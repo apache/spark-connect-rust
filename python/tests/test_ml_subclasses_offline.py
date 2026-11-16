@@ -151,6 +151,43 @@ class _PicklableSubclass(_cls("classification", "LogisticRegression")):
     """A subclass that `pickle` finds by its module and name."""
 
 
+def test_the_modules_have_pysparks_readers_and_writers_of_the_python_format():
+    # PySpark's own classes, which its modules have and their `__all__` does not name.
+    import importlib
+
+    helpers = {
+        "pipeline": [
+            "PipelineReader",
+            "PipelineWriter",
+            "PipelineModelReader",
+            "PipelineModelWriter",
+            "PipelineSharedReadWrite",
+        ],
+        "tuning": [
+            "CrossValidatorReader",
+            "CrossValidatorWriter",
+            "CrossValidatorModelReader",
+            "CrossValidatorModelWriter",
+            "TrainValidationSplitReader",
+            "TrainValidationSplitWriter",
+            "TrainValidationSplitModelReader",
+            "TrainValidationSplitModelWriter",
+        ],
+        "classification": [
+            "OneVsRestReader",
+            "OneVsRestWriter",
+            "OneVsRestModelReader",
+            "OneVsRestModelWriter",
+        ],
+    }
+    for module, names in helpers.items():
+        ours = importlib.import_module(f"pyspark.ml.connect.{module}")
+        pysparks = importlib.import_module(f"pyspark.ml.{module}")
+        for name in names:
+            assert getattr(ours, name) is getattr(pysparks, name), (module, name)
+            assert name not in getattr(ours, "__all__", []), (module, name)
+
+
 def test_copy_deepcopy_and_pickle_of_an_estimator_an_evaluator_and_a_pipeline():
     # PySpark's objects copy, copy deep and pickle of their attributes: `copy.copy` shares them
     # (and a Pipeline's stages), `copy.deepcopy` and `pickle` copy them.

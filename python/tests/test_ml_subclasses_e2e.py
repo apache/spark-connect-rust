@@ -76,6 +76,21 @@ def test_transform_and_evaluate_run_the_primitives_of_a_subclass(frame):
     assert evaluations == [evaluator.uid] * 2
 
 
+def test_pysparks_readers_and_writers_save_and_load_native_objects(frame):
+    # PySpark's own writer and reader of a Pipeline, over the param maps of the native objects.
+    import tempfile
+
+    import pyspark.ml.connect.pipeline as pipeline
+
+    Binarizer = _cls("feature", "Binarizer")
+    stage = Binarizer(threshold=4.5, inputCol="x", outputCol="b")
+    path = tempfile.mkdtemp(prefix="ml-pyspark-writers-") + "/pipeline"
+    pipeline.PipelineWriter(pipeline.Pipeline(stages=[stage])).save(path)
+    loaded = pipeline.PipelineReader(pipeline.Pipeline).load(path)
+    assert [s.getThreshold() for s in loaded.getStages()] == [4.5]
+    assert loaded.getStages()[0].uid == stage.uid
+
+
 def test_the_copies_of_a_pipeline_and_a_validator_fit_the_subclass(frame):
     LR = _cls("classification", "LogisticRegression")
     Pipeline = _cls("pipeline", "Pipeline")
