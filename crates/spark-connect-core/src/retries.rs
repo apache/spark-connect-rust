@@ -167,6 +167,8 @@ pub fn retry_delay_ms(status: &tonic::Status) -> Option<u64> {
 /// its reason) and a call queued on the connection but not sent yet (tonic: `CANCELLED`). A
 /// stream that the server resets has the code of its reason in both, except for the reasons
 /// that tonic leaves `UNKNOWN`, such as `STREAM_CLOSED`, which grpc-python reports as `INTERNAL`.
+/// A connection that does not complete in time is `UNAVAILABLE` in grpc-python (tonic:
+/// `UNKNOWN`, from a connect timeout around a channel's connector).
 pub fn grpc_python_code(status: &tonic::Status) -> tonic::Code {
     let code = status.code();
     match transport_errors(status).find_map(|error| error.downcast_ref::<h2::Error>()) {
@@ -176,7 +178,9 @@ pub fn grpc_python_code(status: &tonic::Status) -> tonic::Code {
         },
         Some(error) if error.is_go_away() => tonic::Code::Unavailable,
         _ => match code {
-            tonic::Code::Unknown if is_transport_error(status) => tonic::Code::Unavailable,
+            tonic::Code::Unknown if is_transport_error(status) || is_connect_timeout(status) => {
+                tonic::Code::Unavailable
+            }
             tonic::Code::Cancelled if is_unsent_request(status) => tonic::Code::Unavailable,
             _ => code,
         },
@@ -194,6 +198,17 @@ fn transport_errors(
 /// Whether tonic built the status from a transport error.
 fn is_transport_error(status: &tonic::Status) -> bool {
     transport_errors(status).any(|error| error.is::<h2::Error>() || error.is::<hyper::Error>())
+}
+
+/// Whether tonic built the status from a connection that did not complete in time: the
+/// `TimedOut` error of the connect timeout around a channel's connector. A status the server
+/// sent has no source, and tonic's timeout of a request is not an I/O error.
+fn is_connect_timeout(status: &tonic::Status) -> bool {
+    transport_errors(status).any(|error| {
+        error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::TimedOut)
+    })
 }
 
 /// Whether tonic built the status from a request that hyper canceled, which hyper does only for
@@ -927,6 +942,24 @@ mod tests {
         assert!(RetryPolicy::default().can_retry(&status), "{status:?}");
         let error = crate::error::SparkError::from_grpc_status(status);
         assert_eq!(error.grpc_code(), Some(tonic::Code::Unavailable as i32));
+    }
+
+    #[test]
+    fn test_can_retry_a_connection_that_timed_out() {
+        // The connect timeout around a channel's connector: tonic's UNKNOWN, with the I/O
+        // timeout as its source, is UNAVAILABLE in grpc-python and retried. Another I/O error
+        // under an UNKNOWN keeps its code.
+        let with_source = |kind| {
+            let mut status = tonic::Status::unknown("transport error");
+            status.set_source(std::sync::Arc::new(std::io::Error::new(kind, "connect")));
+            status
+        };
+        let timed_out = with_source(std::io::ErrorKind::TimedOut);
+        assert_eq!(grpc_python_code(&timed_out), tonic::Code::Unavailable);
+        assert!(RetryPolicy::default().can_retry(&timed_out));
+        let other = with_source(std::io::ErrorKind::PermissionDenied);
+        assert_eq!(grpc_python_code(&other), tonic::Code::Unknown);
+        assert!(!RetryPolicy::default().can_retry(&other));
     }
 
     #[tokio::test]

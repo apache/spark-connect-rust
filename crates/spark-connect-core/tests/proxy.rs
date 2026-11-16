@@ -24,7 +24,7 @@ mod common;
 use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::{FakeServer, FakeService};
 use spark_connect_core::{ChannelBuilder, RetryPolicy, SparkConnectClient};
@@ -62,20 +62,39 @@ async fn bounded<T>(future: impl Future<Output = T>) -> T {
         .expect("test waited past the bound")
 }
 
-/// Runs `test` with exactly the proxy variables `vars` set.
-async fn with_proxy_env<T>(vars: &[(&str, &str)], test: impl Future<Output = T>) -> T {
-    let _turn = ENVIRONMENT.lock().await;
+/// A test's turn on the process's proxy variables. A test takes it before it starts its
+/// servers and proxies, and declares it first, so that it is dropped last: no other test's
+/// threads run while the variables change. The turn starts and ends with none set.
+struct EnvTurn(#[allow(dead_code)] tokio::sync::MutexGuard<'static, ()>);
+
+impl EnvTurn {
+    async fn take() -> Self {
+        let turn = Self(ENVIRONMENT.lock().await);
+        clear_proxy_env();
+        turn
+    }
+
+    /// Runs `test` with exactly the proxy variables `vars` set.
+    async fn with<T>(&self, vars: &[(&str, &str)], test: impl Future<Output = T>) -> T {
+        for (name, value) in vars {
+            std::env::set_var(name, value);
+        }
+        let result = test.await;
+        clear_proxy_env();
+        result
+    }
+}
+
+impl Drop for EnvTurn {
+    fn drop(&mut self) {
+        clear_proxy_env();
+    }
+}
+
+fn clear_proxy_env() {
     for name in PROXY_VARIABLES {
         std::env::remove_var(name);
     }
-    for (name, value) in vars {
-        std::env::set_var(name, value);
-    }
-    let result = test.await;
-    for name in PROXY_VARIABLES {
-        std::env::remove_var(name);
-    }
-    result
 }
 
 /// Config, answered with the session of the request.
@@ -115,6 +134,8 @@ enum Behavior {
     Capture,
     /// Reads the CONNECT and never answers.
     Silent,
+    /// Opens the tunnel, and never relays anything in it.
+    Stall,
     /// Opens the tunnel to this address, and sends the first bytes of the server (a plaintext
     /// HTTP/2 server speaks first) in the same write as its own response.
     TunnelCoalesced(SocketAddr),
@@ -212,6 +233,14 @@ async fn serve_connect(mut client: TcpStream, behavior: Behavior, seen: Arc<Mute
             seen.lock().unwrap().push(connect);
             std::future::pending::<()>().await;
         }
+        Behavior::Stall => {
+            seen.lock().unwrap().push(connect);
+            client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        }
         Behavior::Refuse(status) => {
             seen.lock().unwrap().push(connect);
             let _ = client
@@ -284,10 +313,11 @@ fn config() -> ConfigRequest {
 
 #[tokio::test]
 async fn plaintext_channel_goes_through_the_connect_tunnel() {
+    let env = EnvTurn::take().await;
     let server = spark_server().await;
     let proxy = Proxy::start(Behavior::Tunnel(server.address)).await;
     let port = server.address.port();
-    with_proxy_env(&[("https_proxy", &proxy.url())], async {
+    env.with(&[("https_proxy", &proxy.url())], async {
         // A host that only the proxy can reach: the client must not resolve it itself.
         let client = client(&format!("sc://spark.invalid:{port}/;session_id={SESSION}")).await;
         bounded(client.config(config())).await.unwrap();
@@ -304,12 +334,13 @@ async fn plaintext_channel_goes_through_the_connect_tunnel() {
 
 #[tokio::test]
 async fn server_bytes_in_the_proxy_response_read_are_kept() {
+    let env = EnvTurn::take().await;
     // The tunnel reads the response of the proxy and no more: the bytes after it are the
     // server's, whatever reads the proxy and the server's first bytes arrive in.
     let server = spark_server().await;
     let proxy = Proxy::start(Behavior::TunnelCoalesced(server.address)).await;
     let port = server.address.port();
-    with_proxy_env(&[("https_proxy", &proxy.url())], async {
+    env.with(&[("https_proxy", &proxy.url())], async {
         let mut client = client(&format!("sc://spark.invalid:{port}/;session_id={SESSION}")).await;
         client.set_retry_policy(RetryPolicy {
             max_retries: Some(0),
@@ -323,12 +354,13 @@ async fn server_bytes_in_the_proxy_response_read_are_kept() {
 
 #[tokio::test]
 async fn a_proxy_answer_of_any_2xx_opens_the_tunnel() {
+    let env = EnvTurn::take().await;
     // As grpcio, which takes any 2xx, and RFC 9110.
     let server = spark_server().await;
     let port = server.address.port();
     for status in ["204 No Content", "299 Custom"] {
         let proxy = Proxy::start(Behavior::TunnelWithStatus(server.address, status)).await;
-        with_proxy_env(&[("https_proxy", &proxy.url())], async {
+        env.with(&[("https_proxy", &proxy.url())], async {
             let client = client(&format!("sc://spark.invalid:{port}/;session_id={SESSION}")).await;
             bounded(client.config(config())).await.unwrap();
         })
@@ -338,15 +370,17 @@ async fn a_proxy_answer_of_any_2xx_opens_the_tunnel() {
 
 #[tokio::test]
 async fn tls_is_negotiated_with_the_server_inside_the_tunnel() {
+    let env = EnvTurn::take().await;
     let proxy = Proxy::start(Behavior::Capture).await;
-    let error = with_proxy_env(&[("https_proxy", &proxy.url())], async {
-        let client = client(&format!(
-            "sc://spark.invalid:443/;token={TOKEN};session_id={SESSION}"
-        ))
+    let error = env
+        .with(&[("https_proxy", &proxy.url())], async {
+            let client = client(&format!(
+                "sc://spark.invalid:443/;token={TOKEN};session_id={SESSION}"
+            ))
+            .await;
+            bounded(client.config(config())).await.unwrap_err()
+        })
         .await;
-        bounded(client.config(config())).await.unwrap_err()
-    })
-    .await;
     // The proxy closes the tunnel after the ClientHello, which is UNAVAILABLE as any
     // connection that closes.
     assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
@@ -365,11 +399,12 @@ async fn tls_is_negotiated_with_the_server_inside_the_tunnel() {
 
 #[tokio::test]
 async fn proxy_credentials_are_sent_as_basic_authorization() {
+    let env = EnvTurn::take().await;
     let server = spark_server().await;
     let proxy = Proxy::start(Behavior::Tunnel(server.address)).await;
     let port = server.address.port();
     let url = format!("http://alice:p%40ss@{}", proxy.address);
-    with_proxy_env(&[("grpc_proxy", &url)], async {
+    env.with(&[("grpc_proxy", &url)], async {
         let client = client(&format!("sc://spark.invalid:{port}/;session_id={SESSION}")).await;
         bounded(client.config(config())).await.unwrap();
     })
@@ -383,11 +418,12 @@ async fn proxy_credentials_are_sent_as_basic_authorization() {
 
 #[tokio::test]
 async fn a_loopback_host_is_never_proxied() {
+    let env = EnvTurn::take().await;
     // A token goes to localhost in plaintext, so a proxy must not carry it.
     let server = spark_server().await;
     let proxy = Proxy::start(Behavior::Tunnel(server.address)).await;
     let port = server.address.port();
-    with_proxy_env(
+    env.with(
         &[("grpc_proxy", &proxy.url()), ("https_proxy", &proxy.url())],
         async {
             for host in ["localhost", "127.0.0.1"] {
@@ -407,8 +443,9 @@ async fn a_loopback_host_is_never_proxied() {
 
 #[tokio::test]
 async fn a_host_of_no_proxy_connects_directly() {
+    let env = EnvTurn::take().await;
     let proxy = Proxy::start(Behavior::Refuse("403 Forbidden")).await;
-    with_proxy_env(
+    env.with(
         &[
             ("https_proxy", &proxy.url()),
             ("no_proxy", "other, .invalid"),
@@ -425,17 +462,20 @@ async fn a_host_of_no_proxy_connects_directly() {
 
 #[tokio::test]
 async fn a_proxy_that_refuses_the_tunnel_is_unavailable() {
+    let env = EnvTurn::take().await;
     for status in [
         "407 Proxy Authentication Required",
         "403 Forbidden",
         "502 Bad Gateway",
     ] {
         let proxy = Proxy::start(Behavior::Refuse(status)).await;
-        let error = with_proxy_env(&[("https_proxy", &proxy.url())], async {
-            let client = client(&format!("sc://spark.invalid:15002/;session_id={SESSION}")).await;
-            bounded(client.config(config())).await.unwrap_err()
-        })
-        .await;
+        let error = env
+            .with(&[("https_proxy", &proxy.url())], async {
+                let client =
+                    client(&format!("sc://spark.invalid:15002/;session_id={SESSION}")).await;
+                bounded(client.config(config())).await.unwrap_err()
+            })
+            .await;
         assert_eq!(
             error.grpc_code,
             Some(Code::Unavailable as i32),
@@ -447,40 +487,44 @@ async fn a_proxy_that_refuses_the_tunnel_is_unavailable() {
 
 #[tokio::test]
 async fn a_proxy_that_is_down_is_unavailable() {
+    let env = EnvTurn::take().await;
     // A port that nothing listens on.
     let address = TcpListener::bind("127.0.0.1:0")
         .await
         .unwrap()
         .local_addr()
         .unwrap();
-    let error = with_proxy_env(&[("https_proxy", &format!("http://{address}"))], async {
-        let client = client(&format!("sc://spark.invalid:15002/;session_id={SESSION}")).await;
-        bounded(client.config(config())).await.unwrap_err()
-    })
-    .await;
+    let error = env
+        .with(&[("https_proxy", &format!("http://{address}"))], async {
+            let client = client(&format!("sc://spark.invalid:15002/;session_id={SESSION}")).await;
+            bounded(client.config(config())).await.unwrap_err()
+        })
+        .await;
     assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
 }
 
 #[tokio::test]
 async fn a_proxy_that_never_answers_is_unavailable() {
-    // As grpcio, which retries it: UNAVAILABLE once the tunnel is not open in time, rather than
-    // the UNKNOWN that a connect timeout around the whole connection would raise.
+    let env = EnvTurn::take().await;
+    // As grpcio, which retries it: UNAVAILABLE once the tunnel is not open in time, with an
+    // error that names the proxy, before the bound of the whole connection.
     let proxy = Proxy::start(Behavior::Silent).await;
-    let error = with_proxy_env(&[("https_proxy", &proxy.url())], async {
-        let mut client = client(&format!(
-            "sc://spark.invalid:443/;token={TOKEN};session_id={SESSION}"
-        ))
+    let error = env
+        .with(&[("https_proxy", &proxy.url())], async {
+            let mut client = client(&format!(
+                "sc://spark.invalid:443/;token={TOKEN};session_id={SESSION}"
+            ))
+            .await;
+            client.set_retry_policy(RetryPolicy {
+                max_retries: Some(0),
+                ..RetryPolicy::default()
+            });
+            tokio::time::timeout(Duration::from_secs(30), client.config(config()))
+                .await
+                .expect("the tunnel is bounded")
+                .unwrap_err()
+        })
         .await;
-        client.set_retry_policy(RetryPolicy {
-            max_retries: Some(0),
-            ..RetryPolicy::default()
-        });
-        tokio::time::timeout(Duration::from_secs(30), client.config(config()))
-            .await
-            .expect("the tunnel is bounded")
-            .unwrap_err()
-    })
-    .await;
     assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
     assert!(
         error.to_string().contains("did not open the tunnel"),
@@ -490,12 +534,43 @@ async fn a_proxy_that_never_answers_is_unavailable() {
 }
 
 #[tokio::test]
+async fn a_tls_handshake_that_stalls_in_the_tunnel_is_unavailable() {
+    // The tunnel opens and nothing answers in it: the connect timeout around the whole
+    // connection ends it as UNAVAILABLE, which is retried, as grpcio's connect deadline does.
+    let env = EnvTurn::take().await;
+    let proxy = Proxy::start(Behavior::Stall).await;
+    let start = Instant::now();
+    let error = env
+        .with(&[("https_proxy", &proxy.url())], async {
+            let mut client = client(&format!(
+                "sc://spark.invalid:443/;token={TOKEN};session_id={SESSION}"
+            ))
+            .await;
+            client.set_retry_policy(RetryPolicy {
+                max_retries: Some(0),
+                ..RetryPolicy::default()
+            });
+            tokio::time::timeout(Duration::from_secs(40), client.config(config()))
+                .await
+                .expect("the connection is bounded")
+                .unwrap_err()
+        })
+        .await;
+    assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
+    // Past the bound of the tunnel alone: the tunnel opened, and the handshake timed out.
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
+    assert_eq!(proxy.connects().len(), 1);
+}
+
+#[tokio::test]
 async fn an_unsupported_proxy_scheme_connects_directly() {
+    let env = EnvTurn::take().await;
     let proxy = Proxy::start(Behavior::Refuse("403 Forbidden")).await;
     let server = spark_server().await;
     let port = server.address.port();
     for scheme in ["https", "socks5"] {
-        with_proxy_env(
+        env.with(
             &[("https_proxy", &format!("{scheme}://{}", proxy.address))],
             async {
                 let client =
@@ -510,17 +585,19 @@ async fn an_unsupported_proxy_scheme_connects_directly() {
 
 #[tokio::test]
 async fn an_invalid_proxy_address_fails_the_connection() {
-    let error = with_proxy_env(
-        &[("https_proxy", "http://alice:hunter2@proxy:99999")],
-        async {
-            let builder = ChannelBuilder::parse("sc://spark.invalid:15002").unwrap();
-            match SparkConnectClient::connect(&builder).await {
-                Ok(_) => panic!("connected with an invalid proxy address"),
-                Err(error) => error,
-            }
-        },
-    )
-    .await;
+    let env = EnvTurn::take().await;
+    let error = env
+        .with(
+            &[("https_proxy", "http://alice:hunter2@proxy:99999")],
+            async {
+                let builder = ChannelBuilder::parse("sc://spark.invalid:15002").unwrap();
+                match SparkConnectClient::connect(&builder).await {
+                    Ok(_) => panic!("connected with an invalid proxy address"),
+                    Err(error) => error,
+                }
+            },
+        )
+        .await;
     let message = error.to_string();
     assert!(
         message.contains("Invalid HTTP proxy address in https_proxy"),
@@ -531,10 +608,11 @@ async fn an_invalid_proxy_address_fails_the_connection() {
 
 #[tokio::test]
 async fn uppercase_variables_are_not_read() {
+    let env = EnvTurn::take().await;
     // As grpcio on POSIX, which reads only the lowercase names.
     let server = spark_server().await;
     let proxy = Proxy::start(Behavior::Tunnel(server.address)).await;
-    with_proxy_env(
+    env.with(
         &[("HTTPS_PROXY", &proxy.url()), ("HTTP_PROXY", &proxy.url())],
         async {
             let client = client(&format!("sc://spark.invalid:15002/;session_id={SESSION}")).await;

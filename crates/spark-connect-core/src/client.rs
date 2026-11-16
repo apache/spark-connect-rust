@@ -57,15 +57,23 @@ fn with_keepalive(
     }
 }
 
+/// How long a connection through a proxy may take as a whole: the TCP connection to the
+/// proxy, the tunnel, and the TLS handshake inside it, as grpcio's 20 s connect deadline. It is
+/// longer than [`READY_TIMEOUT`], which bounds the tunnel alone, so that a proxy that does not
+/// answer is reported as that.
+const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// A lazy channel to `endpoint` through an HTTP CONNECT tunnel of `proxy`. tonic negotiates
 /// TLS (for an `https` endpoint) inside the tunnel, with the endpoint's own server name.
 ///
-/// `endpoint` must not have a connect timeout: tonic would bound the whole connection with it
-/// from outside its connector, and fail a proxy that does not answer with `UNKNOWN`, which is
-/// not retried. The connector bounds the TCP connection to the proxy and the tunnel instead,
-/// so that a proxy that does not answer is `UNAVAILABLE` and retried, as in grpcio.
-fn connect_through_proxy(endpoint: &tonic::transport::Endpoint, proxy: HttpProxy) -> Channel {
-    endpoint.connect_with_connector_lazy(ProxyConnector(std::sync::Arc::new(proxy)))
+/// Two bounds apply, and either is `UNAVAILABLE` and retried, as in grpcio. The connector
+/// bounds the TCP connection to the proxy and the tunnel by [`READY_TIMEOUT`]. tonic bounds
+/// the whole connection, the TLS handshake included, by [`PROXY_CONNECT_TIMEOUT`] from outside
+/// the connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
+fn connect_through_proxy(endpoint: tonic::transport::Endpoint, proxy: HttpProxy) -> Channel {
+    endpoint
+        .connect_timeout(PROXY_CONNECT_TIMEOUT)
+        .connect_with_connector_lazy(ProxyConnector(std::sync::Arc::new(proxy)))
 }
 
 /// The longest response to a CONNECT that the client reads, as hyper-util's tunnel.
@@ -109,6 +117,8 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
 async fn open_tunnel(proxy: &HttpProxy, host: &str, port: u16) -> std::io::Result<TcpStream> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut stream = TcpStream::connect(proxy.authority.as_str()).await?;
+    // With a custom connector, tonic ignores the endpoint's TCP options: set any of them here.
+    // This is tonic's default, which the direct channel has.
     stream.set_nodelay(true)?;
     let mut request = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
     if let Some(authorization) = &proxy.authorization {
@@ -718,7 +728,7 @@ impl SparkConnectClient {
             .map_err(SparkError::connect_msg)?;
         let channel = match proxy {
             None => tonic_endpoint.connect_timeout(READY_TIMEOUT).connect_lazy(),
-            Some(proxy) => connect_through_proxy(&tonic_endpoint, proxy),
+            Some(proxy) => connect_through_proxy(tonic_endpoint, proxy),
         };
 
         // Raise the message-size cap from tonic's 4 MiB default (too small for real Arrow

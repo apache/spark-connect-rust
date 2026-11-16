@@ -36,6 +36,9 @@ sha2 = "0.10"
 # Transport errors that tonic keeps as a status's source, for `RetryPolicy::can_retry`.
 h2 = "0.4"
 hyper = "1"
+# The Basic credential and the percent-decoded userinfo of a proxy URI, already built for tonic.
+base64 = "0.22"
+percent-encoding = "2"
 # The tokio stream of a channel through a proxy, as tonic's own connector gives it to hyper.
 hyper-util = { version = "0.1", features = ["tokio"] }
 # Grows the stack for the clones and drops of the requests of deep plans.

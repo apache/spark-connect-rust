@@ -16,9 +16,9 @@
 //!   an entry that is the host itself or a parent domain of it (a leading `.` is optional), or
 //!   an IP host is in an entry's CIDR range.
 //!
-//! One difference is deliberate: a loopback host is never proxied. A token is sent in
-//! plaintext to `localhost` (see [`crate::channel::ChannelBuilder::secure`]), and a proxy must
-//! not see it.
+//! One difference is deliberate: a loopback host is never proxied. Its traffic need not leave
+//! the machine, and a token is sent in plaintext to `localhost` (see
+//! [`crate::channel::ChannelBuilder::secure`]), which a proxy must not see.
 //!
 //! The tunnel only carries bytes: TLS is negotiated through it with the Spark server, against
 //! the server's own name, so the proxy sees neither the token nor the data of a TLS channel.
@@ -26,6 +26,7 @@
 use std::ffi::OsString;
 use std::net::IpAddr;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tonic::codegen::http::uri::Authority;
 
 /// The default port of a proxy without one, as gRPC resolves the proxy name.
@@ -190,7 +191,7 @@ impl HttpProxy {
             return Err(Invalid("the host is not valid".to_string()));
         }
         let authorization =
-            (!userinfo.is_empty()).then(|| format!("Basic {}", base64(userinfo.as_bytes())));
+            (!userinfo.is_empty()).then(|| format!("Basic {}", STANDARD.encode(userinfo)));
         Ok(Self {
             authority,
             authorization,
@@ -198,10 +199,20 @@ impl HttpProxy {
     }
 }
 
-/// Whether `host` (an IPv6 address without brackets) is a loopback host.
+/// Whether `host` (an IPv6 address without brackets) is a loopback host, which is never
+/// proxied. Wider than [`crate::channel::ChannelBuilder::is_loopback`], which names only the
+/// hosts that a token is sent to in plaintext or not.
 fn is_loopback(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost")
-        || host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+    // A trailing dot names the same host, and every name under `.localhost` is loopback
+    // (RFC 6761). An IPv4-mapped IPv6 address is the IPv4 address it maps.
+    let name = host.strip_suffix('.').unwrap_or(host).to_ascii_lowercase();
+    name == "localhost"
+        || name
+            .strip_suffix(".localhost")
+            .is_some_and(|rest| !rest.is_empty())
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|ip| ip.to_canonical().is_loopback())
 }
 
 /// `host` and `port` of `host_port`, as gRPC's `SplitHostPort`: an IPv6 address is in brackets
@@ -270,41 +281,9 @@ fn in_cidr_range(ip: IpAddr, entry: &str) -> bool {
 
 /// `text` with its `%XX` triplets decoded, and any other `%` kept, as gRPC's `PercentDecode`.
 fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let hex = |b: u8| (b as char).to_digit(16);
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push((high * 16 + low) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// The standard base64 of `data`, with padding (RFC 4648), for a Basic credential (RFC 7617).
-fn base64(data: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let n = (u32::from(chunk[0]) << 16)
-            | (u32::from(*chunk.get(1).unwrap_or(&0)) << 8)
-            | u32::from(*chunk.get(2).unwrap_or(&0));
-        for (i, shift) in [18, 12, 6, 0].into_iter().enumerate() {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> shift & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
+    percent_encoding::percent_decode_str(text)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 #[cfg(test)]
@@ -377,13 +356,28 @@ mod tests {
             "127.1.2.3",
             "[::1]",
             "::1",
+            "localhost.",
+            "spark.localhost",
+            "SPARK.LOCALHOST.",
+            "::ffff:127.0.0.1",
+            "[::ffff:127.0.0.1]",
         ] {
             assert_eq!(authority(&[PROXY], host), None, "{host}");
         }
-        assert_eq!(
-            authority(&[PROXY], "[2001:db8::1]"),
-            Some("proxy.corp:3128".into())
-        );
+        for host in [
+            "[2001:db8::1]",
+            "localhost.example",
+            "notlocalhost",
+            "localhost..",
+            ".localhost",
+            "[::ffff:10.0.0.1]",
+        ] {
+            assert_eq!(
+                authority(&[PROXY], host),
+                Some("proxy.corp:3128".into()),
+                "{host}"
+            );
+        }
     }
 
     #[test]
@@ -456,12 +450,12 @@ mod tests {
         assert_eq!(auth("http://alice@p:1"), Some("Basic YWxpY2U=".into()));
         assert_eq!(
             auth("http://a@b:c@p:1"),
-            Some(format!("Basic {}", base64(b"a@b:c")))
+            Some(format!("Basic {}", STANDARD.encode(b"a@b:c")))
         );
         assert_eq!(auth("http://p:1"), None);
         assert_eq!(
             auth("http://bad%zz%4@p:1"),
-            Some(format!("Basic {}", base64(b"bad%zz%4")))
+            Some(format!("Basic {}", STANDARD.encode(b"bad%zz%4")))
         );
     }
 
@@ -520,21 +514,6 @@ mod tests {
                 !shown.contains("hunter2") && !shown.contains("YWxp"),
                 "{shown}"
             );
-        }
-    }
-
-    #[test]
-    fn base64_of_rfc_4648_vectors() {
-        for (data, encoded) in [
-            ("", ""),
-            ("f", "Zg=="),
-            ("fo", "Zm8="),
-            ("foo", "Zm9v"),
-            ("foob", "Zm9vYg=="),
-            ("fooba", "Zm9vYmE="),
-            ("foobar", "Zm9vYmFy"),
-        ] {
-            assert_eq!(base64(data.as_bytes()), encoded);
         }
     }
 

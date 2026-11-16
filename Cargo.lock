@@ -84,12 +84,14 @@ name = "apache-spark-connect-core"
 version = "4.3.0"
 dependencies = [
  "apache-spark-connect-proto",
+ "base64 0.22.1",
  "bytes",
  "crc32fast",
  "futures",
  "h2",
  "hyper",
  "hyper-util",
+ "percent-encoding",
  "prost",
  "prost-types",
  "regex",

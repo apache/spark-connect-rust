@@ -106,6 +106,6 @@ grpcio:
   `.example.com` both match `spark.example.com`, not `notexample.com`), and an IP host in a CIDR
   range such as `10.0.0.0/8`. There is no `*` wildcard, and an entry with a port does not match.
 
-Unlike grpcio, a loopback host (`localhost`, `127.0.0.0/8`, `[::1]`) is never proxied, as a
-token is sent to `localhost` without TLS. A proxy address with an invalid host or port is an
-error when the session is created.
+Unlike grpcio, a loopback host (`localhost` and the names under `.localhost`, `127.0.0.0/8`,
+`[::1]`, and IPv4-mapped loopback addresses) is never proxied, as a token is sent to `localhost`
+without TLS. A proxy address with an invalid host or port is an error when the session is created.
