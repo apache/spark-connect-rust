@@ -41,6 +41,7 @@ from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 from interval_input_cases import IntervalInputConversionTests  # noqa: F401
 from pyspark.sql import Row, SparkSession
 from pyspark.sql import types as T
+from row_conversion_cases import TestRowConversionInterrupts as TestRowConversionInterrupts
 from streaming_listener_cases import TestStreamingListenerLifecycle  # noqa: F401
 
 
