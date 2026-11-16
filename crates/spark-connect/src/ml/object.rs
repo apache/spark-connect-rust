@@ -273,7 +273,7 @@ impl MlValue {
             Self::Decimal(v) => {
                 let (precision, scale) = match data_type {
                     Some(DataType::Decimal { precision, scale }) => (*precision, *scale),
-                    _ => decimal_precision_scale(v),
+                    _ => DECIMAL_TYPE_PRECISION_SCALE,
                 };
                 LiteralExpression::Decimal {
                     value: v.clone(),
@@ -322,8 +322,8 @@ impl MlValue {
             Self::Long(_) => DataType::Long,
             Self::Float(_) => DataType::Float,
             Self::Double(_) => DataType::Double,
-            Self::Decimal(v) => {
-                let (precision, scale) = decimal_precision_scale(v);
+            Self::Decimal(_) => {
+                let (precision, scale) = DECIMAL_TYPE_PRECISION_SCALE;
                 DataType::Decimal { precision, scale }
             }
             Self::String(_) => DataType::String {
@@ -411,16 +411,11 @@ impl MlValue {
     }
 }
 
-/// The precision and scale of the decimal string `value`, as `LiteralExpression._infer_type` types
-/// a `decimal.Decimal`: its digits and the digits after its point, at least one more than its
-/// scale.
-fn decimal_precision_scale(value: &str) -> (i32, i32) {
-    let digits = value.trim_start_matches(['-', '+']);
-    let (int, frac) = digits.split_once('.').unwrap_or((digits, ""));
-    let int_digits = int.trim_start_matches('0').len() as i32;
-    let scale = frac.len() as i32;
-    ((int_digits + scale).max(scale + 1).max(1), scale)
-}
+/// The precision and scale of a decimal value of no type, as `LiteralExpression._infer_type` types
+/// a `decimal.Decimal`: `DecimalType()`, of precision 10 and scale 0 whatever the digits of the
+/// value, which the server widens to them. PySpark's `serialize_param` sends every decimal so,
+/// including one that a server returned and a loaded param or a fetch argument sends again.
+const DECIMAL_TYPE_PRECISION_SCALE: (i32, i32) = (10, 0);
 
 /// The object of a fetch: a server-side object, or the ML helper, and the chain of methods that
 /// reaches the object of which a method is fetched, as `_extract_id_methods` of
@@ -956,9 +951,10 @@ impl MlWriter {
         self
     }
 
-    /// An option of the server's writer, as `MLWriter.option`.
+    /// An option of the server's writer, as `MLWriter.option`, whose key is lowercased as
+    /// PySpark's `optionMap[key.lower()]` does, so two spellings of a key are one option.
     pub fn option(mut self, key: &str, value: &str) -> Self {
-        self.options.insert(key.to_string(), value.to_string());
+        self.options.insert(key.to_lowercase(), value.to_string());
         self
     }
 
@@ -1056,7 +1052,9 @@ pub fn read(
 /// with the inference of `serialize_param`, of Python's one int and one float. So an integral
 /// literal is an `Integer` when it fits in 32 bits, and a `Long` when it does not, and a `Float` is
 /// a `Double`: a `seed` that the server reads back as a `Long` is saved again as an `Integer`, as
-/// PySpark saves it. The other literals are kept as they are.
+/// PySpark saves it. The other literals are serialized again as the value they read as, as
+/// `serialize_param` infers it (a string array of UTF8_BINARY elements, a vector without its
+/// Python class), and one that reads as no value is kept as it is.
 fn read_params(params: Option<&proto::MlParams>) -> Params {
     use proto::expression::literal::LiteralType as L;
     let Some(params) = params else {
@@ -1065,19 +1063,25 @@ fn read_params(params: Option<&proto::MlParams>) -> Params {
     let mut params = params.clone();
     for literal in params.params.values_mut() {
         let retyped = match literal.literal_type {
-            Some(L::Byte(value)) | Some(L::Short(value)) => L::Integer(value),
-            Some(L::Long(value)) => match i32::try_from(value) {
-                Ok(value) => L::Integer(value),
+            Some(L::Byte(value)) | Some(L::Short(value)) => Some(L::Integer(value)),
+            Some(L::Long(value)) => i32::try_from(value).ok().map(L::Integer),
+            Some(L::Float(value)) => Some(L::Double(f64::from(value))),
+            _ => None,
+        };
+        // A literal of the new type, as PySpark builds it of the Python value. A Long that does not
+        // fit in 32 bits is a Python int of the Long range, and so are the other literals, inferred
+        // by their values.
+        let inferred = match retyped {
+            Some(literal_type) => proto::expression::Literal {
+                literal_type: Some(literal_type),
+                ..Default::default()
+            },
+            None => match MlValue::from_literal(literal).and_then(|value| value.to_literal()) {
+                Ok(inferred) => inferred,
                 Err(_) => continue,
             },
-            Some(L::Float(value)) => L::Double(f64::from(value)),
-            _ => continue,
         };
-        // A literal of the new type, as PySpark builds it of the Python value.
-        *literal = proto::expression::Literal {
-            literal_type: Some(retyped),
-            ..Default::default()
-        };
+        *literal = inferred;
     }
     Params::from_proto(&params)
 }
@@ -1216,6 +1220,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(deprecated)] // The element and struct types of the literals of PySpark.
     fn read_params_are_typed_as_pyspark_sends_them_again() {
         use proto::expression::literal::LiteralType as L;
         let literal = |literal_type| proto::expression::Literal {
@@ -1250,9 +1255,11 @@ mod tests {
                 data_type: Some(DataType::Long.to_proto()),
             },
         );
-        // An array is kept as it is, elements and all.
+        // An array is kept as it is, elements and all: an int array param is an Array[Int] on the
+        // server, which sends Integer elements, as PySpark re-infers them (no pyspark.ml param is
+        // an array of longs).
         let array = literal(L::Array(proto::expression::literal::Array {
-            elements: vec![literal(L::Long(1))],
+            elements: vec![literal(L::Integer(1))],
             ..Default::default()
         }));
         sent.params.insert("array".into(), array.clone());
@@ -1266,9 +1273,78 @@ mod tests {
             assert_eq!(params.params[name], literal(expected), "{name}");
         }
         assert_eq!(params.params["typed"], literal(L::Integer(9)));
-        assert_eq!(params.params["array"], array);
+        // Serialized again as its elements infer it: the element type of the first one.
+        let inferred = literal(L::Array(proto::expression::literal::Array {
+            element_type: Some(DataType::Integer.to_proto()),
+            elements: vec![literal(L::Integer(1))],
+        }));
+        assert_eq!(params.params["array"], inferred);
         assert_eq!(params.params.len(), 14);
         assert_eq!(read_params(None).to_proto(), proto::MlParams::default());
+    }
+
+    #[test]
+    #[allow(deprecated)] // The element and struct types of the literals of PySpark.
+    fn read_params_serialize_other_values_again_as_pyspark_infers_them() {
+        use proto::expression::literal::{Array, LiteralType as L};
+        let string = |word: &str| proto::expression::Literal {
+            literal_type: Some(L::String(word.into())),
+            ..Default::default()
+        };
+        // The stopWords of the StopWordsRemover golden (feature_models_persistence.json): the
+        // server reads its string array without a collation, which PySpark's save sends as
+        // UTF8_BINARY.
+        let string_array = |collation: &str| proto::expression::Literal {
+            literal_type: Some(L::Array(Array {
+                element_type: Some(
+                    DataType::String {
+                        collation: collation.into(),
+                    }
+                    .to_proto(),
+                ),
+                elements: vec![string("the"), string("gamma")],
+            })),
+            ..Default::default()
+        };
+        // A dense vector that the server reads with its Python class, which PySpark's save does
+        // not send.
+        let mut vector = MlValue::Vector(MlVector::Dense(vec![1.0, 2.0]))
+            .to_literal()
+            .unwrap();
+        let Some(L::Struct(vector_struct)) = vector.literal_type.as_mut() else {
+            panic!("not a vector: {vector:?}");
+        };
+        let Some(proto::data_type::Kind::Udt(udt)) = vector_struct
+            .struct_type
+            .as_mut()
+            .and_then(|data_type| data_type.kind.as_mut())
+        else {
+            panic!("not a UDT: {vector_struct:?}");
+        };
+        udt.python_class = Some("pyspark.ml.linalg.DenseVector".into());
+        let mut sent = proto::MlParams::default();
+        sent.params.insert("stopWords".into(), string_array(""));
+        sent.params.insert("vector".into(), vector);
+        let params = read_params(Some(&sent)).to_proto();
+        assert_eq!(params.params["stopWords"], string_array("UTF8_BINARY"));
+        let expected = MlValue::Vector(MlVector::Dense(vec![1.0, 2.0]))
+            .to_literal()
+            .unwrap();
+        assert_eq!(params.params["vector"], expected);
+    }
+
+    #[test]
+    fn writer_option_keys_are_lowercased_as_pyspark_does() {
+        let operator = MlOperator::with_uid(
+            "org.apache.spark.ml.feature.StopWordsRemover",
+            "uid",
+            OperatorType::Model,
+        );
+        let writer = MlWriter::operator(&operator, &Params::default())
+            .option("Foo", "1")
+            .option("foo", "2");
+        assert_eq!(writer.options.len(), 1);
+        assert_eq!(writer.options["foo"], "2");
     }
 
     #[test]
@@ -1303,6 +1379,32 @@ mod tests {
                 "{literal:?}"
             );
         }
+    }
+
+    #[test]
+    fn decimal_values_are_sent_as_decimal_type_as_pyspark_sends_them() {
+        use proto::expression::literal::LiteralType as L;
+        // PySpark's `_infer_type` of a decimal.Decimal is DecimalType(): precision 10 and scale 0,
+        // whatever the digits of the value, and the server widens it.
+        for value in ["1.25", "-0.5", "12345678901.5", "100"] {
+            let literal = MlValue::Decimal(value.into()).to_literal().unwrap();
+            let Some(L::Decimal(decimal)) = literal.literal_type else {
+                panic!("not a decimal: {literal:?}");
+            };
+            assert_eq!(decimal.value, value);
+            assert_eq!((decimal.precision, decimal.scale), (Some(10), Some(0)));
+        }
+        // A `(value, DecimalType(p, s))` pair is the literal of its type.
+        let typed = MlValue::Decimal("1.25".into())
+            .to_typed_literal(&DataType::Decimal {
+                precision: 12,
+                scale: 3,
+            })
+            .unwrap();
+        let Some(L::Decimal(decimal)) = typed.literal_type else {
+            panic!("not a decimal: {typed:?}");
+        };
+        assert_eq!((decimal.precision, decimal.scale), (Some(12), Some(3)));
     }
 
     #[test]
