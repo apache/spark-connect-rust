@@ -1310,6 +1310,13 @@ DecisionTreeClassifier, RandomForestClassifier, GBTClassifier, NaiveBayes,
 FMClassifier and MultilayerPerceptronClassifier. Perceptron base classifiers need
 a two-unit output layer.
 
+In Python, the classifier can be any other object, as in PySpark. A classifier that is not a
+native one, such as PySpark's own classes of `pyspark.ml.classification` or a Python subclass of
+them, is fit by PySpark's own `OneVsRest._fit` over the estimator's params. Its model is PySpark's
+`OneVsRestModel` of the classifier's own models. A None classifier is fit there too, and fails at
+its first use. So is a dataset that is not a Spark DataFrame: a pandas DataFrame raises the
+`KeyError` of PySpark's pandas aggregate of its max label.
+
 All seven PySpark constructor parameters have named setters. Rust exposes scalar
 parameter getters and the configured classifier. Fits clone the base classifier
 for each class and run at most `parallelism` fits at once. Python observes
@@ -1374,8 +1381,6 @@ differences from PySpark are these:
 - A `OneVsRest` or a `OneVsRestModel` whose classifier or submodel is not writable raises
   `ValueError` on `write`, as PySpark's `validateParams` does. A `OneVsRest` of no classifier
   raises the `KeyError` of its unset param on `write`, as PySpark's does.
-- `setClassifier` and the `classifier` keyword raise `TypeError` for an object that is not a
-  native binary classifier, when they are set; PySpark accepts any object and fails at `fit`.
 
 ## Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
 
