@@ -304,7 +304,8 @@ def test_stop_words_remover_load_default_stop_words_fetches_the_ml_helper(ml_moc
     sent = len(service.execute_requests)
     assert feature.StopWordsRemover.loadDefaultStopWords(("french", StringType())) == ["i", "me"]
     (command,) = _commands_but_deletes(service, sent)
-    assert command.ml_command.fetch.methods[0].args == [
+    # A list of the repeated field, which protobuf's pure-Python containers compare to a list.
+    assert list(command.ml_command.fetch.methods[0].args) == [
         pb2.Fetch.Method.Args(param=pb2.Expression.Literal(string="french"))
     ]
     assert list(inspect.signature(feature.StopWordsRemover.loadDefaultStopWords).parameters) == [
