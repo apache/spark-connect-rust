@@ -1238,6 +1238,9 @@ with two differences: a loopback host is never proxied, where grpcio proxies `lo
 `no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
 cannot connect (and takes a port past 65535 modulo 65536).
 
+For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
+[TLS Root Certificates](configuration.md#tls-root-certificates).
+
 ## Native NaiveBayes
 
 The Rust `ml::NaiveBayes` and `ml::NaiveBayesModel` train and predict through Spark

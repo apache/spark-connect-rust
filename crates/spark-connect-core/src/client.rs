@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tonic::metadata::{AsciiMetadataKey, AsciiMetadataValue, MetadataMap};
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use tonic::{Request, Response, Streaming};
 use uuid::Uuid;
 
@@ -55,6 +55,27 @@ fn with_keepalive(
             .keep_alive_while_idle(keepalive.without_calls),
         None => endpoint,
     }
+}
+
+/// Names a PEM file of root certificates to trust instead of the default ones, as in grpcio.
+const SSL_ROOTS_FILE_VAR: &str = "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH";
+
+/// The PEM roots that `path`, the value of [`SSL_ROOTS_FILE_VAR`], names, as grpcio reads them:
+/// `None` (the system's roots) without a value, or with a warning for a file that cannot be read
+/// or is empty.
+fn ssl_roots_pem(path: Option<std::ffi::OsString>) -> Option<Vec<u8>> {
+    let path = path.filter(|path| !path.is_empty())?;
+    let path = std::path::Path::new(&path);
+    let reason = match std::fs::read(path) {
+        Ok(pem) if !pem.is_empty() => return Some(pem),
+        Ok(_) => "is empty".to_owned(),
+        Err(error) => format!("cannot be read ({error})"),
+    };
+    tracing::warn!(
+        "{SSL_ROOTS_FILE_VAR} names {}, which {reason}; using the system's roots",
+        path.display()
+    );
+    None
 }
 
 /// How long a connection through a proxy may take as a whole: the TCP connection to the
@@ -708,15 +729,17 @@ impl SparkConnectClient {
         let mut tonic_endpoint = Channel::from_shared(format!("{scheme}://{endpoint}"))
             .map_err(|e| SparkError::connect_msg(format!("Invalid endpoint: {}", e)))?;
         if builder.secure() {
-            // TLS connection with native root certificates
-            // `with_native_roots()` is required: tonic >=0.11 does NOT load a trust store
-            // from the `tls-native-roots` feature alone, so without this the TLS handshake
-            // has no CA anchors, fails, and the retry policy masks it as a hang.
+            // TLS with the roots that grpcio would trust. Roots must be given explicitly:
+            // tonic >=0.11 does NOT load a trust store from the `tls-native-roots` feature
+            // alone, so without them the TLS handshake has no CA anchors, fails, and the retry
+            // policy masks it as a hang.
             // The server name of an IPv6 host is its address without the brackets of the URL.
             let domain = builder.host().trim_start_matches('[').trim_end_matches(']');
-            let tls_config = ClientTlsConfig::new()
-                .domain_name(domain)
-                .with_native_roots();
+            let config = ClientTlsConfig::new().domain_name(domain);
+            let tls_config = match ssl_roots_pem(std::env::var_os(SSL_ROOTS_FILE_VAR)) {
+                Some(pem) => config.ca_certificate(Certificate::from_pem(pem)),
+                None => config.with_native_roots(),
+            };
             tonic_endpoint = tonic_endpoint
                 .tls_config(tls_config)
                 .map_err(|e| SparkError::connect_msg(format!("Failed to configure TLS: {}", e)))?;
@@ -2879,6 +2902,30 @@ impl Drop for ReattachableResponseStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ssl_roots_follow_grpc_default_ssl_roots_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let pem = dir.path().join("roots.pem");
+        std::fs::write(&pem, b"-----BEGIN CERTIFICATE-----\n...").unwrap();
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, b"").unwrap();
+        // As grpcio: a readable file replaces the default roots.
+        assert_eq!(
+            ssl_roots_pem(Some(pem.clone().into_os_string())),
+            Some(std::fs::read(&pem).unwrap())
+        );
+        // No variable, an empty one, an empty file or one that cannot be read: the defaults.
+        for path in [
+            None,
+            Some(std::ffi::OsString::new()),
+            Some(empty.into_os_string()),
+            Some(dir.path().join("missing.pem").into_os_string()),
+            Some(dir.path().as_os_str().to_owned()),
+        ] {
+            assert_eq!(ssl_roots_pem(path), None);
+        }
+    }
 
     fn hash_with_busy_blocking_pool(blobs: Vec<Vec<u8>>) -> (bool, Vec<String>) {
         let runtime = tokio::runtime::Builder::new_current_thread()

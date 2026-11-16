@@ -107,5 +107,20 @@ grpcio:
   range such as `10.0.0.0/8`. There is no `*` wildcard, and an entry with a port does not match.
 
 Unlike grpcio, a loopback host (`localhost` and the names under `.localhost`, `127.0.0.0/8`,
-`[::1]`, and IPv4-mapped loopback addresses) is never proxied, as a token is sent to `localhost`
-without TLS. A proxy address with an invalid host or port is an error when the session is created.
+`[::1]`, and IPv4-mapped loopback addresses) is never proxied: its traffic need not leave the
+machine, and a token is sent to `localhost` without TLS. A proxy address with an invalid host or
+port is an error when the session is created.
+
+## TLS Root Certificates
+
+A TLS channel trusts the root certificates of the system's trust store, which `SSL_CERT_FILE` and
+`SSL_CERT_DIR` can replace. As in grpcio, `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` names a PEM file whose
+certificates are trusted instead, such as the CA of a corporate proxy that inspects TLS:
+
+```bash
+export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/corporate-ca.pem
+```
+
+The file replaces the other roots rather than adding to them. If it cannot be read or is empty,
+the client warns and uses the system's roots. grpcio's default roots are its own bundle, not the
+system's, so a CA that is only in the system's trust store is trusted here but not by PySpark.
