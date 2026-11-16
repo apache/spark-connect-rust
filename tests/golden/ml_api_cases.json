@@ -181,7 +181,7 @@
    ],
    "model_metadata": [
     "ok",
-    "{'class': 'pyspark.ml.tuning.CrossValidatorModel', 'sparkVersion': '4.3.0', 'uid': 'CrossValidatorModel_<uid>', 'paramMap': {'seed': 7, 'numFolds': 2, 'foldCol': '', 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'seed': <hash CrossValidator>, 'numFolds': 3, 'foldCol': ''}, 'avgMetrics': [0.3944444444444445, 0.3944444444444445], 'persistSubModels': True, 'stdMetrics': [0.005555555555555536, 0.005555555555555536]}"
+    "{'class': 'pyspark.ml.tuning.CrossValidatorModel', 'sparkVersion': '4.3.0', 'uid': 'CrossValidatorModel_<uid>', 'paramMap': {'seed': 7, 'numFolds': 2, 'foldCol': '', 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'seed': <hash CrossValidator>, 'numFolds': 3, 'foldCol': ''}, 'avgMetrics': [0.394444444, 0.394444444], 'persistSubModels': True, 'stdMetrics': [0.005555556, 0.005555556]}"
    ],
    "model_params": [
     "ok",
@@ -2849,7 +2849,7 @@
    ],
    "model_metadata": [
     "ok",
-    "{'class': 'pyspark.ml.tuning.TrainValidationSplitModel', 'sparkVersion': '4.3.0', 'uid': 'TrainValidationSplitModel_<uid>', 'paramMap': {'seed': 7, 'trainRatio': 0.75, 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'seed': <hash TrainValidationSplit>, 'trainRatio': 0.75}, 'validationMetrics': [0.40476190476190477, 0.40476190476190477], 'persistSubModels': True}"
+    "{'class': 'pyspark.ml.tuning.TrainValidationSplitModel', 'sparkVersion': '4.3.0', 'uid': 'TrainValidationSplitModel_<uid>', 'paramMap': {'seed': 7, 'trainRatio': 0.75, 'estimatorParamMaps': [[{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '0.1', 'isJson': True}], [{'parent': 'LinearSVC_<uid>', 'name': 'regParam', 'value': '1.0', 'isJson': True}]]}, 'defaultParamMap': {'seed': <hash TrainValidationSplit>, 'trainRatio': 0.75}, 'validationMetrics': [0.404761905, 0.404761905], 'persistSubModels': True}"
    ],
    "model_params": [
     "ok",

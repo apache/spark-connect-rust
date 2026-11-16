@@ -215,8 +215,8 @@
       "recommendations"
      ],
      "rows": [
-      "(1, [Row(user=1, rating=2.8548471927642822), Row(user=0, rating=2.330834150314331)])",
-      "(2, [Row(user=1, rating=4.999820709228516), Row(user=0, rating=4.329103946685791)])"
+      "(1, [Row(user=1, rating=2.854847193), Row(user=0, rating=2.33083415)])",
+      "(2, [Row(user=1, rating=4.999820709), Row(user=0, rating=4.329103947)])"
      ]
     }
    ],
@@ -228,8 +228,8 @@
       "recommendations"
      ],
      "rows": [
-      "(0, [Row(item=2, rating=4.329103946685791), Row(item=0, rating=3.717475414276123)])",
-      "(2, [Row(item=2, rating=3.8933768272399902), Row(item=0, rating=1.097004771232605)])"
+      "(0, [Row(item=2, rating=4.329103947), Row(item=0, rating=3.717475414)])",
+      "(2, [Row(item=2, rating=3.893376827), Row(item=0, rating=1.097004771)])"
      ]
     }
    ],
@@ -253,9 +253,9 @@
       "recommendations"
      ],
      "rows": [
-      "(0, [Row(user=1, rating=4.543262004852295), Row(user=0, rating=3.717475414276123)])",
-      "(1, [Row(user=1, rating=2.8548471927642822), Row(user=0, rating=2.330834150314331)])",
-      "(2, [Row(user=1, rating=4.999820709228516), Row(user=0, rating=4.329103946685791)])"
+      "(0, [Row(user=1, rating=4.543262005), Row(user=0, rating=3.717475414)])",
+      "(1, [Row(user=1, rating=2.854847193), Row(user=0, rating=2.33083415)])",
+      "(2, [Row(user=1, rating=4.999820709), Row(user=0, rating=4.329103947)])"
      ]
     }
    ],
@@ -267,9 +267,9 @@
       "recommendations"
      ],
      "rows": [
-      "(0, [Row(item=2, rating=4.329103946685791), Row(item=0, rating=3.717475414276123)])",
-      "(1, [Row(item=2, rating=4.999820709228516), Row(item=0, rating=4.543262004852295)])",
-      "(2, [Row(item=2, rating=3.8933768272399902), Row(item=0, rating=1.097004771232605)])"
+      "(0, [Row(item=2, rating=4.329103947), Row(item=0, rating=3.717475414)])",
+      "(1, [Row(item=2, rating=4.999820709), Row(item=0, rating=4.543262005)])",
+      "(2, [Row(item=2, rating=3.893376827), Row(item=0, rating=1.097004771)])"
      ]
     }
    ],
@@ -289,8 +289,8 @@
       "recommendations"
      ],
      "rows": [
-      "(1, [Row(user=1, rating=2.8548471927642822), Row(user=0, rating=2.330834150314331)])",
-      "(2, [Row(user=1, rating=4.999820709228516), Row(user=0, rating=4.329103946685791)])"
+      "(1, [Row(user=1, rating=2.854847193), Row(user=0, rating=2.33083415)])",
+      "(2, [Row(user=1, rating=4.999820709), Row(user=0, rating=4.329103947)])"
      ]
     }
    ],
@@ -310,8 +310,8 @@
       "recommendations"
      ],
      "rows": [
-      "(0, [Row(item=2, rating=4.329103946685791), Row(item=0, rating=3.717475414276123)])",
-      "(2, [Row(item=2, rating=3.8933768272399902), Row(item=0, rating=1.097004771232605)])"
+      "(0, [Row(item=2, rating=4.329103947), Row(item=0, rating=3.717475414)])",
+      "(2, [Row(item=2, rating=3.893376827), Row(item=0, rating=1.097004771)])"
      ]
     }
    ],
