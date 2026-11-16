@@ -103,12 +103,12 @@ impl PyStatFunctions {
         let py = col.py();
         let (col, fractions) = sample_by_arguments(col, fractions)?;
         // The long of the seed is converted as the plan is sent, as in `DataFrame.sampleBy`.
-        let (seed, deferred) = match sample_by_seed(py, seed) {
+        let (seed, plan_error) = match sample_by_seed(py, seed) {
             Ok(seed) => (seed, None),
             Err(err) => (0, Some(crate::dataframe::unbuildable_error(py, err)?)),
         };
         let df = self.stat.sample_by(col, fractions, Some(seed)).to_pyerr()?;
-        Ok(PyDataFrame::new(match deferred {
+        Ok(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable(error),
             None => df,
         }))

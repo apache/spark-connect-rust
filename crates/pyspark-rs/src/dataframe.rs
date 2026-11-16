@@ -919,19 +919,19 @@ impl PyDataFrame {
         }
         // A name that UTF-8 cannot encode fails the plan when it is sent, with the error of its
         // encoding, which the first of them gives.
-        let mut deferred = None;
+        let mut plan_error = None;
         let mut pairs = Vec::with_capacity(cols_map.len());
         for (name, column) in cols_map.iter() {
             let column = column.extract::<PyRef<'_, PyColumn>>()?;
             match unbuildable_str_error(&name)? {
                 Some(error) => {
-                    deferred.get_or_insert(error);
+                    plan_error.get_or_insert(error);
                 }
                 None => pairs.push((name.extract::<String>()?, column.column.clone())),
             }
         }
         let df = self.dataframe.with_columns(pairs);
-        Ok(PyDataFrame::new(match deferred {
+        Ok(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable(error),
             None => df,
         }))
@@ -1212,13 +1212,13 @@ impl PyDataFrame {
         // As PySpark's `assert isinstance(how, str)`. A str that UTF-8 cannot encode is one, and
         // fails the plan with the error of its encoding, when PySpark sends it. The plan's
         // values are converted in the order of its protobuf fields, which gives the first error.
-        let mut deferred = None;
+        let mut plan_error = None;
         let join_type = match how.filter(|how| !how.is_none()) {
             None => AsOfJoinType::Inner,
             Some(how) if how.is_instance_of::<pyo3::types::PyString>() => {
                 match unbuildable_str_error(&how)? {
                     Some(error) => {
-                        deferred = Some(error);
+                        plan_error = Some(error);
                         AsOfJoinType::Inner
                     }
                     None => AsOfJoinType::parse(&how.extract::<String>()?),
@@ -1255,7 +1255,7 @@ impl PyDataFrame {
                 match proto_bool(allow) {
                     Ok(allow) => allow,
                     Err(err) => {
-                        deferred.get_or_insert(unbuildable_error(allow.py(), err)?);
+                        plan_error.get_or_insert(unbuildable_error(allow.py(), err)?);
                         false
                     }
                 }
@@ -1269,7 +1269,7 @@ impl PyDataFrame {
                 let direction = direction.bind(leftAsOfColumn.py());
                 match unbuildable_str_error(direction)? {
                     Some(error) => {
-                        deferred.get_or_insert(error);
+                        plan_error.get_or_insert(error);
                         AsOfJoinDirection::Backward
                     }
                     None => AsOfJoinDirection::parse(&crate::options::str_argument(direction)?),
@@ -1290,7 +1290,7 @@ impl PyDataFrame {
             .dataframe
             .as_of_join(&other.dataframe, options)
             .to_pyerr()?;
-        Ok(PyDataFrame::new(match deferred {
+        Ok(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable(error),
             None => df,
         }))
@@ -1395,7 +1395,7 @@ impl PyDataFrame {
         // The count is the proto's int32 of the plan, which PySpark converts once it sends the
         // plan, after the columns: a count that protobuf refuses fails the plan, which is built
         // here with no count, so that the errors of the columns come first.
-        let (num_partitions, deferred) = match num_partitions
+        let (num_partitions, plan_error) = match num_partitions
             .map(|n| proto_int(&n, "spark.connect.RepartitionByExpression.num_partitions"))
             .transpose()
         {
@@ -1406,7 +1406,7 @@ impl PyDataFrame {
             .dataframe
             .repartition_by_range_opt(num_partitions, exprs)
             .to_pyerr()?;
-        Ok(PyDataFrame::new(match deferred {
+        Ok(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable(error),
             None => df,
         }))
@@ -2164,7 +2164,7 @@ impl PyDataFrame {
         let py = col.py();
         let (col, fractions) = crate::stat::sample_by_arguments(col, fractions)?;
         // The seed is converted as the proto's long as PySpark sends the plan, after its checks.
-        let (seed, deferred) = match crate::stat::sample_by_seed(py, seed) {
+        let (seed, plan_error) = match crate::stat::sample_by_seed(py, seed) {
             Ok(seed) => (seed, None),
             Err(err) => (0, Some(unbuildable_error(py, err)?)),
         };
@@ -2173,7 +2173,7 @@ impl PyDataFrame {
             .stat()
             .sample_by(col, fractions, Some(seed))
             .to_pyerr()?;
-        Ok(PyDataFrame::new(match deferred {
+        Ok(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable(error),
             None => df,
         }))
@@ -2303,7 +2303,7 @@ impl PyDataFrame {
         // Converted once the sum is checked, as PySpark's plans do with int(seed). The long of the
         // proto is converted as the plan is sent: a value out of its range fails each split.
         let seed = py.import("builtins")?.getattr("int")?.call1((&seed,))?;
-        let (seed, deferred) = match seed.extract::<i64>() {
+        let (seed, plan_error) = match seed.extract::<i64>() {
             Ok(seed) => (seed, None),
             Err(_) => (
                 0,
@@ -2320,7 +2320,7 @@ impl PyDataFrame {
             .to_pyerr()?
             .into_iter()
             .map(|df| {
-                PyDataFrame::new(match &deferred {
+                PyDataFrame::new(match &plan_error {
                     Some(error) => df.unbuildable(error.clone()),
                     None => df,
                 })
@@ -2932,7 +2932,7 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         use pyo3::types::{PyBool, PyFloat};
         // The seed is `int(seed)`, as PySpark takes it, which fails at the call; the long of the
-        // proto is converted as the plan is sent, so that its error is deferred.
+        // proto is converted as the plan is sent, so that its error is raised then.
         let int = |value: &Bound<'_, PyAny>| -> PyResult<Result<i64, PyErr>> {
             let int = py.import("builtins")?.getattr("int")?.call1((value,))?;
             Ok(int
@@ -2978,13 +2978,13 @@ impl PyDataFrame {
                 ));
             }
         };
-        let (seed, deferred) = match seed {
+        let (seed, plan_error) = match seed {
             Some(Ok(seed)) => (seed, None),
             Some(Err(err)) => (0, Some(unbuildable_error(py, err)?)),
             None => (python_random_seed(py)?, None),
         };
         let df = self.dataframe.sample_opt(frac, replace, Some(seed));
-        Ok(PyDataFrame::new(match deferred {
+        Ok(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable(error),
             None => df,
         }))
