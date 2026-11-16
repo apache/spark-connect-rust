@@ -145,11 +145,16 @@ timestamp conversion helpers normalize the table, then arrow-rs imports its
 those batches to IPC for the local relation sent to Spark. No Python rows are
 materialized; casts, buffer alignment, and IPC serialization may still copy.
 Empty tables require an explicit schema, matching PySpark Connect.
+Every `createDataFrame` of data that is not empty, of any kind, reads the settings of all of its
+conversions in one Config request before it converts any data, as PySpark's does: the 13 keys
+that PySpark 4.3.0 reads, in its order (the timestamp type and the session time zone, the
+local-relation settings, the pandas and inference settings, and Arrow's large types). Every
+conversion path takes its settings from that request, including the relation's cache
+threshold, and empty data reads none.
 Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
 use this importer, preserving integer precision and null masks without Python
 rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the
-row path to avoid the configuration RPC of the importer; nullable `Int64` columns
-use Arrow at any size.
+row path; nullable `Int64` columns use Arrow at any size.
 This initial path accepts inferred schemas, complete string column names,
 and explicit `StructType` schemas whose fields are all `LongType`. Other dtypes,
 DDL/atomic schemas, schema conversions, NUL names, and duplicate/non-string input names
@@ -158,7 +163,7 @@ pandas Arrow input, matching Spark Connect.
 Pandas frames of at least 100,000 rows whose columns are all NumPy `float64`,
 with an explicit `StructType` of `DoubleType` fields, are encoded to Arrow IPC
 from their columns, with pandas' missing values as nulls, and sent inline as the
-row path sends them, without the importer's configuration RPC.
+row path sends them, below the cache threshold.
 Pandas object columns containing exact `datetime.date` values or `None` use the
 Arrow importer at 10,000 rows or more with an explicit `StructType` of `DateType`
 fields. Unsupported values and customized inputs retain the row conversion path.

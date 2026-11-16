@@ -116,6 +116,10 @@ class IntegerTupleTests(unittest.TestCase):
                 b"spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40).encode(),
                 b"spark.sql.execution.pandas.convertToArrowArraySafely": b"true",
                 b"spark.sql.execution.pandas.inferPandasDictAsMap": b"false",
+                # The inference settings, which createDataFrame reads with the others.
+                b"spark.sql.pyspark.inferNestedDictAsStruct.enabled": b"false",
+                b"spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled": b"false",
+                b"spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled": b"false",
             }
             pairs = b"".join(_bytes(2, _bytes(1, key) + _bytes(2, values[key]))
                              for key in keys)
@@ -148,10 +152,9 @@ class IntegerTupleTests(unittest.TestCase):
         config_before = self.config_calls
         frame = self.spark.createDataFrame(data, schema)
         self.assertEqual(len(self.captured), before)  # construction remains offline
-        # Explicit-schema pandas input reads the Arrow conversion settings during
-        # construction, as PySpark does: the Arrow input settings and the safe-cast
-        # configuration, once each.
-        expected = 2 if isinstance(data, pd.DataFrame) else 0
+        # Input that is not empty reads the settings of the conversions once during
+        # construction, as PySpark's createDataFrame does before it converts any data.
+        expected = 0 if len(data) == 0 else 1
         self.assertEqual(self.config_calls - config_before, expected)
         config_before = self.config_calls
         frame.toArrow()
@@ -286,7 +289,9 @@ class IntegerTupleTests(unittest.TestCase):
             self.assertEqual(caught.exception.getMessageParameters(),
                              {"expected_length": "1", "actual_length": "0"})
         self.assertEqual(self.captured, [])
-        self.assertEqual(self.config_calls, 0)
+        # Each of the eight calls reads the settings once before its conversion fails, as
+        # PySpark's createDataFrame reads them before it converts any data.
+        self.assertEqual(self.config_calls, 8)
 
 
 if __name__ == "__main__":

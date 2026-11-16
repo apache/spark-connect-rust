@@ -16,24 +16,39 @@ use crate::types::DataType;
 
 /// Internal settings snapshot shared with the Python Arrow importer; not a stable API.
 #[doc(hidden)]
+#[derive(Clone)]
 pub struct ArrowInputOptions {
     timestamp_type: String,
     timezone: String,
     use_large_var_types: bool,
     cache_threshold: usize,
     upload: Options,
+    /// The settings of the conversions of PySpark's `createDataFrame` that the snapshot reads
+    /// with the others, each true when the server's value is "true".
+    safecheck: bool,
+    infer_pandas_dict_as_map: bool,
+    infer_dict_as_struct: bool,
+    infer_array_from_first_element: bool,
+    infer_map_from_first_pair: bool,
 }
 
 impl ArrowInputOptions {
-    const KEYS: [&'static str; 8] = [
+    /// The configurations that PySpark's `createDataFrame` reads in one request before it
+    /// converts any data, in the order it sends them.
+    const KEYS: [&'static str; 13] = [
         "spark.sql.timestampType",
         "spark.sql.session.timeZone",
-        "spark.sql.execution.arrow.useLargeVarTypes",
         "spark.sql.session.localRelationCacheThreshold",
         "spark.sql.session.localRelationSizeLimit",
         "spark.sql.session.localRelationChunkSizeRows",
         "spark.sql.session.localRelationChunkSizeBytes",
         "spark.sql.session.localRelationBatchOfChunksSizeBytes",
+        "spark.sql.execution.pandas.convertToArrowArraySafely",
+        "spark.sql.execution.pandas.inferPandasDictAsMap",
+        "spark.sql.pyspark.inferNestedDictAsStruct.enabled",
+        "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled",
+        "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled",
+        "spark.sql.execution.arrow.useLargeVarTypes",
     ];
     pub(crate) fn from_client(client: &SparkConnectClient) -> Result<Self> {
         let values = block_on(client.get_configs(&Self::KEYS))?;
@@ -68,7 +83,17 @@ impl ArrowInputOptions {
             "spark.sql.session.localRelationBatchOfChunksSizeBytes",
             false,
         )?;
+        let is_true = |key: &str| values.get(key).is_some_and(|value| value == "true");
         Ok(Self {
+            safecheck: is_true("spark.sql.execution.pandas.convertToArrowArraySafely"),
+            infer_pandas_dict_as_map: is_true("spark.sql.execution.pandas.inferPandasDictAsMap"),
+            infer_dict_as_struct: is_true("spark.sql.pyspark.inferNestedDictAsStruct.enabled"),
+            infer_array_from_first_element: is_true(
+                "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled",
+            ),
+            infer_map_from_first_pair: is_true(
+                "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled",
+            ),
             timestamp_type: required("spark.sql.timestampType")?.to_owned(),
             timezone: required("spark.sql.session.timeZone")?.to_owned(),
             use_large_var_types: required("spark.sql.execution.arrow.useLargeVarTypes")? == "true",
@@ -101,8 +126,40 @@ impl ArrowInputOptions {
             "false"
         })
     }
+
+    /// `spark.sql.execution.pandas.convertToArrowArraySafely`.
+    pub fn safecheck(&self) -> bool {
+        self.safecheck
+    }
+
+    /// `spark.sql.execution.pandas.inferPandasDictAsMap`.
+    pub fn infer_pandas_dict_as_map(&self) -> bool {
+        self.infer_pandas_dict_as_map
+    }
+
+    /// `spark.sql.pyspark.inferNestedDictAsStruct.enabled`.
+    pub fn infer_dict_as_struct(&self) -> bool {
+        self.infer_dict_as_struct
+    }
+
+    /// `spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled`.
+    pub fn infer_array_from_first_element(&self) -> bool {
+        self.infer_array_from_first_element
+    }
+
+    /// `spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled`.
+    pub fn infer_map_from_first_pair(&self) -> bool {
+        self.infer_map_from_first_pair
+    }
+
+    /// The size from which a local relation is uploaded as a cached artifact, of
+    /// `spark.sql.session.localRelationCacheThreshold`.
+    pub(crate) fn cache_threshold(&self) -> usize {
+        self.cache_threshold
+    }
 }
 
+#[derive(Clone)]
 struct Options {
     size_limit: usize,
     chunk_rows: usize,

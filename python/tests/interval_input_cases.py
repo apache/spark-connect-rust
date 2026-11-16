@@ -45,48 +45,47 @@ INFERENCE_CONFS = {
 
 
 class IntervalInputConversionTests(unittest.TestCase):
-    def test_overflow_is_checked_recursively_before_rpc(self):
-        spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
-        # No server to release the session on: stop() closes the client without the release
-        # retries of a refused port.
-        spark.release_session_on_close = False
-        self.addCleanup(spark.stop)
-        interval = T.DayTimeIntervalType()
-        for micros in (-(2**63) - 1, 2**63, -(2**63) - 86400000000):
-            value = timedelta(microseconds=micros)
-            for data, data_type in (
-                ([(value,)], interval),
-                ([([value],)], T.ArrayType(interval)),
-                ([({"k": value},)], T.MapType(T.StringType(), interval)),
-                ([(Row(leaf=value),)], T.StructType([T.StructField("leaf", interval)])),
-            ):
-                with self.subTest(micros=micros, data=data):
-                    schema = T.StructType([T.StructField("interval", data_type)])
-                    with self.assertRaises(OverflowError):
-                        spark.createDataFrame(data, schema)
-            with self.assertRaises(OverflowError):
-                spark.createDataFrame([(value,)])
-            # A Python Row stores objects unchanged; native conversion starts here.
-            with self.assertRaises(OverflowError):
-                spark.createDataFrame([Row(interval=value)])
-            with self.assertRaises(OverflowError):
-                spark.createDataFrame([value], T.DayTimeIntervalType())
-        for value in (timedelta.min, timedelta.max):
-            with self.assertRaises(OverflowError):
-                spark.createDataFrame([(value,)])
+    @unittest.skipIf(grpc is None, "grpcio is required")
+    def test_overflow_is_checked_recursively_before_any_execution(self):
+        # As PySpark's createDataFrame, which reads its settings, then converts the rows: the
+        # OverflowError of the conversion comes after the settings, before any execution.
+        with mock_connect_session() as (spark, service):
+            interval = T.DayTimeIntervalType()
+            for micros in (-(2**63) - 1, 2**63, -(2**63) - 86400000000):
+                value = timedelta(microseconds=micros)
+                for data, data_type in (
+                    ([(value,)], interval),
+                    ([([value],)], T.ArrayType(interval)),
+                    ([({"k": value},)], T.MapType(T.StringType(), interval)),
+                    ([(Row(leaf=value),)], T.StructType([T.StructField("leaf", interval)])),
+                ):
+                    with self.subTest(micros=micros, data=data):
+                        schema = T.StructType([T.StructField("interval", data_type)])
+                        with self.assertRaises(OverflowError):
+                            spark.createDataFrame(data, schema)
+                with self.assertRaises(OverflowError):
+                    spark.createDataFrame([(value,)])
+                # A Python Row stores objects unchanged; native conversion starts here.
+                with self.assertRaises(OverflowError):
+                    spark.createDataFrame([Row(interval=value)])
+                with self.assertRaises(OverflowError):
+                    spark.createDataFrame([value], T.DayTimeIntervalType())
+            for value in (timedelta.min, timedelta.max):
+                with self.assertRaises(OverflowError):
+                    spark.createDataFrame([(value,)])
+            self.assertEqual(service.execute_calls, 0)
 
+    @unittest.skipIf(grpc is None, "grpcio is required")
     def test_inference_rejects_mixed_interval_and_numeric_values(self):
-        spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
-        # No server to release the session on: stop() closes the client without the release
-        # retries of a refused port.
-        spark.release_session_on_close = False
-        self.addCleanup(spark.stop)
-        delta = timedelta(microseconds=-1)
-        with self.assertRaises(PySparkTypeError) as error:
-            spark.createDataFrame([(delta,), (1,)])
-        self.assertEqual(error.exception.getCondition(), "CANNOT_MERGE_TYPE")
-        self.assertEqual(error.exception.getMessageParameters(), {
-            "data_type1": "DayTimeIntervalType", "data_type2": "LongType"})
+        # After the settings, which PySpark's createDataFrame reads before it infers the rows.
+        with mock_connect_session() as (spark, service):
+            delta = timedelta(microseconds=-1)
+            with self.assertRaises(PySparkTypeError) as error:
+                spark.createDataFrame([(delta,), (1,)])
+            self.assertEqual(error.exception.getCondition(), "CANNOT_MERGE_TYPE")
+            self.assertEqual(error.exception.getMessageParameters(), {
+                "data_type1": "DayTimeIntervalType", "data_type2": "LongType"})
+            self.assertEqual(service.execute_calls, 0)
 
     @unittest.skipIf(grpc is None, "grpcio is required")
     def test_nested_inference_reads_config_but_does_not_execute(self):
@@ -105,26 +104,26 @@ class IntervalInputConversionTests(unittest.TestCase):
                 with self.assertRaises(OverflowError):
                     spark.createDataFrame(data)
             self.assertEqual(service.execute_calls, 0)
-            self.assertEqual(set(service.read_confs), set(INFERENCE_CONFS))
+            # Among the settings of the conversions, which each createDataFrame reads at once.
+            self.assertTrue(set(INFERENCE_CONFS) <= set(service.read_confs))
 
-    def test_bounds_and_null_first_inputs_build_without_rpc(self):
-        spark = SparkSession.builder.remote("sc://127.0.0.1:1").create()
-        # No server to release the session on: stop() closes the client without the release
-        # retries of a refused port.
-        spark.release_session_on_close = False
-        self.addCleanup(spark.stop)
-        for schema in (None, ["interval"], T.StructType([
-                T.StructField("interval", T.DayTimeIntervalType())])):
-            spark.createDataFrame([(None,), (timedelta(microseconds=LOWEST),),
-                                   (timedelta(microseconds=HIGHEST),)], schema)
-        interval = T.DayTimeIntervalType()
-        arrays = T.StructType([T.StructField("a", T.ArrayType(interval))])
-        maps = T.StructType([T.StructField("m", T.MapType(T.StringType(), interval))])
-        spark.createDataFrame([([],), ([None, timedelta(microseconds=-1)],)], arrays)
-        spark.createDataFrame([(Row(x=None),), (Row(x=timedelta(microseconds=1)),)])
-        spark.createDataFrame([({},), ({"k": timedelta(microseconds=-1)},)], maps)
-        # As PySpark, an int for an interval field is taken as microseconds.
-        spark.createDataFrame([(1,)], T.StructType([T.StructField("interval", interval)]))
+    @unittest.skipIf(grpc is None, "grpcio is required")
+    def test_bounds_and_null_first_inputs_build_without_execution(self):
+        # The relations build after the one read of the settings, without an execution.
+        with mock_connect_session() as (spark, service):
+            for schema in (None, ["interval"], T.StructType([
+                    T.StructField("interval", T.DayTimeIntervalType())])):
+                spark.createDataFrame([(None,), (timedelta(microseconds=LOWEST),),
+                                       (timedelta(microseconds=HIGHEST),)], schema)
+            interval = T.DayTimeIntervalType()
+            arrays = T.StructType([T.StructField("a", T.ArrayType(interval))])
+            maps = T.StructType([T.StructField("m", T.MapType(T.StringType(), interval))])
+            spark.createDataFrame([([],), ([None, timedelta(microseconds=-1)],)], arrays)
+            spark.createDataFrame([(Row(x=None),), (Row(x=timedelta(microseconds=1)),)])
+            spark.createDataFrame([({},), ({"k": timedelta(microseconds=-1)},)], maps)
+            # As PySpark, an int for an interval field is taken as microseconds.
+            spark.createDataFrame([(1,)], T.StructType([T.StructField("interval", interval)]))
+            self.assertEqual(service.execute_calls, 0)
 
     @unittest.skipIf(grpc is None, "grpcio is required")
     def test_pandas_object_intervals_encode_exact_microseconds(self):

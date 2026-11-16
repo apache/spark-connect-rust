@@ -17,7 +17,10 @@ def pytest_sessionfinish(session, exitstatus):
     # waits on its retries when the server is gone, as PySpark's exit does. The tests leave
     # sessions open to servers that are stopped or never listened, some of them freed. Closing
     # them here, without a release, makes their exit hooks return at once, as PySpark's skip of a
-    # closed client does; the product's exit is unchanged for a live session.
-    from pyspark._pyspark import _close_sessions_at_exit
-
+    # closed client does; the product's exit is unchanged for a live session. Official PySpark,
+    # which runs the tests as the reference, has no such seam.
+    try:
+        from pyspark._pyspark import _close_sessions_at_exit
+    except ImportError:
+        return
     _close_sessions_at_exit()

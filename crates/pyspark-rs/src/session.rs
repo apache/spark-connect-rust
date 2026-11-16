@@ -1124,6 +1124,7 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         spec: Spec,
         checks: LocalChecks<'_>,
+        options: Option<spark_connect::ArrowInputOptions>,
     ) -> PyResult<PyDataFrame> {
         use crate::infer;
 
@@ -1151,6 +1152,12 @@ impl PySparkSession {
             })?;
             return Ok(PyDataFrame::new(df));
         }
+        // As PySpark's createDataFrame, which reads every setting of its conversions in one
+        // request before it converts any data, and before it iterates data of no length.
+        let options = match options {
+            Some(options) => options,
+            None => interruptible(py, &self.session, || self.session.arrow_input_options())?,
+        };
         let mut items: Vec<Bound<'_, PyAny>> = data.try_iter()?.collect::<PyResult<_>>()?;
         let Some(first) = items.first().cloned() else {
             // As PySpark takes the first row of data without a length.
@@ -1179,8 +1186,8 @@ impl PySparkSession {
         let fields = match given {
             Some(fields) => fields,
             None => {
-                // The configurations are read only when a value depends on them.
-                let confs = infer::LazyConfs::new(self.session.clone());
+                // Of the settings that were read with the others, before any conversion.
+                let confs = infer::InferenceConfs::of_options(&options);
                 let options = infer::Options::new(&confs);
                 let mut merged: Option<DataType> = None;
                 for item in &items {
@@ -1277,7 +1284,7 @@ impl PySparkSession {
         let schema = DataType::Struct { fields };
         let df = interruptible(py, &self.session, || {
             self.session
-                .create_dataframe(rows, schema)
+                .create_dataframe_with_options(rows, schema, &options)
                 .map_err(Box::new)
         })?;
         // As pyspark, column names are applied with toDF. The local relation already carries
@@ -1301,6 +1308,7 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         schema: &Bound<'_, PyAny>,
         fields: &[StructField],
+        options: Option<&spark_connect::ArrowInputOptions>,
     ) -> PyResult<Option<PyDataFrame>> {
         if fields.is_empty() || data.len()? == 0 || data.getattr("columns")?.len()? != fields.len()
         {
@@ -1315,18 +1323,15 @@ impl PySparkSession {
         {
             return Ok(None);
         }
-        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
+        // Of the settings that createDataFrame read in one request, as PySpark reads them.
+        let options = match options {
+            Some(options) => options.clone(),
+            None => interruptible(py, &self.session, || self.session.arrow_input_options())?,
+        };
         // The option is always set, as the importer requires it.
         let timezone = options.timezone().unwrap_or("UTC").to_owned();
         let large = options.use_large_var_types() == Some("true");
-        let safecheck = interruptible(py, &self.session, || {
-            self.session
-                .conf()
-                .get("spark.sql.execution.pandas.convertToArrowArraySafely")
-                .map_err(Box::new)
-        })?
-        .as_deref()
-            == Some("true");
+        let safecheck = options.safecheck();
         // The caller's StructType, which the guard checked, is converted as given; a DDL
         // string is parsed into the same fields.
         let schema_py = if schema
@@ -1386,6 +1391,7 @@ impl PySparkSession {
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         spec: &Spec,
+        options: Option<&spark_connect::ArrowInputOptions>,
     ) -> PyResult<Option<PyDataFrame>> {
         let names = match spec {
             Spec::None => None,
@@ -1430,7 +1436,7 @@ impl PySparkSession {
         if columns.len() < width {
             columns.extend((columns.len()..width).map(|i| format!("_{}", i + 1)));
         }
-        let settings = self.pandas_arrow_settings(py, names.is_none())?;
+        let settings = self.pandas_arrow_settings(py, names.is_none(), options)?;
         let (table, struct_names) = settings.prepare_table(&helper, data)?;
         if let Some(struct_names) = struct_names {
             columns = struct_names;
@@ -1489,8 +1495,12 @@ impl PySparkSession {
                 PyList::empty(py).as_any(),
                 spec,
                 LocalChecks::default(),
+                None,
             );
         }
+        // As PySpark's createDataFrame, which reads every setting of its conversions in one
+        // request before it converts the array, and so before the checks of its columns.
+        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
         let width: usize = if ndim == 1 {
             1
         } else {
@@ -1531,7 +1541,6 @@ impl PySparkSession {
             return Err(axis_length_mismatch(expected));
         }
         let batches = crate::pyarrow_import::table_batches(&table)?;
-        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
         let df = interruptible(py, &self.session, || {
             self.session
                 .create_dataframe_from_arrow_with_options(batches, schema, &options)
@@ -1550,6 +1559,7 @@ impl PySparkSession {
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         spec: Spec,
+        options: Option<spark_connect::ArrowInputOptions>,
     ) -> PyResult<PyDataFrame> {
         // Without a struct schema, PySpark infers the Arrow type of each column, which has
         // no int64 for a Python int beyond the 64-bit range.
@@ -1629,6 +1639,7 @@ impl PySparkSession {
                 &labels,
                 &dtypes,
                 infer_dict_as_map_allowed,
+                options.as_ref(),
             )?
         } else {
             PandasRowColumns::empty(row_names.len(), data.len())
@@ -1840,7 +1851,11 @@ impl PySparkSession {
                             PandasDecimalContext {
                                 dtype: dtypes.get(i).map_or("object", String::as_str),
                                 label: labels.get(i).unwrap_or(name),
-                                safecheck: row_settings.as_ref().map(|settings| settings.safecheck),
+                                // Of the one read of the settings, as PySpark's.
+                                safecheck: options
+                                    .as_ref()
+                                    .map(|options| options.safecheck())
+                                    .or(row_settings.as_ref().map(|settings| settings.safecheck)),
                             },
                         )?;
                         let column_names: std::sync::Arc<[String]> = vec![name.clone()].into();
@@ -1877,7 +1892,8 @@ impl PySparkSession {
                     PandasDecimalContext {
                         dtype: dtypes.get(i).map_or("object", String::as_str),
                         label: labels.get(i).unwrap_or(&field.name),
-                        safecheck: None,
+                        // Of the one read of the settings, as PySpark's.
+                        safecheck: options.as_ref().map(|options| options.safecheck()),
                     },
                 )?;
             }
@@ -1939,9 +1955,13 @@ impl PySparkSession {
             })?
         } else {
             interruptible(py, &self.session, || {
-                self.session
-                    .create_dataframe(rows, schema)
-                    .map_err(Box::new)
+                match options.as_ref() {
+                    Some(options) => self
+                        .session
+                        .create_dataframe_with_options(rows, schema, options),
+                    None => self.session.create_dataframe(rows, schema),
+                }
+                .map_err(Box::new)
             })?
         };
         Ok(PyDataFrame::new(match names {
@@ -1952,21 +1972,22 @@ impl PySparkSession {
         }))
     }
 
+    /// The settings of the pandas conversions, of the settings that createDataFrame read in
+    /// one request, as PySpark reads them, or of a read of its own without them.
     fn pandas_arrow_settings(
         &self,
         py: Python<'_>,
         allow_dict_as_map: bool,
+        options: Option<&spark_connect::ArrowInputOptions>,
     ) -> PyResult<PandasArrowSettings> {
-        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
-        let conf = |key: &'static str| {
-            interruptible(py, &self.session, || self.session.conf().get(key))
-                .map(|value| value.as_deref() == Some("true"))
+        let options = match options {
+            Some(options) => options.clone(),
+            None => interruptible(py, &self.session, || self.session.arrow_input_options())?,
         };
         Ok(PandasArrowSettings {
+            safecheck: options.safecheck(),
+            infer_dict_as_map: allow_dict_as_map && options.infer_pandas_dict_as_map(),
             options,
-            safecheck: conf("spark.sql.execution.pandas.convertToArrowArraySafely")?,
-            infer_dict_as_map: allow_dict_as_map
-                && conf("spark.sql.execution.pandas.inferPandasDictAsMap")?,
         })
     }
 
@@ -1980,6 +2001,7 @@ impl PySparkSession {
         labels: &[String],
         dtypes: &[String],
         allow_dict_as_map: bool,
+        options: Option<&spark_connect::ArrowInputOptions>,
     ) -> PyResult<PandasRowColumns> {
         let mut prepared = PandasRowColumns::empty(row_names.len(), data.len());
         // Only a column of Python objects can hold a Row: walk the cells of those alone,
@@ -2014,7 +2036,7 @@ impl PySparkSession {
             })?;
             *selected = true;
         }
-        let settings = match self.pandas_arrow_settings(py, allow_dict_as_map) {
+        let settings = match self.pandas_arrow_settings(py, allow_dict_as_map, options) {
             Ok(settings) => settings,
             Err(error) if error.is_instance_of::<pyo3::exceptions::PyException>(py) => {
                 prepared.errors[*first_index] = Some(error);
@@ -2092,9 +2114,9 @@ impl PySparkSession {
             "Exception thrown when converting pandas.Series ({dtype}) with name '{label}' to \
              Arrow Array (decimal128({precision}, {scale}))."
         );
-        // Row frames reuse the Arrow settings already read for the whole frame. Other
-        // native frames retain their existing read-on-error behavior and default.
-        // A signal that ends the read raises its exception, which the default does not replace.
+        // The settings that createDataFrame read for the whole frame, as PySpark reads them
+        // before it converts; without them, a read on the error, of the existing default. A
+        // signal that ends that read raises its exception, which the default does not replace.
         let safecheck = match safecheck {
             Some(safecheck) => safecheck,
             None => crate::interrupt::interruptible_outcome(py, &self.session, || {
@@ -2363,7 +2385,7 @@ impl PySparkSession {
 
         // A caller holding a Table, or a pandas DataFrame, has already imported its module.
         if is_loaded_instance(py, data, "pyarrow", "Table")? {
-            return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
+            return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema, None);
         }
         // Empty rows of a struct whose nullable flag is not a bool: PySpark sends the `json()` of
         // the schema as it is, which the server cannot parse, so the relation carries that text.
@@ -2388,6 +2410,15 @@ impl PySparkSession {
             return self.create_from_ndarray(py, data, spec);
         }
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
+            // As PySpark's createDataFrame, which reads every setting of its conversions in one
+            // request before it converts a pandas DataFrame that is not empty.
+            let options = if data.len()? > 0 {
+                Some(interruptible(py, &self.session, || {
+                    self.session.arrow_input_options()
+                })?)
+            } else {
+                None
+            };
             // Guarded integer columns share the existing Arrow importer. Schema
             // validation above and unsupported pandas conversions keep master's
             // normal ordering and row fallback.
@@ -2396,8 +2427,13 @@ impl PySparkSession {
                 .getattr("prepare_int64_table")?
                 .call1((data, schema))?;
             if !table.is_none() {
-                let frame =
-                    crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema)?;
+                let frame = crate::pyarrow_import::create_dataframe(
+                    py,
+                    &self.session,
+                    &table,
+                    schema,
+                    options.as_ref(),
+                )?;
                 // pandas applies explicit field names with toDF even though the
                 // local relation already carries them. Empty input stays local.
                 return Ok(match &spec {
@@ -2425,16 +2461,21 @@ impl PySparkSession {
                 let timezone = if aware {
                     None
                 } else {
-                    interruptible(py, &self.session, || {
-                        self.session.conf().get("spark.sql.session.timeZone")
-                    })?
+                    options
+                        .as_ref()
+                        .and_then(|options| options.timezone().map(str::to_owned))
                 };
                 let table = helper
                     .getattr("prepare_timestamp_table")?
                     .call1((columns, schema, timezone))?;
                 if !table.is_none() {
-                    let frame =
-                        crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema)?;
+                    let frame = crate::pyarrow_import::create_dataframe(
+                        py,
+                        &self.session,
+                        &table,
+                        schema,
+                        options.as_ref(),
+                    )?;
                     return Ok(match &spec {
                         Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                             PyDataFrame::new(
@@ -2468,9 +2509,17 @@ impl PySparkSession {
                 };
                 let ipc: Vec<u8> = ipc.extract()?;
                 let frame = interruptible(py, &self.session, || {
-                    self.session
-                        .create_dataframe_from_inline_arrow_ipc(ipc, schema)
-                        .map_err(Box::new)
+                    match options.as_ref() {
+                        Some(options) => self
+                            .session
+                            .create_dataframe_from_inline_arrow_ipc_with_options(
+                                ipc, schema, options,
+                            ),
+                        None => self
+                            .session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema),
+                    }
+                    .map_err(Box::new)
                 })?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
@@ -2490,8 +2539,13 @@ impl PySparkSession {
             // Columns kept in pandas' Arrow string storage come as an Arrow table, which the
             // importer sends, or uploads at the relation cache threshold.
             if !ipc.is_none() && !ipc.is_instance_of::<pyo3::types::PyBytes>() {
-                let frame =
-                    crate::pyarrow_import::create_dataframe(py, &self.session, &ipc, schema)?;
+                let frame = crate::pyarrow_import::create_dataframe(
+                    py,
+                    &self.session,
+                    &ipc,
+                    schema,
+                    options.as_ref(),
+                )?;
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && ipc.len()? > 0 => {
                         PyDataFrame::new(
@@ -2520,9 +2574,17 @@ impl PySparkSession {
                 };
                 let ipc: Vec<u8> = ipc.extract()?;
                 let frame = interruptible(py, &self.session, || {
-                    self.session
-                        .create_dataframe_from_inline_arrow_ipc(ipc, schema)
-                        .map_err(Box::new)
+                    match options.as_ref() {
+                        Some(options) => self
+                            .session
+                            .create_dataframe_from_inline_arrow_ipc_with_options(
+                                ipc, schema, options,
+                            ),
+                        None => self
+                            .session
+                            .create_dataframe_from_inline_arrow_ipc(ipc, schema),
+                    }
+                    .map_err(Box::new)
                 })?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
@@ -2540,8 +2602,13 @@ impl PySparkSession {
                 .getattr("prepare_date_table")?
                 .call1((data, schema))?;
             if !table.is_none() {
-                let frame =
-                    crate::pyarrow_import::create_dataframe(py, &self.session, &table, schema)?;
+                let frame = crate::pyarrow_import::create_dataframe(
+                    py,
+                    &self.session,
+                    &table,
+                    schema,
+                    options.as_ref(),
+                )?;
                 return Ok(match &spec {
                     Spec::Struct(fields) if !fields.is_empty() && table.len()? > 0 => {
                         PyDataFrame::new(
@@ -2559,15 +2626,29 @@ impl PySparkSession {
             // An explicit struct schema converts with PySpark's Arrow conversion, which
             // reports the same values and errors. Other schemas keep the row path.
             if let (Spec::Struct(fields), Some(schema)) = (&spec, schema) {
-                if let Some(frame) = self.create_from_pandas_arrow(py, data, schema, fields)? {
+                if let Some(frame) =
+                    self.create_from_pandas_arrow(py, data, schema, fields, options.as_ref())?
+                {
                     return Ok(frame);
                 }
             }
-            if let Some(frame) = self.create_from_pandas_inferred(py, data, &spec)? {
+            if let Some(frame) =
+                self.create_from_pandas_inferred(py, data, &spec, options.as_ref())?
+            {
                 return Ok(frame);
             }
-            return self.create_from_pandas(py, data, spec);
+            return self.create_from_pandas(py, data, spec, options);
         }
+        // As PySpark's createDataFrame, which reads every setting of its conversions in one
+        // request before it converts local data that is not empty, also data of no length,
+        // before it iterates it.
+        let options = if data.len().is_ok_and(|n| n == 0) {
+            None
+        } else {
+            Some(interruptible(py, &self.session, || {
+                self.session.arrow_input_options()
+            })?)
+        };
         // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
         // Only a native StructType opts into this explicit integer optimization;
         // DDL, inferred schemas and unsupported values keep schema-driven conversion.
@@ -2579,9 +2660,15 @@ impl PySparkSession {
                             fields: fields.clone(),
                         };
                         let df = interruptible(py, &self.session, || {
-                            self.session
-                                .create_dataframe_from_columns(columns, schema)
-                                .map_err(Box::new)
+                            match options.as_ref() {
+                                Some(options) => {
+                                    self.session.create_dataframe_from_columns_with_options(
+                                        columns, schema, options,
+                                    )
+                                }
+                                None => self.session.create_dataframe_from_columns(columns, schema),
+                            }
+                            .map_err(Box::new)
                         })?;
                         return Ok(PyDataFrame::new(df));
                     }
@@ -2605,7 +2692,7 @@ impl PySparkSession {
             },
             _ => LocalChecks::default(),
         };
-        self.create_from_local(py, data, spec, checks)
+        self.create_from_local(py, data, spec, checks, options)
     }
 
     /// Get the catalog API (`spark.catalog`).

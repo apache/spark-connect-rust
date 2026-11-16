@@ -735,6 +735,28 @@ impl SparkSession {
     ///
     /// Mirrors `pyspark.sql.SparkSession.createDataFrame(rows, schema)`.
     pub fn create_dataframe(&self, rows: Vec<Row>, schema: DataType) -> Result<DataFrame> {
+        self.create_dataframe_of(rows, schema, None)
+    }
+
+    /// Internal binding bridge: [`Self::create_dataframe`] with the settings that the caller
+    /// read already, as PySpark's `createDataFrame` reads them once before it converts any
+    /// data, so that no other request reads them; not a stable API.
+    #[doc(hidden)]
+    pub fn create_dataframe_with_options(
+        &self,
+        rows: Vec<Row>,
+        schema: DataType,
+        options: &crate::ArrowInputOptions,
+    ) -> Result<DataFrame> {
+        self.create_dataframe_of(rows, schema, Some(options))
+    }
+
+    fn create_dataframe_of(
+        &self,
+        rows: Vec<Row>,
+        schema: DataType,
+        options: Option<&crate::ArrowInputOptions>,
+    ) -> Result<DataFrame> {
         // Empty data -> send the schema only (no Arrow `data`); the server builds an empty
         // relation from the schema. A zero-row Arrow payload would be empty bytes, which the
         // server cannot parse ("Unexpected end of input. Missing schema.").
@@ -748,7 +770,7 @@ impl SparkSession {
         let batch = rows_to_arrow_batch(&rows, &schema)?;
         Ok(DataFrame::new(
             self.clone(),
-            self.local_relation(batch, schema)?,
+            self.local_relation(batch, schema, options)?,
         ))
     }
 
@@ -756,18 +778,24 @@ impl SparkSession {
     /// it is smaller than [`LOCAL_RELATION_SETTINGS_BYTES`]; otherwise as the Arrow importer
     /// sends one, which reads the server's local-relation settings and applies the cache
     /// threshold and the size limit, as PySpark does. A single gRPC message cannot carry a
-    /// relation beyond the server's message size limit.
+    /// relation beyond the server's message size limit. With the settings given, which the
+    /// caller read already, no request reads them, and a relation of the cache threshold or
+    /// more is uploaded at any size, as PySpark's is.
     fn local_relation(
         &self,
         batch: arrow::record_batch::RecordBatch,
         schema: DataType,
+        options: Option<&crate::ArrowInputOptions>,
     ) -> Result<LogicalPlan> {
-        if crate::arrow_input::batch_data_size(&batch) >= LOCAL_RELATION_SETTINGS_BYTES {
+        let bytes = crate::arrow_input::batch_data_size(&batch);
+        let inline = bytes < LOCAL_RELATION_SETTINGS_BYTES
+            && options.is_none_or(|options| bytes < options.cache_threshold());
+        if !inline {
             return crate::arrow_input::create_relation(
                 &self.client,
                 vec![batch],
                 Some(schema),
-                None,
+                options,
             );
         }
         Ok(LogicalPlan::LocalRelation {
@@ -785,12 +813,33 @@ impl SparkSession {
         columns: Vec<arrow::array::ArrayRef>,
         schema: DataType,
     ) -> Result<DataFrame> {
+        self.create_dataframe_from_columns_of(columns, schema, None)
+    }
+
+    /// Internal binding bridge: [`Self::create_dataframe_from_columns`] with the settings that
+    /// the caller read already (see [`Self::create_dataframe_with_options`]); not a stable API.
+    #[doc(hidden)]
+    pub fn create_dataframe_from_columns_with_options(
+        &self,
+        columns: Vec<arrow::array::ArrayRef>,
+        schema: DataType,
+        options: &crate::ArrowInputOptions,
+    ) -> Result<DataFrame> {
+        self.create_dataframe_from_columns_of(columns, schema, Some(options))
+    }
+
+    fn create_dataframe_from_columns_of(
+        &self,
+        columns: Vec<arrow::array::ArrayRef>,
+        schema: DataType,
+        options: Option<&crate::ArrowInputOptions>,
+    ) -> Result<DataFrame> {
         let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema)?);
         let row_count = columns.first().map_or(0, |column| column.len());
         let batch = columns_to_arrow_batch(columns, arrow_schema, row_count)?;
         Ok(DataFrame::new(
             self.clone(),
-            self.local_relation(batch, schema)?,
+            self.local_relation(batch, schema, options)?,
         ))
     }
 
@@ -805,7 +854,31 @@ impl SparkSession {
         data: Vec<u8>,
         schema: DataType,
     ) -> Result<DataFrame> {
-        let plan = if data.len() >= LOCAL_RELATION_SETTINGS_BYTES {
+        self.create_dataframe_from_inline_arrow_ipc_of(data, schema, None)
+    }
+
+    /// Internal binding bridge: [`Self::create_dataframe_from_inline_arrow_ipc`] with the
+    /// settings that the caller read already (see [`Self::create_dataframe_with_options`]), so
+    /// that IPC of the cache threshold or more is uploaded at any size; not a stable API.
+    #[doc(hidden)]
+    pub fn create_dataframe_from_inline_arrow_ipc_with_options(
+        &self,
+        data: Vec<u8>,
+        schema: DataType,
+        options: &crate::ArrowInputOptions,
+    ) -> Result<DataFrame> {
+        self.create_dataframe_from_inline_arrow_ipc_of(data, schema, Some(options))
+    }
+
+    fn create_dataframe_from_inline_arrow_ipc_of(
+        &self,
+        data: Vec<u8>,
+        schema: DataType,
+        options: Option<&crate::ArrowInputOptions>,
+    ) -> Result<DataFrame> {
+        let inline = data.len() < LOCAL_RELATION_SETTINGS_BYTES
+            && options.is_none_or(|options| data.len() < options.cache_threshold());
+        let plan = if !inline {
             let reader =
                 arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
                     .map_err(|e| {
@@ -814,7 +887,7 @@ impl SparkSession {
             let batches = reader
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?;
-            crate::arrow_input::create_relation(&self.client, batches, Some(schema), None)?
+            crate::arrow_input::create_relation(&self.client, batches, Some(schema), options)?
         } else {
             LogicalPlan::LocalRelation {
                 schema: Some(schema),
