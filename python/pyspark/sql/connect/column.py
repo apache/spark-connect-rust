@@ -33,6 +33,8 @@ def _reduce_column(
     else_value: Any = None,
     sort: Optional[tuple[Any, str]] = None,
     levels: int = 1,
+    build_error: Optional[tuple[str, str, Any]] = None,
+    repr_error: Optional[tuple[str, str, Any]] = None,
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The ``__reduce__`` of a Column of the bytes of its ``spark.connect.Expression`` and of its
     rendering, as PySpark Connect's Column pickles its expression: the function of
@@ -42,4 +44,8 @@ def _reduce_column(
     the Column gives back a sort order. cloudpickle pickles that function by value, also to a
     Python worker of the server, where it gives back PySpark Connect's Column, and ``pickle`` by
     reference."""
-    return _column_reduce.column_of, (expression, rendered, branches, else_value, sort, levels)
+    args: tuple[Any, ...] = (expression, rendered, branches, else_value, sort, levels)
+    if build_error is not None or repr_error is not None:
+        # The errors of an expression that a request does not build, and of its ``__repr__``.
+        args += (build_error, repr_error)
+    return _column_reduce.column_of, args

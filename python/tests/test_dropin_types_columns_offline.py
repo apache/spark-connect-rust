@@ -202,15 +202,91 @@ def test_the_origins_of_column_methods_are_pysparks(name, monkeypatch):
     ],
 )
 def test_alias_names_are_pysparks_string_fields(name, error):
-    # The name is a string field of the plan: a str, a bytes of its UTF-8, and protobuf's
-    # TypeError of any other value. The drop-in raises it at the call, where PySpark raises it
-    # when it builds the plan (docs/compatibility.md).
-    with pytest.raises(TypeError) as raised:
-        F.col("id").alias(name)
-    assert str(raised.value) == error
-    with pytest.raises(TypeError) as raised:
-        F.col("id").name(name)
-    assert str(raised.value) == error
+    # The name is a string field of the plan, which PySpark's ColumnAlias sets as it builds the
+    # plan: a str, a bytes of its UTF-8, and protobuf's TypeError of any other value, which the
+    # request raises, sending nothing; its __repr__ joins the names, which fails of a non-str.
+    with mock_connect_session() as (spark, service):
+        for method in ("alias", "name"):
+            column = getattr(F.col("id"), method)(name)
+            with pytest.raises(TypeError) as raised:
+                repr(column)
+            assert str(raised.value) == (
+                f"sequence item 0: expected str instance, {type(name).__name__} found"
+            )
+            df = spark.range(1).select(column)
+            before = len(service.execute_requests)
+            with pytest.raises(TypeError) as raised:
+                df.collect()
+            assert str(raised.value) == error
+            assert len(service.execute_requests) == before
+
+
+def test_alias_metadata_fails_when_the_plan_is_built_as_pysparks():
+    # `json.dumps` of the metadata of one name, and the metadata of no names, fail as the plan is
+    # built; the metadata of several names, and other keywords, fail at the call, as PySpark's.
+    with mock_connect_session() as (spark, _):
+        df = spark.range(1)
+        unserializable = F.col("id").alias("x", metadata={"k": {1}})
+        no_names = F.col("id").alias(metadata={"k": "v"})
+        assert repr(unserializable) == "Column<'id AS x'>"
+        assert repr(no_names) == "Column<'id AS '>"
+        with pytest.raises(TypeError, match="^Object of type set is not JSON serializable$"):
+            df.select(unserializable).collect()
+        with pytest.raises(PySparkValueError) as raised:
+            df.select(no_names).collect()
+        assert raised.value.getCondition() == "CANNOT_PROVIDE_METADATA"
+        # The first error of the plan, in the order in which PySpark builds it: the name of an
+        # alias before its child, and the metadata after it.
+        nested = F.upper(F.col("id").alias(1)).alias("y", metadata={"k": {1}})
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            df.select(nested).collect()
+        with pytest.raises(PySparkValueError) as raised:
+            F.col("id").alias("a", "b", metadata={"k": "v"})
+        assert raised.value.getCondition() == "ONLY_ALLOWED_FOR_SINGLE_COLUMN"
+        with pytest.raises(AssertionError, match="^Unexpected kwargs where passed"):
+            F.col("id").alias("x", foo=1)
+
+
+def test_a_column_of_an_alias_that_fails_copies_and_pickles_as_pysparks():
+    # PySpark's Column copies and pickles its expression objects, and the copy fails as the
+    # Column did when its plan is built: so does this client's, which pickles the errors.
+    with mock_connect_session() as (spark, _):
+        df = spark.range(1)
+        column = F.upper(F.col("id").alias(1))
+        for copied in (copy.copy(column), copy.deepcopy(column), pickle.loads(pickle.dumps(column))):
+            with pytest.raises(TypeError, match="^sequence item 0: expected str instance, int found$"):
+                repr(copied)
+            with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+                df.select(copied).collect()
+        no_names = pickle.loads(pickle.dumps(F.col("id").alias(metadata={"k": "v"})))
+        with pytest.raises(PySparkValueError) as raised:
+            df.select(no_names).collect()
+        assert raised.value.getCondition() == "CANNOT_PROVIDE_METADATA"
+        surrogate = pickle.loads(pickle.dumps(F.col("id").alias("\ud800")))
+        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+            df.select(surrogate).collect()
+        bad_bytes = pickle.loads(pickle.dumps(F.col("id").alias(b"\xff")))
+        with pytest.raises(UnicodeDecodeError, match="invalid start byte"):
+            df.select(bad_bytes).collect()
+
+
+@pytest.mark.parametrize(
+    "error, raised, message",
+    [
+        (("TypeError", "no", None), TypeError, "no"),
+        (("ValueError", "no", None), ValueError, "no"),
+        (("OverflowError", "no", None), OverflowError, "no"),
+        (("UnicodeEncodeError", "", "\ud800"), UnicodeEncodeError, "surrogates not allowed"),
+        (("UnicodeDecodeError", "", b"\xff"), UnicodeDecodeError, "invalid start byte"),
+        (("PySparkValueError", "CANNOT_PROVIDE_METADATA", {}), PySparkValueError, "single column"),
+    ],
+)
+def test_a_pickled_columns_errors_raise_on_a_worker_as_pysparks(error, raised, message):
+    # The errors that a Python worker of the server raises of a pickled Column, of PySpark's.
+    from pyspark.sql.connect._column_reduce import raise_error
+
+    with pytest.raises(raised, match=message):
+        raise_error(error)
 
 
 def test_alias_takes_bytes_as_pyspark():

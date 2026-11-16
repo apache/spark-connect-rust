@@ -129,6 +129,8 @@ def column_of(
     else_value: Any = None,
     sort: Optional[tuple[Any, str]] = None,
     levels: int = 1,
+    build_error: Optional[tuple[str, str, Any]] = None,
+    repr_error: Optional[tuple[str, str, Any]] = None,
 ) -> Any:
     """The Column of ``expression``, the bytes of a ``spark.connect.Expression`` of ``levels``
     levels, and of its rendering ``rendered``, which sends the expression as it is: of the Rust
@@ -170,13 +172,38 @@ def column_of(
                 self._rendered = rendered
 
             def to_plan(self, session):  # type: ignore[no-untyped-def]
+                if build_error is not None:
+                    raise_error(build_error)
                 sent = proto.Expression()
                 sent.CopyFrom(self._expression)
                 return sent
 
             def __repr__(self):  # type: ignore[no-untyped-def]
+                if repr_error is not None:
+                    raise_error(repr_error)
                 return self._rendered
 
         return ConnectColumn(Sent(parse_deep(proto.Expression, expression), rendered))
 
-    return _pyspark.Column._of_expression(expression, rendered, branches, else_value, levels)
+    return _pyspark.Column._of_expression(
+        expression, rendered, branches, else_value, levels, build_error, repr_error
+    )
+
+
+def raise_error(error: tuple[str, str, Any]) -> None:
+    """Raise the error of ``error``, the ``(kind, text, payload)`` of a pickled Column of an
+    expression that a request did not build, or whose ``__repr__`` failed, as PySpark raised it:
+    a builtin error of its message, the error of UTF-8 of the str or bytes of the payload, or
+    ``PySparkValueError`` of its error class and parameters."""
+    kind, text, payload = error
+    if kind == "UnicodeEncodeError":
+        payload.encode("utf-8")
+    if kind == "UnicodeDecodeError":
+        payload.decode("utf-8")
+    if kind == "PySparkValueError":
+        from pyspark.errors import PySparkValueError
+
+        raise PySparkValueError(errorClass=text, messageParameters=payload)
+    raise {"TypeError": TypeError, "ValueError": ValueError, "OverflowError": OverflowError}[kind](
+        text
+    )
