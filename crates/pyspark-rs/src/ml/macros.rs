@@ -254,7 +254,8 @@ macro_rules! native_pymethods {
                         slf,
                         $jvm,
                         spark_connect::ml::OperatorType::$op,
-                    )?;
+                    )?
+                    .with_instance(slf.as_any());
                     $crate::ml::object::new_py(slf.py(), writer)
                 }
 
@@ -418,7 +419,7 @@ macro_rules! native_model {
             pyclass: [subclass];
             persistence: {
                 fn write(slf: &Bound<'_, Self>) -> PyResult<Py<$crate::ml::object::PyMLWriter>> {
-                    let writer = slf.try_borrow()?.core.writer(slf.py())?;
+                    let writer = slf.try_borrow()?.core.writer(slf.py())?.with_instance(slf.as_any());
                     $crate::ml::object::new_py(slf.py(), writer)
                 }
 

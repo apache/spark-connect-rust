@@ -281,7 +281,8 @@ PySpark class has them:
   transform, an evaluation, a writer, a model's members), and so are those of the objects that it
   holds (an OneVsRest's classifier, a Pipeline's stages, a validator's estimator, evaluator and the
   values of its grids, a PipelineModel's stages, an OneVsRestModel's models, a validator model's
-  best and sub-models). A writer takes them at `write()`, where PySpark's reads them at its `save`.
+  best and sub-models). A writer reads them at its `save`, as PySpark's `RemoteMLWriter` reads
+  those of its `_instance`.
   The maps of an object that this client makes (of a fit, a load, a native copy) are made of the
   native object's values at their first read. The native members have PySpark's docstrings and
   signatures. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,

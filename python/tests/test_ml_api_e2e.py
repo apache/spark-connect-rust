@@ -142,3 +142,28 @@ def test_a_subclass_reads_the_jvm_class_of_its_python_name(session):
         MyLR.load(path + "/lr")
     assert type(LR.load(path + "/lr")) is LR and LR.load(path + "/lr").getMaxIter() == 3
     assert type(MyPipeline.load(path + "/pipeline")) is Pipeline
+
+
+def test_a_writer_reads_the_params_of_its_object_at_its_save(session):
+    # As PySpark's `RemoteMLWriter.save`, which reads the params of its `_instance` at the save:
+    # a param set after `write()` is saved, of an estimator, a model and a Pipeline's stage.
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    LR = cls("classification", "LogisticRegression")
+    Pipeline = cls("pipeline", "Pipeline")
+    Binarizer = cls("feature", "Binarizer")
+    path = tempfile.mkdtemp(prefix="ml-writer-at-save-")
+    lr = LR(maxIter=3)
+    writer = lr.write()
+    assert writer._instance is lr
+    lr.setMaxIter(7)
+    writer.save(path + "/lr")
+    assert LR.load(path + "/lr").getMaxIter() == 7
+    stage = Binarizer(threshold=0.1, inputCol="a", outputCol="b")
+    pipeline = Pipeline(stages=[stage])
+    writer = pipeline.write()
+    assert writer._instance is pipeline
+    stage.setThreshold(0.9)
+    writer.save(path + "/pipeline")
+    assert Pipeline.load(path + "/pipeline").getStages()[0].getThreshold() == 0.9

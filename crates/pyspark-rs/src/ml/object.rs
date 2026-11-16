@@ -407,6 +407,9 @@ pub struct PyMLWriter {
     session: Option<Py<PyAny>>,
     /// The error of PySpark's serialization of the params, which `save` raises.
     error: Option<PyErr>,
+    /// The object of the writer, as PySpark's `RemoteMLWriter._instance`, whose params `save`
+    /// reads at the save.
+    instance: Option<Py<PyAny>>,
 }
 
 impl PyMLWriter {
@@ -417,6 +420,7 @@ impl PyMLWriter {
             optionMap: Python::attach(|py| PyDict::new(py).unbind()),
             session: None,
             error: None,
+            instance: None,
         }
     }
 
@@ -427,6 +431,12 @@ impl PyMLWriter {
 
     pub(super) fn with_error(mut self, error: Option<PyErr>) -> Self {
         self.error = error;
+        self
+    }
+
+    /// The writer of the object `instance`, whose params `save` reads at the save.
+    pub(super) fn with_instance(mut self, instance: &Bound<'_, PyAny>) -> Self {
+        self.instance = Some(instance.clone().unbind());
         self
     }
 }
@@ -442,11 +452,26 @@ impl PyMLWriter {
     /// sets, which `RemoteMLWriter.save` does not read) of an operator, and of the session that
     /// holds a model's object.
     fn save(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<()> {
-        if let Some(error) = &self.error {
+        // PySpark's `RemoteMLWriter.save` reads the params of its instance at the save: the target
+        // of the object's params as of now, of its native class's writer.
+        let fresh = match &self.instance {
+            Some(instance) => Some(
+                py.import("pyspark.ml._native_classes")?
+                    .call_method1("_native_writer", (instance,))?
+                    .cast_into::<Self>()?,
+            ),
+            None => None,
+        };
+        let fresh = fresh.as_ref().map(|f| f.try_borrow()).transpose()?;
+        let (target, error) = match &fresh {
+            Some(f) => (&f.target, &f.error),
+            None => (&self.target, &self.error),
+        };
+        if let Some(error) = error {
             return Err(error.clone_ref(py));
         }
         let options = self.options(py)?;
-        match &self.target {
+        match target {
             WriteTarget::Object(object, params) => {
                 let session = object.session().clone();
                 let path = proto_path(path)?;
@@ -497,9 +522,23 @@ impl PyMLWriter {
                         .map_err(Box::new)
                     })?;
                 }
+                // Of the params of the object (and of the objects that it holds) as of the save.
+                py.import("pyspark.ml._native_classes")?
+                    .call_method1("_sync", (instance,))?;
                 let path = python_path(path)?;
                 save(instance.bind(py), &spark, &session, &path, &options)
             }
+        }
+    }
+
+    /// The object of the writer, as PySpark's `RemoteMLWriter._instance`.
+    #[getter(_instance)]
+    fn instance_of(&self, py: Python<'_>) -> Py<PyAny> {
+        match (&self.instance, &self.target) {
+            (Some(instance), _) | (None, WriteTarget::Python(instance, _)) => {
+                instance.clone_ref(py)
+            }
+            _ => py.None(),
         }
     }
 
