@@ -93,9 +93,10 @@ IPC in Rust: inline in a `LocalRelation`, or, at or above
 `spark.sql.session.localRelationCacheThreshold`, as session-scoped cache artifacts
 referenced by a `ChunkedCachedLocalRelation` (see `docs/architecture.md`).
 
-The Arrow handoff has been tested locally with PyArrow 10.0.0 (Python 3.9)
-and 26.0.0 (Python 3.12). CI installs the latest PyArrow; it does not pin or
-separately test the declared PyArrow 10 minimum. The native live-server smoke
+The package declares the minimum PyArrow of `pyspark-client` 4.3.0 (18.0.0),
+which the vendored PySpark code checks at runtime for its Arrow and pandas UDFs
+and UDTFs. CI installs the latest PyArrow; it does not pin or separately test
+that minimum. The native live-server smoke
 tests in `python/tests/test_arrow_e2e.py` run in the Connect parity CI job
 against its live server and built native extension. Official parity tests
 exercise the Rust transport with official PySpark; the separate native smoke
@@ -104,10 +105,10 @@ step covers the drop-in `toArrow()` path.
 The pandas Arrow-string input guard recognizes pandas 2.2 through 3.x storage
 layouts. The Python Connect and pandas parity workflows pin `pandas>=2.2,<3.0`;
 coverage and pipelines parity install unpinned pandas. CI has no explicit
-pandas-version matrix. The inherited `pandas>=1.0.0` package declaration is
-below the runtime utilities' `>=2.2` requirement. Aligning the package metadata
-is a separate packaging follow-up; neither that declaration nor the Arrow-string
-checks establish support for older pandas versions.
+pandas-version matrix. The package declares the minimum pandas, PyArrow and
+NumPy of `pyspark-client` 4.3.0 (`pandas>=2.2.0`, `pyarrow>=18.0.0`,
+`numpy>=1.23.2`), the versions that the runtime utilities check; the Arrow-string
+checks do not establish support for older pandas versions.
 
 Arrow-string input eligibility checks both array instances and canonical
 classes' row/Arrow conversion methods and label casting, including inherited
