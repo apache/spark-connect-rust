@@ -43,6 +43,7 @@ if LooseVersion(_protobuf.__version__) < LooseVersion("6.33.5"):
 
 import pyspark.sql.connect.proto as pb2  # noqa: E402
 from google.protobuf import text_format  # noqa: E402
+from pyspark import _pyspark  # noqa: E402
 from pyspark.errors import PySparkTypeError, PySparkValueError  # noqa: E402
 from pyspark.ml.linalg import DenseMatrix, DenseVector, SparseMatrix, SparseVector  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
@@ -91,6 +92,9 @@ def _no_session_left_active_of_ml():
 
 
 def _text(message):
+    # A message of the Rust protobuf runtime writes text_format's text itself.
+    if isinstance(message, _pyspark.ProtoMessage):
+        return _pyspark._proto_message_to_string(message, as_one_line=True)
     return text_format.MessageToString(message, as_one_line=True)
 
 
@@ -2298,13 +2302,14 @@ def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
     # executions and the analyses of a thread carry, the global ones first.
     import threading
 
-    from google.protobuf import any_pb2
+    from pyspark.sql.connect.client import _any_class
 
     spark, service = ml_mock
     client = spark.client
 
     def packed(graph_id):
-        extension = any_pb2.Any()
+        # The Any of the messages in use, of protobuf or of the Rust protobuf runtime.
+        extension = _any_class()()
         extension.Pack(pb2.PipelineAnalysisContext(dataflow_graph_id=graph_id))
         return extension
 
@@ -3451,9 +3456,8 @@ def test_ml_modules_import_as_pyspark():
 
 
 def test_ml_modules_import_without_protobuf():
-    # Without the protobuf package, pyspark.ml and the connect modules import, of a progress
-    # response of the transport, and a message of the generated modules raises an
-    # AttributeError that names protobuf.
+    # Without the protobuf package, pyspark.sql.connect.proto is of the Rust protobuf runtime:
+    # pyspark.ml and the connect modules import, and a message builds and encodes as protobuf's.
     script = textwrap.dedent(
         """
         import importlib.abc, sys
@@ -3468,19 +3472,19 @@ def test_ml_modules_import_without_protobuf():
         from pyspark.ml.classification import LogisticRegression
         import pyspark.sql.connect.expressions, pyspark.sql.connect.plan
         import pyspark.sql.connect.proto as proto
+        assert proto._implementation == "rust", proto._implementation
         assert LogisticRegression(maxIter=3).getMaxIter() == 3
-        assert hasattr(proto, "ExecutePlanResponse") and not hasattr(proto, "Relation")
-        try:
-            proto.Relation
-        except AttributeError as error:
-            print(error)
+        relation = proto.Relation(range=proto.Range(start=1, end=3))
+        assert proto.Relation.FromString(relation.SerializeToString()) == relation
+        print(relation.SerializeToString().hex())
         """
     )
     result = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
     )
     assert result.returncode == 0, result.stderr
-    assert "'Relation'" in result.stdout and "protobuf >= 6.33.5" in result.stdout
+    expected = pb2.Relation(range=pb2.Range(start=1, end=3)).SerializeToString().hex()
+    assert result.stdout.strip() == expected
 
 
 def test_session_hooks_rewrite_the_requests_of_executions_as_pyspark(_ml_mock_server):

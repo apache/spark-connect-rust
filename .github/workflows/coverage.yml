@@ -257,6 +257,7 @@ jobs:
           cd python
           PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest -rs \
             tests/test_dropin_offline.py \
+            tests/test_proto_rust_offline.py \
             tests/test_dropin_window_tablearg_offline.py \
             tests/test_dropin_udf_args_offline.py \
             tests/test_dropin_types_columns_offline.py \

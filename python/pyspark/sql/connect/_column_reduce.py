@@ -25,9 +25,6 @@ this module, on the client.
 from collections import deque
 from typing import Any, Optional
 
-from google.protobuf.descriptor import FieldDescriptor
-from google.protobuf.message import DecodeError
-
 
 def parse_deep(message_class: Any, data: bytes) -> Any:
     """The message of ``message_class`` that the bytes ``data`` encode, as its ``FromString``
@@ -36,6 +33,11 @@ def parse_deep(message_class: Any, data: bytes) -> Any:
     filled field by field, from a work list in place of recursion: each message field is parsed
     on its own, and one that the parser refuses is filled in turn, so that the parser never
     nests past its limit. Where ``FromString`` succeeds, this gives the same message."""
+    # Only a Python worker of the server, whose PySpark has protobuf, parses here; the client
+    # of the drop-in rebuilds a Column or DataFrame in Rust, so it needs no protobuf.
+    from google.protobuf.descriptor import FieldDescriptor
+    from google.protobuf.message import DecodeError
+
     try:
         return message_class.FromString(data)
     except DecodeError:
@@ -117,6 +119,8 @@ def _varint(data: bytes, pos: int) -> tuple[int, int]:
 
 def _is_repeated(field: Any) -> bool:
     """Whether ``field`` is a repeated field, of protobuf's descriptor of either version."""
+    from google.protobuf.descriptor import FieldDescriptor
+
     if hasattr(field, "is_repeated"):
         return field.is_repeated
     return field.label == FieldDescriptor.LABEL_REPEATED
