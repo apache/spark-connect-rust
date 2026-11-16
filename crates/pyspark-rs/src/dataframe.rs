@@ -216,15 +216,16 @@ impl PyDataFrame {
         copy
     }
 
-    /// The AttributeError that PySpark raises for `attribute` of the schema of this DataFrame when
-    /// that schema is not a DataType, as the attribute is then read from the object: `None` for a
-    /// DataType schema.
-    fn schema_object_error(&self, py: Python<'_>, attribute: &str) -> Option<PyErr> {
-        let object = self.schema_object.as_ref()?.bind(py);
-        let type_name = object.get_type().name().ok()?.to_string();
-        Some(pyo3::exceptions::PyAttributeError::new_err(format!(
-            "'{type_name}' object has no attribute '{attribute}'"
-        )))
+    /// The schema request that PySpark's `copy` of a DataFrame makes for the new DataFrame of its
+    /// reconstruction, `hasattr(copy, "__setstate__")`, which reads the columns of a DataFrame that
+    /// has no schema yet, even when this one has one. The request is that of a DataFrame of the
+    /// same relation, which has no schema cached, so that it fails as PySpark's does.
+    fn fresh_schema_request(&self, py: Python<'_>) -> PyResult<()> {
+        let session = self.dataframe.spark_session();
+        let relation = self.dataframe.to_relation().to_pyerr()?;
+        let fresh = DataFrame::from_sent_relation(session.clone(), relation);
+        interruptible(py, &session, || fresh.schema())?;
+        Ok(())
     }
 
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
@@ -245,7 +246,7 @@ impl PyDataFrame {
     /// the column at that index of `columns`, of Python's list indexing, and of the origin of
     /// `col`.
     fn column_at(&self, py: Python<'_>, index: i64) -> PyResult<spark_connect::column::Column> {
-        let columns = self.columns(py)?;
+        let columns = self.column_names(py)?;
         let name: String = PyList::new(py, columns)?
             .as_any()
             .get_item(index)?
@@ -381,15 +382,33 @@ impl PyDataFrame {
     }
 }
 
-/// The arguments of a method of `*cols`, the elements of a single list or tuple of them, as
-/// PySpark takes them.
+/// The arguments of a method of `*cols`, the items of a single sequence of them, as PySpark's
+/// `_to_cols` takes them: a sequence that is not an int, a str or a Column, which is then
+/// `tuple(cols[0])`. Any `collections.abc.Sequence` counts, as a range, bytes or a user class.
 fn unwrap_sequence(cols: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<Bound<'_, PyAny>>> {
-    match cols.as_slice() {
-        [only] if only.is_instance_of::<PyList>() || only.is_instance_of::<PyTuple>() => {
-            only.try_iter()?.collect()
+    if let [only] = cols.as_slice() {
+        if is_sequence_argument(only)? {
+            return only.try_iter()?.collect();
         }
-        _ => Ok(cols),
     }
+    Ok(cols)
+}
+
+/// Whether `only`, the single argument of `*cols`, is a sequence that PySpark unpacks: an
+/// `isinstance` of `collections.abc.Sequence`, except for an int, a str and a Column.
+fn is_sequence_argument(only: &Bound<'_, PyAny>) -> PyResult<bool> {
+    use pyo3::types::{PyInt, PyString, PyTuple};
+    if only.is_instance_of::<PyInt>()
+        || only.is_instance_of::<PyString>()
+        || only.is_instance_of::<PyColumn>()
+    {
+        return Ok(false);
+    }
+    if only.is_instance_of::<PyList>() || only.is_instance_of::<PyTuple>() {
+        return Ok(true);
+    }
+    let sequence = only.py().import("collections.abc")?.getattr("Sequence")?;
+    only.is_instance(&sequence)
 }
 
 /// PySpark's check of the `numPartitions` of `repartition`, `repartitionByRange` and `coalesce`,
@@ -440,19 +459,11 @@ fn deduplicate_subset(subset: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<
 
 /// Helper to convert arguments to a vector of Columns.
 pub(crate) fn to_column_list(
-    mut _args: Vec<Bound<'_, PyAny>>,
+    args: Vec<Bound<'_, PyAny>>,
 ) -> PyResult<Vec<spark_connect::column::Column>> {
-    // pyspark unpacks a single list/tuple argument: df.select(["a", "b"]) == df.select("a","b").
+    // pyspark unpacks a single sequence argument: df.select(["a", "b"]) == df.select("a","b").
     // (A single Column/str stays as-is.)
-    if _args.len() == 1 {
-        let only = &_args[0];
-        if only.is_instance_of::<pyo3::types::PyList>()
-            || only.is_instance_of::<pyo3::types::PyTuple>()
-        {
-            _args = only.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-        }
-    }
-    to_columns_as_given(_args)
+    to_columns_as_given(unwrap_sequence(args)?)
 }
 
 /// The columns of `args`, each a Column or a column name, else `NOT_EXPECTED_TYPE`, without
@@ -728,8 +739,9 @@ impl PyDataFrame {
     /// plan, and so the same Observations, as PySpark's copy shares its plan, with the
     /// `_support_repr_html` and the schema that its state carries, and an `executionInfo` of its
     /// own, None until it executes, as that of PySpark's `DataFrame(plan, session)`.
-    fn __copy__(&self) -> PyDataFrame {
-        self.copy_of(self.dataframe.shallow_copy())
+    fn __copy__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
+        self.fresh_schema_request(py)?;
+        Ok(self.copy_of(self.dataframe.shallow_copy()))
     }
 
     /// The deep copy of a DataFrame, as PySpark's `copy.deepcopy` of its `__reduce__`, which
@@ -743,6 +755,12 @@ impl PyDataFrame {
     /// a deep copy raises `NO_ACTIVE_SESSION` where no session is active, as on another thread,
     /// and `PySparkAssertionError` where another one is, while `copy.copy` keeps the session.
     fn __deepcopy__(&self, py: Python<'_>, memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        // As PySpark's: `copy.deepcopy` looks up `__deepcopy__` through `__getattr__`, whose check
+        // reads the columns, so the schema is requested unless it is cached. On a stopped session,
+        // that request raises the SparkConnectException of its closed client, before the session
+        // is copied, which raises a PySparkRuntimeError.
+        let session = self.dataframe.spark_session();
+        interruptible(py, &session, || self.dataframe.schema())?;
         let observations = self
             .dataframe
             .observations()
@@ -765,7 +783,10 @@ impl PyDataFrame {
             .clone();
         let copy = crate::on_grown_stack(|| self.dataframe.deep_copy_with(session, observations))
             .to_pyerr()?;
-        Ok(self.copy_of(copy))
+        // As PySpark's reconstruction of the copy, which requests its schema, as the copy has none.
+        let copy = self.copy_of(copy);
+        copy.fresh_schema_request(py)?;
+        Ok(copy)
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
@@ -878,7 +899,8 @@ impl PyDataFrame {
     }
 
     /// Add or replace multiple columns from a {name: Column} mapping, as PySpark's
-    /// `DataFrame.withColumns`, which asserts that it is given one, of Columns.
+    /// `DataFrame.withColumns`, whose `WithColumns` plan asserts, as the call builds it, that the
+    /// mapping is not empty, and of str names and Columns.
     #[pyo3(name = "withColumns", signature = (*colsMap))]
     fn with_columns(&self, colsMap: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         let [cols_map] = colsMap.as_slice() else {
@@ -887,14 +909,32 @@ impl PyDataFrame {
         let Ok(cols_map) = cols_map.cast::<PyDict>() else {
             return Err(not_expected_type(cols_map, "colsMap", "dict"));
         };
+        let valid = !cols_map.is_empty()
+            && cols_map.iter().all(|(name, column)| {
+                name.is_instance_of::<pyo3::types::PyString>()
+                    && column.is_instance_of::<PyColumn>()
+            });
+        if !valid {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        // A name that UTF-8 cannot encode fails the plan when it is sent, with the error of its
+        // encoding, which the first of them gives.
+        let mut deferred = None;
         let mut pairs = Vec::with_capacity(cols_map.len());
         for (name, column) in cols_map.iter() {
-            let Ok(column) = column.extract::<PyRef<'_, PyColumn>>() else {
-                return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-            };
-            pairs.push((name.extract::<String>()?, column.column.clone()));
+            let column = column.extract::<PyRef<'_, PyColumn>>()?;
+            match unbuildable_str_error(&name)? {
+                Some(error) => {
+                    deferred.get_or_insert(error);
+                }
+                None => pairs.push((name.extract::<String>()?, column.column.clone())),
+            }
         }
-        Ok(PyDataFrame::new(self.dataframe.with_columns(pairs)))
+        let df = self.dataframe.with_columns(pairs);
+        Ok(PyDataFrame::new(match deferred {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// Specify a relation hint (e.g. "broadcast"), with optional parameters. Reference
@@ -998,14 +1038,18 @@ impl PyDataFrame {
     /// `num` in the proto's int32, whose errors ([`proto_int`]) PySpark raises once it sends the
     /// plan; this client builds the plan here, so it raises them here. The server checks the rest.
     fn limit(&self, num: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let num = proto_int(num, "spark.connect.Limit.limit")?;
-        Ok(PyDataFrame::new(self.dataframe.limit(num)))
+        let py = num.py();
+        let value = proto_int(num, "spark.connect.Limit.limit");
+        let df = converted_plan(py, &self.dataframe, value, |num| self.dataframe.limit(num))?;
+        Ok(PyDataFrame::new(df))
     }
 
     /// Skip the first `num` rows, as PySpark's `offset`, which sends `num` as `limit` does.
     fn offset(&self, num: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        let num = proto_int(num, "spark.connect.Offset.offset")?;
-        Ok(PyDataFrame::new(self.dataframe.offset(num)))
+        let py = num.py();
+        let value = proto_int(num, "spark.connect.Offset.offset");
+        let df = converted_plan(py, &self.dataframe, value, |num| self.dataframe.offset(num))?;
+        Ok(PyDataFrame::new(df))
     }
 
     /// Remove duplicate rows.
@@ -1138,7 +1182,7 @@ impl PyDataFrame {
     /// refuses what it does not read.
     #[pyo3(
         name = "_joinAsOf",
-        signature = (other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=true, direction=DefaultedOption::Omitted),
+        signature = (other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=DefaultedOption::Omitted, direction=DefaultedOption::Omitted),
         text_signature = "($self, other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=True, direction='backward')"
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
@@ -1150,18 +1194,25 @@ impl PyDataFrame {
         on: Option<Bound<'_, PyAny>>,
         how: Option<Bound<'_, PyAny>>,
         tolerance: Option<Bound<'_, PyAny>>,
-        allowExactMatches: bool,
+        allowExactMatches: DefaultedOption,
         direction: DefaultedOption,
     ) -> PyResult<PyDataFrame> {
         // As PySpark's `_check_same_session`, first.
         let other = self.same_session(other)?;
         // As PySpark's `assert isinstance(how, str)`. A str that UTF-8 cannot encode is one, and
-        // raises the UnicodeEncodeError of its encoding once PySpark sends the plan, in protobuf's
-        // default upb backend; this client builds the plan here, so it raises that error here.
+        // fails the plan with the error of its encoding, when PySpark sends it. The plan's
+        // values are converted in the order of its protobuf fields, which gives the first error.
+        let mut deferred = None;
         let join_type = match how.filter(|how| !how.is_none()) {
             None => AsOfJoinType::Inner,
             Some(how) if how.is_instance_of::<pyo3::types::PyString>() => {
-                AsOfJoinType::parse(&how.extract::<String>()?)
+                match unbuildable_str_error(&how)? {
+                    Some(error) => {
+                        deferred = Some(error);
+                        AsOfJoinType::Inner
+                    }
+                    None => AsOfJoinType::parse(&how.extract::<String>()?),
+                }
             }
             Some(_) => {
                 return Err(pyo3::exceptions::PyAssertionError::new_err(
@@ -1186,6 +1237,35 @@ impl PyDataFrame {
             None => (None, Vec::new()),
             Some(on) => as_of_join_condition(&on)?,
         };
+        // The flag is a protobuf bool, which PySpark sets as the plan is sent.
+        let allow_exact_matches = match &allowExactMatches {
+            DefaultedOption::Omitted => true,
+            DefaultedOption::Given(allow) => {
+                let allow = allow.bind(leftAsOfColumn.py());
+                match proto_bool(allow) {
+                    Ok(allow) => allow,
+                    Err(err) => {
+                        deferred.get_or_insert(unbuildable_error(allow.py(), err)?);
+                        false
+                    }
+                }
+            }
+        };
+        // PySpark does not check `direction`, so its errors come last, as those of protobuf's
+        // string field when the plan is sent.
+        let direction = match &direction {
+            DefaultedOption::Omitted => AsOfJoinDirection::Backward,
+            DefaultedOption::Given(direction) => {
+                let direction = direction.bind(leftAsOfColumn.py());
+                match unbuildable_str_error(direction)? {
+                    Some(error) => {
+                        deferred.get_or_insert(error);
+                        AsOfJoinDirection::Backward
+                    }
+                    None => AsOfJoinDirection::parse(&crate::options::str_argument(direction)?),
+                }
+            }
+        };
         let options = AsOfJoinOptions {
             left_as_of,
             right_as_of,
@@ -1193,21 +1273,17 @@ impl PyDataFrame {
             using_columns,
             join_type,
             tolerance,
-            allow_exact_matches: allowExactMatches,
-            // PySpark does not check `direction`, so its errors come last, as those of protobuf's
-            // string field when the plan is sent (`crate::str_argument`).
-            direction: match &direction {
-                DefaultedOption::Omitted => AsOfJoinDirection::Backward,
-                DefaultedOption::Given(direction) => AsOfJoinDirection::parse(
-                    &crate::str_argument(direction.bind(leftAsOfColumn.py()))?,
-                ),
-            },
+            allow_exact_matches,
+            direction,
         };
         let df = self
             .dataframe
             .as_of_join(&other.dataframe, options)
             .to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        Ok(PyDataFrame::new(match deferred {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// Cross join.
@@ -1307,15 +1383,23 @@ impl PyDataFrame {
             .map(|c| c.expression().clone())
             .collect();
         // The count is the proto's int32 of the plan, which PySpark converts once it sends the
-        // plan, after the columns; this client builds the plan here, so it converts it here.
-        let num_partitions = num_partitions
+        // plan, after the columns: a count that protobuf refuses fails the plan, which is built
+        // here with no count, so that the errors of the columns come first.
+        let (num_partitions, deferred) = match num_partitions
             .map(|n| proto_int(&n, "spark.connect.RepartitionByExpression.num_partitions"))
-            .transpose()?;
-        Ok(PyDataFrame::new(
-            self.dataframe
-                .repartition_by_range_opt(num_partitions, exprs)
-                .to_pyerr()?,
-        ))
+            .transpose()
+        {
+            Ok(num_partitions) => (num_partitions, None),
+            Err(err) => (None, Some(unbuildable_error(py, err)?)),
+        };
+        let df = self
+            .dataframe
+            .repartition_by_range_opt(num_partitions, exprs)
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(match deferred {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// Repartition into `numPartitions` using a column's value directly as the shuffle
@@ -1348,13 +1432,17 @@ impl PyDataFrame {
         };
         // The count is the proto's int32 of the plan, converted after the column, as in
         // `repartitionByRange`.
-        let num_partitions = proto_int(
+        let value = proto_int(
             numPartitions,
             "spark.connect.RepartitionByExpression.num_partitions",
+        );
+        let df = converted_plan(
+            numPartitions.py(),
+            &self.dataframe,
+            value,
+            |num_partitions| self.dataframe.repartition_by_id(num_partitions, col),
         )?;
-        Ok(PyDataFrame::new(
-            self.dataframe.repartition_by_id(num_partitions, col),
-        ))
+        Ok(PyDataFrame::new(df))
     }
 
     /// Append a distributed monotonically-increasing index column. Mirrors
@@ -1399,7 +1487,7 @@ impl PyDataFrame {
                 .union_by_name_opt(&other.dataframe, allow_missing_columns),
             Err(err) => self
                 .dataframe
-                .union_by_name_unbuildable(&other.dataframe, unbuildable_bool_error(py, err)?),
+                .union_by_name_unbuildable(&other.dataframe, unbuildable_error(py, err)?),
         };
         set_operation_result(py, self, &other, dataframe)
     }
@@ -1441,9 +1529,11 @@ impl PyDataFrame {
         // converted after the columns, as in `repartitionByRange`.
         if numPartitions.is_instance_of::<PyInt>() {
             positive_partitions(&numPartitions)?;
+            let py = numPartitions.py();
             if cols.is_empty() {
-                let n = proto_int(&numPartitions, "spark.connect.Repartition.num_partitions")?;
-                return Ok(PyDataFrame::new(self.dataframe.repartition(n)));
+                let n = proto_int(&numPartitions, "spark.connect.Repartition.num_partitions");
+                let df = converted_plan(py, &self.dataframe, n, |n| self.dataframe.repartition(n))?;
+                return Ok(PyDataFrame::new(df));
             }
             // As PySpark's `_to_cols(cols)`, which does not unpack a list among them.
             let exprs: Vec<_> = to_columns_as_given(cols)?
@@ -1453,10 +1543,11 @@ impl PyDataFrame {
             let n = proto_int(
                 &numPartitions,
                 "spark.connect.RepartitionByExpression.num_partitions",
-            )?;
-            return Ok(PyDataFrame::new(
-                self.dataframe.repartition_by_expressions(n, exprs),
-            ));
+            );
+            let df = converted_plan(py, &self.dataframe, n, |n| {
+                self.dataframe.repartition_by_expressions(n, exprs)
+            })?;
+            return Ok(PyDataFrame::new(df));
         }
         if !(numPartitions.is_instance_of::<pyo3::types::PyString>()
             || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok())
@@ -1482,8 +1573,14 @@ impl PyDataFrame {
     /// `> 0`, which is then the proto's int32 of the plan, as in `repartitionByRange`.
     fn coalesce(&self, numPartitions: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         positive_partitions(numPartitions)?;
-        let num_partitions = proto_int(numPartitions, "spark.connect.Repartition.num_partitions")?;
-        Ok(PyDataFrame::new(self.dataframe.coalesce(num_partitions)))
+        let value = proto_int(numPartitions, "spark.connect.Repartition.num_partitions");
+        let df = converted_plan(
+            numPartitions.py(),
+            &self.dataframe,
+            value,
+            |num_partitions| self.dataframe.coalesce(num_partitions),
+        )?;
+        Ok(PyDataFrame::new(df))
     }
 
     /// Convert to DataFrame with new column names.
@@ -2056,13 +2153,20 @@ impl PyDataFrame {
     ) -> PyResult<PyDataFrame> {
         let py = col.py();
         let (col, fractions) = crate::stat::sample_by_arguments(col, fractions)?;
-        let seed = crate::stat::sample_by_seed(py, seed)?;
-        Ok(PyDataFrame::new(
-            self.dataframe
-                .stat()
-                .sample_by(col, fractions, Some(seed))
-                .to_pyerr()?,
-        ))
+        // The seed is converted as the proto's long as PySpark sends the plan, after its checks.
+        let (seed, deferred) = match crate::stat::sample_by_seed(py, seed) {
+            Ok(seed) => (seed, None),
+            Err(err) => (0, Some(unbuildable_error(py, err)?)),
+        };
+        let df = self
+            .dataframe
+            .stat()
+            .sample_by(col, fractions, Some(seed))
+            .to_pyerr()?;
+        Ok(PyDataFrame::new(match deferred {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// Replace values, as PySpark's `DataFrame.replace`: `to_replace` is a {old: new} dict, or
@@ -2186,15 +2290,31 @@ impl PyDataFrame {
         if total.le(0)? {
             return Err(not_positive("sum(weights)", &total)?);
         }
-        // Converted once the sum is checked, as PySpark's plans do with int(seed).
-        let seed = python_int(py, &seed)?;
+        // Converted once the sum is checked, as PySpark's plans do with int(seed). The long of the
+        // proto is converted as the plan is sent: a value out of its range fails each split.
+        let seed = py.import("builtins")?.getattr("int")?.call1((&seed,))?;
+        let (seed, deferred) = match seed.extract::<i64>() {
+            Ok(seed) => (seed, None),
+            Err(_) => (
+                0,
+                Some(unbuildable_error(
+                    py,
+                    crate::session::value_out_of_range(&seed),
+                )?),
+            ),
+        };
         let weights: Vec<f64> = weights.extract()?;
         Ok(self
             .dataframe
             .random_split(weights, Some(seed))
             .to_pyerr()?
             .into_iter()
-            .map(PyDataFrame::new)
+            .map(|df| {
+                PyDataFrame::new(match &deferred {
+                    Some(error) => df.unbuildable(error.clone()),
+                    None => df,
+                })
+            })
             .collect())
     }
 
@@ -2405,7 +2525,7 @@ impl PyDataFrame {
             ));
         }
         let legacy = std::env::var("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY").as_deref() == Ok("1");
-        if (legacy || name.starts_with("__")) && !self.columns(py)?.iter().any(|c| c == name) {
+        if (legacy || name.starts_with("__")) && !self.column_names(py)?.iter().any(|c| c == name) {
             return Err(crate::column::raise_pyspark(
                 py,
                 "PySparkAttributeError",
@@ -2427,7 +2547,7 @@ impl PyDataFrame {
     fn __dir__(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         // Inspect the class rather than the instance to avoid calling __dir__ again.
         let mut attrs = py.get_type::<Self>().dir()?.extract::<Vec<String>>()?;
-        attrs.extend(self.columns(py)?);
+        attrs.extend(self.column_names(py)?);
         attrs.sort();
         attrs.dedup();
         Ok(attrs)
@@ -2435,7 +2555,7 @@ impl PyDataFrame {
 
     /// Bracket completion keeps column order, duplicates and non-identifiers.
     fn _ipython_key_completions_(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        self.columns(py)
+        self.column_names(py)
     }
 
     /// Aggregate over the whole DataFrame (shorthand for `groupBy().agg(...)`).
@@ -2701,8 +2821,12 @@ impl PyDataFrame {
     /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
     #[getter]
     fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        // As PySpark's `copy.deepcopy` of the schema that `to` keeps, when it is not a DataType.
         if let Some(schema) = &self.schema_object {
-            return Ok(schema.clone_ref(py));
+            return Ok(py
+                .import("copy")?
+                .call_method1("deepcopy", (schema.bind(py),))?
+                .unbind());
         }
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
@@ -2745,11 +2869,25 @@ impl PyDataFrame {
         rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
     }
 
-    /// Column names (a property, mirroring `DataFrame.columns`).
+    /// Column names (a property, mirroring `DataFrame.columns`). A schema of `to` that is not a
+    /// DataType gives the names of its fields as it is, as PySpark's `[field.name for field in
+    /// self._schema.fields]`: an AttributeError of it falls back to a Column, as in PySpark.
     #[getter]
-    fn columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        if let Some(error) = self.schema_object_error(py, "fields") {
-            return Err(error);
+    fn columns(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(schema) = &self.schema_object {
+            let names = PyList::empty(py);
+            for field in schema.bind(py).getattr("fields")?.try_iter()? {
+                names.append(field?.getattr("name")?)?;
+            }
+            return Ok(names.into_any().unbind());
+        }
+        Ok(PyList::new(py, self.column_names(py)?)?.into_any().unbind())
+    }
+
+    /// The names of the columns of the schema of this DataFrame, as Rust callers need them.
+    fn column_names(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        if self.schema_object.is_some() {
+            return self.columns(py)?.bind(py).extract();
         }
         // The schema is cached, so the names come from it without another request.
         let session = self.dataframe.spark_session();
@@ -2783,7 +2921,14 @@ impl PyDataFrame {
         seed: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use pyo3::types::{PyBool, PyFloat};
-        let int = |value: &Bound<'_, PyAny>| python_int(py, value);
+        // The seed is `int(seed)`, as PySpark takes it, which fails at the call; the long of the
+        // proto is converted as the plan is sent, so that its error is deferred.
+        let int = |value: &Bound<'_, PyAny>| -> PyResult<Result<i64, PyErr>> {
+            let int = py.import("builtins")?.getattr("int")?.call1((value,))?;
+            Ok(int
+                .extract::<i64>()
+                .map_err(|_| crate::session::value_out_of_range(&int)))
+        };
         let (replace, frac, seed) = match (withReplacement, fraction) {
             (Some(w), Some(f)) if w.is_instance_of::<PyBool>() && f.is_instance_of::<PyFloat>() => {
                 (w.extract()?, f.extract()?, seed.map(int).transpose()?)
@@ -2823,15 +2968,16 @@ impl PyDataFrame {
                 ));
             }
         };
-        let seed = match seed {
-            Some(seed) => seed,
-            None => python_random_seed(py)?,
+        let (seed, deferred) = match seed {
+            Some(Ok(seed)) => (seed, None),
+            Some(Err(err)) => (0, Some(unbuildable_error(py, err)?)),
+            None => (python_random_seed(py)?, None),
         };
-        Ok(PyDataFrame::new(self.dataframe.sample_opt(
-            frac,
-            replace,
-            Some(seed),
-        )))
+        let df = self.dataframe.sample_opt(frac, replace, Some(seed));
+        Ok(PyDataFrame::new(match deferred {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// Check if the DataFrame is empty, asked once, as PySpark's.
@@ -2850,15 +2996,25 @@ impl PyDataFrame {
     /// Print the schema through Python stdout, honoring the maximum nesting depth.
     #[pyo3(signature = (level=None))]
     fn printSchema(&self, py: Python<'_>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
-        if let Some(error) = self.schema_object_error(py, "treeString") {
-            return Err(error);
-        }
         // Reference's `if level:` selects the default for false values before
         // resolving the schema; positive fractional depths behave as ceil(level).
         let level = match level {
             Some(level) if level.is_truthy()? => Some(level),
             _ => None,
         };
+        // A schema of `to` that is not a DataType is printed as PySpark's `print(self.schema
+        // .treeString(level))`, of a copy of it, whose `treeString` raises its own AttributeError.
+        if let Some(schema) = &self.schema_object {
+            let schema = py
+                .import("copy")?
+                .call_method1("deepcopy", (schema.bind(py),))?;
+            let tree = match level {
+                Some(level) => schema.call_method1("treeString", (level,))?,
+                None => schema.call_method0("treeString")?,
+            };
+            py.import("builtins")?.getattr("print")?.call1((tree,))?;
+            return Ok(());
+        }
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
@@ -2872,11 +3028,12 @@ impl PyDataFrame {
         Ok(())
     }
 
-    /// Get the schema as a list of (name, type) tuples.
+    /// Get the schema as a list of (name, type) tuples. A schema of `to` that is not a DataType
+    /// gives them as it is, as PySpark's `dtypes` reads its fields.
     #[getter]
-    fn dtypes(&self, py: Python<'_>) -> PyResult<Vec<(String, String)>> {
-        if let Some(error) = self.schema_object_error(py, "fields") {
-            return Err(error);
+    fn dtypes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        if let Some(schema) = &self.schema_object {
+            return Ok(object_dtypes(py, schema.bind(py))?.into_any().unbind());
         }
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
@@ -2887,13 +3044,14 @@ impl PyDataFrame {
         };
         // As PySpark, a user-defined type is named by its simpleString(), such as `vector`,
         // which only its Python class knows.
-        fields
+        let pairs = fields
             .into_iter()
             .map(|field| {
                 let name = crate::types::simple_string_with_udts(py, &field.data_type)?;
                 Ok((field.name, name))
             })
-            .collect()
+            .collect::<PyResult<Vec<(String, String)>>>()?;
+        Ok(PyList::new(py, pairs)?.into_any().unbind())
     }
 
     /// Additional set operation: unionAll (alias for union).
@@ -2981,7 +3139,7 @@ impl PyDataFrame {
             let cols = item.try_iter()?.collect::<PyResult<Vec<_>>>()?;
             return self.select(py, cols)?.into_py_any(py);
         } else if item.is_instance_of::<PyInt>() {
-            let columns = self.columns(py)?;
+            let columns = self.column_names(py)?;
             // Use Python list indexing for negative indices, bools (an int
             // subclass), and IndexError even for integers larger than isize.
             PyList::new(py, columns)?
@@ -3031,18 +3189,36 @@ impl PyDataFrame {
                 });
             }
         }
-        // As PySpark's, whose `dtypes` of a schema that is not a DataType is a Column, which
-        // the join of the representation iterates.
-        if self.schema_object.is_some() {
-            return Err(crate::column::raise_pyspark(
-                py,
-                "PySparkTypeError",
-                "NOT_ITERABLE",
-                &[("objectName", "Column")],
-            ));
+        if let Some(schema) = &self.schema_object {
+            let pairs = match object_dtypes(py, schema.bind(py)) {
+                Ok(pairs) => pairs,
+                // As PySpark's: an AttributeError of `dtypes` falls back to a Column, which the
+                // join of the representation cannot iterate.
+                Err(err) if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                    return Err(crate::column::raise_pyspark(
+                        py,
+                        "PySparkTypeError",
+                        "NOT_ITERABLE",
+                        &[("objectName", "Column")],
+                    ));
+                }
+                Err(err) => return Err(err),
+            };
+            let fields = pairs
+                .iter()
+                .map(|pair| {
+                    let name = pair.get_item(0)?.str()?.to_string();
+                    let dtype = pair.get_item(1)?.str()?.to_string();
+                    Ok(format!("{name}: {dtype}"))
+                })
+                .collect::<PyResult<Vec<_>>>()?
+                .join(", ");
+            return Ok(format!("DataFrame[{fields}]"));
         }
         let fields = self
             .dtypes(py)?
+            .bind(py)
+            .extract::<Vec<(String, String)>>()?
             .into_iter()
             .map(|(name, dtype)| format!("{name}: {dtype}"))
             .collect::<Vec<_>>()
@@ -4134,39 +4310,58 @@ impl PyDataFrameWriter {
     /// The shallow copy of a writer, as PySpark's `copy.copy`: the copy shares the state of
     /// this writer, as its `_write` is the same object, so that a setter of either one is seen
     /// by both, and the same DataFrame.
-    fn __copy__(&self, py: Python<'_>) -> PyDataFrameWriter {
-        PyDataFrameWriter {
-            inner: std::sync::Arc::clone(&self.inner),
-            refused_bucket_count: std::sync::Arc::clone(&self.refused_bucket_count),
-            refused_bucket_cols: std::sync::Arc::clone(&self.refused_bucket_cols),
-            unsent: std::sync::Arc::clone(&self.unsent),
-            frame: self.frame.clone_ref(py),
-        }
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Bound::new(
+            py,
+            PyDataFrameWriter {
+                inner: std::sync::Arc::clone(&this.inner),
+                refused_bucket_count: std::sync::Arc::clone(&this.refused_bucket_count),
+                refused_bucket_cols: std::sync::Arc::clone(&this.refused_bucket_cols),
+                unsent: std::sync::Arc::clone(&this.unsent),
+                frame: this.frame.clone_ref(py),
+            },
+        )?;
+        copy_instance_dict(slf.as_any(), copy.as_any())?;
+        Ok(copy)
+    }
+
+    /// The deep copy of a writer, as PySpark's, which copies its session before its DataFrame (see
+    /// [`deep_copy_writer`]).
+    fn __deepcopy__<'py>(
+        slf: &Bound<'py, Self>,
+        memo: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let frame = slf.borrow().frame.clone_ref(slf.py());
+        deep_copy_writer(slf.as_any(), &frame, memo)
     }
 
     /// The reduce of a writer, as PySpark's pickle of its DataFrame and its state, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
         use crate::reduce::{optional_object, save_mode_name, state_reduce, str_dict};
 
-        let writer = self.inner.get();
+        let writer = this.inner.get();
         let mode = match writer.get_unsupported_mode() {
             Some(mode) => Some(mode.to_string()),
             None => writer
                 .get_save_mode()
                 .map(|mode| save_mode_name(mode).to_string()),
         };
-        let refused = self
+        let refused = this
             .refused_bucket_count()
             .as_ref()
             .map(|n| n.clone_ref(py));
         // The core writer has no bucketing of a refused count, whose columns are kept aside.
         let bucket_cols = match refused {
-            Some(_) => self.refused_bucket_cols().clone(),
+            Some(_) => this.refused_bucket_cols().clone(),
             None => writer.get_bucket_cols().to_vec(),
         };
         let (kept_format, kept_partition, kept_clustering, kept_mode, kept_sort, kept_bucket) = {
-            let unsent = self.unsent();
+            let unsent = this.unsent();
             let kept = |object: &Option<Py<PyAny>>| object.as_ref().map(|o| o.clone_ref(py));
             (
                 kept(&unsent.format),
@@ -4177,11 +4372,11 @@ impl PyDataFrameWriter {
                 kept(&unsent.bucket),
             )
         };
-        let kept_options = self.unsent().options.to_list(py)?;
+        let kept_options = this.unsent().options.to_list(py)?;
         let args = PyTuple::new(
             py,
             [
-                self.frame.clone_ref(py).into_any().into_bound(py),
+                this.frame.clone_ref(py).into_any().into_bound(py),
                 writer.get_format().into_pyobject(py)?.into_any(),
                 mode.into_pyobject(py)?.into_any(),
                 str_dict(py, writer.get_options())?.into_any(),
@@ -4200,7 +4395,7 @@ impl PyDataFrameWriter {
                 kept_options.into_any(),
             ],
         )?;
-        state_reduce(py, "writer_reduce", args)
+        reduce_with_instance_dict(slf, state_reduce(py, "writer_reduce", args)?)
     }
 
     /// A writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the format,
@@ -4998,25 +5193,44 @@ impl PyDataFrameWriterV2 {
 impl PyDataFrameWriterV2 {
     /// The shallow copy of a V2 writer, as PySpark's `copy.copy`: the copy shares the state of
     /// this writer, as its `_write` is the same object, and the same DataFrame.
-    fn __copy__(&self, py: Python<'_>) -> PyDataFrameWriterV2 {
-        PyDataFrameWriterV2 {
-            inner: std::sync::Arc::clone(&self.inner),
-            unsent_table: self.unsent_table.as_ref().map(|table| table.clone_ref(py)),
-            unsent_provider: std::sync::Arc::clone(&self.unsent_provider),
-            unsent_clustering: std::sync::Arc::clone(&self.unsent_clustering),
-            unsent_partition: std::sync::Arc::clone(&self.unsent_partition),
-            unsent_options: std::sync::Arc::clone(&self.unsent_options),
-            unsent_properties: std::sync::Arc::clone(&self.unsent_properties),
-            frame: self.frame.clone_ref(py),
-        }
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Bound::new(
+            py,
+            PyDataFrameWriterV2 {
+                inner: std::sync::Arc::clone(&this.inner),
+                unsent_table: this.unsent_table.as_ref().map(|table| table.clone_ref(py)),
+                unsent_provider: std::sync::Arc::clone(&this.unsent_provider),
+                unsent_clustering: std::sync::Arc::clone(&this.unsent_clustering),
+                unsent_partition: std::sync::Arc::clone(&this.unsent_partition),
+                unsent_options: std::sync::Arc::clone(&this.unsent_options),
+                unsent_properties: std::sync::Arc::clone(&this.unsent_properties),
+                frame: this.frame.clone_ref(py),
+            },
+        )?;
+        copy_instance_dict(slf.as_any(), copy.as_any())?;
+        Ok(copy)
+    }
+
+    /// The deep copy of a writer, as PySpark's, which copies its session before its DataFrame (see
+    /// [`deep_copy_writer`]).
+    fn __deepcopy__<'py>(
+        slf: &Bound<'py, Self>,
+        memo: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let frame = slf.borrow().frame.clone_ref(slf.py());
+        deep_copy_writer(slf.as_any(), &frame, memo)
     }
 
     /// The reduce of a V2 writer, as PySpark's pickle of its DataFrame and its state, which
     /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
         use crate::reduce::{column_list, optional_object, state_reduce, str_dict};
 
-        let writer = self.inner.get();
+        let writer = this.inner.get();
         let (kept_provider, kept_clustering, kept_partition) = {
             let kept = |object: &std::sync::Mutex<Option<Py<PyAny>>>| {
                 object
@@ -5026,24 +5240,24 @@ impl PyDataFrameWriterV2 {
                     .map(|o| o.clone_ref(py))
             };
             (
-                kept(&self.unsent_provider),
-                kept(&self.unsent_clustering),
-                kept(&self.unsent_partition),
+                kept(&this.unsent_provider),
+                kept(&this.unsent_clustering),
+                kept(&this.unsent_partition),
             )
         };
-        let kept_options = self.unsent_options().to_list(py)?;
-        let kept_properties = self.unsent_properties().to_list(py)?;
+        let kept_options = this.unsent_options().to_list(py)?;
+        let kept_properties = this.unsent_properties().to_list(py)?;
         let args = PyTuple::new(
             py,
             [
-                self.frame.clone_ref(py).into_any().into_bound(py),
+                this.frame.clone_ref(py).into_any().into_bound(py),
                 writer.get_table_name().into_pyobject(py)?.into_any(),
                 writer.get_provider().into_pyobject(py)?.into_any(),
                 str_dict(py, writer.get_options())?.into_any(),
                 str_dict(py, writer.get_table_properties())?.into_any(),
                 column_list(py, writer.get_partition_cols())?.into_any(),
                 PyList::new(py, writer.get_cluster_cols())?.into_any(),
-                optional_object(py, self.unsent_table.as_ref()),
+                optional_object(py, this.unsent_table.as_ref()),
                 optional_object(py, kept_provider.as_ref()),
                 optional_object(py, kept_clustering.as_ref()),
                 optional_object(py, kept_partition.as_ref()),
@@ -5051,7 +5265,7 @@ impl PyDataFrameWriterV2 {
                 kept_properties.into_any(),
             ],
         )?;
-        state_reduce(py, "writer_v2_reduce", args)
+        reduce_with_instance_dict(slf, state_reduce(py, "writer_v2_reduce", args)?)
     }
 
     /// A V2 writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the table,
@@ -5748,25 +5962,124 @@ fn set_operation_result(
     Ok(result)
 }
 
-/// The error of a flag that a protobuf bool does not take, which PySpark's set operation raises
-/// as a request sends its plan: a `TypeError` or an `OverflowError`, as a builtin of its message.
-/// Another error is raised at the call.
-fn unbuildable_bool_error(
+/// The reduce of a writer with the instance dictionary of `writer` as its state, as the reduce of
+/// a plain Python object carries its `__dict__`: `copy.deepcopy` and a pickle keep the attributes
+/// that were set on the writer.
+fn reduce_with_instance_dict<'py>(
+    writer: &Bound<'py, PyAny>,
+    reduced: Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let (creator, args): (Bound<'py, PyAny>, Bound<'py, PyAny>) = reduced.extract()?;
+    let state = writer.getattr("__dict__")?;
+    Ok(PyTuple::new(writer.py(), [creator, args, state])?.into_any())
+}
+
+/// The deep copy of a writer, as PySpark's, which copies the session of the writer before its
+/// DataFrame: a stopped session raises the PySparkRuntimeError of its copy, and the DataFrame is
+/// not copied. The copy is that of the reduce of the writer, `copy._reconstruct` with `memo`.
+fn deep_copy_writer<'py>(
+    writer: &Bound<'py, PyAny>,
+    frame: &Py<PyDataFrame>,
+    memo: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = writer.py();
+    let session = frame.bind(py).borrow().spark_session(py)?;
+    let copy = py.import("copy")?;
+    copy.call_method1("deepcopy", (session, memo))?;
+    let reduced = writer.call_method0("__reduce__")?;
+    let mut args = vec![writer.clone(), memo.clone()];
+    args.extend(reduced.cast::<PyTuple>()?.iter());
+    copy.call_method1("_reconstruct", PyTuple::new(py, args)?)
+}
+
+/// Sets the instance dictionary of `target` to a copy of the one of `source`, as `copy.copy` of a
+/// plain Python object does.
+fn copy_instance_dict(source: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> PyResult<()> {
+    target
+        .getattr("__dict__")?
+        .call_method1("update", (source.getattr("__dict__")?,))?;
+    Ok(())
+}
+
+/// The `(str(field.name), field.dataType.simpleString())` of each field of `schema`, a schema of
+/// `to` that is not a DataType, as PySpark's `dtypes` reads them: an object without `fields`, or
+/// whose fields lack these attributes, raises the error of Python for it.
+fn object_dtypes<'py>(py: Python<'py>, schema: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyList>> {
+    let pairs = PyList::empty(py);
+    for field in schema.getattr("fields")?.try_iter()? {
+        let field = field?;
+        let name = field.getattr("name")?.str()?;
+        let simple = field.getattr("dataType")?.call_method0("simpleString")?;
+        pairs.append((name, simple))?;
+    }
+    Ok(pairs)
+}
+
+/// The error of a value that protobuf refuses in a field of a plan, which PySpark's plan raises as
+/// a request sends it: a builtin `TypeError`, `OverflowError` or `ValueError`, as [`proto_int`]
+/// and [`proto_bool`] raise them. Another error is raised at the call.
+pub(crate) fn unbuildable_error(
     py: Python<'_>,
     err: PyErr,
 ) -> PyResult<spark_connect_core::error::SparkError> {
+    use spark_connect_core::error::{SparkError, SparkErrorKind};
     let kind = if err.is_instance_of::<pyo3::exceptions::PyTypeError>(py) {
-        spark_connect_core::error::SparkErrorKind::BuiltinTypeError
+        SparkErrorKind::BuiltinTypeError
     } else if err.is_instance_of::<pyo3::exceptions::PyOverflowError>(py) {
-        spark_connect_core::error::SparkErrorKind::BuiltinOverflowError
+        SparkErrorKind::BuiltinOverflowError
+    } else if err.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+        && !err.is_instance_of::<pyo3::exceptions::PyUnicodeError>(py)
+    {
+        SparkErrorKind::BuiltinValueError
     } else {
         return Err(err);
     };
     let message = err.value(py).str()?.to_string();
-    Ok(spark_connect_core::error::SparkError {
+    Ok(SparkError {
         kind,
-        ..spark_connect_core::error::SparkError::value_msg(message)
+        ..SparkError::value_msg(message)
     })
+}
+
+/// The plan of `df` with `plan` of the value `value`, which PySpark converts as it sends the plan:
+/// a value that protobuf refuses makes `df` fail each request with its error, as
+/// [`unbuildable_error`] gives it. Another error is raised at the call.
+fn converted_plan<T>(
+    py: Python<'_>,
+    df: &DataFrame,
+    value: PyResult<T>,
+    plan: impl FnOnce(T) -> DataFrame,
+) -> PyResult<DataFrame> {
+    match value {
+        Ok(value) => Ok(plan(value)),
+        Err(err) => Ok(df.unbuildable(unbuildable_error(py, err)?)),
+    }
+}
+
+/// The error that PySpark's plan raises when it sends the str `text` of a protobuf string field,
+/// which fails to convert as [`crate::options::str_argument`] gives it: a str that UTF-8 cannot
+/// encode, bytes that are not UTF-8, or an object that is neither. None for a value that converts.
+pub(crate) fn unbuildable_str_error(
+    text: &Bound<'_, PyAny>,
+) -> PyResult<Option<spark_connect_core::error::SparkError>> {
+    use pyo3::types::PyBytes;
+    use spark_connect_core::error::SparkError;
+    let err = match crate::options::str_argument(text) {
+        Ok(_) => return Ok(None),
+        Err(err) => err,
+    };
+    let py = text.py();
+    if err.is_instance_of::<pyo3::exceptions::PyUnicodeEncodeError>(py) {
+        // The UTF-32 bytes of the str, which keep the surrogates, as `unencodable_str` takes them.
+        let utf32le = text.call_method1("encode", ("utf-32-le", "surrogatepass"))?;
+        let utf32le = utf32le.cast::<PyBytes>()?;
+        return Ok(Some(SparkError::unencodable_str(utf32le.as_bytes())));
+    }
+    if err.is_instance_of::<pyo3::exceptions::PyUnicodeDecodeError>(py) {
+        let bytes = text.cast::<PyBytes>()?;
+        return Ok(Some(SparkError::invalid_utf8(0, bytes.as_bytes())));
+    }
+    Ok(Some(unbuildable_error(py, err)?))
 }
 
 /// The `eager` flag of a checkpoint, which PySpark passes to the constructor of its command: true
@@ -5859,15 +6172,6 @@ pub(crate) fn python_random_seed(py: Python<'_>) -> PyResult<i64> {
     py.import("random")?
         .call_method1("randint", (0, max_size))?
         .extract()
-}
-
-/// `int(value)` of Python, as PySpark applies to a seed: a float is truncated, a str is parsed,
-/// and a value that `int()` rejects raises its error. An int out of the range of a long is the
-/// `ValueError` of protobuf.
-pub(crate) fn python_int(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<i64> {
-    let int = py.import("builtins")?.getattr("int")?.call1((value,))?;
-    int.extract::<i64>()
-        .map_err(|_| crate::session::value_out_of_range(&int))
 }
 
 /// The collected `rows` of a result of `schema`, with configured binary values and

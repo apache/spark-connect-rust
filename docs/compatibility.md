@@ -1159,6 +1159,9 @@ request that carries it, which is not always the call that takes it. The error i
 - a `DataFrameWriter`'s or a `DataFrameWriterV2`'s format or provider, option, table property,
   partitioning, bucketing, sorting or clustering column, path or table name fails the write, such
   as `save`, `saveAsTable` or `create`;
+- a `withColumns` name, or an as-of join's `how` or `direction`, fails the DataFrame when its plan
+  is built, at its first request, such as `collect` or `columns`. A `direction` of bytes that are
+  not UTF-8 fails there with PySpark's `UnicodeDecodeError`, as protobuf's string field gives it;
 - a key or a value of `SparkSession.builder.config`, or an `appName`, fails `getOrCreate`;
 - a `DataStreamWriter`'s fails the call that takes it, as PySpark sets that writer's request as it
   goes.
@@ -1174,6 +1177,12 @@ and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDef
 `pyspark.sql.udtf.UserDefinedTableFunction` also name, so `isinstance` of a UDF or UDTF it builds
 is True against either name, where PySpark 4.3.0 gives False for the classic name, whose class
 needs a SparkContext.
+
+A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
+for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped
+session fails the copy with `SparkConnectException`, as PySpark's does. One difference remains:
+PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` by reading the columns, which
+the drop-in does not, since it defines `__deepcopy__` itself.
 
 ## Native NaiveBayes
 

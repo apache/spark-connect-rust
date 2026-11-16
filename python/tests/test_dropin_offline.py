@@ -5135,10 +5135,13 @@ def test_counts_that_the_proto_refuses_are_refused_as_pyspark():
     # any other value by its __index__, so a float, a str or None is the TypeError of
     # operator.index, and refuses an int out of the range of the field with a ValueError, of the
     # value itself, or of its int when that is beyond a long. PySpark raises these once it sends
-    # the plan; this client builds the plan at the call, so it raises them there.
+    # the plan, so limit, offset, repartition, repartitionByRange, repartitionById and coalesce
+    # return a DataFrame that raises them at each action. tail, head and take are actions, which
+    # raise them at the call.
     import operator
 
     from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import DataFrame
 
     class Shown(int):
         def __str__(self):
@@ -5172,15 +5175,21 @@ def test_counts_that_the_proto_refuses_are_refused_as_pyspark():
             (Shown(2**40), ValueError, "Value out of range: shown"),
             (Shown(2**70), ValueError, "Value out of range: 1180591620717411303424"),
         ):
+            if method in (df.limit, df.offset):
+                plan = method(value)
+                assert isinstance(plan, DataFrame), (method, value)
+                call = plan.collect
+            else:
+                call = lambda: method(value)  # noqa: E731
             with pytest.raises(error_type) as error:
-                method(value)
+                call()
             assert type(error.value) is error_type, (method, value)
             assert str(error.value) == message, (method, value)
-    count_cases = [
+    # The counts of these plans are converted as the plan is sent, after the checks of PySpark.
+    lazy_cases = [
         (lambda: df.limit(None), TypeError, index_error(None)),
-        (lambda: df.take(None), TypeError, index_error(None)),
         (lambda: df.limit(num=True), *refused("Limit.limit")),
-        (lambda: df.head(n=True), *refused("Limit.limit")),
+        (lambda: df.offset(None), TypeError, index_error(None)),
         (lambda: df.repartition(True), *refused("Repartition.num_partitions")),
         (lambda: df.repartition(True, "id"), *refused("RepartitionByExpression.num_partitions")),
         (lambda: df.coalesce(True), *refused("Repartition.num_partitions")),
@@ -5192,15 +5201,29 @@ def test_counts_that_the_proto_refuses_are_refused_as_pyspark():
         (lambda: df.repartitionByRange(Shown(2**40), "id"), ValueError,
          "Value out of range: shown"),
         (lambda: df.repartitionById(2**40, "id"), ValueError, "Value out of range: 1099511627776"),
-        # coalesce compares any value with 0 first, so that the proto takes what passes.
+        # coalesce compares a float or a bool with 0, and the proto takes it as its int.
         (lambda: df.coalesce(1.5), TypeError, index_error(1.5)),
         (lambda: df.coalesce(np.True_), TypeError, index_error(np.True_)),
+    ]
+    for call, error_type, message in lazy_cases:
+        plan = call()
+        assert isinstance(plan, DataFrame), message
+        with pytest.raises(error_type) as error:
+            plan.collect()
+        assert type(error.value) is error_type, message
+        assert str(error.value) == message
+        with pytest.raises(error_type):
+            plan.schema
+    # The actions, and the comparison of coalesce, which PySpark makes as it is called.
+    eager_cases = [
+        (lambda: df.take(None), TypeError, index_error(None)),
+        (lambda: df.head(n=True), *refused("Limit.limit")),
         (lambda: df.coalesce(None), TypeError,
          "'>' not supported between instances of 'NoneType' and 'int'"),
         (lambda: df.coalesce("1"), TypeError,
          "'>' not supported between instances of 'str' and 'int'"),
     ]
-    for call, error_type, message in count_cases:
+    for call, error_type, message in eager_cases:
         with pytest.raises(error_type) as error:
             call()
         assert type(error.value) is error_type, message
@@ -8647,6 +8670,157 @@ def test_reader_formats_are_kept_until_load_as_pyspark(mock_connect):
     # Read.data_source=2 -> DataSource.format=1.
     data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
     assert data_source[1] == [b"parquet"]
+
+
+def test_with_columns_asserts_its_mapping_as_pyspark(mock_connect):
+    # As PySpark's WithColumns plan, which asserts, as the call builds it, that the mapping is not
+    # empty, and of str names and Columns: a bare AssertionError. A name that UTF-8 cannot encode
+    # fails the plan as it is sent, with the UnicodeEncodeError of its encoding.
+    from pyspark.sql import DataFrame
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    for mapping in ({}, {b"a": F.lit(1)}, {1: F.lit(1)}, {"a": 1}, {"a": F.lit(1), 2: F.lit(2)}):
+        with pytest.raises(AssertionError) as error:
+            df.withColumns(mapping)
+        assert type(error.value) is AssertionError
+        assert str(error.value) == ""
+    assert isinstance(df.withColumns({"a": F.lit(1)}), DataFrame)
+    plan = df.withColumns({"a": F.lit(1), "\ud800": F.lit(2)})
+    with pytest.raises(UnicodeEncodeError):
+        plan.columns
+    with pytest.raises(UnicodeEncodeError):
+        plan.collect()
+
+
+def test_to_keeps_a_schema_that_is_not_a_datatype_as_pyspark_reads_it(mock_connect):
+    # As PySpark's `to`, which keeps the schema as it is given: columns and dtypes read the fields
+    # of the object, and printSchema its treeString, so an object that lacks them raises what
+    # Python raises for it. columns and the representation fall back to a Column, which the
+    # representation cannot iterate.
+    import pyspark.sql.types as T
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    # repr reads the settings of the eager evaluation of the session, which the server has.
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
+                     "spark.sql.repl.eagerEval.maxNumRows": "20",
+                     "spark.sql.repl.eagerEval.truncate": "20"}
+    bogus = T.StructType([T.StructField("x", T.StructField("b", T.IntegerType()))])
+    df = spark.range(1).to(bogus)
+    assert df.columns == ["x"]
+    assert df.dtypes == [("x", "b:int")]
+    assert repr(df) == "DataFrame[x: b:int]"
+    with pytest.raises(PySparkTypeError) as error:
+        df.printSchema()
+    assert error.value.getCondition() == "INVALID_TYPENAME_CALL"
+
+    text = spark.range(1).to("int")
+    assert type(text.columns).__name__ == "Column"
+    assert type(text.dtypes).__name__ == "Column"
+    with pytest.raises(PySparkTypeError) as error:
+        repr(text)
+    assert error.value.getCondition() == "NOT_ITERABLE"
+    with pytest.raises(AttributeError, match="'str' object has no attribute 'treeString'"):
+        text.printSchema()
+    assert text.schema == "int"
+
+
+def test_sequence_arguments_are_unpacked_as_pyspark_does(mock_connect):
+    # As PySpark's `_to_cols`: a single argument that is a collections.abc.Sequence, and not an
+    # int, a str or a Column, stands for its items, so a range, bytes, a UserList and a Sequence of
+    # one's own unpack. The items of bytes are ints, which select and orderBy do not take as names.
+    from collections import UserList
+    from collections.abc import Sequence
+
+    from pyspark.errors import PySparkIndexError, PySparkTypeError
+
+    class Items(Sequence):
+        def __init__(self, items):
+            self._items = list(items)
+
+        def __getitem__(self, index):
+            return self._items[index]
+
+        def __len__(self):
+            return len(self._items)
+
+    spark, _ = mock_connect
+    df = spark.range(2)
+    for items in (range(0), b"", UserList(["id"]), Items(["id"])):
+        df.select(items).collect()
+    df.groupBy(range(0)).count().collect()
+    with pytest.raises(PySparkTypeError) as error:
+        df.select(range(2))
+    assert error.value.getMessageParameters() == {
+        "arg_name": "cols", "expected_type": "Column or str", "arg_type": "int"}
+    with pytest.raises(PySparkTypeError) as error:
+        df.select(b"ab")
+    assert error.value.getMessageParameters() == {
+        "arg_name": "cols", "expected_type": "Column or str", "arg_type": "int"}
+    with pytest.raises(PySparkIndexError) as error:
+        df.groupBy(range(1))
+    assert error.value.getCondition() == "INDEX_NOT_POSITIVE"
+    with pytest.raises(IndexError, match="^list index out of range$"):
+        df.orderBy(b"ab")
+
+
+def test_writers_keep_their_instance_attributes_through_copy_as_pyspark(mock_connect):
+    # As PySpark's plain classes: copy.copy shares the attributes that were set on a writer, and
+    # copy.deepcopy copies them, for DataFrameWriter and DataFrameWriterV2 alike.
+    import copy
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    for writer in (df.write, df.writeTo("t")):
+        writer.foo = [1, 2]
+        shallow = copy.copy(writer)
+        deep = copy.deepcopy(writer)
+        assert type(shallow) is type(writer) and type(deep) is type(writer)
+        assert shallow.foo is writer.foo
+        assert deep.foo == [1, 2] and deep.foo is not writer.foo
+
+
+def test_deep_copy_of_a_dataframe_of_a_stopped_session_fails_as_pyspark(mock_connect):
+    # As PySpark's, whose deep copy looks up `__deepcopy__` through `__getattr__`, which reads the
+    # columns: the schema request of a closed client raises SparkConnectException, which is
+    # NO_ACTIVE_SESSION.
+    import copy
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    other = SparkSession.builder.remote(service.remote).create()
+    df = other.range(1)
+    other.stop()
+    with pytest.raises(SparkConnectException) as error:
+        copy.deepcopy(df)
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+
+
+def test_copies_of_a_dataframe_request_its_schema_as_pyspark_does(mock_connect):
+    # As PySpark's copy, which reads the columns of the DataFrame that the reconstruction of a copy
+    # makes: copy.copy makes one schema request, whether the DataFrame has its schema or not, and
+    # copy.deepcopy makes one for the copy, and one more for the DataFrame when it has no schema.
+    import copy
+
+    spark, service = mock_connect
+
+    def schema_requests(call):
+        before = len(service.analyze_requests)
+        call()
+        return len(service.analyze_requests) - before
+
+    df = spark.range(1)
+    assert schema_requests(lambda: copy.copy(df)) == 1
+    assert schema_requests(lambda: copy.deepcopy(df)) == 2
+    assert schema_requests(lambda: copy.deepcopy(df)) == 1
+    cached = spark.range(1)
+    cached.columns
+    assert schema_requests(lambda: copy.copy(cached)) == 1
+    assert schema_requests(lambda: copy.deepcopy(cached)) == 1
 
 
 def test_reader_strings_that_utf8_cannot_encode_fail_the_plan_as_pyspark(mock_connect):
@@ -14164,12 +14338,16 @@ def test_seeds_that_pyspark_cannot_send_are_refused_as_pyspark(mock_connect):
         (-(2**63) - 1, "-9223372036854775809"),
         (np.uint64(2**63), "9223372036854775808"),
     )
+    # The seed is converted by int() at the call, and its range by protobuf as the plan is sent:
+    # the plans of randomSplit and sample raise it at each of their actions.
     for call in (split, sample, keyword_sample, positional_sample):
         for seed, shown in out_of_range:
-            with pytest.raises(ValueError) as error:
-                call(seed)
-            assert type(error.value) is ValueError
-            assert str(error.value) == f"Value out of range: {shown}"
+            plans = call(seed)
+            for plan in plans if isinstance(plans, list) else [plans]:
+                with pytest.raises(ValueError) as error:
+                    plan.collect()
+                assert type(error.value) is ValueError
+                assert str(error.value) == f"Value out of range: {shown}"
 
     def sample_by(seed):
         return df.sampleBy("id", {0: 0.5}, seed)
@@ -14185,12 +14363,12 @@ def test_seeds_that_pyspark_cannot_send_are_refused_as_pyspark(mock_connect):
             assert str(error.value) == ""
         for seed in (True, False):
             with pytest.raises(TypeError) as error:
-                call(seed)
+                call(seed).collect()
             assert str(error.value) == (
                 "Field spark.connect.StatSampleBy.seed: Expected an int, got a boolean.")
         for seed, shown in out_of_range[1:3]:
             with pytest.raises(ValueError) as error:
-                call(seed)
+                call(seed).collect()
             assert str(error.value) == f"Value out of range: {shown}"
     with pytest.raises(PySparkTypeError) as error:
         df.sampleBy(1, {0: 0.5}, 3.7)
@@ -14217,6 +14395,8 @@ def test_sample_by_seeds_of_int_subclasses_are_set_as_protobuf_does_as_pyspark(m
     # As PySpark's StatSampleBy, which sets its seed, an int, in the long field of the proto:
     # protobuf's default (upb) backend takes the int of an int subclass, and the ValueError of
     # one out of the range of a long shows that int, not the str() of the subclass.
+    from pyspark.sql import DataFrame
+
     spark, service = mock_connect
     df = spark.range(10)
 
@@ -14226,11 +14406,14 @@ def test_sample_by_seeds_of_int_subclasses_are_set_as_protobuf_does_as_pyspark(m
 
         __repr__ = __str__
 
+    # The seed is sent, as the proto's long, as the plan is: its error is raised at each action.
     for call in (df.sampleBy, df.stat.sampleBy):
         for seed, shown in ((Seed(2**63), "9223372036854775808"),
                             (Seed(-(2**63) - 1), "-9223372036854775809")):
+            plan = call("id", {0: 0.5}, seed)
+            assert isinstance(plan, DataFrame)
             with pytest.raises(ValueError) as error:
-                call("id", {0: 0.5}, seed)
+                plan.collect()
             assert str(error.value) == f"Value out of range: {shown}"
     # Relation.sample_by=107 -> StatSampleBy.seed=5.
     df.sampleBy("id", {0: 1.0}, Seed(5)).collect()
@@ -14325,6 +14508,7 @@ def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
     # right_as_of=4, join_expr=5, using_columns=6, join_type=7, tolerance=8,
     # allow_exact_matches=9 and direction=10. The as-of columns are the columns of their
     # DataFrames, and `on` is a condition, or names when it is a name or a list of names.
+    from pyspark.sql import DataFrame
     from pyspark.sql import functions as F
 
     spark, service = mock_connect
@@ -14373,25 +14557,45 @@ def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
         with pytest.raises(AssertionError, match="^how should be a string$"):
             left._joinAsOf(right, "id", "id", how=how)
 
-    # PySpark sends `how` and `direction` as protobuf string fields, whose errors it raises when
-    # it sends the plan, those of protobuf's default upb backend; this client builds the plan at
-    # once, so it raises them at the call. A str that UTF-8 cannot encode is a str to the assert
-    # of `how`, and the UnicodeEncodeError of its encoding; a `direction` of bytes is decoded as
-    # UTF-8, and any other value is upb's TypeError.
+    # PySpark sends `how`, `allowExactMatches` and `direction` in the plan, which raises the errors
+    # of their protobuf fields when it is sent, as the errors of protobuf's default upb backend;
+    # the as-of join raises them at each action. A str that UTF-8 cannot encode is a str to the
+    # assert of `how`, and the UnicodeEncodeError of its encoding; a `direction` of bytes is decoded
+    # as UTF-8, and any other value is upb's TypeError.
     for kwargs in ({"how": "a\ud800"}, {"direction": "a\ud800"}):
+        plan = left._joinAsOf(right, "id", "id", **kwargs)
+        assert isinstance(plan, DataFrame)
         with pytest.raises(UnicodeEncodeError) as e:
-            left._joinAsOf(right, "id", "id", **kwargs)
+            plan.collect()
         assert str(e.value) == (
             "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
         )
     join = sent_as_of_join(left._joinAsOf(right, "id", "id", direction=b"forward"))
     assert join[10] == [b"forward"]
+    plan = left._joinAsOf(right, "id", "id", direction=b"\xff")
     with pytest.raises(UnicodeDecodeError) as e:
-        left._joinAsOf(right, "id", "id", direction=b"\xff")
+        plan.collect()
     assert str(e.value) == "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"
     for direction in (1, None):
+        plan = left._joinAsOf(right, "id", "id", direction=direction)
         with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
-            left._joinAsOf(right, "id", "id", direction=direction)
+            plan.collect()
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            plan.columns
+    # allowExactMatches is a protobuf bool: an int is taken as its truth, and any other value that
+    # is not an int raises the TypeError of the conversion at each action, as protobuf does.
+    assert sent_as_of_join(left._joinAsOf(right, "id", "id", allowExactMatches=1))[9] == [1]
+    join = sent_as_of_join(left._joinAsOf(right, "id", "id", allowExactMatches=0))
+    assert join.get(9, [0]) == [0]
+    for allow, message in (
+        (None, "'NoneType' object cannot be interpreted as an integer"),
+        ("yes", "'str' object cannot be interpreted as an integer"),
+        (2**70, "Python int too large to convert to C long"),
+    ):
+        plan = left._joinAsOf(right, "id", "id", allowExactMatches=allow)
+        with pytest.raises((TypeError, OverflowError)) as e:
+            plan.collect()
+        assert str(e.value) == message
 
 
 def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
