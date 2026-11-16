@@ -813,7 +813,11 @@ def test_messages_work_without_protobuf():
         assert pool.FindMessageTypeByName("spark.connect.Relation") is proto.Relation.DESCRIPTOR
         event = proto.PipelineEvent(timestamp=datetime.datetime(2020, 1, 2, 3, 4, 5, 678000))
         assert event.timestamp.ToJsonString() == "2020-01-02T03:04:05.678Z"
+        # The vendored context manager, which packs into protobuf's Any, is the runtime's.
+        from pyspark.pipelines import add_pipeline_analysis_context as analysis
         from pyspark.sql.connect.proto import _rust
+
+        assert analysis.add_pipeline_analysis_context is _rust.add_pipeline_analysis_context
 
         relation, context = _text_cases(lambda name: _rust._CLASSES[name])
         values = relation.sql.pos_arguments.add().literal.specialized_array.doubles.values
@@ -917,21 +921,33 @@ def test_install_exports_the_messages_and_modules_of_the_runtime(upb):
     assert "example_plugins_pb2" in modules and "ExamplePluginRelation" not in names
 
 
-def test_pipeline_analysis_context_of_the_runtime_is_the_vendored_ones(upb):
+def test_pipeline_analysis_context_of_the_runtime_is_the_vendored_ones(upb, monkeypatch):
     # The context manager of the runtime adds the user context extension that the vendored one
-    # adds with protobuf's Any, and removes it, also when its body raises. The vendored module,
-    # as it is imported, has the runtime's (see pyspark._proto_hooks), so its file is run here.
-    import importlib.util
+    # adds with protobuf's Any, and removes it, also when its body raises. With protobuf, the
+    # vendored module keeps its own, which packs a message of the runtime into protobuf's Any (as
+    # Apache Spark's tests of it patch that Any); without, it has the runtime's (see
+    # pyspark._proto_hooks and test_messages_work_without_protobuf).
+    import types
 
+    import google.protobuf
     import pyspark.pipelines.add_pipeline_analysis_context as module
+    from pyspark import _proto_hooks
 
-    assert module.add_pipeline_analysis_context is _rust.add_pipeline_analysis_context
-    assert _rust.add_pipeline_analysis_context.__module__ == module.__name__
-    spec = importlib.util.spec_from_file_location("_vendored_analysis_context", module.__file__)
-    vendored_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(vendored_module)
-    vendored = vendored_module.add_pipeline_analysis_context
+    vendored = module.add_pipeline_analysis_context
     assert vendored is not _rust.add_pipeline_analysis_context
+    assert _proto_hooks._protobuf_any_imports()
+    monkeypatch.setitem(sys.modules, "google.protobuf.any_pb2", None)
+    monkeypatch.delattr(google.protobuf, "any_pb2", raising=False)
+    assert not _proto_hooks._protobuf_any_imports()
+    monkeypatch.undo()
+    name = _rust.add_pipeline_analysis_context.__module__
+    try:
+        fake = types.ModuleType("_vendored_analysis_context")
+        _proto_hooks._give_runtime_context(fake)
+        assert fake.add_pipeline_analysis_context is _rust.add_pipeline_analysis_context
+        assert _rust.add_pipeline_analysis_context.__module__ == fake.__name__
+    finally:
+        _rust.add_pipeline_analysis_context.__module__ = name
 
     class Client:
         def __init__(self):
