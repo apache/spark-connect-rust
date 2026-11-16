@@ -479,6 +479,15 @@ The Rust `transform` of a fitted model rejects a DataFrame of another session. I
 Python, as with PySpark, it returns a DataFrame whose analysis or execution fails
 on the server of that session with `CONNECT_ML.CACHE_INVALID`.
 
+In Python, a fit, its training summary and the members of its model (`predict`, the summary's
+DataFrames) are sent over the session of the dataset and of the model, so ML works on a session
+that is not the active one (a second session of `SparkSession.builder.remote(...).create()`).
+This is a deliberate difference from PySpark: it sends the summary of a fit and the members of a
+model (`_call_java`) over `SparkSession.getActiveSession()`, so on such a session its fits of a
+model with a summary and its models' members fail with `CONNECT_ML.CACHE_INVALID` (`Cannot
+retrieve Summary object ... from the ML cache`). A model used from a session other than its own
+fails on both.
+
 The native estimators, transformers and evaluators of `pyspark.ml.connect` take
 keyword-only constructor parameters. The evaluators follow standard
 `pyspark.ml.evaluation`: multiclass classification defaults to `metricName="f1"`,
