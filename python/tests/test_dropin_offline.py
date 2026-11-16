@@ -27413,6 +27413,35 @@ def test_a_builder_remote_set_to_none_fails_create_as_pyspark(mock_connect, monk
     assert "sc://localhost" in repr(SparkSession.builder.remote().__reduce__())
 
 
+def test_empty_rows_send_the_json_of_a_raw_nullable_schema_as_pyspark(mock_connect):
+    # As PySpark's empty LocalRelation, which sends `schema.json()` as it is: a nullable flag that
+    # is not a bool stays raw in the text, which the server cannot parse, so its DataFrame fails
+    # with its ParseException. The relation of the empty rows carries that text, and a schema of
+    # bool flags is sent as before. The schema of the DataFrame is analyzed, which sends the plan.
+    import json
+
+    from pyspark.sql import types as T
+
+    spark, service = mock_connect
+
+    def sent_schema(flag):
+        schema = T.StructType([T.StructField("x", T.IntegerType(), flag)])
+        df = spark.createDataFrame([], schema)
+        df.schema
+        # LocalRelation=11 of the relation, and LocalRelation.schema=2.
+        local = _sent_relation(service.analyze_requests[-1], 11)
+        assert len(local[2]) == 1
+        return local[2][0].decode()
+
+    for flag in [0, 1, "x", None, [1]]:
+        expected = {"fields": [{"metadata": {}, "name": "x", "nullable": flag, "type": "integer"}],
+                    "type": "struct"}
+        assert sent_schema(flag) == json.dumps(expected, separators=(",", ":"), sort_keys=True)
+    assert json.loads(sent_schema(False)) == {
+        "fields": [{"metadata": {}, "name": "x", "nullable": False, "type": "integer"}],
+        "type": "struct"}
+
+
 def test_a_shallow_copy_of_a_merge_builder_keeps_its_schema_evolution_as_pyspark(mock_connect):
     # As PySpark, where withSchemaEvolution sets the attribute of the builder it is called on,
     # so a copy that sets it sends it alone, while the clauses that the copy adds are shared.

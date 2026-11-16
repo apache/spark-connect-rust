@@ -2414,6 +2414,24 @@ impl PySparkSession {
         if is_loaded_instance(py, data, "pyarrow", "Table")? {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
         }
+        // Empty rows of a struct whose nullable flag is not a bool: PySpark sends the `json()` of
+        // the schema as it is, which the server cannot parse, so the relation carries that text.
+        if data.is_instance_of::<PyList>() && data.len()? == 0 {
+            if let Some(json) = crate::types::raw_struct_json(schema)? {
+                let relation = spark_connect_proto::Relation {
+                    rel_type: Some(spark_connect_proto::relation::RelType::LocalRelation(
+                        spark_connect_proto::LocalRelation {
+                            data: None,
+                            schema: Some(json),
+                        },
+                    )),
+                    ..Default::default()
+                };
+                let df =
+                    spark_connect::DataFrame::from_relation(self.session.clone(), relation, None);
+                return Ok(PyDataFrame::new(df.to_pyerr()?));
+            }
+        }
         let spec = schema_spec(py, &self.session, schema)?;
         if is_loaded_instance(py, data, "numpy", "ndarray")? {
             return self.create_from_ndarray(py, data, spec);
