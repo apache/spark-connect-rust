@@ -30,6 +30,11 @@ on:
       - crates/spark-connect-proto/proto/**
       - python/pyspark/**
       - pyproject.toml
+      # The license and notice files that the wheels and the sdist ship.
+      - LICENSE
+      - NOTICE
+      - LICENSE-binary
+      - NOTICE-binary
       - .cargo/**
       - rust-toolchain*
       - .github/workflows/release.yml

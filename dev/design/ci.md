@@ -181,7 +181,9 @@ are `FLAKY_FILES` (the files that get retries) and `SLOW_FILE_TIMEOUTS` (per-fil
 live-server tests" step of the `connect-parity` job of `build_python_connect.yml`, which runs the
 `tests/test_*_e2e.py` files of the drop-in and ML tests with `SPARK_REMOTE` set. The
 `connect-dropin` job names no e2e file. The Rust live tests are named in the `--test` lists of the
-`connect-e2e` job. A Rust live test returns early without `SPARK_REMOTE`, so the guard step at the
+`connect-e2e` job and of the live pass of `coverage.yml`, which differ: `e2e_streaming`,
+`e2e_new_methods`, `e2e_ops_breadth` and `e2e_session_catalog` run only in `coverage.yml`, and
+`e2e_reattach_drop` only in `connect-e2e`. A Rust live test returns early without `SPARK_REMOTE`, so the guard step at the
 start of `connect-e2e` fails when a `crates/spark-connect/tests/e2e_*.rs` file is named by no
 workflow's `--test` list. That check is a name match only. The ML live tests that `connect-e2e`
 runs are also in the `--test` list of the live pass of `coverage.yml`'s Rust coverage report,

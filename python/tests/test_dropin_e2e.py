@@ -5919,3 +5919,22 @@ def test_empty_data_with_a_struct_field_as_a_type_is_rejected_by_the_server(sess
     with pytest.raises(ParseException) as e:
         df.collect()
     assert "PARSE_SYNTAX_ERROR" in str(e.value)
+
+
+def test_the_schema_of_a_vector_column_has_the_sql_type_of_its_udt_as_pysparks(session):
+    # The server sends no SQL type of a JVM type with a Python class (VectorUDT): as PySpark's, the
+    # schema takes it of the class, so that its JSON round-trips and an empty DataFrame of it is
+    # created.
+    import json
+
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql.types import StructType
+
+    df = session.createDataFrame([(Vectors.dense([1.0]), [Vectors.dense([2.0])])], ["v", "a"])
+    field = json.loads(df.schema.json())["fields"][0]["type"]
+    assert list(field) == ["class", "pyClass", "sqlType", "type"]
+    assert field["sqlType"] == df.schema.fields[0].dataType.sqlType().jsonValue()
+    assert StructType.fromJson(json.loads(df.schema.json())) == df.schema
+    assert session.createDataFrame([], df.schema).schema.simpleString() == (
+        "struct<v:vector,a:array<vector>>"
+    )

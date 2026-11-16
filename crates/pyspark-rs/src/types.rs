@@ -1121,13 +1121,11 @@ impl PyDataType {
     /// `__eq__` compares, so equal types always hash equal (`str()` can lag behind the
     /// live fields of a mutated `StructType`). A `UserDefinedType` is compared by class
     /// and `__dict__` rather than by core type, so it keeps pyspark's `hash(str(self))`.
+    /// As PySpark's `hash(str(self))`: of the repr, which keeps a flag as it was given, so that
+    /// `ArrayType(IntegerType(), 1)` and `ArrayType(IntegerType(), True)` hash differently, as in
+    /// PySpark, though they are equal.
     fn __hash__(slf: &Bound<'_, Self>) -> PyResult<isize> {
-        let any = slf.as_any();
-        if is_udt(any)? {
-            return any.str()?.hash();
-        }
-        let s = py_to_data_type(any)?.simple_string();
-        pyo3::types::PyString::new(any.py(), &s).hash()
+        slf.as_any().str()?.hash()
     }
 }
 
@@ -3754,7 +3752,7 @@ impl PyCalendarIntervalType {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"calendarinterval\"")
+        type_reduce(py, "\"interval\"")
     }
     /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
     /// returns it, and raises its `TypeError` of an argument.
@@ -4332,6 +4330,14 @@ pub(crate) fn simple_string_with_udts(py: Python<'_>, data_type: &DataType) -> P
 }
 
 pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
+    if matches!(
+        dt,
+        DataType::Struct { .. } | DataType::Array { .. } | DataType::Map { .. }
+    ) {
+        if let Some(filled) = with_udt_sql_types(py, dt) {
+            return data_type_to_py(py, &filled);
+        }
+    }
     macro_rules! obj {
         ($init:expr) => {
             Py::new(py, $init)?.into_any()
@@ -4563,6 +4569,84 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
         }
     };
     Ok(o)
+}
+
+/// `dt` with the SQL type of each user-defined type of a Python class that lacks one, from the
+/// class's `sqlType()`, or `None` if it has none to fill. The server sends no SQL type of a JVM type
+/// with a Python class, such as `VectorUDT`, and PySpark's conversion of a schema of the server
+/// makes the type of its class (`UserDefinedType.fromJson`), whose JSON has its `sqlType`: so the
+/// JSON of the schema, and a schema made of it, have the `sqlType` as PySpark's have. A class that
+/// does not import keeps its type as it is, as before.
+fn with_udt_sql_types(py: Python<'_>, dt: &DataType) -> Option<DataType> {
+    match dt {
+        DataType::Udt {
+            type_str,
+            jvm_class,
+            python_class: Some(python_class),
+            serialized_python_class,
+            sql_type: None,
+        } => {
+            let udt = py
+                .import("pyspark.sql.types")
+                .and_then(|types| types.getattr("_parse_datatype_json_string"))
+                .and_then(|parse| parse.call1((dt.json(),)))
+                .ok()?;
+            let sql_type = udt
+                .call_method0("sqlType")
+                .and_then(|sql_type| py_to_data_type(&sql_type))
+                .ok()?;
+            Some(DataType::Udt {
+                type_str: type_str.clone(),
+                jvm_class: jvm_class.clone(),
+                python_class: Some(python_class.clone()),
+                serialized_python_class: serialized_python_class.clone(),
+                sql_type: Some(Box::new(sql_type)),
+            })
+        }
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => with_udt_sql_types(py, element_type).map(|element_type| DataType::Array {
+            element_type: Box::new(element_type),
+            contains_null: *contains_null,
+        }),
+        DataType::Map {
+            key_type,
+            value_type,
+            value_contains_null,
+        } => {
+            let (key, value) = (
+                with_udt_sql_types(py, key_type),
+                with_udt_sql_types(py, value_type),
+            );
+            if key.is_none() && value.is_none() {
+                return None;
+            }
+            Some(DataType::Map {
+                key_type: Box::new(key.unwrap_or_else(|| (**key_type).clone())),
+                value_type: Box::new(value.unwrap_or_else(|| (**value_type).clone())),
+                value_contains_null: *value_contains_null,
+            })
+        }
+        DataType::Struct { fields } => {
+            let mut filled = false;
+            let fields = fields
+                .iter()
+                .map(|field| match with_udt_sql_types(py, &field.data_type) {
+                    Some(data_type) => {
+                        filled = true;
+                        StructField {
+                            data_type,
+                            ..field.clone()
+                        }
+                    }
+                    None => field.clone(),
+                })
+                .collect();
+            filled.then_some(DataType::Struct { fields })
+        }
+        _ => None,
+    }
 }
 
 /// The type of `schema`, a DataType or a DDL string, which the server parses, as PySpark

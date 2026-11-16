@@ -1,7 +1,7 @@
 //! PyO3 wrapper for spark_connect::column::Column.
 
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyTuple};
 use spark_connect::column::Column;
 use spark_connect::expression::{Alias, ExpressionNode, NullOrdering};
 
@@ -159,7 +159,7 @@ impl PyColumn {
     fn alias(
         &self,
         py: Python<'_>,
-        alias: Vec<String>,
+        alias: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyColumn> {
         crate::options::check_keyword_keys(kwargs)?;
@@ -189,6 +189,14 @@ impl PyColumn {
             ));
         }
         let single = alias.len() == 1;
+        // A name is of a string field of the plan, which PySpark sets when it builds the plan: a
+        // str, a bytes of its UTF-8, and the protobuf TypeError of any other value
+        // (`str_argument`). This client converts it here, after the checks above, as PySpark's
+        // order has them.
+        let alias = alias
+            .iter()
+            .map(|name| crate::options::str_argument(&name))
+            .collect::<PyResult<Vec<String>>>()?;
         let mut node = Alias::with_names(self.column.expression().clone(), alias);
         if let Some(metadata) = metadata {
             if single {
@@ -214,7 +222,7 @@ impl PyColumn {
     fn name(
         &self,
         py: Python<'_>,
-        alias: Vec<String>,
+        alias: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("name")?;
@@ -305,8 +313,9 @@ impl PyColumn {
                 ),
             )?;
         }
-        let key_col = to_value_column(key)?;
-        Ok(PyColumn::new(self.column.clone().get_item(key_col)))
+        // As PySpark's `self[key]`: its `__getitem__`, of the origin of that, which takes a slice
+        // as a `substr`.
+        self.__getitem__(key)
     }
 
     /// Check if NULL.
@@ -405,7 +414,8 @@ impl PyColumn {
     /// Ascending sort.
     fn asc(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("asc")?;
-        Ok(PyColumn::new(self.column.clone().asc()))
+        // As PySpark's `asc`, which is its `asc_nulls_first`, of the origin of that.
+        self.asc_nulls_first()
     }
 
     /// Ascending sort with nulls first.
@@ -423,7 +433,8 @@ impl PyColumn {
     /// Descending sort.
     fn desc(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("desc")?;
-        Ok(PyColumn::new(self.column.clone().desc()))
+        // As PySpark's `desc`, which is its `desc_nulls_last`, of the origin of that.
+        self.desc_nulls_last()
     }
 
     /// Descending sort with nulls first.
@@ -736,13 +747,16 @@ impl PyColumn {
     /// Column and its sort method, as PySpark's SortOrder keeps its child and direction, so that
     /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
     /// A Column too deep to be sent is the `RecursionError` that PySpark's pickler raises for it.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let (expression, levels) = self.column.try_to_proto_with_levels().to_pyerr()?;
+    /// A user-set attribute of the instance is the reduce's state, as of a plain object, so
+    /// that `copy`, `deepcopy` and `pickle` keep it, as they do of PySpark's Column.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let this = slf.borrow();
+        let (expression, levels) = this.column.try_to_proto_with_levels().to_pyerr()?;
         let expression = pyo3::types::PyBytes::new(py, &crate::encode_on_grown_stack(expression));
         let column = |expr: &spark_connect::expression::Expression| -> PyResult<Py<PyColumn>> {
             Py::new(py, PyColumn::new(Column::new(expr.clone())))
         };
-        let (branches, else_value) = match self.column.expression().node() {
+        let (branches, else_value) = match this.column.expression().node() {
             ExpressionNode::CaseWhen(case_when) => {
                 let branches = case_when
                     .branches
@@ -754,7 +768,7 @@ impl PyColumn {
             }
             _ => (None, None),
         };
-        let sort = match self.column.expression().node() {
+        let sort = match this.column.expression().node() {
             ExpressionNode::SortOrder(sort) => {
                 let method = match (sort.ascending, sort.null_ordering) {
                     (true, NullOrdering::First) => "asc_nulls_first",
@@ -766,16 +780,18 @@ impl PyColumn {
             }
             _ => None,
         };
-        py.import("pyspark.sql.connect.column")?
+        let reduce = py
+            .import("pyspark.sql.connect.column")?
             .getattr("_reduce_column")?
             .call1((
                 expression,
-                self.column.expression().render(),
+                this.column.expression().render(),
                 branches,
                 else_value,
                 sort,
                 levels,
-            ))
+            ))?;
+        crate::group::reduce_with_state(&reduce, slf.as_any())
     }
 
     /// The Column of `expression`, the bytes of a `spark.connect.Expression`, and of its
@@ -939,10 +955,12 @@ impl PyColumn {
         lowerBound: Py<PyAny>,
         upperBound: Py<PyAny>,
     ) -> PyResult<PyColumn> {
+        // As PySpark's `(self >= lowerBound) & (self <= upperBound)`: each operator and its operand
+        // are of the origin of their own dunder, which the origin of `between` does not outlast.
         let _origin = crate::origin::with_origin("between")?;
-        let l = operand_column(lowerBound.bind(py))?;
-        let u = operand_column(upperBound.bind(py))?;
-        Ok(PyColumn::new(self.column.clone().between(l, u)))
+        let lower = self.__ge__(py, lowerBound)?;
+        let upper = Py::new(py, self.__le__(py, upperBound)?)?.into_any();
+        lower.__and__(py, upper)
     }
     #[pyo3(name = "bitwiseAND")]
     fn bitwise_and(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {

@@ -302,15 +302,17 @@ impl PyWindowSpec {
     /// through `Window`, also on a Python worker of the server, as PySpark's WindowSpec pickles
     /// the Columns it holds. A sort order is given as the Column of its child and the method of
     /// its direction and nulls, as an unpickled Column is not a sort order of its own.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
         let column = |expr: &Expression| Py::new(py, PyColumn::new(Column::new(expr.clone())));
-        let partition = self
+        let partition = this
             .spec
             .partition_spec
             .iter()
             .map(column)
             .collect::<PyResult<Vec<_>>>()?;
-        let order = self
+        let order = this
             .spec
             .order_spec
             .iter()
@@ -332,7 +334,7 @@ impl PyWindowSpec {
             FrameBound::Following(n) => *n,
             FrameBound::UnboundedFollowing => UNBOUNDED_FOLLOWING,
         };
-        let frame = self
+        let frame = this
             .spec
             .frame_spec
             .as_ref()
@@ -344,7 +346,8 @@ impl PyWindowSpec {
             .getattr("_window_reduce")?
             .getattr("window_of")?;
         let args = (partition, order, frame).into_pyobject(py)?;
-        Ok(PyTuple::new(py, [window_of, args.into_any()])?.into_any())
+        let reduce = PyTuple::new(py, [window_of, args.into_any()])?.into_any();
+        crate::group::reduce_with_state(&reduce, slf.as_any())
     }
 }
 

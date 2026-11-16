@@ -161,9 +161,11 @@ pub fn with_wait_watch<R>(watch: Arc<WaitWatch>, f: impl FnOnce() -> R) -> R {
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// As [`block_on`], but the wait ends at once, with `None`, when the [`WaitWatch`] of the thread
-/// returns [`Watch::Abort`]: the future is dropped, unfinished. For a wait that nothing on the
-/// server stands behind, such as the retries of a session release, which a signal of the
-/// process stops as it stops PySpark's sleep between the retries.
+/// returns [`Watch::Abort`] while the future runs: the future is dropped, unfinished. If the
+/// future has ended and the wait only awaits the interrupt that a [`Watch::Interrupt`] started,
+/// an Abort ends that wait instead, cancelling the interrupt, and the output of the future is
+/// given. For a wait that nothing on the server stands behind, such as the retries of a session
+/// release, which a signal of the process stops as it stops PySpark's sleep between the retries.
 pub fn block_on_abortable<F>(f: F) -> Option<F::Output>
 where
     F: std::future::Future + Send,
@@ -686,6 +688,52 @@ mod tests {
             7_u8
         });
         assert_eq!(ended, Some(Some(7)));
+    }
+
+    #[test]
+    fn test_a_second_signal_after_the_future_ends_cancels_the_interrupt_and_gives_the_output() {
+        // The first signal interrupts, and the interrupt never ends; the future then ends. The
+        // second signal ends the wait for the interrupt, which is cancelled, and the wait gives the
+        // output of the future, which has ended.
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let polls = Arc::new(AtomicUsize::new(0));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (counter, flag) = (Arc::clone(&polls), Arc::clone(&cancelled));
+        let watch: Arc<WaitWatch> =
+            Arc::new(move || match counter.fetch_add(1, Ordering::SeqCst) {
+                0 => {
+                    let dropped = Dropped(Arc::clone(&flag));
+                    Watch::Interrupt(Box::pin(async move {
+                        let _dropped = dropped;
+                        std::future::pending::<()>().await
+                    }))
+                }
+                _ => Watch::Abort,
+            });
+        let output = abortable_wait_under(watch, async {
+            tokio::time::sleep(POLL_INTERVAL / 2).await;
+            7_u8
+        });
+        assert_eq!(
+            output,
+            Some(Some(7)),
+            "the wait did not give the output of its ended future"
+        );
+        assert_eq!(polls.load(Ordering::SeqCst), 2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !cancelled.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "the interrupt was not cancelled"
+        );
     }
 
     #[test]

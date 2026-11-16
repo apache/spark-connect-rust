@@ -209,15 +209,20 @@ impl PyCatalog {
 #[pymethods]
 impl PyCatalog {
     /// The shallow copy of the catalog, as PySpark's `copy.copy`: of the same session.
-    fn __copy__(&self) -> PyCatalog {
-        PyCatalog::new(self.catalog.clone())
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let copy = Bound::new(slf.py(), PyCatalog::new(slf.borrow().catalog.clone()))?;
+        crate::group::copy_instance_state(copy.as_any(), slf.as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of the catalog, as PySpark's: `catalog` of its session, which unpickles with
     /// it.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
-        let session = crate::session::session_object(py, self.catalog.spark_session())?;
-        crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "catalog")
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let session = crate::session::session_object(py, slf.borrow().catalog.spark_session())?;
+        let reduce =
+            crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "catalog")?;
+        crate::group::reduce_with_state(reduce.as_any(), slf.as_any())
     }
 
     /// Get the current catalog.

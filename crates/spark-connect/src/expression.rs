@@ -627,6 +627,12 @@ impl Expression {
 
     fn to_proto_with_origin(&self) -> proto::Expression {
         let mut expr = self.node_to_proto();
+        // PySpark's `CaseWhen.to_plan` sends a new `UnresolvedFunction("when")` of its branches,
+        // made when the plan is built, outside the `when` and `otherwise` that made the CaseWhen:
+        // so of no origin. Its branches keep theirs.
+        if matches!(self.node(), ExpressionNode::CaseWhen(_)) {
+            return expr;
+        }
         if let Some(origin) = &self.origin {
             expr.common = Some(proto::ExpressionCommon {
                 origin: Some(proto::Origin {

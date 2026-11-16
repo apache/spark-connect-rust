@@ -1050,10 +1050,30 @@ decodes server responses deeper than 100 nested messages, such as the schema of 
 34 levels deep, which PySpark's client rejects with "Exception deserializing response!". The
 server is trusted, as SECURITY.md sets out, so this is not a bound on the responses.
 
+The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested
+expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it
+sends the plan, where the drop-in sends it and the server fails it at its own limit of 100 levels.
+A Column too deep to pickle, of 745 levels or more, raises a `RecursionError`, as PySpark's pickler
+does, of the drop-in's own message.
+
+A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
+builds the Column or the window: the names of `Column.alias` and `Column.name`, the frame bounds of
+`Window.rowsBetween` and `rangeBetween`, and a `StructField` given as the type of `cast`,
+`try_cast` or the return type of a UDF. Their errors are PySpark's, raised at the call rather than
+when the plan is built.
+
 An `Observation` that PySpark pickled at protocol 0 or 1 raises a `TypeError` when the drop-in
 unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's `Observation`, a
 class with a native base; protocols 2 and up, pickle's default, load in both clients, and PySpark
 loads the drop-in's at every protocol.
+
+The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
+pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
+
+The keys of `getMessageParameters()` may come in another order than PySpark's, though the dicts
+compare equal. For a server error, PySpark keeps the order of the error details that it fetches,
+and the drop-in the order of the parameters in the error's metadata. For its own errors, PySpark
+keeps the order of each call site.
 
 The `TypeError` for too many positional arguments counts them without `self`: where CPython says
 "takes from 2 to 4 positional arguments but 5 were given", the drop-in says "takes from 1 to 3
@@ -1092,6 +1112,12 @@ PySpark. A stream reader's option of None leaves its option as it was, as PySpar
 key, a table property or a config key that is not a str fails at the same call as PySpark's, with
 the same error: an `AssertionError` at a reader's load of a path, and protobuf's `TypeError` where
 the request is built otherwise.
+
+The drop-in has one class for each UDF and UDTF, the Connect class of `pyspark.sql.connect.udf`
+and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDefinedFunction` and
+`pyspark.sql.udtf.UserDefinedTableFunction` also name, so `isinstance` of a UDF or UDTF it builds
+is True against either name, where PySpark 4.3.0 gives False for the classic name, whose class
+needs a SparkContext.
 
 ## Native NaiveBayes
 

@@ -64,7 +64,8 @@ fn pyfunc_make_udf(
 /// The arguments of a UDF or UDTF call: the positional ones, then a `NamedArgumentExpression`
 /// of each keyword argument, as PySpark's `UserDefinedFunction` and `UserDefinedTableFunction`
 /// build them. As PySpark's, a UDTF call also takes a `TableArg`, which passes the rows of
-/// its DataFrame.
+/// its DataFrame. Any other argument, a literal included, is an `AssertionError` with no
+/// message, as PySpark's `ColumnReference` of it fails.
 fn udf_arguments(
     args: Vec<Bound<'_, PyAny>>,
     named_args: Vec<(String, Bound<'_, PyAny>)>,
@@ -81,7 +82,11 @@ fn udf_arguments(
         if arg.is_instance_of::<pyo3::types::PyString>() {
             return Ok(Column::new(Expression::column(arg.extract::<String>()?)));
         }
-        to_column(arg)
+        // As PySpark's `to_expr`: a Column is its expression.
+        if arg.is_instance_of::<PyColumn>() {
+            return to_column(arg);
+        }
+        Err(pyo3::exceptions::PyAssertionError::new_err(""))
     };
     let mut columns = Vec::with_capacity(args.len() + named_args.len());
     for arg in args {

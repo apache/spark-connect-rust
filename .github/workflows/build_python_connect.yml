@@ -66,6 +66,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check that a workflow runs every Python e2e test
+        # A live test skips without SPARK_REMOTE, so a `tests/test_*_e2e.py` file that no
+        # workflow names in a pytest list passes without running, as the Rust guard of
+        # connect-e2e checks for the Rust live tests.
+        run: |
+          missing=0
+          for f in python/tests/test_*_e2e.py; do
+            name=$(basename "$f")
+            if ! grep -qE -- "tests/${name}([^A-Za-z0-9_.]|$)" .github/workflows/*.yml; then
+              echo "::error file=$f::$name is in no workflow's pytest list"
+              missing=1
+            fi
+          done
+          exit $missing
+
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
@@ -612,6 +627,13 @@ jobs:
             --test e2e_lr_svc_api \
             --test e2e_ml_meta \
             -- --test-threads=1
+
+      - name: Rust core client integration tests (against the live server)
+        # The live tests of the core client are #[ignore]d, so the package's own `cargo test`
+        # skips them; they run here, with the server.
+        env:
+          SPARK_REMOTE: sc://localhost:15002
+        run: cargo test -p apache-spark-connect-core --test integration_test -- --ignored
 
       - name: Rust WASM UDF e2e test (against the live server)
         env:

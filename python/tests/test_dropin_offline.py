@@ -1033,11 +1033,12 @@ def test_types_of_python_objects_are_inferred_merged_and_converted_as_pyspark():
 
 
 def test_unparsed_datatype_pickle_roundtrip():
-    # The core's JSON form of an unparsed type is the UnparsedDataType of
-    # pyspark.sql.connect.types, which pickles of its DDL string, as its JSON raises.
+    # The UnparsedDataType of pyspark.sql.connect.types pickles of its DDL string, as its JSON
+    # raises. Its JSON form is the core's only: a JSON type string never parses to it, as PySpark's
+    # `_parse_datatype_json_value` parses none to it.
     from pyspark.sql.connect.types import UnparsedDataType
 
-    t = T._parse_datatype_json_value("unparsed(some_ddl)")
+    t = UnparsedDataType("some_ddl")
     assert isinstance(t, UnparsedDataType) and t.data_type_string == "some_ddl"
     r = pickle.loads(pickle.dumps(t))
     assert r == t and repr(r) == "UnparsedDataType('some_ddl')"
@@ -5897,7 +5898,7 @@ def test_udtf_construction():
                 yield (i,)
 
     assert isinstance(Echo, UserDefinedTableFunction)
-    assert Echo.name == "Echo"
+    assert Echo._name == "Echo"
 
 
 def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
@@ -5917,7 +5918,7 @@ def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
 
     udtf = F.udtf(Echo, returnType="a int", useArrow=False).asDeterministic()
     assert isinstance(spark.udtf, UDTFRegistration) and spark.udtf.sparkSession is spark
-    assert spark.udtf.register("echo", udtf) is udtf and udtf.name == "Echo"
+    assert spark.udtf.register("echo", udtf) is udtf and udtf._name == "Echo"
     # ExecutePlanRequest.plan=3, Plan.command=2, Command.register_table_function=10;
     # CommonInlineUserDefinedTableFunction.function_name=1, deterministic=2, arguments=3,
     # python_udtf=4; PythonUDTF.return_type=1, eval_type=2, command=3, python_ver=4.
@@ -5978,7 +5979,8 @@ def test_udf_and_udtf_pickle_as_pyspark_connect_classes():
 
     assert type(Echo).__module__ == "pyspark.sql.connect.udtf"
     assert {"_name", "deterministic", "evalType", "func", "returnType"} <= set(vars(Echo))
-    assert "name" not in vars(Echo) and Echo.name == "Echo"
+    # As PySpark's, a UDTF has no `name` until one is set: its name is `_name`.
+    assert "name" not in vars(Echo) and not hasattr(Echo, "name") and Echo._name == "Echo"
     refs = class_references(Echo)
     assert {"pyspark.sql.connect.udtf", "UserDefinedTableFunction"} <= refs
     assert "pyspark.sql.udtf" not in refs
@@ -7639,7 +7641,7 @@ def test_udtf_variants():
 
     # Test name and evalType properties
     assert isinstance(SimpleUDTF, UserDefinedTableFunction)
-    assert SimpleUDTF.name == "SimpleUDTF"
+    assert SimpleUDTF._name == "SimpleUDTF"
     assert SimpleUDTF.evalType == 300  # SQL_TABLE_UDF
 
     # As PySpark's, a UDTF is not deterministic unless asDeterministic() marks it so.

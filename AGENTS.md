@@ -432,7 +432,7 @@ For every method matching a pyspark name:
     (`dataset_of`): a pandas DataFrame raises the `TypeError` of `reject_pandas`, and another
     object the `AttributeError` of `sparkSession`, which `pyspark.ml` reads of the dataset first.
     A helper call that `pyspark.ml` sends with its literal serialization of the dataset, such as
-    `Correlation.corr`, raises what that serialization raises (`helper_dataset_of`);
+    `Correlation.corr`, raises what that serialization raises (`helper_relation`, `fetch_arg_of`);
   - a features column must be a `VectorUDT` column, as the JVM checks it, with no implicit
     `array_to_vector`;
   - column params are sent as given, with no client-side respelling or casting;
