@@ -2,7 +2,7 @@
 //!
 //! Defines the Expression hierarchy and conversion functions to Spark Connect protobufs.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -53,6 +53,35 @@ thread_local! {
     /// Whether this thread serializes in a [`with_expression_depth_bound`], which stops at the
     /// bound.
     static EXPRESSION_DEPTH_BOUNDED: Cell<bool> = const { Cell::new(false) };
+    /// The error of the first [`ExpressionNode::Unbuildable`] that this thread serialized since
+    /// the start of the innermost [`with_expression_depth_bound`], which raises it.
+    static UNBUILDABLE_EXPRESSION_ERROR: RefCell<Option<SparkError>> = const { RefCell::new(None) };
+    /// The error of the first [`ExpressionNode::Unbuildable`] that this thread rendered since the
+    /// start of the innermost [`Expression::try_render`], which raises it; and whether it renders
+    /// in one.
+    static UNRENDERABLE_EXPRESSION_ERROR: RefCell<Option<SparkError>> = const { RefCell::new(None) };
+    static RENDERING_TRIED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Record `error`, of an expression that the serialization of this thread does not build, as the
+/// error that its [`with_expression_depth_bound`] raises, unless one is recorded already: the
+/// first one, in the order in which PySpark's client builds the plan, is raised.
+fn record_unbuildable(error: &SparkError) {
+    if EXPRESSION_DEPTH_BOUNDED.with(Cell::get) {
+        UNBUILDABLE_EXPRESSION_ERROR.with(|slot| {
+            slot.borrow_mut().get_or_insert_with(|| error.clone());
+        });
+    }
+}
+
+/// Record `error`, of an expression that the rendering of this thread does not render, as the
+/// error that its [`Expression::try_render`] raises, unless one is recorded already.
+fn record_unrenderable(error: &SparkError) {
+    if RENDERING_TRIED.with(Cell::get) {
+        UNRENDERABLE_EXPRESSION_ERROR.with(|slot| {
+            slot.borrow_mut().get_or_insert_with(|| error.clone());
+        });
+    }
 }
 
 /// One level of an expression that is being serialized, left when it is dropped (also on a
@@ -82,6 +111,7 @@ impl Drop for ExpressionLevel {
 struct DepthBoundScope {
     outer_bounded: bool,
     outer_deepest: usize,
+    outer_unbuildable: Option<SparkError>,
 }
 
 impl DepthBoundScope {
@@ -89,7 +119,13 @@ impl DepthBoundScope {
         DepthBoundScope {
             outer_bounded: EXPRESSION_DEPTH_BOUNDED.with(|bounded| bounded.replace(true)),
             outer_deepest: DEEPEST_EXPRESSION_LEVEL.with(|deepest| deepest.replace(0)),
+            outer_unbuildable: UNBUILDABLE_EXPRESSION_ERROR.with(|slot| slot.borrow_mut().take()),
         }
+    }
+
+    /// The error of the first expression that was not built since the scope was entered.
+    fn unbuildable(&self) -> Option<SparkError> {
+        UNBUILDABLE_EXPRESSION_ERROR.with(|slot| slot.borrow_mut().take())
     }
 
     /// The deepest level since the scope was entered.
@@ -102,6 +138,8 @@ impl Drop for DepthBoundScope {
     fn drop(&mut self) {
         EXPRESSION_DEPTH_BOUNDED.with(|bounded| bounded.set(self.outer_bounded));
         DEEPEST_EXPRESSION_LEVEL.with(|deepest| deepest.set(deepest.get().max(self.outer_deepest)));
+        let outer = self.outer_unbuildable.take();
+        UNBUILDABLE_EXPRESSION_ERROR.with(|slot| *slot.borrow_mut() = outer);
     }
 }
 
@@ -122,16 +160,30 @@ pub(crate) fn with_expression_depth_bound<T>(serialize: impl FnOnce() -> T) -> R
 
 /// As [`with_expression_depth_bound`], and the levels that the expressions of `serialize` reach.
 fn with_expression_levels<T>(serialize: impl FnOnce() -> T) -> Result<(T, usize)> {
+    let (value, levels, unbuildable) = with_expression_levels_and_unbuildable(serialize)?;
+    // An expression that PySpark's client fails to build, which it raises as it builds the plan.
+    if let Some(error) = unbuildable {
+        return Err(error);
+    }
+    Ok((value, levels))
+}
+
+/// As [`with_expression_levels`], of the error of the first expression that `serialize` does not
+/// build ([`Expression::unbuildable`]) kept apart, rather than raised.
+fn with_expression_levels_and_unbuildable<T>(
+    serialize: impl FnOnce() -> T,
+) -> Result<(T, usize, Option<SparkError>)> {
     let scope = DepthBoundScope::enter();
     let value = serialize();
     let levels = scope.deepest();
+    let unbuildable = scope.unbuildable();
     if levels > MAX_EXPRESSION_DEPTH {
         return Err(SparkError::recursion_msg(format!(
             "maximum recursion depth exceeded while serializing an expression; an expression \
              may be at most {MAX_EXPRESSION_DEPTH} levels deep"
         )));
     }
-    Ok((value, levels))
+    Ok((value, levels, unbuildable))
 }
 
 /// An immutable, shared expression, mirroring PySpark's base Expression type.
@@ -237,6 +289,67 @@ pub enum ExpressionNode {
     /// An expression as it was sent, of its `spark.connect.Expression` and its rendering, as a
     /// pickled Column unpickles: the client sends the expression as it is.
     Sent(Box<SentExpression>),
+    /// An expression that PySpark's client builds when a request sends the plan, and fails to
+    /// build: the request raises its error. Not a stable API (see
+    /// [`Expression::unbuildable`]).
+    #[doc(hidden)]
+    Unbuildable(Box<UnbuildableExpression>),
+}
+
+/// An expression of [`ExpressionNode::Unbuildable`]: `expression`, as this client builds it, and
+/// the errors that PySpark's client raises when it builds the plan of it, `before` it builds
+/// `expression` (the names of a `ColumnAlias`, which its `to_plan` sets first) and `after` (its
+/// metadata, which it sets last), and the error of its `__repr__` (`unrenderable`, PySpark's
+/// `','.join` of names that are not all `str`). Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct UnbuildableExpression {
+    pub expression: Expression,
+    pub before: Option<SparkError>,
+    pub after: Option<SparkError>,
+    pub unrenderable: Option<SparkError>,
+}
+
+impl PartialEq for UnbuildableExpression {
+    fn eq(&self, other: &Self) -> bool {
+        fn same(left: &Option<SparkError>, right: &Option<SparkError>) -> bool {
+            match (left, right) {
+                (Some(left), Some(right)) => {
+                    left.kind == right.kind && left.message() == right.message()
+                }
+                (None, None) => true,
+                _ => false,
+            }
+        }
+        self.expression == other.expression
+            && same(&self.before, &other.before)
+            && same(&self.after, &other.after)
+            && same(&self.unrenderable, &other.unrenderable)
+    }
+}
+
+impl UnbuildableExpression {
+    /// The proto of `expression`, as a request builds it: the errors are recorded for the request
+    /// to raise, in the order in which PySpark's client raises them.
+    fn to_proto(&self) -> proto::Expression {
+        if let Some(error) = &self.before {
+            record_unbuildable(error);
+        }
+        let expr = self.expression.to_proto();
+        if let Some(error) = &self.after {
+            record_unbuildable(error);
+        }
+        expr
+    }
+
+    /// The rendering of `expression`, after which PySpark's `__repr__` fails, if it does.
+    fn render(&self) -> String {
+        let text = self.expression.render();
+        if let Some(error) = &self.unrenderable {
+            record_unrenderable(error);
+        }
+        text
+    }
 }
 
 /// An expression of [`ExpressionNode::Sent`]: the `spark.connect.Expression` of a Column as it
@@ -554,12 +667,60 @@ impl Expression {
             ExpressionNode::NamedArgument(arg) => format!("{} => {}", arg.key, arg.value.render()),
             ExpressionNode::Subquery(subquery) => subquery.render(),
             ExpressionNode::Sent(sent) => sent.rendered.clone(),
+            ExpressionNode::Unbuildable(unbuildable) => unbuildable.render(),
         }
+    }
+
+    /// As [`Expression::render`], and the error of PySpark's `__repr__` of an expression that
+    /// it fails to render (an [`Expression::unbuildable`] of an `unrenderable` error), which a
+    /// Column's `__repr__` raises: of the first one, in the order in which the `__repr__` of the
+    /// expressions render them. Not a stable API.
+    #[doc(hidden)]
+    pub fn try_render(&self) -> Result<String> {
+        let outer_tried = RENDERING_TRIED.with(|tried| tried.replace(true));
+        let outer_error = UNRENDERABLE_EXPRESSION_ERROR.with(|slot| slot.borrow_mut().take());
+        let text = self.render();
+        let error = UNRENDERABLE_EXPRESSION_ERROR.with(|slot| slot.borrow_mut().take());
+        RENDERING_TRIED.with(|tried| tried.set(outer_tried));
+        UNRENDERABLE_EXPRESSION_ERROR.with(|slot| *slot.borrow_mut() = outer_error);
+        match error {
+            Some(error) => Err(error),
+            None => Ok(text),
+        }
+    }
+
+    /// `expression`, which PySpark's client fails to build when a request sends its plan: the
+    /// request raises `before` before it builds `expression`, or `after` after it, as PySpark's
+    /// `ColumnAlias.to_plan` sets its names before it builds its child, and its metadata after;
+    /// and [`Expression::try_render`] raises `unrenderable`. `expression` itself, of no error.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn unbuildable(
+        expression: Expression,
+        before: Option<SparkError>,
+        after: Option<SparkError>,
+        unrenderable: Option<SparkError>,
+    ) -> Expression {
+        if before.is_none() && after.is_none() && unrenderable.is_none() {
+            return expression;
+        }
+        Expression::new(ExpressionNode::Unbuildable(Box::new(
+            UnbuildableExpression {
+                expression,
+                before,
+                after,
+                unrenderable,
+            },
+        )))
     }
 
     /// Converts the expression to a Spark Connect protobuf expression, with its origin, as
     /// PySpark's `Expression._create_proto_expression` sends it.
     pub fn to_proto(&self) -> proto::Expression {
+        // An unbuildable expression is the proto of its expression, of no level of its own.
+        if let ExpressionNode::Unbuildable(unbuildable) = self.node() {
+            return unbuildable.to_proto();
+        }
         // A level serializes the levels below it: grow the stack for an expression of many
         // levels, and count them for `with_expression_depth_bound`.
         with_stack_for_a_level(|| {
@@ -597,6 +758,18 @@ impl Expression {
     /// records them, so that its unpickled copy, [`Expression::sent`], is as deep as it was.
     pub fn try_to_proto_with_levels(&self) -> Result<(proto::Expression, usize)> {
         with_expression_levels(|| self.to_proto())
+    }
+
+    /// As [`Expression::try_to_proto_with_levels`], of an expression that a request fails to
+    /// build too (of an [`Expression::unbuildable`]): its proto, of what this client builds of
+    /// it, its levels, and the error that a request of it raises, which a pickled Column keeps,
+    /// as PySpark's Column pickles and fails when the plan of its unpickled copy is built. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn try_to_proto_with_levels_and_unbuildable(
+        &self,
+    ) -> Result<(proto::Expression, usize, Option<SparkError>)> {
+        with_expression_levels_and_unbuildable(|| self.to_proto())
     }
 
     /// The expression of `expression`, the `spark.connect.Expression` of a Column as it was
@@ -720,6 +893,7 @@ impl Expression {
                 let stack = sent_expression_stack(sent.levels);
                 stacker::maybe_grow(stack, stack, || sent.expression.clone())
             }
+            ExpressionNode::Unbuildable(unbuildable) => unbuildable.to_proto(),
         }
     }
 }
@@ -2421,6 +2595,90 @@ mod tests {
             ExpressionNode::Alias(Box::new(Alias::with_names(col("x"), Vec::<String>::new())))
                 .into();
         assert_eq!(none.render(), "x AS ");
+    }
+
+    use spark_connect_core::error::SparkErrorKind;
+
+    /// An alias of `names` of `child`, whose request raises `before` and `after` and whose
+    /// rendering raises `unrenderable`, as the drop-in's `Column.alias` of names that protobuf
+    /// refuses.
+    fn unbuildable_alias(
+        child: Expression,
+        name: &str,
+        before: Option<SparkError>,
+        after: Option<SparkError>,
+        unrenderable: Option<SparkError>,
+    ) -> Expression {
+        let alias: Expression = ExpressionNode::Alias(Box::new(Alias::new(child, name))).into();
+        Expression::unbuildable(alias, before, after, unrenderable)
+    }
+
+    fn type_error(message: &str) -> SparkError {
+        SparkError {
+            kind: SparkErrorKind::BuiltinTypeError,
+            ..SparkError::value_msg(message)
+        }
+    }
+
+    #[test]
+    fn test_an_unbuildable_expression_fails_its_request_in_pysparks_build_order() {
+        // Of no error, the expression itself.
+        let plain = Expression::unbuildable(col("x"), None, None, None);
+        assert!(matches!(plain.node(), ExpressionNode::ColumnReference(_)));
+        // The request fails of the first error as PySpark builds the plan: the names of an alias
+        // are set before its child is built, its metadata after.
+        let inner = unbuildable_alias(col("x"), "", Some(type_error("names")), None, None);
+        let outer = unbuildable_alias(inner.clone(), "y", None, Some(type_error("metadata")), None);
+        let error = outer.try_to_proto().expect_err("an unbuildable alias");
+        assert_eq!(error.kind, SparkErrorKind::BuiltinTypeError);
+        assert_eq!(error.message, "names");
+        let metadata_first =
+            unbuildable_alias(col("x"), "y", None, Some(type_error("metadata")), None);
+        let both = unbuildable_alias(metadata_first, "z", Some(type_error("outer")), None, None);
+        assert_eq!(both.try_to_proto().expect_err("both").message, "outer");
+        // Its proto is that of what this client builds, of no level of its own, which a pickled
+        // Column keeps with the error.
+        let (proto, levels, unbuildable) = inner
+            .try_to_proto_with_levels_and_unbuildable()
+            .expect("not too deep");
+        assert_eq!(levels, 2);
+        assert_eq!(unbuildable.expect("the error").message, "names");
+        assert!(matches!(
+            proto.expr_type,
+            Some(proto::expression::ExprType::Alias(_))
+        ));
+        // Outside a request, the proto is built as it is.
+        assert!(matches!(
+            inner.to_proto().expr_type,
+            Some(proto::expression::ExprType::Alias(_))
+        ));
+        // A request of a plain expression fails no more.
+        assert!(col("x").try_to_proto().is_ok());
+    }
+
+    #[test]
+    fn test_an_unrenderable_expression_fails_try_render_as_pysparks_repr() {
+        let unrenderable = unbuildable_alias(
+            col("x"),
+            "q",
+            None,
+            None,
+            Some(type_error(
+                "sequence item 0: expected str instance, bytes found",
+            )),
+        );
+        // The plan builds: only the `__repr__` fails, as PySpark's of an alias of bytes.
+        assert!(unrenderable.try_to_proto().is_ok());
+        assert_eq!(unrenderable.render(), "x AS q");
+        let error = unrenderable.try_render().expect_err("a bytes name");
+        assert_eq!(
+            error.message,
+            "sequence item 0: expected str instance, bytes found"
+        );
+        // Within another expression, as PySpark's `__repr__` renders the arguments.
+        let upper = Expression::function("upper", vec![unrenderable]);
+        assert!(upper.try_render().is_err());
+        assert_eq!(col("x").try_render().expect("plain"), "x");
     }
 
     #[test]

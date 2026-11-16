@@ -126,11 +126,13 @@ pub struct PyColumnExpression {
 
 #[pymethods]
 impl PyColumnExpression {
-    fn __repr__(&self) -> String {
-        self.column.expression().render()
+    /// As PySpark's `__repr__` of the expression, which raises its error of an expression that it
+    /// does not render (a `ColumnAlias` of names that are not all `str`).
+    fn __repr__(&self) -> PyResult<String> {
+        self.column.expression().try_render().to_pyerr()
     }
 
-    fn __str__(&self) -> String {
+    fn __str__(&self) -> PyResult<String> {
         self.__repr__()
     }
 
@@ -189,31 +191,63 @@ impl PyColumn {
             ));
         }
         let single = alias.len() == 1;
-        // A name is of a string field of the plan, which PySpark sets when it builds the plan: a
-        // str, a bytes of its UTF-8, and the protobuf TypeError of any other value
-        // (`str_argument`). This client converts it here, after the checks above, as PySpark's
-        // order has them.
-        let alias = alias
-            .iter()
-            .map(|name| crate::options::str_argument(&name))
-            .collect::<PyResult<Vec<String>>>()?;
-        let mut node = Alias::with_names(self.column.expression().clone(), alias);
+        // A name is of a string field of the plan, which PySpark's `ColumnAlias.to_plan` sets when
+        // it builds the plan: a str, a bytes of its UTF-8, and the error of the first other value
+        // (`str_argument`), which the request of the plan raises before it builds the child, of a
+        // placeholder name here.
+        let mut names = Vec::with_capacity(alias.len());
+        let mut before = None;
+        for name in alias.iter() {
+            match crate::dataframe::unbuildable_str_error(&name)? {
+                None => names.push(crate::options::str_argument(&name)?),
+                Some(error) => {
+                    before.get_or_insert(error);
+                    // A str that UTF-8 does not encode renders escaped (PySpark's `__repr__` shows
+                    // it as it is, which a rendering of UTF-8 cannot hold); another value renders
+                    // as nothing, of a `__repr__` that fails.
+                    names.push(if name.is_instance_of::<pyo3::types::PyString>() {
+                        name.call_method1("encode", ("utf-8", "backslashreplace"))?
+                            .call_method1("decode", ("utf-8",))?
+                            .extract()?
+                    } else {
+                        String::new()
+                    });
+                }
+            }
+        }
+        let mut after = None;
+        let mut node = Alias::with_names(self.column.expression().clone(), names);
         if let Some(metadata) = metadata {
             if single {
-                let json = py.import("json")?.call_method1("dumps", (metadata,))?;
-                node = node.with_metadata(json.extract()?);
+                // `json.dumps(metadata)`, of which `to_plan` sets the metadata after it builds the
+                // child: its TypeError or ValueError is raised then.
+                match py.import("json")?.call_method1("dumps", (&metadata,)) {
+                    Ok(json) => node = node.with_metadata(json.extract()?),
+                    Err(err) => after = Some(crate::dataframe::unbuildable_error(py, err)?),
+                }
             } else if metadata.is_truthy()? {
-                // The reference client raises this when it builds the plan of the alias.
-                return Err(raise_pyspark(
-                    py,
-                    "PySparkValueError",
+                // Of no names (several, the check above refuses): `to_plan` raises this before it
+                // sets the names.
+                before = Some(spark_connect_core::error::SparkError::value(
                     "CANNOT_PROVIDE_METADATA",
                     &[],
                 ));
             }
         }
+        // PySpark's `ColumnAlias.__repr__` joins the names, which fails of one that is not a str
+        // (bytes too), as the `__repr__` of a Column of it raises.
+        let unrenderable = match pyo3::types::PyString::new(py, ",").call_method1("join", (alias,))
+        {
+            Ok(_) => None,
+            Err(err) => Some(crate::dataframe::unbuildable_error(py, err)?),
+        };
         Ok(PyColumn::new(Column::new(
-            ExpressionNode::Alias(Box::new(node)).into(),
+            spark_connect::expression::Expression::unbuildable(
+                ExpressionNode::Alias(Box::new(node)).into(),
+                before,
+                after,
+                unrenderable,
+            ),
         )))
     }
 
@@ -718,8 +752,12 @@ impl PyColumn {
 
     /// String representation, mirroring `pyspark.sql.connect.column.Column.__repr__`
     /// (`Column<'<expr>'>`). pandas-on-Spark's `spark_column_equals` relies on this.
-    fn __repr__(&self) -> String {
-        format!("Column<'{}'>", self.column.expression().render())
+    /// Of the error of PySpark's `__repr__` of an expression that it does not render.
+    fn __repr__(&self) -> PyResult<String> {
+        Ok(format!(
+            "Column<'{}'>",
+            self.column.expression().try_render().to_pyerr()?
+        ))
     }
 
     /// The expression of this column, as PySpark Connect's `Column._expr`: its `str` is the
@@ -751,7 +789,25 @@ impl PyColumn {
     /// that `copy`, `deepcopy` and `pickle` keep it, as they do of PySpark's Column.
     fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let this = slf.borrow();
-        let (expression, levels) = this.column.try_to_proto_with_levels().to_pyerr()?;
+        // Of an expression that a request fails to build, as PySpark's Column of an alias of a
+        // name that protobuf refuses: its proto of what this client builds, and the errors of
+        // a request and of the `__repr__` of it, which the unpickled Column raises as it did.
+        let (expression, levels, unbuildable) = this
+            .column
+            .expression()
+            .try_to_proto_with_levels_and_unbuildable()
+            .to_pyerr()?;
+        let build_error = unbuildable
+            .as_ref()
+            .map(|error| error_description(py, error))
+            .transpose()?;
+        let repr_error = this
+            .column
+            .expression()
+            .try_render()
+            .err()
+            .map(|error| error_description(py, &error))
+            .transpose()?;
         let expression = pyo3::types::PyBytes::new(py, &crate::encode_on_grown_stack(expression));
         let column = |expr: &spark_connect::expression::Expression| -> PyResult<Py<PyColumn>> {
             Py::new(py, PyColumn::new(Column::new(expr.clone())))
@@ -790,6 +846,8 @@ impl PyColumn {
                 else_value,
                 sort,
                 levels,
+                build_error,
+                repr_error,
             ))?;
         crate::group::reduce_with_state(&reduce, slf.as_any())
     }
@@ -799,13 +857,24 @@ impl PyColumn {
     /// expression as it is. The CASE WHEN of `branches` and `else_value`, the Columns of its
     /// parts, is built as it was.
     #[staticmethod]
-    #[pyo3(signature = (expression, rendered, branches=None, else_value=None, levels=1))]
+    #[pyo3(signature = (
+        expression,
+        rendered,
+        branches=None,
+        else_value=None,
+        levels=1,
+        build_error=None,
+        repr_error=None
+    ))]
+    #[allow(clippy::too_many_arguments)]
     fn _of_expression(
         expression: &[u8],
         rendered: String,
         branches: Option<Vec<(PyRef<'_, PyColumn>, PyRef<'_, PyColumn>)>>,
         else_value: Option<PyRef<'_, PyColumn>>,
         levels: usize,
+        build_error: Option<&Bound<'_, PyAny>>,
+        repr_error: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyColumn> {
         if let Some(branches) = branches {
             let branches = branches
@@ -837,12 +906,23 @@ impl PyColumn {
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
-        Ok(PyColumn::new(column))
+        // The errors that the pickled Column raised when a request built its plan and when its
+        // `__repr__` rendered it.
+        let before = build_error.map(error_of_description).transpose()?;
+        let unrenderable = repr_error.map(error_of_description).transpose()?;
+        Ok(PyColumn::new(Column::new(
+            spark_connect::expression::Expression::unbuildable(
+                column.expression().clone(),
+                before,
+                None,
+                unrenderable,
+            ),
+        )))
     }
 
     /// As PySpark's Column, which has no `__str__` of its own for `_with_origin` to wrap: no
     /// origin, so no read of the debugging conf.
-    fn __str__(&self) -> String {
+    fn __str__(&self) -> PyResult<String> {
         self.__repr__()
     }
 
@@ -1074,4 +1154,92 @@ impl PyColumn {
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
         Ok(PyColumn::new(self.column.clone().drop_fields(refs)))
     }
+}
+
+/// The description of `error`, of an expression that a request does not build or whose
+/// `__repr__` fails, as a pickled Column keeps it: `(kind, text, payload)`, of which
+/// `pyspark.sql.connect._column_reduce.column_of` raises the error again, also on a Python worker
+/// of the server, where it raises it as PySpark's Column of the expression would.
+fn error_description<'py>(
+    py: Python<'py>,
+    error: &spark_connect_core::error::SparkError,
+) -> PyResult<Bound<'py, PyTuple>> {
+    use pyo3::types::PyBytes;
+    use pyo3::IntoPyObjectExt;
+    use spark_connect_core::error::SparkErrorKind as K;
+    let none = || py.None().into_bound(py);
+    let (kind, text, payload) = match error.kind {
+        K::BuiltinTypeError => ("TypeError", error.message.clone(), none()),
+        K::BuiltinValueError => ("ValueError", error.message.clone(), none()),
+        K::BuiltinOverflowError => ("OverflowError", error.message.clone(), none()),
+        // The str that UTF-8 does not encode, and the bytes that it does not decode.
+        K::UnicodeEncode => {
+            let utf32le = error.unencodable_value().unwrap_or_default();
+            let text = PyBytes::new(py, &utf32le)
+                .call_method1("decode", ("utf-32-le", "surrogatepass"))?;
+            ("UnicodeEncodeError", String::new(), text)
+        }
+        K::UnicodeDecode => {
+            let bytes = error.invalid_utf8_value().unwrap_or_default();
+            (
+                "UnicodeDecodeError",
+                String::new(),
+                PyBytes::new(py, &bytes).into_any(),
+            )
+        }
+        K::ValueError => (
+            "PySparkValueError",
+            error.error_class.clone(),
+            error.params.clone().into_bound_py_any(py)?,
+        ),
+        _ => {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "cannot pickle a Column whose plan fails with {}",
+                error.message
+            )))
+        }
+    };
+    PyTuple::new(
+        py,
+        [
+            kind.into_bound_py_any(py)?,
+            text.into_bound_py_any(py)?,
+            payload,
+        ],
+    )
+}
+
+/// The error of `description`, of [`error_description`].
+fn error_of_description(
+    description: &Bound<'_, PyAny>,
+) -> PyResult<spark_connect_core::error::SparkError> {
+    use spark_connect_core::error::{SparkError, SparkErrorKind as K};
+    let (kind, text, payload): (String, String, Bound<'_, PyAny>) = description.extract()?;
+    let builtin = |kind| SparkError {
+        kind,
+        ..SparkError::value_msg(text.clone())
+    };
+    Ok(match kind.as_str() {
+        "TypeError" => builtin(K::BuiltinTypeError),
+        "ValueError" => builtin(K::BuiltinValueError),
+        "OverflowError" => builtin(K::BuiltinOverflowError),
+        "UnicodeEncodeError" | "UnicodeDecodeError" => {
+            crate::dataframe::unbuildable_str_error(&payload)?.ok_or_else(|| {
+                pyo3::exceptions::PyValueError::new_err(format!("no {kind} of the value"))
+            })?
+        }
+        "PySparkValueError" => {
+            let params: std::collections::BTreeMap<String, String> = payload.extract()?;
+            let params: Vec<(&str, &str)> = params
+                .iter()
+                .map(|(key, value)| (key.as_str(), value.as_str()))
+                .collect();
+            SparkError::classed(K::ValueError, &text, &params)
+        }
+        _ => {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                "no error of the kind {kind}"
+            )))
+        }
+    })
 }

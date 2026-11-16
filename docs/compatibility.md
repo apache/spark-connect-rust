@@ -1098,11 +1098,23 @@ message. PySpark's pickler raises one from about 600 levels, under Python's defa
 so a Column of 600 to 744 levels pickles in the drop-in only.
 
 A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
-builds the Column or the window: the names of `Column.alias` and `Column.name`, the frame bounds of
-`Window.rowsBetween` and `rangeBetween`, and a `StructField` given as the type of `cast`,
-`try_cast` or the return type of a UDF. Their errors are PySpark's, raised at the call rather than
-when the plan is built. So is the `CANNOT_PROVIDE_METADATA` of `Column.alias` with metadata and other
-than one name, which PySpark raises when the plan is built, and so not for a Column that is not used.
+builds the Column or the window: the frame bounds of `Window.rowsBetween` and `rangeBetween`, and a
+`StructField` given as the type of `cast`, `try_cast` or the return type of a UDF. Their errors are
+PySpark's, raised at the call rather than when the plan is built.
+
+`Column.alias` and `Column.name` raise PySpark's errors when PySpark's `ColumnAlias` raises them.
+At the call, they raise the metadata of several names (`ONLY_ALLOWED_FOR_SINGLE_COLUMN`) and other
+keywords. When a request builds the plan, they raise:
+- a name that protobuf refuses (a `TypeError`, or the `UnicodeEncodeError` or `UnicodeDecodeError`
+  of UTF-8);
+- metadata of one name that `json.dumps` refuses;
+- metadata of no names (`CANNOT_PROVIDE_METADATA`).
+
+So a Column that is not used raises none of these. The `__repr__` of an alias of a name that is not
+a `str` (bytes too) raises the `TypeError` of PySpark's join of the names. A Column of such an
+alias copies and pickles, and its copy raises the same errors, also on a Python worker of the
+server. A name of lone surrogates shows escaped in the `__repr__`, where PySpark's shows it as it
+is.
 
 An `Observation` that PySpark pickled at protocol 0 or 1 raises a `TypeError` when the drop-in
 unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's `Observation`, a
