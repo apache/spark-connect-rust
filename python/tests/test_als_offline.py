@@ -198,7 +198,7 @@ def test_pandas_is_rejected_before_requests_in_fit_transform_and_subsets(session
     for pdf in [pd.DataFrame(), pd.DataFrame({"u": [0]})]:
         for operation in operations:
             sent = _requests_but_deletes(service)
-            with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+            with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
                 operation(pdf)
             assert _requests_but_deletes(service) == sent
         for subset in subsets:

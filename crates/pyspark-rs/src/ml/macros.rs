@@ -904,7 +904,7 @@ macro_rules! native_summary {
         impl From<spark_connect::ml::MlTarget> for $ty {
             fn from(target: spark_connect::ml::MlTarget) -> Self {
                 Self {
-                    object: $crate::ml::object::SummaryObject::Target(target),
+                    object: $crate::ml::object::SummaryObject::Target(Box::new(target)),
                 }
             }
         }

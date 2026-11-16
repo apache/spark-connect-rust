@@ -573,7 +573,8 @@ def test_native_ml_other_invalid_inputs(ml_mock):
     # that is not a DataFrame raises the AttributeError of sparkSession, before any request, also
     # of an object of the attributes that the deprecated pyspark.ml.connect read. An object that has
     # a sparkSession, which is still no DataFrame, raises a TypeError. (A pandas DataFrame raises the
-    # TypeError of test_native_ml_rejects_pandas_before_any_requests first.)
+    # AttributeError of its own sparkSession, as test_native_ml_rejects_pandas_before_any_requests
+    # pins.)
     import pyspark.ml.connect as connect
 
     spark, service = ml_mock
@@ -613,8 +614,9 @@ def test_native_ml_other_invalid_inputs(ml_mock):
     # which pyspark.ml.connect.serialize sends as a literal unless it is a DataFrame:
     # PowerIterationClustering.assignClusters, PrefixSpan.findFrequentSequentialPatterns and
     # ALSModel.recommendForUserSubset and recommendForItemSubset. A value that cannot be a literal
-    # raises the error of LiteralExpression._from_value, a pandas DataFrame too (not the TypeError
-    # of a fit, transform or evaluate), and a (value, DataType) pair whose value is not of the type
+    # raises the error of LiteralExpression._from_value, a pandas DataFrame too (not the
+    # AttributeError of a fit, transform or evaluate), and a (value, DataType) pair whose value is
+    # not of the type
     # raises the bare AssertionError of LiteralExpression(value, dataType). PySpark sends the others
     # for the server to reject (a vector and a matrix as they are, and a (value, DataType) pair as a
     # literal of that type), and so do these helper calls, in a lazy DataFrame.
@@ -1255,10 +1257,17 @@ def test_ml_connect_fit_of_a_list_of_param_maps_as_pyspark(ml_mock):
         assert estimator.fit(pdf, []) == []
         assert estimator.fit(pdf, ()) == []
         assert _requests_but_deletes(service) == sent
-        # A map reads the dataset, which must be a Spark DataFrame, as fit(pdf) reads it. PySpark's
-        # own OneVsRest._fit, which fits it, raises the KeyError of its pandas aggregate instead.
-        with pytest.raises(KeyError if isinstance(estimator, connect.OneVsRest) else TypeError):
-            estimator.fit(pdf, [{}])
+        # A map reads the dataset, which must be a Spark DataFrame, as fit(pdf) reads it: the
+        # AttributeError of the pandas DataFrame's own sparkSession. PySpark's own
+        # OneVsRest._fit, which fits a OneVsRest of it, raises the KeyError of its pandas
+        # aggregate instead.
+        if isinstance(estimator, connect.OneVsRest):
+            with pytest.raises(KeyError):
+                estimator.fit(pdf, [{}])
+        else:
+            with pytest.raises(AttributeError) as error:
+                estimator.fit(pdf, [{}])
+            assert str(error.value) == "'DataFrame' object has no attribute 'sparkSession'"
 
 
 
@@ -4263,7 +4272,8 @@ def _native_ml_method(name):
 
 
 def _assert_rejects_pandas(method, pdf):
-    # A fit, transform or evaluate raises the TypeError of a pandas DataFrame. The helper call of
+    # A fit, transform or evaluate reads the sparkSession of its dataset first, as pyspark.ml does,
+    # so a pandas DataFrame raises the AttributeError of its own sparkSession. The helper call of
     # PowerIterationClustering.assignClusters, whose dataset pyspark.ml's serialization sends as a
     # literal, raises the UNSUPPORTED_DATA_TYPE of that conversion, as pyspark.ml's does (see
     # test_native_ml_other_invalid_inputs).
@@ -4284,12 +4294,9 @@ def _assert_rejects_pandas(method, pdf):
             method(dataset=pdf)
         assert error.value.args[0].name == "classifier"
         return
-    with pytest.raises(TypeError) as error:
+    with pytest.raises(AttributeError) as error:
         method(dataset=pdf)
-    assert str(error.value) == (
-        f"{method.__name__}() requires a Spark DataFrame; pandas DataFrames are not supported. "
-        "Convert the input with spark.createDataFrame(...) first."
-    )
+    assert str(error.value) == f"'{type(pdf).__name__}' object has no attribute 'sparkSession'"
 
 
 def test_native_one_vs_rest_fit_of_pandas_is_pysparks(pandas_ml_input):

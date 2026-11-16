@@ -10,7 +10,7 @@ use crate::ml::object::MlValue;
 use crate::ml::regression_api::{as_i64, unexpected};
 use crate::ml::{MlMatrix, MlVector};
 use crate::row::Value;
-use spark_connect_core::error::Result;
+use spark_connect_core::error::{Result, SparkError};
 
 mod bisecting_kmeans;
 mod gaussian_mixture;
@@ -53,7 +53,11 @@ fn as_strings(method: &str, value: MlValue) -> Result<Vec<String>> {
 /// The rows of `matrix`, as PySpark's `Matrix.toArray` lays out its values: a dense matrix of its
 /// values by column (by row of a transposed one), and a sparse matrix of its compressed columns
 /// (its compressed rows of a transposed one).
-pub(crate) fn matrix_rows(matrix: &MlMatrix) -> Vec<Vec<f64>> {
+///
+/// A matrix that the server sends malformed, with negative dimensions, a number of values that
+/// does not fit its shape, column pointers that are not a monotone range of its values, or row
+/// indices out of range, is a ValueError, as PySpark's `DenseMatrix` and `SparseMatrix` require.
+pub(crate) fn matrix_rows(matrix: &MlMatrix) -> Result<Vec<Vec<f64>>> {
     match matrix {
         MlMatrix::Dense {
             num_rows,
@@ -61,8 +65,11 @@ pub(crate) fn matrix_rows(matrix: &MlMatrix) -> Vec<Vec<f64>> {
             values,
             is_transposed,
         } => {
-            let (rows, cols) = (*num_rows as usize, *num_cols as usize);
-            (0..rows)
+            let (rows, cols) = matrix_dims(matrix, *num_rows, *num_cols)?;
+            if rows.checked_mul(cols) != Some(values.len()) {
+                return Err(malformed(matrix, "its values do not fill its shape"));
+            }
+            Ok((0..rows)
                 .map(|i| {
                     (0..cols)
                         .map(|j| {
@@ -75,7 +82,7 @@ pub(crate) fn matrix_rows(matrix: &MlMatrix) -> Vec<Vec<f64>> {
                         })
                         .collect()
                 })
-                .collect()
+                .collect())
         }
         MlMatrix::Sparse {
             num_rows,
@@ -85,21 +92,73 @@ pub(crate) fn matrix_rows(matrix: &MlMatrix) -> Vec<Vec<f64>> {
             values,
             is_transposed,
         } => {
-            let mut rows = vec![vec![0.0; *num_cols as usize]; *num_rows as usize];
-            for (k, bounds) in col_ptrs.windows(2).enumerate() {
-                for entry in bounds[0] as usize..bounds[1] as usize {
-                    let index = row_indices[entry] as usize;
+            let (rows, cols) = matrix_dims(matrix, *num_rows, *num_cols)?;
+            // The compressed dimension is the rows of a transposed matrix, else its columns.
+            let (compressed, extent) = if *is_transposed {
+                (rows, cols)
+            } else {
+                (cols, rows)
+            };
+            let pointers = col_ptrs
+                .iter()
+                .map(|&p| usize::try_from(p).ok())
+                .collect::<Option<Vec<usize>>>();
+            let indices = row_indices
+                .iter()
+                .map(|&i| usize::try_from(i).ok().filter(|&i| i < extent))
+                .collect::<Option<Vec<usize>>>();
+            let (Some(pointers), Some(indices)) = (pointers, indices) else {
+                return Err(malformed(matrix, "a row index is out of range"));
+            };
+            if col_ptrs.len() != compressed + 1
+                || pointers.first() != Some(&0)
+                || pointers.last() != Some(&values.len())
+                || pointers.windows(2).any(|bounds| bounds[0] > bounds[1])
+                || indices.len() != values.len()
+            {
+                return Err(malformed(
+                    matrix,
+                    "its column pointers or row indices do not fit",
+                ));
+            }
+            let mut rows_out = vec![vec![0.0; cols]; rows];
+            for (k, bounds) in pointers.windows(2).enumerate() {
+                for entry in bounds[0]..bounds[1] {
+                    let index = indices[entry];
                     let (i, j) = if *is_transposed {
                         (k, index)
                     } else {
                         (index, k)
                     };
-                    rows[i][j] = values[entry];
+                    rows_out[i][j] = values[entry];
                 }
             }
-            rows
+            Ok(rows_out)
         }
     }
+}
+
+/// The dimensions of `matrix` as counts, which a negative dimension is not.
+fn matrix_dims(matrix: &MlMatrix, num_rows: i32, num_cols: i32) -> Result<(usize, usize)> {
+    match (usize::try_from(num_rows), usize::try_from(num_cols)) {
+        (Ok(rows), Ok(cols)) => Ok((rows, cols)),
+        _ => Err(malformed(matrix, "its dimensions are negative")),
+    }
+}
+
+/// The ValueError of a malformed matrix, of its shape and what is wrong with it.
+fn malformed(matrix: &MlMatrix, problem: &str) -> SparkError {
+    let (num_rows, num_cols) = match matrix {
+        MlMatrix::Dense {
+            num_rows, num_cols, ..
+        }
+        | MlMatrix::Sparse {
+            num_rows, num_cols, ..
+        } => (num_rows, num_cols),
+    };
+    SparkError::value_msg(format!(
+        "malformed matrix of {num_rows} rows and {num_cols} columns: {problem}"
+    ))
 }
 
 fn doubles_of(value: &Value) -> Option<Vec<f64>> {
@@ -207,8 +266,8 @@ mod tests {
             is_transposed: true,
         };
         let expected = vec![vec![1.0, 3.0], vec![2.0, 4.0]];
-        assert_eq!(matrix_rows(&dense), expected);
-        assert_eq!(matrix_rows(&transposed), expected);
+        assert_eq!(matrix_rows(&dense).unwrap(), expected);
+        assert_eq!(matrix_rows(&transposed).unwrap(), expected);
         // [[0, 5, 0], [6, 0, 7]] of its columns, and of its rows when transposed.
         let sparse = MlMatrix::Sparse {
             num_rows: 2,
@@ -227,7 +286,61 @@ mod tests {
             is_transposed: true,
         };
         let expected = vec![vec![0.0, 5.0, 0.0], vec![6.0, 0.0, 7.0]];
-        assert_eq!(matrix_rows(&sparse), expected);
-        assert_eq!(matrix_rows(&sparse_rows), expected);
+        assert_eq!(matrix_rows(&sparse).unwrap(), expected);
+        assert_eq!(matrix_rows(&sparse_rows).unwrap(), expected);
+    }
+
+    #[test]
+    fn matrix_rows_fails_a_malformed_matrix_instead_of_panicking() {
+        fn dense(num_rows: i32, num_cols: i32, values: &[f64]) -> MlMatrix {
+            MlMatrix::Dense {
+                num_rows,
+                num_cols,
+                values: values.to_vec(),
+                is_transposed: false,
+            }
+        }
+        fn sparse(
+            (num_rows, num_cols): (i32, i32),
+            (col_ptrs, row_indices): (&[i32], &[i32]),
+            values: &[f64],
+            is_transposed: bool,
+        ) -> MlMatrix {
+            MlMatrix::Sparse {
+                num_rows,
+                num_cols,
+                col_ptrs: col_ptrs.to_vec(),
+                row_indices: row_indices.to_vec(),
+                values: values.to_vec(),
+                is_transposed,
+            }
+        }
+        let values = [6.0, 5.0, 7.0];
+        let malformed = [
+            dense(2, 2, &[1.0, 2.0, 3.0]),
+            dense(-1, 2, &[]),
+            dense(2, -2, &[]),
+            // The column pointers of a 2 x 3 matrix have 4 entries, not 3, or do not start at 0.
+            sparse((2, 3), (&[0, 1, 3], &[1, 0, 1]), &values, false),
+            sparse((2, 3), (&[1, 2, 3, 3], &[1, 0, 1]), &values, false),
+            // Not monotone, or not ending at the number of values.
+            sparse((2, 3), (&[0, 2, 1, 3], &[1, 0, 1]), &values, false),
+            sparse((2, 3), (&[0, 1, 2, 2], &[1, 0, 1]), &values, false),
+            // A row index out of range of the rows, negative, or a column index of a transposed
+            // matrix out of range of its columns.
+            sparse((2, 3), (&[0, 1, 2, 3], &[2, 0, 1]), &values, false),
+            sparse((2, 3), (&[0, 1, 2, 3], &[-1, 0, 1]), &values, false),
+            sparse((2, 3), (&[0, 1, 3], &[1, 0, 3]), &[5.0, 6.0, 7.0], true),
+            // Indices and values of different lengths.
+            sparse((2, 3), (&[0, 1, 2, 3], &[1, 0]), &values, false),
+            sparse((-2, 3), (&[0, 1, 2, 3], &[1, 0, 1]), &values, false),
+        ];
+        for matrix in &malformed {
+            let error = matrix_rows(matrix).expect_err("a malformed matrix must fail");
+            assert!(
+                error.to_string().contains("malformed matrix"),
+                "unexpected error {error}"
+            );
+        }
     }
 }

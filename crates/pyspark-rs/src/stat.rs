@@ -102,10 +102,16 @@ impl PyStatFunctions {
     ) -> PyResult<PyDataFrame> {
         let py = col.py();
         let (col, fractions) = sample_by_arguments(col, fractions)?;
-        let seed = sample_by_seed(py, seed)?;
-        Ok(PyDataFrame::new(
-            self.stat.sample_by(col, fractions, Some(seed)).to_pyerr()?,
-        ))
+        // The long of the seed is converted as the plan is sent, as in `DataFrame.sampleBy`.
+        let (seed, deferred) = match sample_by_seed(py, seed) {
+            Ok(seed) => (seed, None),
+            Err(err) => (0, Some(crate::dataframe::unbuildable_error(py, err)?)),
+        };
+        let df = self.stat.sample_by(col, fractions, Some(seed)).to_pyerr()?;
+        Ok(PyDataFrame::new(match deferred {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// Approximate quantiles of a column, or of each of a list or tuple of columns, at the

@@ -41,7 +41,7 @@ impl KMeansModel {
     /// PySpark reads the rows of the matrix of the centers (`clusterCenterMatrix`).
     pub fn cluster_centers(&self) -> Result<Vec<Vec<f64>>> {
         let value = fetch_value(&self.model_target()?, "clusterCenterMatrix", vec![])?;
-        Ok(matrix_rows(&as_matrix("clusterCenterMatrix", value)?))
+        matrix_rows(&as_matrix("clusterCenterMatrix", value)?)
     }
 
     /// The number of features that the model was trained on (`numFeatures`).

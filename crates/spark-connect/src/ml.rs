@@ -3842,9 +3842,10 @@ impl Model for FMRegressionModel {
 ///
 /// Supports binary and multiclass labels. Unset parameters use Spark's defaults. A single
 /// tree samples its rows to find split candidates only when there are more than
-/// max(maxBins^2, 10000) rows; the seed picks that sample, or else Spark's default seed (the
-/// hash of the class name), as with PySpark, so fits are reproducible either way. Equal-gain
-/// splits are chosen deterministically, so the seed does not break ties.
+/// max(maxBins^2, 10000) rows; the seed picks that sample, or else the server's default
+/// seed (the Java hash of the class name, which the client does not send, as PySpark does not
+/// send its default), so fits are reproducible. Equal-gain splits are chosen deterministically,
+/// so the seed does not break ties.
 #[derive(Debug, Clone)]
 pub struct DecisionTreeClassifier {
     operator: MlOperator,
@@ -4190,8 +4191,9 @@ impl Model for GBTClassificationModel {
 /// Random forest classification using Spark's JVM implementation and ML vector features.
 ///
 /// Supports binary and multiclass labels. Unset parameters use Spark's defaults. Without a
-/// seed, the sampling uses Spark's default seed (the hash of the class name), as with
-/// PySpark, so fits are reproducible either way; set a seed to draw other samples.
+/// seed, the sampling uses the server's default seed (the Java hash of the class name, which
+/// the client does not send, as PySpark does not send its default), so fits are reproducible;
+/// set a seed to draw other samples.
 #[derive(Debug, Clone)]
 pub struct RandomForestClassifier {
     operator: MlOperator,
@@ -4512,9 +4514,10 @@ impl Model for GBTRegressionModel {
 ///
 /// Supports continuous numeric labels. Unset parameters use Spark's defaults. A single tree
 /// samples its rows to find split candidates only when there are more than
-/// max(maxBins^2, 10000) rows; the seed picks that sample, or else Spark's default seed (the
-/// hash of the class name), as with PySpark, so fits are reproducible either way. Equal-gain
-/// splits are chosen deterministically, so the seed does not break ties.
+/// max(maxBins^2, 10000) rows; the seed picks that sample, or else the server's default
+/// seed (the Java hash of the class name, which the client does not send, as PySpark does not
+/// send its default), so fits are reproducible. Equal-gain splits are chosen deterministically,
+/// so the seed does not break ties.
 #[derive(Debug, Clone)]
 pub struct DecisionTreeRegressor {
     operator: MlOperator,
@@ -4695,8 +4698,9 @@ impl Model for DecisionTreeRegressionModel {
 /// Random forest regression using Spark's JVM implementation and ML vector features.
 ///
 /// Supports continuous numeric labels. Unset parameters use Spark's defaults. Without a
-/// seed, the sampling uses Spark's default seed (the hash of the class name), as with
-/// PySpark, so fits are reproducible either way; set a seed to draw other samples.
+/// seed, the sampling uses the server's default seed (the Java hash of the class name, which
+/// the client does not send, as PySpark does not send its default), so fits are reproducible;
+/// set a seed to draw other samples.
 #[derive(Debug, Clone)]
 pub struct RandomForestRegressor {
     operator: MlOperator,
@@ -4889,8 +4893,9 @@ impl Model for RandomForestRegressionModel {
 /// K-means clustering using Spark's JVM implementation and ML vector features.
 ///
 /// Supports Euclidean and cosine distance. Unset parameters use Spark's defaults. Without a
-/// seed, the initialization uses Spark's default seed (the hash of the class name), as with
-/// PySpark, so fits are reproducible either way; set a seed to start from other centers.
+/// seed, the initialization uses the server's default seed (the Java hash of the class name,
+/// which the client does not send, as PySpark does not send its default), so fits are
+/// reproducible; set a seed to start from other centers.
 #[derive(Debug, Clone)]
 pub struct KMeans {
     operator: MlOperator,

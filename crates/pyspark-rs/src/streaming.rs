@@ -1,7 +1,7 @@
 //! PyO3 wrappers for Structured Streaming.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 
 use spark_connect::streaming::{
     DataStreamReader, DataStreamWriter, ListenerEventStream, StreamingQuery,
@@ -436,42 +436,52 @@ impl PyDataStreamReader {
     /// The shallow copy of a stream reader, as PySpark's `copy.copy`: the copy shares the
     /// options of this reader, as its `_options` dict is shared, so an option that either one
     /// sets or unsets is seen by both, and has its own format, which is kept as it is.
-    fn __copy__(&self, py: Python<'_>) -> PyDataStreamReader {
-        PyDataStreamReader {
-            inner: self.inner.clone(),
-            options: Arc::clone(&self.options),
-            unsent_format: self
-                .unsent_format
-                .as_ref()
-                .map(|format| format.clone_ref(py)),
-            unencodable_options: Arc::clone(&self.unencodable_options),
-            unencodable_schema: self.unencodable_schema.clone(),
-        }
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyDataStreamReader {
+                inner: this.inner.clone(),
+                options: Arc::clone(&this.options),
+                unsent_format: this
+                    .unsent_format
+                    .as_ref()
+                    .map(|format| format.clone_ref(py)),
+                unencodable_options: Arc::clone(&this.unencodable_options),
+                unencodable_schema: this.unencodable_schema.clone(),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of a stream reader, as PySpark's pickle of its session and its state, which
-    /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// `_of_state` gives back, with the instance attributes of the reader.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::{optional_object, state_reduce, str_dict};
 
-        let session = crate::session::session_object(py, &self.inner.spark_session())?;
+        let py = slf.py();
+        let this = slf.borrow();
+        let session = crate::session::session_object(py, &this.inner.spark_session())?;
         let args = PyTuple::new(
             py,
             [
                 session.into_bound(py).into_any(),
-                self.inner.get_format().into_pyobject(py)?.into_any(),
-                self.inner.get_schema().into_pyobject(py)?.into_any(),
-                str_dict(py, &self.options.get())?.into_any(),
-                self.inner.get_source_name().into_pyobject(py)?.into_any(),
-                optional_object(py, self.unsent_format.as_ref().map(|f| &f.object)),
+                this.inner.get_format().into_pyobject(py)?.into_any(),
+                this.inner.get_schema().into_pyobject(py)?.into_any(),
+                str_dict(py, &this.options.get())?.into_any(),
+                this.inner.get_source_name().into_pyobject(py)?.into_any(),
+                optional_object(py, this.unsent_format.as_ref().map(|f| &f.object)),
                 crate::readwriter::unencodable_state(
                     py,
-                    self.unencodable_schema.as_deref(),
-                    &self.unencodable_options.get(),
+                    this.unencodable_schema.as_deref(),
+                    &this.unencodable_options.get(),
                 )?,
             ],
         )?;
-        state_reduce(py, "stream_reader_reduce", args)
+        let reduced = state_reduce(py, "stream_reader_reduce", args)?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
     }
 
     /// A stream reader of its state, as `__reduce__` gives it: of the session `session`, the
@@ -592,10 +602,17 @@ impl PyDataStreamReader {
         self.unsent_format = None;
     }
 
-    /// The configured source format (PySpark Connect's `DataStreamReader._format`).
+    /// The configured source format (PySpark Connect's `DataStreamReader._format`), which is the
+    /// object itself when it is not a str that the core reader takes, as PySpark keeps it.
     #[getter]
-    fn _format(&self) -> Option<String> {
-        self.inner.get_format().map(str::to_string)
+    fn _format(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        match &self.unsent_format {
+            Some(format) => Some(format.object.clone_ref(py)),
+            None => self
+                .inner
+                .get_format()
+                .map(|format| PyString::new(py, format).into_any().unbind()),
+        }
     }
 
     /// The configured schema string, empty when unset (`DataStreamReader._schema`).
@@ -1210,20 +1227,29 @@ impl PyDataStreamWriter {
 impl PyDataStreamWriter {
     /// The shallow copy of a stream writer, as PySpark's `copy.copy`: the copy shares the state
     /// of this writer, as its `_write_stream` is the same object, and its functions.
-    fn __copy__(&self, py: Python<'_>) -> PyDataStreamWriter {
-        PyDataStreamWriter {
-            inner: Arc::clone(&self.inner),
-            frame: self.frame.clone_ref(py),
-            functions: Arc::clone(&self.functions),
-        }
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyDataStreamWriter {
+                inner: Arc::clone(&this.inner),
+                frame: this.frame.clone_ref(py),
+                functions: Arc::clone(&this.functions),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of a stream writer, as PySpark's pickle of its DataFrame and its state, which
-    /// `_of_state` gives back, with the functions that it applied.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// `_of_state` gives back, with the functions that it applied and its instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::{state_reduce, str_dict};
 
-        let writer = self.inner.get();
+        let py = slf.py();
+        let this = slf.borrow();
+        let writer = this.inner.get();
 
         let trigger = match writer.get_trigger() {
             Some(trigger) => {
@@ -1240,7 +1266,7 @@ impl PyDataStreamWriter {
             None => py.None().into_bound(py),
         };
         let functions = {
-            let functions = self
+            let functions = this
                 .functions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1261,7 +1287,7 @@ impl PyDataStreamWriter {
         let args = PyTuple::new(
             py,
             [
-                self.frame.clone_ref(py).into_any().into_bound(py),
+                this.frame.clone_ref(py).into_any().into_bound(py),
                 writer.get_format().into_pyobject(py)?.into_any(),
                 writer.get_output_mode().into_pyobject(py)?.into_any(),
                 str_dict(py, writer.get_options())?.into_any(),
@@ -1272,7 +1298,8 @@ impl PyDataStreamWriter {
                 functions.into_any(),
             ],
         )?;
-        state_reduce(py, "stream_writer_reduce", args)
+        let reduced = state_reduce(py, "stream_writer_reduce", args)?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
     }
 
     /// A stream writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the

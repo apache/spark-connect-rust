@@ -825,6 +825,24 @@ fn json_dumps(py: Python<'_>, json: &Bound<'_, PyAny>) -> PyResult<String> {
         .extract()
 }
 
+/// The `json()` text of the struct type `schema`, as PySpark's `json()` writes it, when one of its
+/// nullable flags is other than a bool, which the core's text does not keep. None for no schema,
+/// any other schema, or a struct of bool flags.
+pub(crate) fn raw_struct_json(schema: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+    let Some(schema) = schema else {
+        return Ok(None);
+    };
+    if !schema.is_instance_of::<PyStructType>() {
+        return Ok(None);
+    }
+    let py = schema.py();
+    let (json, other) = type_json_value(py, schema)?;
+    if !other {
+        return Ok(None);
+    }
+    json_dumps(py, &json).map(Some)
+}
+
 /// The `jsonValue` of the field `field`, with its nullable flags as given, and whether one of
 /// them is other than a bool.
 fn field_json_value<'py>(

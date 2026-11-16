@@ -493,6 +493,38 @@ fn check_model(golden: &Json, persistence: &Json, key: &str) {
     assert_params(loaded.params(), model.params(), &model_key);
 }
 
+/// A pipeline's fit of the QuantileDiscretizer case sends the commands of the discretizer's own
+/// fit, and gives PySpark's stage: a Bucketizer of a new uid, not the discretizer's uid.
+#[test]
+fn a_pipeline_fit_of_a_quantile_discretizer_gives_a_bucketizer_of_a_new_uid() {
+    let golden = fixture(MODELS);
+    let fit = without_deletes(&golden["fits"]["QuantileDiscretizer"]["fit"]);
+    let (server, session) = ReplayServer::start(&[&fit]);
+    let input = session.range(1).unwrap();
+    let discretizer = QuantileDiscretizer::new()
+        .set_input_col("x")
+        .set_output_col("out")
+        .set_num_buckets(3)
+        .set_relative_error(0.0);
+    let discretizer_uid = discretizer.operator().uid.clone();
+    let mut pipeline = Pipeline::new().set_stages(vec![PipelineStage::estimator(discretizer)]);
+    let model = pipeline.fit(&input).unwrap();
+    assert_commands(&server, &fit, "QuantileDiscretizer.pipeline");
+    let pipeline_model = (*model)
+        .as_any()
+        .downcast_ref::<PipelineModel>()
+        .expect("a pipeline model");
+    let PipelineStage::Transformer(bucketizer) = &pipeline_model.stages()[0] else {
+        panic!("a Bucketizer is a transformer stage");
+    };
+    assert_eq!(
+        bucketizer.operator().name,
+        "org.apache.spark.ml.feature.Bucketizer"
+    );
+    assert_ne!(bucketizer.operator().uid, discretizer_uid);
+    assert!(bucketizer.operator().uid.starts_with("Bucketizer_"));
+}
+
 /// Every fit of the golden, with its model's members and the save and load of the model.
 #[test]
 fn feature_models_match_official_pyspark() {

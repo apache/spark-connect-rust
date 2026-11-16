@@ -341,8 +341,10 @@ pub(crate) fn reader_plan_error(
 }
 
 /// The name of a table, as PySpark's `Read` plan sets it in its string field: a str that UTF-8
-/// cannot encode is kept with the error of that plan, and the name is empty. Another object is
-/// converted as [`crate::str_argument`] converts it.
+/// cannot encode is kept with the error of that plan, and the name is empty. Bytes are decoded as
+/// [`crate::str_argument`] decodes them, and bytes that are not UTF-8 are kept with their decode
+/// error. Any other object is kept too, and fails the plan with the TypeError of protobuf's string
+/// field, as PySpark's `table` does at the action and not at the call.
 pub(crate) fn table_name_of(name: &Bound<'_, PyAny>) -> PyResult<(String, Option<SparkError>)> {
     if name.is_instance_of::<PyString>() {
         if let Ok(text) = name.extract::<String>() {
@@ -351,7 +353,16 @@ pub(crate) fn table_name_of(name: &Bound<'_, PyAny>) -> PyResult<(String, Option
         let error = SparkError::unencodable_str(&utf32le_of(name)?);
         return Ok((String::new(), Some(error)));
     }
-    Ok((crate::str_argument(name)?, None))
+    if let Ok(bytes) = name.cast::<PyBytes>() {
+        return Ok(match crate::str_argument(name) {
+            Ok(text) => (text, None),
+            Err(_) => (
+                String::new(),
+                Some(SparkError::invalid_utf8(0, bytes.as_bytes())),
+            ),
+        });
+    }
+    Ok((String::new(), Some(crate::options::builtin_type_error())))
 }
 
 /// The reader without the options of `options`, which the reader keeps apart from its core state.
@@ -662,42 +673,52 @@ impl PyDataFrameReader {
     /// The shallow copy of a reader, as PySpark's `copy.copy`: the copy shares the options of
     /// this reader, as its `_options` dict is shared, so an option that either one sets or
     /// unsets is seen by both, and has its own format, which is kept as it is.
-    fn __copy__(&self, py: Python<'_>) -> PyDataFrameReader {
-        PyDataFrameReader {
-            inner: self.inner.clone(),
-            options: std::sync::Arc::clone(&self.options),
-            unsent_format: self
-                .unsent_format
-                .as_ref()
-                .map(|format| format.clone_ref(py)),
-            unencodable_options: std::sync::Arc::clone(&self.unencodable_options),
-            unencodable_schema: self.unencodable_schema.clone(),
-        }
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyDataFrameReader {
+                inner: this.inner.clone(),
+                options: std::sync::Arc::clone(&this.options),
+                unsent_format: this
+                    .unsent_format
+                    .as_ref()
+                    .map(|format| format.clone_ref(py)),
+                unencodable_options: std::sync::Arc::clone(&this.unencodable_options),
+                unencodable_schema: this.unencodable_schema.clone(),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of a reader, as PySpark's pickle of its session and its state, which
-    /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// `_of_state` gives back, with the instance attributes of the reader.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::{optional_object, state_reduce, str_dict};
 
-        let session = crate::session::session_object(py, &self.inner.spark_session())?;
+        let py = slf.py();
+        let this = slf.borrow();
+        let session = crate::session::session_object(py, &this.inner.spark_session())?;
         let unencodable = unencodable_state(
             py,
-            self.unencodable_schema.as_deref(),
-            &self.unencodable_options.get(),
+            this.unencodable_schema.as_deref(),
+            &this.unencodable_options.get(),
         )?;
         let args = pyo3::types::PyTuple::new(
             py,
             [
                 session.into_bound(py).into_any(),
-                self.inner.get_format().into_pyobject(py)?.into_any(),
-                self.inner.get_schema().into_pyobject(py)?.into_any(),
-                str_dict(py, &self.options.get())?.into_any(),
-                optional_object(py, self.unsent_format.as_ref().map(|f| &f.object)),
+                this.inner.get_format().into_pyobject(py)?.into_any(),
+                this.inner.get_schema().into_pyobject(py)?.into_any(),
+                str_dict(py, &this.options.get())?.into_any(),
+                optional_object(py, this.unsent_format.as_ref().map(|f| &f.object)),
                 unencodable,
             ],
         )?;
-        state_reduce(py, "reader_reduce", args)
+        let reduced = state_reduce(py, "reader_reduce", args)?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
     }
 
     /// A reader of its state, as `__reduce__` gives it: of the session `session`, the format,
@@ -820,10 +841,17 @@ impl PyDataFrameReader {
         self.unsent_format = None;
     }
 
-    /// The configured source format (PySpark Connect's `DataFrameReader._format`).
+    /// The configured source format (PySpark Connect's `DataFrameReader._format`), which is the
+    /// object itself when it is not a str that the core reader takes, as PySpark keeps it.
     #[getter]
-    fn _format(&self) -> Option<String> {
-        self.inner.get_format().map(str::to_string)
+    fn _format(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        match &self.unsent_format {
+            Some(format) => Some(format.object.clone_ref(py)),
+            None => self
+                .inner
+                .get_format()
+                .map(|format| PyString::new(py, format).into_any().unbind()),
+        }
     }
 
     /// The configured schema string, empty when unset (`DataFrameReader._schema`).

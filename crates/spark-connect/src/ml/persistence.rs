@@ -29,12 +29,41 @@ pub struct Metadata {
     pub extra: Vec<(String, String)>,
 }
 
+/// The JSON text of the string `text`, as Python's `json.dumps` writes a str (of its default
+/// `ensure_ascii`): the escapes `\"`, `\\`, `\n`, `\r`, `\t`, `\b` and `\f`, and `\uXXXX` in
+/// lowercase hex for each other character that is not printable ASCII (a surrogate pair above
+/// U+FFFF), as `json.dumps` escapes `\x7f` and the non-ASCII characters.
+pub fn json_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push('"');
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            ' '..='~' => out.push(c),
+            _ => {
+                let mut units = [0u16; 2];
+                for unit in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{unit:04x}"));
+                }
+            }
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// The compact JSON text of an object of the fields `fields` (each a key and the JSON text of its
 /// value), in their order, as `json.dumps` writes a Python dict, of the order of its insertion.
 pub fn json_object(fields: &[(&str, String)]) -> String {
     let body = fields
         .iter()
-        .map(|(key, value)| format!("{}:{value}", serde_json::json!(key)))
+        .map(|(key, value)| format!("{}:{value}", json_string(key)))
         .collect::<Vec<_>>()
         .join(",");
     format!("{{{body}}}")
@@ -70,13 +99,10 @@ impl Metadata {
     /// its `json.dumps(..., separators=(",", ":"))`.
     pub fn to_json(&self) -> String {
         let mut fields = vec![
-            ("class", serde_json::json!(self.class).to_string()),
+            ("class", json_string(&self.class)),
             ("timestamp", self.timestamp.to_string()),
-            (
-                "sparkVersion",
-                serde_json::json!(self.spark_version).to_string(),
-            ),
-            ("uid", serde_json::json!(self.uid).to_string()),
+            ("sparkVersion", json_string(&self.spark_version)),
+            ("uid", json_string(&self.uid)),
             ("paramMap", self.param_map.clone()),
             ("defaultParamMap", self.default_param_map.clone()),
         ];
@@ -188,8 +214,8 @@ mod tests {
     #[test]
     fn metadata_is_the_json_of_default_params_writer_in_its_order() {
         let param_map = json_object(&[
-            ("stageUids", serde_json::json!(["a", "b"]).to_string()),
-            ("language", serde_json::json!("Python").to_string()),
+            ("stageUids", "[\"a\",\"b\"]".to_string()),
+            ("language", json_string("Python")),
         ]);
         let mut metadata = Metadata::new(
             "pyspark.ml.pipeline.Pipeline",
@@ -208,6 +234,17 @@ mod tests {
         );
         metadata.extra.push(("avgMetrics".into(), "[0.5]".into()));
         assert!(metadata.to_json().ends_with(",\"avgMetrics\":[0.5]}"));
+    }
+
+    #[test]
+    fn strings_are_json_as_python_dumps_them_with_ascii_escapes() {
+        // The expected text is Python 3.11's `json.dumps` of the same string (`ensure_ascii`).
+        assert_eq!(
+            json_string("\u{e9}\u{1f600}\x7f\n\t\"\\/\x01\u{8}\u{c}\r"),
+            "\"\\u00e9\\ud83d\\ude00\\u007f\\n\\t\\\"\\\\/\\u0001\\b\\f\\r\""
+        );
+        assert_eq!(json_string("plain 'q' ~"), "\"plain 'q' ~\"");
+        assert_eq!(json_string(""), "\"\"");
     }
 
     #[test]

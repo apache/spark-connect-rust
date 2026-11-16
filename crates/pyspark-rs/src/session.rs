@@ -23,7 +23,9 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 #[pyclass(name = "Builder", module = "pyspark.sql.session", from_py_object)]
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
-    remote_url: Option<String>,
+    /// The URL of `remote()` or of `config("spark.remote")`: None when it is not set, and
+    /// `Some(None)` when it is set to None, which PySpark's `create` asserts ([`Self::url`]).
+    remote_url: Option<Option<String>>,
     /// Runtime configs set via `.config(...)`, applied after the session connects.
     configs: Vec<(String, Option<String>)>,
     /// The hook factories of `_registerHook`, which a new session calls with itself, as
@@ -88,7 +90,7 @@ impl PySparkSessionBuilder {
     fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let mut options = Vec::with_capacity(self.configs.len() + 1);
         if let Some(url) = &self.remote_url {
-            options.push(("spark.remote".to_string(), Some(url.clone())));
+            options.push(("spark.remote".to_string(), url.clone()));
         }
         options.extend(self.configs.iter().cloned());
         let options = PyList::new(
@@ -124,25 +126,59 @@ impl PySparkSessionBuilder {
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).
-    /// Mirrors `SparkSession.Builder.remote(url)`, and the Connect session builder's
-    /// `remote(location="sc://localhost")`: the URL is `url` or the keyword `location`.
-    #[pyo3(signature = (url=None, *, location=None))]
+    /// Mirrors `SparkSession.Builder.remote(url)` and the Connect session builder's
+    /// `remote(location="sc://localhost")`: the URL is the positional argument, or the keyword
+    /// `url` or `location`, and `sc://localhost` when there is none.
+    /// An explicit None is kept as None, as PySpark's `config("spark.remote", None)` keeps it:
+    /// `create` and `getOrCreate` fail its assertion, unless a session exists already, and a later
+    /// `remote` replaces it.
+    ///
+    /// As PySpark's `config("spark.remote", location)`, the URL is kept as an option of any
+    /// value: a value that is not a str (such as bytes) is `str()` of it, which `create` and
+    /// `getOrCreate` reject as an invalid URL, and a str that UTF-8 cannot encode fails there too.
+    #[pyo3(
+        signature = (*args, **kwargs),
+        text_signature = "($self, url=None, *, location=None)"
+    )]
     fn remote<'py>(
         mut slf: PyRefMut<'py, Self>,
-        url: Option<&str>,
-        location: Option<&str>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let url = match (url, location) {
-            (Some(_), Some(_)) => {
+        // The arguments are checked as CPython checks them, so that an omitted URL is told from
+        // a None one, which is an argument of its own.
+        crate::options::check_keyword_keys(kwargs)?;
+        let mut given: Vec<Bound<'py, PyAny>> = args.iter().collect();
+        if given.len() > 1 {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "SparkSession.Builder.remote() takes from 1 to 2 positional arguments but {} \
+                 were given",
+                given.len() + 1
+            )));
+        }
+        for (key, value) in kwargs.into_iter().flat_map(|kwargs| kwargs.iter()) {
+            let name = key.extract::<String>().ok();
+            if !matches!(name.as_deref(), Some("url" | "location")) {
+                return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                    "SparkSession.Builder.remote() got an unexpected keyword argument '{}'",
+                    key.str()?.to_cow()?
+                )));
+            }
+            if !given.is_empty() {
                 return Err(pyo3::exceptions::PyTypeError::new_err(
                     "remote() got multiple values for the URL: give url or location",
-                ))
+                ));
             }
-            (Some(url), None) | (None, Some(url)) => url,
-            (None, None) => "sc://localhost",
-        };
+            given.push(value);
+        }
         let py = slf.py();
-        slf.set_option(py, "spark.remote", url.to_string())?;
+        let key =
+            crate::options::OptionKey::Text(crate::options::OptionText::literal("spark.remote"));
+        let value = match given.first() {
+            Some(location) => crate::options::reader_option_text(location)?,
+            None => Some(crate::options::OptionText::literal("sc://localhost")),
+        };
+        slf.put_config(py, key, value)?;
         Ok(slf)
     }
 
@@ -370,7 +406,7 @@ impl PySparkSessionBuilder {
         value: Option<String>,
     ) -> PyResult<()> {
         if key == "spark.remote" {
-            self.remote_url = value;
+            self.remote_url = Some(value);
         } else {
             self.configs.push((key.to_string(), value));
         }
@@ -392,6 +428,7 @@ impl PySparkSessionBuilder {
         let remote = self
             .remote_url
             .clone()
+            .flatten()
             .or_else(|| std::env::var("SPARK_REMOTE").ok());
         if let (Some(master), Some(remote)) = (&master, &remote) {
             return Err(crate::column::raise_pyspark(
@@ -402,7 +439,7 @@ impl PySparkSessionBuilder {
             ));
         }
         if let (Some(remote), Ok(existing), Ok(_)) = (
-            &self.remote_url,
+            self.remote_url.as_ref().and_then(|url| url.as_ref()),
             std::env::var("SPARK_REMOTE"),
             std::env::var("SPARK_LOCAL_REMOTE"),
         ) {
@@ -419,15 +456,16 @@ impl PySparkSessionBuilder {
     }
 
     /// The URL of the session: that of `remote()`, or else of `SPARK_REMOTE`, as PySpark's
-    /// builder of a Connect-only client, which raises `CONNECT_URL_NOT_SET` without either.
+    /// builder of a Connect-only client, which raises `CONNECT_URL_NOT_SET` without either. A URL
+    /// that is set to None fails the assertion of PySpark's `create`, whatever `SPARK_REMOTE` is.
     fn url(&self, py: Python<'_>) -> PyResult<String> {
-        match self
-            .remote_url
-            .clone()
-            .or_else(|| std::env::var("SPARK_REMOTE").ok())
-        {
-            Some(url) => Ok(url),
-            None => Err(connect_url_not_set(py)),
+        match &self.remote_url {
+            Some(None) => Err(pyo3::exceptions::PyAssertionError::new_err(())),
+            Some(Some(url)) => Ok(url.clone()),
+            None => match std::env::var("SPARK_REMOTE") {
+                Ok(url) => Ok(url),
+                Err(_) => Err(connect_url_not_set(py)),
+            },
         }
     }
 
@@ -2380,6 +2418,24 @@ impl PySparkSession {
         // A caller holding a Table, or a pandas DataFrame, has already imported its module.
         if is_loaded_instance(py, data, "pyarrow", "Table")? {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema);
+        }
+        // Empty rows of a struct whose nullable flag is not a bool: PySpark sends the `json()` of
+        // the schema as it is, which the server cannot parse, so the relation carries that text.
+        if data.is_instance_of::<PyList>() && data.len()? == 0 {
+            if let Some(json) = crate::types::raw_struct_json(schema)? {
+                let relation = spark_connect_proto::Relation {
+                    rel_type: Some(spark_connect_proto::relation::RelType::LocalRelation(
+                        spark_connect_proto::LocalRelation {
+                            data: None,
+                            schema: Some(json),
+                        },
+                    )),
+                    ..Default::default()
+                };
+                let df =
+                    spark_connect::DataFrame::from_relation(self.session.clone(), relation, None);
+                return Ok(PyDataFrame::new(df.to_pyerr()?));
+            }
         }
         let spec = schema_spec(py, &self.session, schema)?;
         if is_loaded_instance(py, data, "numpy", "ndarray")? {
