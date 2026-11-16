@@ -553,9 +553,9 @@ request is sent (the helper calls below raise PySpark's error of their serializa
 empty pandas DataFrames. The `evaluate` of a model's summary (`LogisticRegressionModel.evaluate`
 and its peers) raises the `TypeError` that `pyspark.ml` raises for a dataset that is not a
 DataFrame. The native Pipeline and validators raise the errors of PySpark's: a Pipeline that of
-its first stage, and a validator the `AttributeError` of the `select` of its split. Known
-divergence, pending: `OneVsRest.fit` still raises a `TypeError` for a pandas DataFrame, where
-`pyspark.ml` raises a `KeyError` of the pandas aggregate of its max label.
+its first stage, and a validator the `AttributeError` of the `select` of its split. A
+OneVsRest fits a dataset that is not a Spark DataFrame by PySpark's own `OneVsRest._fit`, so a
+pandas DataFrame raises the `KeyError` that it raises (see Native OneVsRest).
 Convert local data explicitly with `df = spark.createDataFrame(pdf)` before calling
 `estimator.fit(df)`, `model.transform(df)` or `evaluator.evaluate(df)`. Transforms return Spark
 DataFrames; call `toPandas()` explicitly when a local result is needed. The deprecated

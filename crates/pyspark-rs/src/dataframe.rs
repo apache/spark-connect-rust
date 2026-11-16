@@ -1182,7 +1182,17 @@ impl PyDataFrame {
     /// refuses what it does not read.
     #[pyo3(
         name = "_joinAsOf",
-        signature = (other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=DefaultedOption::Omitted, direction=DefaultedOption::Omitted),
+        signature = (
+            other,
+            leftAsOfColumn,
+            rightAsOfColumn,
+            on=None,
+            how=None,
+            *,
+            tolerance=None,
+            allowExactMatches=DefaultedOption::Omitted,
+            direction=DefaultedOption::Omitted
+        ),
         text_signature = "($self, other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *, tolerance=None, allowExactMatches=True, direction='backward')"
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]

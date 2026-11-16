@@ -1374,35 +1374,64 @@ pub(super) const MODEL_CLASSES: &[(&str, &str)] = &[
 pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ("AFTSurvivalRegression", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("censorCol", "censor column name. The value of this column could be 0 or 1. If the value is 1, it means the event has occurred i.e. uncensored; otherwise censored."),
+        ("censorCol",
+         "censor column name. The value of this column could be 0 or 1. If the value is 1, it \
+          means the event has occurred i.e. uncensored; otherwise censored."),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("quantileProbabilities", "quantile probabilities array. Values of the quantile probabilities array should be in the range (0, 1) and the array should be non-empty."),
-        ("quantilesCol", "quantiles column name. This column will output quantiles of corresponding quantileProbabilities if it is set."),
+        ("quantileProbabilities",
+         "quantile probabilities array. Values of the quantile probabilities array should be in \
+          the range (0, 1) and the array should be non-empty."),
+        ("quantilesCol",
+         "quantiles column name. This column will output quantiles of corresponding \
+          quantileProbabilities if it is set."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
     ]),
     ("AFTSurvivalRegressionModel", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("censorCol", "censor column name. The value of this column could be 0 or 1. If the value is 1, it means the event has occurred i.e. uncensored; otherwise censored."),
+        ("censorCol",
+         "censor column name. The value of this column could be 0 or 1. If the value is 1, it \
+          means the event has occurred i.e. uncensored; otherwise censored."),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("quantileProbabilities", "quantile probabilities array. Values of the quantile probabilities array should be in the range (0, 1) and the array should be non-empty."),
-        ("quantilesCol", "quantiles column name. This column will output quantiles of corresponding quantileProbabilities if it is set."),
+        ("quantileProbabilities",
+         "quantile probabilities array. Values of the quantile probabilities array should be in \
+          the range (0, 1) and the array should be non-empty."),
+        ("quantilesCol",
+         "quantiles column name. This column will output quantiles of corresponding \
+          quantileProbabilities if it is set."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
     ]),
     ("ALS", &[
         ("alpha", "alpha for implicit preference"),
-        ("blockSize", "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("coldStartStrategy", "strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'."),
+        ("blockSize",
+         "block size for stacking input data in matrices. Data is stacked within partitions. If \
+          block size is more than remaining data in a partition then it is adjusted to the size of \
+          this data."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("coldStartStrategy",
+         "strategy for dealing with unknown or new users/items at prediction time. This may be \
+          useful in cross-validation or production scenarios, for handling user/item ids the model \
+          has not seen in the training data. Supported values: 'nan', 'drop'."),
         ("finalStorageLevel", "StorageLevel for ALS model factors."),
         ("implicitPrefs", "whether to use implicit preference"),
         ("intermediateStorageLevel", "StorageLevel for intermediate datasets. Cannot be 'NONE'."),
@@ -1419,8 +1448,14 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("userCol", "column name for user ids. Ids must be within the integer value range."),
     ]),
     ("ALSModel", &[
-        ("blockSize", "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data."),
-        ("coldStartStrategy", "strategy for dealing with unknown or new users/items at prediction time. This may be useful in cross-validation or production scenarios, for handling user/item ids the model has not seen in the training data. Supported values: 'nan', 'drop'."),
+        ("blockSize",
+         "block size for stacking input data in matrices. Data is stacked within partitions. If \
+          block size is more than remaining data in a partition then it is adjusted to the size of \
+          this data."),
+        ("coldStartStrategy",
+         "strategy for dealing with unknown or new users/items at prediction time. This may be \
+          useful in cross-validation or production scenarios, for handling user/item ids the model \
+          has not seen in the training data. Supported values: 'nan', 'drop'."),
         ("itemCol", "column name for item ids. Ids must be within the integer value range."),
         ("predictionCol", "prediction column name."),
         ("userCol", "column name for user ids. Ids must be within the integer value range."),
@@ -1430,15 +1465,24 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("inputCols", "input column names."),
         ("outputCol", "output column name."),
         ("outputCols", "output column names."),
-        ("threshold", "Param for threshold used to binarize continuous features. The features greater than the threshold will be binarized to 1.0. The features equal to or less than the threshold will be binarized to 0.0"),
-        ("thresholds", "Param for array of threshold used to binarize continuous features. This is for multiple columns input. If transforming multiple columns and thresholds is not set, but threshold is set, then threshold will be applied across all columns."),
+        ("threshold",
+         "Param for threshold used to binarize continuous features. The features greater than the \
+          threshold will be binarized to 1.0. The features equal to or less than the threshold \
+          will be binarized to 0.0"),
+        ("thresholds",
+         "Param for array of threshold used to binarize continuous features. This is for multiple \
+          columns input. If transforming multiple columns and thresholds is not set, but threshold \
+          is set, then threshold will be applied across all columns."),
     ]),
     ("BinaryClassificationEvaluator", &[
         ("labelCol", "label column name."),
         ("metricName", "metric name in evaluation (areaUnderROC|areaUnderPR)"),
-        ("numBins", "Number of bins to down-sample the curves (ROC curve, PR curve) in area computation. If 0, no down-sampling will occur. Must be >= 0."),
+        ("numBins",
+         "Number of bins to down-sample the curves (ROC curve, PR curve) in area computation. If \
+          0, no down-sampling will occur. Must be >= 0."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("BinaryLogisticRegressionSummary", &[
     ]),
@@ -1453,44 +1497,73 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("featuresCol", "features column name."),
         ("k", "The desired number of leaf clusters. Must be > 1."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("minDivisibleClusterSize", "The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) of a divisible cluster."),
+        ("minDivisibleClusterSize",
+         "The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) \
+          of a divisible cluster."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("BisectingKMeansModel", &[
         ("distanceMeasure", "the distance measure. Supported options: 'euclidean' and 'cosine'."),
         ("featuresCol", "features column name."),
         ("k", "The desired number of leaf clusters. Must be > 1."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("minDivisibleClusterSize", "The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) of a divisible cluster."),
+        ("minDivisibleClusterSize",
+         "The minimum number of points (if >= 1.0) or the minimum proportion of points (if < 1.0) \
+          of a divisible cluster."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("BisectingKMeansSummary", &[
     ]),
     ("BucketedRandomProjectionLSH", &[
-        ("bucketLength", "the length of each hash bucket, a larger bucket lowers the false negative rate."),
+        ("bucketLength",
+         "the length of each hash bucket, a larger bucket lowers the false negative rate."),
         ("inputCol", "input column name."),
-        ("numHashTables", "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance."),
+        ("numHashTables",
+         "number of hash tables, where increasing number of hash tables lowers the false negative \
+          rate, and decreasing it improves the running performance."),
         ("outputCol", "output column name."),
         ("seed", "random seed."),
     ]),
     ("BucketedRandomProjectionLSHModel", &[
-        ("bucketLength", "the length of each hash bucket, a larger bucket lowers the false negative rate."),
+        ("bucketLength",
+         "the length of each hash bucket, a larger bucket lowers the false negative rate."),
         ("inputCol", "input column name."),
-        ("numHashTables", "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance."),
+        ("numHashTables",
+         "number of hash tables, where increasing number of hash tables lowers the false negative \
+          rate, and decreasing it improves the running performance."),
         ("outputCol", "output column name."),
     ]),
     ("Bucketizer", &[
-        ("handleInvalid", "how to handle invalid entries containing NaN values. Values outside the splits will always be treated as errors. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (keep invalid values in a special additional bucket). Note that in the multiple column case, the invalid handling is applied to all columns. That said for 'error' it will throw an error if any invalids are found in any column, for 'skip' it will skip rows with any invalids in any columns, etc."),
+        ("handleInvalid",
+         "how to handle invalid entries containing NaN values. Values outside the splits will \
+          always be treated as errors. Options are 'skip' (filter out rows with invalid values), \
+          'error' (throw an error), or 'keep' (keep invalid values in a special additional \
+          bucket). Note that in the multiple column case, the invalid handling is applied to all \
+          columns. That said for 'error' it will throw an error if any invalids are found in any \
+          column, for 'skip' it will skip rows with any invalids in any columns, etc."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
         ("outputCol", "output column name."),
         ("outputCols", "output column names."),
-        ("splits", "Split points for mapping continuous features into buckets. With n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors."),
-        ("splitsArray", "The array of split points for mapping continuous features into buckets for multiple columns. For each input column, with n+1 splits, there are n buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last bucket, which also includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, inf must be explicitly provided to cover all Double values; otherwise, values outside the splits specified will be treated as errors."),
+        ("splits",
+         "Split points for mapping continuous features into buckets. With n+1 splits, there are n \
+          buckets. A bucket defined by splits x,y holds values in the range [x,y) except the last \
+          bucket, which also includes y. The splits should be of length >= 3 and strictly \
+          increasing. Values at -inf, inf must be explicitly provided to cover all Double values; \
+          otherwise, values outside the splits specified will be treated as errors."),
+        ("splitsArray",
+         "The array of split points for mapping continuous features into buckets for multiple \
+          columns. For each input column, with n+1 splits, there are n buckets. A bucket defined \
+          by splits x,y holds values in the range [x,y) except the last bucket, which also \
+          includes y. The splits should be of length >= 3 and strictly increasing. Values at -inf, \
+          inf must be explicitly provided to cover all Double values; otherwise, values outside \
+          the splits specified will be treated as errors."),
     ]),
     ("ChiSqSelector", &[
         ("fdr", "The upper bound of the expected false discovery rate."),
@@ -1498,10 +1571,15 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("fpr", "The highest p-value for features to be kept."),
         ("fwe", "The upper bound of the expected family-wise error rate."),
         ("labelCol", "label column name."),
-        ("numTopFeatures", "Number of features that selector will select, ordered by ascending p-value. If the number of features is < numTopFeatures, then this will select all features."),
+        ("numTopFeatures",
+         "Number of features that selector will select, ordered by ascending p-value. If the \
+          number of features is < numTopFeatures, then this will select all features."),
         ("outputCol", "output column name."),
-        ("percentile", "Percentile of features that selector will select, ordered by ascending p-value."),
-        ("selectorType", "The selector type. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe."),
+        ("percentile",
+         "Percentile of features that selector will select, ordered by ascending p-value."),
+        ("selectorType",
+         "The selector type. Supported options: numTopFeatures (default), percentile, fpr, fdr, \
+          fwe."),
     ]),
     ("ChiSqSelectorModel", &[
         ("fdr", "The upper bound of the expected false discovery rate."),
@@ -1509,42 +1587,94 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("fpr", "The highest p-value for features to be kept."),
         ("fwe", "The upper bound of the expected family-wise error rate."),
         ("labelCol", "label column name."),
-        ("numTopFeatures", "Number of features that selector will select, ordered by ascending p-value. If the number of features is < numTopFeatures, then this will select all features."),
+        ("numTopFeatures",
+         "Number of features that selector will select, ordered by ascending p-value. If the \
+          number of features is < numTopFeatures, then this will select all features."),
         ("outputCol", "output column name."),
-        ("percentile", "Percentile of features that selector will select, ordered by ascending p-value."),
-        ("selectorType", "The selector type. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe."),
+        ("percentile",
+         "Percentile of features that selector will select, ordered by ascending p-value."),
+        ("selectorType",
+         "The selector type. Supported options: numTopFeatures (default), percentile, fpr, fdr, \
+          fwe."),
     ]),
     ("ClusteringEvaluator", &[
-        ("distanceMeasure", "The distance measure. Supported options: 'squaredEuclidean' and 'cosine'."),
+        ("distanceMeasure",
+         "The distance measure. Supported options: 'squaredEuclidean' and 'cosine'."),
         ("featuresCol", "features column name."),
         ("metricName", "metric name in evaluation (silhouette)"),
         ("predictionCol", "prediction column name."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("CountVectorizer", &[
-        ("binary", "Binary toggle to control the output vector values. If True, all nonzero counts (after minTF filter applied) are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False"),
+        ("binary",
+         "Binary toggle to control the output vector values. If True, all nonzero counts (after \
+          minTF filter applied) are set to 1. This is useful for discrete probabilistic models \
+          that model binary events rather than integer counts. Default False"),
         ("inputCol", "input column name."),
-        ("maxDF", "Specifies the maximum number of different documents a term could appear in to be included in the vocabulary. A term that appears more than the threshold will be ignored. If this is an integer >= 1, this specifies the maximum number of documents the term could appear in; if this is a double in [0,1), then this specifies the maximum fraction of documents the term could appear in. Default (2^63) - 1"),
-        ("minDF", "Specifies the minimum number of different documents a term must appear in to be included in the vocabulary. If this is an integer >= 1, this specifies the number of documents the term must appear in; if this is a double in [0,1), then this specifies the fraction of documents. Default 1.0"),
-        ("minTF", "Filter to ignore rare words in a document. For each document, terms with frequency/count less than the given threshold are ignored. If this is an integer >= 1, then this specifies a count (of times the term must appear in the document); if this is a double in [0,1), then this specifies a fraction (out of the document's token count). Note that the parameter is only used in transform of CountVectorizerModel and does not affect fitting. Default 1.0"),
+        ("maxDF",
+         "Specifies the maximum number of different documents a term could appear in to be \
+          included in the vocabulary. A term that appears more than the threshold will be ignored. \
+          If this is an integer >= 1, this specifies the maximum number of documents the term \
+          could appear in; if this is a double in [0,1), then this specifies the maximum fraction \
+          of documents the term could appear in. Default (2^63) - 1"),
+        ("minDF",
+         "Specifies the minimum number of different documents a term must appear in to be included \
+          in the vocabulary. If this is an integer >= 1, this specifies the number of documents \
+          the term must appear in; if this is a double in [0,1), then this specifies the fraction \
+          of documents. Default 1.0"),
+        ("minTF",
+         "Filter to ignore rare words in a document. For each document, terms with frequency/count \
+          less than the given threshold are ignored. If this is an integer >= 1, then this \
+          specifies a count (of times the term must appear in the document); if this is a double \
+          in [0,1), then this specifies a fraction (out of the document's token count). Note that \
+          the parameter is only used in transform of CountVectorizerModel and does not affect \
+          fitting. Default 1.0"),
         ("outputCol", "output column name."),
         ("vocabSize", "max size of the vocabulary. Default 1 << 18."),
     ]),
     ("CountVectorizerModel", &[
-        ("binary", "Binary toggle to control the output vector values. If True, all nonzero counts (after minTF filter applied) are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False"),
+        ("binary",
+         "Binary toggle to control the output vector values. If True, all nonzero counts (after \
+          minTF filter applied) are set to 1. This is useful for discrete probabilistic models \
+          that model binary events rather than integer counts. Default False"),
         ("inputCol", "input column name."),
-        ("maxDF", "Specifies the maximum number of different documents a term could appear in to be included in the vocabulary. A term that appears more than the threshold will be ignored. If this is an integer >= 1, this specifies the maximum number of documents the term could appear in; if this is a double in [0,1), then this specifies the maximum fraction of documents the term could appear in. Default (2^63) - 1"),
-        ("minDF", "Specifies the minimum number of different documents a term must appear in to be included in the vocabulary. If this is an integer >= 1, this specifies the number of documents the term must appear in; if this is a double in [0,1), then this specifies the fraction of documents. Default 1.0"),
-        ("minTF", "Filter to ignore rare words in a document. For each document, terms with frequency/count less than the given threshold are ignored. If this is an integer >= 1, then this specifies a count (of times the term must appear in the document); if this is a double in [0,1), then this specifies a fraction (out of the document's token count). Note that the parameter is only used in transform of CountVectorizerModel and does not affect fitting. Default 1.0"),
+        ("maxDF",
+         "Specifies the maximum number of different documents a term could appear in to be \
+          included in the vocabulary. A term that appears more than the threshold will be ignored. \
+          If this is an integer >= 1, this specifies the maximum number of documents the term \
+          could appear in; if this is a double in [0,1), then this specifies the maximum fraction \
+          of documents the term could appear in. Default (2^63) - 1"),
+        ("minDF",
+         "Specifies the minimum number of different documents a term must appear in to be included \
+          in the vocabulary. If this is an integer >= 1, this specifies the number of documents \
+          the term must appear in; if this is a double in [0,1), then this specifies the fraction \
+          of documents. Default 1.0"),
+        ("minTF",
+         "Filter to ignore rare words in a document. For each document, terms with frequency/count \
+          less than the given threshold are ignored. If this is an integer >= 1, then this \
+          specifies a count (of times the term must appear in the document); if this is a double \
+          in [0,1), then this specifies a fraction (out of the document's token count). Note that \
+          the parameter is only used in transform of CountVectorizerModel and does not affect \
+          fitting. Default 1.0"),
         ("outputCol", "output column name."),
         ("vocabSize", "max size of the vocabulary. Default 1 << 18."),
     ]),
     ("CrossValidator", &[
-        ("collectSubModels", "Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver."),
+        ("collectSubModels",
+         "Param for whether to collect a list of sub-models trained during tuning. If set to \
+          false, then only the single best sub-model will be available after fitting. If set to \
+          true, then all sub-models will be available. Warning: For large models, collecting all \
+          sub-models can cause OOMs on the Spark driver."),
         ("estimator", "estimator to be cross-validated"),
         ("estimatorParamMaps", "estimator param maps"),
-        ("evaluator", "evaluator used to select hyper-parameters that maximize the validator metric"),
-        ("foldCol", "Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers."),
+        ("evaluator",
+         "evaluator used to select hyper-parameters that maximize the validator metric"),
+        ("foldCol",
+         "Param for the column name of user specified fold number. Once this is specified, \
+          :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be \
+          integer type with range [0, numFolds) and Spark will throw exception on out-of-range \
+          fold numbers."),
         ("numFolds", "number of folds for cross validation"),
         ("parallelism", "the number of threads to use when running parallel algorithms (>= 1)."),
         ("seed", "random seed."),
@@ -1552,8 +1682,13 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ("CrossValidatorModel", &[
         ("estimator", "estimator to be cross-validated"),
         ("estimatorParamMaps", "estimator param maps"),
-        ("evaluator", "evaluator used to select hyper-parameters that maximize the validator metric"),
-        ("foldCol", "Param for the column name of user specified fold number. Once this is specified, :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be integer type with range [0, numFolds) and Spark will throw exception on out-of-range fold numbers."),
+        ("evaluator",
+         "evaluator used to select hyper-parameters that maximize the validator metric"),
+        ("foldCol",
+         "Param for the column name of user specified fold number. Once this is specified, \
+          :py:class:`CrossValidator` won't do random k-fold split. Note that this column should be \
+          integer type with range [0, numFolds) and Spark will throw exception on out-of-range \
+          fold numbers."),
         ("numFolds", "number of folds for cross validation"),
         ("seed", "random seed."),
     ]),
@@ -1563,98 +1698,241 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("outputCol", "output column name."),
     ]),
     ("DecisionTreeClassificationModel", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          entropy, gini"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
-        ("pruneTree", "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
+        ("pruneTree",
+         "If true, the trained tree will undergo a pruning process after training, in which \
+          sibling leaf nodes with the same prediction are merged into their parent. The resulting \
+          tree will be smaller and have faster predictions. Class probabilities remain available \
+          after pruning. If false, no pruning is applied after training."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("DecisionTreeClassifier", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          entropy, gini"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
-        ("pruneTree", "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
+        ("pruneTree",
+         "If true, the trained tree will undergo a pruning process after training, in which \
+          sibling leaf nodes with the same prediction are merged into their parent. The resulting \
+          tree will be smaller and have faster predictions. Class probabilities remain available \
+          after pruning. If false, no pruning is applied after training."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("DecisionTreeRegressionModel", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
         ("varianceCol", "column name for the biased sample variance of prediction."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("DecisionTreeRegressor", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
         ("varianceCol", "column name for the biased sample variance of prediction."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("DistributedLDAModel", &[
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("docConcentration", "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\")."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("docConcentration",
+         "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' \
+          distributions over topics (\"theta\")."),
         ("featuresCol", "features column name."),
         ("k", "The number of topics (clusters) to infer. Must be > 1."),
-        ("keepLastCheckpoint", "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care."),
-        ("learningDecay", "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence."),
-        ("learningOffset", "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less"),
+        ("keepLastCheckpoint",
+         "(For EM optimizer) If using checkpointing, this indicates whether to keep the last \
+          checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can \
+          cause failures if a data partition is lost, so set this bit with care."),
+        ("learningDecay",
+         "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to \
+          guarantee asymptotic convergence."),
+        ("learningOffset",
+         "A (positive) learning parameter that downweights early iterations. Larger values make \
+          early iterations count less"),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("optimizeDocConcentration", "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training."),
-        ("optimizer", "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
+        ("optimizeDocConcentration",
+         "Indicates whether the docConcentration (Dirichlet parameter for document-topic \
+          distribution) will be optimized during training."),
+        ("optimizer",
+         "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1]."),
-        ("topicConcentration", "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms."),
-        ("topicDistributionCol", "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
+        ("subsamplingRate",
+         "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient \
+          descent, in range (0, 1]."),
+        ("topicConcentration",
+         "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on \
+          topic' distributions over terms."),
+        ("topicDistributionCol",
+         "Output column with estimates of the topic mixture distribution for each document (often \
+          called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
     ]),
     ("ElementwiseProduct", &[
         ("inputCol", "input column name."),
@@ -1664,95 +1942,147 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ("Evaluator", &[
     ]),
     ("FMClassificationModel", &[
-        ("factorSize", "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables"),
+        ("factorSize",
+         "Dimensionality of the factor vectors, which are used to get pairwise interactions \
+          between variables"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("fitLinear", "whether to fit linear term (aka 1-way term)"),
         ("initStd", "standard deviation of initial coefficients"),
         ("labelCol", "label column name."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("miniBatchFraction", "fraction of the input data set that should be used for one iteration of gradient descent"),
+        ("miniBatchFraction",
+         "fraction of the input data set that should be used for one iteration of gradient \
+          descent"),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("regParam", "regularization parameter (>= 0)."),
         ("seed", "random seed."),
-        ("solver", "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
+        ("solver",
+         "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("FMClassificationSummary", &[
     ]),
     ("FMClassificationTrainingSummary", &[
     ]),
     ("FMClassifier", &[
-        ("factorSize", "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables"),
+        ("factorSize",
+         "Dimensionality of the factor vectors, which are used to get pairwise interactions \
+          between variables"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("fitLinear", "whether to fit linear term (aka 1-way term)"),
         ("initStd", "standard deviation of initial coefficients"),
         ("labelCol", "label column name."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("miniBatchFraction", "fraction of the input data set that should be used for one iteration of gradient descent"),
+        ("miniBatchFraction",
+         "fraction of the input data set that should be used for one iteration of gradient \
+          descent"),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("regParam", "regularization parameter (>= 0)."),
         ("seed", "random seed."),
-        ("solver", "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
+        ("solver",
+         "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("FMRegressionModel", &[
-        ("factorSize", "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables"),
+        ("factorSize",
+         "Dimensionality of the factor vectors, which are used to get pairwise interactions \
+          between variables"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("fitLinear", "whether to fit linear term (aka 1-way term)"),
         ("initStd", "standard deviation of initial coefficients"),
         ("labelCol", "label column name."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("miniBatchFraction", "fraction of the input data set that should be used for one iteration of gradient descent"),
+        ("miniBatchFraction",
+         "fraction of the input data set that should be used for one iteration of gradient \
+          descent"),
         ("predictionCol", "prediction column name."),
         ("regParam", "regularization parameter (>= 0)."),
         ("seed", "random seed."),
-        ("solver", "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
+        ("solver",
+         "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("FMRegressor", &[
-        ("factorSize", "Dimensionality of the factor vectors, which are used to get pairwise interactions between variables"),
+        ("factorSize",
+         "Dimensionality of the factor vectors, which are used to get pairwise interactions \
+          between variables"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("fitLinear", "whether to fit linear term (aka 1-way term)"),
         ("initStd", "standard deviation of initial coefficients"),
         ("labelCol", "label column name."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("miniBatchFraction", "fraction of the input data set that should be used for one iteration of gradient descent"),
+        ("miniBatchFraction",
+         "fraction of the input data set that should be used for one iteration of gradient \
+          descent"),
         ("predictionCol", "prediction column name."),
         ("regParam", "regularization parameter (>= 0)."),
         ("seed", "random seed."),
-        ("solver", "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
+        ("solver",
+         "The solver algorithm for optimization. Supported options: gd, adamW. (Default adamW)"),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("FPGrowth", &[
         ("itemsCol", "items column name"),
-        ("minConfidence", "Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation."),
-        ("minSupport", "Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets."),
-        ("numPartitions", "Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used."),
+        ("minConfidence",
+         "Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not \
+          affect the mining for frequent itemsets, but will affect the association rules \
+          generation."),
+        ("minSupport",
+         "Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more \
+          than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets."),
+        ("numPartitions",
+         "Number of partitions (at least 1) used by parallel FP-growth. By default the param is \
+          not set, and partition number of the input dataset is used."),
         ("predictionCol", "prediction column name."),
     ]),
     ("FPGrowthModel", &[
         ("itemsCol", "items column name"),
-        ("minConfidence", "Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not affect the mining for frequent itemsets, but will affect the association rules generation."),
-        ("minSupport", "Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets."),
-        ("numPartitions", "Number of partitions (at least 1) used by parallel FP-growth. By default the param is not set, and partition number of the input dataset is used."),
+        ("minConfidence",
+         "Minimal confidence for generating Association Rule. [0.0, 1.0]. minConfidence will not \
+          affect the mining for frequent itemsets, but will affect the association rules \
+          generation."),
+        ("minSupport",
+         "Minimal support level of the frequent pattern. [0.0, 1.0]. Any pattern that appears more \
+          than (minSupport * size-of-the-dataset) times will be output in the frequent itemsets."),
+        ("numPartitions",
+         "Number of partitions (at least 1) used by parallel FP-growth. By default the param is \
+          not set, and partition number of the input dataset is used."),
         ("predictionCol", "prediction column name."),
     ]),
     ("FeatureHasher", &[
@@ -1762,106 +2092,288 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("outputCol", "output column name."),
     ]),
     ("GBTClassificationModel", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("lossType", "Loss function which GBT tries to minimize (case-insensitive). Supported options: logistic"),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("lossType",
+         "Loss function which GBT tries to minimize (case-insensitive). Supported options: \
+          logistic"),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
-        ("stepSize", "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("validationIndicatorCol", "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation."),
-        ("validationTol", "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("stepSize",
+         "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of \
+          each estimator."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("validationIndicatorCol",
+         "name of the column that indicates whether each row is for training or for validation. \
+          False indicates training; true indicates validation."),
+        ("validationTol",
+         "Threshold for stopping early when fit with validation is used. If the error rate on the \
+          validation input changes by less than the validationTol, then learning will stop early \
+          (before `maxIter`). This parameter is ignored when fit without validation is used."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GBTClassifier", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("lossType", "Loss function which GBT tries to minimize (case-insensitive). Supported options: logistic"),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("lossType",
+         "Loss function which GBT tries to minimize (case-insensitive). Supported options: \
+          logistic"),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
-        ("stepSize", "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("validationIndicatorCol", "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation."),
-        ("validationTol", "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("stepSize",
+         "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of \
+          each estimator."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("validationIndicatorCol",
+         "name of the column that indicates whether each row is for training or for validation. \
+          False indicates training; true indicates validation."),
+        ("validationTol",
+         "Threshold for stopping early when fit with validation is used. If the error rate on the \
+          validation input changes by less than the validationTol, then learning will stop early \
+          (before `maxIter`). This parameter is ignored when fit without validation is used."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GBTRegressionModel", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("lossType", "Loss function which GBT tries to minimize (case-insensitive). Supported options: squared, absolute"),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("lossType",
+         "Loss function which GBT tries to minimize (case-insensitive). Supported options: \
+          squared, absolute"),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
-        ("stepSize", "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("validationIndicatorCol", "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation."),
-        ("validationTol", "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("stepSize",
+         "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of \
+          each estimator."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("validationIndicatorCol",
+         "name of the column that indicates whether each row is for training or for validation. \
+          False indicates training; true indicates validation."),
+        ("validationTol",
+         "Threshold for stopping early when fit with validation is used. If the error rate on the \
+          validation input changes by less than the validationTol, then learning will stop early \
+          (before `maxIter`). This parameter is ignored when fit without validation is used."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GBTRegressor", &[
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("lossType", "Loss function which GBT tries to minimize (case-insensitive). Supported options: squared, absolute"),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("lossType",
+         "Loss function which GBT tries to minimize (case-insensitive). Supported options: \
+          squared, absolute"),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
-        ("stepSize", "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of each estimator."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("validationIndicatorCol", "name of the column that indicates whether each row is for training or for validation. False indicates training; true indicates validation."),
-        ("validationTol", "Threshold for stopping early when fit with validation is used. If the error rate on the validation input changes by less than the validationTol, then learning will stop early (before `maxIter`). This parameter is ignored when fit without validation is used."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("stepSize",
+         "Step size (a.k.a. learning rate) in interval (0, 1] for shrinking the contribution of \
+          each estimator."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("validationIndicatorCol",
+         "name of the column that indicates whether each row is for training or for validation. \
+          False indicates training; true indicates validation."),
+        ("validationTol",
+         "Threshold for stopping early when fit with validation is used. If the error rate on the \
+          validation input changes by less than the validationTol, then learning will stop early \
+          (before `maxIter`). This parameter is ignored when fit without validation is used."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GaussianMixture", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
@@ -1869,10 +2381,14 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("k", "Number of independent Gaussians in the mixture model. Must be > 1."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("seed", "random seed."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GaussianMixtureModel", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
@@ -1880,55 +2396,85 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("k", "Number of independent Gaussians in the mixture model. Must be > 1."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("seed", "random seed."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GaussianMixtureSummary", &[
     ]),
     ("GeneralizedLinearRegression", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("family", "The name of family which is a description of the error distribution to be used in the model. Supported options: gaussian (default), binomial, poisson, gamma and tweedie."),
+        ("family",
+         "The name of family which is a description of the error distribution to be used in the \
+          model. Supported options: gaussian (default), binomial, poisson, gamma and tweedie."),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("link", "The name of link function which provides the relationship between the linear predictor and the mean of the distribution function. Supported options: identity, log, inverse, logit, probit, cloglog and sqrt."),
-        ("linkPower", "The index in the power link function. Only applicable to the Tweedie family."),
+        ("link",
+         "The name of link function which provides the relationship between the linear predictor \
+          and the mean of the distribution function. Supported options: identity, log, inverse, \
+          logit, probit, cloglog and sqrt."),
+        ("linkPower",
+         "The index in the power link function. Only applicable to the Tweedie family."),
         ("linkPredictionCol", "link prediction (linear predictor) column name"),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("offsetCol", "The offset column name. If this is not set or empty, we treat all instance offsets as 0.0"),
+        ("offsetCol",
+         "The offset column name. If this is not set or empty, we treat all instance offsets as \
+          0.0"),
         ("predictionCol", "prediction column name."),
         ("regParam", "regularization parameter (>= 0)."),
         ("solver", "The solver algorithm for optimization. Supported options: irls."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("variancePower", "The power in the variance function of the Tweedie distribution which characterizes the relationship between the variance and mean of the distribution. Only applicable for the Tweedie family. Supported values: 0 and [1, Inf)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("variancePower",
+         "The power in the variance function of the Tweedie distribution which characterizes the \
+          relationship between the variance and mean of the distribution. Only applicable for the \
+          Tweedie family. Supported values: 0 and [1, Inf)."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GeneralizedLinearRegressionModel", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("family", "The name of family which is a description of the error distribution to be used in the model. Supported options: gaussian (default), binomial, poisson, gamma and tweedie."),
+        ("family",
+         "The name of family which is a description of the error distribution to be used in the \
+          model. Supported options: gaussian (default), binomial, poisson, gamma and tweedie."),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("link", "The name of link function which provides the relationship between the linear predictor and the mean of the distribution function. Supported options: identity, log, inverse, logit, probit, cloglog and sqrt."),
-        ("linkPower", "The index in the power link function. Only applicable to the Tweedie family."),
+        ("link",
+         "The name of link function which provides the relationship between the linear predictor \
+          and the mean of the distribution function. Supported options: identity, log, inverse, \
+          logit, probit, cloglog and sqrt."),
+        ("linkPower",
+         "The index in the power link function. Only applicable to the Tweedie family."),
         ("linkPredictionCol", "link prediction (linear predictor) column name"),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("offsetCol", "The offset column name. If this is not set or empty, we treat all instance offsets as 0.0"),
+        ("offsetCol",
+         "The offset column name. If this is not set or empty, we treat all instance offsets as \
+          0.0"),
         ("predictionCol", "prediction column name."),
         ("regParam", "regularization parameter (>= 0)."),
         ("solver", "The solver algorithm for optimization. Supported options: irls."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("variancePower", "The power in the variance function of the Tweedie distribution which characterizes the relationship between the variance and mean of the distribution. Only applicable for the Tweedie family. Supported values: 0 and [1, Inf)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("variancePower",
+         "The power in the variance function of the Tweedie distribution which characterizes the \
+          relationship between the variance and mean of the distribution. Only applicable for the \
+          Tweedie family. Supported values: 0 and [1, Inf)."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("GeneralizedLinearRegressionSummary", &[
     ]),
     ("GeneralizedLinearRegressionTrainingSummary", &[
     ]),
     ("HashingTF", &[
-        ("binary", "If True, all non zero counts are set to 1. This is useful for discrete probabilistic models that model binary events rather than integer counts. Default False."),
+        ("binary",
+         "If True, all non zero counts are set to 1. This is useful for discrete probabilistic \
+          models that model binary events rather than integer counts. Default False."),
         ("inputCol", "input column name."),
         ("numFeatures", "Number of features. Should be greater than 0."),
         ("outputCol", "output column name."),
@@ -1946,24 +2492,40 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ("Imputer", &[
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
-        ("missingValue", "The placeholder for the missing values. All occurrences of missingValue will be imputed."),
+        ("missingValue",
+         "The placeholder for the missing values. All occurrences of missingValue will be \
+          imputed."),
         ("outputCol", "output column name."),
         ("outputCols", "output column names."),
-        ("relativeError", "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]"),
-        ("strategy", "strategy for imputation. If mean, then replace missing values using the mean value of the feature. If median, then replace missing values using the median value of the feature. If mode, then replace missing using the most frequent value of the feature."),
+        ("relativeError",
+         "the relative target precision for the approximate quantile algorithm. Must be in the \
+          range [0, 1]"),
+        ("strategy",
+         "strategy for imputation. If mean, then replace missing values using the mean value of \
+          the feature. If median, then replace missing values using the median value of the \
+          feature. If mode, then replace missing using the most frequent value of the feature."),
     ]),
     ("ImputerModel", &[
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
-        ("missingValue", "The placeholder for the missing values. All occurrences of missingValue will be imputed."),
+        ("missingValue",
+         "The placeholder for the missing values. All occurrences of missingValue will be \
+          imputed."),
         ("outputCol", "output column name."),
         ("outputCols", "output column names."),
-        ("relativeError", "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]"),
-        ("strategy", "strategy for imputation. If mean, then replace missing values using the mean value of the feature. If median, then replace missing values using the median value of the feature. If mode, then replace missing using the most frequent value of the feature."),
+        ("relativeError",
+         "the relative target precision for the approximate quantile algorithm. Must be in the \
+          range [0, 1]"),
+        ("strategy",
+         "strategy for imputation. If mean, then replace missing values using the mean value of \
+          the feature. If median, then replace missing values using the median value of the \
+          feature. If mode, then replace missing using the most frequent value of the feature."),
     ]),
     ("IndexToString", &[
         ("inputCol", "input column name."),
-        ("labels", "Optional array of labels specifying index-string mapping. If not provided or if empty, then metadata from inputCol is used instead."),
+        ("labels",
+         "Optional array of labels specifying index-string mapping. If not provided or if empty, \
+          then metadata from inputCol is used instead."),
         ("outputCol", "output column name."),
     ]),
     ("Interaction", &[
@@ -1971,118 +2533,204 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("outputCol", "output column name."),
     ]),
     ("IsotonicRegression", &[
-        ("featureIndex", "The index of the feature if featuresCol is a vector column, no effect otherwise."),
+        ("featureIndex",
+         "The index of the feature if featuresCol is a vector column, no effect otherwise."),
         ("featuresCol", "features column name."),
-        ("isotonic", "whether the output sequence should be isotonic/increasing (true) orantitonic/decreasing (false)."),
+        ("isotonic",
+         "whether the output sequence should be isotonic/increasing (true) orantitonic/decreasing \
+          (false)."),
         ("labelCol", "label column name."),
         ("predictionCol", "prediction column name."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("IsotonicRegressionModel", &[
-        ("featureIndex", "The index of the feature if featuresCol is a vector column, no effect otherwise."),
+        ("featureIndex",
+         "The index of the feature if featuresCol is a vector column, no effect otherwise."),
         ("featuresCol", "features column name."),
-        ("isotonic", "whether the output sequence should be isotonic/increasing (true) orantitonic/decreasing (false)."),
+        ("isotonic",
+         "whether the output sequence should be isotonic/increasing (true) orantitonic/decreasing \
+          (false)."),
         ("labelCol", "label column name."),
         ("predictionCol", "prediction column name."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("KMeans", &[
         ("distanceMeasure", "the distance measure. Supported options: 'euclidean' and 'cosine'."),
         ("featuresCol", "features column name."),
-        ("initMode", "The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++"),
+        ("initMode",
+         "The initialization algorithm. This can be either \"random\" to choose random points as \
+          initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++"),
         ("initSteps", "The number of steps for k-means|| initialization mode. Must be > 0."),
         ("intermediateStorageLevel", "StorageLevel for intermediate datasets. Cannot be 'NONE'."),
         ("k", "The number of clusters to create. Must be > 1."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
         ("solver", "The solver algorithm for optimization. Supported options: auto, row, block."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("KMeansModel", &[
         ("distanceMeasure", "the distance measure. Supported options: 'euclidean' and 'cosine'."),
         ("featuresCol", "features column name."),
-        ("initMode", "The initialization algorithm. This can be either \"random\" to choose random points as initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++"),
+        ("initMode",
+         "The initialization algorithm. This can be either \"random\" to choose random points as \
+          initial cluster centers, or \"k-means||\" to use a parallel variant of k-means++"),
         ("initSteps", "The number of steps for k-means|| initialization mode. Must be > 0."),
         ("intermediateStorageLevel", "StorageLevel for intermediate datasets. Cannot be 'NONE'."),
         ("k", "The number of clusters to create. Must be > 1."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
         ("solver", "The solver algorithm for optimization. Supported options: auto, row, block."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("KMeansSummary", &[
     ]),
     ("LDA", &[
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("docConcentration", "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\")."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("docConcentration",
+         "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' \
+          distributions over topics (\"theta\")."),
         ("featuresCol", "features column name."),
         ("k", "The number of topics (clusters) to infer. Must be > 1."),
-        ("keepLastCheckpoint", "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care."),
-        ("learningDecay", "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence."),
-        ("learningOffset", "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less"),
+        ("keepLastCheckpoint",
+         "(For EM optimizer) If using checkpointing, this indicates whether to keep the last \
+          checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can \
+          cause failures if a data partition is lost, so set this bit with care."),
+        ("learningDecay",
+         "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to \
+          guarantee asymptotic convergence."),
+        ("learningOffset",
+         "A (positive) learning parameter that downweights early iterations. Larger values make \
+          early iterations count less"),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("optimizeDocConcentration", "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training."),
-        ("optimizer", "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
+        ("optimizeDocConcentration",
+         "Indicates whether the docConcentration (Dirichlet parameter for document-topic \
+          distribution) will be optimized during training."),
+        ("optimizer",
+         "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1]."),
-        ("topicConcentration", "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms."),
-        ("topicDistributionCol", "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
+        ("subsamplingRate",
+         "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient \
+          descent, in range (0, 1]."),
+        ("topicConcentration",
+         "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on \
+          topic' distributions over terms."),
+        ("topicDistributionCol",
+         "Output column with estimates of the topic mixture distribution for each document (often \
+          called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
     ]),
     ("LDAModel", &[
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("docConcentration", "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\")."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("docConcentration",
+         "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' \
+          distributions over topics (\"theta\")."),
         ("featuresCol", "features column name."),
         ("k", "The number of topics (clusters) to infer. Must be > 1."),
-        ("keepLastCheckpoint", "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care."),
-        ("learningDecay", "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence."),
-        ("learningOffset", "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less"),
+        ("keepLastCheckpoint",
+         "(For EM optimizer) If using checkpointing, this indicates whether to keep the last \
+          checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can \
+          cause failures if a data partition is lost, so set this bit with care."),
+        ("learningDecay",
+         "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to \
+          guarantee asymptotic convergence."),
+        ("learningOffset",
+         "A (positive) learning parameter that downweights early iterations. Larger values make \
+          early iterations count less"),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("optimizeDocConcentration", "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training."),
-        ("optimizer", "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
+        ("optimizeDocConcentration",
+         "Indicates whether the docConcentration (Dirichlet parameter for document-topic \
+          distribution) will be optimized during training."),
+        ("optimizer",
+         "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1]."),
-        ("topicConcentration", "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms."),
-        ("topicDistributionCol", "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
+        ("subsamplingRate",
+         "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient \
+          descent, in range (0, 1]."),
+        ("topicConcentration",
+         "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on \
+          topic' distributions over terms."),
+        ("topicDistributionCol",
+         "Output column with estimates of the topic mixture distribution for each document (often \
+          called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
     ]),
     ("LinearRegression", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("elasticNetParam", "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty."),
-        ("epsilon", "The shape parameter to control the amount of robustness. Must be > 1.0. Only valid when loss is huber"),
+        ("elasticNetParam",
+         "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 \
+          penalty. For alpha = 1, it is an L1 penalty."),
+        ("epsilon",
+         "The shape parameter to control the amount of robustness. Must be > 1.0. Only valid when \
+          loss is huber"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
         ("loss", "The loss function to be optimized. Supported options: squaredError, huber."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
         ("regParam", "regularization parameter (>= 0)."),
-        ("solver", "The solver algorithm for optimization. Supported options: auto, normal, l-bfgs."),
-        ("standardization", "whether to standardize the training features before fitting the model."),
+        ("solver",
+         "The solver algorithm for optimization. Supported options: auto, normal, l-bfgs."),
+        ("standardization",
+         "whether to standardize the training features before fitting the model."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("LinearRegressionModel", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("elasticNetParam", "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty."),
-        ("epsilon", "The shape parameter to control the amount of robustness. Must be > 1.0. Only valid when loss is huber"),
+        ("elasticNetParam",
+         "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 \
+          penalty. For alpha = 1, it is an L1 penalty."),
+        ("epsilon",
+         "The shape parameter to control the amount of robustness. Must be > 1.0. Only valid when \
+          loss is huber"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
         ("loss", "The loss function to be optimized. Supported options: squaredError, huber."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
         ("regParam", "regularization parameter (>= 0)."),
-        ("solver", "The solver algorithm for optimization. Supported options: auto, normal, l-bfgs."),
-        ("standardization", "whether to standardize the training features before fitting the model."),
+        ("solver",
+         "The solver algorithm for optimization. Supported options: auto, normal, l-bfgs."),
+        ("standardization",
+         "whether to standardize the training features before fitting the model."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("LinearRegressionSummary", &[
     ]),
@@ -2093,96 +2741,199 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("regParam", "regularization parameter (>= 0)."),
-        ("standardization", "whether to standardize the training features before fitting the model."),
-        ("threshold", "The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0."),
+        ("standardization",
+         "whether to standardize the training features before fitting the model."),
+        ("threshold",
+         "The threshold in binary classification applied to the linear model prediction.  This \
+          threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will \
+          make all predictions 1.0."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("LinearSVCModel", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("regParam", "regularization parameter (>= 0)."),
-        ("standardization", "whether to standardize the training features before fitting the model."),
-        ("threshold", "The threshold in binary classification applied to the linear model prediction.  This threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will make all predictions 1.0."),
+        ("standardization",
+         "whether to standardize the training features before fitting the model."),
+        ("threshold",
+         "The threshold in binary classification applied to the linear model prediction.  This \
+          threshold can be any real number, where Inf will make all predictions 0.0 and -Inf will \
+          make all predictions 1.0."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("LinearSVCSummary", &[
     ]),
     ("LinearSVCTrainingSummary", &[
     ]),
     ("LocalLDAModel", &[
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("docConcentration", "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' distributions over topics (\"theta\")."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("docConcentration",
+         "Concentration parameter (commonly named \"alpha\") for the prior placed on documents' \
+          distributions over topics (\"theta\")."),
         ("featuresCol", "features column name."),
         ("k", "The number of topics (clusters) to infer. Must be > 1."),
-        ("keepLastCheckpoint", "(For EM optimizer) If using checkpointing, this indicates whether to keep the last checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can cause failures if a data partition is lost, so set this bit with care."),
-        ("learningDecay", "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to guarantee asymptotic convergence."),
-        ("learningOffset", "A (positive) learning parameter that downweights early iterations. Larger values make early iterations count less"),
+        ("keepLastCheckpoint",
+         "(For EM optimizer) If using checkpointing, this indicates whether to keep the last \
+          checkpoint. If false, then the checkpoint will be deleted. Deleting the checkpoint can \
+          cause failures if a data partition is lost, so set this bit with care."),
+        ("learningDecay",
+         "Learning rate, set as anexponential decay rate. This should be between (0.5, 1.0] to \
+          guarantee asymptotic convergence."),
+        ("learningOffset",
+         "A (positive) learning parameter that downweights early iterations. Larger values make \
+          early iterations count less"),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("optimizeDocConcentration", "Indicates whether the docConcentration (Dirichlet parameter for document-topic distribution) will be optimized during training."),
-        ("optimizer", "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
+        ("optimizeDocConcentration",
+         "Indicates whether the docConcentration (Dirichlet parameter for document-topic \
+          distribution) will be optimized during training."),
+        ("optimizer",
+         "Optimizer or inference algorithm used to estimate the LDA model.  Supported: online, em"),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient descent, in range (0, 1]."),
-        ("topicConcentration", "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on topic' distributions over terms."),
-        ("topicDistributionCol", "Output column with estimates of the topic mixture distribution for each document (often called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
+        ("subsamplingRate",
+         "Fraction of the corpus to be sampled and used in each iteration of mini-batch gradient \
+          descent, in range (0, 1]."),
+        ("topicConcentration",
+         "Concentration parameter (commonly named \"beta\" or \"eta\") for the prior placed on \
+          topic' distributions over terms."),
+        ("topicDistributionCol",
+         "Output column with estimates of the topic mixture distribution for each document (often \
+          called \"theta\" in the literature). Returns a vector of zeros for an empty document."),
     ]),
     ("LogisticRegression", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("elasticNetParam", "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty."),
-        ("family", "The name of family which is a description of the label distribution to be used in the model. Supported options: auto, binomial, multinomial"),
+        ("elasticNetParam",
+         "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 \
+          penalty. For alpha = 1, it is an L1 penalty."),
+        ("family",
+         "The name of family which is a description of the label distribution to be used in the \
+          model. Supported options: auto, binomial, multinomial"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("lowerBoundsOnCoefficients", "The lower bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression."),
-        ("lowerBoundsOnIntercepts", "The lower bounds on intercepts if fitting under bound constrained optimization. The bounds vector size must beequal with 1 for binomial regression, or the number oflasses for multinomial regression."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("lowerBoundsOnCoefficients",
+         "The lower bounds on coefficients if fitting under bound constrained optimization. The \
+          bound matrix must be compatible with the shape (1, number of features) for binomial \
+          regression, or (number of classes, number of features) for multinomial regression."),
+        ("lowerBoundsOnIntercepts",
+         "The lower bounds on intercepts if fitting under bound constrained optimization. The \
+          bounds vector size must beequal with 1 for binomial regression, or the number oflasses \
+          for multinomial regression."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("regParam", "regularization parameter (>= 0)."),
-        ("standardization", "whether to standardize the training features before fitting the model."),
-        ("threshold", "Threshold in binary classification prediction, in range [0, 1]. If threshold and thresholds are both set, they must match.e.g. if threshold is p, then thresholds must be equal to [1-p, p]."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
+        ("standardization",
+         "whether to standardize the training features before fitting the model."),
+        ("threshold",
+         "Threshold in binary classification prediction, in range [0, 1]. If threshold and \
+          thresholds are both set, they must match.e.g. if threshold is p, then thresholds must be \
+          equal to [1-p, p]."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("upperBoundsOnCoefficients", "The upper bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression."),
-        ("upperBoundsOnIntercepts", "The upper bounds on intercepts if fitting under bound constrained optimization. The bound vector size must be equal with 1 for binomial regression, or the number of classes for multinomial regression."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("upperBoundsOnCoefficients",
+         "The upper bounds on coefficients if fitting under bound constrained optimization. The \
+          bound matrix must be compatible with the shape (1, number of features) for binomial \
+          regression, or (number of classes, number of features) for multinomial regression."),
+        ("upperBoundsOnIntercepts",
+         "The upper bounds on intercepts if fitting under bound constrained optimization. The \
+          bound vector size must be equal with 1 for binomial regression, or the number of classes \
+          for multinomial regression."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("LogisticRegressionModel", &[
         ("aggregationDepth", "suggested depth for treeAggregate (>= 2)."),
-        ("elasticNetParam", "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 penalty. For alpha = 1, it is an L1 penalty."),
-        ("family", "The name of family which is a description of the label distribution to be used in the model. Supported options: auto, binomial, multinomial"),
+        ("elasticNetParam",
+         "the ElasticNet mixing parameter, in range [0, 1]. For alpha = 0, the penalty is an L2 \
+          penalty. For alpha = 1, it is an L1 penalty."),
+        ("family",
+         "The name of family which is a description of the label distribution to be used in the \
+          model. Supported options: auto, binomial, multinomial"),
         ("featuresCol", "features column name."),
         ("fitIntercept", "whether to fit an intercept term."),
         ("labelCol", "label column name."),
-        ("lowerBoundsOnCoefficients", "The lower bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression."),
-        ("lowerBoundsOnIntercepts", "The lower bounds on intercepts if fitting under bound constrained optimization. The bounds vector size must beequal with 1 for binomial regression, or the number oflasses for multinomial regression."),
-        ("maxBlockSizeInMB", "maximum memory in MB for stacking input data into blocks. Data is stacked within partitions. If more than remaining data size in a partition then it is adjusted to the data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. Must be >= 0."),
+        ("lowerBoundsOnCoefficients",
+         "The lower bounds on coefficients if fitting under bound constrained optimization. The \
+          bound matrix must be compatible with the shape (1, number of features) for binomial \
+          regression, or (number of classes, number of features) for multinomial regression."),
+        ("lowerBoundsOnIntercepts",
+         "The lower bounds on intercepts if fitting under bound constrained optimization. The \
+          bounds vector size must beequal with 1 for binomial regression, or the number oflasses \
+          for multinomial regression."),
+        ("maxBlockSizeInMB",
+         "maximum memory in MB for stacking input data into blocks. Data is stacked within \
+          partitions. If more than remaining data size in a partition then it is adjusted to the \
+          data size. Default 0.0 represents choosing optimal value, depends on specific algorithm. \
+          Must be >= 0."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("regParam", "regularization parameter (>= 0)."),
-        ("standardization", "whether to standardize the training features before fitting the model."),
-        ("threshold", "Threshold in binary classification prediction, in range [0, 1]. If threshold and thresholds are both set, they must match.e.g. if threshold is p, then thresholds must be equal to [1-p, p]."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
+        ("standardization",
+         "whether to standardize the training features before fitting the model."),
+        ("threshold",
+         "Threshold in binary classification prediction, in range [0, 1]. If threshold and \
+          thresholds are both set, they must match.e.g. if threshold is p, then thresholds must be \
+          equal to [1-p, p]."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
-        ("upperBoundsOnCoefficients", "The upper bounds on coefficients if fitting under bound constrained optimization. The bound matrix must be compatible with the shape (1, number of features) for binomial regression, or (number of classes, number of features) for multinomial regression."),
-        ("upperBoundsOnIntercepts", "The upper bounds on intercepts if fitting under bound constrained optimization. The bound vector size must be equal with 1 for binomial regression, or the number of classes for multinomial regression."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("upperBoundsOnCoefficients",
+         "The upper bounds on coefficients if fitting under bound constrained optimization. The \
+          bound matrix must be compatible with the shape (1, number of features) for binomial \
+          regression, or (number of classes, number of features) for multinomial regression."),
+        ("upperBoundsOnIntercepts",
+         "The upper bounds on intercepts if fitting under bound constrained optimization. The \
+          bound vector size must be equal with 1 for binomial regression, or the number of classes \
+          for multinomial regression."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("LogisticRegressionSummary", &[
     ]),
@@ -2198,13 +2949,17 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("MinHashLSH", &[
         ("inputCol", "input column name."),
-        ("numHashTables", "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance."),
+        ("numHashTables",
+         "number of hash tables, where increasing number of hash tables lowers the false negative \
+          rate, and decreasing it improves the running performance."),
         ("outputCol", "output column name."),
         ("seed", "random seed."),
     ]),
     ("MinHashLSHModel", &[
         ("inputCol", "input column name."),
-        ("numHashTables", "number of hash tables, where increasing number of hash tables lowers the false negative rate, and decreasing it improves the running performance."),
+        ("numHashTables",
+         "number of hash tables, where increasing number of hash tables lowers the false negative \
+          rate, and decreasing it improves the running performance."),
         ("outputCol", "output column name."),
     ]),
     ("MinMaxScaler", &[
@@ -2220,35 +2975,68 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("outputCol", "output column name."),
     ]),
     ("MulticlassClassificationEvaluator", &[
-        ("beta", "The beta value used in weightedFMeasure|fMeasureByLabel. Must be > 0. The default value is 1."),
-        ("eps", "log-loss is undefined for p=0 or p=1, so probabilities are clipped to max(eps, min(1 - eps, p)). Must be in range (0, 0.5). The default value is 1e-15."),
+        ("beta",
+         "The beta value used in weightedFMeasure|fMeasureByLabel. Must be > 0. The default value \
+          is 1."),
+        ("eps",
+         "log-loss is undefined for p=0 or p=1, so probabilities are clipped to max(eps, min(1 - \
+          eps, p)). Must be in range (0, 0.5). The default value is 1e-15."),
         ("labelCol", "label column name."),
-        ("metricLabel", "The class whose metric will be computed in truePositiveRateByLabel|falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel. Must be >= 0. The default value is 0."),
-        ("metricName", "metric name in evaluation (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| logLoss|hammingLoss)"),
+        ("metricLabel",
+         "The class whose metric will be computed in \
+          truePositiveRateByLabel|falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasure\
+          ByLabel. Must be >= 0. The default value is 0."),
+        ("metricName",
+         "metric name in evaluation \
+          (f1|accuracy|weightedPrecision|weightedRecall|weightedTruePositiveRate| \
+          weightedFalsePositiveRate|weightedFMeasure|truePositiveRateByLabel| \
+          falsePositiveRateByLabel|precisionByLabel|recallByLabel|fMeasureByLabel| \
+          logLoss|hammingLoss)"),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("MultilabelClassificationEvaluator", &[
         ("labelCol", "label column name."),
-        ("metricLabel", "The class whose metric will be computed in precisionByLabel|recallByLabel|f1MeasureByLabel. Must be >= 0. The default value is 0."),
-        ("metricName", "metric name in evaluation (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallByLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure)"),
+        ("metricLabel",
+         "The class whose metric will be computed in \
+          precisionByLabel|recallByLabel|f1MeasureByLabel. Must be >= 0. The default value is 0."),
+        ("metricName",
+         "metric name in evaluation \
+          (subsetAccuracy|accuracy|hammingLoss|precision|recall|f1Measure|precisionByLabel|recallB\
+          yLabel|f1MeasureByLabel|microPrecision|microRecall|microF1Measure)"),
         ("predictionCol", "prediction column name."),
     ]),
     ("MultilayerPerceptronClassificationModel", &[
-        ("blockSize", "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data."),
+        ("blockSize",
+         "block size for stacking input data in matrices. Data is stacked within partitions. If \
+          block size is more than remaining data in a partition then it is adjusted to the size of \
+          this data."),
         ("featuresCol", "features column name."),
         ("initialWeights", "The initial weights of the model."),
         ("labelCol", "label column name."),
-        ("layers", "Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons."),
+        ("layers",
+         "Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 \
+          inputs, one hidden layer with 100 neurons and output layer of 10 neurons."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
         ("solver", "The solver algorithm for optimization. Supported options: l-bfgs, gd."),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
     ]),
     ("MultilayerPerceptronClassificationSummary", &[
@@ -2256,19 +3044,31 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ("MultilayerPerceptronClassificationTrainingSummary", &[
     ]),
     ("MultilayerPerceptronClassifier", &[
-        ("blockSize", "block size for stacking input data in matrices. Data is stacked within partitions. If block size is more than remaining data in a partition then it is adjusted to the size of this data."),
+        ("blockSize",
+         "block size for stacking input data in matrices. Data is stacked within partitions. If \
+          block size is more than remaining data in a partition then it is adjusted to the size of \
+          this data."),
         ("featuresCol", "features column name."),
         ("initialWeights", "The initial weights of the model."),
         ("labelCol", "label column name."),
-        ("layers", "Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 inputs, one hidden layer with 100 neurons and output layer of 10 neurons."),
+        ("layers",
+         "Sizes of layers from input layer to output layer E.g., Array(780, 100, 10) means 780 \
+          inputs, one hidden layer with 100 neurons and output layer of 10 neurons."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
         ("solver", "The solver algorithm for optimization. Supported options: l-bfgs, gd."),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
         ("tol", "the convergence tolerance for iterative algorithms (>= 0)."),
     ]),
     ("NGram", &[
@@ -2279,24 +3079,44 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ("NaiveBayes", &[
         ("featuresCol", "features column name."),
         ("labelCol", "label column name."),
-        ("modelType", "The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian."),
+        ("modelType",
+         "The model type which is a string (case-sensitive). Supported options: multinomial \
+          (default), bernoulli and gaussian."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("smoothing", "The smoothing parameter, should be >= 0, default is 1.0"),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("NaiveBayesModel", &[
         ("featuresCol", "features column name."),
         ("labelCol", "label column name."),
-        ("modelType", "The model type which is a string (case-sensitive). Supported options: multinomial (default), bernoulli and gaussian."),
+        ("modelType",
+         "The model type which is a string (case-sensitive). Supported options: multinomial \
+          (default), bernoulli and gaussian."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("smoothing", "The smoothing parameter, should be >= 0, default is 1.0"),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("Normalizer", &[
         ("inputCol", "input column name."),
@@ -2305,7 +3125,11 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("OneHotEncoder", &[
         ("dropLast", "whether to drop the last category"),
-        ("handleInvalid", "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error). Note that this Param is only used during transform; during fitting, invalid data will result in an error."),
+        ("handleInvalid",
+         "How to handle invalid data during transform(). Options are 'keep' (invalid data \
+          presented as an extra categorical feature) or error (throw an error). Note that this \
+          Param is only used during transform; during fitting, invalid data will result in an \
+          error."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
         ("outputCol", "output column name."),
@@ -2313,7 +3137,11 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("OneHotEncoderModel", &[
         ("dropLast", "whether to drop the last category"),
-        ("handleInvalid", "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error). Note that this Param is only used during transform; during fitting, invalid data will result in an error."),
+        ("handleInvalid",
+         "How to handle invalid data during transform(). Options are 'keep' (invalid data \
+          presented as an extra categorical feature) or error (throw an error). Note that this \
+          Param is only used during transform; during fitting, invalid data will result in an \
+          error."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
         ("outputCol", "output column name."),
@@ -2326,7 +3154,8 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("parallelism", "the number of threads to use when running parallel algorithms (>= 1)."),
         ("predictionCol", "prediction column name."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("OneVsRestModel", &[
         ("classifier", "base binary classifier"),
@@ -2334,7 +3163,8 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("labelCol", "label column name."),
         ("predictionCol", "prediction column name."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("PCA", &[
         ("inputCol", "input column name."),
@@ -2360,68 +3190,151 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("PowerIterationClustering", &[
         ("dstCol", "Name of the input column for destination vertex IDs."),
-        ("initMode", "The initialization algorithm. This can be either 'random' to use a random vector as vertex properties, or 'degree' to use a normalized sum of similarities with other vertices.  Supported options: 'random' and 'degree'."),
+        ("initMode",
+         "The initialization algorithm. This can be either 'random' to use a random vector as \
+          vertex properties, or 'degree' to use a normalized sum of similarities with other \
+          vertices.  Supported options: 'random' and 'degree'."),
         ("k", "The number of clusters to create. Must be > 1."),
         ("maxIter", "max number of iterations (>= 0)."),
         ("srcCol", "Name of the input column for source vertex IDs."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("PrefixSpan", &[
-        ("maxLocalProjDBSize", "The maximum number of items (including delimiters used in the internal storage format) allowed in a projected database before local processing. If a projected database exceeds this size, another iteration of distributed prefix growth is run. Must be > 0."),
+        ("maxLocalProjDBSize",
+         "The maximum number of items (including delimiters used in the internal storage format) \
+          allowed in a projected database before local processing. If a projected database exceeds \
+          this size, another iteration of distributed prefix growth is run. Must be > 0."),
         ("maxPatternLength", "The maximal length of the sequential pattern. Must be > 0."),
-        ("minSupport", "The minimal support level of the sequential pattern. Sequential pattern that appears more than (minSupport * size-of-the-dataset) times will be output. Must be >= 0."),
-        ("sequenceCol", "The name of the sequence column in dataset, rows with nulls in this column are ignored."),
+        ("minSupport",
+         "The minimal support level of the sequential pattern. Sequential pattern that appears \
+          more than (minSupport * size-of-the-dataset) times will be output. Must be >= 0."),
+        ("sequenceCol",
+         "The name of the sequence column in dataset, rows with nulls in this column are ignored."),
     ]),
     ("QuantileDiscretizer", &[
-        ("handleInvalid", "how to handle invalid entries. Options are skip (filter out rows with invalid values), error (throw an error), or keep (keep invalid values in a special additional bucket). Note that in the multiple columns case, the invalid handling is applied to all columns. That said for 'error' it will throw an error if any invalids are found in any columns, for 'skip' it will skip rows with any invalids in any columns, etc."),
+        ("handleInvalid",
+         "how to handle invalid entries. Options are skip (filter out rows with invalid values), \
+          error (throw an error), or keep (keep invalid values in a special additional bucket). \
+          Note that in the multiple columns case, the invalid handling is applied to all columns. \
+          That said for 'error' it will throw an error if any invalids are found in any columns, \
+          for 'skip' it will skip rows with any invalids in any columns, etc."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
-        ("numBuckets", "Maximum number of buckets (quantiles, or categories) into which data points are grouped. Must be >= 2."),
-        ("numBucketsArray", "Array of number of buckets (quantiles, or categories) into which data points are grouped. This is for multiple columns input. If transforming multiple columns and numBucketsArray is not set, but numBuckets is set, then numBuckets will be applied across all columns."),
+        ("numBuckets",
+         "Maximum number of buckets (quantiles, or categories) into which data points are grouped. \
+          Must be >= 2."),
+        ("numBucketsArray",
+         "Array of number of buckets (quantiles, or categories) into which data points are \
+          grouped. This is for multiple columns input. If transforming multiple columns and \
+          numBucketsArray is not set, but numBuckets is set, then numBuckets will be applied \
+          across all columns."),
         ("outputCol", "output column name."),
         ("outputCols", "output column names."),
-        ("relativeError", "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]"),
+        ("relativeError",
+         "the relative target precision for the approximate quantile algorithm. Must be in the \
+          range [0, 1]"),
     ]),
     ("RFormula", &[
         ("featuresCol", "features column name."),
         ("forceIndexLabel", "Force to index label whether it is numeric or string"),
         ("formula", "R model formula"),
-        ("handleInvalid", "how to handle invalid entries. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels)."),
+        ("handleInvalid",
+         "how to handle invalid entries. Options are 'skip' (filter out rows with invalid values), \
+          'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at \
+          index numLabels)."),
         ("labelCol", "label column name."),
-        ("stringIndexerOrderType", "How to order categories of a string feature column used by StringIndexer. The last category after ordering is dropped when encoding strings. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. The default value is frequencyDesc. When the ordering is set to alphabetDesc, RFormula drops the same category as R when encoding strings."),
+        ("stringIndexerOrderType",
+         "How to order categories of a string feature column used by StringIndexer. The last \
+          category after ordering is dropped when encoding strings. Supported options: \
+          frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. The default value is \
+          frequencyDesc. When the ordering is set to alphabetDesc, RFormula drops the same \
+          category as R when encoding strings."),
     ]),
     ("RFormulaModel", &[
         ("featuresCol", "features column name."),
         ("forceIndexLabel", "Force to index label whether it is numeric or string"),
         ("formula", "R model formula"),
-        ("handleInvalid", "how to handle invalid entries. Options are 'skip' (filter out rows with invalid values), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels)."),
+        ("handleInvalid",
+         "how to handle invalid entries. Options are 'skip' (filter out rows with invalid values), \
+          'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at \
+          index numLabels)."),
         ("labelCol", "label column name."),
-        ("stringIndexerOrderType", "How to order categories of a string feature column used by StringIndexer. The last category after ordering is dropped when encoding strings. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. The default value is frequencyDesc. When the ordering is set to alphabetDesc, RFormula drops the same category as R when encoding strings."),
+        ("stringIndexerOrderType",
+         "How to order categories of a string feature column used by StringIndexer. The last \
+          category after ordering is dropped when encoding strings. Supported options: \
+          frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. The default value is \
+          frequencyDesc. When the ordering is set to alphabetDesc, RFormula drops the same \
+          category as R when encoding strings."),
     ]),
     ("RandomForestClassificationModel", &[
         ("bootstrap", "Whether bootstrap samples are used when building trees."),
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          entropy, gini"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("numTrees", "Number of trees to train (>= 1)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
-        ("pruneTree", "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
+        ("pruneTree",
+         "If true, the trained tree will undergo a pruning process after training, in which \
+          sibling leaf nodes with the same prediction are merged into their parent. The resulting \
+          tree will be smaller and have faster predictions. Class probabilities remain available \
+          after pruning. If false, no pruning is applied after training."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("RandomForestClassificationSummary", &[
     ]),
@@ -2429,75 +3342,190 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("RandomForestClassifier", &[
         ("bootstrap", "Whether bootstrap samples are used when building trees."),
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: entropy, gini"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          entropy, gini"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("numTrees", "Number of trees to train (>= 1)."),
         ("predictionCol", "prediction column name."),
-        ("probabilityCol", "Column name for predicted class conditional probabilities. Note: Not all models output well-calibrated probability estimates! These probabilities should be treated as confidences, not precise probabilities."),
-        ("pruneTree", "If true, the trained tree will undergo a pruning process after training, in which sibling leaf nodes with the same prediction are merged into their parent. The resulting tree will be smaller and have faster predictions. Class probabilities remain available after pruning. If false, no pruning is applied after training."),
+        ("probabilityCol",
+         "Column name for predicted class conditional probabilities. Note: Not all models output \
+          well-calibrated probability estimates! These probabilities should be treated as \
+          confidences, not precise probabilities."),
+        ("pruneTree",
+         "If true, the trained tree will undergo a pruning process after training, in which \
+          sibling leaf nodes with the same prediction are merged into their parent. The resulting \
+          tree will be smaller and have faster predictions. Class probabilities remain available \
+          after pruning. If false, no pruning is applied after training."),
         ("rawPredictionCol", "raw prediction (a.k.a. confidence) column name."),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("thresholds", "Thresholds in multi-class classification to adjust the probability of predicting each class. Array must have length equal to the number of classes, with values > 0, excepting that at most one value may be 0. The class with largest value p/t is predicted, where p is the original probability of that class and t is the class's threshold."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("thresholds",
+         "Thresholds in multi-class classification to adjust the probability of predicting each \
+          class. Array must have length equal to the number of classes, with values > 0, excepting \
+          that at most one value may be 0. The class with largest value p/t is predicted, where p \
+          is the original probability of that class and t is the class's threshold."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("RandomForestRegressionModel", &[
         ("bootstrap", "Whether bootstrap samples are used when building trees."),
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("numTrees", "Number of trees to train (>= 1)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("RandomForestRegressor", &[
         ("bootstrap", "Whether bootstrap samples are used when building trees."),
-        ("cacheNodeIds", "If false, the algorithm will pass trees to executors to match instances with nodes. If true, the algorithm will cache node IDs for each instance. Caching can speed up training of deeper trees. Users can set how often should the cache be checkpointed or disable it by setting checkpointInterval."),
-        ("checkpointInterval", "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache will get checkpointed every 10 iterations. Note: this setting will be ignored if the checkpoint directory is not set in the SparkContext."),
-        ("featureSubsetStrategy", "The number of features to consider for splits at each tree node. Supported options: 'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], use n * number of features. When n is in the range (1, number of features), use n features). default = 'auto'"),
+        ("cacheNodeIds",
+         "If false, the algorithm will pass trees to executors to match instances with nodes. If \
+          true, the algorithm will cache node IDs for each instance. Caching can speed up training \
+          of deeper trees. Users can set how often should the cache be checkpointed or disable it \
+          by setting checkpointInterval."),
+        ("checkpointInterval",
+         "set checkpoint interval (>= 1) or disable checkpoint (-1). E.g. 10 means that the cache \
+          will get checkpointed every 10 iterations. Note: this setting will be ignored if the \
+          checkpoint directory is not set in the SparkContext."),
+        ("featureSubsetStrategy",
+         "The number of features to consider for splits at each tree node. Supported options: \
+          'auto' (choose automatically for task: If numTrees == 1, set to 'all'. If numTrees > 1 \
+          (forest), set to 'sqrt' for classification and to 'onethird' for regression), 'all' (use \
+          all features), 'onethird' (use 1/3 of the features), 'sqrt' (use sqrt(number of \
+          features)), 'log2' (use log2(number of features)), 'n' (when n is in the range (0, 1.0], \
+          use n * number of features. When n is in the range (1, number of features), use n \
+          features). default = 'auto'"),
         ("featuresCol", "features column name."),
-        ("impurity", "Criterion used for information gain calculation (case-insensitive). Supported options: variance"),
+        ("impurity",
+         "Criterion used for information gain calculation (case-insensitive). Supported options: \
+          variance"),
         ("labelCol", "label column name."),
-        ("leafCol", "Leaf indices column name. Predicted leaf index of each instance in each tree by preorder."),
-        ("maxBins", "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of categories for any categorical feature."),
-        ("maxDepth", "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 internal node + 2 leaf nodes. Must be in range [0, 30]."),
-        ("maxMemoryInMB", "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will be split per iteration, and its aggregates may exceed this size."),
+        ("leafCol",
+         "Leaf indices column name. Predicted leaf index of each instance in each tree by \
+          preorder."),
+        ("maxBins",
+         "Max number of bins for discretizing continuous features.  Must be >=2 and >= number of \
+          categories for any categorical feature."),
+        ("maxDepth",
+         "Maximum depth of the tree. (>= 0) E.g., depth 0 means 1 leaf node; depth 1 means 1 \
+          internal node + 2 leaf nodes. Must be in range [0, 30]."),
+        ("maxMemoryInMB",
+         "Maximum memory in MB allocated to histogram aggregation. If too small, then 1 node will \
+          be split per iteration, and its aggregates may exceed this size."),
         ("minInfoGain", "Minimum information gain for a split to be considered at a tree node."),
-        ("minInstancesPerNode", "Minimum number of instances each child must have after split. If a split causes the left or right child to have fewer than minInstancesPerNode, the split will be discarded as invalid. Should be >= 1."),
-        ("minWeightFractionPerNode", "Minimum fraction of the weighted sample count that each child must have after split. If a split causes the fraction of the total weight in the left or right child to be less than minWeightFractionPerNode, the split will be discarded as invalid. Should be in interval [0.0, 0.5)."),
+        ("minInstancesPerNode",
+         "Minimum number of instances each child must have after split. If a split causes the left \
+          or right child to have fewer than minInstancesPerNode, the split will be discarded as \
+          invalid. Should be >= 1."),
+        ("minWeightFractionPerNode",
+         "Minimum fraction of the weighted sample count that each child must have after split. If \
+          a split causes the fraction of the total weight in the left or right child to be less \
+          than minWeightFractionPerNode, the split will be discarded as invalid. Should be in \
+          interval [0.0, 0.5)."),
         ("numTrees", "Number of trees to train (>= 1)."),
         ("predictionCol", "prediction column name."),
         ("seed", "random seed."),
-        ("subsamplingRate", "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("subsamplingRate",
+         "Fraction of the training data used for learning each decision tree, in range (0, 1]."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("RankingEvaluator", &[
-        ("k", "The ranking position value used in meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK. Must be > 0. The default value is 10."),
+        ("k",
+         "The ranking position value used in \
+          meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK. Must be > 0. The default value \
+          is 10."),
         ("labelCol", "label column name."),
-        ("metricName", "metric name in evaluation (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK)"),
+        ("metricName",
+         "metric name in evaluation \
+          (meanAveragePrecision|meanAveragePrecisionAtK|precisionAtK|ndcgAtK|recallAtK)"),
         ("predictionCol", "prediction column name."),
     ]),
     ("RegexTokenizer", &[
@@ -2510,16 +3538,23 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("RegressionEvaluator", &[
         ("labelCol", "label column name."),
-        ("metricName", "metric name in evaluation - one of:\n                       rmse - root mean squared error (default)\n                       mse - mean squared error\n                       r2 - r^2 metric\n                       mae - mean absolute error\n                       var - explained variance."),
+        ("metricName",
+         "metric name in evaluation - one of:\n                       rmse - root mean squared \
+          error (default)\n                       mse - mean squared error\n                       \
+          r2 - r^2 metric\n                       mae - mean absolute \
+          error\n                       var - explained variance."),
         ("predictionCol", "prediction column name."),
         ("throughOrigin", "whether the regression is through the origin."),
-        ("weightCol", "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
+        ("weightCol",
+         "weight column name. If this is not set or empty, we treat all instance weights as 1.0."),
     ]),
     ("RobustScaler", &[
         ("inputCol", "input column name."),
         ("lower", "Lower quantile to calculate quantile range"),
         ("outputCol", "output column name."),
-        ("relativeError", "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]"),
+        ("relativeError",
+         "the relative target precision for the approximate quantile algorithm. Must be in the \
+          range [0, 1]"),
         ("upper", "Upper quantile to calculate quantile range"),
         ("withCentering", "Whether to center data with median"),
         ("withScaling", "Whether to scale the data to quantile range"),
@@ -2528,7 +3563,9 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("inputCol", "input column name."),
         ("lower", "Lower quantile to calculate quantile range"),
         ("outputCol", "output column name."),
-        ("relativeError", "the relative target precision for the approximate quantile algorithm. Must be in the range [0, 1]"),
+        ("relativeError",
+         "the relative target precision for the approximate quantile algorithm. Must be in the \
+          range [0, 1]"),
         ("upper", "Upper quantile to calculate quantile range"),
         ("withCentering", "Whether to center data with median"),
         ("withScaling", "Whether to scale the data to quantile range"),
@@ -2558,23 +3595,41 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("stopWords", "The words to be filtered out"),
     ]),
     ("StringIndexer", &[
-        ("handleInvalid", "how to handle invalid data (unseen or NULL values) in features and label column of string type. Options are 'skip' (filter out rows with invalid data), error (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels)."),
+        ("handleInvalid",
+         "how to handle invalid data (unseen or NULL values) in features and label column of \
+          string type. Options are 'skip' (filter out rows with invalid data), error (throw an \
+          error), or 'keep' (put invalid data in a special additional bucket, at index \
+          numLabels)."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
         ("outputCol", "output column name."),
         ("outputCols", "output column names."),
-        ("stringOrderType", "How to order labels of string column. The first label after ordering is assigned an index of 0. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. Default is frequencyDesc. In case of equal frequency when under frequencyDesc/Asc, the strings are further sorted alphabetically"),
+        ("stringOrderType",
+         "How to order labels of string column. The first label after ordering is assigned an \
+          index of 0. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. \
+          Default is frequencyDesc. In case of equal frequency when under frequencyDesc/Asc, the \
+          strings are further sorted alphabetically"),
     ]),
     ("StringIndexerModel", &[
-        ("handleInvalid", "how to handle invalid data (unseen or NULL values) in features and label column of string type. Options are 'skip' (filter out rows with invalid data), error (throw an error), or 'keep' (put invalid data in a special additional bucket, at index numLabels)."),
+        ("handleInvalid",
+         "how to handle invalid data (unseen or NULL values) in features and label column of \
+          string type. Options are 'skip' (filter out rows with invalid data), error (throw an \
+          error), or 'keep' (put invalid data in a special additional bucket, at index \
+          numLabels)."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
         ("outputCol", "output column name."),
         ("outputCols", "output column names."),
-        ("stringOrderType", "How to order labels of string column. The first label after ordering is assigned an index of 0. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. Default is frequencyDesc. In case of equal frequency when under frequencyDesc/Asc, the strings are further sorted alphabetically"),
+        ("stringOrderType",
+         "How to order labels of string column. The first label after ordering is assigned an \
+          index of 0. Supported options: frequencyDesc, frequencyAsc, alphabetDesc, alphabetAsc. \
+          Default is frequencyDesc. In case of equal frequency when under frequencyDesc/Asc, the \
+          strings are further sorted alphabetically"),
     ]),
     ("TargetEncoder", &[
-        ("handleInvalid", "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error)."),
+        ("handleInvalid",
+         "How to handle invalid data during transform(). Options are 'keep' (invalid data \
+          presented as an extra categorical feature) or error (throw an error)."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
         ("labelCol", "label column name."),
@@ -2584,7 +3639,9 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("targetType", "whether the label is 'binary' or 'continuous'"),
     ]),
     ("TargetEncoderModel", &[
-        ("handleInvalid", "How to handle invalid data during transform(). Options are 'keep' (invalid data presented as an extra categorical feature) or error (throw an error)."),
+        ("handleInvalid",
+         "How to handle invalid data during transform(). Options are 'keep' (invalid data \
+          presented as an extra categorical feature) or error (throw an error)."),
         ("inputCol", "input column name."),
         ("inputCols", "input column names."),
         ("labelCol", "label column name."),
@@ -2598,20 +3655,28 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("outputCol", "output column name."),
     ]),
     ("TrainValidationSplit", &[
-        ("collectSubModels", "Param for whether to collect a list of sub-models trained during tuning. If set to false, then only the single best sub-model will be available after fitting. If set to true, then all sub-models will be available. Warning: For large models, collecting all sub-models can cause OOMs on the Spark driver."),
+        ("collectSubModels",
+         "Param for whether to collect a list of sub-models trained during tuning. If set to \
+          false, then only the single best sub-model will be available after fitting. If set to \
+          true, then all sub-models will be available. Warning: For large models, collecting all \
+          sub-models can cause OOMs on the Spark driver."),
         ("estimator", "estimator to be cross-validated"),
         ("estimatorParamMaps", "estimator param maps"),
-        ("evaluator", "evaluator used to select hyper-parameters that maximize the validator metric"),
+        ("evaluator",
+         "evaluator used to select hyper-parameters that maximize the validator metric"),
         ("parallelism", "the number of threads to use when running parallel algorithms (>= 1)."),
         ("seed", "random seed."),
-        ("trainRatio", "Param for ratio between train and     validation data. Must be between 0 and 1."),
+        ("trainRatio",
+         "Param for ratio between train and     validation data. Must be between 0 and 1."),
     ]),
     ("TrainValidationSplitModel", &[
         ("estimator", "estimator to be cross-validated"),
         ("estimatorParamMaps", "estimator param maps"),
-        ("evaluator", "evaluator used to select hyper-parameters that maximize the validator metric"),
+        ("evaluator",
+         "evaluator used to select hyper-parameters that maximize the validator metric"),
         ("seed", "random seed."),
-        ("trainRatio", "Param for ratio between train and     validation data. Must be between 0 and 1."),
+        ("trainRatio",
+         "Param for ratio between train and     validation data. Must be between 0 and 1."),
     ]),
     ("UnivariateFeatureSelector", &[
         ("featureType", "The feature type. Supported options: categorical, continuous."),
@@ -2619,7 +3684,9 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("labelCol", "label column name."),
         ("labelType", "The label type. Supported options: categorical, continuous."),
         ("outputCol", "output column name."),
-        ("selectionMode", "The selection mode. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe."),
+        ("selectionMode",
+         "The selection mode. Supported options: numTopFeatures (default), percentile, fpr, fdr, \
+          fwe."),
         ("selectionThreshold", "The upper bound of the features that selector will select."),
     ]),
     ("UnivariateFeatureSelectorModel", &[
@@ -2628,69 +3695,110 @@ pub(super) const PARAM_DOCS: &[(&str, &[(&str, &str)])] = &[
         ("labelCol", "label column name."),
         ("labelType", "The label type. Supported options: categorical, continuous."),
         ("outputCol", "output column name."),
-        ("selectionMode", "The selection mode. Supported options: numTopFeatures (default), percentile, fpr, fdr, fwe."),
+        ("selectionMode",
+         "The selection mode. Supported options: numTopFeatures (default), percentile, fpr, fdr, \
+          fwe."),
         ("selectionThreshold", "The upper bound of the features that selector will select."),
     ]),
     ("VarianceThresholdSelector", &[
         ("featuresCol", "features column name."),
         ("outputCol", "output column name."),
-        ("varianceThreshold", "Param for variance threshold. Features with a variance not greater than this threshold will be removed. The default value is 0.0."),
+        ("varianceThreshold",
+         "Param for variance threshold. Features with a variance not greater than this threshold \
+          will be removed. The default value is 0.0."),
     ]),
     ("VarianceThresholdSelectorModel", &[
         ("featuresCol", "features column name."),
         ("outputCol", "output column name."),
-        ("varianceThreshold", "Param for variance threshold. Features with a variance not greater than this threshold will be removed. The default value is 0.0."),
+        ("varianceThreshold",
+         "Param for variance threshold. Features with a variance not greater than this threshold \
+          will be removed. The default value is 0.0."),
     ]),
     ("VectorAssembler", &[
-        ("handleInvalid", "How to handle invalid data (NULL and NaN values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (return relevant number of NaN in the output). Column lengths are taken from the size of ML Attribute Group, which can be set using `VectorSizeHint` in a pipeline before `VectorAssembler`. Column lengths can also be inferred from first rows of the data since it is safe to do so but only in case of 'error' or 'skip')."),
+        ("handleInvalid",
+         "How to handle invalid data (NULL and NaN values). Options are 'skip' (filter out rows \
+          with invalid data), 'error' (throw an error), or 'keep' (return relevant number of NaN \
+          in the output). Column lengths are taken from the size of ML Attribute Group, which can \
+          be set using `VectorSizeHint` in a pipeline before `VectorAssembler`. Column lengths can \
+          also be inferred from first rows of the data since it is safe to do so but only in case \
+          of 'error' or 'skip')."),
         ("inputCols", "input column names."),
         ("outputCol", "output column name."),
     ]),
     ("VectorIndexer", &[
-        ("handleInvalid", "How to handle invalid data (unseen labels or NULL values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index of the number of categories of the feature)."),
+        ("handleInvalid",
+         "How to handle invalid data (unseen labels or NULL values). Options are 'skip' (filter \
+          out rows with invalid data), 'error' (throw an error), or 'keep' (put invalid data in a \
+          special additional bucket, at index of the number of categories of the feature)."),
         ("inputCol", "input column name."),
-        ("maxCategories", "Threshold for the number of values a categorical feature can take (>= 2). If a feature is found to have > maxCategories values, then it is declared continuous."),
+        ("maxCategories",
+         "Threshold for the number of values a categorical feature can take (>= 2). If a feature \
+          is found to have > maxCategories values, then it is declared continuous."),
         ("outputCol", "output column name."),
     ]),
     ("VectorIndexerModel", &[
-        ("handleInvalid", "How to handle invalid data (unseen labels or NULL values). Options are 'skip' (filter out rows with invalid data), 'error' (throw an error), or 'keep' (put invalid data in a special additional bucket, at index of the number of categories of the feature)."),
+        ("handleInvalid",
+         "How to handle invalid data (unseen labels or NULL values). Options are 'skip' (filter \
+          out rows with invalid data), 'error' (throw an error), or 'keep' (put invalid data in a \
+          special additional bucket, at index of the number of categories of the feature)."),
         ("inputCol", "input column name."),
-        ("maxCategories", "Threshold for the number of values a categorical feature can take (>= 2). If a feature is found to have > maxCategories values, then it is declared continuous."),
+        ("maxCategories",
+         "Threshold for the number of values a categorical feature can take (>= 2). If a feature \
+          is found to have > maxCategories values, then it is declared continuous."),
         ("outputCol", "output column name."),
     ]),
     ("VectorSizeHint", &[
-        ("handleInvalid", "How to handle invalid vectors in inputCol. Invalid vectors include nulls and vectors with the wrong size. The options are `skip` (filter out rows with invalid vectors), `error` (throw an error) and `optimistic` (do not check the vector size, and keep all rows). `error` by default."),
+        ("handleInvalid",
+         "How to handle invalid vectors in inputCol. Invalid vectors include nulls and vectors \
+          with the wrong size. The options are `skip` (filter out rows with invalid vectors), \
+          `error` (throw an error) and `optimistic` (do not check the vector size, and keep all \
+          rows). `error` by default."),
         ("inputCol", "input column name."),
         ("size", "Size of vectors in column."),
     ]),
     ("VectorSlicer", &[
-        ("indices", "An array of indices to select features from a vector column. There can be no overlap with names."),
+        ("indices",
+         "An array of indices to select features from a vector column. There can be no overlap \
+          with names."),
         ("inputCol", "input column name."),
-        ("names", "An array of feature names to select features from a vector column. These names must be specified by ML org.apache.spark.ml.attribute.Attribute. There can be no overlap with indices."),
+        ("names",
+         "An array of feature names to select features from a vector column. These names must be \
+          specified by ML org.apache.spark.ml.attribute.Attribute. There can be no overlap with \
+          indices."),
         ("outputCol", "output column name."),
     ]),
     ("Word2Vec", &[
         ("inputCol", "input column name."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("maxSentenceLength", "Maximum length (in words) of each sentence in the input data. Any sentence longer than this threshold will be divided into chunks up to the size."),
-        ("minCount", "the minimum number of times a token must appear to be included in the word2vec model's vocabulary"),
+        ("maxSentenceLength",
+         "Maximum length (in words) of each sentence in the input data. Any sentence longer than \
+          this threshold will be divided into chunks up to the size."),
+        ("minCount",
+         "the minimum number of times a token must appear to be included in the word2vec model's \
+          vocabulary"),
         ("numPartitions", "number of partitions for sentences of words"),
         ("outputCol", "output column name."),
         ("seed", "random seed."),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
         ("vectorSize", "the dimension of codes after transforming from words"),
-        ("windowSize", "the window size (context words from [-window, window]). Default value is 5"),
+        ("windowSize",
+         "the window size (context words from [-window, window]). Default value is 5"),
     ]),
     ("Word2VecModel", &[
         ("inputCol", "input column name."),
         ("maxIter", "max number of iterations (>= 0)."),
-        ("maxSentenceLength", "Maximum length (in words) of each sentence in the input data. Any sentence longer than this threshold will be divided into chunks up to the size."),
-        ("minCount", "the minimum number of times a token must appear to be included in the word2vec model's vocabulary"),
+        ("maxSentenceLength",
+         "Maximum length (in words) of each sentence in the input data. Any sentence longer than \
+          this threshold will be divided into chunks up to the size."),
+        ("minCount",
+         "the minimum number of times a token must appear to be included in the word2vec model's \
+          vocabulary"),
         ("numPartitions", "number of partitions for sentences of words"),
         ("outputCol", "output column name."),
         ("seed", "random seed."),
         ("stepSize", "Step size to be used for each iteration of optimization (>= 0)."),
         ("vectorSize", "the dimension of codes after transforming from words"),
-        ("windowSize", "the window size (context words from [-window, window]). Default value is 5"),
+        ("windowSize",
+         "the window size (context words from [-window, window]). Default value is 5"),
     ]),
 ];

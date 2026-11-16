@@ -13,6 +13,7 @@
 """
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -114,6 +115,43 @@ def rust_str(text):
     return '"' + "".join(out) + '"'
 
 
+def param_doc_lines(name, doc, width=100):
+    """The lines of the PARAM_DOCS entry of the param `name` of `doc`: one line when it fits in
+    `width` columns, else the doc on lines of its own, split by Rust's line continuations. A
+    continuation drops the newline and the whitespace that follow it, so each line after the
+    first starts with a word, and the spaces after a word stay on the line before the break."""
+    literal = rust_str(doc)
+    line = f'        ("{name}", {literal}),'
+    if len(line) <= width:
+        return [line]
+    body = literal[1:-1]
+    lead = re.match(r" *", body).group(0)
+    pieces = []
+    for token in re.findall(r"\S+ *", body[len(lead) :]):
+        word, spaces = token.rstrip(" "), token[len(token.rstrip(" ")) :]
+        # A word longer than a line is split between its characters, not inside an escape.
+        room = width - 12
+        while len(word) > room:
+            cut = room
+            while word[cut - 1] == "\\" and (len(word[:cut]) - len(word[:cut].rstrip("\\"))) % 2:
+                cut -= 1
+            pieces.append(word[:cut])
+            word = word[cut:]
+        pieces.append(word + spaces)
+    if pieces:
+        pieces[0] = lead + pieces[0]
+    lines = [f'        ("{name}",']
+    current = '         "'
+    for i, piece in enumerate(pieces):
+        end = 3 if i == len(pieces) - 1 else 1
+        if len(current) + len(piece) + end > width and current.strip() != '"':
+            lines.append(current + "\\")
+            current = "          "
+        current += piece
+    lines.append(current + '"),')
+    return lines
+
+
 def param_specs(api):
     # Each estimator of a JVM class has a model: the class of its name with `Model` appended, or
     # the one of MODEL_CLASSES. Each target must be a model of the golden file.
@@ -144,7 +182,7 @@ def param_specs(api):
     for name, entry in sorted(api.items()):
         params = []
         for param in sorted(entry.get("params", []), key=lambda p: p["name"]):
-            params.append(f'        ("{param["name"]}", {rust_str(param["doc"])}),')
+            params.extend(param_doc_lines(param["name"], param["doc"]))
         docs.append(f'    ("{name}", &[')
         docs.extend(params)
         docs.append("    ]),")
