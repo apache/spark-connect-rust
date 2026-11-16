@@ -589,31 +589,14 @@ native_summary! {
 
 native_summary! {
     PyLinearRegressionTrainingSummary = "LinearRegressionTrainingSummary"
-        in "pyspark.ml.connect.regression";
+        in "pyspark.ml.connect.regression"
+        extends PyLinearRegressionSummary;
     properties: [
-        "coefficientStandardErrors" => (coefficient_standard_errors, "coefficientStandardErrors"),
-        "degreesOfFreedom" => (degrees_of_freedom, "degreesOfFreedom"),
-        "devianceResiduals" => (deviance_residuals, "devianceResiduals"),
-        "explainedVariance" => (explained_variance, "explainedVariance"),
-        "featuresCol" => (features_col, "featuresCol"),
-        "labelCol" => (label_col, "labelCol"),
-        "meanAbsoluteError" => (mean_absolute_error, "meanAbsoluteError"),
-        "meanSquaredError" => (mean_squared_error, "meanSquaredError"),
-        "numInstances" => (num_instances, "numInstances"),
-        "pValues" => (p_values, "pValues"),
-        "predictionCol" => (prediction_col, "predictionCol"),
-        "r2" => (r2, "r2"),
-        "r2adj" => (r2adj, "r2adj"),
-        "rootMeanSquaredError" => (root_mean_squared_error, "rootMeanSquaredError"),
-        "tValues" => (t_values, "tValues"),
         "objectiveHistory" => (objective_history, "objectiveHistory"),
         "totalIterations" => (total_iterations, "totalIterations"),
     ];
     methods: [];
-    relations: [
-        "predictions" => (predictions, "predictions"),
-        "residuals" => (residuals, "residuals"),
-    ];
+    relations: [];
     relation_methods: [];
 }
 
@@ -649,21 +632,9 @@ native_summary! {
 
 native_summary! {
     PyGeneralizedLinearRegressionTrainingSummary = "GeneralizedLinearRegressionTrainingSummary"
-        in "pyspark.ml.connect.regression";
+        in "pyspark.ml.connect.regression"
+        extends PyGeneralizedLinearRegressionSummary;
     properties: [
-        "aic" => (aic, "aic"),
-        "degreesOfFreedom" => (degrees_of_freedom, "degreesOfFreedom"),
-        "deviance" => (deviance, "deviance"),
-        "dispersion" => (dispersion, "dispersion"),
-        "nullDeviance" => (null_deviance, "nullDeviance"),
-        "numInstances" => (num_instances, "numInstances"),
-        "predictionCol" => (prediction_col, "predictionCol"),
-        "rank" => (rank, "rank"),
-        "residualDegreeOfFreedom" => (residual_degree_of_freedom, "residualDegreeOfFreedom"),
-        "residualDegreeOfFreedomNull" => (
-            residual_degree_of_freedom_null,
-            "residualDegreeOfFreedomNull"
-        ),
         "coefficientStandardErrors" => (coefficient_standard_errors, "coefficientStandardErrors"),
         "numIterations" => (num_iterations, "numIterations"),
         "pValues" => (p_values, "pValues"),
@@ -671,22 +642,15 @@ native_summary! {
         "tValues" => (t_values, "tValues"),
     ];
     methods: [];
-    relations: [
-        "predictions" => (predictions, "predictions"),
-    ];
-    relation_methods: [
-        "residuals" => (
-            residuals,
-            "residuals",
-            (residualsType = "deviance"),
-            "($self, residualsType='deviance')"
-        ),
-    ];
+    relations: [];
+    relation_methods: [];
 
     /// The server's description of the summary (its coefficients table and deviances), as
     /// PySpark's `__repr__` (its `toString`).
-    fn __repr__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let out = crate::ml::object::fetch_py(py, &self.target, "toString", &[])?;
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let target = Self::summary_target(slf)?;
+        let out = crate::ml::object::fetch_py(py, &target, "toString", &[])?;
         crate::ml::object::fetch_output_to_py(py, out)
     }
 }

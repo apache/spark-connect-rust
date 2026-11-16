@@ -294,10 +294,16 @@ PySpark class has them:
   of PySpark's class: `MLWritable`, `MLReadable` and `Identifiable`, `HasTrainingSummary` and the
   summary bases, the param mixins (`HasMaxIter`), `PredictionModel` and `ClassificationModel`,
   PySpark's Java wrappers, and PySpark's class itself. Every object that this client makes (of a
-  fit, a load, a copy, a summary) is of that class, and a class of the same module that is a base
-  of PySpark's class (`LinearSVCSummary` of `LinearSVCTrainingSummary`) has it as a virtual
-  subclass. So `isinstance(LinearSVCModel(), MLWritable)` holds, and a Pipeline of `pyspark.ml`
-  fits and saves native stages. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
+  fit, a load, a copy, a summary) is of that class, which is a subclass of the class of the same
+  module of each base of PySpark's class of the module (`LinearSVCSummary` of
+  `LinearSVCTrainingSummary`, and both `BinaryLogisticRegressionSummary` and
+  `LogisticRegressionTrainingSummary` of `BinaryLogisticRegressionTrainingSummary`), of PySpark's
+  metaclass (`type` of the summaries). So `isinstance(LinearSVCModel(), MLWritable)` holds, and a
+  Pipeline of `pyspark.ml` fits and saves native stages. A summary constructs as PySpark's
+  `JavaWrapper.__init__(java_obj=None)`, with its errors of a call that does not bind, and its
+  members read the `java_obj` as PySpark's `_extract_id_methods`: the id of an object of the ML
+  cache and its methods (`"<id>.summary"`) of a string, over the active session, and PySpark's
+  `AttributeError: 'NoneType' object has no attribute 'split'` of a summary of no object. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
   `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
   the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute

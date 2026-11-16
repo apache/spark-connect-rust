@@ -126,3 +126,19 @@ def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
     for copied in (copy.copy(fitted), copy.deepcopy(fitted), pickle.loads(pickle.dumps(fitted))):
         assert len(copied.stages) == 1 and copied.uid == fitted.uid
         assert copied.transform(frame).columns[-1] == "b"
+
+
+def test_a_summary_of_no_server_side_object_raises_pysparks_errors(session):
+    # As PySpark's `_extract_id_methods` of the `java_obj` of the summary: the AttributeError of its
+    # `split` of a value that is not a string, and the server's error of an id that it does not hold.
+    Summary = _cls("classification", "LinearSVCTrainingSummary")
+    for call in (lambda: Summary().accuracy, lambda: Summary().predictions, lambda: Summary().fMeasureByLabel()):
+        with pytest.raises(AttributeError, match="^'NoneType' object has no attribute 'split'$"):
+            call()
+    with pytest.raises(AttributeError, match="^'int' object has no attribute 'split'$"):
+        Summary(123).accuracy
+    with pytest.raises(Exception, match="The MLCache key abc is invalid"):
+        Summary("abc").accuracy
+    KMeansSummary = _cls("clustering", "KMeansSummary")
+    with pytest.raises(AttributeError, match="^'NoneType' object has no attribute 'split'$"):
+        KMeansSummary().k
