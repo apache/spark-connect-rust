@@ -53,9 +53,9 @@ A cast to `char(5)` or `varchar(5)` gives a `string` column, with no padding and
 check, unless the session sets `spark.sql.preserveCharVarcharTypeInfo` to `true`: then the
 column keeps `DataType::Char` or `DataType::Varchar`, and a CHAR value is padded to its
 length. The server rejects CHAR and VARCHAR in the schema of `DataFrameReader::schema` with
-`UNSUPPORTED_CHAR_OR_VARCHAR_AS_STRING`, and fails to analyze a `create_dataframe` of such a
-schema (an `INTERNAL_ERROR` that its output has a char/varchar type), even with that setting;
-use `string` there.
+`UNSUPPORTED_CHAR_OR_VARCHAR_AS_STRING`, and so in a `create_dataframe` of rows, even with that
+setting. A `create_dataframe` of no rows fails to analyze (`HYBRID_ANALYZER_EXCEPTION`) unless
+the setting is `true`. Use `string` there.
 
 ### Dates, times and timestamps
 

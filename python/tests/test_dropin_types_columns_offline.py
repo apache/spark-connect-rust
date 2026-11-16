@@ -203,7 +203,8 @@ def test_the_origins_of_column_methods_are_pysparks(name, monkeypatch):
 )
 def test_alias_names_are_pysparks_string_fields(name, error):
     # The name is a string field of the plan: a str, a bytes of its UTF-8, and protobuf's
-    # TypeError of any other value.
+    # TypeError of any other value. The drop-in raises it at the call, where PySpark raises it
+    # when it builds the plan (docs/compatibility.md).
     with pytest.raises(TypeError) as raised:
         F.col("id").alias(name)
     assert str(raised.value) == error

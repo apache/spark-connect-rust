@@ -300,5 +300,23 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     functions::register_functions(_py, &functions_module)?;
     m.add_submodule(&functions_module)?;
 
+    bare_type_names(m)?;
+    Ok(())
+}
+
+/// Give each class of the module the C name of a Python class, its bare `__name__`, which
+/// CPython's messages show: "'Column' object is not iterable", "unsupported operand type(s) for
+/// ^: 'bool' and 'Column'", as PySpark's. PyO3 makes it the dotted path of the class's module,
+/// "pyspark.sql.connect.column.Column". Setting `__name__` of a heap type sets that C name too;
+/// its `__module__` and `__qualname__`, and so its repr and its pickle, stay as they are.
+fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    for (_, value) in m.dict().iter() {
+        if let Ok(cls) = value.cast::<pyo3::types::PyType>() {
+            let name = cls.getattr(pyo3::intern!(py, "__name__"))?;
+            // A type whose name cannot be set, as an immutable type, keeps its C name.
+            let _ = cls.setattr(pyo3::intern!(py, "__name__"), name);
+        }
+    }
     Ok(())
 }
