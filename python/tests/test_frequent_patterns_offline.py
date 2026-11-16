@@ -110,7 +110,7 @@ def test_rejects_pandas_before_validation_or_requests(session):
     for frame in [pd.DataFrame(), pd.DataFrame({"items": [["a"]]})]:
         for method in [fpm.FPGrowth(numPartitions=2**70).fit, model.transform]:
             sent = _requests_but_deletes(service)
-            with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+            with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
                 method(frame)
             assert _requests_but_deletes(service) == sent
         # The helper call sends its dataset first, which pyspark.ml's serialization converts to a

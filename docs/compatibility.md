@@ -545,12 +545,17 @@ so that `[]` fits nothing and does not read the dataset. Any other value raises 
 `pyspark.ml` checks it.
 
 Native `fit`, `transform` and `evaluate` require a Spark DataFrame, matching the dataset
-contract of standard `pyspark.ml` over Spark Connect. Passing a pandas DataFrame raises
-`TypeError` before the params of the class are validated, the schema is read or any request is
-sent (the helper calls below raise PySpark's error of its serialization); only a `params` argument that is not a param map is checked before it (see above). This
-also applies to empty pandas DataFrames. The native Pipeline and validators raise the errors of
-PySpark's: a Pipeline that of its first stage, and a validator the `AttributeError` of the
-`select` of its split.
+contract of standard `pyspark.ml` over Spark Connect. Passing a pandas DataFrame raises the
+`AttributeError` of its own `sparkSession` (`'DataFrame' object has no attribute 'sparkSession'`),
+as `pyspark.ml` does, before the params of the class are validated, the schema is read or any
+request is sent (the helper calls below raise PySpark's error of their serialization). Only a
+`params` argument that is not a param map is checked before it (see above). This also applies to
+empty pandas DataFrames. The `evaluate` of a model's summary (`LogisticRegressionModel.evaluate`
+and its peers) raises the `TypeError` that `pyspark.ml` raises for a dataset that is not a
+DataFrame. The native Pipeline and validators raise the errors of PySpark's: a Pipeline that of
+its first stage, and a validator the `AttributeError` of the `select` of its split. Known
+divergence, pending: `OneVsRest.fit` still raises a `TypeError` for a pandas DataFrame, where
+`pyspark.ml` raises a `KeyError` of the pandas aggregate of its max label.
 Convert local data explicitly with `df = spark.createDataFrame(pdf)` before calling
 `estimator.fit(df)`, `model.transform(df)` or `evaluator.evaluate(df)`. Transforms return Spark
 DataFrames; call `toPandas()` explicitly when a local result is needed. The deprecated
@@ -566,8 +571,8 @@ DataFrame as PySpark does, and the server rejects it when the result is analyzed
 PySpark's serialization (`pyspark.ml.connect.serialize`)
 converts any other value to a literal, as `LiteralExpression._from_value` does:
 - One that cannot be a literal raises PySpark's error of the conversion. That includes a pandas
-  DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `TypeError` above, as with
-  `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
+  DataFrame, which raises `UNSUPPORTED_DATA_TYPE` here rather than the `AttributeError` above, as
+  with `pyspark.ml`, and an empty list, which raises `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
 - A `(value, DataType)` pair is the literal of that type, as `LiteralExpression(value, dataType)`
   makes it, whose asserts raise a bare `AssertionError` of a value that is not of the type
   (`("x", IntegerType())`) and of a type that no literal has (a `MapType`, `StructType`,
@@ -1683,7 +1688,9 @@ keyword arguments. Use `rawPredictionCol` / `setRawPredictionCol` instead of the
 deprecated `probabilityCol` / `setProbabilityCol` binary-evaluator argument.
 
 Evaluation sends Spark DataFrames and their column names/types directly to Spark.
-Pandas DataFrames are rejected before serialization or RPC. Prepare double
+A pandas DataFrame raises the `AttributeError` of its own `sparkSession`, as `pyspark.ml`
+does, before serialization or RPC; a model's summary `evaluate` raises the `TypeError` of
+`pyspark.ml` instead. Prepare double
 prediction columns, vector scores, and arrays of doubles where required
 by the corresponding standard evaluator. Clustering features may be vectors or
 arrays of doubles. Evaluators no longer silently cast

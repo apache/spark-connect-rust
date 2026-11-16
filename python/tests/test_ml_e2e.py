@@ -461,7 +461,7 @@ def test_ml_connect_evaluators_take_spark_columns_and_reject_pandas(session):
     multiclass = multiclass.withColumn("prediction", F.col("prediction").cast("double"))
     accuracy = MulticlassClassificationEvaluator(metricName="accuracy")
     assert accuracy.evaluate(multiclass) == pytest.approx(0.6)
-    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+    with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
         accuracy.evaluate(dataset=multiclass.toPandas())
     docstring = session.createDataFrame(
         [(1, 1), (0, 0), (2, 2), (1, 0), (2, 1)], schema=["label", "prediction"])
@@ -473,7 +473,7 @@ def test_ml_connect_evaluators_take_spark_columns_and_reject_pandas(session):
     regression = regression.withColumn("prediction", F.col("prediction").cast("double"))
     mse = RegressionEvaluator(metricName="mse")
     assert mse.evaluate(regression) == pytest.approx(2 / 3)
-    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+    with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
         mse.evaluate(regression.toPandas())
 
     binary = session.createDataFrame(
@@ -493,12 +493,12 @@ def test_ml_connect_evaluators_take_spark_columns_and_reject_pandas(session):
         for column in ("prob2", "prob"):
             evaluator = BinaryClassificationEvaluator(metricName=metric, rawPredictionCol=column)
             assert evaluator.evaluate(binary) == pytest.approx(expected), (metric, column)
-            with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+            with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
                 evaluator.evaluate(binary.toPandas())
     auroc = BinaryClassificationEvaluator(rawPredictionCol="prob2").evaluate(binary)
     assert auroc == pytest.approx(2 / 3)
-    # Another object raises the AttributeError of its sparkSession, which pyspark.ml's
-    # try_remote_evaluate reads first, as PySpark 4.3.0 does.
+    # Another object, or a pandas DataFrame, raises the AttributeError of its sparkSession, which
+    # pyspark.ml's try_remote_evaluate reads first, as PySpark 4.3.0 does.
     with pytest.raises(AttributeError, match="'list' object has no attribute 'sparkSession'"):
         accuracy.evaluate([(1, 1)])
 
@@ -517,10 +517,10 @@ def test_native_ml_accepts_explicitly_converted_pandas(session):
     # converted to vectors explicitly too.
     df = session.createDataFrame(pdf).withColumn("features", array_to_vector("features"))
     for estimator in [connect.LogisticRegression(maxIter=5), connect.KMeans(k=2, seed=1)]:
-        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
             estimator.fit(pdf)
         model = estimator.fit(df)
-        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
             model.transform(pdf)
         transformed = model.transform(df)
         assert isinstance(transformed, DataFrame)
@@ -528,14 +528,14 @@ def test_native_ml_accepts_explicitly_converted_pandas(session):
         assert set(transformed.toPandas()["prediction"]) <= {0, 1}
 
     assembler = connect.VectorAssembler(inputCols=["label"], outputCol="assembled")
-    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+    with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
         assembler.transform(pdf)
     assert [row.assembled.toArray().tolist() for row in assembler.transform(df).collect()] == [
         [0.0], [1.0], [1.0], [0.0]
     ]
     scored = pd.DataFrame({"label": [1.0, 2.0, 3.0], "prediction": [1.0, 2.5, 3.0]})
     evaluator = connect.RegressionEvaluator()
-    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+    with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
         evaluator.evaluate(scored)
     assert evaluator.evaluate(session.createDataFrame(scored)) == pytest.approx(0.28867513459481287)
 
@@ -812,7 +812,7 @@ def test_ml_connect_empty_pandas_transforms(session):
     from pyspark.ml.connect.classification import LogisticRegression
 
     model = LogisticRegression(maxIter=5).fit(_labeled(session))
-    with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+    with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
         model.transform(pd.DataFrame({"features": pd.Series([], dtype=object)}))
 
 

@@ -583,15 +583,14 @@ fn reject_pandas(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<()> {
     Ok(())
 }
 
-/// The dataset of `method`, a Spark DataFrame. A pandas DataFrame raises the TypeError of
-/// [`reject_pandas`]. Another object raises the `AttributeError` of `sparkSession`, the attribute
-/// that `pyspark.ml` reads of the dataset first (`try_remote_fit`, `try_remote_transform_relation`
-/// and `try_remote_evaluate` of `pyspark.ml.util`), and an object that has it raises a TypeError.
+/// The dataset of `method`, a Spark DataFrame. Another object raises the `AttributeError` of
+/// `sparkSession`, the attribute that `pyspark.ml` reads of the dataset first (`try_remote_fit`,
+/// `try_remote_transform_relation` and `try_remote_evaluate` of `pyspark.ml.util`), so a pandas
+/// DataFrame raises pandas' own AttributeError too, and an object that has it raises a TypeError.
 fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
         return Ok(df.dataframe.clone());
     }
-    reject_pandas(dataset, method)?;
     dataset.getattr("sparkSession")?;
     Err(PyTypeError::new_err(format!(
         "{method}() takes a Spark DataFrame, not '{}'",

@@ -204,7 +204,7 @@ def test_feature_stages_and_fitted_models_reject_pandas_before_requests(ml_mock,
     method = stage.fit if estimator else stage.transform
     for pdf in [pd.DataFrame(), pd.DataFrame({"features": [[1., 2.]]})]:
         sent = _requests_but_deletes(service)
-        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
             method(pdf)
         assert _requests_but_deletes(service) == sent
     if estimator:
@@ -213,7 +213,7 @@ def test_feature_stages_and_fitted_models_reject_pandas_before_requests(ml_mock,
             _splits_payloads(service)
         model = stage.fit(spark.range(1))
         sent = _requests_but_deletes(service)
-        with pytest.raises(TypeError, match="requires a Spark DataFrame"):
+        with pytest.raises(AttributeError, match="object has no attribute 'sparkSession'"):
             model.transform(pd.DataFrame())
         assert _requests_but_deletes(service) == sent
 
