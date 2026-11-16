@@ -83,4 +83,9 @@ mod fixtures {
     pub fn batch_scratch(x: i64) -> i64 {
         x
     }
+
+    // Always `None`: a wasm32-unknown-unknown module has no environment.
+    pub fn env_var(name: String) -> Option<String> {
+        std::env::var(name).ok()
+    }
 }

@@ -130,7 +130,7 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-          rustup target add wasm32-unknown-unknown
+          rustup target add wasm32-unknown-unknown wasm32-wasip1
 
       - name: Cache cargo & target
         uses: actions/cache@v4
@@ -175,7 +175,9 @@ jobs:
         run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces
 
       - name: WASM UDF runners (pyarrow batches, no server)
-        run: cargo test --manifest-path tests/wasm-udf/Cargo.toml -- --ignored
+        run: |
+          cargo test --manifest-path tests/wasm-udf/Cargo.toml -- --ignored
+          cargo test --manifest-path tests/wasm-udf-wasi/Cargo.toml -- --ignored
 
   msrv:
     name: Minimum supported Rust

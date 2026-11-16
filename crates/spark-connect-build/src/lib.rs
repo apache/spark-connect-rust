@@ -7,7 +7,8 @@
 //! # Requirements (build machine)
 //!
 //! * the `wasm32-unknown-unknown` target
-//!   (`rustup target add wasm32-unknown-unknown`), and
+//!   (`rustup target add wasm32-unknown-unknown`), or `wasm32-wasip1` for
+//!   [`embed_wasm_udf_for`] with [`WasmTarget::Wasip1`], and
 //! * `apache-spark-connect-macros` listed as a **build-dependency** of the
 //!   calling crate, so its proc-macro is compiled before `build.rs` runs and
 //!   this helper can find its dylib.
@@ -34,6 +35,43 @@ use std::process::Command;
 /// `#[cfg(not(target_arch = "wasm32"))]` so the wasm build keeps only the
 /// exported UDF functions.
 pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
+    embed_wasm_udf_for(src_file, WasmTarget::Unknown)
+}
+
+/// The WebAssembly target a UDF module is compiled for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum WasmTarget {
+    /// `wasm32-unknown-unknown`: the module imports nothing from its host, so
+    /// `std::env::var` always fails and `std::time` and `std::fs` are unavailable.
+    #[default]
+    Unknown,
+    /// `wasm32-wasip1`: the runner gives the module, through WASI, a snapshot of the
+    /// environment of the Python worker that runs it, taken when the module is
+    /// instantiated: the `os.environ` a Python UDF sees, including the session's
+    /// `spark.pythonWorkerEnv.*` variables, without the names Spark reserves for its
+    /// workers (`SPARK_*`, `PYSPARK_*`, `PYTHON_WORKER_FACTORY_*` and a few others), so
+    /// `std::env::var` reads it.
+    ///
+    /// WASI also gives the module clocks, randomness and sleep, so a UDF that reads the
+    /// time or random numbers should be marked nondeterministic. It gets no files or
+    /// arguments, and what it writes to standard output or error is discarded.
+    Wasip1,
+}
+
+impl WasmTarget {
+    fn triple(self) -> &'static str {
+        match self {
+            WasmTarget::Unknown => "wasm32-unknown-unknown",
+            WasmTarget::Wasip1 => "wasm32-wasip1",
+        }
+    }
+}
+
+/// Like [`embed_wasm_udf`], but compile `src_file` for `target`: pick
+/// [`WasmTarget::Wasip1`] for UDFs that read environment variables. Emits the same
+/// `WASM_UDFS_MODULE` env var and returns the module path.
+pub fn embed_wasm_udf_for(src_file: impl AsRef<Path>, target: WasmTarget) -> PathBuf {
     let src_file = src_file.as_ref();
     let out_dir = PathBuf::from(env("OUT_DIR"));
     let manifest_dir = PathBuf::from(env("CARGO_MANIFEST_DIR"));
@@ -82,7 +120,7 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
     let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".to_string());
     let status = Command::new(&rustc)
         .args(["--edition", "2021", "--crate-type", "cdylib"])
-        .args(["--target", "wasm32-unknown-unknown"])
+        .args(["--target", target.triple()])
         // Keep the embedded module small and self-contained.
         .args([
             "-C",
@@ -106,8 +144,11 @@ pub fn embed_wasm_udf(src_file: impl AsRef<Path>) -> PathBuf {
         eprintln!();
         eprintln!("cargo:warning=wasm32 build of {} failed", src_abs.display());
         eprintln!("cargo:warning=");
-        eprintln!("cargo:warning=The `wasm32-unknown-unknown` Rust target is required to build WASM UDF crates.");
-        eprintln!("cargo:warning=Install it with: rustup target add wasm32-unknown-unknown");
+        let triple = target.triple();
+        eprintln!(
+            "cargo:warning=The `{triple}` Rust target is required to build this WASM UDF crate."
+        );
+        eprintln!("cargo:warning=Install it with: rustup target add {triple}");
         eprintln!();
         panic!("wasm32 build of {} failed", src_abs.display());
     }

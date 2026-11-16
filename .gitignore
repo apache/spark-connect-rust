@@ -20,6 +20,7 @@
 /examples/wasm-udfs/target
 /examples/wasm-udf-inline/target
 /tests/wasm-udf/target
+/tests/wasm-udf-wasi/target
 **/*.rs.bk
 Cargo.lock
 __pycache__/

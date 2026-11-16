@@ -131,7 +131,8 @@ file - they write `add_one(x: i64) -> i64` and call `udf::add_one(col("id"))`.
 Nothing here is needed unless the `wasm-udf` feature is enabled:
 
 - **Build machine** - the `wasm32-unknown-unknown` target (`rustup target add
-  wasm32-unknown-unknown`), plus `apache-spark-connect-macros` and
+  wasm32-unknown-unknown`), or `wasm32-wasip1` for a module that reads environment
+  variables (see below), plus `apache-spark-connect-macros` and
   `apache-spark-connect-build` as (build-)dependencies.
 - **Client** (building the UDF command) - a Python interpreter with `pyspark`
   importable (used for its vendored `cloudpickle` and the pure-Python type
@@ -139,7 +140,7 @@ Nothing here is needed unless the `wasm-udf` feature is enabled:
   there is nothing extra to install or put on a path; point `SPARK_CONNECT_PYTHON`
   at the interpreter if it isn't your default `python3`.
 - **Executors** - the `wasmtime` Python package.
-- **Spark** - 4.3.0+.
+- **Spark** - 4.3.0+ (4.4.0+ for the session's environment variables).
 
 ## Advanced
 
@@ -172,3 +173,39 @@ let wasm = std::fs::read("shout.wasm")?;
 let shout = udf("shout", wasm, "shout", vec![AbiType::Str], AbiType::Str);
 let c = shout.call(vec![col("name")])?;
 ```
+
+## Environment variables
+
+A session sets environment variables for the Python workers that run its UDFs with
+`spark.pythonWorkerEnv.<NAME>` (Spark 4.4.0+), as in PySpark:
+
+```{.rust .no-run}
+spark.conf().set("spark.pythonWorkerEnv.MY_SETTING", "value")?;
+```
+
+A module built for `wasm32-unknown-unknown` has no environment, so `std::env::var`
+always fails in it. To read the worker's environment - the same `os.environ` a
+Python UDF sees, the session's variables included - build the module for
+`wasm32-wasip1` (`rustup target add wasm32-wasip1`):
+
+```{.rust .no-run}
+// build.rs
+spark_connect_build::embed_wasm_udf_for(
+    "src/lib.rs",
+    spark_connect_build::WasmTarget::Wasip1,
+);
+```
+
+The module then gets, through WASI, a snapshot of the worker's environment taken
+when it is instantiated, once per UDF in each task. That is the whole environment
+of the worker, not only the session's variables: it includes what the executor and
+`spark.executorEnv.*` set, which can hold credentials. Unsetting a session variable
+reveals any value the worker inherited for the same name. Left out are the names
+Spark reserves for its own workers (those beginning with `SPARK_`, `PYSPARK_` or
+`PYTHON_WORKER_FACTORY_`, and a few others, none of which a session can set) and a
+variable the worker's Python cannot decode as UTF-8. A prebuilt WASI module passed
+to `wasm_udf::udf` gets the same environment, so only use modules you trust with it.
+
+WASI also gives the module clocks, randomness and sleep, so mark a UDF that reads
+the time or random numbers with `.as_nondeterministic()`. It gets no files or
+arguments, and what it writes to standard output or error is discarded.
