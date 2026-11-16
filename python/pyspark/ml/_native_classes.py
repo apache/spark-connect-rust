@@ -7,9 +7,10 @@ the summary bases, the Java wrappers, and PySpark's class itself), and the membe
 class come first. The native module (`pyspark._pyspark`) makes every object of a native class of
 its public class (`_register_public_class`), as the constructor of the public class does.
 
-A class of PySpark's of the same module that is a base of PySpark's class, and whose native class
-is not a base of the native class (a training summary of its summary), has the public class as a
-virtual subclass, so that `isinstance` holds of the public classes as of PySpark's.
+The public class of a native class is a subclass of the public class of each class of PySpark's of
+the same module that is a base of PySpark's class (a training summary of its summary, and the
+`LogisticRegressionTrainingSummary` of a `BinaryLogisticRegressionTrainingSummary`), so that
+`isinstance` holds of the public classes as of PySpark's, and its metaclass is PySpark's.
 
 A public class constructs, copies and fits as PySpark's class, so that a Python subclass of it
 behaves as a subclass of PySpark's:
@@ -36,7 +37,6 @@ PySpark's constructor did not make (a fit's model, a load, a native copy) are ma
 object's values at their first read.
 """
 
-import abc
 import functools
 import importlib
 import inspect
@@ -349,12 +349,12 @@ def _constructors(native, official, holder):
     return __new__, __init__
 
 
-def _public_class(native, official, parent):
-    """The public class of `native`, of PySpark's class `official` and of the public class
-    `parent` of the native base class of `native`, if it has one."""
-    bases = (native,) + ((parent,) if parent is not None else ()) + (official,)
-    # A metaclass of `abc`, so that the public classes take virtual subclasses (see `publish`).
-    meta = abc.ABCMeta if type(official) is type else type(official)
+def _public_class(native, official, parents):
+    """The public class of `native`, of PySpark's class `official` and of the public classes
+    `parents` of its bases of the module (see `publish`)."""
+    bases = (native,) + parents + (official,)
+    # PySpark's metaclass (`ABCMeta` of the Params, `type` of the summaries).
+    meta = type(official)
     holder = [None]
     __new__, __init__ = _constructors(native, official, holder)
     namespace = {
@@ -474,19 +474,22 @@ def publish(namespace, official_module, bases=None):
         if official_class is None:
             # A module of pyspark.ml that is not imported in full yet (an import cycle) lacks it.
             raise ImportError(f"{official_module} has no {name} of the native class {native}")
-        parent = next(
-            (published[b.__name__][1] for b in native.__mro__[1:] if b.__name__ in published),
-            None,
-        )
-        public = _public_class(native, official_class, parent)
-        published[name] = (official_class, public)
-        namespace[name] = public
-    # The classes of PySpark's of the same module that are bases of PySpark's class, of which the
-    # public class is a virtual subclass where its native class is not a subclass.
-    for official_class, public in published.values():
+        # The public class of the native base class of `native` (LDA's `LDAModel`, a training
+        # summary's summary), and those of PySpark's bases of the same module whose native classes
+        # are not bases of `native` (the LogisticRegressionTrainingSummary of a
+        # BinaryLogisticRegressionTrainingSummary, whose native class extends
+        # BinaryLogisticRegressionSummary): the public class is a subclass of each, as PySpark's
+        # class is of theirs. The native classes of a summary add no fields to their native base,
+        # so that a class of two native bases has their layout.
+        parents = [
+            published[b.__name__][1] for b in native.__mro__[1:] if b.__name__ in published
+        ][:1]
         for base in official_class.__mro__[1:]:
             if base.__name__ in published and published[base.__name__][0] is base:
                 ours = published[base.__name__][1]
-                if not issubclass(public, ours):
-                    ours.register(public)
+                if not any(issubclass(parent, ours) for parent in parents):
+                    parents.append(ours)
+        public = _public_class(native, official_class, tuple(parents))
+        published[name] = (official_class, public)
+        namespace[name] = public
     return {name: public for name, (_, public) in published.items()}

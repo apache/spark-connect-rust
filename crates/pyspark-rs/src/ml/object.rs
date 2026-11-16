@@ -360,6 +360,50 @@ pub(super) fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResul
     Ok(session)
 }
 
+/// The server-side object of a summary: the target of this client's fit, load or evaluation; or
+/// the `java_obj` of PySpark's constructor (`JavaWrapper.__init__(java_obj=None)`), which the
+/// members read as PySpark's `_extract_id_methods` does (see [`SummaryObject::target`]).
+pub(crate) enum SummaryObject {
+    Target(spark_connect::ml::MlTarget),
+    Given(Py<PyAny>),
+}
+
+impl SummaryObject {
+    /// A copy of the object, of the same server-side object.
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
+        match self {
+            Self::Target(target) => Self::Target(target.clone()),
+            Self::Given(object) => Self::Given(object.clone_ref(py)),
+        }
+    }
+
+    /// The target of the members of the summary. Of a given object, as PySpark's `try_remote_call`:
+    /// it asserts an active session first, then `_extract_id_methods` splits the object, the id of
+    /// an object of the ML cache and the methods of its chain (`"<id>.summary"`), over the active
+    /// session; another value than a string (None) raises the AttributeError of its `split`.
+    pub(crate) fn target(&self, py: Python<'_>) -> PyResult<spark_connect::ml::MlTarget> {
+        let object = match self {
+            Self::Target(target) => return Ok(target.clone()),
+            Self::Given(object) => object.bind(py),
+        };
+        let session = session_of(py, None)?;
+        let Ok(text) = object.cast::<PyString>() else {
+            return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                "'{}' object has no attribute 'split'",
+                object.get_type().name()?
+            )));
+        };
+        let text: String = text.extract()?;
+        let mut chain = text.split('.');
+        let id = chain.next().unwrap_or_default();
+        let mut target = spark_connect::ml::MlTarget::unowned(&session, id);
+        for method in chain {
+            target = target.child(method);
+        }
+        Ok(target)
+    }
+}
+
 /// What a writer saves: an operator that is not fitted (an estimator, a transformer or an
 /// evaluator), of its params, a fitted model's object, of its params, or an object of PySpark's
 /// Python format.

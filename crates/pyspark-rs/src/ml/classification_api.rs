@@ -139,42 +139,14 @@ native_summary! {
 }
 
 native_summary! {
-    PyLinearSVCTrainingSummary = "LinearSVCTrainingSummary" in "pyspark.ml.connect.classification";
+    PyLinearSVCTrainingSummary = "LinearSVCTrainingSummary" in "pyspark.ml.connect.classification"
+        extends PyLinearSVCSummary;
     properties: [
-        "accuracy" => (accuracy, "accuracy"),
-        "areaUnderROC" => (area_under_roc, "areaUnderROC"),
-        "falsePositiveRateByLabel" => (false_positive_rate_by_label, "falsePositiveRateByLabel"),
-        "labelCol" => (label_col, "labelCol"),
-        "labels" => (labels, "labels"),
         "objectiveHistory" => (objective_history, "objectiveHistory"),
-        "precisionByLabel" => (precision_by_label, "precisionByLabel"),
-        "predictionCol" => (prediction_col, "predictionCol"),
-        "recallByLabel" => (recall_by_label, "recallByLabel"),
-        "scoreCol" => (score_col, "scoreCol"),
         "totalIterations" => (total_iterations, "totalIterations"),
-        "truePositiveRateByLabel" => (true_positive_rate_by_label, "truePositiveRateByLabel"),
-        "weightCol" => (weight_col, "weightCol"),
-        "weightedFalsePositiveRate" => (weighted_false_positive_rate, "weightedFalsePositiveRate"),
-        "weightedPrecision" => (weighted_precision, "weightedPrecision"),
-        "weightedRecall" => (weighted_recall, "weightedRecall"),
-        "weightedTruePositiveRate" => (weighted_true_positive_rate, "weightedTruePositiveRate"),
     ];
-    methods: [
-        "fMeasureByLabel" => (
-            f_measure_by_label, "fMeasureByLabel", (beta = 1.0), "($self, beta=1.0)"
-        ),
-        "weightedFMeasure" => (
-            weighted_f_measure, "weightedFMeasure", (beta = 1.0), "($self, beta=1.0)"
-        ),
-    ];
-    relations: [
-        "fMeasureByThreshold" => (f_measure_by_threshold, "fMeasureByThreshold"),
-        "pr" => (pr, "pr"),
-        "precisionByThreshold" => (precision_by_threshold, "precisionByThreshold"),
-        "predictions" => (predictions, "predictions"),
-        "recallByThreshold" => (recall_by_threshold, "recallByThreshold"),
-        "roc" => (roc, "roc"),
-    ];
+    methods: [];
+    relations: [];
     relation_methods: [];
 }
 
