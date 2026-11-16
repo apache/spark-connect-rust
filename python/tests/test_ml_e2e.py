@@ -26,14 +26,7 @@ import os
 
 import pytest
 from _native_classes import native_class
-from pyspark.loose_version import LooseVersion
-
-# The generated pyspark.sql.connect.proto, of Apache Spark v4.3.0, needs protobuf >= 6.33.5.
-_protobuf = pytest.importorskip("google.protobuf")
-if LooseVersion(_protobuf.__version__) < LooseVersion("6.33.5"):
-    pytest.skip("pyspark.sql.connect.proto needs protobuf >= 6.33.5", allow_module_level=True)
-
-from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql import SparkSession
 
 
 @pytest.fixture

@@ -31,6 +31,7 @@ import weakref
 from collections.abc import Iterable, Mapping
 from typing import Any, Optional
 
+from pyspark import _pyspark
 from pyspark.errors import PySparkNotImplementedError, PySparkValueError
 from pyspark.errors.exceptions.connect import SparkConnectException
 from pyspark.sql.metrics import ObservedMetrics
@@ -470,12 +471,16 @@ class SparkConnectClient:
 
     def _proto_to_string(self, p: Any, truncate: bool = False) -> str:
         """A one-line string of the protobuf message ``p``, truncated if ``truncate``, as
-        SparkConnectClient's ``_proto_to_string``, which plan logging uses."""
-        from google.protobuf import text_format
-
+        SparkConnectClient's ``_proto_to_string``, which plan logging uses. A message of the
+        Rust protobuf runtime (see ``pyspark.sql.connect.proto``) writes its text format itself,
+        as protobuf's ``text_format`` writes one of protobuf's."""
         try:
             max_level = 8 if truncate else sys.maxsize
             p2 = self._truncate(p, max_level) if truncate else p
+            if isinstance(p2, _pyspark.ProtoMessage):
+                return _pyspark._proto_message_to_string(p2, as_one_line=True)
+            from google.protobuf import text_format
+
             return text_format.MessageToString(p2, as_one_line=True)
         except RecursionError:
             return "<Truncated message due to recursion error>"
@@ -705,12 +710,25 @@ class SparkConnectClient:
         return properties["ml_command_result"].param.long
 
 
+def _any_class() -> Any:
+    """The ``google.protobuf.Any`` of the messages of ``pyspark.sql.connect.proto``: protobuf's,
+    or that of the Rust protobuf runtime when it is the one in use."""
+    from pyspark.sql.connect import proto
+
+    if proto._implementation == "rust":
+        from pyspark.sql.connect.proto._rust import Any as RustAny
+
+        return RustAny
+    from google.protobuf import any_pb2
+
+    return any_pb2.Any
+
+
 def _extensions_of(extensions: Any) -> list[Any]:
     # The user context extensions of the Rust transport, as SparkConnectClient keeps them: the
     # ID and the google.protobuf.Any of each.
-    from google.protobuf import any_pb2
-
-    return [(extension_id, any_pb2.Any.FromString(data)) for extension_id, data in extensions]
+    any_class = _any_class()
+    return [(extension_id, any_class.FromString(data)) for extension_id, data in extensions]
 
 
 class _ThreadLocalOfClient:

@@ -29,6 +29,7 @@ mod observation;
 mod options;
 mod origin;
 mod pandas_input;
+mod pbmsg;
 mod pipelines;
 mod profiler;
 mod progress;
@@ -145,6 +146,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<storagelevel::PyStorageLevel>()?;
 
     // The core DataType JSON grammar, which `pyspark.sql.types` parses type JSON with.
+    pbmsg::register(m)?;
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
     m.add_function(wrap_pyfunction!(connect_bridge::_data_type_proto, m)?)?;
     m.add_function(wrap_pyfunction!(connect_bridge::_data_type_of_proto, m)?)?;

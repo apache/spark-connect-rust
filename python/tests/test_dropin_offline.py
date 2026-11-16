@@ -2728,6 +2728,9 @@ def test_deep_messages_parse_as_from_string_and_fill_past_protobufs_limit():
     from pyspark.sql.connect import proto
     from pyspark.sql.connect._column_reduce import parse_deep
 
+    if proto._implementation != "protobuf":
+        pytest.skip("parse_deep parses protobuf's messages, on a Python worker of the server")
+
     def deep_expression(levels):
         root = proto.Expression()
         current = root
@@ -3877,7 +3880,12 @@ def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
     for _ in range(400):
         node.project.input.SetInParent()
         node = node.project.input
-    assert "recursion" in client._proto_to_string(deep)
+    if pb2._implementation == "protobuf":
+        # text_format recurses once per level of the message, past Python's recursion limit.
+        assert "recursion" in client._proto_to_string(deep)
+    else:
+        # The Rust protobuf runtime writes a message of any depth.
+        assert client._proto_to_string(deep).count("project {") == 400
 
 
 def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connect):
@@ -7457,13 +7465,14 @@ def test_inheritable_thread_targets_carry_the_user_context_extensions_as_pyspark
     import threading
 
     import pyspark.sql.connect.proto as pb2
-    from google.protobuf import any_pb2
     from pyspark import InheritableThread, inheritable_thread_target
+    from pyspark.sql.connect.client import _any_class
 
     spark, service = mock_connect
 
     def packed(graph_id):
-        extension = any_pb2.Any()
+        # The Any of the messages in use, of protobuf or of the Rust protobuf runtime.
+        extension = _any_class()()
         extension.Pack(pb2.PipelineAnalysisContext(dataflow_graph_id=graph_id))
         return extension
 

@@ -29,11 +29,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={}", p.display());
     }
 
+    let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
+    let full_set = out_dir.join("spark_connect_descriptor_set_full.bin");
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
         .bytes(".")
+        .file_descriptor_set_path(&full_set)
         .compile_protos(&protos, &[proto_root])?;
+
+    // The descriptor set of the protos and of the ones they import (google/protobuf/any.proto),
+    // for `FILE_DESCRIPTOR_SET`. The source info, which holds the comments of every declaration,
+    // is dropped: it is most of the set, and nothing reads it.
+    use prost::Message;
+    let mut set = prost_types::FileDescriptorSet::decode(std::fs::read(&full_set)?.as_slice())?;
+    for file in &mut set.file {
+        file.source_code_info = None;
+    }
+    std::fs::write(
+        out_dir.join("spark_connect_descriptor_set.bin"),
+        set.encode_to_vec(),
+    )?;
 
     Ok(())
 }

@@ -23,3 +23,6 @@ prost-types.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
+# To write the descriptor set of the protos without their source info (see build.rs).
+prost.workspace = true
+prost-types.workspace = true

@@ -235,15 +235,27 @@ jobs:
             --exclude "test_artifact.py,test_artifact_localcluster.py,test_parity_resources.py" \
             2>&1 | tee /tmp/parity_ours.log
 
-      - name: Drop-in live-server tests (native Arrow handoff and API behaviors)
+      - name: Drop-in live-server tests (native Arrow handoff and API behaviors), without protobuf
         # The parity gate above runs the reference pyspark over our transport, so the
-        # drop-in's own Rust-backed classes are only exercised against a server here.
+        # drop-in's own Rust-backed classes are only exercised against a server here. They run
+        # in an environment of only the drop-in's dependencies (pandas, pyarrow, numpy) and
+        # pytest, without protobuf, where pyspark.sql.connect.proto is the Rust protobuf runtime.
+        # The server's Python workers keep the job's environment, as those of foreachBatch and
+        # the listeners run PySpark's own client.
         working-directory: python
         env:
           SPARK_REMOTE: sc://localhost:15002
           PYTHONPATH: ${{ github.workspace }}/python
         run: |
-          python -m pytest -q \
+          python -m venv /tmp/client
+          /tmp/client/bin/python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy
+          if /tmp/client/bin/python -c "import google.protobuf" 2>/dev/null; then
+            echo "protobuf is installed in the client environment"; exit 1
+          fi
+          /tmp/client/bin/python -c \
+            "import pyspark.sql.connect.proto as p; assert p._implementation == 'rust', p._implementation"
+          /tmp/client/bin/python -m pytest -q \
+            tests/test_proto_rust_offline.py \
             tests/test_arrow_e2e.py \
             tests/test_dropin_e2e.py \
             tests/test_ml_e2e.py \

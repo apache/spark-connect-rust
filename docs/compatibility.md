@@ -1015,11 +1015,20 @@ The DataFrame-based `pyspark.ml` API (`pyspark.ml.classification`, `feature`,
 `regression`, `clustering`, `evaluation`, `tuning`, `stat`, `Pipeline`, ...) is
 Apache Spark's own, vendored from v4.3.0: estimators fit, models transform, and
 pipelines save and load on the server as with PySpark Connect, over the Rust
-transport. These modules build their own `spark.connect` messages with the
-generated `pyspark.sql.connect.proto`, which needs the `protobuf` package
-(`pip install "protobuf>=6.33.5"`). The package is not a dependency of
-`pyspark-client-rust`: without it, `pyspark.ml` imports, but a fit or a transform
-raises an `AttributeError` that names `protobuf`.
+transport. These modules build their own `spark.connect` messages with
+`pyspark.sql.connect.proto`. That is the generated modules of Apache Spark when `protobuf`
+(>= 6.33.5) is installed, and otherwise the drop-in's own protobuf runtime in Rust
+(`pyspark.sql.connect.proto._rust`, also chosen by `PYSPARK_CONNECT_PROTO_IMPLEMENTATION=rust`),
+so `protobuf` is not a dependency of `pyspark-client-rust`. The runtime has the classes,
+containers and descriptors of upb, the implementation of a `protobuf` install, with their bytes,
+text, errors and presence. The differences:
+
+- its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`, and
+  it has one map container type where upb has a scalar one and a message one;
+- it parses and prints messages of any depth, where upb refuses more than 100 nested messages
+  and `text_format` exceeds Python's recursion limit;
+- the iteration order of a map is the order of insertion, where upb's is that of its hash table.
+  Serialization and the text format write the entries in upb's order of the keys.
 
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.
@@ -1028,8 +1037,8 @@ of this client rather than the one of the plan, which its columns refer to.
 
 The CLI of Spark Declarative Pipelines (`python -m pyspark.pipelines.cli init`, `run` and
 `dry-run`) and its modules are Apache Spark's own, vendored from v4.3.0, and Apache Spark's
-tests of them pass with this client. The CLI needs `pyyaml` and `protobuf`, which, as for
-`pyspark.ml`, are not dependencies of `pyspark-client-rust`. The user context extensions of a
+tests of them pass with this client. The CLI needs `pyyaml`, which is not a dependency of
+`pyspark-client-rust`. The user context extensions of a
 client (`spark.client.add_threadlocal_user_context_extension` and
 `add_global_user_context_extension`), which the CLI adds for the analyses of a pipeline, are
 sent with the requests of executions, analyses, configurations, error details and interrupts,
