@@ -10279,10 +10279,10 @@ class _TaggedVariant(T.VariantVal):
         self.tag = tag
 
 
-def test_variant_val_subclass_as_pyspark():
+def test_variant_val_subclass_as_pyspark(mock_connect):
     # As PySpark's VariantVal, which a subclass of it is: it is repr'd, str'd and typed as the
     # class does, compares by identity, and pickles as its class with its attributes, without
-    # running its __init__.
+    # running its __init__. Its createDataFrame reads the settings, of the mock server, first.
     import pickle
 
     from pyspark.errors import PySparkValueError
@@ -10304,8 +10304,9 @@ def test_variant_val_subclass_as_pyspark():
 
     assert T._infer_type(tagged) == T.VariantType()
     struct = T.StructType([T.StructField("v", T.VariantType())])
+    spark, _ = mock_connect
     with pytest.raises(PySparkValueError, match="Rows cannot be of type VariantVal"):
-        _offline_session().createDataFrame([tagged], struct)
+        spark.createDataFrame([tagged], struct)
 
 
 def test_variant_val_subclass_is_sent_as_its_variant(mock_connect):
@@ -10719,7 +10720,7 @@ print("freed")
     assert (freed.returncode, freed.stdout) == (0, "freed\n"), freed.stderr
 
 
-def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
+def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark(mock_connect):
     # As PySpark's VariantVal: str is its JSON, in UTC, as toJson(); repr is of its bytes. And
     # as PySpark's createDataFrame, whose VariantVal has a __dict__, so that it is a row, which
     # to_row rejects: a VariantVal is no row, also without a schema or of one that is not a
@@ -10733,7 +10734,8 @@ def test_str_of_variant_values_is_their_json_and_they_are_no_rows_as_pyspark():
     assert str(VariantVal.parseJson('"x"')) == '"x"'
     assert "{}".format(VariantVal.parseJson("1")) == "1"
 
-    spark = _offline_session()
+    # createDataFrame reads the settings, of the mock server, before it converts the rows.
+    spark, _ = mock_connect
     struct = T.StructType([T.StructField("v", T.VariantType())])
     for data, schema in [([v], struct), ([v, None], struct), ([v], None), ([v], T.VariantType())]:
         with pytest.raises(PySparkValueError, match="Rows cannot be of type VariantVal"):
@@ -13608,16 +13610,18 @@ def test_pyspark_version_exported():
 
 # --------------------------------------------------------------------------- createDataFrame
 
-def test_create_dataframe_width_mismatch_is_a_normal_exception():
-    # Isolate the active session from the remaining offline tests. Session
-    # construction and local input validation do not need a running server.
+def test_create_dataframe_width_mismatch_is_a_normal_exception(mock_connect):
+    # Isolate the active session from the remaining offline tests. The local input validation
+    # needs no execution; the mock server answers the settings that createDataFrame reads first,
+    # as PySpark's does.
     import subprocess
     import sys
 
     subprocess.run([sys.executable, "-c", """
+import sys
 from pyspark.sql import SparkSession, types as T
 from pyspark.errors import PySparkValueError
-spark = SparkSession.builder.remote("sc://localhost:15002").getOrCreate()
+spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
 schemas = [None, ["a", "b"], T.StructType([
     T.StructField("a", T.LongType()), T.StructField("b", T.LongType())
 ])]
@@ -13632,9 +13636,8 @@ for schema in schemas:
             "expected_length": "2", "actual_length": "1"}, error
     else:
         raise AssertionError("expected a width validation error")
-spark.release_session_on_close = False
 spark.stop()
-"""], check=True)
+""", mock_connect[1].remote], check=True)
 
 
 def test_create_dataframe_types_pandas_columns_as_arrow(mock_connect):
@@ -14014,7 +14017,7 @@ def test_udt_converters_of_null_structs_and_maps():
         T.StructField("m", T.MapType(T.StringType(), T.LongType()))])) is None
 
 
-def test_timedelta_values_convert_as_pyspark():
+def test_timedelta_values_convert_as_pyspark(mock_connect):
     import datetime
     import re
 
@@ -14024,8 +14027,8 @@ def test_timedelta_values_convert_as_pyspark():
     # A day-time interval, rather than UNSUPPORTED_DATA_TYPE (the live suite checks values).
     one = datetime.timedelta(days=1, seconds=2, microseconds=3)
     F.lit(one)
-    _local_create_dataframe([(one,), (None,)])
-    _local_create_dataframe([(5,), (1.5,)], "d interval day to second")
+    _local_create_dataframe([(one,), (None,)], session=mock_connect[0])
+    _local_create_dataframe([(5,), (1.5,)], "d interval day to second", session=mock_connect[0])
     # Other values raise as PyArrow's conversion to duration[us] does.
     for value, error, message in (
         (True, pa.ArrowTypeError, "Expected integer, got bool"),
@@ -14034,16 +14037,17 @@ def test_timedelta_values_convert_as_pyspark():
         (2**63, OverflowError, "Python int too large to convert to C long"),
     ):
         with pytest.raises(error, match="^" + re.escape(message) + "$"):
-            _local_create_dataframe([(value,)], "d interval day to second")
+            _local_create_dataframe([(value,)], "d interval day to second", session=mock_connect[0])
 
 
-def _local_create_dataframe(*args, session=None):
-    # The local relation and its toDF are built without a server; a DDL schema, which PySpark
-    # asks the server to parse, is parsed as the server would.
+def _local_create_dataframe(*args, session):
+    # The local relation and its toDF are built without an execution, on a session of the mock
+    # server, which answers the settings that createDataFrame reads first, as PySpark's does; a
+    # DDL schema, which PySpark asks the server to parse, is parsed as the server would.
     args = list(args)
     if len(args) > 1 and isinstance(args[1], str) and ddl_json(args[1]) is not None:
         args[1] = T._parse_datatype_json_string(json.dumps(ddl_json(args[1])))
-    return (_offline_session() if session is None else session).createDataFrame(*args)
+    return session.createDataFrame(*args)
 
 
 def _is_local_created(mock_connect, *args):
@@ -14102,11 +14106,12 @@ _Pair = namedtuple("_Pair", ["x", "y"])
     # A namedtuple, as a Row, does not extend the names.
     ([_Pair(1, 2)], ["a"], "1", "2"),
 ])
-def test_create_dataframe_name_width_errors_as_pyspark(data, schema, expected, actual):
+def test_create_dataframe_name_width_errors_as_pyspark(
+        data, schema, expected, actual, mock_connect):
     from pyspark.errors import PySparkValueError
 
     with pytest.raises(PySparkValueError) as error:
-        _local_create_dataframe(data, schema)
+        _local_create_dataframe(data, schema, session=mock_connect[0])
     assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
     assert error.value.getMessageParameters() == {
         "expected_length": expected, "actual_length": actual}
@@ -14144,7 +14149,7 @@ def test_multi_and_categorical_labels_convert_cells_as_pyspark(
     assert table.column(0).to_pylist() == [cell]
 
 
-def test_create_dataframe_pandas_errors_as_pyspark():
+def test_create_dataframe_pandas_errors_as_pyspark(mock_connect):
     pd = pytest.importorskip("pandas")
     from pyspark.errors import PySparkTypeError, PySparkValueError
 
@@ -14152,23 +14157,23 @@ def test_create_dataframe_pandas_errors_as_pyspark():
     # pyspark reports the parsed type, also for an atomic DDL string.
     for schema, data_type in [(T.LongType(), "LongType()"), ("int", "IntegerType()")]:
         with pytest.raises(PySparkTypeError) as error:
-            _local_create_dataframe(pdf, schema)
+            _local_create_dataframe(pdf, schema, session=mock_connect[0])
         assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW"
         assert error.value.getMessageParameters() == {"data_type": data_type}
     for data, schema in [(pd.DataFrame(index=[0, 1]), None), ([], None), ([], ["a"]),
                          (pdf.iloc[:0], None), (pdf.iloc[:0], ["a", "b"])]:
         with pytest.raises(PySparkValueError) as error:
-            _local_create_dataframe(data, schema)
+            _local_create_dataframe(data, schema, session=mock_connect[0])
         assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
 
 
 @pytest.mark.parametrize("data", [[(None,)], [(1, None)], [{"a": None}], [{"a": 1}, {"b": None}]])
-def test_create_dataframe_cannot_type_an_all_null_field_as_pyspark(data):
+def test_create_dataframe_cannot_type_an_all_null_field_as_pyspark(data, mock_connect):
     from pyspark.errors import PySparkValueError
 
     # A field without a non-null value in any row has no type to infer.
     with pytest.raises(PySparkValueError) as error:
-        _local_create_dataframe(data, None)
+        _local_create_dataframe(data, None, session=mock_connect[0])
     assert error.value.getCondition() == "CANNOT_DETERMINE_TYPE"
 
 
@@ -14184,11 +14189,12 @@ def test_create_dataframe_cannot_type_an_all_null_field_as_pyspark(data):
     ([({1, 2},)], "CANNOT_INFER_TYPE_FOR_FIELD", {"field_name": "_1"}),
     ([(array.array("q", [1]),)], "CANNOT_INFER_TYPE_FOR_FIELD", {"field_name": "_1"}),
 ])
-def test_create_dataframe_raises_inference_errors_as_pyspark(data, condition, parameters):
+def test_create_dataframe_raises_inference_errors_as_pyspark(
+        data, condition, parameters, mock_connect):
     from pyspark.errors import PySparkTypeError
 
     with pytest.raises(PySparkTypeError) as error:
-        _local_create_dataframe(data)
+        _local_create_dataframe(data, session=mock_connect[0])
     assert error.value.getCondition() == condition
     assert error.value.getMessageParameters() == parameters
 
@@ -14644,12 +14650,12 @@ def test_grouping_sets_group_by_their_grouping_columns_as_pyspark(mock_connect):
             "expected_type": "Column, int or str", "arg_name": arg_name, "arg_type": arg_type}
 
 
-def test_create_dataframe_checks_every_row_against_the_merged_schema():
+def test_create_dataframe_checks_every_row_against_the_merged_schema(mock_connect):
     from pyspark.errors import PySparkValueError
 
     # Rows of different fields merge into one struct, which each Row must then fill.
     with pytest.raises(PySparkValueError) as error:
-        _local_create_dataframe([Row(a=1), Row(b=2)])
+        _local_create_dataframe([Row(a=1), Row(b=2)], session=mock_connect[0])
     assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
     assert error.value.getMessageParameters() == {"expected_length": "2", "actual_length": "1"}
 
@@ -14660,11 +14666,12 @@ def test_create_dataframe_checks_every_row_against_the_merged_schema():
     ("array<int>", "ArrayType"),
     (5, "int"),
 ])
-def test_create_dataframe_schema_is_names_a_struct_or_an_atomic_type(schema, arg_type):
+def test_create_dataframe_schema_is_names_a_struct_or_an_atomic_type(
+        schema, arg_type, mock_connect):
     from pyspark.errors import PySparkTypeError
 
     with pytest.raises(PySparkTypeError) as error:
-        _local_create_dataframe([(1,)], schema)
+        _local_create_dataframe([(1,)], schema, session=mock_connect[0])
     assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
     assert error.value.getMessageParameters() == {
         "arg_name": "schema", "expected_type": "list, None or StructType", "arg_type": arg_type}
@@ -14859,12 +14866,12 @@ def test_create_dataframe_of_a_dataframe_raises_as_pyspark():
     assert error.value.getMessageParameters() == {"arg_name": "data", "arg_type": "DataFrame"}
 
 
-def test_create_dataframe_warns_of_the_arguments_that_connect_ignores():
+def test_create_dataframe_warns_of_the_arguments_that_connect_ignores(mock_connect):
     # As PySpark Connect, which ignores both.
     with pytest.warns(UserWarning, match="'samplingRatio' is ignored"):
-        _local_create_dataframe([(1,)], None, 0.5)
+        _local_create_dataframe([(1,)], None, 0.5, session=mock_connect[0])
     with pytest.warns(UserWarning, match="'verifySchema' is ignored"):
-        _local_create_dataframe([(1,)], None, None, True)
+        _local_create_dataframe([(1,)], None, None, True, session=mock_connect[0])
 
 
 def test_create_dataframe_converts_numpy_scalars_as_pyarrow(mock_connect):
@@ -14892,7 +14899,7 @@ def test_create_dataframe_converts_numpy_scalars_as_pyarrow(mock_connect):
             "a IEEE 754 single precision value")),
     ]:
         with pytest.raises(ValueError, match=message):
-            _local_create_dataframe([(value,)], schema)
+            _local_create_dataframe([(value,)], schema, session=mock_connect[0])
 
 
 def test_a_subquery_of_a_deep_plan_is_sent_or_raises_recursion_error_as_pyspark(mock_connect):
@@ -15046,7 +15053,7 @@ thread.join()
     assert len(service.analyze_requests) == 3
 
 
-def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itself():
+def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itself(mock_connect):
     class Node:
         def __init__(self):
             self.parent = self
@@ -15056,7 +15063,7 @@ def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itsel
     # As PySpark, rather than overflowing the stack.
     for value in [Node(), cyclic]:
         with pytest.raises(RecursionError):
-            _local_create_dataframe([(value,)])
+            _local_create_dataframe([(value,)], session=mock_connect[0])
 
 
 # py_to_value converts object-dtype cells of customized pandas frames, plus fillna
@@ -15220,13 +15227,8 @@ def test_customized_pandas_row_frames_share_absent_safecheck_setting(
         f"Exception thrown when converting pandas.Series (object) with name '{label}' "
         f"to Arrow Array ({arrow_type})."
     )
-    if kind == "native_without_rows":
-        # Preserve the existing native fallback's default when no Row settings were read.
-        expected += (
-            " It can be caused by overflows or other unsafe conversions warned by Arrow. "
-            "Arrow safe type check can be disabled by using SQL config "
-            "`spark.sql.execution.pandas.convertToArrowArraySafely`."
-        )
+    # Every kind takes the setting of the one read of createDataFrame, as PySpark's does, so an
+    # absent value is no safe check, and the message has no hint of it.
     assert str(error.value) == expected
     assert service.read_confs.count(key) - before_reads == 1
     assert len(service.execute_requests) == before_execute
@@ -15606,9 +15608,11 @@ def test_customized_pandas_row_discovery_walks_only_object_columns(mock_connect,
 
 
 @pytest.mark.parametrize("native_invalid", [False, True])
-def test_customized_pandas_row_setup_conf_error_follows_column_order(
+def test_customized_pandas_row_conf_error_comes_before_any_conversion(
     mock_connect, monkeypatch, native_invalid
 ):
+    # PySpark's createDataFrame reads its settings before it converts any column, so the error of
+    # that read comes first, whatever the columns.
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
 
     pd = pytest.importorskip("pandas")
@@ -15622,19 +15626,15 @@ def test_customized_pandas_row_setup_conf_error_follows_column_order(
         "native": [2**63 if native_invalid else 1], "rows": [Row(a=2)],
     }, dtype=object)
     before = len(service.execute_requests)
-    if native_invalid:
-        with pytest.raises(OverflowError, match="^Python int too large to convert to C long$"):
-            spark.createDataFrame(frame)
-    else:
-        with pytest.raises(SparkConnectGrpcException, match=r"\[SQL_CONF_NOT_FOUND\]") as error:
-            spark.createDataFrame(frame)
-        assert error.value.getGrpcStatusCode() == StatusCode.INTERNAL
+    with pytest.raises(SparkConnectGrpcException, match=r"\[SQL_CONF_NOT_FOUND\]") as error:
+        spark.createDataFrame(frame)
+    assert error.value.getGrpcStatusCode() == StatusCode.INTERNAL
     assert missing in service.read_confs
     assert len(service.execute_requests) == before
 
 
 @pytest.mark.parametrize("schema", [None, ["renamed"]])
-def test_customized_pandas_without_rows_skips_arrow_settings(mock_connect, schema):
+def test_customized_pandas_without_rows_reads_the_settings_once(mock_connect, schema):
     pd = pytest.importorskip("pandas")
     spark, service = mock_connect
     arrow_settings = {
@@ -15653,7 +15653,9 @@ def test_customized_pandas_without_rows_skips_arrow_settings(mock_connect, schem
     before_confs = len(service.read_confs)
     before_execute = len(service.execute_requests)
     assert type(spark.createDataFrame(frame, schema)).__name__ == "DataFrame"
-    assert arrow_settings.isdisjoint(service.read_confs[before_confs:])
+    # The one read of the settings of createDataFrame, as PySpark's, and no other.
+    read = service.read_confs[before_confs:]
+    assert arrow_settings <= set(read) and len(read) == len(set(read))
     assert len(service.execute_requests) == before_execute
 
 
@@ -16563,6 +16565,10 @@ def _exact_date_capture_server(connection):
         "spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40),
         "spark.sql.execution.pandas.convertToArrowArraySafely": "true",
         "spark.sql.execution.pandas.inferPandasDictAsMap": "false",
+        # The inference settings, which createDataFrame reads with the others.
+        "spark.sql.pyspark.inferNestedDictAsStruct.enabled": "false",
+        "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled": "false",
+        "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled": "false",
     }
 
     def _exact_date_config(request, context):
@@ -26017,10 +26023,10 @@ def test_exact_string_converts_as_text(mock_connect, text):
 
 
 @pytest.mark.parametrize("text", ["\ud800", "\udfff", "a\ud800b"])
-def test_exact_string_surrogate_error_preserves_generic_fallback(text):
+def test_exact_string_surrogate_error_preserves_generic_fallback(text, mock_connect):
     # As PySpark, where PyArrow cannot encode a lone surrogate either.
     with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
-        _local_create_dataframe([Row(value=text)])
+        _local_create_dataframe([Row(value=text)], session=mock_connect[0])
 
 
 def test_exact_string_subclass_uses_generic_conversion(mock_connect):
@@ -26035,7 +26041,8 @@ def test_exact_string_subclass_uses_generic_conversion(mock_connect):
     assert _is_local_created(mock_connect, [Row(value=IndexString("x"))])
     for other, data_type in [(5, "LongType"), ("y", "StringType")]:
         with pytest.raises(PySparkTypeError) as error:
-            _local_create_dataframe([Row(value=IndexString("x")), Row(value=other)])
+            _local_create_dataframe(
+                [Row(value=IndexString("x")), Row(value=other)], session=mock_connect[0])
         assert error.value.getCondition() == "CANNOT_MERGE_TYPE"
         assert error.value.getMessageParameters() == {
             "data_type1": "StructType", "data_type2": data_type}

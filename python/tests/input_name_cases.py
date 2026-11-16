@@ -114,6 +114,10 @@ class InputNameTests(unittest.TestCase):
                 b"spark.sql.session.localRelationBatchOfChunksSizeBytes": str(1 << 40).encode(),
                 b"spark.sql.execution.pandas.convertToArrowArraySafely": b"true",
                 b"spark.sql.execution.pandas.inferPandasDictAsMap": b"false",
+                # The inference settings, which createDataFrame reads with the others.
+                b"spark.sql.pyspark.inferNestedDictAsStruct.enabled": b"false",
+                b"spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled": b"false",
+                b"spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled": b"false",
             }
             pairs = b"".join(_bytes(2, _bytes(1, key) + _bytes(2, values[key]))
                              for key in keys)

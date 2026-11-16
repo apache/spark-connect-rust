@@ -1905,7 +1905,11 @@ impl PySparkSession {
                             PandasDecimalContext {
                                 dtype: dtypes.get(i).map_or("object", String::as_str),
                                 label: labels.get(i).unwrap_or(name),
-                                safecheck: row_settings.as_ref().map(|settings| settings.safecheck),
+                                // Of the one read of the settings, as PySpark's.
+                                safecheck: options
+                                    .as_ref()
+                                    .map(|options| options.safecheck())
+                                    .or(row_settings.as_ref().map(|settings| settings.safecheck)),
                             },
                         )?;
                         let column_names: std::sync::Arc<[String]> = vec![name.clone()].into();
@@ -1942,7 +1946,8 @@ impl PySparkSession {
                     PandasDecimalContext {
                         dtype: dtypes.get(i).map_or("object", String::as_str),
                         label: labels.get(i).unwrap_or(&field.name),
-                        safecheck: None,
+                        // Of the one read of the settings, as PySpark's.
+                        safecheck: options.as_ref().map(|options| options.safecheck()),
                     },
                 )?;
             }
@@ -2163,9 +2168,9 @@ impl PySparkSession {
             "Exception thrown when converting pandas.Series ({dtype}) with name '{label}' to \
              Arrow Array (decimal128({precision}, {scale}))."
         );
-        // Row frames reuse the Arrow settings already read for the whole frame. Other
-        // native frames retain their existing read-on-error behavior and default.
-        // A signal that ends the read raises its exception, which the default does not replace.
+        // The settings that createDataFrame read for the whole frame, as PySpark reads them
+        // before it converts; without them, a read on the error, of the existing default. A
+        // signal that ends that read raises its exception, which the default does not replace.
         let safecheck = match safecheck {
             Some(safecheck) => safecheck,
             None => crate::interrupt::interruptible_outcome(py, &self.session, || {
