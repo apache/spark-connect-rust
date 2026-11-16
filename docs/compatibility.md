@@ -1189,7 +1189,12 @@ A table name that is neither a str nor bytes, and bytes that are not UTF-8, give
 decode error when it is built, as PySpark's do. A reader's format that is not a str is kept as the
 object it is, which `_format` gives back, and a copy or a pickle of the reader keeps it.
 `SparkSession.builder.remote` keeps a value that is not a str as PySpark does, and `create` rejects
-it as an invalid Spark Connect URL, as PySpark's `create` does for its `str()`.
+it as an invalid Spark Connect URL, as PySpark's `create` does for its `str()`. An explicit `None`,
+given as `remote(None)`, `remote(url=None)`, `remote(location=None)` or
+`config("spark.remote", None)`, is kept as None: `create` and `getOrCreate` fail PySpark's
+assertion whatever `SPARK_REMOTE` is,
+unless a session exists, which `getOrCreate` returns. A later `remote` replaces it. A `remote()`
+without an argument is `sc://localhost`, as in PySpark's Connect builder.
 
 ## Native NaiveBayes
 

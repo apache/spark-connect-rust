@@ -27384,6 +27384,35 @@ def test_a_builder_remote_that_is_not_a_str_fails_create_as_pyspark(mock_connect
             builder.create()
 
 
+def test_a_builder_remote_set_to_none_fails_create_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark's Connect builder: `remote(None)`, and a config of spark.remote of None, keep the
+    # URL as None, which `create` asserts whatever SPARK_REMOTE is. `getOrCreate` returns the
+    # session that exists, as PySpark's does, and a later `remote` replaces the None.
+    from pyspark.sql import SparkSession
+
+    spark, service = mock_connect
+    monkeypatch.setenv("SPARK_REMOTE", service.remote)
+    builders = [
+        lambda: SparkSession.builder.remote(None),
+        lambda: SparkSession.builder.remote(location=None),
+        lambda: SparkSession.builder.config("spark.remote", None),
+    ]
+    for builder in builders:
+        with pytest.raises(AssertionError):
+            builder().create()
+        assert builder().getOrCreate() is spark
+    replaced = SparkSession.builder.remote(None).remote(service.remote).create()
+    try:
+        assert replaced is not spark
+    finally:
+        replaced.stop()
+    # The keyword `url` is the positional URL, so None by it fails the same way, and a remote
+    # without an argument is the default URL.
+    with pytest.raises(AssertionError):
+        SparkSession.builder.remote(url=None).create()
+    assert "sc://localhost" in repr(SparkSession.builder.remote().__reduce__())
+
+
 def test_a_shallow_copy_of_a_merge_builder_keeps_its_schema_evolution_as_pyspark(mock_connect):
     # As PySpark, where withSchemaEvolution sets the attribute of the builder it is called on,
     # so a copy that sets it sends it alone, while the clauses that the copy adds are shared.
