@@ -842,6 +842,12 @@ def test_ml_connect_setters_set_the_params_of_their_receiver_as_pyspark(ml_mock)
         ) == sorted(setters)
         receiver = cls()
         for setter, name in setters.items():
+            if (cls.__name__, name) in _PYSPARKS_BROKEN_SETTERS:
+                # PySpark's setter sets a param of another name, which the class does not have.
+                with pytest.raises(AttributeError, match=f"has no attribute '{_PYSPARKS_BROKEN_SETTERS[(cls.__name__, name)]}'"):
+                    getattr(receiver, setter)(value=values[name])
+                receiver._set(**{name: values[name]})
+                continue
             # By the name of the argument of PySpark's setters, value. The evaluators' setters are
             # of this client, as PySpark's evaluators have none, with the same argument.
             assert getattr(receiver, setter)(value=values[name]) is receiver, (cls, setter)
@@ -864,6 +870,18 @@ _NO_PARAM_MAP = (
     "The native ML classes take no param map: set their params with the constructor or "
     "setParams instead."
 )
+
+
+# The setters of PySpark 4.3.0 that set a param of another name, which the class does not have
+# (`LinearRegression.setLoss` sets `lossType`), and so raise the AttributeError of its `_set`:
+# the public classes run PySpark's setters, of the same error. By the class and param, the name
+# that the setter sets.
+_PYSPARKS_BROKEN_SETTERS = {("LinearRegression", "loss"): "lossType"}
+
+
+def _parameters_of(signature):
+    """The names, kinds and defaults of the parameters of `signature`, of its annotations."""
+    return [(p.name, p.kind, repr(p.default)) for p in signature.parameters.values()]
 
 
 def _no_param_map(estimator, key):
@@ -901,8 +919,9 @@ def test_ml_connect_fpm_and_als_set_params_and_params_argument_as_pyspark(ml_moc
 
     spark, service = ml_mock
     for cls in [FPGrowth, PrefixSpan, ALS]:
-        assert str(inspect.signature(cls.setParams)) == (
-            "(self, " + str(inspect.signature(cls))[1:]
+        # Of the parameters of the constructor (PySpark's signatures, of their annotations).
+        assert _parameters_of(inspect.signature(cls.setParams))[1:] == _parameters_of(
+            inspect.signature(cls)
         ), cls
         obj = cls()
         name, value = ("maxIter", 5) if cls is ALS else ("minSupport", 0.5)
@@ -951,8 +970,8 @@ def test_ml_connect_set_params_as_pyspark(ml_mock):
                 return cls(classifier=connect.LinearSVC(), **given)
             return cls(**given)
 
-        assert str(inspect.signature(cls.setParams)) == (
-            "(self, " + str(inspect.signature(cls))[1:]
+        assert _parameters_of(inspect.signature(cls.setParams))[1:] == _parameters_of(
+            inspect.signature(cls)
         ), name
         with pytest.raises(TypeError) as error:
             make().setParams(bogus=1)
@@ -1465,6 +1484,8 @@ def test_ml_connect_params_convert_with_the_type_converters_of_pyspark(ml_mock):
         cls = getattr(connect, name)
         for param, kind in params.items():
             setter = "set" + param[0].upper() + param[1:]
+            if (name, param) in _PYSPARKS_BROKEN_SETTERS:
+                continue
             for value, expected in _NATIVE_CONVERTED[kind]:
                 made = [getattr(cls(), setter)(value)]
                 if param != "thresholds":
@@ -1512,12 +1533,12 @@ def test_ml_connect_evaluators_take_the_signatures_and_defaults_of_pyspark(ml_mo
     import inspect
 
     import pyspark.ml.connect as connect
-    from _evaluators import FIXTURE
+    from _evaluators import FIXTURE, signature_text
 
     spark, service = ml_mock
     for name, info in FIXTURE["classes"].items():
         cls = getattr(connect, name)
-        assert str(inspect.signature(cls)) == info["signature"]
+        assert signature_text(inspect.signature(cls)) == info["signature"]
         assert _native_sent(spark, service, cls(), []) == {}
 
 
@@ -1577,6 +1598,8 @@ def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
         cls = getattr(connect, name)
         for param, kind in params.items():
             setter = "set" + param[0].upper() + param[1:]
+            if (name, param) in _PYSPARKS_BROKEN_SETTERS:
+                continue
             value = _NATIVE_CONVERTED[kind][0][0]
             obj = cls()
             assert getattr(obj, setter)(value) is obj
@@ -4122,8 +4145,8 @@ def test_one_vs_rest_signature_and_native_classifier_validation():
     assert estimator.setClassifier(LinearSVC()) is estimator
     for key, value in dict(featuresCol="x", labelCol="y", predictionCol="p", rawPredictionCol="r", weightCol="w", parallelism=2).items():
         assert getattr(estimator, "set" + key[0].upper() + key[1:])(value) is estimator
-    with pytest.raises(TypeError):
-        estimator.setClassifier(object())
+    # PySpark's classifier param takes any object (`TypeConverters.identity`).
+    assert type(OneVsRest().setClassifier(object()).getClassifier()) is object
     with pytest.raises(TypeError):
         OneVsRest(LinearSVC())
     with pytest.raises(TypeError):
