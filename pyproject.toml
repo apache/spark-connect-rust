@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "pyspark-client-rust"
-version = "4.3.0"
+version = "4.4.0"
 description = "Rust-backed drop-in for the PySpark Spark Connect client (pyspark-client): the same `pyspark` API and results, powered by a native Rust engine (tonic) instead of grpcio/py4j."
 readme = "README.md"
 requires-python = ">=3.9"
