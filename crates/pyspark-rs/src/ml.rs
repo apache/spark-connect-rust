@@ -1987,32 +1987,28 @@ native_pymethods! {
         // A list of param maps fits once per map (`fit_with`), each in PySpark's order below.
         fit_with(slf, dataset, params, || -> PyResult<_> {
             let py = slf.py();
-            reject_pandas(dataset, "fit")?;
             // PySpark's `_fit` reads the classifier of the param, which raises its KeyError when
             // it is unset.
             let classifier = slf.call_method0("getClassifier")?.unbind();
-            // A classifier that is not a native one, such as PySpark's own classes or a Python
-            // subclass of them, is fit by PySpark's own `OneVsRest._fit` over this object's
-            // params, as PySpark fits any classifier: its model is PySpark's `OneVsRestModel` of
-            // the classifier's models.
-            if !classifier.bind(py).is_none() && !is_native_classifier(classifier.bind(py)) {
-                return Ok(py
-                    .import("pyspark.ml.classification")?
-                    .getattr("OneVsRest")?
-                    .getattr("_fit")?
-                    .call1((slf, dataset))?
-                    .unbind());
-            }
-            // PySpark's `_fit` reads the max label first, by `dataset.agg`: another object raises the
-            // AttributeError of `agg`.
-            let df = match dataset.extract::<PyRef<'_, PyDataFrame>>() {
-                Ok(df) => df.dataframe.clone(),
-                Err(_) => {
-                    dataset.getattr("agg")?;
-                    return Err(PyTypeError::new_err(format!(
-                        "fit() takes a Spark DataFrame, not '{}'",
-                        dataset.get_type().name()?
-                    )));
+            // The native fit is that of a native classifier on a Spark DataFrame. PySpark's own
+            // `OneVsRest._fit` fits any other over this object's params, as PySpark does: a
+            // classifier that is not a native one (PySpark's own classes, or a Python subclass of
+            // them), whose model is PySpark's `OneVsRestModel` of the classifier's models; a None
+            // classifier, which fails at its first use there; and a dataset that is not a Spark
+            // DataFrame, such as a pandas DataFrame, which fails at the read of its max label.
+            let spark_df = dataset
+                .extract::<PyRef<'_, PyDataFrame>>()
+                .ok()
+                .map(|df| df.dataframe.clone());
+            let df = match spark_df {
+                Some(df) if is_native_classifier(classifier.bind(py)) => df,
+                _ => {
+                    return Ok(py
+                        .import("pyspark.ml.classification")?
+                        .getattr("OneVsRest")?
+                        .getattr("_fit")?
+                        .call1((slf, dataset))?
+                        .unbind());
                 }
             };
             let defaults = params_api::fit_defaults(slf)?;
@@ -2024,11 +2020,6 @@ native_pymethods! {
             // or infinite max, and a null parallelism, raise their errors of this Python.
             let builtins = py.import("builtins")?;
             let num_classes = builtins.getattr("int")?.call1((max,))?.add(1)?;
-            // A None classifier fails at its first use by the fits, as PySpark's
-            // `classifier.labelCol` does.
-            if classifier.bind(py).is_none() {
-                let _ = classifier.bind(py).getattr("labelCol")?;
-            }
             // PySpark passes the weight to the classifiers that are a `HasWeightCol`, and warns of
             // the others by the classifier's `str` (its uid), as `"...{}...".format(classifier)`.
             let supports_weight = native_classifier(classifier.bind(py), false)?.supports_weight();

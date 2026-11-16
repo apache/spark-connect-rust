@@ -1255,8 +1255,9 @@ def test_ml_connect_fit_of_a_list_of_param_maps_as_pyspark(ml_mock):
         assert estimator.fit(pdf, []) == []
         assert estimator.fit(pdf, ()) == []
         assert _requests_but_deletes(service) == sent
-        # A map reads the dataset, which must be a Spark DataFrame, as fit(pdf) reads it.
-        with pytest.raises(TypeError):
+        # A map reads the dataset, which must be a Spark DataFrame, as fit(pdf) reads it. PySpark's
+        # own OneVsRest._fit, which fits it, raises the KeyError of its pandas aggregate instead.
+        with pytest.raises(KeyError if isinstance(estimator, connect.OneVsRest) else TypeError):
             estimator.fit(pdf, [{}])
 
 
@@ -4274,12 +4275,35 @@ def _assert_rejects_pandas(method, pdf):
         assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE"
         assert error.value.getMessageParameters() == {"data_type": type(pdf).__name__}
         return
+    if type(method.__self__).__name__ == "OneVsRest":
+        # The fit of a OneVsRest of no classifier is PySpark's own OneVsRest._fit's, as for any
+        # dataset that is not a Spark DataFrame: it reads the classifier first, and raises the
+        # KeyError of that unset param (test_native_one_vs_rest_fit_of_pandas_is_pysparks has
+        # a classifier).
+        with pytest.raises(KeyError) as error:
+            method(dataset=pdf)
+        assert error.value.args[0].name == "classifier"
+        return
     with pytest.raises(TypeError) as error:
         method(dataset=pdf)
     assert str(error.value) == (
         f"{method.__name__}() requires a Spark DataFrame; pandas DataFrames are not supported. "
         "Convert the input with spark.createDataFrame(...) first."
     )
+
+
+def test_native_one_vs_rest_fit_of_pandas_is_pysparks(pandas_ml_input):
+    # The native OneVsRest fits a dataset that is not a Spark DataFrame by PySpark's own
+    # OneVsRest._fit, which reads its max label by the dataset's own agg: a pandas DataFrame
+    # raises the error of that expression of PySpark's, before any request.
+    import pyspark.ml.connect as connect
+
+    with pytest.raises(Exception) as expected:
+        int(pandas_ml_input.agg({"label": "max"}).head()["max(label)"]) + 1
+    estimator = connect.OneVsRest(classifier=connect.LinearSVC())
+    with pytest.raises(type(expected.value)) as error:
+        estimator.fit(pandas_ml_input)
+    assert error.value.args == expected.value.args
 
 
 def test_stop_words_remover_load_default_stop_words_asserts_an_active_session():
