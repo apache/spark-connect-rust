@@ -2620,7 +2620,9 @@ impl OneVsRest {
                         if index >= count {
                             break;
                         }
-                        let binary_label = format!("{}_label_{}", this.operator.uid, index);
+                        // PySpark's `OneVsRest._fit` names the binary label of the class
+                        // "mc2b$" + str(index).
+                        let binary_label = format!("mc2b${index}");
                         let binary = training.with_column(
                             &binary_label,
                             when(
@@ -2788,79 +2790,134 @@ impl OneVsRestModel {
         self.models.len()
     }
 
+    /// PySpark's `OneVsRestModel._transform`, of the same DataFrame operations (and so the same
+    /// requests): the scores of each submodel, of its own params, are appended to an accumulator
+    /// column, which the rawPrediction and the prediction are derived from.
     fn transformed(&self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
-        use crate::column::{lit, Column};
+        use crate::column::{col, lit, Column};
         use crate::expression::Expression;
-        use crate::functions::{array, array_append, get};
+        use crate::functions::{array, array_append};
         if df.session.session_id() != self.session_id {
             return Err(SparkError::value_msg(
                 "A fitted ML model must transform data from its fitting session",
             ));
         }
         let original = df.columns()?;
-        let uid = Uuid::new_v4().to_string();
-        let acc = format!("{uid}_scores");
-        let raw = format!("{uid}_raw");
-        let mut result = df.clone();
-        for (index, base) in self.models.iter().enumerate() {
-            let mut model = base.clone_box();
-            let mut params = std::mem::take(model.params_mut())
-                .set_param_string(
-                    "featuresCol",
-                    self.params.string_or("featuresCol", "features"),
-                )
-                .set_param_string("rawPredictionCol", &raw)
-                .set_param_string("predictionCol", "");
-            if !model.operator().name.ends_with("LinearSVCModel") {
-                params = params.set_param_string("probabilityCol", "");
-            }
-            *model.params_mut() = params;
-            let transformed = model.transform(&result)?;
-            let values = Column::new(Expression::function(
-                "vector_to_array",
-                vec![
-                    ml_exact_column(&raw).expression().clone(),
-                    crate::column::lit_string("float64").expression().clone(),
-                ],
-            ));
-            let score = get(values, lit(1));
-            result = transformed
-                .with_column(
-                    &acc,
-                    if index == 0 {
-                        array([score])
-                    } else {
-                        array_append(ml_exact_column(&acc), score)
-                    },
-                )
-                .select(
-                    original
-                        .iter()
-                        .map(|name| ml_exact_column(name))
-                        .chain(std::iter::once(ml_exact_column(&acc))),
-                );
-        }
-        let raw_output = self.params.string_or("rawPredictionCol", "rawPrediction");
-        if !raw_output.is_empty() {
+        let acc = format!("mbc$acc{}", Uuid::new_v4());
+        let raw = self.params.string_or("rawPredictionCol", "rawPrediction");
+        let new_dataset =
+            df.with_column(&acc, array(Vec::<Column>::new()).cast_str("array<double>"));
+        // PySpark persists the dataset when its input is not persisted, at MEMORY_AND_DISK.
+        let enable = is_storage_level_none(&df.storage_level()?);
+        let aggregated = validators::with_cached_at(
+            &new_dataset,
+            proto::StorageLevel {
+                use_disk: true,
+                use_memory: true,
+                use_off_heap: false,
+                deserialized: false,
+                replication: 1,
+            },
+            enable,
+            |cached| {
+                let mut aggregated = cached.clone();
+                for base in &self.models {
+                    let tmp = format!("mbc$tmp{}", Uuid::new_v4());
+                    let mut model = base.clone_box();
+                    let transformed = model.transform(&aggregated)?.select(
+                        original
+                            .iter()
+                            .map(|name| col(name))
+                            .chain([col(raw), col(&acc)]),
+                    );
+                    let updated = transformed
+                        .with_column(&tmp, array_append(col(&acc), vector_get(col(raw), lit(1))));
+                    aggregated = updated
+                        .select(
+                            original
+                                .iter()
+                                .map(|name| col(name))
+                                .chain(std::iter::once(col(&tmp))),
+                        )
+                        .with_column_renamed(&tmp, &acc);
+                }
+                Ok(aggregated)
+            },
+        )?;
+        let mut result = aggregated;
+        if !raw.is_empty() {
             result = result.with_column(
-                raw_output,
+                raw,
                 Column::new(Expression::function(
                     "array_to_vector",
-                    vec![ml_exact_column(&acc).expression().clone()],
+                    vec![col(&acc).expression().clone()],
                 )),
             );
         }
         let prediction = self.params.string_or("predictionCol", "prediction");
         if !prediction.is_empty() {
-            result = result.with_column(prediction, one_vs_rest_prediction(ml_exact_column(&acc)));
+            // The index of the classifier with the highest score as the prediction.
+            result = result.with_column(prediction, array_argmax(col(&acc)).cast_str("double"));
         }
-        Ok(result.drop_columns(std::iter::empty::<Column>(), [acc]))
+        Ok(result.drop([acc]))
     }
 }
 
-// PySpark's array_argmax ignores NaN/null, keeps the first tie and returns -1
-// when no score exceeds negative infinity.
-fn one_vs_rest_prediction(scores: crate::column::Column) -> crate::column::Column {
+/// Whether a storage level is PySpark's `StorageLevel(False, False, False, False)` (of replication
+/// 1, which its `==` compares too): the storage of a DataFrame that is not persisted.
+fn is_storage_level_none(level: &proto::StorageLevel) -> bool {
+    !level.use_disk
+        && !level.use_memory
+        && !level.use_off_heap
+        && !level.deserialized
+        && level.replication == 1
+}
+
+/// PySpark's `InternalFunction.vector_get`: the element `idx` of the vector `vec`, which is dense
+/// or sparse, and an error for an index out of range.
+fn vector_get(vec: crate::column::Column, idx: crate::column::Column) -> crate::column::Column {
+    use crate::column::{lit, lit_double, lit_string, when, Column};
+    use crate::expression::Expression;
+    use crate::functions::{array_size, get, raise_error, unwrap_udt};
+    let unwrapped = unwrap_udt(vec);
+    let is_dense = unwrapped.clone().get_field("type").eq(lit(1));
+    let values = unwrapped.clone().get_field("values");
+    let size = when(is_dense.clone(), array_size(values.clone()))
+        .otherwise(unwrapped.clone().get_field("size"));
+    // The internal function of the server, sent without a flag, as PySpark's connect client does.
+    let sparse_idx = Column::new(Expression::function(
+        "array_binary_search",
+        vec![
+            unwrapped.clone().get_field("indices").expression().clone(),
+            idx.expression().clone(),
+        ],
+    ));
+    let value = when(is_dense, get(values.clone(), idx.clone()))
+        .when(
+            sparse_idx.clone().ge(lit(0)),
+            get(values.clone(), sparse_idx),
+        )
+        .otherwise(lit_double(0.0));
+    let message = Column::new(Expression::function(
+        "printf",
+        vec![
+            lit_string("Vector index must be in [0, %s), but got %s")
+                .expression()
+                .clone(),
+            size.clone().expression().clone(),
+            idx.clone().expression().clone(),
+        ],
+    ));
+    when(
+        idx.clone().ge(lit(0)).and(idx.clone().lt(size.clone())),
+        value,
+    )
+    .otherwise(raise_error(message))
+}
+
+/// PySpark's `InternalFunction.array_argmax`: the index of the first greatest of `scores`, which
+/// ignores NaN and null, and is -1 when no score is above negative infinity.
+fn array_argmax(scores: crate::column::Column) -> crate::column::Column {
     use crate::column::{lit, lit_double, when};
     use crate::functions::{aggregate_with_finish, r#struct};
     aggregate_with_finish(
@@ -2871,10 +2928,11 @@ fn one_vs_rest_prediction(scores: crate::column::Column) -> crate::column::Colum
             lit(0).alias("j"),
         ]),
         |args| {
+            let acc = args[0].clone();
             let value = args[1].clone();
-            let best = args[0].clone().get_field("v");
-            let index = args[0].clone().get_field("i");
-            let current = args[0].clone().get_field("j");
+            let best = acc.clone().get_field("v");
+            let index = acc.clone().get_field("i");
+            let current = acc.get_field("j");
             when(
                 value
                     .clone()
@@ -2885,18 +2943,17 @@ fn one_vs_rest_prediction(scores: crate::column::Column) -> crate::column::Colum
                 r#struct([
                     value.alias("v"),
                     current.clone().alias("i"),
-                    (current.clone() + lit(1)).alias("j"),
+                    current.clone() + lit(1),
                 ]),
             )
             .otherwise(r#struct([
                 best.alias("v"),
                 index.alias("i"),
-                (current + lit(1)).alias("j"),
+                current + lit(1),
             ]))
         },
         |args| args[0].clone().get_field("i"),
     )
-    .cast(DataType::Double)
 }
 
 impl Transformer for OneVsRestModel {

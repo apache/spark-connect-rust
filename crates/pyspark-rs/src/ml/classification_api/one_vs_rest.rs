@@ -12,13 +12,11 @@ use spark_connect::ml::{
 use spark_connect::SparkSession;
 use std::sync::{Mutex, PoisonError};
 
-/// The fit of a OneVsRest, of what its model's submodels are made of: the training DataFrame, the
-/// prefix of the names of the binary labels that the core fits them with, and the columns of
-/// the fit.
+/// The fit of a OneVsRest, of what its model's submodels are made of: the training DataFrame and
+/// the columns of the fit (the binary labels are PySpark's `mc2b$<class>`).
 #[derive(Clone)]
 pub(crate) struct OneVsRestFit {
     pub(crate) train: DataFrame,
-    pub(crate) label_prefix: String,
     pub(crate) label: String,
     pub(crate) features: String,
     pub(crate) weight: Option<String>,
@@ -106,7 +104,7 @@ fn binary_frame(fit: &OneVsRestFit, index: usize) -> DataFrame {
         columns.push(ml_column(weight));
     }
     fit.train.select(columns).with_column(
-        &format!("{}_label_{}", fit.label_prefix, index),
+        &format!("mc2b${index}"),
         when(
             ml_column(&fit.label).eq(lit_double(index as f64)),
             lit_double(1.0),

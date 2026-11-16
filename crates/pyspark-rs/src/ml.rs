@@ -2044,11 +2044,9 @@ native_pymethods! {
             // The classifier's params are serialized by its fits, which run in that pool.
             core = core.set_classifier(native_classifier(classifier.bind(py), true)?);
             core.ensure_operator();
-            // The names of the binary labels of the classes, and of the columns of the fit, which
-            // the submodels of the model are made of.
+            // The columns of the fit, which the submodels of the model are made of.
             let fit = classification_api::OneVsRestFit {
                 train: df.clone(),
-                label_prefix: Estimator::operator(&core).uid.clone(),
                 label: core.label_col().to_string(),
                 features: core.features_col().to_string(),
                 weight: core

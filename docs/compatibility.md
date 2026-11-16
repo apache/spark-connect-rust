@@ -1292,14 +1292,21 @@ perceptron (FMClassifier included). For the perceptron, Python warns
 `weightCol is ignored, as it is not supported by <uid> now.`, with the classifier's
 uid, as PySpark does, and fits without the weights.
 
-The model aggregates positive-class raw scores into `rawPrediction` and chooses
-the first highest score for `prediction`, ignoring NaN/null scores as PySpark
-does. It produces no probability column. In Python, `transform` is PySpark's
-`OneVsRestModel._transform`: it composes the transforms of the `models` with their
-own params, so the model's `featuresCol` is not read, and a `rawPredictionCol` that
-the submodels do not produce fails as PySpark's does. Temporary columns and
-fit-created caches are cleaned up, and transformed DataFrames retain the binary
-models for lazy evaluation. Models must transform data in their fitting session.
+The model aggregates the positive-class raw scores of its submodels into `rawPrediction` and
+chooses the first highest score for `prediction`, ignoring NaN/null scores as PySpark does; it
+produces no probability column. In Python, `transform` is PySpark's own
+`OneVsRestModel._transform`, and the Rust transform is a port of it, with the same DataFrame
+operations and so the same requests. Each submodel transforms the data with its own `featuresCol`
+and `rawPredictionCol`, not the model's, so a model whose `featuresCol` names no column still
+transforms, and a model `rawPredictionCol` that the submodels do not produce fails with
+`UNRESOLVED_COLUMN` when the transform is evaluated, as PySpark's does. The scores are accumulated
+in a `mbc$acc<uuid>` column. When the input is not persisted, the transform persists it at
+`MEMORY_AND_DISK` while it builds the composition and unpersists it then, as PySpark's
+`_cache_spark_dataset` does. With `SPARKML_TEMP_DFS_PATH` set, a copy of the input is written there
+and read back, and the copy is deleted before the transform returns: as in PySpark, the returned
+DataFrame then fails with `PATH_NOT_FOUND` when it is evaluated. Temporary columns and fit-created
+caches are cleaned up, and transformed DataFrames retain the binary models for lazy evaluation.
+Models must transform data in their fitting session.
 
 Rust `OneVsRest::fit` returns the typed `OneVsRestModel`. Its `models()` gives each binary
 submodel as its typed model, one `SubModel` variant per native classifier, and `classifier()`

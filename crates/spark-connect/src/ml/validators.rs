@@ -226,10 +226,33 @@ fn check_pool(parallelism: i64, maps: usize) -> Result<()> {
     Ok(())
 }
 
-/// Run `body` of `dataset` cached, as `_cache_spark_dataset`: of a copy saved under
-/// `SPARKML_TEMP_DFS_PATH`, if set, which the ML helper deletes after; else persisted
-/// (`MEMORY_AND_DISK_DESER`), and unpersisted after.
+/// Run `body` of `dataset` cached, as `_cache_spark_dataset` does by default: persisted
+/// (`MEMORY_AND_DISK_DESER`), and unpersisted after, or of a copy saved under
+/// `SPARKML_TEMP_DFS_PATH` when that is set.
 fn with_cached<R>(dataset: &DataFrame, body: impl FnOnce(&DataFrame) -> Result<R>) -> Result<R> {
+    let level = proto::StorageLevel {
+        use_disk: true,
+        use_memory: true,
+        use_off_heap: false,
+        deserialized: true,
+        replication: 1,
+    };
+    with_cached_at(dataset, level, true, body)
+}
+
+/// Run `body` of `dataset` cached at `level`, as `_cache_spark_dataset(dataset,
+/// storageLevel=level, enable=enable)`: of `dataset` itself, uncached, if not `enable`; else of a
+/// copy saved under `SPARKML_TEMP_DFS_PATH`, if set, which the ML helper deletes after; else
+/// persisted at `level`, and unpersisted after `body` returns.
+pub(super) fn with_cached_at<R>(
+    dataset: &DataFrame,
+    level: proto::StorageLevel,
+    enable: bool,
+    body: impl FnOnce(&DataFrame) -> Result<R>,
+) -> Result<R> {
+    if !enable {
+        return body(dataset);
+    }
     match std::env::var("SPARKML_TEMP_DFS_PATH") {
         Ok(dir) if !dir.is_empty() => {
             let path = join_path(&dir, &uuid::Uuid::new_v4().simple().to_string());
@@ -242,7 +265,7 @@ fn with_cached<R>(dataset: &DataFrame, body: impl FnOnce(&DataFrame) -> Result<R
             Ok(value)
         }
         _ => {
-            dataset.cache()?;
+            dataset.persist(level)?;
             let result = body(dataset);
             let unpersisted = dataset.unpersist(false);
             let value = result?;
