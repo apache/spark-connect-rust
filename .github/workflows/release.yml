@@ -335,7 +335,8 @@ jobs:
         # shows whether the packaged crate has them.
         run: |
           set -euo pipefail
-          for c in apache-spark-connect-proto apache-spark-connect-core apache-spark-connect; do
+          for c in apache-spark-connect-proto apache-spark-connect-core apache-spark-connect \
+                   apache-spark-connect-macros apache-spark-connect-build; do
             files=$(cargo package --list --allow-dirty -p "$c")
             for f in LICENSE NOTICE; do
               if ! grep -qx "$f" <<<"$files"; then
@@ -351,7 +352,9 @@ jobs:
           cargo publish --dry-run \
             -p apache-spark-connect-proto \
             -p apache-spark-connect-core \
-            -p apache-spark-connect
+            -p apache-spark-connect \
+            -p apache-spark-connect-macros \
+            -p apache-spark-connect-build
 
   # ---- Cut an RC: tag + GitHub pre-release with the artifacts (no crates.io/PyPI) ----
   publish-rc:
@@ -498,7 +501,8 @@ jobs:
         # shows whether the packaged crate has them.
         run: |
           set -euo pipefail
-          for c in apache-spark-connect-proto apache-spark-connect-core apache-spark-connect; do
+          for c in apache-spark-connect-proto apache-spark-connect-core apache-spark-connect \
+                   apache-spark-connect-macros apache-spark-connect-build; do
             files=$(cargo package --list --allow-dirty -p "$c")
             for f in LICENSE NOTICE; do
               if ! grep -qx "$f" <<<"$files"; then
@@ -522,7 +526,9 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          CRATES=(apache-spark-connect-proto apache-spark-connect-core apache-spark-connect)
+          # The macros and build crates are what a Rust UDF depends on (docs/udfs.md).
+          CRATES=(apache-spark-connect-proto apache-spark-connect-core apache-spark-connect
+                  apache-spark-connect-macros apache-spark-connect-build)
           VER="${{ needs.resolve.outputs.version }}"
           # Skip any crate already on crates.io at this version so a re-run is idempotent.
           pkgs=()
