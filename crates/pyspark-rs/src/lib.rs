@@ -109,6 +109,8 @@ pub(crate) fn encode_on_grown_stack<M: prost::Message + Send>(message: M) -> Vec
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySparkSession>()?;
     m.add_function(wrap_pyfunction!(session::_close_sessions_at_exit, m)?)?;
+    m.add_function(wrap_pyfunction!(session::_refuse_releases, m)?)?;
+    session::register_release_refusal(m)?;
     m.add_class::<PyHook>()?;
     m.add_class::<PySparkSessionBuilder>()?;
     // As PySpark's nested class: `<pyspark.sql.session.SparkSession.Builder object at ...>`.

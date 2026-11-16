@@ -1450,7 +1450,10 @@ impl SparkConnectClient {
             Err(error) => {
                 // As the reference iterator releases an execution that fails at once, such
                 // as for an analysis error, so the server does not keep it until its
-                // detached timeout.
+                // detached timeout. Once releases are refused, that release raises instead.
+                if let Some(refused) = release_refused() {
+                    return Err(refused);
+                }
                 self.spawn_release(self.execution_metadata(), iter.release_all_request());
                 return Err(error.with_operation_id(iter.operation_id()));
             }
@@ -2398,6 +2401,34 @@ fn user_id_from_env(
     spark_user.or(user).ok().filter(|u| !u.is_empty())
 }
 
+/// Whether the releases of executions are refused. The reference client sends its releases
+/// through a `ThreadPoolExecutor`, whose `submit` refuses new work once the interpreter has
+/// begun to shut down. The Python binding sets this at that point, with
+/// [`refuse_releases`]. The Rust API never sets it.
+static RELEASES_REFUSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Refuse the releases of executions for the rest of the process, as the reference client's
+/// thread pool refuses them once the interpreter has begun to shut down. Each reattachable
+/// execution then fails where it would schedule a release, after its first response or at its
+/// failure, with that pool's `RuntimeError`, and sends no ReleaseExecute. For the exit of the
+/// Python binding; not a stable API.
+#[doc(hidden)]
+pub fn refuse_releases() {
+    RELEASES_REFUSED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The error of a release once releases are refused, as `ThreadPoolExecutor.submit` raises it
+/// after the interpreter has begun to shut down; none before.
+fn release_refused() -> Option<SparkError> {
+    RELEASES_REFUSED
+        .load(std::sync::atomic::Ordering::SeqCst)
+        .then(|| {
+            SparkError::builtin_runtime_msg(
+                "cannot schedule new futures after interpreter shutdown",
+            )
+        })
+}
+
 impl SparkConnectClient {
     /// The gRPC metadata of every request about an execution.
     fn execution_metadata(&self) -> MetadataMap {
@@ -2523,11 +2554,19 @@ impl ReattachableResponseStream {
                         return Err(self.fail(error));
                     }
                     self.iter.set_last_response_id(&resp).await;
-                    if self.iter.is_completed().await {
+                    // As the reference's `send`, whose release raises before it returns the
+                    // response once releases are refused: the stream ends with that error.
+                    let released = if self.iter.is_completed().await {
                         self.done = true;
-                        self.release_all();
+                        self.release_all()
                     } else if !resp.response_id.is_empty() {
-                        self.release_until(&resp.response_id);
+                        self.release_until(&resp.response_id)
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(refused) = released {
+                        self.done = true;
+                        return Err(refused);
                     }
                     return Ok(Some(resp));
                 }
@@ -2686,25 +2725,39 @@ impl ReattachableResponseStream {
     /// Ends the stream with `error`, releasing the execution as the reference client does
     /// when an execution fails.
     /// The error carries the ExecutePlan operation id (`SparkConnectException.operation_id`).
+    /// Once releases are refused, the error is that of the refused release, as the reference's
+    /// `_has_next` raises the error of its release of the failed execution.
     fn fail(&mut self, error: SparkError) -> SparkError {
         self.done = true;
-        self.release_all();
-        error.with_operation_id(self.iter.operation_id())
-    }
-
-    /// Releases the responses up to and including `response_id`, which were read.
-    fn release_until(&self, response_id: &str) {
-        if !self.released {
-            self.spawn_release(self.iter.release_until_request(response_id));
+        match self.release_all() {
+            Ok(()) => error.with_operation_id(self.iter.operation_id()),
+            Err(refused) => refused,
         }
     }
 
-    /// Releases the whole execution.
-    fn release_all(&mut self) {
+    /// Releases the responses up to and including `response_id`, which were read. Once
+    /// releases are refused, nothing is sent, and the refusal is the error.
+    fn release_until(&self, response_id: &str) -> Result<()> {
         if !self.released {
+            if let Some(refused) = release_refused() {
+                return Err(refused);
+            }
+            self.spawn_release(self.iter.release_until_request(response_id));
+        }
+        Ok(())
+    }
+
+    /// Releases the whole execution. Once releases are refused, nothing is sent, and the
+    /// refusal is the error.
+    fn release_all(&mut self) -> Result<()> {
+        if !self.released {
+            if let Some(refused) = release_refused() {
+                return Err(refused);
+            }
             self.released = true;
             self.spawn_release(self.iter.release_all_request());
         }
+        Ok(())
     }
 
     /// Sends `request` in the background, as [`SparkConnectClient::spawn_release`] does.
@@ -2717,9 +2770,9 @@ impl ReattachableResponseStream {
 impl Drop for ReattachableResponseStream {
     /// A stream dropped before its result is complete, for example by a caller that stopped
     /// reading, still holds its execution on the server: release it, as the reference client
-    /// does when its iterator is closed.
+    /// does when its iterator is closed. A release that is refused sends nothing.
     fn drop(&mut self) {
-        self.release_all();
+        let _ = self.release_all();
     }
 }
 
