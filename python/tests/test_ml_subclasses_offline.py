@@ -186,3 +186,160 @@ def test_copy_deepcopy_and_pickle_of_a_model_of_no_server_side_object():
     model = LRModel()
     for copied in (copy.copy(model), copy.deepcopy(model), pickle.loads(pickle.dumps(model))):
         assert type(copied) is LRModel and copied.uid == model.uid
+
+
+
+def test_the_params_take_numpy_values_as_pysparks_type_converters_do():
+    # PySpark's converters: a NumPy string stays as given (it is a str), a NumPy int64 becomes an
+    # int, and a float32 is no float of `toFloat`; the native object takes the values of the map.
+    import numpy as np
+
+    LR = _cls("classification", "LogisticRegression")
+    lr = LR(family=np.str_("multinomial"))
+    assert type(lr.getFamily()) is np.str_ and lr.getFamily() == "multinomial"
+    assert type(lr.setMaxIter(np.int64(3)).getMaxIter()) is int
+    message = 'Invalid param value given for param "regParam". Could not convert 0.5 to float'
+    with pytest.raises(TypeError, match=f"^{message}$"):
+        lr.setRegParam(np.float32(0.5))
+    lr._native_sync(
+        {p.name: v for p, v in lr._paramMap.items()},
+        {p.name: v for p, v in lr._defaultParamMap.items()},
+    )
+    assert lr._native_params()[0]["family"] == "multinomial"
+    StringIndexer = _cls("feature", "StringIndexer")
+    columns = StringIndexer(inputCols=[np.str_("a"), "b"]).getInputCols()
+    assert [type(c) for c in columns] == [np.str_, str]
+
+
+def test_the_private_params_state_is_pysparks():
+    # PySpark's `_paramMap` and `_defaultParamMap` (by Param, in the order that they were set: the
+    # defaults of a new object in its constructor's order), its `_set`, `_setDefault`,
+    # `_copyValues` and `_input_kwargs`, of the object's attributes.
+    LR = _cls("classification", "LogisticRegression")
+    lr = LR(maxIter=5, regParam=0.1)
+    assert [p.name for p in lr._paramMap] == ["maxIter", "regParam"]
+    assert lr._input_kwargs == {"maxIter": 5, "regParam": 0.1}
+    names = [p.name for p in lr._defaultParamMap]
+    assert names[:4] == ["maxBlockSizeInMB", "threshold", "aggregationDepth", "standardization"]
+    assert [p.name for p in lr.extractParamMap()][:4] == names[:4]
+    assert lr._set(tol=0.5) is lr and lr.getTol() == 0.5 and lr.isSet("tol")
+    lr._setDefault(maxIter=7)
+    assert lr._defaultParamMap[lr.maxIter] == 7 and lr.getMaxIter() == 5
+    other = LR()
+    lr._copyValues(other)
+    assert other.getMaxIter() == 5 and other.getTol() == 0.5
+    with pytest.raises(TypeError, match="^Expecting a valid instance of Param, but received: x$"):
+        lr._copyValues(LR(), {"x": 1})
+    # A copy, a fit's model and a load are of the order of PySpark's `_copyValues` (of `params`).
+    assert [p.name for p in lr.copy().extractParamMap()][:3] == [
+        "aggregationDepth",
+        "elasticNetParam",
+        "family",
+    ]
+
+
+def test_an_assignment_of_the_uid_keeps_the_params_of_the_old_uid():
+    # As PySpark's: an assignment of `uid` keeps the Params of the old uid, which do not belong to
+    # the object, so the calls of a Param raise PySpark's ValueError, and those of a name read
+    # the map; `_resetUid` gives them the new uid.
+    LR = _cls("classification", "LogisticRegression")
+    lr = LR(maxIter=7)
+    old = lr.uid
+    lr.uid = "LogisticRegression_abcdefabcdef"
+    assert lr.maxIter.parent == old
+    for call in (lr.getMaxIter, lambda: lr.isSet(lr.maxIter), lambda: lr.explainParam("maxIter")):
+        with pytest.raises(ValueError, match="does not belong to"):
+            call()
+    assert lr.isSet("maxIter") is True
+    assert [p.parent for p in lr.extractParamMap()][:1] == [old]
+    # `_set` reads the Param of the name, of no check of its parent.
+    assert lr.setMaxIter(3) is lr and lr.getOrDefault("maxIter") == 3
+    assert lr.copy().uid == "LogisticRegression_abcdefabcdef"
+    reset = LR(maxIter=7)._resetUid("LogisticRegression_abcdefabcdef")
+    assert reset.uid == "LogisticRegression_abcdefabcdef" and reset.maxIter.parent == reset.uid
+    assert reset.getMaxIter() == 7 and reset.setMaxIter(3).getMaxIter() == 3
+
+
+def test_the_params_api_raises_pysparks_messages_of_a_call_that_does_not_bind():
+    # PySpark's own functions of the Params API, of their qualified names.
+    LR = _cls("classification", "LogisticRegression")
+    lr = LR()
+    cases = [
+        (lambda: lr.getParam(foo=1), "Params.getParam() got an unexpected keyword argument 'foo'"),
+        (lambda: lr.isSet(), "Params.isSet() missing 1 required positional argument: 'param'"),
+        (lambda: lr.copy(foo=1), "JavaParams.copy() got an unexpected keyword argument 'foo'"),
+        (lambda: lr.setMaxIter(), "LogisticRegression.setMaxIter() missing 1 required positional argument: 'value'"),
+    ]
+    if sys.version_info < (3, 10):
+        return
+    for call, message in cases:
+        with pytest.raises(TypeError) as error:
+            call()
+        assert str(error.value) == message
+
+
+def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_object_holds():
+    # The native members of an object read the native objects that it holds (an OneVsRest's
+    # classifier, a Pipeline's stages, a validator's estimator, evaluator and grids, a
+    # PipelineModel's stages), whose params are of their own maps: they are synced with it.
+    LR = _cls("classification", "LogisticRegression")
+    OneVsRest = _cls("classification", "OneVsRest")
+    Pipeline = _cls("pipeline", "Pipeline")
+    PipelineModel = _cls("pipeline", "PipelineModel")
+    CrossValidator = _cls("tuning", "CrossValidator")
+    Evaluator = _cls("evaluation", "BinaryClassificationEvaluator")
+    Binarizer = _cls("feature", "Binarizer")
+
+    def native_set(obj):
+        return obj._native_params()[0]
+
+    lr = LR(maxIter=3)
+    assert native_set(lr) == {}
+    lr.write()
+    assert native_set(lr) == {"maxIter": 3}
+    classifier = LR(regParam=0.25)
+    OneVsRest(classifier=classifier).write()
+    assert native_set(classifier) == {"regParam": 0.25}
+    stage = Binarizer(threshold=0.5)
+    Pipeline(stages=[stage]).write()
+    assert native_set(stage) == {"threshold": 0.5}
+    held = Binarizer(inputCol="x")
+    model = PipelineModel(stages=[held])
+    held.setThreshold(0.75)
+    model.write()
+    assert native_set(held) == {"inputCol": "x", "threshold": 0.75}
+    estimator, evaluator, grid = LR(tol=0.5), Evaluator(metricName="areaUnderPR"), LR(maxIter=9)
+    ovr = OneVsRest(classifier=estimator)
+    CrossValidator(
+        estimator=ovr, evaluator=evaluator, estimatorParamMaps=[{ovr.classifier: grid}]
+    ).write()
+    assert native_set(estimator) == {"tol": 0.5} and native_set(grid) == {"maxIter": 9}
+    assert native_set(evaluator) == {"metricName": "areaUnderPR"}
+
+
+def test_the_native_members_of_a_public_class_have_pysparks_docstrings_and_signatures():
+    import inspect
+
+    import pyspark.ml.classification as reference
+
+    LR = _cls("classification", "LogisticRegression")
+    LRModel = _cls("classification", "LogisticRegressionModel")
+    for public, pysparks, name in [
+        (LR, reference.LogisticRegression, "write"),
+        (LRModel, reference.LogisticRegressionModel, "predict"),
+        (LRModel, reference.LogisticRegressionModel, "evaluate"),
+    ]:
+        member = getattr(public, name)
+        assert member.__doc__ == getattr(pysparks, name).__doc__, name
+        assert inspect.signature(member) == inspect.signature(getattr(pysparks, name)), name
+        assert member.__qualname__ == f"{pysparks.__name__}.{name}"
+
+
+def test_the_summaries_of_the_models_are_the_native_ones():
+    # PySpark's `summary` of a model reads the `_summary` that its fit sets of its server-side
+    # object (`super().summary` of LinearSVCModel's own): the native model fetches its own.
+    import pyspark.ml.classification as reference
+
+    for name in ["LinearSVCModel", "MultilayerPerceptronClassificationModel", "FMClassificationModel"]:
+        public = _cls("classification", name)
+        assert public.summary is not getattr(reference, name).summary, name

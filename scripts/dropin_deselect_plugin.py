@@ -8,6 +8,9 @@ same way rust_transport_plugin.py does:
 
     RUST_PARITY_DESELECT     - newline-separated "Class::method" suffixes to drop
     RUST_PARITY_SELECT_ONLY  - newline-separated suffixes to keep (the drift check)
+
+At the end of a file it also closes the sessions that the file left open (see
+pytest_sessionfinish).
 """
 
 import os
@@ -39,3 +42,17 @@ def pytest_collection_modifyitems(config, items):
     if drop:
         config.hook.pytest_deselected(items=drop)
         items[:] = keep
+
+
+def pytest_sessionfinish(session, exitstatus):
+    # The official files leave sessions open to hosts that do not exist, such as the
+    # `sc://other` of test_connect_session.py. At interpreter exit, a session that is not
+    # stopped sends its clean_cache, and waits on the retries of that request when nothing
+    # answers, as PySpark's client does, which would outlast the file's timeout. Close them
+    # here, without a release, as python/tests/conftest.py does for this repository's suites:
+    # the file is done with them by now.
+    try:
+        from pyspark._pyspark import _close_sessions_at_exit
+    except ImportError:
+        return
+    _close_sessions_at_exit()

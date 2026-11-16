@@ -58,6 +58,26 @@ macro_rules! params_api_block {
                 $crate::ml::params_api::set_state(slf, state)
             }
 
+            /// The set values and the defaults of the params by name, of which the public class
+            /// makes PySpark's param maps of the object (see `params_api::native_params`).
+            #[pyo3(name = "_native_params")]
+            fn __native_params<'py>(
+                slf: &Bound<'py, Self>,
+            ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
+                $crate::ml::params_api::native_params(slf)
+            }
+
+            /// Make the params those of PySpark's param maps of the object, of their values by
+            /// name (see `params_api::sync_params`).
+            #[pyo3(name = "_native_sync")]
+            fn __native_sync(
+                slf: &Bound<'_, Self>,
+                set: &Bound<'_, PyDict>,
+                defaults: &Bound<'_, PyDict>,
+            ) -> PyResult<()> {
+                $crate::ml::params_api::sync_params(slf, set, defaults)
+            }
+
             /// `getParam(paramName)`, of PySpark's keyword.
             #[pyo3(name = "getParam")]
             #[allow(non_snake_case)]
@@ -536,6 +556,15 @@ macro_rules! native_model {
 
             fn own_default(&self, py: Python<'_>, name: &str) -> Option<Py<PyAny>> {
                 $crate::ml::params_api::own_default_of(py, &self.core.own_defaults, name)
+            }
+
+            /// Unset the param `name`, as `del self._paramMap[param]` of PySpark's `_clear`.
+            fn unset(&mut self, name: &'static str) -> PyResult<()> {
+                let params = std::mem::take(self.core.model.params_mut())
+                    .clear_param(&$crate::ml::params_api::unsendable_key(name))
+                    .clear_param(name);
+                *self.core.model.params_mut() = params;
+                Ok(())
             }
 
             fn put_own_default(&mut self, name: &'static str, value: Py<PyAny>) -> bool {

@@ -1723,6 +1723,11 @@ os.environ["SPARK_REMOTE"] = "sc://localhost:1"
 again = SparkSession.builder.getOrCreate()
 assert again is not first and again is not created
 assert SparkSession.getActiveSession() is again and SparkSession.active() is again
+# The sessions left open would wait on the retries of their refused ports at exit: close them
+# without a release, as the release of the first one was not sent either.
+for session in (again, created):
+    session.release_session_on_close = False
+    session.stop()
 """], check=True)
 
 
@@ -2067,6 +2072,10 @@ second = SparkSession.builder.remote(url).create()
 assert first is not second
 assert first.range(1).sparkSession is first
 assert second.range(1).sparkSession is second
+# Closed without a release: no server listens at localhost:1, and the exit would retry it.
+for session in (first, second):
+    session.release_session_on_close = False
+    session.stop()
 """], check=True)
 
 
@@ -6062,6 +6071,8 @@ class Dynamic(Echo):
     def analyze(value):
         pass
 assert isinstance(F.udtf(Dynamic, useArrow=False)(F.lit(1)), DataFrame)
+spark.release_session_on_close = False
+spark.stop()
 """], check=True)
 
 
@@ -13439,6 +13450,8 @@ for schema in schemas:
             "expected_length": "2", "actual_length": "1"}, error
     else:
         raise AssertionError("expected a width validation error")
+spark.release_session_on_close = False
+spark.stop()
 """], check=True)
 
 
@@ -14730,6 +14743,10 @@ threading.stack_size(512 * 1024)
 thread = threading.Thread(target=work)
 thread.start()
 thread.join()
+# Closed without a release: the exit would send its clean_cache, which the count of
+# requests below does not expect.
+spark.release_session_on_close = False
+spark.stop()
 """.replace("REMOTE_URL", repr(service.remote))
     result = subprocess.run(
         [sys.executable, "-c", script], env=dict(os.environ, TZ="UTC"),
@@ -16816,6 +16833,9 @@ for schema in (None, ["v"]):
     actual.validate(full=True)
     assert actual.schema == expected.schema
     assert actual.equals(expected)
+# The session is closed without its release: no server listens at its port to release it on.
+spark.release_session_on_close = False
+spark.stop()
 '''
     try:
         result = subprocess.run(
@@ -23198,6 +23218,8 @@ try:
     print("returned")
 except KeyboardInterrupt:
     print("interrupted, in the bus:", spark.streams._sqlb._listener_bus == [listener])
+spark.release_session_on_close = False
+spark.stop()
 """
     result = subprocess.run(
         [sys.executable, "-c", code], env=dict(os.environ, TZ="UTC"),
@@ -23844,6 +23866,10 @@ for name, call in calls.items():
     finally:
         timer.cancel()
     print(name, outcome, round(time.monotonic() - started, 2), flush=True)
+# The session is closed without its release: the hung server would never answer the
+# clean_cache of its exit, and a refused port would only be retried.
+spark.release_session_on_close = False
+spark.stop()
 """
     result = subprocess.run(
         [sys.executable, "-c", code, server, str(artifact)],
@@ -23946,6 +23972,8 @@ try:
     print("collect returned")
 except KeyboardInterrupt:
     print("interrupted after", round(time.monotonic() - started, 1))
+spark.release_session_on_close = False
+spark.stop()
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -23978,6 +24006,8 @@ try:
     print("col returned after", round(time.monotonic() - started, 1))
 except KeyboardInterrupt:
     print("interrupted after", round(time.monotonic() - started, 1))
+spark.release_session_on_close = False
+spark.stop()
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
