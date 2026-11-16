@@ -883,12 +883,17 @@ Spark Connect:
   - the metadata of `pyspark.ml.pipeline.Pipeline` (or `PipelineModel`), of the `stageUids`;
   - each stage, saved by its own writer at `stages/<index>_<uid>`.
 
-  PySpark loads what this client saves, and this client loads what PySpark saves. A stage loads
-  as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
-  class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
+  PySpark loads what this client saves, and this client loads what PySpark saves, and a pipeline
+  or a validator that the JVM writer saved (of the `org.apache.spark.ml` class names, as Scala
+  writes them). A stage loads as the native class of `pyspark.ml.connect` of its name where one
+  loads, else as PySpark's class. An overwrite deletes the path by the ML helper first, as
+  `RemoteMLWriter` does.
 
 The vendored `pyspark.ml.Pipeline` and the validators of `pyspark.ml.tuning` fit, transform and
-save native stages, which are `MLWritable` (see "PySpark's types and class Params"). Their loads
+save native stages, which are `MLWritable` (see "PySpark's types and class Params"). A fitted model
+is a stage of `PipelineStage::model`, which a save writes by the model's server-side object: a
+`PipelineStage::transformer` of a model fails at the save, as a transformer holds no such object.
+Their loads
 (`pyspark.ml.PipelineModel.load`, `pyspark.ml.tuning.CrossValidatorModel.load`) give PySpark's
 classes of `pyspark.ml`, as they give of PySpark's own stages: `DefaultParamsReader` resolves each
 stage of its JVM class. The loads of `pyspark.ml.connect` give the native classes. The native
@@ -952,7 +957,9 @@ client:
 
 - **Stages**: a `PipelineStage` is an estimator, a transformer or a fitted model
   (`PipelineStage::estimator(LinearSVC::new())`), of any type that clones (`EstimatorStage`,
-  `TransformerStage`, `EvaluatorStage`).
+  `TransformerStage`, `EvaluatorStage`). A fitted model is given to `PipelineStage::model`, and
+  a fitted model given to `PipelineStage::transformer` fails at the save (see "Native Pipeline
+  and PipelineModel").
 - **Param maps**: a `ParamMap` holds values of params of stages, by the uid of a stage and the
   name of its param, as PySpark's `Param.parent` and `Param.name`. `ParamGridBuilder` builds
   PySpark's grids (`add_grid`, `base_on`, `build`, the last param varying fastest), and

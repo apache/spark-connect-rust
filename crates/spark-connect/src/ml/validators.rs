@@ -4,9 +4,10 @@
 //! of any estimator and evaluator, and their persistence of PySpark's Python format
 //! (`_ValidatorSharedReadWrite`), which PySpark loads, and which they load of PySpark.
 use super::meta::{
-    converted, json_to_ml_value, load_evaluator, load_python_metadata, load_stage, metadata_item,
-    metadata_str, ml_value_json, python_float, python_float_json, CROSS_VALIDATOR_CLASS,
-    CROSS_VALIDATOR_MODEL_CLASS, TRAIN_VALIDATION_SPLIT_CLASS, TRAIN_VALIDATION_SPLIT_MODEL_CLASS,
+    check_not_model, converted, json_to_ml_value, load_evaluator, load_python_metadata, load_stage,
+    metadata_item, metadata_str, ml_value_json, param_doc, python_class_of, python_float,
+    python_float_json, python_str_repr, CROSS_VALIDATOR_CLASS, CROSS_VALIDATOR_MODEL_CLASS,
+    TRAIN_VALIDATION_SPLIT_CLASS, TRAIN_VALIDATION_SPLIT_MODEL_CLASS,
 };
 use super::*;
 use spark_connect_core::error::Result;
@@ -596,11 +597,7 @@ impl Estimator for CrossValidator {
             common: self.common.clone(),
             own: vec![
                 ("numFolds", self.num_folds.to_string(), "3".to_string()),
-                (
-                    "foldCol",
-                    serde_json::json!(self.fold_col).to_string(),
-                    "\"\"".to_string(),
-                ),
+                ("foldCol", json_string(&self.fold_col), "\"\"".to_string()),
             ],
             model: None,
         }))
@@ -763,11 +760,7 @@ impl Model for CrossValidatorModel {
             common: self.common.clone(),
             own: vec![
                 ("numFolds", self.num_folds.to_string(), "3".to_string()),
-                (
-                    "foldCol",
-                    serde_json::json!(self.fold_col).to_string(),
-                    "\"\"".to_string(),
-                ),
+                ("foldCol", json_string(&self.fold_col), "\"\"".to_string()),
             ],
             model: Some(ModelPart {
                 extra,
@@ -1361,14 +1354,17 @@ fn stage_of(operator: &MlOperator) -> (String, String) {
     (operator.uid.clone(), operator.name.clone())
 }
 
-/// The stages of `stage` and of its nested stages, as `MetaAlgorithmReadWrite.getUidMap` of
-/// `getAllNestedStages` of PySpark, each as its uid and its JVM class: a nested validator is an
-/// error, as PySpark raises it.
+/// The stages of `stage` and of its nested stages, as `MetaAlgorithmReadWrite.getAllNestedStages`
+/// of PySpark, each as its uid and its JVM class: a nested validator is an error, as PySpark raises
+/// it.
 fn nested_stages(stage: &PipelineStage, out: &mut Vec<(String, String)>) -> Result<()> {
     out.push(stage_of(stage.operator()));
     let any = match stage {
         PipelineStage::Estimator(e) => e.as_any_stage(),
-        PipelineStage::Transformer(_) => None,
+        PipelineStage::Transformer(t) => {
+            check_not_model(t.operator())?;
+            None
+        }
         PipelineStage::Model(m) => Some(m.as_ref().as_any()),
     };
     if let Some(any) = any {
@@ -1404,30 +1400,68 @@ fn nested_stages(stage: &PipelineStage, out: &mut Vec<(String, String)>) -> Resu
     Ok(())
 }
 
-/// Check that the validator saves, as `_ValidatorSharedReadWrite.validateParams`: each param of its
-/// param maps is of its estimator or of a stage that the estimator nests. The stages of the
-/// estimator, each as its uid and JVM class, are returned.
-fn validate_params(
-    estimator: &dyn EstimatorStage,
-    maps: &[ParamMap],
-) -> Result<Vec<(String, String)>> {
+/// The stages of `estimator` and of its nested stages, each as its uid and JVM class, as
+/// `MetaAlgorithmReadWrite.getUidMap` of PySpark gives them: a uid that two of the stages have is
+/// an error, which PySpark raises at the save and at the load alike, of the estimator's class.
+fn uid_map(estimator: &dyn EstimatorStage) -> Result<Vec<(String, String)>> {
     let mut stages = Vec::new();
     nested_stages(
         &PipelineStage::Estimator(estimator.clone_stage()),
         &mut stages,
     )?;
+    // The uids in the order of their first stage, as the keys of PySpark's dict of the stages.
+    let mut uids: Vec<&str> = Vec::with_capacity(stages.len());
+    for (uid, _) in &stages {
+        if !uids.contains(&uid.as_str()) {
+            uids.push(uid);
+        }
+    }
+    if uids.len() != stages.len() {
+        let list: Vec<String> = uids.iter().map(|uid| format!("'{uid}'")).collect();
+        return Err(SparkError::value_msg(format!(
+            "{}.load found a compound estimator with stages with duplicate UIDs. List of UIDs: \
+             [{}].",
+            python_class_of(&estimator.operator().name),
+            list.join(", ")
+        )));
+    }
+    Ok(stages)
+}
+
+/// Check that the validator saves, as `_ValidatorSharedReadWrite.validateParams`: its estimator's
+/// uids are distinct, and each param of its param maps is of its estimator or of a stage that the
+/// estimator nests. The stages of the estimator, each as its uid and JVM class, are returned.
+fn validate_params(
+    estimator: &dyn EstimatorStage,
+    maps: &[ParamMap],
+) -> Result<Vec<(String, String)>> {
+    let stages = uid_map(estimator)?;
     for map in maps {
         for pair in map.pairs() {
             if !stages.iter().any(|(uid, _)| *uid == pair.parent) {
                 return Err(SparkError::value_msg(format!(
                     "Validator save requires all Params in estimatorParamMaps to apply to its \
-                     Estimator, An extraneous Param was found: {}__{}",
-                    pair.parent, pair.name
+                     Estimator, An extraneous Param was found: {}",
+                    param_repr(&pair.parent, &pair.name)
                 )));
             }
         }
     }
     Ok(stages)
+}
+
+/// PySpark's `repr` of the param `name` of the stage of the uid `parent`, `Param(parent=..,
+/// name=.., doc=..)`. A uid is its class's name and a suffix, as PySpark's `Identifiable` makes it,
+/// so the doc is the one of that class; a param that the tables do not have has an empty doc.
+fn param_repr(parent: &str, name: &str) -> String {
+    let class = parent.rsplit_once('_').map_or(parent, |(class, _)| class);
+    let doc = param_doc(class, name).unwrap_or("");
+    format!(
+        "Param(parent={}, name={}, doc={})",
+        python_str_repr(parent),
+        python_str_repr(name),
+        python_str_repr(doc)
+    )
 }
 
 /// The param maps of a validator, as `_ValidatorSharedReadWrite.saveImpl` writes them: each value
@@ -1445,12 +1479,9 @@ fn param_maps_json(maps: &[ParamMap], stages: &[(String, String)]) -> Result<Str
                 .map_or("", |(_, class)| class.as_str());
             let value = converted(class, &pair.name, &pair.value)?;
             pairs.push(json_object(&[
-                ("parent", serde_json::json!(pair.parent).to_string()),
-                ("name", serde_json::json!(pair.name).to_string()),
-                (
-                    "value",
-                    serde_json::json!(ml_value_json(&value)?).to_string(),
-                ),
+                ("parent", json_string(&pair.parent)),
+                ("name", json_string(&pair.name)),
+                ("value", json_string(&ml_value_json(&value)?)),
                 ("isJson", "true".to_string()),
             ]));
         }
@@ -1486,11 +1517,7 @@ fn load_common(session: &SparkSession, path: &str, default_seed: i64) -> Result<
             )))
         }
     };
-    let mut stages = Vec::new();
-    nested_stages(
-        &PipelineStage::Estimator(estimator.clone_stage()),
-        &mut stages,
-    )?;
+    let mut stages = uid_map(estimator.as_ref())?;
     stages.push(stage_of(evaluator.operator()));
     let param_map = metadata_item(&metadata, "paramMap")?;
     let mut maps = Vec::new();
@@ -1638,11 +1665,24 @@ mod tests {
             )
         );
         assert_eq!(validate_params(&svc, &maps).unwrap(), stages);
-        let foreign = vec![ParamMap::new().put("Other_1", "maxIter", MlValue::Int(1))];
-        assert!(validate_params(&svc, &foreign)
+        // PySpark's `repr` of the param: its parent, its name and the doc of its class's param.
+        let other = LinearSVC::new();
+        let foreign =
+            vec![ParamMap::new().put(&other.operator().uid, "regParam", MlValue::Double(0.1))];
+        let error = validate_params(&svc, &foreign).unwrap_err().to_string();
+        let other_uid = other.operator().uid.clone();
+        let expected = format!(
+            "An extraneous Param was found: Param(parent='{other_uid}', name='regParam', \
+             doc='regularization parameter (>= 0).')"
+        );
+        assert!(error.ends_with(&expected), "{error}");
+        let unknown = vec![ParamMap::new().put("Other_1", "maxIter", MlValue::Int(1))];
+        assert!(validate_params(&svc, &unknown)
             .unwrap_err()
             .to_string()
-            .contains("An extraneous Param was found: Other_1__maxIter"));
+            .ends_with(
+                "An extraneous Param was found: Param(parent='Other_1', name='maxIter', doc='')"
+            ));
         let nested = CrossValidator::new().set_estimator(svc.clone());
         assert!(validate_params(&nested, &[])
             .unwrap_err()
@@ -1658,6 +1698,44 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![pipeline.uid().to_string(), uid]
         );
+    }
+
+    #[test]
+    fn a_compound_estimator_with_a_uid_twice_fails_as_pyspark_does() {
+        // As `getUidMap` of PySpark: the uids of the estimator and its nested stages are distinct,
+        // and the message names the estimator's class and the uids in the order of the first.
+        let svc = LinearSVC::new();
+        let svc_uid = svc.operator().uid.clone();
+        let pipeline = Pipeline::new().set_stages(vec![
+            PipelineStage::estimator(svc.clone()),
+            PipelineStage::estimator(svc.clone()),
+        ]);
+        let pipeline_uid = pipeline.uid().to_string();
+        let expected = format!(
+            "pyspark.ml.pipeline.Pipeline.load found a compound estimator with stages with \
+             duplicate UIDs. List of UIDs: ['{pipeline_uid}', '{svc_uid}']."
+        );
+        let error = validate_params(&pipeline, &[]).unwrap_err().to_string();
+        assert!(error.ends_with(&expected), "{error}");
+        let error = uid_map(&pipeline).unwrap_err().to_string();
+        assert!(error.ends_with(&expected), "{error}");
+        // A validator's save refuses it before it writes anything, as its `validateParams` does.
+        let cv = CrossValidator::new()
+            .set_estimator(pipeline.clone())
+            .set_evaluator(BinaryClassificationEvaluator::new());
+        let error = cv
+            .write()
+            .session(&offline_session())
+            .save("unused/path")
+            .unwrap_err()
+            .to_string();
+        assert!(error.ends_with(&expected), "{error}");
+        // Distinct stages of one class are no duplicates.
+        let distinct = Pipeline::new().set_stages(vec![
+            PipelineStage::estimator(svc.clone()),
+            PipelineStage::estimator(LinearSVC::new()),
+        ]);
+        assert_eq!(uid_map(&distinct).unwrap().len(), 3);
     }
 
     #[test]
