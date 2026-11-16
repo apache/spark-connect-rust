@@ -15,7 +15,12 @@
 # limitations under the License.
 #
 """The partition transform functions under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.functions.partitioning``: those of ``pyspark.sql.functions.partitioning``,
-which the Rust core builds."""
+``pyspark.sql.connect.functions.partitioning``: copies of those of
+``pyspark.sql.functions.partitioning``, which the Rust core builds, of this module (see
+``_copies``)."""
 
-from pyspark.sql.functions.partitioning import bucket, days, hours, months, years  # noqa: F401
+from pyspark.sql.connect.functions._copies import connect_functions as _connect_functions
+from pyspark.sql.connect.functions.builtin import lit  # noqa: F401
+from pyspark.sql.functions import partitioning as _partitioning
+
+_connect_functions(globals(), _partitioning, __name__)

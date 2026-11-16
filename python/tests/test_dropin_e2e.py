@@ -1503,6 +1503,8 @@ def test_progress_handler_runs_a_query_of_its_own_as_pyspark(session):
 
 def test_hook_runs_a_query_of_its_own_as_pyspark(session):
     # As PySpark's: an on_execute_plan hook runs a query, which runs without the hook.
+    from pyspark.sql.connect.session import SparkSession
+
     remote = os.environ["SPARK_REMOTE"]
     nested = []
     started = []
@@ -1527,6 +1529,8 @@ def test_hook_runs_a_query_of_its_own_as_pyspark(session):
 def test_hook_appending_a_non_reattachable_option_keeps_the_execution_reattachable(session):
     # As PySpark's: the iterator appends its own reattachable option after the hooks ran, so
     # an option of a hook that says false does not make the execution non-reattachable.
+    from pyspark.sql.connect.session import SparkSession
+
     remote = os.environ["SPARK_REMOTE"]
 
     class NotReattachableHook(SparkSession.Hook):

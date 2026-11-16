@@ -1082,6 +1082,16 @@ From Python, `pyspark-client-rust` replaces the `pyspark-client` package: same
 Use it exactly like [PySpark](https://spark.apache.org/docs/latest/api/python/).
 The native [Rust API](dataframes.md) mirrors the same surface.
 
+Three differences come with being a different package with a native core. The distribution is
+`pyspark-client-rust`, so `importlib.metadata.version("pyspark-client")` raises
+`PackageNotFoundError`, where `pyspark.__version__` is PySpark's. A traceback of an error that the
+server raises has the frames of the user's code only, without those of PySpark's client
+(`collect`, `_to_table`, `_execute_and_fetch`, ...), which the native core does not have. The
+package is marked typed as PySpark's is (`py.typed` and PySpark's stubs), and
+`pyspark.sql.SparkSession`, PySpark's own class, has PySpark's signatures and docstrings. The
+functions of `pyspark.sql.functions` and the methods of the native classes, such as
+`DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
+
 The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
 that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
 protobuf and prost stop at 100 nested messages. Its Rust client enables prost's
@@ -1112,10 +1122,11 @@ loads the drop-in's at every protocol.
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
 
-The keys of `getMessageParameters()` may come in another order than PySpark's, though the dicts
-compare equal. For a server error, PySpark keeps the order of the error details that it fetches,
-and the drop-in the order of the parameters in the error's metadata. For its own errors, PySpark
-keeps the order of each call site.
+The keys of `getMessageParameters()` of a server error are in the server's order. PySpark's
+follow the protobuf map of the error details that it fetches: with protobuf's pure-Python
+implementation that is the server's order too, and with upb, protobuf's default, the order of its
+hash table, which changes from one process to the next. For its own errors, PySpark keeps the
+order of each call site.
 
 At interpreter exit, a session that is not stopped has its ML cache cleaned by one
 `clean_cache` request, as PySpark's client does. Its errors are ignored, but when the server
@@ -1181,14 +1192,28 @@ is True against either name, where PySpark 4.3.0 gives False for the classic nam
 needs a SparkContext. `udf` gives a function in both clients, which is of neither class.
 
 So it is for the objects of a session: each is of PySpark Connect's class, of its module of
-`pyspark.sql.connect`, as `repr`, `type(x).__module__` and pickle show it, and the classic name
-names the same class. These are the SparkSession, its `catalog`, `read`, `readStream`, `streams`,
-`udf`, `udtf`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
-`mergeInto` and its clauses, `na`, `stat`, `groupBy`, `asTable` and the WindowSpec of its
-windows. So `pyspark.sql.SparkSession.__module__` is `pyspark.sql.connect.session`, where
-PySpark's is `pyspark.sql.session`. `spark.dataSource` and `GroupedData.cogroup` still give the
-classic classes, `pyspark.sql.datasource.DataSourceRegistration` and
-`pyspark.sql.pandas.group_ops.PandasCogroupedOps`.
+`pyspark.sql.connect`, as `repr`, `type(x).__module__` and pickle show it. These are the
+SparkSession, its `catalog`, `read`, `readStream`, `streams`, `udf`, `udtf`, `tvf` and `client`,
+and a DataFrame's `write`, `writeTo`, `writeStream`, `mergeInto` and its clauses, `na`, `stat`,
+`groupBy`, `cogroup`, `asTable` and the WindowSpec of its windows. `spark.dataSource` still gives
+the classic class, `pyspark.sql.datasource.DataSourceRegistration`. The functions of
+`pyspark.sql.connect.functions` are of its modules (`builtin` and `partitioning`), and are not
+those of `pyspark.sql.functions`, as in PySpark.
+
+`pyspark.sql.SparkSession` is PySpark's classic class, the module `pyspark.sql.session` of Apache
+Spark as it is, as in PySpark. Its builder reads `spark.remote` or `SPARK_REMOTE`, raises
+`CONNECT_URL_NOT_SET` without either, also while a session is active, and makes the session with
+the builder of `pyspark.sql.connect.session.SparkSession`, of which the session is. So
+`isinstance(spark, pyspark.sql.SparkSession)` is False, as in PySpark, and `active()` and
+`getActiveSession()` of the classic class give the session of Spark Connect. The builder of
+`pyspark.sql.connect.session.SparkSession` is PySpark Connect's: it does not read `SPARK_REMOTE`,
+raises `SESSION_NEED_CONN_STR_OR_BUILDER` without a URL or a channel builder, and returns the
+active session from `getOrCreate`. For the other objects of a session, the classic name names the
+same class, so `isinstance` against it is True, where PySpark gives False for `GroupedData`, the
+readers and writers and `Catalog`. The concrete DataFrame and Column are not subclasses of the
+public `pyspark.sql.DataFrame` and `pyspark.sql.Column`: `isinstance` holds by registration, so
+the MRO of a DataFrame is its native class and `object`, and `pyspark.sql.Column` names the
+concrete class.
 
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped
@@ -1200,13 +1225,12 @@ A table name that is neither a str nor bytes, and bytes that are not UTF-8, give
 `read.table`, `readStream.table` and `changes`, whose plan raises protobuf's `TypeError` or the
 decode error when it is built, as PySpark's do. A reader's format that is not a str is kept as the
 object it is, which `_format` gives back, and a copy or a pickle of the reader keeps it.
-`SparkSession.builder.remote` keeps a value that is not a str as PySpark does, and `create` rejects
-it as an invalid Spark Connect URL, as PySpark's `create` does for its `str()`. An explicit `None`,
-given as `remote(None)`, `remote(url=None)`, `remote(location=None)` or
-`config("spark.remote", None)`, is kept as None: `create` and `getOrCreate` fail PySpark's
-assertion whatever `SPARK_REMOTE` is,
-unless a session exists, which `getOrCreate` returns. A later `remote` replaces it. A `remote()`
-without an argument is `sc://localhost`, as in PySpark's Connect builder.
+The Connect builder's `remote` keeps a value that is not a str as PySpark's does, and `create`
+rejects it as an invalid Spark Connect URL, as PySpark's `create` does for its `str()`. An explicit
+`None`, given as `remote(None)`, `remote(location=None)` or `config("spark.remote", None)`, is
+kept as None: `create` and `getOrCreate` fail PySpark's assertion, unless a session exists, which
+`getOrCreate` returns. A later `remote` replaces it. A `remote()` without an argument is
+`sc://localhost`, as in PySpark's Connect builder.
 
 ## Native NaiveBayes
 

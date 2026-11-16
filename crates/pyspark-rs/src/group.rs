@@ -676,10 +676,11 @@ fn twus_func<'py>(
     Ok((util.getattr(attr)?, et))
 }
 
-/// Python wrapper for cogrouped pandas/arrow ops (`pyspark.sql.group.PandasCogroupedOps`).
+/// Python wrapper for cogrouped pandas/arrow ops, of the module of PySpark Connect's class of the
+/// objects of `cogroup`, `pyspark.sql.connect.group.PandasCogroupedOps`.
 #[pyclass(
     name = "PandasCogroupedOps",
-    module = "pyspark.sql.pandas.group_ops",
+    module = "pyspark.sql.connect.group",
     weakref,
     dict
 )]

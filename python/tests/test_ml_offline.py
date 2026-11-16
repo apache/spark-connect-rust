@@ -2390,6 +2390,8 @@ def test_ml_session_client_is_one_object_of_the_session(ml_mock):
 def test_dataframe_session_and_session_client_as_pyspark(ml_mock):
     # As PySpark Connect's DataFrame._session and SparkSession._client, which the modules of
     # PySpark read, such as pyspark.ml, pyspark.sql.plot and pyspark.pandas.
+    from pyspark.sql.connect.session import SparkSession
+
     spark, _ = ml_mock
     session = spark.range(1)._session
     assert isinstance(session, SparkSession)
@@ -3485,6 +3487,8 @@ def test_session_hooks_rewrite_the_requests_of_executions_as_pyspark(_ml_mock_se
     # As official PySpark 4.3.0's SparkSession.Hook: a session that the builder creates calls
     # each factory of _registerHook with itself, and the on_execute_plan of each hook with each
     # ExecutePlanRequest before it sends it, which keeps the operation ID of the request.
+    from pyspark.sql.connect.session import SparkSession
+
     _, service = _ml_mock_server
     service.reset()
     created = []
@@ -3536,6 +3540,8 @@ def test_session_hooks_rewrite_the_requests_of_executions_as_pyspark(_ml_mock_se
 def test_session_hooks_raise_their_errors_as_pyspark(_ml_mock_server):
     # As official PySpark 4.3.0: the error of a hook is raised by the execution that calls it,
     # as it is.
+    from pyspark.sql.connect.session import SparkSession
+
     _, service = _ml_mock_server
     service.reset()
 

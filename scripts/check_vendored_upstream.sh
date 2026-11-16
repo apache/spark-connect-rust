@@ -116,6 +116,16 @@ VENDORED_FILES=(
   "sql/geo_utils.py"
   "sql/sql_formatter.py"
 
+  # PySpark's classic SparkSession, of pyspark.sql.SparkSession, as in PySpark: its builder reads
+  # spark.remote and SPARK_REMOTE and makes the session of Spark Connect, the native class of
+  # pyspark.sql.connect.session, with that class's builder; its classmethods run that class's.
+  "sql/session.py"
+
+  # PEP 561: the package is typed, and the type aliases of PySpark's stubs.
+  "py.typed"
+  "_typing.pyi"
+  "sql/_typing.pyi"
+
   # Top-level modules
   "accumulators.py"
   "memory_profiler_ext.py"
