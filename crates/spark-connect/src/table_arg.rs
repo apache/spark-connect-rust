@@ -53,6 +53,41 @@ impl TableArg {
         !self.subquery.partition_spec.is_empty() || self.is_single_partition()
     }
 
+    /// Check that [`TableArg::partition_by`] may be called. PySpark checks the partitioning
+    /// before it converts the columns, so a caller that converts them first checks this first.
+    pub fn check_partition_by(&self) -> Result<()> {
+        if self.is_partitioned() {
+            return Err(illegal_argument(
+                "Cannot call partitionBy() after partitionBy() or withSinglePartition() has \
+                 been called.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check that [`TableArg::order_by`] may be called, as [`TableArg::check_partition_by`]
+    /// does for `partition_by`.
+    pub fn check_order_by(&self) -> Result<()> {
+        if !self.is_partitioned() {
+            return Err(illegal_argument(
+                "Please call partitionBy() or withSinglePartition() before orderBy().",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Check that [`TableArg::with_single_partition`] may be called, as
+    /// [`TableArg::check_partition_by`] does for `partition_by`.
+    pub fn check_with_single_partition(&self) -> Result<()> {
+        if self.is_partitioned() {
+            return Err(illegal_argument(
+                "Cannot call withSinglePartition() after partitionBy() or withSinglePartition() \
+                 has been called.",
+            ));
+        }
+        Ok(())
+    }
+
     /// Add partitioning to this table argument.
     ///
     /// # Arguments
@@ -69,12 +104,7 @@ impl TableArg {
         mut self,
         cols: impl IntoIterator<Item = C>,
     ) -> Result<Self> {
-        if self.is_partitioned() {
-            return Err(illegal_argument(
-                "Cannot call partitionBy() after partitionBy() or withSinglePartition() has \
-                 been called.",
-            ));
-        }
+        self.check_partition_by()?;
 
         for col in cols {
             self.subquery
@@ -101,11 +131,7 @@ impl TableArg {
     ///     .order_by(vec![col("value")])?;
     /// ```
     pub fn order_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Result<Self> {
-        if !self.is_partitioned() {
-            return Err(illegal_argument(
-                "Please call partitionBy() or withSinglePartition() before orderBy().",
-            ));
-        }
+        self.check_order_by()?;
 
         for col in cols {
             self.subquery
@@ -125,12 +151,7 @@ impl TableArg {
     ///     .with_single_partition()?;
     /// ```
     pub fn with_single_partition(mut self) -> Result<Self> {
-        if self.is_partitioned() {
-            return Err(illegal_argument(
-                "Cannot call withSinglePartition() after partitionBy() or withSinglePartition() \
-                 has been called.",
-            ));
-        }
+        self.check_with_single_partition()?;
 
         self.subquery.with_single_partition = Some(true);
         Ok(self)

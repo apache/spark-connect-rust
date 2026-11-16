@@ -26,11 +26,17 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - ".github/workflows/docs.yml"
+      # The snippet check compiles the Rust snippets of the README too, against the crates.
+      - "README.md"
+      - "scripts/check_doc_snippets.py"
+      - "crates/**"
   pull_request:
     paths:
       - "docs/**"
       - "mkdocs.yml"
       - ".github/workflows/docs.yml"
+      - "README.md"
+      - "scripts/check_doc_snippets.py"
       - "crates/**"
   workflow_dispatch:
 

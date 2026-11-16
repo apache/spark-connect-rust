@@ -1525,8 +1525,10 @@ fn parse_json_type_string(s: &str) -> Result<DataType> {
     }
     match s {
         // `null` is read as the server's JSON parser reads it, for the schemas written before
-        // NullType was named `void`, and PySpark rejects it. `calendarinterval` is a lenient alias
-        // that the drop-in's Python parser accepted before it delegated here.
+        // NullType was named `void`, and `calendarinterval` is a lenient alias of the Rust API.
+        // PySpark rejects both, and so does the drop-in's Python parser, which parses a string
+        // itself as PySpark's `_parse_datatype_json_value` does and delegates only the names of
+        // `_all_mappable_types` here.
         "null" => Ok(DataType::Null),
         "calendarinterval" => Ok(DataType::CalendarInterval),
         // A bare spatial name is of the default CRS, `OGC:CRS84`, as Spark's JSON reader reads

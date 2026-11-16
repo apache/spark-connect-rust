@@ -1,7 +1,6 @@
-/// Integration tests against a live Spark Connect server.
-///
-/// These tests require the server to be running at localhost:15002.
-/// Run with: RUN_SPARK_INTEGRATION_TESTS=1 cargo test --test integration_test -- --ignored
+/// Integration tests of the core client against a live Spark Connect server, at `SPARK_REMOTE`
+/// (or `sc://localhost:15002`). The `connect-e2e` job of CI runs them with
+/// `cargo test -p apache-spark-connect-core --test integration_test -- --ignored`.
 use spark_connect_core::ChannelBuilder;
 use spark_connect_core::SparkConnectClient;
 use spark_connect_proto::AnalyzePlanRequest;
@@ -14,7 +13,7 @@ async fn test_connect_to_live_server() {
         return;
     }
 
-    let builder = ChannelBuilder::parse("sc://localhost:15002").expect("Failed to parse URL");
+    let builder = ChannelBuilder::parse(&remote()).expect("Failed to parse URL");
     let client = SparkConnectClient::connect(&builder)
         .await
         .expect("Failed to connect to server");
@@ -29,7 +28,7 @@ async fn test_analyze_spark_version() {
         return;
     }
 
-    let builder = ChannelBuilder::parse("sc://localhost:15002").expect("Failed to parse URL");
+    let builder = ChannelBuilder::parse(&remote()).expect("Failed to parse URL");
     let client = SparkConnectClient::connect(&builder)
         .await
         .expect("Failed to connect to server");
@@ -62,20 +61,40 @@ async fn test_config_get() {
         return;
     }
 
-    let builder = ChannelBuilder::parse("sc://localhost:15002").expect("Failed to parse URL");
+    let builder = ChannelBuilder::parse(&remote()).expect("Failed to parse URL");
     let client = SparkConnectClient::connect(&builder)
         .await
         .expect("Failed to connect to server");
 
+    // A Get of a conf that every session has: the server answers its value.
     let mut request = spark_connect_proto::ConfigRequest::default();
     request.session_id = client.session_id().to_string();
     request.user_context = Some(spark_connect_proto::UserContext::default());
+    let get = spark_connect_proto::config_request::Get {
+        keys: vec!["spark.sql.shuffle.partitions".to_string()],
+    };
+    request.operation = Some(spark_connect_proto::config_request::Operation {
+        op_type: Some(spark_connect_proto::config_request::operation::OpType::Get(
+            get,
+        )),
+    });
+    let response = client.config(request).await.expect("Failed to get a conf");
+    let pair = response
+        .pairs
+        .iter()
+        .find(|pair| pair.key == "spark.sql.shuffle.partitions")
+        .expect("the conf is not in the response");
+    assert!(
+        pair.value
+            .as_deref()
+            .is_some_and(|value| value.parse::<u32>().is_ok()),
+        "the conf has no value of a number: {pair:?}"
+    );
+}
 
-    // This may fail with server error since we're not setting valid operation,
-    // but it proves the RPC call goes through
-    let result = client.config(request).await;
-    // Either success or gRPC error is acceptable for this test
-    assert!(result.is_ok() || result.is_err());
+/// The Spark Connect URL of the server of the tests.
+fn remote() -> String {
+    std::env::var("SPARK_REMOTE").unwrap_or_else(|_| "sc://localhost:15002".to_string())
 }
 
 /// Check if live tests should run.

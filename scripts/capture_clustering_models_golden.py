@@ -3,7 +3,9 @@
 """Capture the clustering models and summaries golden from official PySpark 4.3.0.
 
 Each estimator variant is fitted on a fixed one-partition dataset with fixed seeds and pinned
-uids. The fitted model's members, its children (the training summary, and the LocalLDAModel of
+uids, so a capture gives the same golden again up to the last bit of a float: the transform of the
+EM LDA model can differ by an ULP between two captures, which the tests' tolerance takes. The
+fitted model's members, its children (the training summary, and the LocalLDAModel of
 toLocal) and the summaries' members are captured by the shared helper
 (scripts/ml_golden_common.py), together with the requests the client sends. Models and estimators
 are persisted and loaded back. PowerIterationClustering fits no model: its estimator is persisted

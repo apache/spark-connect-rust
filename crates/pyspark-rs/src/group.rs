@@ -33,6 +33,43 @@ fn check_same_session(
     }
 }
 
+/// The shallow copy of the user-set attributes of `source`, its `__dict__`, onto `copy`, as
+/// `copy.copy` of a plain Python object carries them: the same values, not copies of them.
+pub(crate) fn copy_instance_state(
+    copy: &Bound<'_, PyAny>,
+    source: &Bound<'_, PyAny>,
+) -> PyResult<()> {
+    copy.getattr("__dict__")?
+        .call_method1("update", (source.getattr("__dict__")?,))?;
+    Ok(())
+}
+
+/// The state of `owner` in its reduce, as a plain Python object pickles it: its `__dict__`, the
+/// user-set attributes, or None if it has none.
+pub(crate) fn instance_state<'py>(owner: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let dict = owner.getattr("__dict__")?;
+    if dict.len()? == 0 {
+        return Ok(owner.py().None().into_bound(owner.py()));
+    }
+    Ok(dict)
+}
+
+/// The reduce `reduce` of `owner` with its state as its third element, which `copy` and `pickle`
+/// restore into the `__dict__` of the object they rebuild, as they do for a plain object. A
+/// reduce of no state is left as it is.
+pub(crate) fn reduce_with_state<'py>(
+    reduce: &Bound<'py, PyAny>,
+    owner: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let state = instance_state(owner)?;
+    if state.is_none() {
+        return Ok(reduce.clone());
+    }
+    let mut items: Vec<Bound<'py, PyAny>> = reduce.cast::<PyTuple>()?.iter().collect();
+    items.push(state);
+    Ok(PyTuple::new(owner.py(), items)?.into_any())
+}
+
 /// Python wrapper for Spark GroupedData.
 #[pyclass(name = "GroupedData", module = "pyspark.sql.group", weakref, dict)]
 pub struct PyGroupedData {
@@ -134,20 +171,29 @@ impl PyGroupedData {
 
     /// The shallow copy of grouped data, as PySpark's `copy.copy`: of the DataFrame that it
     /// groups, which the copy holds too, and of the same grouping.
-    fn __copy__(&self, py: Python<'_>) -> PyGroupedData {
-        PyGroupedData {
-            grouped_data: self.grouped_data.clone(),
-            frame: self.frame.clone_ref(py),
-        }
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Bound::new(
+            py,
+            PyGroupedData {
+                grouped_data: this.grouped_data.clone(),
+                frame: this.frame.clone_ref(py),
+            },
+        )?;
+        copy_instance_state(copy.as_any(), slf.as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of grouped data, as PySpark's pickle of its state: its DataFrame, the
     /// grouping columns, the type of the grouping, the pivot column and values, and the
     /// grouping sets, which `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::{column_list, group_type_name, state_reduce};
 
-        let group = &self.grouped_data;
+        let py = slf.py();
+        let this = slf.borrow();
+        let group = &this.grouped_data;
         let pivot_col = match group.pivot_column() {
             Some(column) => Bound::new(py, PyColumn::new(column))?.into_any(),
             None => py.None().into_bound(py),
@@ -160,7 +206,7 @@ impl PyGroupedData {
         let args = PyTuple::new(
             py,
             [
-                self.frame.clone_ref(py).into_any().into_bound(py),
+                this.frame.clone_ref(py).into_any().into_bound(py),
                 group_type_name(group.group_type())
                     .into_pyobject(py)?
                     .into_any(),
@@ -170,7 +216,8 @@ impl PyGroupedData {
                 PyList::new(py, sets)?.into_any(),
             ],
         )?;
-        state_reduce(py, "grouped_reduce", args)
+        let reduce = state_reduce(py, "grouped_reduce", args)?;
+        reduce_with_state(&reduce, slf.as_any())
     }
 
     /// Grouped data of its state, as `__reduce__` gives it: of the DataFrame `frame`, the

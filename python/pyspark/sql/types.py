@@ -324,34 +324,50 @@ def _parse_datatype_json_value(json_value, fieldPath="", collationsMap=None):
     """Recursively reconstruct a DataType from a parsed Spark-JSON value (a string for
     atomic/parameterized types, or a dict for the nested struct/array/map forms).
 
-    The string forms (atomics, ``decimal(p,s)``, ``string collate X``, intervals,
-    ``geometry(<crs>)``, ``geography(<crs>, <alg>)``, ...) are parsed by the Rust core's
-    JSON grammar, so the drop-in keeps one grammar. The nested object forms recurse here,
-    because a ``udt`` leaf has to reconstruct its Python class.
+    A string is read as PySpark's reads it: a name of ``_all_mappable_types`` (whose type the
+    Rust core makes), else the first of PySpark's patterns that matches a prefix of it
+    (``decimal(p,s)``, ``time(p)``, the intervals, ``string collate X``, ``char(n)``,
+    ``varchar(n)``, the spatial forms), so that text after a match is ignored, else
+    ``CANNOT_PARSE_DATATYPE``. A value that is not a str raises the TypeError of the name
+    lookup or of the match, as PySpark's does. The nested object forms recurse here, because a
+    ``udt`` leaf has to reconstruct its Python class.
 
     As PySpark's, a string at a ``fieldPath`` of ``collationsMap``, the collations of the
     ``__COLLATIONS`` of the metadata of a struct field by their paths, is of its collation."""
     import json as _json
 
     if not isinstance(json_value, dict):
-        if (
-            collationsMap is not None
-            and fieldPath in collationsMap
-            and json_value in _MAPPABLE_TYPE_NAMES
-        ):
-            _assert_valid_type_for_collation(fieldPath, json_value, collationsMap)
-            return StringType(collationsMap[fieldPath])
-        if isinstance(json_value, str) and json_value.startswith(("geometry", "geography")):
-            return _spatial_type_from_json(json_value)
-        from pyspark._pyspark import parse_datatype_json
+        if json_value in _MAPPABLE_TYPE_NAMES:
+            if collationsMap is not None and fieldPath in collationsMap:
+                _assert_valid_type_for_collation(fieldPath, json_value, collationsMap)
+                return StringType(collationsMap[fieldPath])
+            from pyspark._pyspark import parse_datatype_json
 
-        try:
             return parse_datatype_json(_json.dumps(json_value))
-        except ValueError:
-            # As PySpark's, of a str that is not the JSON value of a data type.
-            raise _pyspark_value_error(
-                "CANNOT_PARSE_DATATYPE", {"msg": str(json_value)}
-            ) from None
+        elif m := _FIXED_DECIMAL.match(json_value):
+            return DecimalType(int(m.group(1)), int(m.group(2)))
+        elif m := _TIME.match(json_value):
+            return TimeType(int(m.group(1)))
+        elif m := _INTERVAL_DAYTIME.match(json_value):
+            first_field = _DAY_TIME_FIELDS.get(m.group(1))
+            second_field = _DAY_TIME_FIELDS.get(m.group(3))
+            if first_field is not None and second_field is None:
+                return DayTimeIntervalType(first_field)
+            return DayTimeIntervalType(first_field, second_field)
+        elif m := _INTERVAL_YEARMONTH.match(json_value):
+            first_field = _YEAR_MONTH_FIELDS.get(m.group(1))
+            second_field = _YEAR_MONTH_FIELDS.get(m.group(3))
+            if first_field is not None and second_field is None:
+                return YearMonthIntervalType(first_field)
+            return YearMonthIntervalType(first_field, second_field)
+        elif m := _STRING_WITH_COLLATION.match(json_value):
+            return StringType(m.group(1))
+        elif m := _LENGTH_CHAR.match(json_value):
+            return CharType(int(m.group(1)))
+        elif m := _LENGTH_VARCHAR.match(json_value):
+            return VarcharType(int(m.group(1)))
+        # The spatial forms, as PySpark's, and CANNOT_PARSE_DATATYPE of any other string.
+        return _spatial_type_from_json(json_value)
     tpe = json_value["type"]
     if tpe in ("array", "map", "struct"):
         if collationsMap is not None and fieldPath in collationsMap:
@@ -366,6 +382,19 @@ def _parse_datatype_json_value(json_value, fieldPath="", collationsMap=None):
     # As PySpark's, of an object of a type that is not one of a data type.
     raise _pyspark_value_error("UNSUPPORTED_DATA_TYPE", {"data_type": str(tpe)})
 
+
+# The patterns of the JSON type strings that take arguments, as PySpark's
+# `_parse_datatype_json_value` matches them: a match of a prefix, so text after it is ignored.
+_LENGTH_CHAR = re.compile(r"char\(\s*(\d+)\s*\)")
+_LENGTH_VARCHAR = re.compile(r"varchar\(\s*(\d+)\s*\)")
+_STRING_WITH_COLLATION = re.compile(r"string\s+collate\s+(\w+)")
+_FIXED_DECIMAL = re.compile(r"decimal\(\s*(\d+)\s*,\s*(-?\d+)\s*\)")
+_INTERVAL_DAYTIME = re.compile(r"interval (day|hour|minute|second)( to (day|hour|minute|second))?")
+_INTERVAL_YEARMONTH = re.compile(r"interval (year|month)( to (year|month))?")
+_TIME = re.compile(r"time\(\s*(\d+)\s*\)")
+# The fields of the interval types by their names, as PySpark's `_inverted_fields`.
+_DAY_TIME_FIELDS = {"day": 0, "hour": 1, "minute": 2, "second": 3}
+_YEAR_MONTH_FIELDS = {"year": 0, "month": 1}
 
 # The patterns of the JSON of the spatial types, as PySpark's.
 _GEOMETRY = re.compile(r"^geometry$")
