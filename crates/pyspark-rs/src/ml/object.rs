@@ -364,7 +364,8 @@ pub(super) fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResul
 /// the `java_obj` of PySpark's constructor (`JavaWrapper.__init__(java_obj=None)`), which the
 /// members read as PySpark's `_extract_id_methods` does (see [`SummaryObject::target`]).
 pub(crate) enum SummaryObject {
-    Target(spark_connect::ml::MlTarget),
+    // Boxed: a target is much larger than a Python object.
+    Target(Box<spark_connect::ml::MlTarget>),
     Given(Py<PyAny>),
 }
 
@@ -383,7 +384,7 @@ impl SummaryObject {
     /// session; another value than a string (None) raises the AttributeError of its `split`.
     pub(crate) fn target(&self, py: Python<'_>) -> PyResult<spark_connect::ml::MlTarget> {
         let object = match self {
-            Self::Target(target) => return Ok(target.clone()),
+            Self::Target(target) => return Ok((**target).clone()),
             Self::Given(object) => object.bind(py),
         };
         let session = session_of(py, None)?;
