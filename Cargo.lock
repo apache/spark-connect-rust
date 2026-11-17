@@ -100,7 +100,6 @@ dependencies = [
  "stacker",
  "tempfile",
  "tokio",
- "tokio-stream",
  "tonic",
  "tonic-prost",
  "tracing",
