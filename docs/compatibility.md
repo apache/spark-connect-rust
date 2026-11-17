@@ -918,11 +918,11 @@ Spark Connect:
   - the metadata of `pyspark.ml.pipeline.Pipeline` (or `PipelineModel`), of the `stageUids`;
   - each stage, saved by its own writer at `stages/<index>_<uid>`.
 
-  PySpark loads what this client saves, and this client loads what PySpark saves, and a pipeline
-  or a validator that the JVM writer saved (of the `org.apache.spark.ml` class names, as Scala
-  writes them). A stage loads as the native class of `pyspark.ml.connect` of its name where one
-  loads, else as PySpark's class. An overwrite deletes the path by the ML helper first, as
-  `RemoteMLWriter` does.
+  PySpark loads what this client saves, and this client loads what PySpark saves, and a pipeline,
+  a validator or a OneVsRest (and its model) that the JVM writer saved (of the `org.apache.spark.ml`
+  class names, as Scala and classic PySpark's `JavaMLWriter` write them), also as a stage. A stage
+  loads as the native class of `pyspark.ml.connect` of its name where one loads, else as PySpark's
+  class. An overwrite deletes the path by the ML helper first, as `RemoteMLWriter` does.
 
 The vendored `pyspark.ml.Pipeline` and the validators of `pyspark.ml.tuning` fit, transform and
 save native stages, which are `MLWritable` (see "PySpark's types and class Params"). A fitted model
@@ -1001,7 +1001,9 @@ client:
   `apply_param_map` of an estimator, a transformer or an evaluator sets the values of its params,
   as a copy of a param map of PySpark does: each value is converted by the type converter of its
   param (`Param.typeConverter`, so an integer grid value of a double param is a double), and a
-  param that the stage's class does not have is not set. A pipeline applies them to its stages.
+  param that the stage's class does not have is not set. A pipeline applies them to its stages, a
+  `OneVsRest` to its classifier and a `OneVsRestModel` to its models, as their `copy(extra)` does,
+  so that `{lr.featuresCol: "f2"}` of the classifier's uid sets the features of each model.
   The grid keeps the values as they were given, and a validator converts them when it applies or
   saves them, not when the grid is built as PySpark does, so a value that PySpark refuses at build
   (a `TypeError`) is refused at the fit or the save of the validator. So is a value that PySpark
@@ -1045,9 +1047,11 @@ client:
   - the validators' param maps, estimator, evaluator, best model and sub-models
     (`persistSubModels`).
 
-  `load_stage` loads any saved stage, of its class: a meta-algorithm, or an estimator,
-  transformer or model of the server's class (`OperatorEstimator`, `OperatorTransformer`,
-  `ObjectModel`). The evaluator of a loaded validator is the evaluator of its class. A param map
+  `load_stage` loads any saved stage, of its class: a meta-algorithm (of PySpark's Python format,
+  or of the JVM writer's class names, a OneVsRest and its model too, whose readers check no class,
+  as PySpark's do), or an estimator, transformer or model of the server's class
+  (`OperatorEstimator`, `OperatorTransformer`, `ObjectModel`). The evaluator of a loaded validator
+  is the evaluator of its class. A param map
   of a value that is a saved stage, which PySpark writes of a stage-valued param, does not load.
   A fitted model of an estimator has the JVM class that PySpark's `_create_model` names (the
   classes of the decision trees, random forests, gradient-boosted trees, factorization machines
@@ -1589,23 +1593,59 @@ DecisionTreeClassifier, RandomForestClassifier, GBTClassifier, NaiveBayes,
 FMClassifier and MultilayerPerceptronClassifier. Perceptron base classifiers need
 a two-unit output layer.
 
-In Python, the classifier can be any other object, as in PySpark. A classifier that is not a
-native one, such as PySpark's own classes of `pyspark.ml.classification` or a Python subclass of
-them, is fit by PySpark's own `OneVsRest._fit` over the estimator's params. Its model is PySpark's
-`OneVsRestModel` of the classifier's own models. A None classifier is fit there too, and fails at
-its first use. So is a dataset that is not a Spark DataFrame: a pandas DataFrame raises the
-`KeyError` of PySpark's pandas aggregate of its max label.
+In Python, the classifier can be any other object, as in PySpark. The native fit is that of a
+classifier of exactly a native class. Any other classifier, such as PySpark's own classes of
+`pyspark.ml.classification`, or a Python subclass of them or of a native class, is fit by PySpark's
+own `OneVsRest._fit` over the estimator's params, which runs the classifier's own `fit` and `_fit`
+for each class (`classifier.fit(trainingDataset, paramMap)`), overrides of a subclass too. Its
+model is PySpark's `OneVsRestModel` of the classifier's own models. A None classifier is fit there
+too, and fails at its first use. So is a dataset that is not a Spark DataFrame: a pandas DataFrame
+raises the `KeyError` of PySpark's pandas aggregate of its max label.
 
 All seven PySpark constructor parameters have named setters. Rust exposes scalar
 parameter getters and the configured classifier. Fits clone the base classifier
 for each class and run at most `parallelism` fits at once. Python observes
 mutations to the supplied classifier made before `fit`, while fitting leaves that
-classifier unchanged. Class indices run from zero through the maximum label, as
-in PySpark. Instance weights are forwarded to each class's fit when the base
+classifier unchanged. Instance weights are forwarded to each class's fit when the base
 classifier is a `HasWeightCol` of PySpark, which every native classifier is but the
 perceptron (FMClassifier included). For the perceptron, Python warns
 `weightCol is ignored, as it is not supported by <uid> now.`, with the classifier's
 uid, as PySpark does, and fits without the weights.
+
+A fit runs the steps of PySpark's `OneVsRest._fit`, in its order and of its requests, in Rust and
+in Python, but for the reads of each class's model that PySpark's makes after its fit (`numClasses`
+of a LogisticRegression model), which the Rust API makes when they are asked for:
+
+- **Classes:** the fit reads the max label first, as
+  `dataset.agg({labelCol: "max"}).head()["max(" + labelCol + ")"]`: the max of the label column as
+  named, which the server resolves (a name with a dot names a field of a struct), of the column's
+  own type. The classes are `int(max) + 1`, of Python's `int`, so the max of a string column is its
+  greatest string (labels "10", "9" and "0" fit ten classes, and the rows of "10" are of no class),
+  a fraction is truncated (a max of -0.5 fits one class), and a null (of no rows), a NaN, an
+  infinity or a string that is no integer raises the `TypeError`, `ValueError` or `OverflowError`
+  of `int`. Python takes PySpark's own Python values and `int`. Rust converts the max as `int` does,
+  of the same messages, but of the ASCII digits of a string only, where Python's `int` takes the
+  decimal digits of other scripts too.
+- **Dataset:** the label, features and weight columns (`dataset.select(labelCol, featuresCol,
+  weightCol)`) are cached while the classes fit when the input is not persisted, as PySpark's
+  `_cache_spark_dataset(..., StorageLevel.MEMORY_AND_DISK)` caches them: persisted, and unpersisted
+  after the fits and the reads of their models; or, with `SPARKML_TEMP_DFS_PATH` set, saved under
+  that path, read back, and deleted after by the ML helper (`handleOverwrite`). The binary label of
+  each class is `1.0` where the label column of that dataset (`multiclassLabeled[labelCol]`) is
+  the class, and the training summary of each class's model is of its binary training set.
+- **Pool:** then PySpark makes its list of the tasks of the classes and its pool of
+  `min(parallelism, classes)` threads, so that a parallelism below one, a null one, and a max label
+  below zero raise their errors after the max label is read and the dataset is cached:
+  `ValueError: Number of processes must be at least 1`, or the `TypeError` of `min` of a None. This
+  client fits at most 2147483647 classes: a count beyond raises a `MemoryError` in Python (and an
+  error in Rust), where PySpark allocates its list of that many tasks, and beyond 2^63 the
+  `OverflowError` of that list, as PySpark's.
+- **Params:** the params are read where PySpark reads them, with no check of their own: an unset
+  classifier raises PySpark's `KeyError` of the param, a null `labelCol` the `AttributeError` of
+  `F.col(None)`, a null `featuresCol` the `TypeError` of the select (after the max query), a null
+  `predictionCol` is sent to the classifier's fits, which the server rejects, and a null
+  `rawPredictionCol` fits, as PySpark's does. In Python, `parallelism` is an int of any size, which
+  PySpark compares and never sends, and which saves and loads as it is.
 
 The model aggregates the positive-class raw scores of its submodels into `rawPrediction` and
 chooses the first highest score for `prediction`, ignoring NaN/null scores as PySpark does; it
@@ -1625,7 +1665,9 @@ Models must transform data in their fitting session.
 
 Rust `OneVsRest::fit` returns the typed `OneVsRestModel`. Its `models()` gives each binary
 submodel as its typed model, one `SubModel` variant per native classifier, and `classifier()`
-gives the classifier. Single-vector prediction is on the submodels.
+gives the classifier. Single-vector prediction is on the submodels. `OneVsRestModel::new(session,
+models)` constructs a model of the given models, of a new uid and no set params or classifier, as
+PySpark's `OneVsRestModel(models)`, and its `set_classifier` sets the classifier.
 
 Persistence is of PySpark's Python format, in Rust and in Python, as PySpark's `OneVsRestWriter`,
 `OneVsRestModelWriter` and their readers write it: `OneVsRest::write().save(path)` and
@@ -1633,9 +1675,14 @@ Persistence is of PySpark's Python format, in Rust and in Python, as PySpark's `
 has its params without the classifier, which is saved at `classifier`; the metadata of the model
 also has `numClasses`, and each submodel is saved at `model_<index>` by its own writer. What each
 of PySpark and this client saves, the other loads, with the same uids, params and predictions, and
-the metadata files equal PySpark's apart from their timestamps and uids. A `CrossValidator` or a
-`TrainValidationSplit` over a OneVsRest saves and loads with it, and a param map of the validator
-sets the params of the classifier, as PySpark's `copy` does.
+the metadata files equal PySpark's apart from their timestamps and uids. As PySpark's readers, the
+loads read metadata of any class, of PySpark's Python format and of the JVM's class names, which
+classic PySpark's `JavaMLWriter` (and Scala's writer) saves of a OneVsRest of a Java classifier, in
+the same layout, also as a stage of a pipeline. A load of a model loads its classifier and each of
+its models once, of PySpark's requests. A `CrossValidator` or a `TrainValidationSplit` over a
+OneVsRest saves and loads with it, and a param map of the validator sets the params of the
+classifier, as PySpark's `copy` does. In Rust, a param map of a model sets the params of its
+models (`apply_param_map`), as PySpark's `OneVsRestModel.copy(extra)` copies each model with it.
 
 In Python, the `OneVsRest` estimator has the Params API of `pyspark.ml` (its `classifier` param
 included), `setClassifier`, `fitMultiple` and `clear`, and its `fit` returns the typed

@@ -12,13 +12,13 @@ use serde_json::Value;
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::ml::{
-    fetch, load_metadata, BinaryClassificationEvaluator, BinaryClassificationSummary,
+    fetch, load_metadata, load_stage, BinaryClassificationEvaluator, BinaryClassificationSummary,
     ClassificationModel, ClassificationSummary, Classifier, CrossValidator, CrossValidatorModel,
     Estimator, FMClassificationModel, FMClassifier, FetchArg, LogisticRegression, MlMatrix,
     MlTarget, MlValue, MlVector, Model, MultilayerPerceptronClassificationModel,
     MultilayerPerceptronClassifier, NaiveBayes, NaiveBayesModel, OneVsRest, OneVsRestModel,
-    ParamGridBuilder, PredictionModel, ProbabilisticClassificationModel, SubModel, TrainingSummary,
-    Transformer,
+    ParamGridBuilder, ParamMap, Pipeline, PipelineModel, PipelineStage, PredictionModel,
+    ProbabilisticClassificationModel, SubModel, TrainingSummary, Transformer,
 };
 use spark_connect::{Column, DataFrame, SparkSession};
 
@@ -647,6 +647,39 @@ fn one_vs_rest_transform_reads_the_features_of_its_submodels_as_pyspark() {
 }
 
 #[test]
+fn one_vs_rest_model_sets_a_param_map_in_its_models_as_pyspark() {
+    // PySpark's `OneVsRestModel.copy(extra)` copies each model with `extra` too, so that
+    // `model.transform(dataset, {lr.featuresCol: "f2"})` transforms by the features of "f2", which
+    // the models, of the classifier's uid, read.
+    let Some(s) = live_session() else {
+        return;
+    };
+    let root = golden();
+    // The model of the golden's fit, of a classifier of a uid of its own.
+    let classifier = LogisticRegression::new()
+        .set_max_iter(20)
+        .set_reg_param(0.01);
+    let uid = classifier.operator().uid.clone();
+    let mut model = OneVsRest::new()
+        .set_classifier(classifier)
+        .set_weight_col("weight")
+        .fit(&dataset(&s, &root, "multi_train"))
+        .unwrap();
+    let eval = dataset(&s, &root, "multi_eval");
+    let other = eval.with_column_renamed("features", "f2");
+    let map = ParamMap::new().put(&uid, "featuresCol", MlValue::String("f2".into()));
+    Transformer::apply_param_map(&mut model, &map).unwrap();
+    for sub in model.models() {
+        let SubModel::LogisticRegression(sub) = sub else {
+            panic!("a LogisticRegression model");
+        };
+        assert_eq!(sub.features_col(), "f2");
+    }
+    let actual = one_vs_rest_rows(&model.transform(&other).unwrap());
+    assert_one_vs_rest_golden(&actual, &one_vs_rest_golden_transform(&root));
+}
+
+#[test]
 fn one_vs_rest_transform_of_another_raw_prediction_col_fails_as_pyspark() {
     // The submodels write rawPrediction, which the model's rawPredictionCol "scores" does not
     // name: PySpark's select of it fails to resolve the column, when the transform is evaluated.
@@ -802,6 +835,128 @@ fn one_vs_rest_saves_and_loads_as_pyspark() {
         .save(&resaved)
         .unwrap();
     assert_eq!(load_metadata(&s, &resaved, None).unwrap()["numClasses"], 3);
+}
+
+/// Rewrite the class of the metadata of the save at `path` to the JVM's class `class`, as a save of
+/// classic PySpark's `JavaMLWriter` (and of Scala's writer) of a OneVsRest of a Java classifier
+/// names it, in the same layout as PySpark's Python format.
+fn rewrite_class(path: &std::path::Path, class: &str) {
+    let dir = path.join("metadata");
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let file = entry.unwrap().path();
+        let name = file.file_name().unwrap().to_string_lossy().to_string();
+        if name.starts_with("part-") {
+            let mut metadata: Value =
+                serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+            metadata["class"] = Value::String(class.to_string());
+            std::fs::write(&file, format!("{metadata}\n")).unwrap();
+            // The checksum of the file, which the local file system of the server checks.
+            let _ = std::fs::remove_file(dir.join(format!(".{name}.crc")));
+        }
+    }
+}
+
+/// The directory of the only stage of the pipeline saved at `path`.
+fn only_stage(path: &str) -> std::path::PathBuf {
+    let mut stages: Vec<_> = std::fs::read_dir(std::path::Path::new(path).join("stages"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(stages.len(), 1, "{stages:?}");
+    stages.remove(0)
+}
+
+#[test]
+fn one_vs_rest_loads_the_metadata_of_the_jvms_class_as_pyspark() {
+    // PySpark's `OneVsRestReader` and `OneVsRestModelReader` load the metadata of any class
+    // (`loadMetadata` of no expected class), so they load what classic PySpark's `JavaMLWriter`
+    // saves of a OneVsRest of a Java classifier, of the JVM's class name, and so does
+    // `DefaultParamsReader.loadParamsInstance` of a stage of a pipeline, of the PySpark class of
+    // the JVM's.
+    let Some(s) = live_session() else {
+        return;
+    };
+    let root = golden();
+    let frame = dataset(&s, &root, "multi_train");
+    let mut estimator = OneVsRest::new()
+        .set_classifier(LogisticRegression::new().set_max_iter(5))
+        .set_weight_col("weight");
+    let uid = estimator.operator().uid.clone();
+    let path = scratch_path("ovr-jvm");
+    estimator
+        .write()
+        .session(&s)
+        .overwrite()
+        .save(&path)
+        .unwrap();
+    rewrite_class(
+        std::path::Path::new(&path),
+        "org.apache.spark.ml.classification.OneVsRest",
+    );
+    let loaded = OneVsRest::load(&s, &path).unwrap();
+    assert_eq!(loaded.operator().uid, uid);
+    assert_eq!(loaded.weight_col(), Some("weight"));
+    assert!(matches!(
+        loaded.classifier(),
+        Some(Classifier::LogisticRegression(_))
+    ));
+    assert_eq!(load_stage(&s, &path).unwrap().uid(), uid);
+
+    let mut model = estimator.fit(&frame).unwrap();
+    let model_path = scratch_path("ovr-model-jvm");
+    model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&model_path)
+        .unwrap();
+    rewrite_class(
+        std::path::Path::new(&model_path),
+        "org.apache.spark.ml.classification.OneVsRestModel",
+    );
+    let mut loaded_model = OneVsRestModel::load(&s, &model_path).unwrap();
+    assert_eq!(loaded_model.num_classes(), 3);
+    assert_eq!(
+        Transformer::operator(&loaded_model).uid,
+        Transformer::operator(&model).uid
+    );
+    let expected = predictions(&model.transform(&frame).unwrap());
+    assert_eq!(
+        predictions(&loaded_model.transform(&frame).unwrap()),
+        expected
+    );
+
+    // As the stage of a pipeline, and of its model.
+    let mut pipeline = Pipeline::new().set_stages([PipelineStage::estimator(estimator)]);
+    let pipeline_path = scratch_path("pipeline-ovr-jvm");
+    pipeline
+        .write()
+        .session(&s)
+        .overwrite()
+        .save(&pipeline_path)
+        .unwrap();
+    rewrite_class(
+        &only_stage(&pipeline_path),
+        "org.apache.spark.ml.classification.OneVsRest",
+    );
+    let loaded = Pipeline::load(&s, &pipeline_path).unwrap();
+    assert_eq!(loaded.stages()[0].uid(), uid);
+    let pipeline_model = pipeline.fit_pipeline(&frame).unwrap();
+    let pipeline_model_path = scratch_path("pipeline-ovr-model-jvm");
+    pipeline_model
+        .write()
+        .unwrap()
+        .session(&s)
+        .overwrite()
+        .save(&pipeline_model_path)
+        .unwrap();
+    rewrite_class(
+        &only_stage(&pipeline_model_path),
+        "org.apache.spark.ml.classification.OneVsRestModel",
+    );
+    let mut loaded = PipelineModel::load(&s, &pipeline_model_path).unwrap();
+    assert_eq!(predictions(&loaded.transform(&frame).unwrap()), expected);
 }
 
 #[test]

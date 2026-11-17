@@ -197,13 +197,6 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
         let _ = name;
         Ok(())
     }
-    /// The kind of the param `name` that the class's setters convert its values of, where it is not
-    /// the kind of its converter (OneVsRest's `parallelism`, which PySpark compares but never
-    /// sends); None for the others.
-    fn param_kind(&self, name: &str) -> Option<Kind> {
-        let _ = name;
-        None
-    }
 
     /// The `params` walk of PySpark's `Params.params`, which `explainParams` and `copy` run too:
     /// it reads every attribute of the object but its properties, so the members of
@@ -899,11 +892,7 @@ pub(super) fn set<T: ParamsHolder>(
                 error
             }
         })?;
-    let kind = slf
-        .try_borrow()?
-        .param_kind(&meta.name)
-        .or_else(|| kind_of_converter(&meta.converter))
-        .unwrap_or(Kind::Identity);
+    let kind = kind_of_converter(&meta.converter).unwrap_or(Kind::Identity);
     // Of a value that the converter has converted already, so that it does not fail again.
     let converted = convert(&meta.name, kind, &converted)?;
     slf.try_borrow_mut()?.put(py, meta.name.as_str(), converted)
@@ -917,11 +906,7 @@ pub(super) fn set_by_name<T: ParamsHolder>(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let meta = get_param_meta(slf.as_any(), name)?;
-    let kind = slf
-        .try_borrow()?
-        .param_kind(&meta.name)
-        .or_else(|| kind_of_converter(&meta.converter))
-        .unwrap_or(Kind::Identity);
+    let kind = kind_of_converter(&meta.converter).unwrap_or(Kind::Identity);
     let converted = convert(&meta.name, kind, value)?;
     slf.try_borrow_mut()?
         .put(slf.py(), meta.name.as_str(), converted)

@@ -5,21 +5,20 @@ use super::*;
 use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
 use crate::ml::pipeline_api::{load_metadata_dict, load_params_instance, metadata_str, writable};
-use spark_connect::column::{lit_double, when};
 use spark_connect::ml::{
     join_path, save_metadata, Metadata, OneVsRestModel as CoreOneVsRestModel, SubModel,
 };
 use spark_connect::SparkSession;
 use std::sync::{Mutex, PoisonError};
 
-/// The fit of a OneVsRest, of what its model's submodels are made of: the training DataFrame and
-/// the columns of the fit (the binary labels are PySpark's `mc2b$<class>`).
+/// The fit of a OneVsRest, of what its model's submodels are made of: the dataset of the fit's
+/// columns, and the binary training set of each class (of its binary label, PySpark's
+/// `mc2b$<class>`), which the classifier of the class was fitted on, of which the class's model's
+/// training summary is.
 #[derive(Clone)]
 pub(crate) struct OneVsRestFit {
     pub(crate) train: DataFrame,
-    pub(crate) label: String,
-    pub(crate) features: String,
-    pub(crate) weight: Option<String>,
+    pub(crate) datasets: Vec<DataFrame>,
 }
 
 /// OneVsRestModel: the models of the classes of a fit, with the classifier and the other params
@@ -90,29 +89,6 @@ impl PyOneVsRestModel {
     }
 }
 
-/// The column of the name `name` exactly, a name with a dot too.
-fn ml_column(name: &str) -> spark_connect::Column {
-    spark_connect::column::col(&format!("`{}`", name.replace('`', "``")))
-}
-
-/// The binary training set of the class `index`, which PySpark's `OneVsRest._fit` fits the class
-/// with: the label, the features and the weight, and the binary label of the class, as the core
-/// names it on the server (the summary dataset of the class's model).
-fn binary_frame(fit: &OneVsRestFit, index: usize) -> DataFrame {
-    let mut columns = vec![ml_column(&fit.label), ml_column(&fit.features)];
-    if let Some(weight) = &fit.weight {
-        columns.push(ml_column(weight));
-    }
-    fit.train.select(columns).with_column(
-        &format!("mc2b${index}"),
-        when(
-            ml_column(&fit.label).eq(lit_double(index as f64)),
-            lit_double(1.0),
-        )
-        .otherwise(lit_double(0.0)),
-    )
-}
-
 /// The defaults of the classifier `classifier`, which PySpark's submodels have as the classifier's
 /// copy has them (see `params_api::fit_defaults`).
 fn classifier_defaults(classifier: &Bound<'_, PyAny>) -> PyResult<params_api::OwnDefaults> {
@@ -157,7 +133,11 @@ fn submodel(
     fit: &OneVsRestFit,
     defaults: &params_api::OwnDefaults,
 ) -> PyResult<Py<PyAny>> {
-    let binary = binary_frame(fit, index);
+    let Some(binary) = fit.datasets.get(index) else {
+        return Err(PyValueError::new_err(format!(
+            "the fit of the OneVsRest has no binary training set of the class {index}"
+        )));
+    };
     let label = format!("mc2b${index}");
     // PySpark's submodel has the binary label of the class as its labelCol param.
     let with_label = |mut model: Box<dyn Model>| -> Box<dyn Model> {
@@ -170,7 +150,7 @@ fn submodel(
             let mut typed = PyLinearSVCModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::Train,
             )?;
             params_api::copy_defaults(
@@ -184,7 +164,7 @@ fn submodel(
             let mut typed = PyNaiveBayesModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::None,
             )?;
             params_api::copy_defaults(
@@ -198,7 +178,7 @@ fn submodel(
             let mut typed = PyFMClassificationModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::Train,
             )?;
             params_api::copy_defaults(
@@ -212,7 +192,7 @@ fn submodel(
             let mut typed = PyMultilayerPerceptronClassificationModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::Train,
             )?;
             params_api::copy_defaults(
@@ -226,7 +206,7 @@ fn submodel(
             let mut typed = PyLogisticRegressionModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::Train,
             )?;
             params_api::copy_defaults(
@@ -240,7 +220,7 @@ fn submodel(
             let mut typed = PyDecisionTreeClassificationModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::None,
             )?;
             params_api::copy_defaults(
@@ -254,7 +234,7 @@ fn submodel(
             let mut typed = PyRandomForestClassificationModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::Train,
             )?;
             params_api::copy_defaults(
@@ -268,7 +248,7 @@ fn submodel(
             let mut typed = PyGBTClassificationModel::fitted(
                 py,
                 with_label(Box::new(model)),
-                &binary,
+                binary,
                 object::SummaryDataset::None,
             )?;
             params_api::copy_defaults(
@@ -278,7 +258,7 @@ fn submodel(
             )?;
             Ok(crate::ml::object::new_py(py, typed)?.into_any())
         }
-        SubModel::Other(model) => generic_submodel(py, with_label(model), &binary),
+        SubModel::Other(model) => generic_submodel(py, with_label(model), binary),
     }
 }
 
@@ -765,8 +745,37 @@ pub(crate) fn load_one_vs_rest(
     Ok(estimator.into_any().unbind())
 }
 
-/// Load the OneVsRestModel at `path`, as `OneVsRestModelReader.load`: its classifier, its models
-/// (`numClasses` of them, each loaded of its own format), and its uid and params.
+/// The core model of the loaded model `model`, of one of the native classification models that the
+/// classifier of a OneVsRest makes; None of a model of another class.
+fn core_submodel(model: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn Model>>> {
+    macro_rules! core_of {
+        ($($class:ty),* $(,)?) => {$(
+            if let Ok(model) = model.cast::<$class>() {
+                return Ok(Some(model.try_borrow()?.core_model()));
+            }
+        )*};
+    }
+    core_of!(
+        PyLinearSVCModel,
+        PyLogisticRegressionModel,
+        PyDecisionTreeClassificationModel,
+        PyRandomForestClassificationModel,
+        PyGBTClassificationModel,
+        PyNaiveBayesModel,
+        PyFMClassificationModel,
+        PyMultilayerPerceptronClassificationModel,
+    );
+    Ok(None)
+}
+
+/// Load the OneVsRestModel at `path`, as `OneVsRestModelReader.load`: its metadata, of any class
+/// (PySpark's of the Python format, or the JVM's, as a classic `JavaMLWriter` writes it), its
+/// classifier, its models (`numClasses` of them, each loaded of its own format), and then
+/// `OneVsRestModel(subModels)._resetUid(metadata["uid"])` of the classifier and the params of the
+/// metadata. Each is loaded once, as PySpark loads it: the core's composite of the classes (of
+/// which a fit makes the typed models) is of the core models of the models just loaded, when they
+/// are of the native classes; a model of models of another class has none, as one that
+/// `OneVsRestModel(models)` constructs.
 fn load_one_vs_rest_model(
     py: Python<'_>,
     spark: &Bound<'_, PyAny>,
@@ -781,16 +790,31 @@ fn load_one_vs_rest_model(
         let model_path = join_path(path, &format!("model_{index}"));
         models.append(load_params_instance(py, spark, session, &model_path)?)?;
     }
-    // The composite of the classes, which the core transforms with, of the same save.
-    let composite = CoreOneVsRestModel::load(session, path).to_pyerr()?;
-    let df = session.range(1).to_pyerr()?;
-    let core = object::ModelCore::fitted(
-        py,
-        Box::new(composite),
-        &df,
-        object::SummaryDataset::None,
-        None,
-    )?;
+    let core_models = models
+        .iter()
+        .map(|model| core_submodel(&model))
+        .collect::<PyResult<Option<Vec<_>>>>()?;
+    let core = match core_models {
+        Some(core_models) => {
+            let mut composite = CoreOneVsRestModel::new(session, core_models);
+            if let Ok(native) = native_classifier(&classifier, false) {
+                composite = composite.set_classifier(native);
+            }
+            let df = session.range(1).to_pyerr()?;
+            object::ModelCore::fitted(
+                py,
+                Box::new(composite),
+                &df,
+                object::SummaryDataset::None,
+                None,
+            )?
+        }
+        None => object::ModelCore::unbound(
+            py,
+            "org.apache.spark.ml.classification.OneVsRestModel",
+            "OneVsRestModel",
+        )?,
+    };
     let model = PyOneVsRestModel {
         core,
         raw: vec![("classifier", classifier.unbind())],
@@ -798,6 +822,8 @@ fn load_one_vs_rest_model(
         models: Mutex::new(Some(models.into_any().unbind())),
     };
     let model = crate::ml::object::new_object(py, model)?;
+    let uid = metadata_str(&metadata.get_item("uid")?)?;
+    params_api::NativeInstance::set_uid(&mut *model.try_borrow_mut()?, &uid);
     set_metadata_params(&model, &metadata)?;
     Ok(model.into_any().unbind())
 }

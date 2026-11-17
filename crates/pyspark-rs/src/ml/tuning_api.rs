@@ -570,7 +570,7 @@ fn cross_validator_folds<'py>(
 /// The end of a `with` of the context manager `cm` of the result of its block: `__exit__` of the
 /// error of the block, if any, else of none. The context managers here (`_cache_spark_dataset`)
 /// do not suppress an error.
-fn exit_context<T>(cm: &Bound<'_, PyAny>, result: PyResult<T>) -> PyResult<T> {
+pub(super) fn exit_context<T>(cm: &Bound<'_, PyAny>, result: PyResult<T>) -> PyResult<T> {
     let py = cm.py();
     match result {
         Ok(value) => {
