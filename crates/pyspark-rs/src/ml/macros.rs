@@ -662,6 +662,13 @@ macro_rules! native_model {
                 let this = Self { core, make: Self::__make };
                 Ok($crate::ml::object::new_object(py, this)?.unbind())
             }
+
+            /// The core model of the object, of its server-side object and its params, which the
+            /// composite of a loaded OneVsRestModel holds of its loaded models.
+            #[allow(dead_code)]
+            pub(crate) fn core_model(&self) -> Box<dyn Model> {
+                self.core.model.clone_box()
+            }
         }
 
         impl $crate::ml::object::ModelObject for $ty {

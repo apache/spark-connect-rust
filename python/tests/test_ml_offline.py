@@ -131,12 +131,15 @@ def _operator_info(ref_id):
 
 def _label_query_result(obj):
     # The response of the query that the fit of obj makes of its labels: the maximum label of a
-    # OneVsRest, which it fits one model of each class of. The other native fits make no query.
+    # OneVsRest, which it fits one model of each class of, in the column `max(<labelCol>)` that the
+    # server names it, which PySpark's fit reads (`head()["max(" + labelCol + ")"]`). The other
+    # native fits make no query.
     import pyarrow as pa
 
     if type(obj).__name__ == "OneVsRest":
-        table = pa.table({"max": pa.array([1.0], pa.float64())})
-        return _arrow_result(table, T.StructType([T.StructField("max", T.DoubleType())]))
+        name = "max(" + obj.getLabelCol() + ")"
+        table = pa.table({name: pa.array([1.0], pa.float64())})
+        return _arrow_result(table, T.StructType([T.StructField(name, T.DoubleType())]))
     return None
 
 
@@ -4358,6 +4361,21 @@ def test_one_vs_rest_reads_the_dataset_before_its_parallelism(parallelism, use_s
         estimator.fit(None)
 
 
+@pytest.mark.parametrize("value", [2**64, -(2**64), 2**63, -(2**63) - 1, 7])
+def test_one_vs_rest_keeps_a_parallelism_of_any_size_as_pyspark(value):
+    # PySpark's `parallelism` is an int of any size, which its fit compares in Python and never
+    # sends, and which its writer saves as it is: the native object keeps it as it is too (an int
+    # beyond a long, of the repr that the core keeps of it), so that its getter, its save and its
+    # load are of the int itself.
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect.classification import OneVsRest
+
+    assert native.OneVsRest(parallelism=value).getParallelism() == value
+    assert native.OneVsRest().setParallelism(value).getParallelism() == value
+    assert native.OneVsRest().setParams(parallelism=value).getParallelism() == value
+    assert OneVsRest(parallelism=value).getParallelism() == value
+
+
 @pytest.mark.parametrize("name", ["AFTSurvivalRegression", "IsotonicRegression", "FMRegressor"])
 @pytest.mark.parametrize("use_setters", [False, True])
 def test_remaining_regressor_native_parameters_match_official_fixture(ml_mock, name, use_setters):
@@ -4466,6 +4484,35 @@ def test_native_one_vs_rest_fit_of_pandas_is_pysparks(pandas_ml_input):
     with pytest.raises(type(expected.value)) as error:
         estimator.fit(pandas_ml_input)
     assert error.value.args == expected.value.args
+
+
+def test_native_one_vs_rest_fits_a_subclass_of_a_native_classifier_by_pysparks_fit(ml_mock):
+    # The native fit takes a classifier of exactly a native class. PySpark's own OneVsRest._fit fits
+    # a Python subclass of one, of `classifier.fit(trainingDataset, paramMap)` for each class, so
+    # that the subclass's `_fit` runs, of the binary label of each class, and sends no fit of its
+    # own. Its model is PySpark's OneVsRestModel of the subclass's models.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.classification import OneVsRestModel
+    from pyspark.ml.connect.classification import LinearSVCModel
+
+    spark, service = ml_mock
+    calls = []
+
+    class Overriding(connect.LinearSVC):
+        def _fit(self, dataset):
+            calls.append(self.getLabelCol())
+            return LinearSVCModel()
+
+    estimator = connect.OneVsRest(classifier=Overriding())
+    service.query_payload = _label_query_result(estimator)
+    try:
+        model = estimator.fit(spark.range(1))
+    finally:
+        service.query_payload = None
+    assert sorted(calls) == ["mc2b$0", "mc2b$1"]
+    assert type(model) is OneVsRestModel
+    assert [type(m) for m in model.models] == [LinearSVCModel] * 2
+    assert not any(c.ml_command.HasField("fit") for c in _commands(service))
 
 
 def test_stop_words_remover_load_default_stop_words_asserts_an_active_session():
