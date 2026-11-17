@@ -1022,10 +1022,12 @@ impl PyDataStreamReader {
                 ("recursiveFileLookup", recursiveFileLookup),
             ],
         )?;
-        // Like PySpark, the options stay on the reader, and the format of a str path.
+        // Like PySpark, the options stay on the reader, and the format of a str path. The load
+        // is of the options set here: the core's `text` would set its own `wholetext`.
         let (path, path_error) = self.format_path(&r, "text", path)?;
         let error = self.plan_error().or(path_error);
-        Ok(PyDataFrame::new(with_plan_error(r.text(&path), error)))
+        let df = r.format("text").load(Some(&path));
+        Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 }
 
