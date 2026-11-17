@@ -28,7 +28,9 @@ use std::time::Duration;
 
 use common::{FakeServer, FakeService};
 use futures::{stream, Stream, StreamExt};
-use spark_connect_core::{ChannelBuilder, RetryPolicy, RpcDeadlines, SparkConnectClient};
+use spark_connect_core::{
+    ChannelBuilder, ResultChunking, RetryPolicy, RpcDeadlines, SparkConnectClient,
+};
 use spark_connect_proto::execute_plan_response::{ResponseType, ResultComplete};
 use spark_connect_proto::release_execute_request::Release;
 use spark_connect_proto::{
@@ -648,6 +650,151 @@ async fn initial_failure_releases_the_execution() {
     assert!(error.contains("plan sentinel"), "unexpected error: {error}");
     fixture.assert_release_all_count(1).await;
     assert_identity(&fixture.state.all_releases()[0]);
+}
+
+/// Whether `request` asks for a reattachable execution.
+fn asks_to_reattach(request: &ExecutePlanRequest) -> bool {
+    use spark_connect_proto::execute_plan_request::request_option::RequestOption;
+    request.request_options.iter().any(|option| {
+        matches!(
+            &option.request_option,
+            Some(RequestOption::ReattachOptions(_))
+        )
+    })
+}
+
+#[tokio::test]
+async fn an_execution_that_is_not_reattachable_is_sent_again_and_never_released() {
+    // As PySpark's client with `use_reattachable_execute` False: the request has no reattach
+    // option and the ExecutePlan no deadline, a stream that fails in a way that the policy
+    // retries sends the ExecutePlan again, under the retries of the whole execution (two here),
+    // and nothing is reattached or released.
+    let fixture = Fixture::start(Scenario::Disconnect).await;
+    fixture.client.set_reattachable_execute(false);
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    let mut ids = Vec::new();
+    let error = loop {
+        match bounded(stream.message()).await {
+            Ok(Some(response)) => ids.push(response.response_id),
+            Ok(None) => panic!("the failed execution ended"),
+            Err(error) => break error,
+        }
+    };
+    assert!(error.to_string().contains("stream disconnected"), "{error}");
+    assert_eq!(ids, ["first", "first", "first"]);
+    let executions = fixture.state.executions.lock().unwrap().clone();
+    assert_eq!(executions.len(), 3);
+    assert!(executions.iter().all(|e| !asks_to_reattach(&e.request)));
+    assert!(fixture
+        .state
+        .timeouts
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(call, timeout)| *call == "ExecutePlan" && timeout.is_none()));
+    drop(stream);
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(fixture.state.releases.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_execution_that_is_not_reattachable_ends_with_its_stream() {
+    // The stream of an execution that is not reattachable ends with the call, without a
+    // ResultComplete, and a client of a new session keeps the setting, as PySpark's
+    // `newSession` keeps `use_reattachable_execute`; it can be turned on again.
+    let fixture = Fixture::start(Scenario::Eof).await;
+    fixture.client.set_reattachable_execute(false);
+    assert!(!fixture.client.with_new_session_id().reattachable_execute());
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert_eq!(
+        bounded(stream.message())
+            .await
+            .unwrap()
+            .unwrap()
+            .response_id,
+        "first"
+    );
+    assert!(bounded(stream.message()).await.unwrap().is_none());
+    drop(stream);
+    assert!(fixture.state.reattaches.lock().unwrap().is_empty());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(fixture.state.releases.lock().unwrap().is_empty());
+
+    fixture.client.set_reattachable_execute(true);
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    while bounded(stream.message()).await.unwrap().is_some() {}
+    assert!(asks_to_reattach(
+        &fixture.state.executions.lock().unwrap()[1].request
+    ));
+    assert_eq!(fixture.state.reattaches.lock().unwrap().len(), 1);
+    drop(stream);
+    fixture.assert_release_all_count(1).await;
+}
+
+#[tokio::test]
+async fn the_result_chunking_of_the_client_is_that_of_its_requests() {
+    // As PySpark's `allow_arrow_batch_chunking` and `preferred_arrow_chunk_size`, sent in the
+    // options of each ExecutePlanRequest; a client of a new session has the default ones.
+    let mut fixture = Fixture::start(Scenario::Complete).await;
+    let chunking = ResultChunking {
+        allow_arrow_batch_chunking: false,
+        preferred_arrow_chunk_size: Some(4096),
+    };
+    fixture.client.set_result_chunking(chunking);
+    assert_eq!(
+        fixture.client.with_new_session_id().result_chunking(),
+        ResultChunking::default()
+    );
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    while bounded(stream.message()).await.unwrap().is_some() {}
+    use spark_connect_proto::execute_plan_request::request_option::RequestOption;
+    let request = fixture.state.executions.lock().unwrap()[0].request.clone();
+    let sent: Vec<_> = request
+        .request_options
+        .iter()
+        .filter_map(|option| match &option.request_option {
+            Some(RequestOption::ResultChunkingOptions(options)) => Some((
+                options.allow_arrow_batch_chunking,
+                options.preferred_arrow_chunk_size,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, [(false, Some(4096))]);
+}
+
+#[tokio::test]
+async fn a_replaced_retry_policy_retries_the_calls_that_start_after_it() {
+    // As PySpark's `set_retry_policies` on a client in use: the clones of the client share
+    // the policy, which the next call reads; a client of a new session has the default one.
+    let fixture = Fixture::start(Scenario::Disconnect).await;
+    let clone = fixture.client.clone();
+    clone.replace_retry_policy(RetryPolicy::no_retries());
+    assert_eq!(fixture.client.retry_policy().max_retries, Some(0));
+    assert_eq!(
+        fixture
+            .client
+            .with_new_session_id()
+            .retry_policy()
+            .max_retries,
+        RetryPolicy::default().max_retries
+    );
+    fixture.client.set_reattachable_execute(false);
+    let mut stream = bounded(fixture.client.execute_plan_reattachable(execute_request()))
+        .await
+        .unwrap();
+    assert!(bounded(stream.message()).await.unwrap().is_some());
+    assert!(bounded(stream.message()).await.is_err());
+    assert_eq!(fixture.state.executions.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

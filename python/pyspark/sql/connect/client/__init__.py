@@ -16,26 +16,118 @@
 #
 
 """Compatibility shim for pyspark.sql.connect.client: ``SparkConnectClient``, the class of
-``SparkSession.client``, and related classes."""
+``SparkSession.client``, and related classes.
 
-__all__ = ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
+The client runs over the Rust transport of its session, which sends the messages that it is
+given, such as the plans of ``to_table`` and ``schema``, as they are: the client builds the
+requests of those as PySpark Connect's does, and reads their responses as it does. The retry
+policies, the reattachable executions, the result chunking and the RPC deadlines of the client are
+those of the transport."""
+
+__all__ = ["ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
 
 
 import copy
+import logging
+import math
 import os
+import pickle
 import platform
 import sys
 import urllib.parse
 import uuid
 import weakref
-from collections.abc import Iterable, Mapping
-from typing import Any, Optional
+from collections.abc import Iterable, Iterator, Mapping
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Optional, Union
 
 from pyspark import _pyspark
-from pyspark.errors import PySparkNotImplementedError, PySparkValueError
+from pyspark.errors import (
+    PySparkNotImplementedError,
+    PySparkPicklingError,
+    PySparkValueError,
+)
 from pyspark.errors.exceptions.connect import SparkConnectException
-from pyspark.sql.metrics import ObservedMetrics
+from pyspark.sql.connect.logging import logger
+# As PySpark's package, which exports the log level of Spark Connect's logger.
+from pyspark.sql.connect.logging import getLogLevel  # noqa: F401
+from pyspark.sql.metrics import ExecutionInfo, ObservedMetrics, PlanMetrics
+from pyspark.sql.types import DataType, StructType
+from pyspark.util import PythonEvalType
 from pyspark.version import __version__
+
+if TYPE_CHECKING:
+    import pandas as pd
+    import pyarrow as pa
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client.retries import RetryPolicy
+    from pyspark.sql.connect.observation import Observation
+    from pyspark.sql.datasource import DataSource
+    from pyspark.storagelevel import StorageLevel
+
+
+@dataclass(frozen=True)
+class RpcDeadlines:
+    """Per-RPC timeout configuration for :class:`SparkConnectClient`, as PySpark Connect's.
+
+    Each field controls the timeout (in seconds as a float) for one gRPC call type. Set a field to
+    ``None`` to disable the per-RPC timeout for that call. Use :meth:`RpcDeadlines.disabled` to
+    create an instance with all timeouts disabled.
+
+    Note on ``reattachable_execute_plan`` and ``reattach_execute``: these timeouts apply to each
+    individual gRPC stream segment, not to the overall query execution lifetime. When a deadline
+    fires, the server-side operation continues running; the client opens a new ReattachExecute
+    stream to resume receiving results. Non-reattachable ExecutePlan has no deadline because a
+    timeout there would kill the execution with no recovery path.
+
+    The Rust transport applies the deadline of each of its RPCs. It sends no GetStatus, the RPC of
+    ``get_status``.
+    """
+
+    reattachable_execute_plan: Optional[float] = 10 * 60  # 10 min
+    reattach_execute: Optional[float] = 10 * 60  # 10 min
+    analyze_plan: Optional[float] = 60 * 60  # 1 hour
+    add_artifacts: Optional[float] = 60 * 60  # 1 hour
+    config: Optional[float] = 10 * 60  # 10 min
+    interrupt: Optional[float] = 10 * 60  # 10 min
+    release_session: Optional[float] = 10 * 60  # 10 min
+    artifact_status: Optional[float] = 10 * 60  # 10 min
+    clone_session: Optional[float] = 10 * 60  # 10 min
+    get_status: Optional[float] = 10 * 60  # 10 min
+    fetch_error_details: Optional[float] = 10 * 60  # 10 min
+
+    def __post_init__(self) -> None:
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if value is not None and value <= 0:
+                raise PySparkValueError(
+                    message=(
+                        f"RpcDeadlines.{field.name} must be a positive number or None, "
+                        f"got {value!r}"
+                    ),
+                )
+
+    @classmethod
+    def disabled(cls) -> "RpcDeadlines":
+        """Create an :class:`RpcDeadlines` with all per-RPC timeouts disabled.
+
+        Use this when you want to rely solely on server-side or network-layer timeouts.
+        """
+        return cls(
+            reattachable_execute_plan=None,
+            reattach_execute=None,
+            analyze_plan=None,
+            add_artifacts=None,
+            config=None,
+            interrupt=None,
+            release_session=None,
+            artifact_status=None,
+            clone_session=None,
+            get_status=None,
+            fetch_error_details=None,
+        )
 
 
 class ChannelBuilder:
@@ -377,6 +469,119 @@ class PlanObservedMetrics(ObservedMetrics):
         return {"name": self._name, "keys": self._keys, "pairs": self.pairs}
 
 
+class AnalyzeResult:
+    """The result of an analysis of SparkConnectClient's ``_analyze``, as PySpark Connect's: the
+    one field of the result of the analysis, and None for the others."""
+
+    def __init__(
+        self,
+        schema: Optional[DataType],
+        explain_string: Optional[str],
+        tree_string: Optional[str],
+        is_local: Optional[bool],
+        is_streaming: Optional[bool],
+        input_files: Optional[list[str]],
+        spark_version: Optional[str],
+        parsed: Optional[DataType],
+        is_same_semantics: Optional[bool],
+        semantic_hash: Optional[int],
+        storage_level: Optional["StorageLevel"],
+        ddl_string: Optional[str],
+    ):
+        self.schema = schema
+        self.explain_string = explain_string
+        self.tree_string = tree_string
+        self.is_local = is_local
+        self.is_streaming = is_streaming
+        self.input_files = input_files
+        self.spark_version = spark_version
+        self.parsed = parsed
+        self.is_same_semantics = is_same_semantics
+        self.semantic_hash = semantic_hash
+        self.storage_level = storage_level
+        self.ddl_string = ddl_string
+
+    @classmethod
+    def fromProto(cls, pb: Any) -> "AnalyzeResult":
+        from pyspark.sql.connect import types
+        from pyspark.sql.connect.conversion import proto_to_storage_level
+
+        schema: Optional[DataType] = None
+        explain_string: Optional[str] = None
+        tree_string: Optional[str] = None
+        is_local: Optional[bool] = None
+        is_streaming: Optional[bool] = None
+        input_files: Optional[list[str]] = None
+        spark_version: Optional[str] = None
+        parsed: Optional[DataType] = None
+        is_same_semantics: Optional[bool] = None
+        semantic_hash: Optional[int] = None
+        storage_level: Optional[StorageLevel] = None
+        ddl_string: Optional[str] = None
+
+        if pb.HasField("schema"):
+            schema = types.proto_schema_to_pyspark_data_type(pb.schema.schema)
+        elif pb.HasField("explain"):
+            explain_string = pb.explain.explain_string
+        elif pb.HasField("tree_string"):
+            tree_string = pb.tree_string.tree_string
+        elif pb.HasField("is_local"):
+            is_local = pb.is_local.is_local
+        elif pb.HasField("is_streaming"):
+            is_streaming = pb.is_streaming.is_streaming
+        elif pb.HasField("input_files"):
+            input_files = pb.input_files.files
+        elif pb.HasField("spark_version"):
+            spark_version = pb.spark_version.version
+        elif pb.HasField("ddl_parse"):
+            parsed = types.proto_schema_to_pyspark_data_type(pb.ddl_parse.parsed)
+        elif pb.HasField("same_semantics"):
+            is_same_semantics = pb.same_semantics.result
+        elif pb.HasField("semantic_hash"):
+            semantic_hash = pb.semantic_hash.result
+        elif pb.HasField("persist"):
+            pass
+        elif pb.HasField("unpersist"):
+            pass
+        elif pb.HasField("get_storage_level"):
+            storage_level = proto_to_storage_level(pb.get_storage_level.storage_level)
+        elif pb.HasField("json_to_ddl"):
+            ddl_string = pb.json_to_ddl.ddl_string
+        else:
+            raise SparkConnectException("No analyze result found!")
+
+        return AnalyzeResult(
+            schema,
+            explain_string,
+            tree_string,
+            is_local,
+            is_streaming,
+            input_files,
+            spark_version,
+            parsed,
+            is_same_semantics,
+            semantic_hash,
+            storage_level,
+            ddl_string,
+        )
+
+
+class ConfigResult:
+    """The result of SparkConnectClient's ``config``, as PySpark Connect's: the pairs of a key and
+    its value, None for a key without one, and the warnings of the server."""
+
+    def __init__(self, pairs: list[tuple[str, Optional[str]]], warnings: list[str]):
+        self.pairs = pairs
+        self.warnings = warnings
+
+    @classmethod
+    def fromProto(cls, pb: "pb2.ConfigResponse") -> "ConfigResult":
+        return ConfigResult(
+            pairs=[(pair.key, pair.value if pair.HasField("value") else None) for pair in pb.pairs],
+            warnings=list(pb.warnings),
+        )
+
+
 def _to_pandas(
     table: Any,
     schema: Any,
@@ -410,22 +615,98 @@ def _to_pandas(
 
 
 class SparkConnectClient:
-    """The client of ``SparkSession.client``: of PySpark Connect's ``SparkConnectClient``, what
-    the modules of PySpark that build their own messages, such as ``pyspark.ml``, use: their
-    commands and the ML cache, over the Rust transport of the session, and the session ID. The
-    messages are those of ``pyspark.sql.connect.proto``. The Rust transport is the rest of the
-    client, of the DataFrame API."""
+    """The client of a Spark Connect session, as PySpark Connect's ``SparkConnectClient``: the
+    client of ``SparkSession.client``, and one that ``SparkConnectClient(connection, ...)`` makes
+    of a session of its own. It sends the messages that it is given, of
+    ``pyspark.sql.connect.proto``, over the Rust transport of its session, as the modules of
+    PySpark that build their own messages, such as ``pyspark.ml``, send them: commands, plans and
+    their analyses, configurations, and the artifacts, the tags, the interrupts and the progress
+    handlers of the session."""
 
     # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
     __module__ = "pyspark.sql.connect.client.core"
 
-    def __init__(self, session: Any) -> None:
+    # The thread of an ML cache RPC in flight, as SparkConnectClient's re-entrancy guard of a
+    # RemoteModelRef finalizer that deletes a model.
+    _ml_cache_rpc_thread: Optional[int] = None
+
+    def __init__(
+        self,
+        connection: Union[str, ChannelBuilder],
+        user_id: Optional[str] = None,
+        channel_options: Optional[list[tuple[str, Any]]] = None,
+        retry_policy: Optional[dict[str, Any]] = None,
+        use_reattachable_execute: bool = True,
+        session_hooks: Optional[list[Any]] = None,
+        allow_arrow_batch_chunking: bool = True,
+        preferred_arrow_chunk_size: Optional[int] = None,
+        rpc_deadlines: Optional[RpcDeadlines] = None,
+        max_retry_exception_elapsed_time: Optional[float] = None,
+    ):
+        """A client of a new session of the connection string or the channel builder
+        ``connection``, as PySpark Connect's ``SparkConnectClient``: of the user ``user_id``
+        unless the connection names one, else of ``SPARK_USER`` or ``USER``; of the retries of a
+        ``DefaultPolicy`` of the keyword arguments ``retry_policy``, and of a
+        ``RetryException`` for up to ``max_retry_exception_elapsed_time`` seconds; of reattachable
+        executions unless ``use_reattachable_execute`` is False; whose executions call the
+        ``on_execute_plan`` of ``session_hooks``; of the result chunking of
+        ``allow_arrow_batch_chunking`` and ``preferred_arrow_chunk_size``; and of the deadlines
+        of ``rpc_deadlines``. The session is neither the default session nor the active one.
+
+        The Rust transport opens the channel of the connection, so a ``channel_options`` of a
+        connection string raises ``NOT_IMPLEMENTED``, as its ``DefaultChannelBuilder`` does; as
+        PySpark's, the client of a channel builder does not read it."""
+        # As PySpark's, the channel builder of a connection string, which checks it, and then the
+        # retry policy and the session ID that the client reads of them.
+        builder = (
+            connection
+            if isinstance(connection, ChannelBuilder)
+            else DefaultChannelBuilder(connection, channel_options)
+        )
+        policies = None
+        if retry_policy is not None:
+            from pyspark.sql.connect.client.retries import DefaultPolicy
+
+            policies = [DefaultPolicy(**retry_policy)]
+        _ = builder.session_id
+        hook_factories = [_hook_factory(hook) for hook in session_hooks or []]
+        deadlines = (
+            None
+            if rpc_deadlines is None
+            else {field.name: getattr(rpc_deadlines, field.name) for field in fields(RpcDeadlines)}
+        )
+        session = _pyspark.SparkSession._of_client_options(
+            connection,
+            user_id,
+            hook_factories,
+            allow_arrow_batch_chunking,
+            preferred_arrow_chunk_size,
+            deadlines,
+        )
+        self._init_of_session(session, builder)
+        if not use_reattachable_execute:
+            self.disable_reattachable_execute()
+        if policies is not None or max_retry_exception_elapsed_time is not None:
+            self._set_retry_policies(policies, max_retry_exception_elapsed_time)
+
+    @classmethod
+    def _of_session(
+        cls, session: Any, builder: Optional[ChannelBuilder] = None
+    ) -> "SparkConnectClient":
+        """The client of ``session``, a session of the drop-in, as ``SparkSession.client`` and
+        the clients of ``newSession`` and ``clone`` are, of the channel builder ``builder`` of the
+        connection, if there is one."""
+        client = cls.__new__(cls)
+        client._init_of_session(session, builder)
+        return client
+
+    def _init_of_session(self, session: Any, builder: Optional[ChannelBuilder]) -> None:
         import threading
 
         self._session = session
-        # The thread of an ML cache RPC in flight, as SparkConnectClient's re-entrancy guard of a
-        # RemoteModelRef finalizer that deletes a model.
-        self._ml_cache_rpc_thread: Any = None
+        # The channel builder of the connection of a client made of one, of its host and token,
+        # as PySpark's `_builder`; the client of a session reads them of the session.
+        self._builder = builder
         # The state of the current thread of the session, as SparkConnectClient's thread_local.
         self.thread_local = _ThreadLocalOfClient(session)
         self.global_user_context_extensions_lock = threading.Lock()
@@ -437,8 +718,23 @@ class SparkConnectClient:
 
     @property
     def host(self) -> str:
-        """The hostname where this client intends to connect, as SparkConnectClient's ``host``."""
+        """The hostname where this client intends to connect, as SparkConnectClient's ``host``:
+        of its channel builder."""
+        if self._builder is not None:
+            return self._builder.host
         return self._session._endpoint_host()
+
+    @property
+    def token(self) -> Optional[str]:
+        """The authentication bearer token during connection, as SparkConnectClient's ``token``:
+        that of its channel builder, the ``token`` parameter of the connection string, else the
+        environment variable ``SPARK_CONNECT_AUTHENTICATE_TOKEN``, or None."""
+        if self._builder is not None:
+            return self._builder.token
+        token = self._session._token_parameter()
+        if token is not None:
+            return token
+        return os.environ.get("SPARK_CONNECT_AUTHENTICATE_TOKEN")
 
     @property
     def _server_session_id(self) -> Optional[str]:
@@ -554,50 +850,386 @@ class SparkConnectClient:
         ``get_config_with_defaults``, of which pandas-on-Spark reads its ANSI mode."""
         return tuple(self._session.conf._get_with_defaults(list(pairs)))
 
-    def execute_command(self, command: Any, observations: Any = None) -> Any:
-        """Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's
-        ``execute_command``: no data, the properties of the results of the responses, of their
-        field names, as SparkConnectClient converts them (the resources of a
-        GetResourcesCommand, the profile ID of a resource profile, and the DataFrame of a
-        checkpoint), and no execution information."""
+    def config(self, operation: "pb2.ConfigRequest.Operation") -> ConfigResult:
+        """Send ``operation``, a ``ConfigRequest.Operation``, as SparkConnectClient's ``config``:
+        the result of the configuration request of the session."""
         import pyspark.sql.connect.proto as pb2
 
+        req = pb2.ConfigRequest()
+        req.operation.CopyFrom(operation)
+        response = pb2.ConfigResponse.FromString(self._session._config(req.SerializeToString()))
+        return ConfigResult.fromProto(response)
+
+    def _analyze(self, method: str, **kwargs: Any) -> AnalyzeResult:
+        """The result of the analysis ``method`` of the arguments ``kwargs``, as
+        SparkConnectClient's ``_analyze``: an AnalyzePlanRequest of the plans or the relations it
+        is given, as they are."""
+        import pyspark.sql.connect.proto as pb2
+        from pyspark.sql.connect.conversion import storage_level_to_proto
+
+        req = pb2.AnalyzePlanRequest()
+        if method == "schema":
+            req.schema.plan.CopyFrom(kwargs.get("plan"))
+        elif method == "explain":
+            req.explain.plan.CopyFrom(kwargs.get("plan"))
+            explain_mode = kwargs.get("explain_mode")
+            allowed_explain_modes = ["simple", "extended", "codegen", "cost", "formatted"]
+            if explain_mode not in allowed_explain_modes:
+                raise PySparkValueError(
+                    errorClass="VALUE_NOT_ALLOWED",
+                    messageParameters={
+                        "arg_name": "explain_mode",
+                        "allowed_values": str(allowed_explain_modes),
+                    },
+                )
+            modes = pb2.AnalyzePlanRequest.Explain.ExplainMode
+            req.explain.explain_mode = {
+                "simple": modes.EXPLAIN_MODE_SIMPLE,
+                "extended": modes.EXPLAIN_MODE_EXTENDED,
+                "cost": modes.EXPLAIN_MODE_COST,
+                "codegen": modes.EXPLAIN_MODE_CODEGEN,
+                "formatted": modes.EXPLAIN_MODE_FORMATTED,
+            }[explain_mode]
+        elif method == "tree_string":
+            req.tree_string.plan.CopyFrom(kwargs.get("plan"))
+            level = kwargs.get("level")
+            if level and isinstance(level, int):
+                req.tree_string.level = level
+        elif method == "is_local":
+            req.is_local.plan.CopyFrom(kwargs.get("plan"))
+        elif method == "is_streaming":
+            req.is_streaming.plan.CopyFrom(kwargs.get("plan"))
+        elif method == "input_files":
+            req.input_files.plan.CopyFrom(kwargs.get("plan"))
+        elif method == "spark_version":
+            req.spark_version.SetInParent()
+        elif method == "ddl_parse":
+            req.ddl_parse.ddl_string = kwargs.get("ddl_string")
+        elif method == "same_semantics":
+            req.same_semantics.target_plan.CopyFrom(kwargs.get("plan"))
+            req.same_semantics.other_plan.CopyFrom(kwargs.get("other"))
+        elif method == "semantic_hash":
+            req.semantic_hash.plan.CopyFrom(kwargs.get("plan"))
+        elif method == "persist":
+            req.persist.relation.CopyFrom(kwargs.get("relation"))
+            if kwargs.get("storage_level", None) is not None:
+                storage_level = kwargs.get("storage_level")
+                req.persist.storage_level.CopyFrom(storage_level_to_proto(storage_level))
+        elif method == "unpersist":
+            req.unpersist.relation.CopyFrom(kwargs.get("relation"))
+            if kwargs.get("blocking", None) is not None:
+                req.unpersist.blocking = kwargs.get("blocking")
+        elif method == "get_storage_level":
+            req.get_storage_level.relation.CopyFrom(kwargs.get("relation"))
+        elif method == "json_to_ddl":
+            req.json_to_ddl.json_string = kwargs.get("json_string")
+        else:
+            raise PySparkValueError(
+                errorClass="UNSUPPORTED_OPERATION",
+                messageParameters={
+                    "operation": method,
+                },
+            )
+        data = self._session._analyze_plan(req.SerializeToString())
+        return AnalyzeResult.fromProto(pb2.AnalyzePlanResponse.FromString(data))
+
+    def schema(self, plan: "pb2.Plan") -> StructType:
+        """The schema of ``plan``, a ``spark.connect.Plan``, as SparkConnectClient's ``schema``:
+        of its analysis by the server."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Schema for plan: {self._proto_to_string(plan, True)}")
+        schema = self._analyze(method="schema", plan=plan).schema
+        assert schema is not None
+        # Server side should populate the struct field which is the schema.
+        assert isinstance(schema, StructType)
+        return schema
+
+    def explain_string(self, plan: "pb2.Plan", explain_mode: str = "extended") -> str:
+        """The explain string of ``plan`` in ``explain_mode``, as SparkConnectClient's
+        ``explain_string``: ``VALUE_NOT_ALLOWED`` for a mode other than ``simple``,
+        ``extended``, ``codegen``, ``cost`` and ``formatted``."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"Explain (mode={explain_mode}) for plan {self._proto_to_string(plan, True)}"
+            )
+        result = self._analyze(
+            method="explain", plan=plan, explain_mode=explain_mode
+        ).explain_string
+        assert result is not None
+        return result
+
+    def same_semantics(self, plan: "pb2.Plan", other: "pb2.Plan") -> bool:
+        """Whether ``plan`` and ``other`` have the same semantics, as SparkConnectClient's
+        ``same_semantics``."""
+        result = self._analyze(method="same_semantics", plan=plan, other=other).is_same_semantics
+        assert result is not None
+        return result
+
+    def semantic_hash(self, plan: "pb2.Plan") -> int:
+        """The ``hashCode`` of the logical plan of ``plan``, as SparkConnectClient's
+        ``semantic_hash``."""
+        result = self._analyze(method="semantic_hash", plan=plan).semantic_hash
+        assert result is not None
+        return result
+
+    def _execute_plan(self, plan: "pb2.Plan", observations: Any, reported: bool) -> Any:
+        """Start the execution of ``plan``, a ``spark.connect.Plan`` that the client sends as it
+        is, as SparkConnectClient's request of a copy of it: its responses, whose observed metrics
+        set the Observations of ``observations`` by their names, and whose progress reaches the
+        progress handlers when ``reported``."""
+        return self._session._execute_plan(
+            plan.SerializeToString(), list(observations.items()), reported
+        )
+
+    def _results(self, responses: Any) -> Iterator[Any]:
+        """The results of ``responses``, as SparkConnectClient's
+        ``_execute_and_fetch_as_iterator`` yields them of each response: its plan metrics, its
+        observed metrics, the schema of its result, the properties of the result of a command by
+        their field names, its extension, and the record batches of its Arrow batch. The Rust
+        transport has joined the chunks of a batch, checked their offsets and their rows, updated
+        the progress of the execution and set the Observations. The execution ends with them."""
+        import pyspark.sql.connect.proto as pb2
+        from pyspark.sql.connect import types
+
+        try:
+            for data, metrics, observed_metrics in responses:
+                yield from metrics
+                yield from observed_metrics
+                b = pb2.ExecutePlanResponse.FromString(data)
+                if b.HasField("schema"):
+                    dt = types.proto_schema_to_pyspark_data_type(b.schema)
+                    assert isinstance(dt, StructType)
+                    yield dt
+                if b.HasField("sql_command_result"):
+                    yield {"sql_command_result": b.sql_command_result.relation}
+                if b.HasField("write_stream_operation_start_result"):
+                    field = "write_stream_operation_start_result"
+                    yield {field: b.write_stream_operation_start_result}
+                if b.HasField("streaming_query_command_result"):
+                    yield {"streaming_query_command_result": b.streaming_query_command_result}
+                if b.HasField("streaming_query_manager_command_result"):
+                    cmd_result = b.streaming_query_manager_command_result
+                    yield {"streaming_query_manager_command_result": cmd_result}
+                if b.HasField("streaming_query_listener_events_result"):
+                    event_result = b.streaming_query_listener_events_result
+                    yield {"streaming_query_listener_events_result": event_result}
+                if b.HasField("pipeline_command_result"):
+                    yield {"pipeline_command_result": b.pipeline_command_result}
+                if b.HasField("pipeline_event_result"):
+                    yield {"pipeline_event_result": b.pipeline_event_result}
+                if b.HasField("get_resources_command_result"):
+                    from pyspark.resource.information import ResourceInformation
+
+                    resources = {}
+                    for key, resource in b.get_resources_command_result.resources.items():
+                        name = resource.name
+                        addresses = [address for address in resource.addresses]
+                        resources[key] = ResourceInformation(name, addresses)
+                    yield {"get_resources_command_result": resources}
+                if b.HasField("extension"):
+                    yield b.extension
+                if b.HasField("arrow_batch"):
+                    import pyarrow as pa
+
+                    with pa.ipc.open_stream(b.arrow_batch.data) as reader:
+                        yield from reader
+                if b.HasField("create_resource_profile_command_result"):
+                    profile_id = b.create_resource_profile_command_result.profile_id
+                    yield {"create_resource_profile_command_result": profile_id}
+                if b.HasField("checkpoint_command_result"):
+                    from pyspark.sql.connect.conversion import proto_to_remote_cached_dataframe
+
+                    yield {
+                        "checkpoint_command_result": proto_to_remote_cached_dataframe(
+                            b.checkpoint_command_result.relation
+                        )
+                    }
+                if b.HasField("ml_command_result"):
+                    yield {"ml_command_result": b.ml_command_result}
+        finally:
+            responses.close()
+
+    def _execute_and_fetch(
+        self, plan: "pb2.Plan", observations: Any, self_destruct: bool = False
+    ) -> tuple[Any, Optional[StructType], list[Any], list[Any], dict[str, Any], str]:
+        """The results of the execution of ``plan``, as SparkConnectClient's
+        ``_execute_and_fetch``: the table of its record batches, or None without any, its schema,
+        its plan metrics, its observed metrics, its properties, and its operation ID."""
+        import pyarrow as pa
+
+        observed_metrics: list[PlanObservedMetrics] = []
+        metrics: list[PlanMetrics] = []
+        batches: list[pa.RecordBatch] = []
+        schema: Optional[StructType] = None
         properties: dict[str, Any] = {}
-        for data in self._session._execute_command(command.SerializeToString()):
-            response = pb2.ExecutePlanResponse.FromString(data)
-            # The results of commands, as SparkConnectClient._execute_and_fetch_as_iterator
-            # yields them.
-            if response.HasField("sql_command_result"):
-                properties["sql_command_result"] = response.sql_command_result.relation
-            for field in (
-                "write_stream_operation_start_result",
-                "streaming_query_command_result",
-                "streaming_query_manager_command_result",
-                "streaming_query_listener_events_result",
-                "pipeline_command_result",
-                "pipeline_event_result",
-                "ml_command_result",
-            ):
-                if response.HasField(field):
-                    properties[field] = getattr(response, field)
-            if response.HasField("get_resources_command_result"):
-                from pyspark.resource.information import ResourceInformation
 
-                properties["get_resources_command_result"] = {
-                    key: ResourceInformation(resource.name, list(resource.addresses))
-                    for key, resource in response.get_resources_command_result.resources.items()
-                }
-            if response.HasField("create_resource_profile_command_result"):
-                properties["create_resource_profile_command_result"] = (
-                    response.create_resource_profile_command_result.profile_id
+        responses = self._execute_plan(plan, observations, True)
+        for response in self._results(responses):
+            if isinstance(response, StructType):
+                schema = response
+            elif isinstance(response, pa.RecordBatch):
+                batches.append(response)
+            elif isinstance(response, PlanMetrics):
+                metrics.append(response)
+            elif isinstance(response, PlanObservedMetrics):
+                observed_metrics.append(response)
+            elif isinstance(response, dict):
+                properties.update(**response)
+            else:
+                raise PySparkValueError(
+                    errorClass="UNKNOWN_RESPONSE",
+                    messageParameters={
+                        "response": response,
+                    },
                 )
-            if response.HasField("checkpoint_command_result"):
-                from pyspark.sql.connect.conversion import proto_to_remote_cached_dataframe
 
-                properties["checkpoint_command_result"] = proto_to_remote_cached_dataframe(
-                    response.checkpoint_command_result.relation
+        operation_id = responses.operation_id
+        if len(batches) > 0:
+            if self_destruct:
+                results = []
+                for batch in batches:
+                    # self_destruct frees memory column-wise, but Arrow record batches are
+                    # oriented row-wise, so copies each column into its own allocation
+                    batch = pa.RecordBatch.from_arrays(
+                        [
+                            # This call actually reallocates the array
+                            pa.concat_arrays([array])
+                            for array in batch
+                        ],
+                        schema=batch.schema,
+                    )
+                    results.append(batch)
+                table = pa.Table.from_batches(batches=results)
+                # Ensure only the table has a reference to the batches, so that
+                # self_destruct (if enabled) is effective
+                del results
+                del batches
+            else:
+                table = pa.Table.from_batches(batches=batches)
+            return table, schema, metrics, observed_metrics, properties, operation_id
+        else:
+            return None, schema, metrics, observed_metrics, properties, operation_id
+
+    def to_table_as_iterator(
+        self, plan: "pb2.Plan", observations: dict[str, "Observation"]
+    ) -> Iterator[Union[StructType, "pa.Table"]]:
+        """The result of ``plan`` as it arrives, as SparkConnectClient's
+        ``to_table_as_iterator``: its schema, once the server sends it, and a PyArrow Table of
+        each record batch. The execution sets the Observations of ``observations`` by their
+        names, and starts with the first item."""
+        import pyarrow as pa
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
+        sent = _plan_of(plan)
+        for response in self._results(self._execute_plan(sent, observations, True)):
+            if isinstance(response, StructType):
+                yield response
+            elif isinstance(response, pa.RecordBatch):
+                yield pa.Table.from_batches([response])
+
+    def to_table(
+        self, plan: "pb2.Plan", observations: dict[str, "Observation"]
+    ) -> tuple["pa.Table", Optional[StructType], ExecutionInfo]:
+        """The result of ``plan`` as a PyArrow Table, as SparkConnectClient's ``to_table``: the
+        table of the record batches of the server, the schema that it sent, or None, and the
+        ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
+        sent = _plan_of(plan)
+        table, schema, metrics, observed_metrics, _, operation_id = self._execute_and_fetch(
+            sent, observations
+        )
+        # Create a query execution object.
+        ei = ExecutionInfo(metrics, observed_metrics, operation_id)
+        assert table is not None
+        return table, schema, ei
+
+    def to_pandas(
+        self, plan: "pb2.Plan", observations: dict[str, "Observation"], **kwargs: Any
+    ) -> tuple["pd.DataFrame", ExecutionInfo]:
+        """The result of ``plan`` as a pandas DataFrame, as SparkConnectClient's ``to_pandas``:
+        each column converted by its Spark type, in the session time zone, of the
+        ``spark.sql.execution.pandas.structHandlingMode``, or of a ``pandasStructHandlingMode``
+        keyword argument, and the ``ExecutionInfo`` of the execution."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
+        sent = _plan_of(plan)
+
+        # Get all related configs in a batch
+        (
+            timezone,
+            structHandlingMode,
+            selfDestruct,
+        ) = self.get_configs(
+            "spark.sql.session.timeZone",
+            "spark.sql.execution.pandas.structHandlingMode",
+            "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
+        )
+
+        # if pandasStructHandlingMode is explicitly set, override the runtime config
+        if "pandasStructHandlingMode" in kwargs:
+            structHandlingMode = str(kwargs["pandasStructHandlingMode"])
+
+        table, schema, metrics, observed_metrics, _, operation_id = self._execute_and_fetch(
+            sent, observations, selfDestruct == "true"
+        )
+        assert table is not None
+        ei = ExecutionInfo(metrics, observed_metrics, operation_id)
+        pdf = _to_pandas(
+            table,
+            schema,
+            metrics,
+            observed_metrics,
+            timezone=timezone,
+            struct_handling_mode=structHandlingMode,
+            self_destruct=selfDestruct,
+        )
+        return pdf, ei
+
+    def execute_command(
+        self, command: "pb2.Command", observations: Optional[dict[str, "Observation"]] = None
+    ) -> tuple[Optional["pd.DataFrame"], dict[str, Any], ExecutionInfo]:
+        """Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's
+        ``execute_command``: the pandas DataFrame of the record batches of the responses, or
+        None without any, the properties of the results of the responses, of their field names,
+        as SparkConnectClient converts them (the resources of a GetResourcesCommand, the
+        profile ID of a resource profile, and the DataFrame of a checkpoint), and the
+        ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Execute command for command {self._proto_to_string(command, True)}")
+        data, _, metrics, observed_metrics, properties, operation_id = self._execute_and_fetch(
+            _plan_of_command(command), observations or {}
+        )
+        # Create a query execution object.
+        ei = ExecutionInfo(metrics, observed_metrics, operation_id)
+        if data is not None:
+            return (data.to_pandas(), properties, ei)
+        else:
+            return (None, properties, ei)
+
+    def execute_command_as_iterator(
+        self, command: "pb2.Command", observations: Optional[dict[str, "Observation"]] = None
+    ) -> Iterator[dict[str, Any]]:
+        """Execute ``command``, as ``execute_command``, and yield the properties of the result of
+        each response as it arrives, as SparkConnectClient's ``execute_command_as_iterator``:
+        ``UNKNOWN_RESPONSE`` for a result that is not one, such as metrics or a record batch. Its
+        progress does not reach the progress handlers, as PySpark's does not."""
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"Execute command as iterator for command {self._proto_to_string(command, True)}"
+            )
+        plan = _plan_of_command(command)
+        for response in self._results(self._execute_plan(plan, observations or {}, False)):
+            if isinstance(response, dict):
+                yield response
+            else:
+                raise PySparkValueError(
+                    errorClass="UNKNOWN_RESPONSE",
+                    messageParameters={
+                        "response": str(response),
+                    },
                 )
-        return None, properties, None
 
     def add_threadlocal_user_context_extension(self, extension: Any) -> str:
         """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests that
@@ -617,6 +1249,244 @@ class SparkConnectClient:
         """Remove the user context extensions of the current thread and the global ones, as
         SparkConnectClient's."""
         self._session._clear_user_context_extensions()
+
+    def add_tag(self, tag: str) -> None:
+        """Add ``tag`` to the tags of the current thread, which the executions that it starts
+        carry, as SparkConnectClient's: ``CANNOT_BE_NONE`` for None, ``VALUE_ALLOWED`` for a tag
+        of a comma and ``VALUE_NOT_NON_EMPTY_STR`` for an empty one."""
+        self._session.addTag(tag)
+
+    def remove_tag(self, tag: str) -> None:
+        """Remove ``tag`` from the tags of the current thread, as SparkConnectClient's: of the
+        errors of ``add_tag``, and nothing for a tag that the thread does not have."""
+        self._session.removeTag(tag)
+
+    def get_tags(self) -> set[str]:
+        """The tags of the current thread, as SparkConnectClient's: a copy of them, which the
+        Rust transport keeps, where PySpark's client gives the set that it keeps."""
+        return self._session.getTags()
+
+    def clear_tags(self) -> None:
+        """Remove the tags of the current thread, as SparkConnectClient's."""
+        self._session.clearTags()
+
+    def interrupt_all(self) -> Optional[list[str]]:
+        """Interrupt the executions of the session, as SparkConnectClient's: the IDs of the
+        operations interrupted."""
+        return self._session.interruptAll()
+
+    def interrupt_tag(self, tag: str) -> Optional[list[str]]:
+        """Interrupt the executions of the session of the tag ``tag``, as SparkConnectClient's:
+        the IDs of the operations interrupted."""
+        # As PySpark's request of an interrupt of a tag, which asserts that there is one.
+        assert tag is not None
+        return self._session.interruptTag(tag)
+
+    def interrupt_operation(self, op_id: str) -> Optional[list[str]]:
+        """Interrupt the execution of the operation ``op_id``, as SparkConnectClient's: the IDs
+        of the operations interrupted."""
+        # As PySpark's request of an interrupt of an operation, which asserts that there is one.
+        assert op_id is not None
+        return self._session.interruptOperation(op_id)
+
+    def register_udf(
+        self,
+        function: Any,
+        return_type: "Union[DataType, str]",
+        name: Optional[str] = None,
+        eval_type: int = PythonEvalType.SQL_BATCHED_UDF,
+        deterministic: bool = True,
+    ) -> str:
+        """Register the Python function ``function`` as a temporary function of the session of
+        the name ``name``, else of a name that the client generates, as SparkConnectClient's
+        ``register_udf``: the name. A DDL ``return_type`` is parsed by the server, and the
+        function is pickled with the type, as PySpark's ``PythonUDF`` does."""
+        if name is None:
+            name = f"fun_{uuid.uuid4().hex}"
+        output_type = return_type
+        if isinstance(return_type, str):
+            output_type = self._session._parse_ddl(return_type)
+            assert isinstance(output_type, DataType)
+        from pyspark.serializers import CloudPickleSerializer
+
+        self._session._registerPythonUdf(
+            name,
+            output_type,
+            eval_type,
+            CloudPickleSerializer().dumps((function, output_type)),
+            f"{sys.version_info.major}.{sys.version_info.minor}",
+            deterministic,
+        )
+        return name
+
+    def register_udtf(
+        self,
+        function: Any,
+        return_type: "Optional[Union[DataType, str]]",
+        name: str,
+        eval_type: int = PythonEvalType.SQL_TABLE_UDF,
+        deterministic: bool = True,
+    ) -> str:
+        """Register the user-defined table function class ``function`` as the temporary
+        function ``name`` of the session, as SparkConnectClient's ``register_udtf``: the name. A
+        DDL ``return_type`` is left to the server to parse, and a handler that does not pickle
+        raises ``UDTF_SERIALIZATION_ERROR``."""
+        from pyspark.serializers import CloudPickleSerializer
+        from pyspark.sql.connect.utils import get_python_ver
+
+        udtf_name = function.__name__
+        try:
+            command = CloudPickleSerializer().dumps(function)
+        except pickle.PicklingError:
+            raise PySparkPicklingError(  # noqa: B904
+                errorClass="UDTF_SERIALIZATION_ERROR",
+                messageParameters={
+                    "name": udtf_name,
+                    "message": "Please check the stack trace and "
+                    "make sure the function is serializable.",
+                },
+            )
+        self._session._registerPythonUdtf(
+            name, return_type, eval_type, command, get_python_ver(), deterministic
+        )
+        return name
+
+    def register_data_source(self, dataSource: type["DataSource"]) -> None:
+        """Register the Python data source class ``dataSource`` with the session, of its
+        ``name()``, as SparkConnectClient's ``register_data_source``."""
+        self._session.dataSource.register(dataSource)
+
+    def register_java(
+        self,
+        name: str,
+        javaClassName: str,
+        return_type: "Optional[Union[DataType, str]]" = None,
+        aggregate: bool = False,
+    ) -> None:
+        """Register the Java function of the class ``javaClassName`` as the temporary function
+        ``name`` of the session, as SparkConnectClient's ``register_java``: an aggregate one for
+        ``aggregate``, of the class's own type, and of a ``return_type``, a DataType or a DDL
+        string that the server parses, a function that is not an aggregate one, as PySpark's
+        ``JavaUDF`` of an output type is."""
+        self._session._registerJavaFunction(
+            name, javaClassName, return_type, aggregate if return_type is None else False
+        )
+
+    def add_artifacts(self, *paths: str, pyfile: bool, archive: bool, file: bool) -> None:
+        """Add the local files, or ``file:`` URIs, ``paths`` as artifacts of the session, as
+        SparkConnectClient's ``add_artifacts``: each named by the first of ``pyfile``,
+        ``archive`` and ``file`` that it matches, which the client, unlike
+        ``SparkSession.addArtifacts``, does not check against each other, else a jar."""
+        self._session._add_artifacts_of_flags(*paths, pyfile=pyfile, archive=archive, file=file)
+
+    def copy_from_local_to_fs(self, local_path: str, dest_path: str) -> None:
+        """Copy the local file ``local_path`` to the absolute path ``dest_path`` of the file
+        system of the server, as SparkConnectClient's ``copy_from_local_to_fs``: of the
+        assertions of its ArtifactManager, without the check of a scheme of
+        ``SparkSession.copyFromLocalToFs``."""
+        assert Path(local_path).absolute().is_file(), "local path must be a file path."
+        assert Path(dest_path).is_absolute(), "destination FS path must be an absolute path."
+        self._session.copyFromLocalToFs(local_path, dest_path)
+
+    def cache_artifact(self, blob: bytes) -> str:
+        """Cache ``blob`` as an artifact of the session, as SparkConnectClient's
+        ``cache_artifact``: its SHA-256 hash, of which it is uploaded unless the server has it."""
+        return self._session._cache_artifacts([blob])[0]
+
+    def cache_artifacts(self, blobs: list[bytes]) -> list[str]:
+        """Cache ``blobs`` as artifacts of the session, as SparkConnectClient's
+        ``cache_artifacts``: their SHA-256 hashes, in order, of which those that the server does
+        not have are uploaded, once each, in one request."""
+        return self._session._cache_artifacts(list(blobs))
+
+    def newSession(self) -> "SparkConnectClient":
+        """A client of a new session of the same connection, as SparkConnectClient's
+        ``newSession``: of none of the state of this session, of its hooks, its deadlines and
+        whether its executions are reattachable, and of the default retry policy."""
+        builder = None
+        if self._builder is not None:
+            builder = copy.deepcopy(self._builder)
+            builder._params.pop(ChannelBuilder.PARAM_SESSION_ID, None)
+        return SparkConnectClient._of_session(self._session.newSession(), builder)
+
+    def clone(self, new_session_id: Optional[str] = None) -> "SparkConnectClient":
+        """A client of a clone of this session on the server, of the ID ``new_session_id``, a
+        UUID, if one is given, as SparkConnectClient's ``clone``: of a copy of its SQL
+        configurations, temporary views, registered functions and catalog state, of the hooks,
+        the deadlines and the reattachable executions of this client, and of the default retry
+        policy."""
+        session = self._session.cloneSession(new_session_id)
+        builder = None
+        if self._builder is not None:
+            builder = copy.deepcopy(self._builder)
+            builder.set(ChannelBuilder.PARAM_SESSION_ID, session.session_id)
+        return SparkConnectClient._of_session(session, builder)
+
+    def register_progress_handler(self, handler: Any) -> None:
+        """Register ``handler`` to be called with the progress of the executions of the session,
+        once, as SparkConnectClient's ``register_progress_handler``."""
+        self._session.registerProgressHandler(handler)
+
+    def remove_progress_handler(self, handler: Any) -> None:
+        """Remove the progress handler ``handler``, as SparkConnectClient's
+        ``remove_progress_handler``: a ``ValueError`` for one that is not registered."""
+        self._session.removeProgressHandler(handler)
+
+    def clear_progress_handlers(self) -> None:
+        """Remove the progress handlers, as SparkConnectClient's ``clear_progress_handlers``."""
+        self._session.clearProgressHandlers()
+
+    def disable_reattachable_execute(self) -> "SparkConnectClient":
+        """Make the executions of the session not reattachable from the next one on, as
+        SparkConnectClient's ``disable_reattachable_execute``: the client."""
+        self._session._set_reattachable_execute(False)
+        return self
+
+    def enable_reattachable_execute(self) -> "SparkConnectClient":
+        """Make the executions of the session reattachable from the next one on, as
+        SparkConnectClient's ``enable_reattachable_execute``: the client."""
+        self._session._set_reattachable_execute(True)
+        return self
+
+    def set_retry_policies(self, policies: Iterable["RetryPolicy"]) -> None:
+        """Set the retry policies of the RPCs of the session, as SparkConnectClient's
+        ``set_retry_policies``: a failure is retried by the first of ``policies`` that can retry
+        it, with its backoff, until its retries are spent. The Rust transport retries with the
+        parameters of the policies as they are now, and classifies the failures as PySpark's
+        ``DefaultPolicy.can_retry`` does, which a ``RetryPolicy`` never retries, so a policy of
+        another ``can_retry`` or ``to_state`` raises ``NOT_IMPLEMENTED``."""
+        self._set_retry_policies(list(policies), None)
+
+    def get_retry_policies(self) -> list["RetryPolicy"]:
+        """The retry policies of the RPCs of the session, as SparkConnectClient's
+        ``get_retry_policies``: those that ``set_retry_policies`` set, else a ``DefaultPolicy``
+        of the parameters that the transport retries with."""
+        policies = _RETRY_POLICIES.get(self._session)
+        if policies is None:
+            from pyspark.sql.connect.client.retries import DefaultPolicy
+
+            parameters = self._session._retry_policy()
+            parameters.pop("max_retry_exception_elapsed_time")
+            policies = [DefaultPolicy(**parameters)]
+            _RETRY_POLICIES[self._session] = policies
+        return list(policies)
+
+    def _set_retry_policies(
+        self, policies: Optional[list[Any]], max_retry_exception_elapsed_time: Optional[float]
+    ) -> None:
+        """Make the Rust transport retry with ``policies``, if given, and for up to
+        ``max_retry_exception_elapsed_time`` seconds of the retries of a ``RetryException``, if
+        given, from the calls that start from now on."""
+        parameters = self._session._retry_policy()
+        if max_retry_exception_elapsed_time is not None:
+            parameters["max_retry_exception_elapsed_time"] = _elapsed_time_bound(
+                max_retry_exception_elapsed_time
+            )
+        if policies is not None:
+            parameters.update(_retry_parameters(policies))
+        self._session._set_retry_policy(**parameters)
+        if policies is not None:
+            _RETRY_POLICIES[self._session] = policies
 
     def release_session(self) -> None:
         """Release the session on the server, as SparkConnectClient's: its state there."""
@@ -738,12 +1608,124 @@ class _ThreadLocalOfClient:
 # The client of each session, by its ID, while it is in use.
 _CLIENTS: "weakref.WeakValueDictionary[str, SparkConnectClient]" = weakref.WeakValueDictionary()
 
+# The retry policies that `set_retry_policies` set on each session, which its clients give back,
+# whatever client of the session set them, as PySpark's client keeps the policies objects it is
+# given. The Rust transport retries with their parameters.
+_RETRY_POLICIES: "weakref.WeakKeyDictionary[Any, list[Any]]" = weakref.WeakKeyDictionary()
+
 
 def _client_of(session: Any) -> "SparkConnectClient":
     """The client of ``session``, the same object while it is in use, as ``SparkSession.client``
     is one object per session."""
     client = _CLIENTS.get(session.session_id)
     if client is None or client._session is not session:
-        client = SparkConnectClient(session)
+        client = SparkConnectClient._of_session(session)
         _CLIENTS[session.session_id] = client
     return client
+
+
+def _hook_factory(hook: Any) -> Any:
+    """The factory of the hook ``hook`` of SparkConnectClient's ``session_hooks``, which the
+    session calls with itself, as ``SparkSession(hook_factories=...)`` calls its factories: the
+    hook itself, whose ``on_execute_plan`` the executions call."""
+    return lambda _session: hook
+
+
+def _plan_of(plan: Any) -> "pb2.Plan":
+    """A copy of ``plan``, as SparkConnectClient copies a plan into its request: protobuf's
+    ``TypeError`` for an object that is not a ``spark.connect.Plan``."""
+    import pyspark.sql.connect.proto as pb2
+
+    sent = pb2.Plan()
+    sent.CopyFrom(plan)
+    return sent
+
+
+def _plan_of_command(command: Any) -> "pb2.Plan":
+    """The plan of ``command``, as SparkConnectClient sets a command in the plan of its request:
+    protobuf's ``TypeError`` for an object that is not a ``spark.connect.Command``."""
+    import pyspark.sql.connect.proto as pb2
+
+    sent = pb2.Plan()
+    sent.command.CopyFrom(command)
+    return sent
+
+
+def _retry_parameters(policies: list[Any]) -> dict[str, Any]:
+    """The parameters of ``policies`` that the Rust transport retries with, as PySpark's
+    ``Retrying`` retries with them: a failure is retried by the first policy that can retry it, a
+    ``DefaultPolicy`` of the failures that the transport retries, as a ``RetryPolicy`` can retry
+    none, so those of the first ``DefaultPolicy`` retry, and without one nothing is retried. A
+    policy of another ``can_retry``, of the failures that it retries, or of another ``to_state``,
+    of the waits of its retries, raises ``NOT_IMPLEMENTED``: the transport cannot call them."""
+    from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
+
+    effective = None
+    for policy in policies:
+        can_retry = getattr(getattr(policy, "can_retry", None), "__func__", None)
+        to_state = getattr(getattr(policy, "to_state", None), "__func__", None)
+        if to_state is not RetryPolicy.to_state or can_retry not in (
+            DefaultPolicy.can_retry,
+            RetryPolicy.can_retry,
+        ):
+            raise PySparkNotImplementedError(
+                errorClass="NOT_IMPLEMENTED",
+                messageParameters={
+                    "feature": f"The retry policy {type(policy).__name__} of its own can_retry "
+                    "or to_state"
+                },
+            )
+        if effective is None and can_retry is DefaultPolicy.can_retry:
+            effective = policy
+    if effective is None:
+        return {"max_retries": 0}
+    max_retries = effective.max_retries
+    if max_retries is not None:
+        # As RetryPolicyState, which retries while the attempts are fewer than it.
+        max_retries = min(max(math.ceil(max_retries), 0), 2**32 - 1)
+    max_backoff = effective.max_backoff
+    max_server_retry_delay = effective.max_server_retry_delay
+    return {
+        "max_retries": max_retries,
+        "initial_backoff": _milliseconds("initial_backoff", effective.initial_backoff),
+        "max_backoff": None if max_backoff is None else _milliseconds("max_backoff", max_backoff),
+        "backoff_multiplier": float(effective.backoff_multiplier),
+        "jitter": _milliseconds("jitter", effective.jitter),
+        "min_jitter_threshold": _milliseconds(
+            "min_jitter_threshold", effective.min_jitter_threshold
+        ),
+        "recognize_server_retry_delay": bool(effective.recognize_server_retry_delay),
+        "max_server_retry_delay": (
+            None
+            if max_server_retry_delay is None
+            else _milliseconds("max_server_retry_delay", max_server_retry_delay)
+        ),
+    }
+
+
+def _milliseconds(name: str, value: Any) -> int:
+    """The milliseconds ``value`` of the parameter ``name`` of a retry policy, a whole number of
+    them, which the Rust transport waits: ``NOT_IMPLEMENTED`` for a negative or fractional one."""
+    if (
+        isinstance(value, (int, float))
+        and math.isfinite(value)
+        and value >= 0
+        and value == int(value)
+    ):
+        return int(value)
+    raise PySparkNotImplementedError(
+        errorClass="NOT_IMPLEMENTED",
+        messageParameters={
+            "feature": f"The {name} {value!r} of a retry policy, which is not a whole number of "
+            "milliseconds,"
+        },
+    )
+
+
+def _elapsed_time_bound(seconds: float) -> Optional[float]:
+    """The bound of the retries of a ``RetryException``, of ``max_retry_exception_elapsed_time``
+    seconds, as PySpark's ``Retrying`` compares the time elapsed with it: None for an infinite
+    bound, and 0 for a negative one, which the first of them passes."""
+    if math.isinf(seconds) and seconds > 0:
+        return None
+    return max(float(seconds), 0.0)

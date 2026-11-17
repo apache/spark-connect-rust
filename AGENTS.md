@@ -131,9 +131,11 @@ new version introduces).
 There are no justified non-gaps: anything in the diff is a real gap to close. Re-run the
 diff until it shows none.
 
-`SparkSession.client` is not the gRPC `SparkConnectClient`: it is the client that the
-vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses
-over the Rust transport - `execute_command(pb2.Command)` and the ML cache RPCs - with the
+`SparkSession.client` is not the gRPC `SparkConnectClient`: it has the public API of PySpark
+Connect's over the Rust transport (`python/pyspark/sql/connect/client/__init__.py`), which the
+vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses -
+`execute_command(pb2.Command)`, `to_table(pb2.Plan)`, `schema(pb2.Plan)`, `config`, the ML cache
+RPCs, and the retry policies, which the transport retries with - with the
 `pyspark.sql.connect.proto`: always the Rust protobuf runtime (`crates/pyspark-rs/src/pbmsg`,
 exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are not vendored, only
 their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where

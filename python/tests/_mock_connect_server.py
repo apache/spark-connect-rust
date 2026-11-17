@@ -473,6 +473,16 @@ def serve(connection):
             # a test sets.
             if 18 in parse_message(request):
                 return message_field(16, message_field(1, self.ddl_string.encode()))
+            # base.proto: AnalyzePlanRequest.same_semantics=12 (SameSemantics.target_plan=1,
+            # other_plan=2) and semantic_hash=13; AnalyzePlanResponse.same_semantics=10 and
+            # semantic_hash=11, of result=1: whether the two plans are the same bytes, and
+            # `semantic_hash`, which a test may set.
+            if 12 in parse_message(request):
+                plans = parse_message(parse_message(request)[12][0])
+                same = plans.get(1, [b""])[0] == plans.get(2, [b""])[0]
+                return message_field(10, varint_field(1, 1) if same else b"")
+            if 13 in parse_message(request):
+                return message_field(11, varint_field(1, getattr(self, "semantic_hash", 7)))
             if self.failure == "no-result":
                 return b""
             if self.failure == "missing-schema":

@@ -17,9 +17,10 @@ pub struct RetryPolicy {
     pub max_retries: Option<u32>,
     /// Initial backoff in milliseconds.
     pub initial_backoff_ms: u64,
-    /// Maximum backoff in milliseconds.
+    /// Maximum backoff in milliseconds. As PySpark's `RetryPolicy`, a policy without one does not
+    /// grow its backoff: each of its waits is the initial backoff.
     pub max_backoff_ms: Option<u64>,
-    /// Multiplier for exponential backoff.
+    /// Multiplier for exponential backoff, of a policy with a maximum backoff.
     pub backoff_multiplier: f64,
     /// Random jitter to add to backoff (in milliseconds).
     pub jitter_ms: u64,
@@ -257,14 +258,13 @@ impl RetryPolicyState {
         self.attempt += 1;
         let mut wait_time = self.next_wait_ms;
 
-        // Calculate next backoff for future attempts
+        // Calculate next backoff for future attempts. As the reference's, only a policy of a
+        // maximum backoff grows its backoff: without one, every wait is the initial backoff.
         if let Some(max_backoff) = self.policy.max_backoff_ms {
             self.next_wait_ms = f64::min(
                 max_backoff as f64,
                 wait_time * self.policy.backoff_multiplier,
             );
-        } else {
-            self.next_wait_ms = wait_time * self.policy.backoff_multiplier;
         }
 
         // Honor server-provided retry delay if configured
@@ -616,6 +616,27 @@ mod tests {
         for _ in 0..10 {
             assert!(state.next_attempt(None).is_some());
         }
+    }
+
+    #[test]
+    fn test_a_policy_without_a_max_backoff_waits_its_initial_backoff() {
+        // As PySpark's RetryPolicyState, whose next wait is only computed with a max_backoff:
+        // DefaultPolicy(max_retries=4, initial_backoff=10, max_backoff=None,
+        // backoff_multiplier=2.0, jitter=0) waits [10, 10, 10, 10] and then gives up.
+        let policy = RetryPolicy {
+            max_retries: Some(4),
+            initial_backoff_ms: 10,
+            max_backoff_ms: None,
+            backoff_multiplier: 2.0,
+            jitter_ms: 0,
+            min_jitter_threshold_ms: 0,
+            recognize_server_retry_delay: false,
+            max_server_retry_delay_ms: None,
+            max_retry_exception_elapsed_time_ms: None,
+        };
+        let mut state = RetryPolicyState::new(policy);
+        let waits: Vec<_> = (0..5).map(|_| state.next_attempt(None)).collect();
+        assert_eq!(waits, [Some(10), Some(10), Some(10), Some(10), None]);
     }
 
     #[test]

@@ -1041,6 +1041,92 @@ impl SparkSession {
         Ok(responses)
     }
 
+    /// Execute `plan`, a plan built outside the core, such as one that PySpark's
+    /// `SparkConnectClient.to_table` or `execute_command_as_iterator` is given, and return its
+    /// responses as the server sends them, once they are read (see
+    /// [`PlanExecution`](crate::dataframe::PlanExecution)). The placeholders of its relation or its
+    /// command are replaced, as [`SparkSession::execute_command_proto`] replaces them. The metrics
+    /// that it observes set `observations`, by their names, as PySpark's client sets the
+    /// Observations that it is given, and its progress reaches the progress handlers when
+    /// `reported`, as PySpark reports the progress of all its executions but those of
+    /// `execute_command_as_iterator`. Not a stable API.
+    #[doc(hidden)]
+    pub fn execute_plan_proto(
+        &self,
+        plan: proto::Plan,
+        observations: Vec<(String, crate::observation::Observation)>,
+        reported: bool,
+    ) -> Result<crate::dataframe::PlanExecution> {
+        crate::dataframe::PlanExecution::start(self, plan, observations, reported)
+    }
+
+    /// The response of the server to `request`, an analysis built outside the core, such as the
+    /// analyses of PySpark's `SparkConnectClient.schema`, `explain_string`, `same_semantics` and
+    /// `semantic_hash`: of this session, with the placeholders of its plans replaced, retried and
+    /// checked as the analyses of the core are. Not a stable API.
+    #[doc(hidden)]
+    pub fn analyze_plan_proto(
+        &self,
+        mut request: proto::AnalyzePlanRequest,
+    ) -> Result<proto::AnalyzePlanResponse> {
+        request.session_id = self.client.session_id().to_string();
+        if let Some(analyze) = request.analyze.as_mut() {
+            crate::plan::resolve_analysis(analyze)?;
+        }
+        block_on(self.client.analyze_plan(request))
+    }
+
+    /// The response of the server to `request`, a configuration request built outside the core,
+    /// such as that of PySpark's `SparkConnectClient.config`: of this session, retried and checked
+    /// as the configuration requests of the core are. Not a stable API.
+    #[doc(hidden)]
+    pub fn config_proto(&self, mut request: proto::ConfigRequest) -> Result<proto::ConfigResponse> {
+        request.session_id = self.client.session_id().to_string();
+        block_on(self.client.config(request))
+    }
+
+    /// Cache `blobs` as artifacts of the session, of their SHA-256 hashes, which are returned in
+    /// the order of the blobs, as PySpark's `SparkConnectClient.cache_artifacts`: one
+    /// `ArtifactStatus` request asks which are cached on the server already, and one
+    /// `AddArtifacts` uploads each other one once.
+    pub fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
+        block_on(self.client.cache_artifacts(blobs))
+    }
+
+    /// The retry policy of the RPCs of this session, as the policies of PySpark's
+    /// `SparkConnectClient.get_retry_policies` retry them.
+    pub fn retry_policy(&self) -> spark_connect_core::retries::RetryPolicy {
+        self.client.retry_policy()
+    }
+
+    /// Replace the retry policy of the RPCs of this session and of its clones, as PySpark's
+    /// `SparkConnectClient.set_retry_policies`: the calls that start from now on retry under
+    /// `policy`. A new session ([`SparkSession::new_session`], [`SparkSession::clone_session`])
+    /// has the default policy, as PySpark's new client does.
+    pub fn set_retry_policy(&self, policy: spark_connect_core::retries::RetryPolicy) {
+        self.client.replace_retry_policy(policy);
+    }
+
+    /// Make the executions of this session reattachable or not, from the next one on, as PySpark's
+    /// `SparkConnectClient.enable_reattachable_execute` and `disable_reattachable_execute` (see
+    /// [`SparkConnectClient::set_reattachable_execute`]). A new session keeps the setting, as
+    /// PySpark's new client does.
+    pub fn set_reattachable_execute(&self, reattachable: bool) {
+        self.client.set_reattachable_execute(reattachable);
+    }
+
+    /// Whether the executions of this session are reattachable, which they are by default.
+    pub fn reattachable_execute(&self) -> bool {
+        self.client.reattachable_execute()
+    }
+
+    /// The `token` parameter of the connection string of this session, if it has one, which
+    /// PySpark's `SparkConnectClient.token` reads before the environment's
+    /// `SPARK_CONNECT_AUTHENTICATE_TOKEN`.
+    pub fn token_parameter(&self) -> Option<&str> {
+        self.client.token_parameter()
+    }
+
     /// Delete the ML cached objects `refs` on the server, as PySpark's `RemoteModelRef` does
     /// when the last reference to a model goes. It does not wait for the server: the request
     /// runs on the shared runtime, and its errors (a closed channel) are ignored. As
@@ -1317,6 +1403,21 @@ impl SparkSession {
                  cannot be True together.",
             ));
         }
+        self.add_artifacts_of_flags(paths, pyfile, archive, file)
+    }
+
+    /// Add local files as artifacts of the session, as [`SparkSession::add_artifacts_with`],
+    /// with any of the flags true: each path is named by the first flag that its extension
+    /// matches, `pyfile`, then `archive`, then `file`, as PySpark's
+    /// `SparkConnectClient.add_artifacts` names it, which does not check the flags as
+    /// `SparkSession.addArtifacts` does.
+    pub fn add_artifacts_of_flags(
+        &self,
+        paths: &[&str],
+        pyfile: bool,
+        archive: bool,
+        file: bool,
+    ) -> Result<()> {
         block_on(self.client.add_artifacts(paths, pyfile, archive, file))
     }
 
@@ -1597,15 +1698,36 @@ impl Clone for SparkSession {
     }
 }
 
+/// The configuration of the client of a session that a [`SparkSessionBuilder`] builds.
+type ClientConfiguration = Box<dyn FnOnce(&mut SparkConnectClient) + Send>;
+
 /// Builder for creating a SparkSession.
 pub struct SparkSessionBuilder {
     remote_url: Option<String>,
+    /// The configuration of the client of the session (see
+    /// [`SparkSessionBuilder::configure_client`]).
+    configure: Option<ClientConfiguration>,
 }
 
 impl SparkSessionBuilder {
     /// Create a new builder.
     pub fn new() -> Self {
-        SparkSessionBuilder { remote_url: None }
+        SparkSessionBuilder {
+            remote_url: None,
+            configure: None,
+        }
+    }
+
+    /// Configure the client of the session once it is connected, before the session is built
+    /// of it, with the settings that PySpark's `SparkConnectClient` takes when it is made, such
+    /// as its RPC deadlines and the result chunking of its executions. Not a stable API.
+    #[doc(hidden)]
+    pub fn configure_client(
+        mut self,
+        configure: impl FnOnce(&mut SparkConnectClient) + Send + 'static,
+    ) -> Self {
+        self.configure = Some(Box::new(configure));
+        self
     }
 
     /// Set the remote Spark Connect server URL.
@@ -1624,7 +1746,10 @@ impl SparkSessionBuilder {
         })?;
 
         let builder = ChannelBuilder::parse(&url)?;
-        let client = block_on(SparkConnectClient::connect(&builder))?;
+        let mut client = block_on(SparkConnectClient::connect(&builder))?;
+        if let Some(configure) = self.configure {
+            configure(&mut client);
+        }
         Ok(SparkSession::new(client))
     }
 }

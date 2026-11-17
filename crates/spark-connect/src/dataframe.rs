@@ -3059,6 +3059,95 @@ fn execute_command_reporting(
     Ok((responses, info))
 }
 
+/// The responses of the execution of a plan built outside the core, such as the plans that
+/// PySpark's `SparkConnectClient.to_table`, `to_table_as_iterator`, `to_pandas` and
+/// `execute_command_as_iterator` are given, as PySpark's `_execute_and_fetch_as_iterator` reads
+/// them: each response whole, as the server sent it, but with the chunks of an Arrow batch joined
+/// into the batch (see [`ExecutionStream`]), once the metrics that it observed have set the
+/// Observations of the execution, by their names, and the updates of the Python accumulators have
+/// gone to the session. Dropping it before its end releases the execution. Not a stable API.
+#[doc(hidden)]
+pub struct PlanExecution {
+    session: SparkSession,
+    stream: ExecutionStream,
+    observations: Vec<(String, crate::observation::Observation)>,
+    info: ExecutionInfo,
+    /// Whether the information of the execution was recorded as the session's last, at its end.
+    recorded: bool,
+}
+
+impl PlanExecution {
+    /// Start the execution of `plan`, with its placeholders replaced, whose observed metrics set
+    /// `observations`, and whose progress reaches the progress handlers of the session when
+    /// `reported`, as PySpark's `Progress` of the execution reports it.
+    pub(crate) fn start(
+        session: &SparkSession,
+        mut plan: proto::Plan,
+        observations: Vec<(String, crate::observation::Observation)>,
+        reported: bool,
+    ) -> Result<PlanExecution> {
+        crate::plan::resolve_plan(&mut plan)?;
+        // As PySpark's request, whose operation ID the client assigns before it sends it.
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let request = proto::ExecutePlanRequest {
+            session_id: session.client().session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            operation_id: Some(operation_id.clone()),
+            tags: session.tags(),
+            plan: Some(plan),
+            ..Default::default()
+        };
+        let stream = if reported {
+            session.execute_plan(request)?
+        } else {
+            session.execute_plan_unreported(request)?
+        };
+        Ok(PlanExecution {
+            session: session.clone(),
+            stream,
+            observations,
+            info: ExecutionInfo {
+                operation_id: Some(operation_id),
+                ..Default::default()
+            },
+            recorded: false,
+        })
+    }
+
+    /// The operation ID of the execution, which the client assigned to its request.
+    pub fn operation_id(&self) -> &str {
+        self.info.operation_id.as_deref().unwrap_or_default()
+    }
+
+    /// The next response of the execution, or None once it ended. Its error ends the execution.
+    pub fn next_response(&mut self) -> Result<Option<proto::ExecutePlanResponse>> {
+        let Some(mut response) = self.stream.next_message()? else {
+            if !std::mem::replace(&mut self.recorded, true) {
+                self.session.record_execution(self.info.clone());
+            }
+            return Ok(None);
+        };
+        // The metrics are read off a copy, so that the response keeps them as the server sent it.
+        let (metrics, observed) = (response.metrics.clone(), response.observed_metrics.clone());
+        capture_execution(
+            &mut response,
+            &mut self.info,
+            &self.session,
+            &self.observations,
+        )
+        .map_err(|error| self.stream.fail(error))?;
+        response.metrics = metrics;
+        response.observed_metrics = observed;
+        Ok(Some(response))
+    }
+
+    /// The information of the execution so far: its metrics, the metrics that it observed, in the
+    /// order of the responses, and its operation ID.
+    pub fn execution_info(&self) -> &ExecutionInfo {
+        &self.info
+    }
+}
+
 /// Pull execution metrics/observed-metrics off a response; the `ExecutionStream` of the
 /// response updates the progress of the execution. `metrics`/`observed_metrics` are top-level
 /// fields (not part of the `response_type` oneof), so this must run before `response_type` is

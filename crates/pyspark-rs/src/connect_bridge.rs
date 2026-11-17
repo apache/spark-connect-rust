@@ -41,11 +41,13 @@ pub fn _data_type_proto<'py>(
 }
 
 /// The type of the bytes of a `spark.connect.DataType`, as the client reads the types of the
-/// server.
+/// server, with the errors of PySpark's `proto_schema_to_pyspark_data_type` for a type that it
+/// does not convert, such as a spatial type of an SRID that PySpark does not take.
 #[pyfunction]
 pub fn _data_type_of_proto(py: Python<'_>, data_type: &[u8]) -> PyResult<Py<PyAny>> {
     let data_type = proto::DataType::decode(data_type)
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let data_type = DataType::from_proto(&data_type).to_pyerr()?;
+    crate::dataframe::check_schema_conversion(py, Some(&data_type))?;
     crate::types::data_type_to_py(py, &data_type)
 }

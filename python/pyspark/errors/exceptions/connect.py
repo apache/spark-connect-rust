@@ -16,17 +16,19 @@
 #
 """Exceptions raised from Spark Connect.
 
-The classes are those of upstream pyspark. Upstream, ``convert_exception`` converts the gRPC
-``ErrorInfo`` and ``FetchErrorDetails`` of an error that the server raised into one of them.
-In this Rust-backed drop-in, the Rust transport fetches and reads those, and
-``_convert_server_error`` picks and builds the exception from what it read, as the rest of
-upstream ``_convert_exception`` does. ``grpc`` is optional: without it, ``StatusCode`` is an
-enum with the members and values of ``grpc.StatusCode``.
+The classes are those of upstream pyspark, and so are ``convert_exception``, which converts the
+gRPC ``ErrorInfo`` and ``FetchErrorDetailsResponse`` of an error that the server raised into one
+of them, and ``convert_observation_errors``, of the errors of the metrics of an Observation, for
+the code that has those messages. In this Rust-backed drop-in, the Rust transport fetches and
+reads them of the errors of its RPCs, and ``_convert_server_error`` picks and builds the
+exception from what it read, as the rest of upstream ``_convert_exception`` does. ``grpc`` is
+optional: without it, ``StatusCode`` is an enum with the members and values of
+``grpc.StatusCode``.
 """
 import enum
 import json
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
 try:
     from grpc import StatusCode
@@ -81,6 +83,10 @@ from pyspark.errors.exceptions.base import (
 # Exported here too, as this module did before it had the classes of upstream pyspark.
 from pyspark.errors.exceptions.base import TempTableAlreadyExistsException  # noqa: F401
 
+if TYPE_CHECKING:
+    import pyspark.sql.connect.proto as pb2
+    from google.rpc.error_details_pb2 import ErrorInfo
+
 
 class _MultiThreadedRendezvous(Exception):
     """The gRPC error of a call that the server ended with an error, as the ``grpc`` package's
@@ -122,6 +128,202 @@ class SparkConnectException(PySparkException):
         .. versionadded:: 4.3.0
         """
         return getattr(self, "_operation_id", None)
+
+
+def convert_exception(
+    info: "ErrorInfo",
+    truncated_message: str,
+    resp: Optional["pb2.FetchErrorDetailsResponse"],
+    display_server_stacktrace: bool = False,
+    grpc_status_code: StatusCode = StatusCode.UNKNOWN,
+) -> SparkConnectException:
+    raw_classes = info.metadata.get("classes")
+    classes: List[str] = json.loads(raw_classes) if raw_classes else []
+    raw_message_parameters = info.metadata.get("messageParameters")
+    message_parameters: Dict[str, str] = (
+        json.loads(raw_message_parameters) if raw_message_parameters else {}
+    )
+    root_error_idx = (
+        resp.root_error_idx if resp is not None and resp.HasField("root_error_idx") else None
+    )
+    converted = _convert_exception(
+        classes=classes,
+        sql_state=info.metadata.get("sqlState"),
+        error_class=info.metadata.get("errorClass"),
+        reason=info.reason,
+        root_error_idx=root_error_idx,
+        errors=list(resp.errors) if resp is not None else None,
+        truncated_message=truncated_message,
+        truncated_message_parameters=message_parameters,
+        truncated_stacktrace=info.metadata.get("stackTrace"),
+        display_server_stacktrace=display_server_stacktrace,
+        grpc_status_code=grpc_status_code,
+    )
+    return recover_python_exception(converted)
+
+
+def convert_observation_errors(
+    root_error_idx: int,
+    errors: List["pb2.FetchErrorDetailsResponse.Error"],
+) -> SparkConnectException:
+    """
+    Convert observation error payload (root_error_idx + list of Error from ObservedMetrics)
+    to a SparkConnectException.
+    """
+    if root_error_idx < 0 or root_error_idx >= len(errors):
+        return SparkConnectException("Observation error: invalid root_error_idx")
+
+    if len(errors) == 0:
+        return SparkConnectException("Observation error: no errors")
+
+    root_error = errors[root_error_idx]
+
+    return _convert_exception(
+        classes=list(root_error.error_type_hierarchy),
+        sql_state=(
+            root_error.spark_throwable.sql_state
+            if root_error.spark_throwable.HasField("sql_state")
+            else None
+        ),
+        error_class=(
+            root_error.spark_throwable.error_class
+            if root_error.spark_throwable.HasField("error_class")
+            else None
+        ),
+        reason=None,
+        root_error_idx=root_error_idx,
+        errors=errors,
+        truncated_message="",
+        truncated_message_parameters=None,
+        truncated_stacktrace=None,
+    )
+
+
+def _convert_exception(
+    classes: List[str],
+    sql_state: Optional[str],
+    error_class: Optional[str],
+    reason: Optional[str],
+    root_error_idx: Optional[int],
+    errors: Optional[List["pb2.FetchErrorDetailsResponse.Error"]],
+    truncated_message: str,
+    truncated_message_parameters: Optional[Dict[str, str]],
+    truncated_stacktrace: Optional[str],
+    display_server_stacktrace: bool = False,
+    grpc_status_code: StatusCode = StatusCode.UNKNOWN,
+) -> SparkConnectException:
+    import pyspark.sql.connect.proto as pb2
+
+    message = truncated_message
+    stacktrace = truncated_stacktrace
+    message_parameters = truncated_message_parameters
+    contexts = None
+    breaking_change_info = None
+
+    if root_error_idx is not None and errors is not None:
+        root_error = errors[root_error_idx]
+        message = root_error.message
+        stacktrace = _extract_jvm_stacktrace(root_error_idx, errors)
+        if hasattr(root_error, "spark_throwable"):
+            # Extract errorClass from FetchErrorDetailsResponse if not in metadata
+            if error_class is None and root_error.spark_throwable.HasField("error_class"):
+                error_class = root_error.spark_throwable.error_class
+            message_parameters = dict(root_error.spark_throwable.message_parameters)
+            contexts = [
+                (
+                    SQLQueryContext(c)
+                    if c.context_type == pb2.FetchErrorDetailsResponse.QueryContext.SQL
+                    else DataFrameQueryContext(c)
+                )
+                for c in root_error.spark_throwable.query_contexts
+            ]
+            # Extract breaking change info if present
+            if hasattr(
+                root_error.spark_throwable, "breaking_change_info"
+            ) and root_error.spark_throwable.HasField("breaking_change_info"):
+                bci = root_error.spark_throwable.breaking_change_info
+                breaking_change_info = {
+                    "migration_message": list(bci.migration_message),
+                    "needs_audit": bci.needs_audit if bci.HasField("needs_audit") else True,
+                }
+                if bci.HasField("mitigation_config"):
+                    breaking_change_info["mitigation_config"] = {
+                        "key": bci.mitigation_config.key,
+                        "value": bci.mitigation_config.value,
+                    }
+    else:
+        display_server_stacktrace = display_server_stacktrace if stacktrace else False
+
+    if "org.apache.spark.api.python.PythonException" in classes:
+        return PythonException(
+            message="\n  An exception was thrown from the Python worker. "
+            "Please see the stack trace below.\n%s" % message,
+            grpc_status_code=grpc_status_code,
+        )
+
+    # Return exception based on class mapping
+    for error_class_name in classes:
+        ExceptionClass = EXCEPTION_CLASS_MAPPING.get(error_class_name)
+        if ExceptionClass is SparkException:
+            for third_party_exception_class in THIRD_PARTY_EXCEPTION_CLASS_MAPPING:
+                ExceptionClass = (
+                    THIRD_PARTY_EXCEPTION_CLASS_MAPPING.get(third_party_exception_class)
+                    if third_party_exception_class in message
+                    else SparkException
+                )
+
+        if ExceptionClass:
+            return ExceptionClass(
+                message,
+                errorClass=error_class,
+                messageParameters=message_parameters,
+                sql_state=sql_state,
+                server_stacktrace=stacktrace,
+                display_server_stacktrace=display_server_stacktrace,
+                contexts=contexts,  # type: ignore[arg-type]
+                grpc_status_code=grpc_status_code,
+                breaking_change_info=breaking_change_info,
+            )
+
+    # Return UnknownException if there is no matched exception class
+    return UnknownException(
+        message,
+        reason=reason,
+        messageParameters=message_parameters,
+        errorClass=error_class,
+        sql_state=sql_state,
+        server_stacktrace=stacktrace,
+        display_server_stacktrace=display_server_stacktrace,
+        contexts=contexts,  # type: ignore[arg-type]
+        grpc_status_code=grpc_status_code,
+        breaking_change_info=breaking_change_info,
+    )
+
+
+def _extract_jvm_stacktrace(
+    root_error_idx: int, errors: List["pb2.FetchErrorDetailsResponse.Error"]
+) -> str:
+    lines: List[str] = []
+
+    def format_stacktrace(error: "pb2.FetchErrorDetailsResponse.Error") -> None:
+        message = f"{error.error_type_hierarchy[0]}: {error.message}"
+        if len(lines) == 0:
+            lines.append(error.error_type_hierarchy[0])
+        else:
+            lines.append(f"Caused by: {message}")
+        for elem in error.stack_trace:
+            lines.append(
+                f"\tat {elem.declaring_class}.{elem.method_name}"
+                f"({elem.file_name}:{elem.line_number})"
+            )
+
+        # If this error has a cause, format that recursively
+        if error.HasField("cause_idx"):
+            format_stacktrace(errors[error.cause_idx])
+
+    format_stacktrace(errors[root_error_idx])
+
+    return "\n".join(lines)
 
 
 class SparkConnectGrpcException(SparkConnectException):
@@ -505,8 +707,8 @@ def _convert_server_error(
     breaking_change_info: Optional[Dict[str, Any]],
 ) -> SparkConnectException:
     """The exception for an error that the server raised, from what the Rust transport read of
-    its ``ErrorInfo`` and ``FetchErrorDetails``. Picks and builds it as upstream
-    ``_convert_exception`` does once it has read them."""
+    its ``ErrorInfo`` and ``FetchErrorDetails``. Picks and builds it as ``convert_exception``
+    does once ``_convert_exception`` has read them."""
     grpc_status_code = _status_code(grpc_status_code)  # type: ignore[assignment]
     if contexts is not None:
         contexts = [  # type: ignore[misc]

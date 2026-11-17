@@ -1051,6 +1051,56 @@ either packs and unpacks a message of either.
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.
 
+## SparkSession.client
+
+`spark.client` is PySpark Connect's `SparkConnectClient` (`pyspark.sql.connect.client`), with the
+public API of pyspark-client 4.3.0, over the Rust transport of the session. It sends the messages
+of `pyspark.sql.connect.proto` that it is given as they are, and reads their responses as PySpark's
+client does:
+
+- the analyses of a `pb2.Plan` (`schema`, `explain_string`, `same_semantics`, `semantic_hash`), the
+  configuration requests of a `ConfigRequest.Operation` (`config`, which returns a `ConfigResult`),
+  and the executions of a plan (`to_table`, `to_table_as_iterator`, `to_pandas`) or of a command
+  (`execute_command`, `execute_command_as_iterator`), with the `ExecutionInfo` of the execution, the
+  Observations that they are given set by their names, and the progress of the progress handlers
+  (`register_progress_handler`), except for `execute_command_as_iterator`, as in PySpark;
+- the registrations of `register_udf`, `register_udtf`, `register_java` and
+  `register_data_source`, the artifacts of `add_artifacts`, `copy_from_local_to_fs`,
+  `cache_artifact` and `cache_artifacts`, with the checks of PySpark's client rather than those of
+  `SparkSession.addArtifacts` and `copyFromLocalToFs`, the tags, the interrupts, `token`, `host`,
+  and the clients of `newSession` and `clone`.
+
+`SparkConnectClient(connection, user_id=None, ...)` takes the arguments of PySpark's: it makes a
+client of a session of its own of the connection string or the `ChannelBuilder` `connection`, which
+is neither the default nor the active session. Its `retry_policy`, `use_reattachable_execute`,
+`session_hooks`, `allow_arrow_batch_chunking`, `preferred_arrow_chunk_size`, `rpc_deadlines`
+(`pyspark.sql.connect.client.RpcDeadlines`, of which the transport has no GetStatus RPC) and
+`max_retry_exception_elapsed_time` are those of the transport. A `channel_options` of a connection
+string raises `NOT_IMPLEMENTED`, as `DefaultChannelBuilder` does: the Rust transport opens the
+channel; as PySpark's, the client of a `ChannelBuilder` does not read it.
+
+The retry policies of `get_retry_policies` and `set_retry_policies` are PySpark's own
+(`pyspark.sql.connect.client.retries`, vendored from v4.3.0, which needs `grpcio`,
+`grpcio-status` and `googleapis-common-protos`). The transport retries a failure with the
+parameters of the first `DefaultPolicy` of the list, its retries, backoffs, jitter and the delay
+that the server asks for, as PySpark's `Retrying` does, of the failures that
+`DefaultPolicy.can_retry` retries; a `RetryPolicy` retries none. It reads the parameters when the
+policies are set, so a change to a policy afterwards applies once the policies are set again. A
+policy of its own `can_retry` or `to_state`, which the transport cannot call, and a backoff, jitter
+or delay that is not a whole number of milliseconds raise `NOT_IMPLEMENTED`. The client of a new
+session has the default policy, as PySpark's `newSession` and `clone` do. With
+`disable_reattachable_execute`, an execution has no reattach option and no deadline, is never
+released, and is sent again when it fails in a way that its policy retries, as PySpark's.
+
+The relation of a DataFrame's plan (`df._plan.plan(client)`) stands for the relation of the
+DataFrame, which the transport sends in its place while the DataFrame is alive: keep the DataFrame
+while a plan of it is sent. `get_tags` returns a copy of the tags of the thread, where PySpark
+returns the set that its client keeps, which the later changes of the tags change too. The
+official tests of the client (`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and
+the reattachable iterator of PySpark's client, which the drop-in does not have; those of its
+retries (`test_connect_retry.py`) and of `pyspark.errors.exceptions.connect.convert_exception`
+(`test_connect_errors_conversion.py`) pass.
+
 ## Spark Declarative Pipelines CLI
 
 The CLI of Spark Declarative Pipelines (`python -m pyspark.pipelines.cli init`, `run` and

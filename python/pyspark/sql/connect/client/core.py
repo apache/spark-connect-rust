@@ -16,8 +16,36 @@
 
 """Thin re-export of the client classes of ``pyspark.sql.connect.client.core``, which official
 PySpark code and tests import from there. The gRPC client itself is the Rust transport: the
-drop-in does not provide the rest of ``core`` (``RpcDeadlines``, the gRPC stub)."""
+drop-in does not provide the rest of ``core`` (the gRPC stub of the client)."""
 
-__all__ = ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
+__all__ = ["ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
 
-from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder, SparkConnectClient
+from typing import Any
+
+from pyspark.sql.connect.client import (
+    AnalyzeResult,  # noqa: F401
+    ChannelBuilder,
+    ConfigResult,  # noqa: F401
+    DefaultChannelBuilder,
+    PlanObservedMetrics,  # noqa: F401
+    RpcDeadlines,
+    SparkConnectClient,
+)
+
+# The names of pyspark.sql.connect.client.retries that PySpark's core imports, and so has too.
+_RETRIES_NAMES = (
+    "RetryPolicy",
+    "Retrying",
+    "DefaultPolicy",
+    "DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME",
+)
+
+
+def __getattr__(name: str) -> Any:
+    # Of the retries module when they are first read: it imports grpc, which this client does
+    # not need otherwise.
+    if name in _RETRIES_NAMES:
+        from pyspark.sql.connect.client import retries
+
+        return getattr(retries, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
