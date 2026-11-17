@@ -1058,15 +1058,41 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
 Where `protobuf` is installed, the files of the protos of Spark Connect are added to its default
 descriptor pool, as the generated modules add them. The modules that protoc generates of other
 protos that import them (those of a plugin, such as Delta Lake's Connect client) then build, and
-`json_format` finds the types of an `Any`. The messages of such a module are `protobuf`'s, which
-take messages of their own classes only: their `CopyFrom`, `MergeFrom` and constructors raise
-`TypeError` for a message of `pyspark.sql.connect.proto`, which a field of theirs takes through its
-bytes (`plugin.input.ParseFromString(relation.SerializeToString())`) or a dict instead. PySpark's
-messages are of `protobuf`'s classes, so its plugins pass them as they are: Delta Lake 4.0's
-`DeltaTable.delete`, `update` and `merge` build their plans with `CopyFrom` of PySpark's
-messages, and raise that `TypeError` here. The other way, the messages of
-`pyspark.sql.connect.proto` take `protobuf`'s messages of their types as they are, and an `Any` of
-either packs and unpacks a message of either.
+`json_format` finds the types of an `Any`. Such a module, of a proto3 file that imports the protos
+of Spark Connect directly or through the files it imports, gets the classes of the runtime when
+`protobuf`'s builder builds it (the drop-in wraps `builder.BuildTopDescriptorsAndMessages`, which
+the generated modules call), and its files are added to the runtime's pool. So their message
+fields take the messages of `pyspark.sql.connect.proto` as they are, as `protobuf`'s messages of
+PySpark's plugins take PySpark's: Delta Lake 4.0's `DeltaTable.delete`, `update` and `merge` build
+their plans with `CopyFrom` of the package's messages, of the bytes, text and JSON of PySpark's,
+with either implementation of `protobuf`. The relation of a DataFrame that such a message takes
+(`df._plan.plan(session)`, as `merge` takes the plan of its source DataFrame) is a shallow
+placeholder of the relation of the DataFrame of this client, as in the plans of `pyspark.ml`: the
+core replaces it when the plan or the command reaches it, also in the message of an extension, of a
+type that it does not know, so the server receives the relation, as PySpark's plugins send it.
+Its classes are the runtime's, as those of the package (not `google.protobuf.message.Message`'s),
+and the rest of such a module is `protobuf`'s:
+
+- its `DESCRIPTOR` and the descriptors of its messages and enums (`_DELETEFROMTABLE`), whose
+  options and serialized ranges the generated code sets with `protobuf`'s pure-Python
+  implementation, and its extensions and services. `protobuf`'s own lookups of its types
+  (`message_factory.GetMessageClass`, `symbol_database`) give `protobuf`'s classes of them, which
+  the builder makes too, as without the drop-in; a class of those takes a message of the package
+  only through its bytes (`plugin.input.ParseFromString(relation.SerializeToString())`) or a dict;
+- a file that it imports that does not import the protos of Spark Connect (Delta Lake's
+  `delta/connect/base.proto`) keeps `protobuf`'s classes in its own module. A message field of the
+  runtime of one of its types takes `protobuf`'s messages of the type, by their full name and
+  bytes, and gives a message of the runtime's class of the type, which is not the module's class:
+  `isinstance(relation.scan.table, base_pb2.DeltaTable)` is false, and such a message pickles only
+  within the message that holds it;
+- a file that is not proto3 (of proto2 or of editions, whose presence, defaults and packing the
+  runtime does not read), or that imports one, or a well-known type other than `Any` and
+  `Timestamp` (`protobuf`'s classes of `Duration`, `Struct` and the others have methods that the
+  runtime's classes would lack), keeps `protobuf`'s classes, which take the package's messages
+  only through bytes or dicts.
+
+The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their
+types as they are, and an `Any` of either packs and unpacks a message of either.
 
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.

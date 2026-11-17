@@ -247,3 +247,27 @@ difference is intentional or tracked for a fix.
   hook_factories=...)` makes a session that is neither default nor active, as PySpark's
   constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
   takes precedence, as PySpark's does.
+
+## `pyspark.sql.connect.proto` and plugins
+
+- **Generated modules of a plugin's protos** (intentional; DESIGN). A module that protoc
+  generates of a proto3 file that imports the protos of Spark Connect, directly or through the
+  files it imports (Delta Lake's `delta/connect/relations.proto` and `commands.proto`), gets the
+  classes of the drop-in's Rust protobuf runtime when `protobuf`'s builder builds it, so its
+  message fields take the messages of `pyspark.sql.connect.proto` as they are, as PySpark's
+  plugins take PySpark's, and the server receives the plans of Delta Lake 4.0's `delete`,
+  `update` and `merge` as PySpark sends them: the core replaces the shallow placeholder of the
+  relation of a DataFrame, which `DataFrame._plan.plan(session)` gives, in the message of an
+  extension too. What stays different (see `docs/compatibility.md`):
+  - its classes are the runtime's, not subclasses of `google.protobuf.message.Message`, while its
+    `DESCRIPTOR`, its `_*` descriptors, its extensions and services stay `protobuf`'s, and
+    `protobuf`'s `message_factory` and `symbol_database` give `protobuf`'s classes of its types;
+  - a file that it imports that does not import the protos of Spark Connect (Delta Lake's
+    `delta/connect/base.proto`) keeps `protobuf`'s classes. A field of the runtime of one of its
+    types takes `protobuf`'s messages of the type, and gives a message of the runtime's class of
+    the type, not of the module's class, which upb gives, so `isinstance` with the module's class
+    is false, and the message pickles only within the message that holds it;
+  - a file that is not proto3, or that imports one or a well-known type other than `Any` and
+    `Timestamp`, keeps `protobuf`'s classes, which take the package's messages only through bytes
+    or dicts, as before. So does a module that builds before `pyspark.sql.connect.proto` is
+    imported, as only one that imports another copy of Spark's generated modules can.

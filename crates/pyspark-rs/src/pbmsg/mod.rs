@@ -7,7 +7,9 @@
 //! `Column._expr` and the pipelines, run unchanged on it: the messages hold their fields in Rust
 //! ([`message`]), read the descriptors of the protos that the proto crate compiles ([`pool`]),
 //! and encode and decode the wire format here ([`codec`]), with the Python API of protobuf's
-//! messages, containers, descriptors and descriptor pool.
+//! messages, containers, descriptors and descriptor pool. The messages of a plugin's protos that
+//! import those of Spark Connect run on it too: the files of the modules that protoc generates of
+//! them are added to its pool when protobuf's builder builds them ([`pool::register`]).
 
 mod codec;
 mod containers;
@@ -17,6 +19,7 @@ pub(crate) mod pool;
 mod scalar;
 mod text;
 
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 
 pyo3::create_exception!(
@@ -32,22 +35,39 @@ pub(crate) fn grow<T>(f: impl FnOnce() -> T) -> T {
     stacker::maybe_grow(128 * 1024, 2 << 20, f)
 }
 
+/// A file as `_proto_files` gives it: its name and package, and the full names of its top-level
+/// messages and enums.
+type FileSummary = (String, String, Vec<String>, Vec<String>);
+
+fn summary_of(file: &pool::FileDesc) -> FileSummary {
+    (
+        file.name.clone(),
+        file.package.clone(),
+        file.messages.clone(),
+        file.enums.clone(),
+    )
+}
+
 /// The files of the descriptor set: the name and package of each, and the full names of its
 /// top-level messages and enums.
 #[pyfunction]
-fn _proto_files() -> Vec<(String, String, Vec<String>, Vec<String>)> {
-    pool::pool()
-        .files
-        .iter()
-        .map(|f| {
-            (
-                f.name.clone(),
-                f.package.clone(),
-                f.messages.clone(),
-                f.enums.clone(),
-            )
-        })
-        .collect()
+fn _proto_files() -> Vec<FileSummary> {
+    pool::pool().files.iter().map(summary_of).collect()
+}
+
+/// Add the files `files`, serialized `FileDescriptorProto`s (protobuf's
+/// `FileDescriptor.serialized_pb`), to the pool of the runtime, as [`pool::register`] adds them:
+/// the name and package of each, and the full names of its top-level messages and enums, as
+/// `_proto_files` gives those of the descriptor set. A `ValueError` of files that the runtime
+/// does not hold adds none of them.
+#[pyfunction]
+fn _proto_register_files(files: &Bound<'_, PyAny>) -> PyResult<Vec<FileSummary>> {
+    let files = files
+        .try_iter()?
+        .map(|file| message::bytes_of(&file?))
+        .collect::<PyResult<Vec<_>>>()?;
+    let registered = pool::register(&files).map_err(PyValueError::new_err)?;
+    Ok(registered.into_iter().map(summary_of).collect())
 }
 
 /// The descriptor of the message type `full_name`.
@@ -141,6 +161,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add("ProtoDecodeError", py.get_type::<DecodeError>())?;
     m.add_function(wrap_pyfunction!(_proto_files, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_register_files, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_descriptor, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_enum_descriptor, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_file_descriptor, m)?)?;
