@@ -20,6 +20,7 @@ Each test makes a PySpark source tree and a drop-in of a few modules; none needs
 PySpark, which the generated-drift workflow checks the real stubs against.
 """
 
+import ast
 import importlib.util
 import sys
 import tempfile
@@ -153,7 +154,8 @@ def lit(value: str) -> Column: ...
 
 class Reader:
     limit: int = ...
-    def __init__(self, df: 'DataFrame') -> None: ...
+    def __init__(self, df: 'DataFrame') -> None:
+        self._df = df
     @property
     def df(self) -> 'DataFrame': ...
     def _private_member(self) -> Optional[str]: ...
@@ -189,10 +191,11 @@ class Tree:
         (base / path).parent.mkdir(parents=True, exist_ok=True)
         (base / path).write_text(textwrap.dedent(text).lstrip("\n"))
 
-    def generate(self, modules, extras=None):
+    def generate(self, modules, extras=None, attribute_types=None):
         with (
             mock.patch.object(gen, "STUB_MODULES", tuple(modules)),
             mock.patch.object(gen, "EXTRAS", extras or {}),
+            mock.patch.object(gen, "ATTRIBUTE_TYPES", attribute_types or {}),
             mock.patch.object(
                 gen, "IDENTITY_DECORATORS", frozenset({"pyspark.sql.utils.try_remote_functions"})
             ),
@@ -213,11 +216,167 @@ class TransformTests(unittest.TestCase):
         stub = outputs[Path("python/pyspark/sql/reader.pyi")]
         self.assertIn("from python/pyspark/sql/reader.py of Apache Spark v9.9.9", stub)
         # Bodies, docstrings, the doctests, the implementation of the overloads, the identity
-        # decorator, the unreferenced private function and the unneeded imports are dropped.
-        # Column is re-exported, as PySpark's module imports it at run time, and so is helper,
-        # which the drop-in's pyspark.sql.utils has, unlike missing_helper. DataFrame, of the
+        # decorator, the unreferenced private function and the unneeded imports are dropped,
+        # but the body of __init__, which assigns the instance attribute _df. Column is
+        # re-exported, as PySpark's module imports it at run time, and so is helper, which the
+        # drop-in's pyspark.sql.utils has, unlike missing_helper. DataFrame, of the
         # TYPE_CHECKING block, is imported for the annotations only. Defaults keep their text.
         self.assertEqual(body(stub), EXPECTED)
+
+    def test_keeps_the_methods_that_assign_instance_attributes(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/schema.py",
+            '''
+            import os
+            from typing import Dict, List, Optional
+
+            from pyspark.sql.column import Column
+
+
+            class Field:
+                kind: str = "field"
+
+                def __init__(self, name: str, metadata: Optional[Dict[str, str]] = None) -> None:
+                    """A field."""
+                    from pyspark.sql.utils import helper
+
+                    self.name = name  # as PySpark writes it
+                    self.metadata = metadata or {}
+                    self.helper = helper
+
+                def rename(self, name: str) -> "Field":
+                    self.name, self.kind = name, os.sep
+                    return self
+
+                def describe(self) -> str:
+                    return self.name
+
+
+            class Schema:
+                def __init__(self, fields: Optional[List[Field]] = None) -> None:
+                    if not fields:
+                        self.fields = []
+                    else:
+                        self.fields = fields
+
+                @staticmethod
+                def empty(column: Column) -> "Schema":
+                    return Schema()
+            ''',
+        )
+        attribute_types = {"pyspark.sql.schema": {"Schema.fields": "List[Field]"}}
+        stub = body(
+            tree.generate(["pyspark.sql.schema"], attribute_types=attribute_types)[
+                Path("python/pyspark/sql/schema.pyi")
+            ]
+        )
+        # A type checker infers each attribute from the body that its method keeps, as
+        # PySpark's source writes it, but its docstring: Field.name and Field.metadata, of
+        # __init__ and rename. The other methods are stubs. pyright does not narrow fields in a
+        # stub, which ATTRIBUTE_TYPES declares. The import of os is kept for the body that reads
+        # it, not the function-local import of helper, nor the import of Column.
+        self.assertEqual(
+            stub,
+            """
+import os
+from typing import Dict, List, Optional
+from pyspark.sql.column import Column as Column
+
+class Field:
+    kind: str = ...
+    def __init__(self, name: str, metadata: Optional[Dict[str, str]]=None) -> None:
+        from pyspark.sql.utils import helper
+
+        self.name = name  # as PySpark writes it
+        self.metadata = metadata or {}
+        self.helper = helper
+    def rename(self, name: str) -> 'Field':
+        self.name, self.kind = name, os.sep
+        return self
+    def describe(self) -> str: ...
+
+class Schema:
+    fields: List[Field]
+    def __init__(self, fields: Optional[List[Field]]=None) -> None:
+        if not fields:
+            self.fields = []
+        else:
+            self.fields = fields
+    @staticmethod
+    def empty(column: Column) -> 'Schema': ...
+""",
+        )
+
+    def test_attribute_types_and_the_attributes_are_checked(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/schema.py",
+            """
+            from typing import Optional, overload
+
+            class Writer:
+                source: str
+
+                def __init__(self) -> None:
+                    self._mode = None
+
+                @overload
+                def mode(self, mode: str) -> "Writer": ...
+
+                @overload
+                def mode(self, mode: None) -> "Writer": ...
+
+                def mode(self, mode: Optional[str]) -> "Writer":
+                    self.current = mode
+                    return self
+            """,
+        )
+
+        def generate(attribute_types):
+            return tree.generate(["pyspark.sql.schema"], attribute_types=attribute_types)
+
+        # The stub drops the implementation of an overloaded method, and with it the only
+        # assignment of the public attribute current: an error, not a missing attribute.
+        with self.assertRaisesRegex(
+            gen.GeneratorError, r"declares no instance attribute \['Writer.current'\]"
+        ):
+            generate({})
+        stub = generate({"pyspark.sql.schema": {"Writer.current": "Optional[str]"}})
+        self.assertIn(
+            "class Writer:\n    current: Optional[str]\n",
+            body(stub[Path("python/pyspark/sql/schema.pyi")]),
+        )
+        # An entry that PySpark's module does not assign, declares or has is an error.
+        for key, error in (
+            ("Writer.mode_name", "does not assign it"),
+            ("Writer.source", "declares it now"),
+            ("Reader.current", "of no class"),
+        ):
+            with self.subTest(key), self.assertRaisesRegex(gen.GeneratorError, error):
+                generate({"pyspark.sql.schema": {key: "int", "Writer.current": "Optional[str]"}})
+
+    def test_check_attributes_reports_a_stub_without_them(self):
+        # The check of each stub that the generator renders, on the stub that it rendered before
+        # it kept the bodies of the methods that assign instance attributes.
+        source = ast.parse(
+            textwrap.dedent(
+                """
+                class StructType:
+                    def __init__(self, fields):
+                        self.fields = fields
+                        self._needConversion = []
+                """
+            )
+        )
+        stub = "class StructType:\n    def __init__(self, fields): ...\n"
+        with self.assertRaisesRegex(
+            gen.GeneratorError, r"declares no instance attribute \['StructType.fields'\]"
+        ):
+            gen.check_attributes("pyspark.sql.types", source, stub)
+        gen.check_attributes("pyspark.sql.types", source, "class StructType:\n    fields: list\n")
 
     def test_an_unknown_decorator_is_an_error(self):
         tree = Tree(self)
