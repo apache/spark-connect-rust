@@ -18,7 +18,6 @@ use ml_golden::{
     ReplayServer,
 };
 use serde_json::{json, Value};
-use spark_connect::ml::{load_stage, Estimator, Params, PipelineStage, Transformer};
 use spark_connect::ml::{
     BinaryClassificationSummary, ClassificationSummary, FMClassificationModel, FMClassifier,
     MlMatrix, MlSummary, MlTarget, MlVector, Model, MultilayerPerceptronClassificationModel,
@@ -26,6 +25,7 @@ use spark_connect::ml::{
     PredictionModel, ProbabilisticClassificationModel, RandomForestClassificationModel,
     RandomForestClassifier, TrainingSummary,
 };
+use spark_connect::ml::{Estimator, Params, Transformer};
 use spark_connect::SparkSession;
 use spark_connect_core::error::Result;
 
@@ -224,16 +224,12 @@ impl<'a> Checker<'a> {
     /// The error of `label`, whose message is the golden's.
     fn error<T: Golden>(&mut self, label: &str, call: impl FnOnce() -> Result<T>) {
         let entry = self.entry(label);
-        let expected = entry["error"]["message"].as_str().unwrap().to_string();
         let error = match call() {
             Ok(_) => panic!("{label}: the call succeeded"),
             Err(error) => error.to_string(),
         };
         assert_commands(self.server, &entry, label);
-        assert!(
-            error.contains(&expected),
-            "{label}: {error:?} does not carry {expected:?}"
-        );
+        ml_golden::assert_error(&error, &entry["error"], label);
         self.checked.insert(label.to_string());
     }
 
@@ -659,17 +655,9 @@ fn operator_info(load: &Value) -> spark_connect_proto::ml_command_result::MlOper
     }
 }
 
-/// The estimator that PySpark's loader reads at a path by its class name, as the stage of that
-/// class: a Naive Bayes, MLP or FM estimator, which has no typed load of its own.
-fn load_estimator_stage(session: &SparkSession, path: &str) -> Result<Box<dyn Estimator>> {
-    match load_stage(session, path)? {
-        PipelineStage::Estimator(stage) => Ok(stage),
-        _ => panic!("{path}: not an estimator"),
-    }
-}
-
-/// An estimator's persistence entry, which no other test replays: its load reads the uid and the
-/// params that the golden load read, and its save of the loaded estimator sends the golden save.
+/// An estimator's persistence entry, which the tests above do not replay: its load reads the uid
+/// and the params that the golden load read, and its save of the loaded estimator sends the golden
+/// save.
 fn check_estimator_entry(
     persistence: &Value,
     key: &str,
@@ -721,9 +709,12 @@ fn check_model_entry<M: Model>(
     assert_commands(&server, &entry["save"], &format!("{key}: save"));
 }
 
-/// The persistence entry of the multiclass random forest's estimator, which no other test loads.
-/// Its model, and the entries of Naive Bayes, MLP, FM and OneVsRest, are in the known-failure test
-/// below.
+/// The persistence entries of the estimators that the tests above do not load: the multiclass
+/// random forest's, and those of Naive Bayes, MLP and FM, each read by its typed load, as
+/// PySpark's `load` reads it with one ML Read. Their params are compared with the read ones by
+/// value here (`classification_estimator_loads_golden.rs` replays the Naive Bayes, MLP and FM
+/// entries too, and compares their names). The forest's model and the entries of OneVsRest are in
+/// the known-failure test below.
 #[test]
 fn unused_persistence_entries_match_official_pyspark() {
     let persistence: Value = serde_json::from_str(PERSISTENCE).unwrap();
@@ -732,12 +723,27 @@ fn unused_persistence_entries_match_official_pyspark() {
         "RandomForestClassifier.multiclass.estimator",
         |s| Ok(Box::new(RandomForestClassifier::load(s, "/unused/path")?)),
     );
+    for model_type in ["multinomial", "complement", "bernoulli", "gaussian"] {
+        check_estimator_entry(
+            &persistence,
+            &format!("NaiveBayes.{model_type}.estimator"),
+            |s| Ok(Box::new(NaiveBayes::load(s, "/unused/path")?)),
+        );
+    }
+    check_estimator_entry(
+        &persistence,
+        "MultilayerPerceptronClassifier.estimator",
+        |s| {
+            let estimator = MultilayerPerceptronClassifier::load(s, "/unused/path")?;
+            Ok(Box::new(estimator))
+        },
+    );
+    check_estimator_entry(&persistence, "FMClassifier.estimator", |s| {
+        Ok(Box::new(FMClassifier::load(s, "/unused/path")?))
+    });
 }
 
-/// KNOWN FAILURE, of three causes, none of them a difference in the files or the values:
-/// - The NaiveBayes, MultilayerPerceptronClassifier and FMClassifier estimators have no typed load
-///   in the Rust API: the generic stage loader reads their metadata with a DataFrame query, where
-///   PySpark's `load` sends one ML Read. A gap of the Rust API.
+/// KNOWN FAILURE, of two causes, neither of them a difference in the files or the values:
 /// - The OneVsRest estimator and model read their metadata with a DataFrame query, as PySpark's
 ///   `DefaultParamsReader.loadMetadata` does (`spark.read.text`), which the golden does not record
 ///   and the replay does not answer. A limit of the replay.
@@ -750,20 +756,8 @@ fn unused_persistence_entries_match_official_pyspark() {
 /// Left failing on purpose (run with `--ignored`); the product code is not changed here.
 #[test]
 #[ignore = "known gaps, of the causes that the doc comment gives"]
-fn naive_bayes_mlp_fm_and_one_vs_rest_loads_as_official_pyspark() {
+fn one_vs_rest_and_forest_model_loads_as_official_pyspark() {
     let persistence: Value = serde_json::from_str(PERSISTENCE).unwrap();
-    for key in [
-        "NaiveBayes.multinomial.estimator",
-        "NaiveBayes.complement.estimator",
-        "NaiveBayes.bernoulli.estimator",
-        "NaiveBayes.gaussian.estimator",
-        "MultilayerPerceptronClassifier.estimator",
-        "FMClassifier.estimator",
-    ] {
-        check_estimator_entry(&persistence, key, |session| {
-            load_estimator_stage(session, "/unused/path")
-        });
-    }
     check_estimator_entry(&persistence, "OneVsRest.estimator", |s| {
         Ok(Box::new(OneVsRest::load(s, "/unused/path")?))
     });

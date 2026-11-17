@@ -19,19 +19,27 @@
 import importlib
 
 
-def native_class(module, name, reference_module):
-    """The native class `name` of `module` in this client. A class that this client lacks fails the
-    test, rather than running it with the vendored pyspark.ml class. Official PySpark, which has no
-    pyspark._pyspark, runs the test with its JVM-backed class of `reference_module`, as the
-    reference."""
+def native_module():
+    """This client's native module, pyspark._pyspark, or None in official PySpark, which has none
+    and runs the tests as the reference."""
     try:
-        import pyspark._pyspark  # noqa: F401
+        import pyspark._pyspark as native
     except ModuleNotFoundError as error:
         # Only the absence of the native module is the reference. A native module that is present
         # but fails to load, such as one with a missing symbol, raises an ImportError that is not
         # ours to hide, and so does a module that the native module imports and lacks.
         if error.name != "pyspark._pyspark":
             raise
+        return None
+    return native
+
+
+def native_class(module, name, reference_module):
+    """The native class `name` of `module` in this client. A class that this client lacks fails the
+    test, rather than running it with the vendored pyspark.ml class. Official PySpark, which has no
+    pyspark._pyspark (`native_module`), runs the test with its JVM-backed class of
+    `reference_module`, as the reference."""
+    if native_module() is None:
         return getattr(importlib.import_module(reference_module), name)
     native = getattr(importlib.import_module(module), name)
     assert native.__module__.startswith("pyspark.ml.connect"), native

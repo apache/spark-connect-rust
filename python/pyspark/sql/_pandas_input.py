@@ -588,8 +588,9 @@ def prepare_int64_table(frame, schema):
                or type(dtype) is Int64Dtype
                for dtype in dtypes):
         return None
-    # The importer's configuration RPC outweighs row conversion for small NumPy frames.
-    # Nullable Int64 frames use Arrow at any size, which keeps their null masks.
+    # Frames of fewer than 1,000 rows with only NumPy columns are left to the general
+    # conversions of pandas, which give the same values; nullable Int64 frames take this path
+    # at any size, which keeps their null masks.
     if len(frame) < 1000 and not any(type(dtype) is Int64Dtype for dtype in dtypes):
         return None
 
@@ -671,7 +672,8 @@ def prepare_int64_table(frame, schema):
         expected = IntegerArray if type(dtype) is Int64Dtype else NumpyExtensionArray
         if type(column.array) is not expected:
             return None
-        # The native row path rejects invalid nullability before any Config RPC.
+        # A null in a non-nullable field is left to the general conversion, which raises
+        # PySpark's error for it.
         if (fields is not None and not fields[i].nullable
                 and type(dtype) is Int64Dtype and column.hasnans):
             return None
@@ -731,8 +733,8 @@ def timestamp_columns(frame, schema):
             or type(schema) is not NativeStructType or not len(frame)
             or any(name in vars(frame) for name in ("astype", "notna", "where"))):
         return None
-    # The row path calls these normalization methods before reading cells.
-    # Preserve customized transformations and errors before any Arrow Config RPC.
+    # The row path calls these normalization methods before reading cells: a frame that
+    # customizes them keeps that path, with their transformations and errors.
     for name, module, qualname in (
         ("astype", generic_module, "NDFrame.astype"),
         ("notna", frame_module, "DataFrame.notna"),
@@ -823,14 +825,15 @@ def timestamp_columns(frame, schema):
         column = frame.iloc[:, i]
         if type(column) is not Series or type(column.array) is not DatetimeArray:
             return None
-        # Preserve the row path's local null error before any timezone Config RPC.
+        # A null in a non-nullable field is left to the general conversion, which raises
+        # PySpark's error for it.
         if not fields[i].nullable and column.hasnans:
             return None
         if unit == "ns" and np.any(column.array.asi8[column.notna()] % 1000):
             return None
         columns.append(column)
-    # Reject unsupported host zones before Rust queries the session time zone.
-    # Their row fallback builds a local relation without any configuration RPC.
+    # A naive column takes this path on a UTC host only, as `prepare_timestamp_table`
+    # requires; on another host, the general conversion takes it in the session time zone.
     if not timestamp_columns_are_aware(columns) and not _timestamp_host_is_utc():
         return None
     return columns
@@ -1107,7 +1110,7 @@ def _arrow_string_table(frame, schema, dtypes):
                for dtype in dtypes):
         return None
     # The importer uses mutable public/captured schema names. Decline a rebound
-    # namespace before conversion or configuration/upload RPCs, as the generic route does.
+    # namespace before conversion or an upload, as the generic route does.
     if not _converter_namespaces_intact():
         return None
 
@@ -1136,7 +1139,7 @@ def _arrow_string_table(frame, schema, dtypes):
         try:
             # Malformed offsets or UTF-8 keep the row path and its error.
             values.validate(full=True)
-            # Check normal-string capacity before configuration/upload RPCs. The importer
+            # Check normal-string capacity before an upload. The importer
             # may widen back to large_string when useLargeVarTypes is enabled.
             # pandas 2.2+ stores large_string, so this narrowing copies each column's offsets.
             values = values.cast(pa.string())
@@ -1188,7 +1191,8 @@ def prepare_date_table(frame, schema):
     )
     from pyspark.sql import types as sql_types
 
-    # Keep smaller frames on the row path to avoid the importer's config RPC overhead.
+    # Frames of fewer than 10,000 rows are left to the general conversion of the schema,
+    # which gives the same values.
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
             or type(schema) is not NativeStructType
             or len(frame) < 10000
@@ -1197,7 +1201,7 @@ def prepare_date_table(frame, schema):
     if not _has_canonical_columns(frame.columns):
         return None
     # The row path calls these normalization methods. Custom class or instance
-    # hooks must retain those calls and the values they produce before Arrow RPCs.
+    # hooks must retain those calls and the values they produce on that path.
     for name, module, qualname in (
         ("astype", generic_module, "NDFrame.astype"),
         ("notna", frame_module, "DataFrame.notna"),
@@ -1413,6 +1417,17 @@ def accepts_pandas_table(frame, schema):
     return accepts_pandas_frame(frame) and (type(schema) is str or _canonical_struct(schema))
 
 
+def accepts_pandas_index_table(schema):
+    """Whether `prepare_pandas_table` may convert a frame of no columns under this schema, a
+    struct of no fields.
+
+    Such a frame is the table of its index, which PySpark's conversion takes of any frame, and
+    the row path has no cells of it to read, so the class of the frame does not matter. The
+    schema and the namespaces are checked as in `accepts_pandas_table`.
+    """
+    return (type(schema) is str or _canonical_struct(schema)) and _converter_namespaces_intact()
+
+
 def accepts_pandas_frame(frame):
     """Check frame eligibility for explicit or inferred Arrow schema conversion."""
     import sys
@@ -1477,8 +1492,12 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
     Each column goes through PySpark's own Arrow conversion, with the session time zone
     and the safe-cast setting, and the table is then renamed and cast to the schema's
     Arrow types. The values and errors therefore match PySpark, including the nullability
-    and overflow messages. The caller checks the frame with `accepts_pandas_table` and
-    the column count against the schema first.
+    and overflow messages. A frame of no columns, under a struct of no fields, is the table of
+    `pa.RecordBatch.from_pandas`, which keeps its number of rows, with a column of each level
+    of its index unless it is a RangeIndex, and is not renamed; the caller checks its number
+    of columns, as PySpark does. The caller checks the frame with `accepts_pandas_table`, or,
+    of no columns, with `accepts_pandas_index_table`, and the column count against the schema
+    first.
     """
     import pyarrow as pa
 
@@ -1494,16 +1513,21 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
         pa.field(name, field.type, field.nullable, field.metadata)
         for name, field in zip(schema.names, arrow_schema)
     ])
-    series_with_types = [
-        (column, field.dataType)
-        for (_, column), field in zip(frame.items(), deduplicated.fields)
-    ]
-    table = create_arrow_table_from_pandas(
-        series_with_types,
-        timezone=timezone,
-        safecheck=safecheck,
-        prefers_large_types=prefers_large_types,
-    )
+    if len(frame.columns) == 0:
+        table = pa.Table.from_batches([pa.RecordBatch.from_pandas(frame)])
+    else:
+        series_with_types = [
+            (column, field.dataType)
+            for (_, column), field in zip(frame.items(), deduplicated.fields)
+        ]
+        table = create_arrow_table_from_pandas(
+            series_with_types,
+            timezone=timezone,
+            safecheck=safecheck,
+            prefers_large_types=prefers_large_types,
+        )
+    if len(schema.fields) == 0:
+        return table
     return table.rename_columns(schema.names).cast(arrow_schema)
 
 

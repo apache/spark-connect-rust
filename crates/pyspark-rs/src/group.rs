@@ -8,11 +8,32 @@ use spark_connect::udf::eval_type;
 
 use crate::column::PyColumn;
 use crate::dataframe::{
-    build_map_udf, infer_group_map_eval_type, validate_map_function, PyDataFrame,
+    build_map_udf, check_return_type_argument, infer_group_map_eval_type, map_udf_of,
+    resolve_datatype, validate_map_function, PyDataFrame,
 };
 use crate::errors::ResultExt;
 
 use crate::interrupt::interruptible;
+
+/// A schema of `applyInPandasWithState` as PySpark sends it: a `StructType` as its JSON, and
+/// anything else as it is, which protobuf converts as a str when the plan is built. The `Err` is
+/// the error of a value that it does not take, which the plan raises then (see
+/// [`crate::dataframe::unbuildable_str_error`]).
+fn sent_schema(
+    py: Python<'_>,
+    schema: &Bound<'_, PyAny>,
+) -> PyResult<Result<String, spark_connect_core::error::SparkError>> {
+    if let Ok(st) = schema.extract::<PyRef<'_, crate::types::PyStructType>>() {
+        return Ok(Ok(spark_connect::types::DataType::Struct {
+            fields: st.current_fields(py)?,
+        }
+        .json()));
+    }
+    if let Some(error) = crate::dataframe::unbuildable_str_error(schema)? {
+        return Ok(Err(error));
+    }
+    Ok(Ok(crate::options::str_argument(schema)?))
+}
 
 /// As PySpark's `_check_same_session` of the DataFrames of grouped data: `SESSION_NOT_SAME`
 /// unless `other` is of the session of `this`.
@@ -94,37 +115,35 @@ impl PyGroupedData {
 }
 
 /// The aggregates of the dict form `agg({column: function})`, one `function(column)` per entry
-/// in order, as PySpark builds them (`F._invoke_function(function, F.col(column))`). A column
-/// that is not a str raises the `AttributeError` of `F.col`, and a function that is not a str
-/// the `AssertionError` of `_invoke_function`.
+/// in order, as PySpark builds them (`F._invoke_function(function, F.col(column))`). The column
+/// raises the errors of `F.col` (an int the `AttributeError` of its `endswith`), and then a
+/// function that is not a str the `AssertionError` of `_invoke_function`, whose
+/// `UnresolvedFunction` sets the name when it builds the plan, before the column.
 pub(crate) fn dict_aggregates(
     dict: &Bound<'_, pyo3::types::PyDict>,
 ) -> PyResult<Vec<spark_connect::expression::Expression>> {
     let mut agg_exprs = Vec::with_capacity(dict.len());
     for (column, function) in dict.iter() {
-        let Ok(column) = column.extract::<String>() else {
-            let typ = column
-                .get_type()
-                .name()
-                .map(|name| name.to_string())
-                .unwrap_or_default();
-            return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
-                "'{typ}' object has no attribute 'endswith'"
-            )));
+        // As PySpark's `agg` of a dict, `F._invoke_function(func, F.col(name))`: the column is of
+        // `col`, of its origin, and the function is of none.
+        let c = {
+            let _origin = crate::origin::with_origin("col")?;
+            crate::plan_args::col(&column)?
         };
-        let Ok(function) = function.extract::<String>() else {
+        if !function.is_instance_of::<pyo3::types::PyString>() {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-        };
-        // As PySpark's `agg` of a dict, by `col`, of its origin.
-        let _origin = crate::origin::with_origin("col")?;
-        let c = spark_connect::functions::col(&column);
+        }
+        let mut args = crate::plan_args::PlanArgs::new();
+        let function = args.str(&function)?;
         // Build func(col) as an unresolved function resolved server-side, so aggregate names
         // (max/min/sum/avg/count/...) all work regardless of whether they are in the generated
         // dispatch.
-        agg_exprs.push(spark_connect::expression::Expression::function(
-            function,
-            vec![c.expression().clone()],
-        ));
+        agg_exprs.push(
+            args.expression(spark_connect::expression::Expression::function(
+                function,
+                vec![c.expression().clone()],
+            )),
+        );
     }
     Ok(agg_exprs)
 }
@@ -141,17 +160,55 @@ impl PyGroupedData {
     ) -> PyResult<PyDataFrame> {
         let mut names = Vec::with_capacity(cols.len());
         for col in &cols {
-            if !col.is_instance_of::<pyo3::types::PyString>() {
+            let Ok(name) = col.cast::<pyo3::types::PyString>() else {
                 return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-            }
-            names.push(col.extract::<String>()?);
+            };
+            names.push(name.to_cow().ok().map(|name| name.into_owned()));
         }
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let grouped = &self.grouped_data;
-        interruptible(py, &grouped.spark_session(), || {
-            grouped.numeric_agg(function, refs)
-        })
-        .map(PyDataFrame::new)
+        if names.iter().any(Option::is_none) {
+            // A name that UTF-8 cannot encode is no column of the schema, which the server
+            // sends: PySpark reads the schema, and raises `NOT_NUMERIC_COLUMNS` of the `str` of
+            // the list of the names that are not of numeric columns, in their order.
+            let session = grouped.spark_session();
+            let mut invalid = Vec::new();
+            for (col, name) in cols.iter().zip(&names) {
+                let numeric = match name {
+                    None => {
+                        interruptible(py, &session, || grouped.dataframe().schema())?;
+                        false
+                    }
+                    Some(name) => interruptible(py, &session, || grouped.is_numeric_column(name))?,
+                };
+                if !numeric {
+                    invalid.push(col.clone());
+                }
+            }
+            let invalid = PyList::new(py, invalid)?.str()?;
+            return Err(crate::errors::raise_pyspark_of(
+                py,
+                "PySparkTypeError",
+                "NOT_NUMERIC_COLUMNS",
+                &[("invalid_columns", invalid.as_any())],
+            ));
+        }
+        let names = interruptible(py, &grouped.spark_session(), || {
+            grouped.numeric_agg_columns(names.into_iter().flatten())
+        })?;
+        // As PySpark's `F._invoke_function(function, F.col(c))` of each column: the column is of
+        // `col`, of its origin, and the function is of none.
+        let mut expressions = Vec::with_capacity(names.len());
+        for name in &names {
+            let column = {
+                let _origin = crate::origin::with_origin("col")?;
+                spark_connect::col(name)
+            };
+            expressions.push(spark_connect::expression::Expression::function(
+                function,
+                vec![column.expression().clone()],
+            ));
+        }
+        Ok(PyDataFrame::new(grouped.agg(expressions)))
     }
 }
 
@@ -325,9 +382,18 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Count rows in each group.
+    /// Count rows in each group, as PySpark's `agg(F._invoke_function("count", F.lit(1))
+    /// .alias("count"))`: the alias is of `alias`, of its origin, and the count is of none.
     fn count(&self) -> PyResult<PyDataFrame> {
-        let df = self.grouped_data.count();
+        use spark_connect::expression::{Expression, LiteralExpression};
+        let count = spark_connect::functions::count(spark_connect::Column::new(
+            Expression::literal(LiteralExpression::int(1)),
+        ));
+        let counted = {
+            let _origin = crate::origin::with_origin("alias")?;
+            count.alias("count")
+        };
+        let df = self.grouped_data.agg(vec![counted.expression().clone()]);
         Ok(PyDataFrame::new(df))
     }
 
@@ -347,6 +413,9 @@ impl PyGroupedData {
         let Ok(name) = pivot_col.cast::<PyString>() else {
             return Err(not_expected_type(pivot_col, "pivot_col", "str"));
         };
+        // The `F.lit` of each value, whose str PySpark sets when it builds the plan: of each, the
+        // error of protobuf, if any (`values_args`).
+        let mut values_args = Vec::new();
         let vals = match values {
             None => None,
             Some(values) => {
@@ -366,18 +435,39 @@ impl PyGroupedData {
                             "bool, float, int or str",
                         ));
                     }
-                    out.push(crate::session::py_to_value(&value)?);
+                    let mut args = crate::plan_args::PlanArgs::new();
+                    out.push(match value.is_instance_of::<PyString>() {
+                        true => spark_connect::row::Value::String(args.str(&value)?),
+                        false => crate::session::py_to_value(&value)?,
+                    });
+                    values_args.push(args);
                 }
                 Some(out)
             }
         };
         // As PySpark's `self._df[pivot_col]`: a column of the DataFrame that is grouped, by its
         // plan ID.
-        let pcol = self.grouped_data.dataframe().col(&name.to_cow()?);
-        Ok(PyGroupedData::new(
-            self.grouped_data.pivot(pcol, vals).to_pyerr()?,
-            self.frame.clone_ref(py),
-        ))
+        let pcol = crate::plan_args::df_col(self.grouped_data.dataframe(), name.as_any(), false)?;
+        let grouped = self.grouped_data.pivot(pcol, vals).to_pyerr()?;
+        let grouped = if values_args.iter().all(|args| args.error().is_none()) {
+            grouped
+        } else {
+            let values = grouped
+                .pivot_value_columns()
+                .into_iter()
+                .zip(values_args)
+                .map(|(value, args)| args.column(value))
+                .collect();
+            RustGroupedData::from_parts(
+                grouped.dataframe().clone(),
+                grouped.grouping_columns().to_vec(),
+                grouped.group_type(),
+                grouped.pivot_column(),
+                values,
+                Vec::new(),
+            )
+        };
+        Ok(PyGroupedData::new(grouped, self.frame.clone_ref(py)))
     }
 
     /// Sum values in each group.
@@ -426,11 +516,11 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;
-        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
-            self.grouped_data.input_columns()
-        })?;
+        // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let session = self.grouped_data.spark_session();
-        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
+        let return_type = resolve_datatype(py, &session, &schema)?;
+        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
+        let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
     }
 
@@ -485,11 +575,11 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_ARROW_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;
-        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
-            self.grouped_data.input_columns()
-        })?;
+        // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let session = self.grouped_data.spark_session();
-        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
+        let return_type = resolve_datatype(py, &session, &schema)?;
+        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
+        let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
     }
 
@@ -510,7 +600,11 @@ impl PyGroupedData {
         })
     }
 
-    /// `GroupedData.applyInPandasWithState` (stateful streaming).
+    /// `GroupedData.applyInPandasWithState` (stateful streaming), as PySpark's: the output
+    /// schema is the return type of the function, whose DDL string is parsed once the columns of
+    /// the input are read, and both schemas are sent as they are given, a `StructType` as its
+    /// JSON, which the server parses. A state schema that protobuf does not take as a str fails
+    /// each request of the DataFrame, as PySpark's plan fails to build.
     #[pyo3(name = "applyInPandasWithState")]
     #[pyo3(signature = (func, outputStructType, stateStructType, outputMode, timeoutConf))]
     fn apply_in_pandas_with_state(
@@ -523,10 +617,11 @@ impl PyGroupedData {
         timeoutConf: &str,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE)?;
-        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
-            self.grouped_data.input_columns()
-        })?;
+        check_return_type_argument(&outputStructType)?;
+        let output_schema = sent_schema(py, &outputStructType)?;
+        let state_schema = sent_schema(py, &stateStructType)?;
         let session = self.grouped_data.spark_session();
+        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
         let udf = build_map_udf(
             py,
             &session,
@@ -535,15 +630,22 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE,
             &cols,
         )?;
-        let state_schema = crate::dataframe::resolve_datatype(py, &session, &stateStructType)?;
-        Ok(PyDataFrame::new(
-            self.grouped_data.apply_in_pandas_with_state(
-                udf,
-                state_schema,
-                outputMode,
-                timeoutConf,
-            ),
-        ))
+        // The plan sets the output schema, then the state schema.
+        let (output_schema, state_schema, plan_error) = match (output_schema, state_schema) {
+            (Ok(output), Ok(state)) => (output, state, None),
+            (Err(error), _) | (_, Err(error)) => (String::new(), String::new(), Some(error)),
+        };
+        let df = self.grouped_data.apply_in_pandas_with_state_with_schemas(
+            udf,
+            &output_schema,
+            &state_schema,
+            outputMode,
+            timeoutConf,
+        );
+        Ok(PyDataFrame::new(match plan_error {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// `GroupedData.transformWithStateInPandas` — arbitrary stateful processing with a
@@ -693,26 +795,37 @@ pub struct PyCoGroupedData {
 
 #[pymethods]
 impl PyCoGroupedData {
-    /// The shallow copy of cogrouped ops, as PySpark's `copy.copy`: of the same two groups.
-    fn __copy__(&self, py: Python<'_>) -> PyCoGroupedData {
-        PyCoGroupedData {
-            inner: self.inner.clone(),
-            left: self.left.clone_ref(py),
-            right: self.right.clone_ref(py),
-        }
+    /// The shallow copy of cogrouped ops, as PySpark's `copy.copy`: of the same two groups, with
+    /// the instance attributes of these.
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Bound::new(
+            py,
+            PyCoGroupedData {
+                inner: this.inner.clone(),
+                left: this.left.clone_ref(py),
+                right: this.right.clone_ref(py),
+            },
+        )?;
+        copy_instance_state(copy.as_any(), slf.as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of cogrouped ops, as PySpark's pickle of its two grouped data, which
-    /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// `_of_state` gives back, and of its instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
         let args = PyTuple::new(
             py,
             [
-                self.left.clone_ref(py).into_any().into_bound(py),
-                self.right.clone_ref(py).into_any().into_bound(py),
+                this.left.clone_ref(py).into_any().into_bound(py),
+                this.right.clone_ref(py).into_any().into_bound(py),
             ],
         )?;
-        crate::reduce::state_reduce(py, "cogrouped_reduce", args)
+        let reduce = crate::reduce::state_reduce(py, "cogrouped_reduce", args)?;
+        reduce_with_state(&reduce, slf.as_any())
     }
 
     /// The cogrouped ops of two grouped data, as `__reduce__` gives them back.
@@ -739,16 +852,16 @@ impl PyCoGroupedData {
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_PANDAS_UDF)?;
-        let cols = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.input_columns()
-        })?;
-        let udf = build_map_udf(
+        // As PySpark's: a DDL string is parsed, and the function binds no columns, as it takes
+        // the whole cogroups, so the inputs are not analyzed.
+        let return_type = resolve_datatype(py, &self.inner.spark_session(), &schema)?;
+        let udf = map_udf_of(
             py,
-            &self.inner.spark_session(),
             &func,
             &schema,
+            return_type,
             eval_type::SQL_COGROUPED_MAP_PANDAS_UDF,
-            &cols,
+            &[],
         )?;
         Ok(PyDataFrame::new(self.inner.apply_in_pandas(udf)))
     }
@@ -762,16 +875,16 @@ impl PyCoGroupedData {
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_ARROW_UDF)?;
-        let cols = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.input_columns()
-        })?;
-        let udf = build_map_udf(
+        // As PySpark's: a DDL string is parsed, and the function binds no columns, as it takes
+        // the whole cogroups, so the inputs are not analyzed.
+        let return_type = resolve_datatype(py, &self.inner.spark_session(), &schema)?;
+        let udf = map_udf_of(
             py,
-            &self.inner.spark_session(),
             &func,
             &schema,
+            return_type,
             eval_type::SQL_COGROUPED_MAP_ARROW_UDF,
-            &cols,
+            &[],
         )?;
         Ok(PyDataFrame::new(self.inner.apply_in_arrow(udf)))
     }

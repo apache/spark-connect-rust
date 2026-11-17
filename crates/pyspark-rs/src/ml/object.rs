@@ -360,34 +360,37 @@ pub(super) fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResul
     Ok(session)
 }
 
-/// The server-side object of a summary: the target of this client's fit, load or evaluation; or
-/// the `java_obj` of PySpark's constructor (`JavaWrapper.__init__(java_obj=None)`), which the
-/// members read as PySpark's `_extract_id_methods` does (see [`SummaryObject::target`]).
+/// The server-side object of a summary: the target of this client's fit or evaluation; or, of a
+/// summary of PySpark's constructor (`JavaWrapper.__init__(java_obj=None)`), the `java_obj` that
+/// its `__init__` keeps in the object's attributes (`_java_obj`), which the members read at each
+/// call, as PySpark's read `self._java_obj` (see [`SummaryObject::target`]).
 pub(crate) enum SummaryObject {
     // Boxed: a target is much larger than a Python object.
     Target(Box<spark_connect::ml::MlTarget>),
-    Given(Py<PyAny>),
+    Given,
 }
 
 impl SummaryObject {
     /// A copy of the object, of the same server-side object.
-    pub(crate) fn clone_ref(&self, py: Python<'_>) -> Self {
+    pub(crate) fn clone_ref(&self) -> Self {
         match self {
             Self::Target(target) => Self::Target(target.clone()),
-            Self::Given(object) => Self::Given(object.clone_ref(py)),
+            Self::Given => Self::Given,
         }
     }
 
-    /// The target of the members of the summary. Of a given object, as PySpark's `try_remote_call`:
-    /// it asserts an active session first, then `_extract_id_methods` splits the object, the id of
-    /// an object of the ML cache and the methods of its chain (`"<id>.summary"`), over the active
-    /// session; another value than a string (None) raises the AttributeError of its `split`.
-    pub(crate) fn target(&self, py: Python<'_>) -> PyResult<spark_connect::ml::MlTarget> {
-        let object = match self {
-            Self::Target(target) => return Ok((**target).clone()),
-            Self::Given(object) => object.bind(py),
-        };
+    /// The target of the members of the summary `slf` that fetch, as PySpark's `try_remote_call`
+    /// reads it. Of a summary of PySpark's constructor, it asserts an active session first, then
+    /// `_extract_id_methods` splits the `_java_obj` of the object, the id of an object of the ML
+    /// cache and the methods of its chain (`"<id>.summary"`), over the active session; another
+    /// value than a string (None) raises the AttributeError of its `split`.
+    pub(crate) fn target(&self, slf: &Bound<'_, PyAny>) -> PyResult<spark_connect::ml::MlTarget> {
+        if let Self::Target(target) = self {
+            return Ok((**target).clone());
+        }
+        let py = slf.py();
         let session = session_of(py, None)?;
+        let object = slf.getattr(pyo3::intern!(py, "_java_obj"))?;
         let Ok(text) = object.cast::<PyString>() else {
             return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
                 "'{}' object has no attribute 'split'",
@@ -402,6 +405,94 @@ impl SummaryObject {
             target = target.child(method);
         }
         Ok(target)
+    }
+
+    /// The target of the DataFrame members of the summary `slf`, as PySpark's
+    /// `invoke_remote_attribute_relation` reads it: the target of its other members (see
+    /// [`SummaryObject::target`]), which of the training summary of a fit has the summary dataset
+    /// of the fit. Of a summary of PySpark's constructor whose methods start with `summary`
+    /// (`"<id>.summary"`, as PySpark names the training summary of a fit), the summary dataset is
+    /// the plan of its `_summary_dataset`, which PySpark's fit sets: a summary of none raises the
+    /// AttributeError of the attribute, and one of no `_plan` the AttributeError of the value, as
+    /// PySpark's do.
+    pub(crate) fn relation_target(
+        &self,
+        slf: &Bound<'_, PyAny>,
+    ) -> PyResult<spark_connect::ml::MlTarget> {
+        let target = self.target(slf)?;
+        if matches!(self, Self::Target(_)) || target.id().split('.').nth(1) != Some("summary") {
+            return Ok(target);
+        }
+        let py = slf.py();
+        let dataset = slf.getattr(pyo3::intern!(py, "_summary_dataset"))?;
+        let plan = dataset.getattr(pyo3::intern!(py, "_plan"))?;
+        let dataset = match dataset.cast::<PyDataFrame>() {
+            Ok(dataset) => dataset.borrow().dataframe.clone(),
+            // Another object of a plan: the DataFrame of the plan, as PySpark's `AttributeRelation`
+            // takes the plan as its child.
+            Err(_) => {
+                let session = crate::session::active_session(py)
+                    .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err(()))?;
+                py.get_type::<PyDataFrame>()
+                    .call1((plan, session))?
+                    .cast::<PyDataFrame>()?
+                    .borrow()
+                    .dataframe
+                    .clone()
+            }
+        };
+        Ok(target.with_summary_dataset(&dataset))
+    }
+}
+
+/// The member `name` of the class of `obj`, as the class of its MRO that has it holds it (as
+/// `inspect.getattr_static` finds it, without the attributes of the metaclass), if any.
+pub(crate) fn class_member<'py>(
+    obj: &Bound<'py, PyAny>,
+    name: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = obj.py();
+    for class in obj
+        .get_type()
+        .getattr(pyo3::intern!(py, "__mro__"))?
+        .try_iter()?
+    {
+        let members = class?.getattr(pyo3::intern!(py, "__dict__"))?;
+        if members.contains(name)? {
+            return Ok(Some(members.get_item(name)?));
+        }
+    }
+    Ok(None)
+}
+
+/// The error of a pickle at `protocol` of the summary of the server-side object `target`, as
+/// PySpark's pickle of its summary raises it, of the first of its attributes that does not pickle:
+/// the lock of the `RemoteModelRef` of the model that the summary of an evaluation keeps
+/// (`__source_transformer__`), and that the plan of the summary dataset of a fit's keeps when that
+/// reads a transform of a fitted model (PySpark's default `_summary_dataset`,
+/// `model.transform(dataset)` of the clustering models, and a training dataset of a stage after a
+/// model of a Pipeline); else the session of that DataFrame, which it pickles after its plan, of
+/// the local function of its `__reduce__`.
+pub(crate) fn summary_pickle_error(
+    py: Python<'_>,
+    target: &MlTarget,
+    protocol: &Bound<'_, PyAny>,
+) -> PyErr {
+    // The summary of an evaluation is of the id that the server returns, of no root object.
+    if !(target.root().is_none() || target.summary_dataset_reads_model()) {
+        return pyo3::exceptions::PyAttributeError::new_err(
+            "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'",
+        );
+    }
+    // The error of the pickle of a lock at the protocol: the TypeError of the protocols 2 and up,
+    // and the PicklingError of the lookup of its class below.
+    let pickled = py
+        .import("threading")
+        .and_then(|threading| threading.call_method0("Lock"))
+        .and_then(|lock| py.import("pickle")?.call_method1("dumps", (lock, protocol)));
+    match pickled {
+        Err(error) => error,
+        Ok(_) => params_api::lock_error(),
     }
 }
 
@@ -894,32 +985,17 @@ impl ModelCore {
         Ok(core)
     }
 
-    /// The model of the server-side object `object` that a fetch returns, of the model's JVM class
-    /// `jvm_class`: of a new uid of the class `class` (`Identifiable._randomUID`), without set
-    /// params, a training summary, own defaults or cached members, as PySpark makes a model of a
-    /// bare object (the trees of an ensemble, the models of a OneVsRestModel).
-    pub(super) fn of_object(
-        py: Python<'_>,
-        jvm_class: &str,
-        class: &str,
-        object: spark_connect::ml::MlRef,
-    ) -> PyResult<Self> {
-        let session_id = object.session().session_id().to_string();
-        let uid = params_api::random_uid(py, class)?;
-        let operator = MlOperator::with_uid(jvm_class, &uid, OperatorType::Model);
-        Ok(Self {
-            model: Box::new(spark_connect::ml::ObjectModel::new(
-                object,
-                operator,
-                Params::new(),
-            )),
-            session_id,
-            summary: None,
-            summary_object: std::sync::OnceLock::new(),
-            own_defaults: Vec::new(),
-            cache: Default::default(),
-            method_cache: Default::default(),
-        })
+    /// Make the model of no server-side object (see [`ModelCore::unbound`]) the model of the
+    /// server-side object `object`, of its uid and params, as PySpark gives a model that its
+    /// constructor made the `_java_obj` of a `RemoteModelRef` (see `native_model!`'s
+    /// `of_constructor`).
+    pub(super) fn bind(&mut self, object: spark_connect::ml::MlRef) {
+        let operator = self.model.operator().clone();
+        let params = self.model.params().clone();
+        self.session_id = object.session().session_id().to_string();
+        self.model = Box::new(spark_connect::ml::ObjectModel::new(
+            object, operator, params,
+        ));
     }
 
     /// The model that a `Read` loads: of its object, the model's JVM class `jvm_class`, its uid and
@@ -1089,16 +1165,17 @@ impl ModelCore {
         self.model.operator().uid.clone()
     }
 
-    /// The error of PySpark's serialization of the model's params (an int that it cannot send).
+    /// The error of PySpark's serialization of the model's params: of a value that it cannot send
+    /// (see [`params_api::unsendable_error`]), the first of them by name.
     pub(super) fn serialization_error(&self, py: Python<'_>) -> Option<PyErr> {
-        let unsendable = self
-            .model
-            .params()
+        let params = self.model.params();
+        let jvm = params
             .to_proto()
             .params
-            .keys()
-            .any(|name| name.starts_with("\u{0}unsendable:"));
-        unsendable.then(|| crate::functions::value_not_between(py))
+            .into_keys()
+            .filter_map(|key| key.strip_prefix("\u{0}unsendable:").map(str::to_string))
+            .min()?;
+        Some(params_api::unsendable_error(py, params, &jvm))
     }
 
     /// The transform of `df` by the model, of `df` as it is, as `try_remote_transform_relation` of
@@ -1152,9 +1229,9 @@ impl ModelCore {
 }
 
 /// Set the param `jvm` of the model params `params` to `value`, as the setters of a model set it:
-/// a value of the converter `identity` as the literal of `LiteralExpression._from_value`, and an
-/// int that PySpark cannot send under the reserved key that keeps it (see
-/// [`params_api::unsendable_key`]).
+/// a value of the converter `identity` as the literal of `LiteralExpression._from_value`, and a
+/// value that PySpark cannot send (an int beyond a long, or a list of ints whose literal fails)
+/// under the reserved key that keeps it (see [`params_api::unsendable_key`]).
 pub(super) fn put_model_param(
     py: Python<'_>,
     params: Params,
@@ -1173,7 +1250,7 @@ pub(super) fn put_model_param(
         Converted::Bool(value) => params.set_param_bool(jvm, value),
         Converted::StrList(values) => params.set_param_string_array(jvm, values),
         Converted::FloatList(values) => params.set_param_double_array(jvm, values),
-        Converted::IntList(values) => params.set_param_int_array(jvm, values),
+        Converted::IntList(literal) => params.set_param_literal(jvm, literal),
         Converted::Vector(value) => params.set_param_vector(jvm, value),
         Converted::FloatListList(value) => params.set_param_double_arrays(jvm, value),
         Converted::Matrix(value) => params.set_param_matrix(jvm, value),

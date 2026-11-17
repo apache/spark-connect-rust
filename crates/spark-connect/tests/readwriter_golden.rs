@@ -1,15 +1,92 @@
-//! Golden parity test for read/write operations.
+//! Golden parity test for read operations, and the protos of the read relations and the save
+//! enums of the Rust plan.
 //!
-//! Read and write operations must serialize to the exact same protobuf
-//! the reference PySpark client produces.
+//! The reads of the Rust API's `DataFrameReader` must serialize to the exact same protobuf that
+//! the reference PySpark client produces. The goldens live in `tests/golden/readwriter.jsonl`
+//! (captured by `scripts/capture_readwriter_golden.py`, base64-encoded `spark.connect.Plan`), whose
+//! plan IDs and origins are cleared, as they are here. Writes are commands, which the integration
+//! tests run against a server.
 
 #![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
+
+mod common;
 
 use std::collections::HashMap;
 
 use spark_connect::plan::LogicalPlan;
 use spark_connect::readwriter::{ReadType, SaveMode, TableSaveMethod};
+use spark_connect::{DataFrame, SparkSession};
 use spark_connect_proto as proto;
+
+/// The read relation of each case of the capture, built by the Rust API's reader as PySpark's
+/// reader builds it: byte for byte, but the plan ID and origin of its `common`. Of a reader of no
+/// schema, PySpark sends the schema `""`, and its `text` sets `wholetext` to `false`.
+#[test]
+fn reads_match_official_pyspark() {
+    let goldens = common::load_goldens("readwriter.jsonl", |plan: &mut proto::Plan| {
+        if let Some(proto::plan::OpType::Root(root)) = &mut plan.op_type {
+            root.common = None;
+        }
+    });
+    // The channel connects lazily: building plans needs no server.
+    let spark = SparkSession::builder()
+        .remote("sc://127.0.0.1:1")
+        .get_or_create()
+        .unwrap();
+    let read = || spark.read();
+    let cases: Vec<(&str, DataFrame)> = vec![
+        ("read_json", read().json("data/test.json")),
+        ("read_parquet", read().parquet("data/test.parquet")),
+        ("read_csv", read().csv("data/test.csv")),
+        (
+            "read_csv_with_option",
+            read().option("header", "true").csv("data/test.csv"),
+        ),
+        ("read_orc", read().orc("data/test.orc")),
+        ("read_text", read().text("data/test.txt")),
+        ("read_table", read().table("my_table")),
+        (
+            "read_parquet_with_option",
+            read()
+                .option("mergeSchema", "true")
+                .parquet("data/test.parquet"),
+        ),
+        (
+            "read_json_with_schema",
+            read()
+                .schema("id INT, name STRING".to_string())
+                .json("data/test.json"),
+        ),
+        (
+            "read_csv_with_multiple_options",
+            read()
+                .option("header", "true")
+                .option("sep", ",")
+                .csv("data/test.csv"),
+        ),
+    ];
+    assert_eq!(cases.len(), goldens.len(), "a case of each golden");
+    for (name, df) in cases {
+        let Some(proto::plan::OpType::Root(expected)) = &goldens[name].op_type else {
+            panic!("{name}: the golden has no root relation");
+        };
+        let mut relation = df.to_relation().unwrap();
+        relation.common = None;
+        assert_eq!(&relation, expected, "{name}");
+    }
+    // PySpark's `text(paths)` sets its `wholetext=False` over an earlier option, as its
+    // `_set_opts` sets every named option that is not None.
+    let mut over = read()
+        .option("wholetext", "true")
+        .text("data/test.txt")
+        .to_relation()
+        .unwrap();
+    over.common = None;
+    let Some(proto::plan::OpType::Root(expected)) = &goldens["read_text"].op_type else {
+        panic!("read_text: the golden has no root relation");
+    };
+    assert_eq!(&over, expected, "read_text over an earlier wholetext");
+}
 
 #[test]
 fn test_read_json() {

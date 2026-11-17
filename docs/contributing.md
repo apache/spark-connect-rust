@@ -28,8 +28,12 @@ cargo test                  # unit + golden-proto tests
 cargo build -p examples     # the Rust-native examples
 ```
 
-Builder correctness is covered by **golden-proto tests**: plans, expressions, and
-all SQL functions are asserted byte-for-byte against captured reference protos.
+Builder correctness is covered by **golden-proto tests**: plans, expressions,
+all SQL functions, the reads, the catalog calls and ML transforms are asserted
+byte-for-byte against captured reference protos. The goldens under `tests/golden/`
+are captured from the official `pyspark-client` by the `scripts/capture_*_golden.py`
+scripts, against a Spark Connect server: run each with that client's Python, isolated,
+as `python -I scripts/capture_golden.py --remote sc://localhost:15002`.
 Transport and Arrow paths are exercised by the end-to-end tests below and by the
 official Apache Spark Connect test suite in CI - see the CI notes under
 [`dev/design/`](https://github.com/apache/spark-connect-rust/tree/master/dev/design).
@@ -58,7 +62,10 @@ The end-to-end tests, the live Python tests and the official test suites run aga
 Spark 4.3.0 Connect server. The Spark distribution bundles the server, so no
 `--packages` is needed: unpack `spark-4.3.0-bin-hadoop3-connect.tgz` (the one CI uses)
 or `spark-4.3.0-bin-hadoop3.tgz` from the
-[Apache archive](https://archive.apache.org/dist/spark/spark-4.3.0/), and start it with
+[Apache CDN](https://dlcdn.apache.org/spark/spark-4.3.0/), which serves the current releases,
+or the [Apache archive](https://archive.apache.org/dist/spark/spark-4.3.0/), which keeps every
+release but is slower. `scripts/download_spark_dist.sh 4.3.0 spark-4.3.0-bin-hadoop3-connect DIR`
+downloads and unpacks it as CI does, from the CDN or else from the archive. Start it with
 Java 17 and CI's settings:
 
 ```bash
@@ -128,12 +135,12 @@ To build a wheel instead, run `maturin build --release --out dist`, which reads
 
 ### Run the tests
 
-Run the tests from `python/`. The offline suites need no server:
+Run the tests from `python/`. The offline suites, `tests/test_*_offline.py` and
+`tests/test_arrow_handoff.py`, need no server:
 
 ```bash
 cd python
-TZ=UTC PYTHONPATH=$(pwd) python -m pytest \
-  tests/test_dropin_offline.py tests/test_arrow_handoff.py tests/test_ml_offline.py
+TZ=UTC PYTHONPATH=$(pwd) python -m pytest tests/test_*_offline.py tests/test_arrow_handoff.py
 TZ=UTC PYTHONPATH=$(pwd) python -m pytest tests/test_dropin_offline.py -k pickle   # a subset
 ```
 
@@ -146,13 +153,14 @@ SPARK_REMOTE=sc://localhost:15002 TZ=UTC PYTHONPATH=$(pwd) python -m pytest test
 
 CI runs the test files that its workflows name (`coverage.yml` for the offline suites,
 `build_python_connect.yml` for the live ones), so add a new test to an existing file, or
-add a new file to the workflow. CI also measures the coverage of the hand-written shim
-within the scope of `python/.coveragerc`, and fails below the floor that `coverage.yml`
+add a new file to the workflow: a guard step of each fails when a test file is in no list.
+CI also measures the coverage of the hand-written shim within the scope of
+`python/.coveragerc`, over the offline suites, and fails below the floor that `coverage.yml`
 sets:
 
 ```bash
 TZ=UTC PYTHONPATH=$(pwd) python -m coverage run --rcfile=.coveragerc -m pytest \
-  tests/test_dropin_offline.py tests/test_arrow_handoff.py tests/test_ml_offline.py
+  tests/test_*_offline.py tests/test_arrow_handoff.py
 python -m coverage report --rcfile=.coveragerc
 ```
 
@@ -238,8 +246,9 @@ target (`rustup target add wasm32-unknown-unknown`), because it builds
 (`.github/workflows/lint.yml`), so that their verdicts do not change with a new release:
 run `cargo +1.100.0 clippy ...` to match it. CI also lints the `datafusion` and `polars`
 features of `apache-spark-connect`, and the crates that the workspace excludes
-(`examples/wasm-udfs`, `examples/wasm-udf-inline` and `tests/wasm-udf`) through their
-manifests. The lints this codebase triggers by design are allowed once, with
+(`examples/wasm-udfs`, `examples/wasm-udf-inline`, `tests/wasm-udf` and `tests/wasm-udf-wasi`,
+which needs the `wasm32-wasip1` target too) through their manifests. The lints this codebase
+triggers by design are allowed once, with
 a reason, in `[workspace.lints.clippy]` of the root `Cargo.toml`; a targeted `#[allow]`
 needs a comment saying why. CI also fails on deferral
 markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`

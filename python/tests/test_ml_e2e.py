@@ -68,6 +68,100 @@ def test_ml_connect_random_forest_null_bootstrap_fits_as_pyspark(session):
         RandomForestClassifier(numTrees=5, seed=None).fit(df)
 
 
+def test_ml_fits_log_the_warning_of_a_tree_training_stopped_early_as_pyspark():
+    # The memory control of the server's ML cache stops the training of a tree model early when
+    # the model outgrows the threshold of the session's maxModelSize (2/5 of it: 24000 bytes of
+    # 60000), and the server sends a warning with the model, which PySpark 4.3.0's try_remote_fit
+    # logs to the logger pyspark.ml.util at WARNING: of each fit, of the stages of a Pipeline, of
+    # each class of a OneVsRest and of each fit of a CrossValidator. Without the conf, a fit logs
+    # nothing. The conf is of a session of its own; the server sets the threshold of each ML
+    # command of a session (a global of Spark's TreeConfig), so the live tests run one at a time.
+    import logging
+    import random
+    import re
+
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    remote = os.environ.get("SPARK_REMOTE")
+    if not remote:
+        pytest.skip("SPARK_REMOTE is required for live-server tests")
+
+    def of_module(module, name):
+        # The native class `name` of pyspark.ml.connect.<module>, or PySpark's of the reference.
+        return native_class("pyspark.ml.connect." + module, name, "pyspark.ml." + module)
+
+    RandomForestRegressor = of_module("regression", "RandomForestRegressor")
+    GBTRegressor = of_module("regression", "GBTRegressor")
+    RandomForestClassifier = of_module("classification", "RandomForestClassifier")
+    OneVsRest = of_module("classification", "OneVsRest")
+    Pipeline = of_module("pipeline", "Pipeline")
+    CrossValidator = of_module("tuning", "CrossValidator")
+    RegressionEvaluator = of_module("evaluation", "RegressionEvaluator")
+    size = r"\(\d+ bytes\)"
+    of_forest = "The random forest training stops early because the model size " + size
+    forest = re.compile(of_forest + r" exceeds threshold \(24000 bytes\)\.")
+    # The server joins the warnings of a fit a line each: of a boosting tree that outgrows what is
+    # left of the threshold, the forest's of the tree comes first.
+    boosting = re.compile(
+        f"(?:{of_forest} exceeds threshold {size}\\.\n)*The boosting tree training stops early "
+        f"because the GBT accumulated tree models size {size} exceeds threshold "
+        r"\(24000 bytes\)\."
+    )
+    records = []
+
+    class Recording(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    def logged(fit):
+        # The messages that `fit` logs, each of PySpark's record.
+        del records[:]
+        fit()
+        for record in records:
+            assert (record.name, record.levelname) == ("pyspark.ml.util", "WARNING")
+            assert record.args == ()
+        return [record.getMessage() for record in records]
+
+    def of(messages, *patterns):
+        # Whether each message is of its pattern.
+        return len(messages) == len(patterns) and all(map(re.Pattern.fullmatch, patterns, messages))
+
+    def forest_regressor():
+        return RandomForestRegressor(numTrees=20, maxDepth=6, seed=1)
+
+    logger = logging.getLogger("pyspark.ml.util")
+    handler = Recording()
+    logger.addHandler(handler)
+    spark = SparkSession.builder.remote(remote).create()
+    try:
+        random.seed(0)
+        features = [Vectors.dense([random.random() for _ in range(4)]) for _ in range(200)]
+        rows = [(float(random.randint(0, 2)), vector) for vector in features]
+        df = spark.createDataFrame(rows, ["label", "features"])
+        assert logged(lambda: forest_regressor().fit(df)) == []
+        max_model_size = "spark.connect.session.connectML.mlCache.memoryControl.maxModelSize"
+        spark.conf.set(max_model_size, "60000")
+        assert of(logged(lambda: forest_regressor().fit(df)), forest)
+        boosted = GBTRegressor(maxIter=20, maxDepth=6, seed=1)
+        stages = [forest_regressor().setPredictionCol("p"), boosted]
+        assert of(logged(lambda: Pipeline(stages=stages).fit(df)), forest, boosting)
+        classifier = RandomForestClassifier(numTrees=20, maxDepth=6, seed=1)
+        one_vs_rest = OneVsRest(classifier=classifier, parallelism=1)
+        assert of(logged(lambda: one_vs_rest.fit(df)), forest, forest, forest)
+        estimator = forest_regressor()
+        grid = ParamGridBuilder().addGrid(estimator.maxDepth, [5, 6]).build()
+        validator = CrossValidator(
+            estimator=estimator, estimatorParamMaps=grid, evaluator=RegressionEvaluator(),
+            numFolds=2, seed=1, parallelism=1,
+        )
+        # A fit of each param map of each fold, and of the best one.
+        assert of(logged(lambda: validator.fit(df)), *[forest] * 5)
+    finally:
+        logger.removeHandler(handler)
+        spark.stop()
+
+
 def test_ml_connect_scalers_fit_and_transform_as_pyspark(session):
     from pyspark.ml.connect.feature import MaxAbsScaler, StandardScaler, StringIndexer
     from pyspark.ml.functions import array_to_vector

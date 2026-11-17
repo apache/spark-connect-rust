@@ -953,8 +953,6 @@ def named_struct(*cols):
     return _invoke_function_over_columns("named_struct", *cols)
 def nanvl(col1, col2):
     return _invoke_function_over_columns("nanvl", col1, col2)
-def negate(col):
-    return _invoke_function_over_columns("negative", col)
 def negative(col):
     return _invoke_function_over_columns("negative", col)
 def next_day(date, dayOfWeek):
@@ -1047,8 +1045,6 @@ def position(substr, str, start=None):
 def positive(col):
     return _invoke_function_over_columns("positive", col)
 def pow(col1, col2):
-    return _invoke_binary_math_function("power", col1, col2)
-def power(col1, col2):
     return _invoke_binary_math_function("power", col1, col2)
 def printf(format, *cols):
     return _invoke_function("printf", _to_col(format), *[_to_col(c) for c in cols])
@@ -2028,6 +2024,11 @@ def year(col):
     return _invoke_function_over_columns("year", col)
 def zeroifnull(col):
     return _invoke_function_over_columns("zeroifnull", col)
+
+
+# The aliases of PySpark, bound to their functions.
+negate = negative
+power = pow
 
 
 __all__ = [

@@ -22,9 +22,7 @@ prost.workspace = true
 prost-types.workspace = true
 arrow.workspace = true
 bytes.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
-futures.workspace = true
 serde_json = { version = "1.0", features = ["float_roundtrip"] }
 # Local time for the reprs of timestamp literals, as Python's `datetime.fromtimestamp`.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
@@ -41,6 +39,7 @@ polars = { workspace = true, optional = true }
 
 [dev-dependencies]
 base64 = "0.21"
+futures.workspace = true
 tonic.workspace = true
 
 [features]

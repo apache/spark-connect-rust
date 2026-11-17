@@ -29,7 +29,7 @@ pub(crate) fn window_columns(
             if c.is_instance_of::<pyo3::types::PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
                 let _origin = crate::origin::with_origin("col")?;
-                return Ok(spark_connect::functions::col(&c.extract::<String>()?));
+                return crate::plan_args::col(c);
             }
             let type_name = c.get_type().name()?.to_string();
             Err(crate::column::raise_pyspark(
@@ -351,8 +351,9 @@ impl PyWindowSpec {
     }
 }
 
-/// Python wrapper for the Window static builder.
-#[pyclass(name = "Window", module = "pyspark.sql.window")]
+/// Python wrapper for the Window static builder, `pyspark.sql.window.Window`. As PySpark's, it is
+/// subclassed by PySpark Connect's `pyspark.sql.connect.window.Window`, a class of its own.
+#[pyclass(name = "Window", module = "pyspark.sql.window", subclass)]
 pub struct PyWindow;
 
 #[pymethods]

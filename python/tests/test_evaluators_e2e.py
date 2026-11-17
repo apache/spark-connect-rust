@@ -93,6 +93,8 @@ def test_standard_input_types_and_column_names(case, session):
     else:
         with pytest.raises(Exception) as error:
             evaluator.evaluate(frame)
+        # A golden message of no text would be in any error.
+        assert case["message"], case["name"]
         assert case["message"] in str(error.value)
         if case["condition"]:
             assert error.value.getCondition() == case["condition"]

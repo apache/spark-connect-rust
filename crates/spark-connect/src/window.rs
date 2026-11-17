@@ -74,24 +74,27 @@ impl WindowSpec {
         }
     }
 
-    /// Add partition columns to this window specification.
+    /// The window specification of these partition columns, in place of those of this one, as
+    /// PySpark's `WindowSpec.partitionBy` (and Spark's) makes it: a chained call partitions by
+    /// the columns of the last one only.
     pub fn partition_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Self {
-        self.partition_spec.extend(expressions_of(cols));
+        self.partition_spec = expressions_of(cols);
         self
     }
 
-    /// Set ordering for this window specification. A sort order, of [`Column::asc`],
-    /// [`Column::desc`] and their nulls variants, or a [`SortOrder`], sorts as it says; any
-    /// other column is sorted ascending, nulls first, as PySpark's `WindowSpec.orderBy` sorts it.
+    /// The window specification of this ordering, in place of that of this one, as PySpark's
+    /// `WindowSpec.orderBy` (and Spark's) makes it: a chained call orders by the columns of the
+    /// last one only. A sort order, of [`Column::asc`], [`Column::desc`] and their nulls
+    /// variants, or a [`SortOrder`], sorts as it says; any other column is sorted ascending,
+    /// nulls first, as PySpark's `WindowSpec.orderBy` sorts it.
     pub fn order_by<C: Into<Column>>(mut self, cols: impl IntoIterator<Item = C>) -> Self {
-        self.order_spec.extend(
-            expressions_of(cols)
-                .into_iter()
-                .map(|expr| match expr.node() {
-                    ExpressionNode::SortOrder(sort) => (**sort).clone(),
-                    _ => SortOrder::asc_nulls_first(expr),
-                }),
-        );
+        self.order_spec = expressions_of(cols)
+            .into_iter()
+            .map(|expr| match expr.node() {
+                ExpressionNode::SortOrder(sort) => (**sort).clone(),
+                _ => SortOrder::asc_nulls_first(expr),
+            })
+            .collect();
         self
     }
 
@@ -189,6 +192,33 @@ mod tests {
             .order_by(vec![sort("c")]);
         assert_eq!(w.partition_spec.len(), 2);
         assert_eq!(w.order_spec.len(), 1);
+    }
+
+    #[test]
+    fn chained_partition_by_and_order_by_replace_the_specs_as_pyspark() {
+        // As PySpark's `WindowSpec.partitionBy` and `orderBy`, which make a spec of the new
+        // partitioning or ordering in place of the old one, and keep the other parts.
+        let w = WindowSpec::new()
+            .partition_by(vec![col("a")])
+            .order_by(vec![sort("c")])
+            .rows_between(FrameBound::Preceding(1), FrameBound::CurrentRow)
+            .partition_by(vec![col("b")])
+            .order_by(vec![SortOrder::desc_nulls_last(col("d")), sort("e")]);
+        assert_eq!(w.partition_spec, vec![col("b")]);
+        assert_eq!(
+            w.order_spec,
+            vec![SortOrder::desc_nulls_last(col("d")), sort("e")]
+        );
+        assert_eq!(
+            w.frame_spec,
+            Some((
+                FrameType::Row,
+                FrameBound::Preceding(1),
+                FrameBound::CurrentRow
+            ))
+        );
+        let unpartitioned = Window::partition_by(vec![col("a")]).partition_by(Vec::<Column>::new());
+        assert!(unpartitioned.partition_spec.is_empty());
     }
 
     #[test]

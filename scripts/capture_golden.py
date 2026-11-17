@@ -40,19 +40,20 @@ def normalize(msg) -> None:
             msg.ClearField(field.name)
             continue
         if field.type == field.TYPE_MESSAGE:
-            if field.label == field.LABEL_REPEATED:
-                if field.message_type.GetOptions().map_entry:
-                    # map<...>: values may be messages
-                    for k in value:
-                        v = value[k]
-                        if isinstance(v, Message):
-                            normalize(v)
-                else:
-                    for item in value:
-                        if isinstance(item, Message):
-                            normalize(item)
-            elif isinstance(value, Message):
+            # A singular field is a message; a repeated one or a map is a container of them. The
+            # value tells which, as protobuf 7 has no `FieldDescriptor.label`.
+            if isinstance(value, Message):
                 normalize(value)
+            elif field.message_type.GetOptions().map_entry:
+                # map<...>: values may be messages
+                for k in value:
+                    v = value[k]
+                    if isinstance(v, Message):
+                        normalize(v)
+            else:
+                for item in value:
+                    if isinstance(item, Message):
+                        normalize(item)
 
 
 def cap_plan(spark, name, df):
@@ -128,7 +129,10 @@ def plan_cases(spark):
         .join(spark.range(5).alias("b"), F.col("a.id") == F.col("b.id"), "left"),
     )
     yield "cross_join", spark.range(5).crossJoin(spark.range(3))
-    yield "sample", r.sample(0.5, seed=42)
+    # Of a positional fraction, PySpark's `sample` takes the seed of the second positional
+    # argument only: `sample(0.5, seed=42)` sends a random seed. Of a keyword fraction, it sends
+    # the seed given.
+    yield "sample", r.sample(fraction=0.5, seed=42)
     yield "repartition", r.repartition(4)
     yield "repartition_by", r.repartition(4, F.col("id"))
     yield "coalesce", r.coalesce(1)

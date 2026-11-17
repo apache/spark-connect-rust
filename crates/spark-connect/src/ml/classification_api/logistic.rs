@@ -473,7 +473,7 @@ impl LogisticRegression {
             .iter()
             .map(|map| {
                 let mut estimator = self.clone();
-                estimator.params.params.extend(map.params.clone());
+                estimator.params.extend_from(map);
                 estimator.fit(df)
             })
             .collect()

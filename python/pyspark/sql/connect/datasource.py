@@ -15,32 +15,10 @@
 # limitations under the License.
 #
 """The registration of data sources under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.datasource``: a wrapper of a session whose ``register`` registers a
-data source with the session, as ``spark.dataSource.register`` does."""
+``pyspark.sql.connect.datasource``: its ``DataSourceRegistration``, the class of
+``spark.dataSource``, which the Rust extension implements. ``pyspark.sql.datasource`` has PySpark's
+classic class, of which it is not, as in PySpark."""
 
-from typing import Type, TYPE_CHECKING
+from pyspark._pyspark import DataSourceRegistration
 
-from pyspark.sql.datasource import DataSourceRegistration as PySparkDataSourceRegistration
-
-if TYPE_CHECKING:
-    from pyspark.sql.datasource import DataSource
-    from pyspark.sql.session import SparkSession
-
-
-class DataSourceRegistration:
-    """
-    Wrapper for data source registration.
-
-    .. versionadded:: 4.0.0
-    """
-
-    def __init__(self, sparkSession: "SparkSession"):
-        self.sparkSession = sparkSession
-
-    def register(
-        self,
-        dataSource: Type["DataSource"],
-    ) -> None:
-        self.sparkSession.dataSource.register(dataSource)
-
-    register.__doc__ = PySparkDataSourceRegistration.register.__doc__
+__all__ = ["DataSourceRegistration"]

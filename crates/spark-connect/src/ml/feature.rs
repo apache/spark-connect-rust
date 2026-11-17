@@ -3,8 +3,9 @@
 use super::*;
 
 macro_rules! feature_stage {
-    ($name:ident, $kind:ident) => {
+    ($(#[$doc:meta])* $name:ident, $kind:ident) => {
         #[doc = concat!("Spark ML `", stringify!($name), "` feature stage.")]
+        $(#[$doc])*
         #[derive(Debug, Clone)]
         pub struct $name {
             operator: MlOperator,
@@ -38,11 +39,11 @@ macro_rules! feature_stage {
 }
 
 macro_rules! feature_estimator {
-    ($name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?], no_model_load) => {
-        feature_estimator!(@stage $name, $model, $jvm_model, [$($model_param),*]);
+    ($(#[$doc:meta])* $name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?], no_model_load) => {
+        feature_estimator!(@stage $(#[$doc])* $name, $model, $jvm_model, [$($model_param),*]);
     };
-    ($name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?]) => {
-        feature_estimator!(@stage $name, $model, $jvm_model, [$($model_param),*]);
+    ($(#[$doc:meta])* $name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?]) => {
+        feature_estimator!(@stage $(#[$doc])* $name, $model, $jvm_model, [$($model_param),*]);
         impl $model {
             #[doc = concat!("Load a `", stringify!($model), "` saved to `path`, as PySpark's `", stringify!($model), ".load(path)`: the server caches it, as a fitted model.")]
             pub fn load(session: &SparkSession, path: &str) -> spark_connect_core::error::Result<Self> {
@@ -52,8 +53,8 @@ macro_rules! feature_estimator {
             }
         }
     };
-    (@stage $name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?]) => {
-        feature_stage!($name, Estimator);
+    (@stage $(#[$doc:meta])* $name:ident, $model:ident, $jvm_model:literal, [$($model_param:literal),* $(,)?]) => {
+        feature_stage!($(#[$doc])* $name, Estimator);
         impl $name {
             #[doc = concat!("Fit a typed `", stringify!($model), "`, as `Estimator::fit` fits it, which boxes it.")]
             pub fn fit(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<$model> {
@@ -195,6 +196,7 @@ feature_params! { Bucketizer {
 } }
 
 feature_estimator!(
+    /// PySpark deprecates `ChiSqSelector` since 3.1.0, in favor of [`UnivariateFeatureSelector`].
     ChiSqSelector,
     ChiSqSelectorModel,
     "ChiSqSelectorModel",
@@ -1002,7 +1004,9 @@ impl CountVectorizerModel {
 
 impl StringIndexerModel {
     /// The labels of a model of one column, as `StringIndexerModel.labels`. The server rejects it
-    /// of a model of several columns, whose labels are [`Self::labels_array`].
+    /// of a model of several columns, whose labels are [`Self::labels_array`]. PySpark deprecates
+    /// `labels` since 3.1.0: it will be removed in future versions, in favor of `labelsArray`
+    /// (`labels_array`).
     pub fn labels(&self) -> MlResult<Vec<String>> {
         strings_of("labels", model_value(&self.cached, "labels")?)
     }
@@ -1240,18 +1244,21 @@ impl VectorIndexerModel {
         let mut maps: std::collections::BTreeMap<i32, Vec<(f64, i32)>> = Default::default();
         for row in rows {
             let field = |index: usize| row.get(index);
-            let (Some(feature), Some(value), Some(category)) = (
-                field(0).and_then(|v| v.as_i64()),
-                field(1).and_then(|v| v.as_f64()),
-                field(2).and_then(|v| v.as_i64()),
-            ) else {
+            // PySpark's `int` of each index is a Python int of any size: one out of the range of
+            // an `i32` is an error, rather than truncated.
+            let int = |index: usize| {
+                field(index)
+                    .and_then(|v| v.as_i64())
+                    .and_then(|v| i32::try_from(v).ok())
+            };
+            let (Some(feature), Some(value), Some(category)) =
+                (int(0), field(1).and_then(|v| v.as_f64()), int(2))
+            else {
                 return Err(SparkError::connect_msg(
                     "categoryMapsDF: the server returned a row that is not (int, double, int)",
                 ));
             };
-            maps.entry(feature as i32)
-                .or_default()
-                .push((value, category as i32));
+            maps.entry(feature).or_default().push((value, category));
         }
         for values in maps.values_mut() {
             values.sort_by(|a, b| a.0.total_cmp(&b.0));

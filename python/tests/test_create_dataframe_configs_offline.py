@@ -23,17 +23,11 @@ records the requests that the server receives for one createDataFrame, which is 
 
 import datetime
 
+import pyspark.sql.connect.proto as pb2
 import pytest
 from _mock_connect_server import mock_connect_session
-from pyspark.loose_version import LooseVersion
-
-_protobuf = pytest.importorskip("google.protobuf")
-if LooseVersion(_protobuf.__version__) < LooseVersion("6.33.5"):
-    pytest.skip("pyspark.sql.connect.proto needs protobuf >= 6.33.5", allow_module_level=True)
-
-import pyspark.sql.connect.proto as pb2  # noqa: E402
-from pyspark.sql import Row  # noqa: E402
-from pyspark.sql.types import LongType, StringType, StructField, StructType  # noqa: E402
+from pyspark.sql import Row
+from pyspark.sql.types import LongType, StringType, StructField, StructType
 
 # The keys of the Config get of PySpark 4.3.0's createDataFrame, in its order.
 _KEYS = [

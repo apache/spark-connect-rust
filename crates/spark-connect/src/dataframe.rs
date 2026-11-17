@@ -105,6 +105,31 @@ impl AsOfJoinOptions {
     }
 }
 
+/// An execution of a DataFrame whose request is built and not yet sent, which
+/// [`DataFrame::prepare_execution`] gives: one of its methods sends it. Not a stable API.
+#[doc(hidden)]
+pub struct PreparedExecution {
+    dataframe: DataFrame,
+    request: proto::ExecutePlanRequest,
+}
+
+impl PreparedExecution {
+    /// Send the execution and collect its Arrow batches, as
+    /// [`DataFrame::collect_record_batches_with_schema_checked`] does.
+    pub fn collect_record_batches_checked(
+        self,
+        check: impl Fn(&DataType) -> Result<()>,
+    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
+        self.dataframe.record_batches_of(self.request, check)
+    }
+
+    /// Send the execution and stream its rows, as [`DataFrame::to_local_iterator`] does.
+    pub fn into_local_iterator(self, prefetch_partitions: bool) -> Result<LocalRowIterator> {
+        self.dataframe
+            .local_iterator_of(self.request, prefetch_partitions)
+    }
+}
+
 /// Returned by `DataFrame::to_local_iterator()`, this iterator consumes the ExecutePlan
 /// response stream incrementally and yields Row objects without buffering the entire result.
 pub struct LocalRowIterator {
@@ -118,10 +143,16 @@ pub struct LocalRowIterator {
     /// The schema of the result that the server sends before the rows
     /// (`ExecutePlanResponse.schema`), once received.
     schema: SchemaSlot,
+    /// Whether a record batch of the result has arrived, also one without rows.
+    batch_received: bool,
 }
 
 /// The schema of a result as the server sends it, shared with a prefetch task.
 type SchemaSlot = Arc<Mutex<Option<DataType>>>;
+
+/// The rows of an Arrow batch of a result, and whether its IPC stream has a record batch, as
+/// [`decode_arrow_batch_counted`] reads them.
+type BatchRows = (Vec<Row>, bool);
 
 /// Keeps the schema of `resp`, if it has one, in `slot`.
 fn keep_schema(resp: &mut proto::ExecutePlanResponse, slot: &SchemaSlot) -> Result<()> {
@@ -150,7 +181,7 @@ enum RowSource {
     /// ahead, so the next server fetch overlaps with the caller consuming the
     /// current batch's rows (`prefetchPartitions=True`).
     Prefetch {
-        rx: tokio::sync::mpsc::Receiver<Result<Vec<Row>>>,
+        rx: tokio::sync::mpsc::Receiver<Result<BatchRows>>,
         /// The task, to raise its panic (of a progress handler, say) in the caller once its
         /// channel closes, as the on-demand source raises it, instead of ending early.
         task: Option<tokio::task::JoinHandle<()>>,
@@ -193,6 +224,7 @@ impl LocalRowIterator {
             source,
             done: false,
             schema,
+            batch_received: false,
         }
     }
 
@@ -206,11 +238,26 @@ impl LocalRowIterator {
             .clone()
     }
 
+    /// The next row of the batch that the iterator holds, without fetching another: None once
+    /// that batch is used up, when [`Iterator::next`] fetches the next batch or ends the
+    /// iteration. A caller that waits for the server only to fetch a batch takes the rows of the
+    /// batches that it has with this.
+    pub fn next_decoded(&mut self) -> Option<Row> {
+        self.current_rows.next()
+    }
+
+    /// Whether a record batch of the result has arrived, also one without rows, as the server
+    /// sends one for an empty result: PySpark's `toLocalIterator` converts each record batch as it
+    /// arrives, so the checks of its conversion raise then, before the error of a later response.
+    pub fn has_received_batch(&self) -> bool {
+        self.batch_received
+    }
+
     /// Fetch the next batch of rows, or `None` once the source is exhausted.
     ///
     /// A batch may legitimately decode to zero rows (e.g. a metrics-only
     /// response was skipped); the caller loops until it gets a row or `None`.
-    fn fetch_next_batch(&mut self) -> Option<Result<Vec<Row>>> {
+    fn fetch_next_batch(&mut self) -> Option<Result<BatchRows>> {
         match &mut self.source {
             RowSource::OnDemand {
                 session,
@@ -238,7 +285,7 @@ impl LocalRowIterator {
                         {
                             let schema = self.schema.lock().unwrap_or_else(|p| p.into_inner());
                             return Some(
-                                decode_arrow_batch_of(&batch, schema.as_ref())
+                                decode_arrow_batch_counted(&batch, schema.as_ref())
                                     .map_err(|e| stream.fail(e)),
                             );
                         }
@@ -305,7 +352,10 @@ impl Iterator for LocalRowIterator {
                 return None;
             }
             match self.fetch_next_batch() {
-                Some(Ok(rows)) => self.current_rows = rows.into_iter(),
+                Some(Ok((rows, has_record_batch))) => {
+                    self.batch_received |= has_record_batch;
+                    self.current_rows = rows.into_iter();
+                }
                 Some(Err(e)) => {
                     self.done = true;
                     return Some(Err(e));
@@ -331,10 +381,10 @@ fn spawn_prefetch(
     schema: SchemaSlot,
     observations: Vec<(String, crate::observation::Observation)>,
 ) -> (
-    tokio::sync::mpsc::Receiver<Result<Vec<Row>>>,
+    tokio::sync::mpsc::Receiver<Result<BatchRows>>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<Row>>>(1);
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<BatchRows>>(1);
     let task = get_runtime().spawn(async move {
         let mut execution_info = ExecutionInfo::default();
         loop {
@@ -361,7 +411,7 @@ fn spawn_prefetch(
                     {
                         let decoded = {
                             let schema = schema.lock().unwrap_or_else(|p| p.into_inner());
-                            decode_arrow_batch_of(&batch, schema.as_ref())
+                            decode_arrow_batch_counted(&batch, schema.as_ref())
                         };
                         match decoded {
                             Ok(rows) => {
@@ -1090,6 +1140,16 @@ impl DataFrame {
     ///   fetched on demand only once the previous batch is exhausted.
     pub fn to_local_iterator(&self, prefetch_partitions: bool) -> Result<LocalRowIterator> {
         let request = self.build_execute_request()?;
+        self.local_iterator_of(request, prefetch_partitions)
+    }
+
+    /// The rows of the execution of `request`, a request of this DataFrame, as
+    /// [`DataFrame::to_local_iterator`] streams them.
+    fn local_iterator_of(
+        &self,
+        request: proto::ExecutePlanRequest,
+        prefetch_partitions: bool,
+    ) -> Result<LocalRowIterator> {
         let observations = self.plan.observations();
         let stream = self.session.execute_plan(request)?;
         Ok(LocalRowIterator::new(
@@ -1098,6 +1158,23 @@ impl DataFrame {
             prefetch_partitions,
             observations,
         ))
+    }
+
+    /// The execution of this DataFrame with its request built, as PySpark builds the plan of a
+    /// conversion (`to_proto`) before the conversion reads settings of its own, which
+    /// `toPandas` and `toLocalIterator` do: a plan that does not build fails here, before any
+    /// request, and the first plan of the session reads the server's plan compression settings
+    /// here, as PySpark's client reads them when it builds its first plan (see
+    /// `SparkConnectClient::read_plan_compression`). A method of the result sends it. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn prepare_execution(&self) -> Result<PreparedExecution> {
+        let request = self.build_execute_request()?;
+        block_on(self.session.client().read_plan_compression());
+        Ok(PreparedExecution {
+            dataframe: self.clone(),
+            request,
+        })
     }
 
     /// The information of the last execution of this DataFrame. Mirrors
@@ -1139,6 +1216,16 @@ impl DataFrame {
         check: impl Fn(&DataType) -> Result<()>,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
+        self.record_batches_of(request, check)
+    }
+
+    /// The Arrow batches of the execution of `request`, a request of this DataFrame, as
+    /// [`DataFrame::collect_record_batches_with_schema_checked`] collects them.
+    fn record_batches_of(
+        &self,
+        request: proto::ExecutePlanRequest,
+        check: impl Fn(&DataType) -> Result<()>,
+    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let observations = self.plan.observations();
         let mut stream = self.session.execute_plan(request)?;
 
@@ -1273,6 +1360,19 @@ impl DataFrame {
             depth,
             observations,
         ))
+    }
+
+    /// The objects of the picklers of the UDFs and the UDTFs of the plan of this DataFrame that
+    /// it alone keeps alive, as [`DataFrame::exclusive_relation_owners`] gives the owners of its
+    /// relations, which a Python wrapper reports to Python's garbage collector too: a function
+    /// of a UDF may keep the DataFrame of the UDF, as the bound method of an object that keeps
+    /// the DataFrame does (see `crate::udf::exclusive_pickler_objects`). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        if Arc::strong_count(&self.plan) != 1 {
+            return Vec::new();
+        }
+        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
     }
 
     /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
@@ -1457,6 +1557,44 @@ impl DataFrame {
         Ok(copy)
     }
 
+    /// The picklers of the UDFs and the UDTFs of the plan of this DataFrame, each once, in the
+    /// order of the build of a request, which a deep copy of the DataFrame copies. Not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn picklers(&self) -> Vec<crate::udf::CommandPickler> {
+        crate::udf::all_picklers(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
+    }
+
+    /// As [`DataFrame::deep_copy_with`], of `copies`, the copies of the picklers of the UDFs of the
+    /// plan, as PySpark's deep copy copies the functions of the UDFs of its plan: the copy is of
+    /// this plan with the copies of its picklers and of its Observations, of the same plan IDs,
+    /// which pickles the copied functions at each request, as PySpark's copy does. A copy in
+    /// another session, of plan IDs of its own, is that of [`DataFrame::deep_copy_with`], whose
+    /// relation carries the plan IDs. Not a stable API.
+    #[doc(hidden)]
+    pub fn deep_copy_with_pickler_copies(
+        &self,
+        session: SparkSession,
+        observations: Vec<(String, crate::observation::Observation)>,
+        copies: &crate::udf::PicklerCopies,
+    ) -> Result<DataFrame> {
+        if copies.is_empty()
+            || !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared())
+        {
+            return self.deep_copy_with(session, observations);
+        }
+        let plan = crate::udf::PicklerRebuild::new(copies, &observations)
+            .plan(&self.plan, Some(session.plan_ids()))
+            .unwrap_or_else(|| Arc::clone(&self.plan));
+        Ok(DataFrame {
+            session,
+            plan,
+            schema_cache: Arc::new(Mutex::new(self.cached_schema())),
+            is_local_cache: Arc::new(Mutex::new(None)),
+            execution: Arc::new(Mutex::new(None)),
+        })
+    }
+
     /// The levels of the plan of this DataFrame, as a pickled DataFrame records them for
     /// [`DataFrame::from_sent_relation_levels`]. Not a stable API.
     #[doc(hidden)]
@@ -1595,7 +1733,7 @@ impl DataFrame {
         let mut request = proto::ExecutePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
         request.user_context = Some(proto::UserContext::default());
-        request.tags = self.session.tags();
+        request.tags = self.session.tags()?;
 
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
@@ -1859,9 +1997,12 @@ impl DataFrame {
 
     /// The execution plan in an explain mode, mirroring `pyspark.sql.DataFrame._explain_string`
     /// of a mode, which PySpark Connect's client checks: one of "simple", "extended",
-    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error.
+    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error, which it raises
+    /// once it has built the plan, so that the error of a plan that it fails to build comes
+    /// first.
     pub fn explain_string(&self, mode: &str) -> Result<String> {
         use proto::analyze_plan_request::explain::ExplainMode;
+        let relation = self.relation()?;
         let explain_mode = match mode {
             "simple" => ExplainMode::Simple,
             "extended" => ExplainMode::Extended,
@@ -1882,7 +2023,7 @@ impl DataFrame {
             }
         };
         let plan = proto::Plan {
-            op_type: Some(proto::plan::OpType::Root(self.relation()?)),
+            op_type: Some(proto::plan::OpType::Root(relation)),
         };
         let request = proto::AnalyzePlanRequest {
             session_id: self.session.client().session_id().to_string(),
@@ -2897,17 +3038,34 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
+    /// As [`DataFrame::unbuildable`], with the schema that this DataFrame cached. Mirrors a
+    /// `limit`, `coalesce`, `repartition`, `repartitionByRange`, `repartitionById`, `sample` or
+    /// `randomSplit` of a value that PySpark's client fails with when it builds the plan: these
+    /// copy the `_cached_schema` of their input, so the schema is known without a request, and
+    /// each request of the plan raises `error`. Not a stable API.
+    #[doc(hidden)]
+    pub fn unbuildable_with_cached_schema(&self, error: SparkError) -> DataFrame {
+        let plan = LogicalPlan::Unbuildable {
+            input: Arc::clone(&self.plan),
+            error,
+        };
+        self.with_cached_schema(plan)
+    }
+
     /// A subquery of `subquery_type` of this DataFrame's plan, which refers to the plan by
     /// its plan ID in the session.
     pub(crate) fn subquery(
         &self,
         subquery_type: crate::expression::SubqueryType,
     ) -> crate::expression::SubqueryExpression {
-        crate::expression::SubqueryExpression::new(
-            Arc::clone(&self.plan),
-            self.session.plan_ids().id_of(&self.plan),
-            subquery_type,
-        )
+        crate::expression::SubqueryExpression {
+            plan_ids: Some(Arc::clone(self.session.plan_ids_shared())),
+            ..crate::expression::SubqueryExpression::new(
+                Arc::clone(&self.plan),
+                self.session.plan_ids().id_of(&self.plan),
+                subquery_type,
+            )
+        }
     }
 
     /// The scalar subquery of this DataFrame, which returns one row of one column, as a
@@ -3038,7 +3196,7 @@ fn execute_command_reporting(
     let mut request = proto::ExecutePlanRequest::default();
     request.session_id = session.client().session_id().to_string();
     request.user_context = Some(proto::UserContext::default());
-    request.tags = session.tags();
+    request.tags = session.tags()?;
     request.plan = Some(plan);
 
     let mut stream = if reported {
@@ -3212,7 +3370,18 @@ pub(crate) fn decode_arrow_batch_of(
     batch: &proto::execute_plan_response::ArrowBatch,
     spark_schema: Option<&DataType>,
 ) -> Result<Vec<Row>> {
+    decode_arrow_batch_counted(batch, spark_schema).map(|(rows, _)| rows)
+}
+
+/// As [`decode_arrow_batch_of`], with whether the IPC stream of `batch` has a record batch, also
+/// one without rows: PySpark's `toLocalIterator` converts each record batch of the result as it
+/// arrives, and a Spark server sends one without rows for an empty result.
+fn decode_arrow_batch_counted(
+    batch: &proto::execute_plan_response::ArrowBatch,
+    spark_schema: Option<&DataType>,
+) -> Result<BatchRows> {
     let (record_batches, _) = read_record_batches(&batch.data, decode_error)?;
+    let has_record_batch = !record_batches.is_empty();
 
     let mut rows = vec![];
 
@@ -3251,7 +3420,7 @@ pub(crate) fn decode_arrow_batch_of(
         }
     }
 
-    Ok(rows)
+    Ok((rows, has_record_batch))
 }
 
 /// The record batches of the Arrow IPC stream `data`, and the schema of them when they are read
@@ -4027,10 +4196,7 @@ impl<'a> ArrowValueLayout<'a> {
             }
             ArrowValueDecoder::IntervalMonthDayNano(arr) => {
                 let v = arr.value(index);
-                Ok(Value::String(format!(
-                    "{} months {} days {} ns",
-                    v.months, v.days, v.nanoseconds
-                )))
+                Ok(Value::calendar_interval(v.months, v.days, v.nanoseconds))
             }
             ArrowValueDecoder::List { array, child } => {
                 // Sliced list/map arrays retain their original children. Their
@@ -5231,6 +5397,38 @@ mod cache_tests {
     }
 
     #[test]
+    fn an_unbuildable_plan_keeps_the_cached_schema_only_where_pyspark_copies_it() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let error = || SparkError::value_msg("Value out of range: 1099511627776");
+        // Of no cached schema, both have none.
+        assert!(df
+            .unbuildable_with_cached_schema(error())
+            .cached_schema()
+            .is_none());
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+
+        // As PySpark's `limit` of a count that it fails to send, whose DataFrame copies the
+        // `_cached_schema` of its input: the schema needs no request, and a request fails.
+        let kept = df.unbuildable_with_cached_schema(error());
+        assert_eq!(kept.cached_schema().as_deref(), Some(&schema));
+        assert_eq!(kept.schema().unwrap(), schema);
+        assert_eq!(
+            kept.limit(1).cached_schema().as_deref(),
+            Some(&schema),
+            "a later transformation that keeps the schema keeps it too"
+        );
+        let failed = kept.collect().unwrap_err();
+        assert_eq!(failed.message(), "Value out of range: 1099511627776");
+        // As PySpark's `offset`, which does not copy it.
+        assert!(df.unbuildable(error()).cached_schema().is_none());
+    }
+
+    #[test]
     fn schema_cache_recovers_after_analysis_panics() {
         let spark = SparkSession::builder()
             .remote("sc://localhost:15002")
@@ -6171,6 +6369,66 @@ mod plan_construction_tests {
             other.plan_ids().id_of(&moved.plan),
             spark.plan_ids().id_of(&df.plan)
         );
+    }
+
+    /// As PySpark's `copy.deepcopy` of a DataFrame of UDFs, which copies the functions of the UDFs
+    /// of its plan with the plan: the plan of the copy holds the copies of the picklers and of the
+    /// Observations that it is given, of the plan IDs of the DataFrame, so its requests pickle
+    /// the copies and its actions set the copied Observations. A copy in another session is of
+    /// the relation, as a copy without UDFs.
+    #[test]
+    fn a_deep_copy_of_copies_of_picklers_holds_them_of_the_plan_ids_as_pyspark_deep_copies() {
+        use crate::observation::Observation;
+        use crate::udf::{CommandPickler, CommonInlineUserDefinedFunctionExpression};
+        use crate::udf::{PicklerCopies, PythonUDFPayload};
+        let spark = session();
+        let observation = Observation::new("c");
+        let observed = observe_count(&spark.range(3).unwrap(), &observation);
+        let pickler = CommandPickler::new("f", |_| Ok(b"<original>".to_vec()));
+        let udf = CommonInlineUserDefinedFunctionExpression::new(
+            "f".to_string(),
+            true,
+            vec![],
+            PythonUDFPayload::pickled_at_build(DataType::Long, 100, pickler.clone(), "3.11".into()),
+        );
+        let df = observed.select([Column::new(
+            ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into(),
+        )]);
+        let mut copies = PicklerCopies::new();
+        copies.insert(
+            &pickler,
+            CommandPickler::new("f'", |_| Ok(b"<copied>".to_vec())),
+        );
+        let given = observation.detached();
+        let copy = df
+            .deep_copy_with_pickler_copies(
+                spark.clone(),
+                vec![("c".into(), given.clone())],
+                &copies,
+            )
+            .unwrap();
+        use prost::Message;
+        let sent = |frame: &DataFrame| frame.relation().unwrap().encode_to_vec();
+        let contains = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|w| w == part);
+        assert!(contains(&sent(&copy), b"<copied>") && !contains(&sent(&copy), b"<original>"));
+        assert!(contains(&sent(&df), b"<original>"));
+        let ids = spark.plan_ids();
+        assert_eq!(ids.id_of(&copy.plan), ids.id_of(&df.plan));
+        let held = copy.observations();
+        assert!(held.len() == 1 && held[0].1.same(&given));
+        report_count(&copy, 3);
+        assert_eq!(counts(&given), [3]);
+        assert!(counts(&observation).is_empty());
+        // Of no copies, or in another session: the copy of the relation.
+        let other = spark.new_session();
+        let moved = df
+            .deep_copy_with_pickler_copies(other, Vec::new(), &copies)
+            .unwrap();
+        assert!(matches!(moved.plan.as_ref(), LogicalPlan::Raw { .. }));
+        let plain = df
+            .deep_copy_with_pickler_copies(spark.clone(), Vec::new(), &PicklerCopies::new())
+            .unwrap();
+        assert!(matches!(plain.plan.as_ref(), LogicalPlan::Raw { .. }));
     }
 
     /// As PySpark's unpickled plan, which has copies of the Observations of the pickled one: a

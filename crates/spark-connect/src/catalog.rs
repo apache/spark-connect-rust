@@ -533,27 +533,27 @@ impl Catalog {
     }
 
     /// Create an external table of a schema and options, mirroring
-    /// `Catalog.createExternalTable(tableName, path, source, schema, **options)`.
+    /// `Catalog.createExternalTable(tableName, path, source, schema, **options)`. Deprecated since
+    /// Spark 4.0, PySpark's creates the table as `createTable(tableName, path, source, schema,
+    /// **options)` does, so it sends a `CreateTable`, of the `description` option as the
+    /// description of the table, as that keyword binds to the parameter of `createTable`.
     pub fn create_external_table_with(
         &self,
         table_name: &str,
         path: Option<&str>,
         source: Option<&str>,
         schema: Option<&crate::types::DataType>,
-        options: HashMap<String, String>,
+        mut options: HashMap<String, String>,
     ) -> Result<DataFrame> {
-        let create_ext = proto::CreateExternalTable {
-            table_name: table_name.to_string(),
-            path: path.map(str::to_string),
-            source: source.map(str::to_string),
-            schema: schema.map(|s| s.to_proto()),
+        let description = options.remove("description");
+        self.create_table_with(
+            table_name,
+            path,
+            source,
+            schema,
+            description.as_deref(),
             options,
-        };
-
-        let mut catalog_msg = proto::Catalog::default();
-        catalog_msg.cat_type = Some(proto::catalog::CatType::CreateExternalTable(create_ext));
-
-        self.execute_catalog_eagerly(&catalog_msg)
+        )
     }
 
     /// Create a table.

@@ -69,14 +69,22 @@ impl PyTableArg {
         Ok(copy)
     }
 
-    /// The deep copy of the table argument, as PySpark's `copy.deepcopy`: of its subquery, and of
-    /// its user-set attributes, each deep-copied with the `memo` of the copy.
+    /// The deep copy of the table argument, as PySpark's `copy.deepcopy`: of its subquery, whose
+    /// plan PySpark copies with the function of each UDF of it, with `memo` (see the deep copy of
+    /// a Column), and of its user-set attributes, each deep-copied with the `memo` of the copy,
+    /// which has the copy before them, as `copy` reconstructs a plain object.
     fn __deepcopy__<'py>(
         slf: &Bound<'py, Self>,
         memo: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         let py = slf.py();
-        let copy = Bound::new(py, PyTableArg::new(slf.borrow().inner.clone()))?;
+        let inner = slf.borrow().inner.clone();
+        let copy = Bound::new(py, PyTableArg::new(inner.clone()))?;
+        memo.set_item(slf.as_ptr() as usize, &copy)?;
+        let copies = crate::udf_command::deep_copied_picklers(py, inner.picklers(), memo)?;
+        if !copies.is_empty() {
+            copy.borrow_mut().inner = inner.with_pickler_copies(&copies);
+        }
         let deepcopy = py.import("copy")?.getattr("deepcopy")?;
         let state = slf.getattr("__dict__")?;
         for (name, value) in state.cast::<PyDict>()?.iter() {

@@ -8,6 +8,7 @@ import pytest
 from _mock_connect_server import mock_connect_session
 from _statistics_cases import (
     ARGUMENTS,
+    CLASSES,
     FIXTURE,
     api,
     argument_case_id,
@@ -56,7 +57,7 @@ def test_native_exports_and_reference_signatures():
     import pyspark.ml.stat as public
 
     stat = api()
-    for name in stat.__all__:
+    for name in CLASSES:
         assert getattr(stat, name) is getattr(public, name)
         if name != "MultivariateGaussian":
             assert issubclass(getattr(stat, name), getattr(_pyspark, name))
@@ -73,6 +74,62 @@ def test_native_exports_and_reference_signatures():
             if p.name != "self"
         ]
         assert actual == expected, key
+
+
+def test_the_module_has_pysparks_names_and_no_all():
+    # PySpark's module has no `__all__`, so `from pyspark.ml.stat import *` imports its public
+    # names: its classes and the names of its imports, of the objects of those modules.
+    import pyspark.ml.stat as public
+    from pyspark.ml.wrapper import JavaWrapper
+    from pyspark.sql.column import Column
+
+    assert not hasattr(public, "__all__")
+    namespace = {}
+    exec("from pyspark.ml.stat import *", namespace)  # noqa: S102
+    assert sorted(name for name in namespace if name != "__builtins__") == [
+        "ArrayType", "ChiSquareTest", "Column", "Correlation", "DataFrame", "DoubleType",
+        "JavaWrapper", "KolmogorovSmirnovTest", "Matrix", "MultivariateGaussian", "Optional",
+        "Summarizer", "SummaryBuilder", "TYPE_CHECKING", "Tuple", "Vector",
+        "invoke_helper_relation", "is_remote", "lit", "since", "sys",
+    ]
+    assert namespace["JavaWrapper"] is JavaWrapper and namespace["Column"] is Column
+    assert all(namespace[name] is getattr(public, name) for name in CLASSES)
+
+
+def test_the_statistics_classes_construct_as_pysparks_plain_classes(session):
+    # PySpark's ChiSquareTest, Correlation, KolmogorovSmirnovTest and Summarizer are plain classes
+    # of static methods: an object, and one of a subclass, are made as `object.__new__` makes
+    # them, of no arguments unless the subclass has an `__init__` of its own, they take
+    # attributes and weak references, they pickle and copy, and their methods are those of the
+    # class.
+    import copy
+    import pickle
+    import weakref
+
+    spark, _ = session
+    stat = api()
+    for name in ["ChiSquareTest", "Correlation", "KolmogorovSmirnovTest", "Summarizer"]:
+        cls = getattr(stat, name)
+        assert type(cls()) is cls and str(inspect.signature(cls)) == "()"
+        for call in (lambda: cls(1), lambda: cls(a=1)):
+            with pytest.raises(TypeError, match=f"^{name}\\(\\) takes no arguments$"):
+                call()
+        Sub = type("Sub", (cls,), {})
+        assert type(Sub()) is Sub
+        with pytest.raises(TypeError, match="^Sub\\(\\) takes no arguments$"):
+            Sub(1)
+        WithInit = type("WithInit", (cls,), {"__init__": lambda self, x: setattr(self, "x", x)})
+        assert WithInit(1).x == 1
+        obj = cls()
+        obj.tag = [1]
+        assert weakref.ref(obj)() is obj
+        for copied in (copy.copy(obj), copy.deepcopy(obj), pickle.loads(pickle.dumps(obj))):
+            assert type(copied) is cls and vars(copied) == {"tag": [1]}
+    frame = spark.range(4)
+    instance = stat.ChiSquareTest().test(frame, "features", "label")
+    expected = stat.ChiSquareTest.test(frame, "features", "label")
+    assert _relation(instance).ml_relation == _relation(expected).ml_relation
+    assert str(stat.Summarizer().mean(F.col("f"))) == str(stat.Summarizer.mean(F.col("f")))
 
 
 @pytest.mark.parametrize("case", FIXTURE["helpers"])
@@ -198,6 +255,54 @@ def test_a_typed_pair_argument_is_sent_as_the_literal_of_its_type(session):
 def test_static_metrics_require_columns(metric, features, weight):
     with pytest.raises(TypeError, match="featureCol and weightCol should be a Column"):
         getattr(api().Summarizer, metric)(features, weight)
+
+
+def test_a_summary_builder_constructs_and_summarizes_as_pysparks():
+    # PySpark's SummaryBuilder(jSummaryBuilder), a JavaWrapper, keeps no Java object over Spark
+    # Connect: its `summary` reads the `_metrics` of its attributes, which `Summarizer.metrics` sets
+    # with a `_java_obj` of None, so that a builder of its constructor has none (an AttributeError),
+    # and those of a subclass and the copies of a builder summarize of theirs.
+    import copy
+    import pickle
+
+    from pyspark.ml.wrapper import JavaWrapper
+
+    stat = api()
+    SummaryBuilder = stat.SummaryBuilder
+
+    def expression(column):
+        return clean(column._expr.to_plan(None))
+
+    assert str(inspect.signature(SummaryBuilder)) == "(jSummaryBuilder: 'JavaObject')"
+    builder = SummaryBuilder(None)
+    assert isinstance(builder, JavaWrapper) and vars(builder) == {}
+    assert vars(SummaryBuilder(jSummaryBuilder=None)) == {}
+    for call, message in [
+        (SummaryBuilder, "missing 1 required positional argument: 'jSummaryBuilder'"),
+        (lambda: SummaryBuilder(None, 1), "takes 2 positional arguments but 3 were given"),
+        (lambda: SummaryBuilder(java_obj=None), "got an unexpected keyword argument 'java_obj'"),
+    ]:
+        with pytest.raises(TypeError, match=f"^SummaryBuilder.__init__\\(\\) {message}$"):
+            call()
+    with pytest.raises(AttributeError, match="^'SummaryBuilder' object has no attribute '_metrics'$"):
+        builder.summary(F.col("f"))
+    metrics = stat.Summarizer.metrics("mean", "count")
+    assert type(metrics) is SummaryBuilder
+    assert vars(metrics) == {"_metrics": ["mean", "count"], "_java_obj": None}
+    expected = expression(stat.Summarizer.metrics("max").summary(F.col("f")))
+    builder._metrics = ["max"]
+    assert expression(builder.summary(F.col("f"))) == expected
+    for copied in (copy.copy(metrics), copy.deepcopy(metrics), pickle.loads(pickle.dumps(metrics))):
+        assert type(copied) is SummaryBuilder and vars(copied) == vars(metrics)
+
+    class Builder(SummaryBuilder):
+        def __init__(self):
+            super().__init__(None)
+            self._metrics = ["max"]
+
+    assert expression(Builder().summary(F.col("f"))) == expected
+    with pytest.raises(AttributeError, match="^'Sub' object has no attribute '_metrics'$"):
+        type("Sub", (SummaryBuilder,), {})(None).summary(F.col("f"))
 
 
 @pytest.mark.parametrize("features,weight", [("features", None), (F.col("features"), "weight")])
