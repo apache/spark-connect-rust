@@ -8,6 +8,7 @@ use spark_connect::group::StatFunctions;
 
 use crate::column::raise_pyspark;
 use crate::dataframe::PyDataFrame;
+use crate::plan_args::PlanArgs;
 // Re-exported for the modules that raise through `crate::stat_arguments::not_expected_type`.
 pub(crate) use crate::errors::not_expected_type;
 use crate::errors::ResultExt;
@@ -34,28 +35,34 @@ fn string_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
 }
 
 /// The columns of the `subset` of `dropna` and `fillna`, as PySpark's: a column name, or a
-/// list or tuple of them; `expected` is the type that the error of another type names.
-fn subset_columns(subset: Option<&Bound<'_, PyAny>>, expected: &str) -> PyResult<Vec<String>> {
+/// list or tuple of them; `expected` is the type that the error of another type names. Their
+/// plans set them when they build the plan (`args`).
+fn subset_columns(
+    args: &mut PlanArgs,
+    subset: Option<&Bound<'_, PyAny>>,
+    expected: &str,
+) -> PyResult<Vec<String>> {
     let Some(subset) = subset else {
         return Ok(Vec::new());
     };
     if subset.is_instance_of::<PyString>() {
-        return Ok(vec![crate::str_argument(subset)?]);
+        return Ok(vec![args.str(subset)?]);
     }
     if !is_sequence(subset) {
         return Err(not_expected_type(subset, "subset", expected));
     }
-    subset
+    let columns = subset
         .try_iter()?
         .map(|column| {
             let column = column?;
             if column.is_instance_of::<PyString>() {
-                crate::str_argument(&column)
+                Ok(column)
             } else {
                 Err(not_expected_type(&column, "cols", "list, str or tuple"))
             }
         })
-        .collect()
+        .collect::<PyResult<Vec<_>>>()?;
+    args.strs(columns)
 }
 
 fn column_refs(columns: &[String]) -> Option<Vec<&str>> {
@@ -71,21 +78,34 @@ pub(crate) fn dropna(
     thresh: Option<&Bound<'_, PyAny>>,
     subset: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<PyDataFrame> {
-    let how = how.map(|how| string_argument(how, "how")).transpose()?;
+    // PySpark compares `how` to "all" and "any" in Python: a str that UTF-8 cannot encode is
+    // neither, as "" is not.
+    let how = how
+        .map(|how| match how.cast::<PyString>() {
+            Ok(text) => Ok(text
+                .to_cow()
+                .map(|how| how.into_owned())
+                .unwrap_or_default()),
+            Err(_) => string_argument(how, "how"),
+        })
+        .transpose()?;
     // PySpark checks `how` before `thresh` and `subset`, so the core's error of `how` comes first.
-    let parsed = dropna_thresh_and_subset(thresh, subset);
+    let mut args = PlanArgs::new();
+    let parsed = dropna_thresh_and_subset(&mut args, thresh, subset);
     let (thresh, columns) = match &parsed {
         Ok((thresh, columns)) => (*thresh, column_refs(columns)),
         Err(_) => (None, None),
     };
     let dataframe = df.dropna(how.as_deref(), thresh, columns).to_pyerr()?;
     parsed?;
-    Ok(PyDataFrame::new(dataframe))
+    Ok(PyDataFrame::new(args.plan(dataframe)))
 }
 
-/// The `thresh` and the `subset` of `dropna`, checked as PySpark's. The `subset` is checked
-/// before the `thresh` is sent as the proto's int32, which [`proto_int`] converts.
+/// The `thresh` and the `subset` of `dropna`, checked as PySpark's. Its `NADrop` plan sets the
+/// `subset`, and then the `thresh` in the proto's int32, which [`proto_int`] converts, when it
+/// builds the plan (`args`).
 fn dropna_thresh_and_subset(
+    args: &mut PlanArgs,
     thresh: Option<&Bound<'_, PyAny>>,
     subset: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(Option<i32>, Vec<String>)> {
@@ -94,9 +114,9 @@ fn dropna_thresh_and_subset(
         Some(thresh) if thresh.is_instance_of::<PyInt>() => Some(thresh),
         Some(thresh) => return Err(not_expected_type(thresh, "thresh", "int")),
     };
-    let columns = subset_columns(subset, "list, str or tuple")?;
+    let columns = subset_columns(args, subset, "list, str or tuple")?;
     let thresh = thresh
-        .map(|thresh| proto_int(thresh, "spark.connect.NADrop.min_non_nulls"))
+        .map(|thresh| args.int(thresh, "spark.connect.NADrop.min_non_nulls"))
         .transpose()?;
     Ok((thresh, columns))
 }
@@ -167,44 +187,58 @@ pub(crate) fn fillna(
             }
         }
     }
-    let columns = subset_columns(subset, "list or tuple")?;
+    // Its `NAFill` plan sets the columns, then the values, when it builds the plan.
+    let mut args = PlanArgs::new();
+    let columns = subset_columns(&mut args, subset, "list or tuple")?;
     if let Some(dict) = dict {
+        let columns = args.strs(dict.keys())?;
         let mut pairs = Vec::with_capacity(dict.len());
-        for (column, fill) in dict.iter() {
-            pairs.push((crate::str_argument(&column)?, fill_value(&fill)?));
+        for (column, fill) in columns.into_iter().zip(dict.values()) {
+            pairs.push((column, fill_value(&mut args, &fill)?));
         }
-        return Ok(PyDataFrame::new(df.fillna_map(pairs).to_pyerr()?));
+        return Ok(PyDataFrame::new(
+            args.plan(df.fillna_map(pairs).to_pyerr()?),
+        ));
     }
-    Ok(PyDataFrame::new(
-        df.fillna_value(fill_value(value)?, column_refs(&columns))
-            .to_pyerr()?,
-    ))
+    let fill = fill_value(&mut args, value)?;
+    Ok(PyDataFrame::new(args.plan(
+        df.fillna_value(fill, column_refs(&columns)).to_pyerr()?,
+    )))
 }
 
-/// The value of a fill. As PySpark sends it as a proto literal, an int beyond a long is out of
-/// range for the proto, which raises `ValueError`, not the error of a literal.
-fn fill_value(value: &Bound<'_, PyAny>) -> PyResult<spark_connect::row::Value> {
-    // A str is sent in a protobuf string field, which raises the ValueError of a str that UTF-8
-    // cannot encode, as `str_argument` does.
+/// The value of a fill, which PySpark sets in a proto literal when it builds the plan (`args`):
+/// a str in its string field, of which one that UTF-8 cannot encode fails the plan with its
+/// `UnicodeEncodeError`, and an int in its long field, which refuses an int beyond a long with a
+/// `ValueError`, not the error of a literal.
+fn fill_value(
+    args: &mut PlanArgs,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<spark_connect::row::Value> {
     if value.is_instance_of::<PyString>() {
-        return Ok(spark_connect::row::Value::String(crate::str_argument(
-            value,
-        )?));
+        return Ok(spark_connect::row::Value::String(args.str(value)?));
     }
     if value.is_instance_of::<PyInt>()
         && !value.is_instance_of::<pyo3::types::PyBool>()
         && value.extract::<i64>().is_err()
     {
-        return Err(pyo3::exceptions::PyValueError::new_err(format!(
+        let out_of_range = Err(pyo3::exceptions::PyValueError::new_err(format!(
             "Value out of range: {}",
             value.str()?
         )));
+        return Ok(spark_connect::row::Value::Long(
+            args.converted(value.py(), out_of_range)?,
+        ));
     }
     crate::session::py_to_value(value)
 }
 
-/// The columns of `df.describe(*cols)`, as PySpark's: column names, or a list of them.
-pub(crate) fn describe_columns(cols: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
+/// The columns of `df.describe(*cols)`, as PySpark's: column names, or a list of them, of which
+/// another item is iterated for its names, as bytes for their ints. Its `StatDescribe` plan sets
+/// them when it builds the plan (`args`).
+pub(crate) fn describe_columns(
+    args: &mut PlanArgs,
+    cols: &[Bound<'_, PyAny>],
+) -> PyResult<Vec<String>> {
     let cols: Vec<Bound<'_, PyAny>> = match cols {
         [only] if only.is_instance_of::<PyList>() => only.try_iter()?.collect::<PyResult<_>>()?,
         _ => cols.to_vec(),
@@ -212,28 +246,28 @@ pub(crate) fn describe_columns(cols: &[Bound<'_, PyAny>]) -> PyResult<Vec<String
     let mut names = Vec::new();
     for column in cols {
         if column.is_instance_of::<PyString>() {
-            names.push(column.extract()?);
+            names.push(column);
         } else {
             for name in column.try_iter()? {
-                names.push(name?.extract()?);
+                names.push(name?);
             }
         }
     }
-    Ok(names)
+    args.strs(names)
 }
 
-/// The statistics of `df.summary(*statistics)`, as PySpark's: strings.
-pub(crate) fn summary_statistics(statistics: &[Bound<'_, PyAny>]) -> PyResult<Vec<String>> {
-    statistics
-        .iter()
-        .map(|statistic| {
-            if statistic.is_instance_of::<PyString>() {
-                statistic.extract()
-            } else {
-                Err(not_expected_type(statistic, "statistics", "list[str]"))
-            }
-        })
-        .collect()
+/// The statistics of `df.summary(*statistics)`, as PySpark's: strings, which its `StatSummary`
+/// plan sets when it builds the plan (`args`).
+pub(crate) fn summary_statistics(
+    args: &mut PlanArgs,
+    statistics: &[Bound<'_, PyAny>],
+) -> PyResult<Vec<String>> {
+    for statistic in statistics {
+        if !statistic.is_instance_of::<PyString>() {
+            return Err(not_expected_type(statistic, "statistics", "list[str]"));
+        }
+    }
+    args.strs(statistics.iter().cloned())
 }
 
 /// `df.cov(col1, col2)`, of two column names, as PySpark's.
@@ -280,21 +314,26 @@ pub(crate) fn corr(
     })
 }
 
-/// `df.crosstab(col1, col2)`, of two column names, as PySpark's.
+/// `df.crosstab(col1, col2)`, of two column names, as PySpark's, whose `StatCrosstab` plan sets
+/// them when it builds the plan.
 pub(crate) fn crosstab(
     stat: &StatFunctions,
     col1: &Bound<'_, PyAny>,
     col2: &Bound<'_, PyAny>,
 ) -> PyResult<PyDataFrame> {
-    let (col1, col2) = (
-        string_argument(col1, "col1")?,
-        string_argument(col2, "col2")?,
-    );
-    Ok(PyDataFrame::new(stat.crosstab(&col1, &col2)))
+    for (col, name) in [(col1, "col1"), (col2, "col2")] {
+        if !col.is_instance_of::<PyString>() {
+            return Err(not_expected_type(col, name, "str"));
+        }
+    }
+    let mut args = PlanArgs::new();
+    let (col1, col2) = (args.str(col1)?, args.str(col2)?);
+    Ok(PyDataFrame::new(args.plan(stat.crosstab(&col1, &col2))))
 }
 
 /// `df.freqItems(cols, support)`, as PySpark's: `cols` is a list or tuple, and `support` is
-/// 0.01 unless one is given.
+/// 0.01 unless one is given. Its `StatFreqItems` plan sets the columns in their repeated string
+/// field, and then the support in its double field, when it builds the plan.
 pub(crate) fn freq_items(
     stat: &StatFunctions,
     cols: &Bound<'_, PyAny>,
@@ -303,13 +342,14 @@ pub(crate) fn freq_items(
     if !is_sequence(cols) {
         return Err(not_expected_type(cols, "cols", "list or tuple"));
     }
-    let cols: Vec<String> = cols.extract()?;
+    let mut args = PlanArgs::new();
+    let cols = args.strs(cols.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
     let support = match support {
-        Some(support) if support.is_truthy()? => support.extract()?,
+        Some(support) if support.is_truthy()? => args.double(support)?,
         _ => 0.01,
     };
     let refs: Vec<&str> = cols.iter().map(String::as_str).collect();
-    Ok(PyDataFrame::new(stat.freq_items(refs, support)))
+    Ok(PyDataFrame::new(args.plan(stat.freq_items(refs, support))))
 }
 
 /// `df.approxQuantile(col, probabilities, relativeError)`, as PySpark's: the quantiles of a

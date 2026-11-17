@@ -63,10 +63,11 @@ thread_local! {
     static RENDERING_TRIED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Record `error`, of an expression that the serialization of this thread does not build, as the
-/// error that its [`with_expression_depth_bound`] raises, unless one is recorded already: the
-/// first one, in the order in which PySpark's client builds the plan, is raised.
-fn record_unbuildable(error: &SparkError) {
+/// Record `error`, of an expression or a plan (`LogicalPlan::Unbuildable`) that the serialization
+/// of this thread does not build, as the error that its [`with_expression_depth_bound`] raises,
+/// unless one is recorded already: the first one, in the order in which PySpark's client builds
+/// the plan, is raised.
+pub(crate) fn record_unbuildable(error: &SparkError) {
     if EXPRESSION_DEPTH_BOUNDED.with(Cell::get) {
         UNBUILDABLE_EXPRESSION_ERROR.with(|slot| {
             slot.borrow_mut().get_or_insert_with(|| error.clone());
@@ -787,6 +788,16 @@ impl Expression {
             expression,
             fragment: fragment.to_string(),
         })))
+    }
+
+    /// The expression that a request builds of this one: that of an [`Expression::unbuildable`],
+    /// whose error the request raises, else this one. Not a stable API.
+    #[doc(hidden)]
+    pub fn built(&self) -> &Expression {
+        match self.node() {
+            ExpressionNode::Unbuildable(unbuildable) => unbuildable.expression.built(),
+            _ => self,
+        }
     }
 
     /// Converts the expression to a Spark Connect protobuf expression, with its origin, as

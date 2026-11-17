@@ -1682,7 +1682,7 @@ impl DataFrame {
         let mut request = proto::ExecutePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
         request.user_context = Some(proto::UserContext::default());
-        request.tags = self.session.tags();
+        request.tags = self.session.tags()?;
 
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
@@ -1946,9 +1946,12 @@ impl DataFrame {
 
     /// The execution plan in an explain mode, mirroring `pyspark.sql.DataFrame._explain_string`
     /// of a mode, which PySpark Connect's client checks: one of "simple", "extended",
-    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error.
+    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error, which it raises
+    /// once it has built the plan, so that the error of a plan that it fails to build comes
+    /// first.
     pub fn explain_string(&self, mode: &str) -> Result<String> {
         use proto::analyze_plan_request::explain::ExplainMode;
+        let relation = self.relation()?;
         let explain_mode = match mode {
             "simple" => ExplainMode::Simple,
             "extended" => ExplainMode::Extended,
@@ -1969,7 +1972,7 @@ impl DataFrame {
             }
         };
         let plan = proto::Plan {
-            op_type: Some(proto::plan::OpType::Root(self.relation()?)),
+            op_type: Some(proto::plan::OpType::Root(relation)),
         };
         let request = proto::AnalyzePlanRequest {
             session_id: self.session.client().session_id().to_string(),
@@ -3139,7 +3142,7 @@ fn execute_command_reporting(
     let mut request = proto::ExecutePlanRequest::default();
     request.session_id = session.client().session_id().to_string();
     request.user_context = Some(proto::UserContext::default());
-    request.tags = session.tags();
+    request.tags = session.tags()?;
     request.plan = Some(plan);
 
     let mut stream = if reported {

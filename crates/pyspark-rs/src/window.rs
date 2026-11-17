@@ -29,7 +29,7 @@ pub(crate) fn window_columns(
             if c.is_instance_of::<pyo3::types::PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
                 let _origin = crate::origin::with_origin("col")?;
-                return Ok(spark_connect::functions::col(&c.extract::<String>()?));
+                return crate::plan_args::col(c);
             }
             let type_name = c.get_type().name()?.to_string();
             Err(crate::column::raise_pyspark(

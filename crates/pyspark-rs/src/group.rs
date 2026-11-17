@@ -115,40 +115,35 @@ impl PyGroupedData {
 }
 
 /// The aggregates of the dict form `agg({column: function})`, one `function(column)` per entry
-/// in order, as PySpark builds them (`F._invoke_function(function, F.col(column))`). A column
-/// that is not a str raises the `AttributeError` of `F.col`, and a function that is not a str
-/// the `AssertionError` of `_invoke_function`.
+/// in order, as PySpark builds them (`F._invoke_function(function, F.col(column))`). The column
+/// raises the errors of `F.col` (an int the `AttributeError` of its `endswith`), and then a
+/// function that is not a str the `AssertionError` of `_invoke_function`, whose
+/// `UnresolvedFunction` sets the name when it builds the plan, before the column.
 pub(crate) fn dict_aggregates(
     dict: &Bound<'_, pyo3::types::PyDict>,
 ) -> PyResult<Vec<spark_connect::expression::Expression>> {
     let mut agg_exprs = Vec::with_capacity(dict.len());
     for (column, function) in dict.iter() {
-        let Ok(column) = column.extract::<String>() else {
-            let typ = column
-                .get_type()
-                .name()
-                .map(|name| name.to_string())
-                .unwrap_or_default();
-            return Err(pyo3::exceptions::PyAttributeError::new_err(format!(
-                "'{typ}' object has no attribute 'endswith'"
-            )));
-        };
-        let Ok(function) = function.extract::<String>() else {
-            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-        };
         // As PySpark's `agg` of a dict, `F._invoke_function(func, F.col(name))`: the column is of
         // `col`, of its origin, and the function is of none.
         let c = {
             let _origin = crate::origin::with_origin("col")?;
-            spark_connect::functions::col(&column)
+            crate::plan_args::col(&column)?
         };
+        if !function.is_instance_of::<pyo3::types::PyString>() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        let mut args = crate::plan_args::PlanArgs::new();
+        let function = args.str(&function)?;
         // Build func(col) as an unresolved function resolved server-side, so aggregate names
         // (max/min/sum/avg/count/...) all work regardless of whether they are in the generated
         // dispatch.
-        agg_exprs.push(spark_connect::expression::Expression::function(
-            function,
-            vec![c.expression().clone()],
-        ));
+        agg_exprs.push(
+            args.expression(spark_connect::expression::Expression::function(
+                function,
+                vec![c.expression().clone()],
+            )),
+        );
     }
     Ok(agg_exprs)
 }
@@ -165,14 +160,40 @@ impl PyGroupedData {
     ) -> PyResult<PyDataFrame> {
         let mut names = Vec::with_capacity(cols.len());
         for col in &cols {
-            if !col.is_instance_of::<pyo3::types::PyString>() {
+            let Ok(name) = col.cast::<pyo3::types::PyString>() else {
                 return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-            }
-            names.push(col.extract::<String>()?);
+            };
+            names.push(name.to_cow().ok().map(|name| name.into_owned()));
         }
         let grouped = &self.grouped_data;
+        if names.iter().any(Option::is_none) {
+            // A name that UTF-8 cannot encode is no column of the schema, which the server
+            // sends: PySpark reads the schema, and raises `NOT_NUMERIC_COLUMNS` of the `str` of
+            // the list of the names that are not of numeric columns, in their order.
+            let session = grouped.spark_session();
+            let mut invalid = Vec::new();
+            for (col, name) in cols.iter().zip(&names) {
+                let numeric = match name {
+                    None => {
+                        interruptible(py, &session, || grouped.dataframe().schema())?;
+                        false
+                    }
+                    Some(name) => interruptible(py, &session, || grouped.is_numeric_column(name))?,
+                };
+                if !numeric {
+                    invalid.push(col.clone());
+                }
+            }
+            let invalid = PyList::new(py, invalid)?.str()?;
+            return Err(crate::errors::raise_pyspark_of(
+                py,
+                "PySparkTypeError",
+                "NOT_NUMERIC_COLUMNS",
+                &[("invalid_columns", invalid.as_any())],
+            ));
+        }
         let names = interruptible(py, &grouped.spark_session(), || {
-            grouped.numeric_agg_columns(names)
+            grouped.numeric_agg_columns(names.into_iter().flatten())
         })?;
         // As PySpark's `F._invoke_function(function, F.col(c))` of each column: the column is of
         // `col`, of its origin, and the function is of none.
@@ -392,6 +413,9 @@ impl PyGroupedData {
         let Ok(name) = pivot_col.cast::<PyString>() else {
             return Err(not_expected_type(pivot_col, "pivot_col", "str"));
         };
+        // The `F.lit` of each value, whose str PySpark sets when it builds the plan: of each, the
+        // error of protobuf, if any (`values_args`).
+        let mut values_args = Vec::new();
         let vals = match values {
             None => None,
             Some(values) => {
@@ -411,18 +435,39 @@ impl PyGroupedData {
                             "bool, float, int or str",
                         ));
                     }
-                    out.push(crate::session::py_to_value(&value)?);
+                    let mut args = crate::plan_args::PlanArgs::new();
+                    out.push(match value.is_instance_of::<PyString>() {
+                        true => spark_connect::row::Value::String(args.str(&value)?),
+                        false => crate::session::py_to_value(&value)?,
+                    });
+                    values_args.push(args);
                 }
                 Some(out)
             }
         };
         // As PySpark's `self._df[pivot_col]`: a column of the DataFrame that is grouped, by its
         // plan ID.
-        let pcol = self.grouped_data.dataframe().col(&name.to_cow()?);
-        Ok(PyGroupedData::new(
-            self.grouped_data.pivot(pcol, vals).to_pyerr()?,
-            self.frame.clone_ref(py),
-        ))
+        let pcol = crate::plan_args::df_col(self.grouped_data.dataframe(), name.as_any(), false)?;
+        let grouped = self.grouped_data.pivot(pcol, vals).to_pyerr()?;
+        let grouped = if values_args.iter().all(|args| args.error().is_none()) {
+            grouped
+        } else {
+            let values = grouped
+                .pivot_value_columns()
+                .into_iter()
+                .zip(values_args)
+                .map(|(value, args)| args.column(value))
+                .collect();
+            RustGroupedData::from_parts(
+                grouped.dataframe().clone(),
+                grouped.grouping_columns().to_vec(),
+                grouped.group_type(),
+                grouped.pivot_column(),
+                values,
+                Vec::new(),
+            )
+        };
+        Ok(PyGroupedData::new(grouped, self.frame.clone_ref(py)))
     }
 
     /// Sum values in each group.

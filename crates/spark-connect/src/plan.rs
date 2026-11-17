@@ -221,9 +221,12 @@ pub enum LogicalPlan {
         schema: DataType,
     },
     /// A plan that PySpark's client fails to build when a request sends it, with `error`: the
-    /// error is raised by each request of the plan, and the plan is not built, as PySpark's
+    /// error is raised by each request of the plan, and the plan is not sent, as PySpark's
     /// `DataFrame.to` of a schema that is not a DataType, and `unionByName` of a flag that a
-    /// protobuf bool does not take. The plans below it are built first, as PySpark builds them.
+    /// protobuf bool does not take. `input` is serialized first, and the error is recorded after
+    /// it, in the slot of the expressions that a request fails to build (see
+    /// [`crate::expression::Expression::unbuildable`]): a request raises the first error of
+    /// either kind, in the order in which PySpark builds the plan, its inputs before itself.
     Unbuildable {
         input: Arc<LogicalPlan>,
         error: SparkError,
@@ -1091,10 +1094,9 @@ fn relation_with_ids_and_levels(
     ids: &PlanIds,
 ) -> Result<(proto::Relation, usize)> {
     // The levels of the plan itself are known before it is serialized; those of the plans of
-    // its subqueries are counted as they are serialized.
-    if let Some(error) = node.unbuildable_error() {
-        return Err(error);
-    }
+    // its subqueries are counted as they are serialized. A plan or an expression that a request
+    // fails to build raises its error after the serialization, the first of them in PySpark's
+    // order (`LogicalPlan::Unbuildable`).
     let depth = node.depth();
     if depth > MAX_PLAN_DEPTH {
         return Err(too_deep_a_plan(depth));
@@ -1453,34 +1455,6 @@ impl LogicalPlan {
         depths[&(self as *const LogicalPlan)]
     }
 
-    /// The error of the first [`LogicalPlan::Unbuildable`] of this plan, which a request raises
-    /// before it serializes the plan. The plans below a plan are built before it, the left ones
-    /// first, so the error of the deepest and leftmost of them is the one raised. Computed
-    /// without recursing, and once for each node that several plans share.
-    pub(crate) fn unbuildable_error(&self) -> Option<SparkError> {
-        let mut seen: std::collections::HashSet<*const LogicalPlan> = Default::default();
-        let mut pending: Vec<(&LogicalPlan, bool)> = vec![(self, false)];
-        while let Some((plan, inputs_done)) = pending.pop() {
-            if inputs_done {
-                if let LogicalPlan::Unbuildable { error, .. } = plan {
-                    return Some(error.clone());
-                }
-                continue;
-            }
-            if !seen.insert(plan as *const LogicalPlan) {
-                continue;
-            }
-            pending.push((plan, true));
-            pending.extend(
-                plan.inputs()
-                    .into_iter()
-                    .rev()
-                    .map(|input| (input.as_ref(), false)),
-            );
-        }
-        None
-    }
-
     /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
     ///
     /// Any depth is serialized, on a stack that grows for its levels; but prost encodes and drops
@@ -1495,9 +1469,6 @@ impl LogicalPlan {
     /// subqueries, or with an expression deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`],
     /// is a `RecursionError`, as PySpark's serializer raises it, and its proto is not built.
     pub fn try_to_proto(&self) -> Result<proto::Relation> {
-        if let Some(error) = self.unbuildable_error() {
-            return Err(error);
-        }
         let depth = self.depth();
         if depth > MAX_PLAN_DEPTH {
             return Err(too_deep_a_plan(depth));
@@ -1875,6 +1846,11 @@ impl LogicalPlan {
                 expressions,
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
+                // The partition expressions before the input, as PySpark's plan builds them, so
+                // that an expression that a request fails to build raises its error first.
+                for expr in expressions {
+                    repart.partition_exprs.push(expr.to_proto());
+                }
                 repart.input = Some(Box::new(relation_of(input, plan_ids)));
                 // num_partitions is optional in the proto: <= 0 means "unset" so the
                 // server uses the default (the `df.repartition(*cols)` column-only form,
@@ -1884,9 +1860,6 @@ impl LogicalPlan {
                 } else {
                     None
                 };
-                for expr in expressions {
-                    repart.partition_exprs.push(expr.to_proto());
-                }
                 relation.rel_type = Some(proto::relation::RelType::RepartitionByExpression(
                     Box::new(repart),
                 ));
@@ -1961,10 +1934,11 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::ToDf(Box::new(to_df)));
             }
 
-            LogicalPlan::Unbuildable { input, .. } => {
-                // A request checks the error before it serializes the plan
-                // (`unbuildable_error`); this path serializes the input alone.
+            LogicalPlan::Unbuildable { input, error } => {
+                // The input, as PySpark builds it first, and then the error, which the request
+                // raises; the relation is not sent.
                 relation.rel_type = relation_of(input, plan_ids).rel_type;
+                crate::expression::record_unbuildable(error);
             }
 
             LogicalPlan::ToSchema { input, schema } => {
@@ -2256,12 +2230,13 @@ impl LogicalPlan {
                 partition_exprs,
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
+                // The partition expressions before the input, as PySpark's plan builds them.
+                for expr in partition_exprs {
+                    repart.partition_exprs.push(expr.to_proto());
+                }
                 repart.input = Some(Box::new(relation_of(input, plan_ids)));
                 if let Some(n) = num_partitions {
                     repart.num_partitions = Some(*n);
-                }
-                for expr in partition_exprs {
-                    repart.partition_exprs.push(expr.to_proto());
                 }
                 relation.rel_type = Some(proto::relation::RelType::RepartitionByExpression(
                     Box::new(repart),
@@ -4064,8 +4039,59 @@ mod deep_plan_tests {
             by_name: true,
             allow_missing_columns: false,
         };
-        let error = both.unbuildable_error().unwrap();
+        let error = both.try_to_proto().unwrap_err();
         assert!(error.message().contains("data type left"), "{error}");
-        assert!(range(0, 10, 1).unbuildable_error().is_none());
+        assert!(range(0, 10, 1).try_to_proto().is_ok());
+    }
+
+    /// An expression of a plan that a request fails to build, below an unbuildable plan,
+    /// raises its error first, as PySpark builds the input of a plan before the plan; and one
+    /// above it raises its error after that of the plan.
+    #[test]
+    fn unbuildable_plans_and_expressions_fail_in_the_order_of_pysparks_build() {
+        let unbuildable_column = |name: &str| {
+            let error = SparkError::classed(
+                SparkErrorKind::ValueError,
+                "UNSUPPORTED_OPERATION",
+                &[("operation", &format!("data type {name}"))],
+            );
+            crate::column::Column::new(Expression::unbuildable(
+                Expression::column(name),
+                Some(error),
+                None,
+                None,
+            ))
+        };
+        let filter = |input: Arc<LogicalPlan>, name: &str| {
+            Arc::new(LogicalPlan::Filter {
+                input,
+                condition: unbuildable_column(name),
+            })
+        };
+        let below = unbuildable(filter(Arc::new(range(0, 10, 1)), "inner"), "plan");
+        let error = relation_with_ids(&below, &PlanIds::new()).unwrap_err();
+        assert!(error.message().contains("data type inner"), "{error}");
+        let above = filter(unbuildable(Arc::new(range(0, 10, 1)), "plan"), "outer");
+        let error = relation_with_ids(&above, &PlanIds::new()).unwrap_err();
+        assert!(error.message().contains("data type plan"), "{error}");
+    }
+
+    /// The plan of a subquery that a request fails to build fails the request of the plan
+    /// that refers to it, as PySpark builds the plans of its references with the plan.
+    #[test]
+    fn an_unbuildable_plan_of_a_subquery_fails_the_request() {
+        let subquery = crate::expression::SubqueryExpression::new(
+            unbuildable(Arc::new(range(0, 10, 1)), "subquery"),
+            7,
+            crate::expression::SubqueryType::Scalar,
+        );
+        let plan = Arc::new(LogicalPlan::Project {
+            input: Arc::new(range(0, 1, 1)),
+            columns: vec![crate::column::Column::new(Expression::new(
+                ExpressionNode::Subquery(Box::new(subquery)),
+            ))],
+        });
+        let error = relation_with_ids(&plan, &PlanIds::new()).unwrap_err();
+        assert!(error.message().contains("data type subquery"), "{error}");
     }
 }

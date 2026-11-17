@@ -1028,7 +1028,7 @@ pub struct PySharedTags(spark_connect::session::SharedTags);
 pub struct PySharedUserContextExtensions(spark_connect_core::client::SharedUserContextExtensions);
 
 /// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
-fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
+fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<SessionTag> {
     if tag.is_none() {
         return Err(crate::column::raise_pyspark(
             py,
@@ -1037,7 +1037,34 @@ fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<String> {
             &[("arg_name", "Spark Connect tag")],
         ));
     }
-    tag.extract()
+    // As PySpark's `"," in tag`, which raises the `TypeError` of an object that is not a str,
+    // such as an int or bytes, before the checks of the tag; and of the set of the tags, which
+    // refuses one that is not hashable, such as a list.
+    tag.contains(",")?;
+    let tag = if let Ok(text) = tag.cast::<pyo3::types::PyString>() {
+        text
+    } else {
+        tag.hash()?;
+        return Ok(SessionTag::Text(tag.extract()?));
+    };
+    let Ok(text) = tag.to_cow() else {
+        // A str that UTF-8 cannot encode, which PySpark keeps, and which fails the requests that
+        // carry it. Its rendering has a comma if the str does, and is not empty.
+        let utf32le = tag.call_method1("encode", ("utf-32-le", "surrogatepass"))?;
+        let rendered = crate::plan_args::rendered(tag.as_any())?;
+        SparkSession::check_tag(&rendered).to_pyerr()?;
+        return Ok(SessionTag::Unencodable(
+            utf32le.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec(),
+        ));
+    };
+    Ok(SessionTag::Text(text.into_owned()))
+}
+
+/// A tag of `addTag` and `removeTag`: its text, or the UTF-32 bytes of a str that UTF-8 cannot
+/// encode, which the core keeps (see `SparkSession::add_unencodable_tag`).
+enum SessionTag {
+    Text(String),
+    Unencodable(Vec<u8>),
 }
 
 #[pyclass(
@@ -2338,12 +2365,14 @@ impl PySparkSession {
         step: RangeStep,
         numPartitions: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let (start, end, step, num_partitions) = range_arguments(start, end, step, numPartitions)?;
+        let mut args = crate::plan_args::PlanArgs::new();
+        let (start, end, step, num_partitions) =
+            range_arguments(&mut args, start, end, step, numPartitions)?;
         let df = self
             .session
             .range_full(start, end, step, num_partitions)
             .to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        Ok(PyDataFrame::new(args.plan(df)))
     }
 
     /// Execute a SQL query and return a DataFrame, as PySpark Connect does. `args` binds
@@ -3562,16 +3591,25 @@ impl PySparkSession {
     /// for None, and those of [`SparkSession::check_tag`].
     #[pyo3(name = "addTag")]
     fn add_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
-        let tag = tag_of(py, tag)?;
-        self.session.add_tag(&tag).to_pyerr()
+        match tag_of(py, tag)? {
+            SessionTag::Text(tag) => self.session.add_tag(&tag).to_pyerr(),
+            SessionTag::Unencodable(utf32le) => {
+                self.session.add_unencodable_tag(utf32le);
+                Ok(())
+            }
+        }
     }
 
     /// Remove a tag of the current thread, with the errors of `addTag`, as PySpark Connect's.
     #[pyo3(name = "removeTag")]
     fn remove_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
-        let tag = tag_of(py, tag)?;
-        SparkSession::check_tag(&tag).to_pyerr()?;
-        self.session.remove_tag(&tag);
+        match tag_of(py, tag)? {
+            SessionTag::Text(tag) => {
+                SparkSession::check_tag(&tag).to_pyerr()?;
+                self.session.remove_tag(&tag);
+            }
+            SessionTag::Unencodable(utf32le) => self.session.remove_unencodable_tag(&utf32le),
+        }
         Ok(())
     }
 
@@ -3597,7 +3635,15 @@ impl PySparkSession {
     /// The tags of the current thread, a set, as PySpark's `getTags`.
     #[pyo3(name = "getTags")]
     fn get_tags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
-        pyo3::types::PySet::new(py, self.session.get_tags())
+        let tags = pyo3::types::PySet::new(py, self.session.get_tags())?;
+        // A tag that UTF-8 cannot encode, as it was given.
+        for utf32le in self.session.unencodable_tags() {
+            tags.add(
+                pyo3::types::PyBytes::new(py, &utf32le)
+                    .call_method1("decode", ("utf-32-le", "surrogatepass"))?,
+            )?;
+        }
+        Ok(tags)
     }
 
     #[pyo3(name = "clearTags")]
@@ -4465,34 +4511,42 @@ impl<'a, 'py> FromPyObject<'a, 'py> for RangeStep {
 
 /// The start, end, step and number of partitions of `spark.range` and `spark.tvf.range`, as
 /// PySpark's `range` takes them: the `int()` of each, of the number of partitions first, with
-/// `range(n)` from 0 to `n`. A value out of the range of its proto field is the `ValueError` of
-/// protobuf.
+/// `range(n)` from 0 to `n`. Its `Range` plan sets them in their proto fields when it builds the
+/// plan, in this order, which refuse a value out of their range with the `ValueError` of protobuf
+/// (`args`).
 pub(crate) fn range_arguments(
+    args: &mut crate::plan_args::PlanArgs,
     start: &Bound<'_, PyAny>,
     end: Option<&Bound<'_, PyAny>>,
     step: RangeStep,
     num_partitions: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<(i64, i64, i64, Option<i32>)> {
     let py = start.py();
-    let int = |value: &Bound<'_, PyAny>| -> PyResult<i64> {
-        let int = py.get_type::<pyo3::types::PyInt>().call1((value,))?;
-        int.extract::<i64>().map_err(|_| value_out_of_range(&int))
-    };
-    let num_partitions = match num_partitions {
-        None => None,
-        Some(value) => {
-            let int = py.get_type::<pyo3::types::PyInt>().call1((value,))?;
-            Some(int.extract::<i32>().map_err(|_| value_out_of_range(&int))?)
-        }
-    };
+    fn int<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+        value.py().get_type::<pyo3::types::PyInt>().call1((value,))
+    }
+    let num_partitions = num_partitions.map(int).transpose()?;
     let (start, end) = match end {
-        Some(end) => (int(start)?, int(end)?),
-        None => (0, int(start)?),
+        Some(end) => (Some(int(start)?), int(end)?),
+        None => (None, int(start)?),
     };
     let step = match step {
-        RangeStep::Omitted => 1,
-        RangeStep::Given(step) => int(step.bind(py))?,
+        RangeStep::Omitted => None,
+        RangeStep::Given(step) => Some(int(step.bind(py))?),
     };
+    let mut field = |int: &Bound<'_, PyAny>| -> PyResult<i64> {
+        let value = int.extract::<i64>().map_err(|_| value_out_of_range(int));
+        args.converted(py, value)
+    };
+    let start = start.map(|start| field(&start)).transpose()?.unwrap_or(0);
+    let end = field(&end)?;
+    let step = step.map(|step| field(&step)).transpose()?.unwrap_or(1);
+    let num_partitions = num_partitions
+        .map(|int| {
+            let value = int.extract::<i32>().map_err(|_| value_out_of_range(&int));
+            args.converted(py, value)
+        })
+        .transpose()?;
     Ok((start, end, step, num_partitions))
 }
 

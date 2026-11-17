@@ -62,7 +62,7 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 /// The Column of an operand of a binary operator, as PySpark's `_bin_op` takes it: a Column, or
 /// a literal (see `is_literal_operand`). Another object is looked up for its `_expr`, as PySpark
 /// does, so that its AttributeError, or a Row's PySparkAttributeError, is the one it raises.
-fn operand_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
+pub(crate) fn operand_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     operand(obj, true)
 }
 
@@ -192,29 +192,14 @@ impl PyColumn {
         }
         let single = alias.len() == 1;
         // A name is of a string field of the plan, which PySpark's `ColumnAlias.to_plan` sets when
-        // it builds the plan: a str, a bytes of its UTF-8, and the error of the first other value
-        // (`str_argument`), which the request of the plan raises before it builds the child, of a
-        // placeholder name here.
-        let mut names = Vec::with_capacity(alias.len());
-        let mut before = None;
-        for name in alias.iter() {
-            match crate::dataframe::unbuildable_str_error(&name)? {
-                None => names.push(crate::options::str_argument(&name)?),
-                Some(error) => {
-                    before.get_or_insert(error);
-                    // A str that UTF-8 does not encode renders escaped (PySpark's `__repr__` shows
-                    // it as it is, which a rendering of UTF-8 cannot hold); another value renders
-                    // as nothing, of a `__repr__` that fails.
-                    names.push(if name.is_instance_of::<pyo3::types::PyString>() {
-                        name.call_method1("encode", ("utf-8", "backslashreplace"))?
-                            .call_method1("decode", ("utf-8",))?
-                            .extract()?
-                    } else {
-                        String::new()
-                    });
-                }
-            }
-        }
+        // it builds the plan: a str, a bytes of its UTF-8, and the error of the first other value,
+        // which the request of the plan raises before it builds the child. Such a name renders as
+        // `crate::plan_args::rendered` gives it: a str that UTF-8 does not encode escaped
+        // (PySpark's `__repr__` shows it as it is, which a rendering of UTF-8 cannot hold), and
+        // another value as nothing, of a `__repr__` that fails.
+        let mut names_args = crate::plan_args::PlanArgs::new();
+        let names = names_args.strs(alias.iter())?;
+        let mut before = names_args.error().cloned();
         let mut after = None;
         let mut node = Alias::with_names(self.column.expression().clone(), names);
         if let Some(metadata) = metadata {
@@ -290,12 +275,7 @@ impl PyColumn {
         }
         // A DDL string keeps the unparsed type_str form (reference cast("int"));
         // any DataType object is converted to a typed cast.
-        if let Ok(s) = dataType.extract::<String>() {
-            Ok(PyColumn::new(self.column.clone().cast_str(&s)))
-        } else {
-            let dt = crate::types::py_to_proto_data_type(dataType)?;
-            Ok(PyColumn::new(self.column.clone().cast(dt)))
-        }
+        cast_column(&self.column, dataType, false)
     }
 
     /// Alias for `cast` (pyspark `Column.astype`).
@@ -319,12 +299,7 @@ impl PyColumn {
                 "DataType or str",
             ));
         }
-        if let Ok(s) = dataType.extract::<String>() {
-            Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
-        } else {
-            let dt = crate::types::py_to_proto_data_type(dataType)?;
-            Ok(PyColumn::new(self.column.clone().try_cast(dt)))
-        }
+        cast_column(&self.column, dataType, true)
     }
 
     /// Get an item from a list/map by key (pyspark `Column.getItem`), with PySpark's
@@ -1126,23 +1101,29 @@ impl PyColumn {
         let Ok(value) = col.extract::<PyRef<'_, PyColumn>>() else {
             return Err(not_expected_type(col, "col", "Column"));
         };
-        let field_name: String = fieldName.extract()?;
+        // Its `WithField` sets the name when it builds the plan, after the struct.
+        let mut args = crate::plan_args::PlanArgs::new();
+        let field_name = args.str(fieldName)?;
         Ok(PyColumn::new(
-            self.column
-                .clone()
-                .with_field(&field_name, value.column.clone()),
+            args.column_after(
+                self.column
+                    .clone()
+                    .with_field(&field_name, value.column.clone()),
+            ),
         ))
     }
     #[pyo3(name = "dropFields", signature = (*fieldNames))]
     fn drop_fields(&self, py: Python<'_>, fieldNames: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("dropFields")?;
-        // As PySpark's, of strings, at least one.
+        // As PySpark's, of strings, at least one, which each `DropField` sets when it builds the
+        // plan, after the struct.
+        let mut args = crate::plan_args::PlanArgs::new();
         let mut names = Vec::with_capacity(fieldNames.len());
         for name in &fieldNames {
             if !name.is_instance_of::<pyo3::types::PyString>() {
                 return Err(not_expected_type(name, "fieldName", "str"));
             }
-            names.push(name.extract::<String>()?);
+            names.push(args.str(name)?);
         }
         if names.is_empty() {
             return Err(raise_pyspark(
@@ -1153,8 +1134,63 @@ impl PyColumn {
             ));
         }
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        Ok(PyColumn::new(self.column.clone().drop_fields(refs)))
+        Ok(PyColumn::new(
+            args.column_after(self.column.clone().drop_fields(refs)),
+        ))
     }
+}
+
+/// The cast of `column` to `data_type`, a DataType or a str, as PySpark's `CastExpression`, whose
+/// `to_plan` sets the type after its child, when it builds the plan: a str as the unparsed type,
+/// of which one that UTF-8 cannot encode fails the requests of the plan with its
+/// `UnicodeEncodeError`, and a DataType as the type. A DataType that PySpark's
+/// `pyspark_types_to_proto_types` does not convert, of none of its types
+/// ([`crate::plan_args::unsupported_type_error`]) or with a `StructField` as a type in it, fails
+/// them with its `UNSUPPORTED_OPERATION`, and renders as its `simpleString()` of PySpark, as
+/// PySpark's `__repr__`. A `try_cast` for `try_`.
+fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyResult<PyColumn> {
+    let mut args = crate::plan_args::PlanArgs::new();
+    let unparsed = |text: &str| match try_ {
+        false => column.clone().cast_str(text),
+        true => column.clone().try_cast_str(text),
+    };
+    if data_type.is_instance_of::<pyo3::types::PyString>() {
+        let text = args.str(data_type)?;
+        return Ok(PyColumn::new(args.column_after(unparsed(&text))));
+    }
+    let error = match crate::plan_args::unsupported_type_error(data_type)? {
+        Some(error) => error,
+        None => {
+            let parsed = crate::types::py_to_data_type(data_type)?;
+            let Some(field) = crate::types::unsendable_field_repr(data_type, &parsed)? else {
+                return Ok(PyColumn::new(match try_ {
+                    false => column.clone().cast(parsed),
+                    true => column.clone().try_cast(parsed),
+                }));
+            };
+            spark_connect_core::error::SparkError::classed(
+                spark_connect_core::error::SparkErrorKind::ValueError,
+                "UNSUPPORTED_OPERATION",
+                &[("operation", &format!("data type {field}"))],
+            )
+        }
+    };
+    args.record(error);
+    // As PySpark's `simpleString`, which is the `typeName` of the type, unless its class has a
+    // `simpleString` of its own, as a `StructField` has.
+    let base = data_type
+        .py()
+        .import("pyspark.sql.types")?
+        .getattr("DataType")?
+        .getattr("simpleString")?;
+    let simple_string = data_type.get_type().getattr("simpleString")?;
+    let name = if simple_string.is(&base) {
+        "typeName"
+    } else {
+        "simpleString"
+    };
+    let text: String = data_type.call_method0(name)?.extract()?;
+    Ok(PyColumn::new(args.column_after(unparsed(&text))))
 }
 
 /// The description of `error`, of an expression that a request does not build or whose
