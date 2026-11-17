@@ -1811,6 +1811,10 @@ pub struct PyOneVsRest {
     inner: OneVsRest,
     /// The Python values of the identity params, which the core does not hold: the classifier.
     raw: Vec<(&'static str, Py<PyAny>)>,
+    /// The order of the set params, of which a load makes PySpark's `_paramMap` (the classifier,
+    /// then the params of the metadata in its order); the defaults of a load are of the names of
+    /// the params, as its `_resetUid` makes them.
+    set_order: params_api::SetOrder,
 }
 
 const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
@@ -1844,6 +1848,7 @@ impl params_api::ParamsHolder for PyOneVsRest {
             }
             value => object::put_model_param(py, params, name, value)?,
         };
+        self.set_order.put(name);
         Ok(())
     }
 
@@ -1851,7 +1856,13 @@ impl params_api::ParamsHolder for PyOneVsRest {
         self.raw.retain(|(n, _)| *n != name);
         let params = std::mem::take(self.inner.params_mut()).clear_param(name);
         *self.inner.params_mut() = params;
+        self.set_order.unset(name);
         Ok(())
+    }
+
+    /// The defaults of the names of the params, and the set params in the order of their setting.
+    fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+        Some((Vec::new(), self.set_order.names()))
     }
 }
 
@@ -1877,6 +1888,7 @@ native_pymethods! {
         let mut this = Self {
             inner: OneVsRest::new(),
             raw: Vec::new(),
+            set_order: params_api::SetOrder::default(),
         };
         check_classifier_kwarg(kwargs)?;
         set_ovr_params(&mut this, args.py(), "__init__", args, kwargs)?;
@@ -2117,7 +2129,21 @@ fn fit_one_vs_rest(
                 "weightCol is ignored, as it is not supported by {} now.",
                 classifier.str()?
             );
-            py.import("warnings")?.call_method1("warn", (text,))?;
+            // PySpark's UserWarning, attributed as PySpark's is: to the line of its
+            // `warnings.warn` in `OneVsRest._fit` and to `pyspark.ml.classification` (see
+            // `_native_classes._warn_as`).
+            let pysparks = py
+                .import("pyspark.ml.classification")?
+                .getattr("OneVsRest")?
+                .getattr("_fit")?;
+            py.import("pyspark.ml._native_classes")?.call_method1(
+                "_warn_as",
+                (
+                    pysparks,
+                    text,
+                    py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                ),
+            )?;
         }
     }
     // `multiclassLabeled = dataset.select(labelCol, featuresCol[, weightCol])`.
@@ -2249,6 +2275,7 @@ impl params_api::NativeInstance for PyOneVsRest {
             Self {
                 inner: self.inner.clone(),
                 raw,
+                set_order: self.set_order.clone(),
             },
         )
     }

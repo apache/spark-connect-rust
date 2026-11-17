@@ -765,8 +765,11 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
 ],
 {
     /// Fit the discretizer, as PySpark's `QuantileDiscretizer.fit`: of its `_create_model`, a
-    /// `Bucketizer` (of a new uid) of the splits, `inputCol(s)`, `outputCol(s)` and `handleInvalid`
-    /// of the discretizer (see `QuantileDiscretizer::fit_bucketizer`).
+    /// `Bucketizer` of the splits, `inputCol(s)`, `outputCol(s)` and `handleInvalid` of the
+    /// discretizer (see `QuantileDiscretizer::fit_bucketizer`). As PySpark's, the Bucketizer is of
+    /// its keyword constructor, of a new uid and of PySpark's param maps (the keywords in the order
+    /// of its call), and then the `_copyValues` of `try_remote_fit` gives it the params and the
+    /// defaults of the discretizer that it has (the `outputCol` default of the discretizer's uid).
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
@@ -781,15 +784,24 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
             let bucketizer = interruptible(py, &session, || {
                 estimator.fit_bucketizer(&df).map_err(Box::new)
             })?;
-            crate::ml::object::new_py(
-                py,
-                PyBucketizer {
-                    inner: bucketizer,
-                    unsendable: Vec::new(),
-                    raw: Vec::new(),
-                    own_defaults: Vec::new(),
-                },
-            )
+            let names = if bucketizer.params().get_param("splits").is_some() {
+                ["splits", "inputCol", "outputCol", "handleInvalid"]
+            } else {
+                ["splitsArray", "inputCols", "outputCols", "handleInvalid"]
+            };
+            let kwargs = PyDict::new(py);
+            for name in names {
+                if let Some(value) = params_api::literal_value(py, bucketizer.params(), name)? {
+                    kwargs.set_item(name, value)?;
+                }
+            }
+            let class = crate::ml::object::public_class::<PyBucketizer>(py)
+                .unwrap_or_else(|| py.get_type::<PyBucketizer>());
+            let model = class.call((), Some(&kwargs))?;
+            if slf.as_any().hasattr("_copyValues")? {
+                slf.as_any().call_method1("_copyValues", (&model,))?;
+            }
+            Ok(model.cast_into::<PyBucketizer>()?.unbind())
         })
     }
 });

@@ -4027,6 +4027,44 @@ def test_gaussian_mixture_native_parameters_match_official_fixture(ml_mock, use_
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
 
 
+def test_the_future_warning_of_compute_cost_is_attributed_as_pysparks():
+    # PySpark's `BisectingKMeansModel.computeCost` warns before its `_call_java`, of its
+    # `warnings.warn(...)`: of that line of `pyspark/ml/clustering.py` and of the module
+    # `pyspark.ml.clustering`, whose filters take it, and of its registry, of which the "default"
+    # action shows it once. A model of no server-side object then raises its AssertionError.
+    import inspect
+    import warnings
+
+    import pyspark.ml.clustering as reference
+    from pyspark.ml.connect import clustering
+
+    function = reference.BisectingKMeansModel.computeCost
+    lines, start = inspect.getsourcelines(function)
+    line = start + next(i for i, text in enumerate(lines) if "warnings.warn(" in text)
+    model = clustering.BisectingKMeansModel()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(AssertionError):
+            model.computeCost(None)
+    (warning,) = caught
+    assert warning.category is FutureWarning and str(warning.message).startswith("Deprecated in 3.0.0.")
+    assert (warning.filename, warning.lineno) == (function.__code__.co_filename, line)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings("ignore", category=FutureWarning, module="pyspark.ml.clustering")
+        with pytest.raises(AssertionError):
+            model.computeCost(None)
+    assert caught == []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.resetwarnings()
+        warnings.simplefilter("default")
+        vars(reference).pop("__warningregistry__", None)
+        for _ in range(2):
+            with pytest.raises(AssertionError):
+                model.computeCost(None)
+    assert len(caught) == 1
+
+
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
 def test_bisecting_kmeans_native_parameters_match_official_fixture(ml_mock, use_setters):
     import base64
@@ -4657,6 +4695,75 @@ def test_native_ml_rejects_pandas_before_any_requests(ml_mock, pandas_ml_input, 
         assert requests() == sent
 
 
+def test_the_models_of_objects_of_the_server_are_of_their_constructors_as_pysparks(ml_mock):
+    # PySpark makes the model of an object that a fetch returns of its class's constructor, of
+    # no params (`DecisionTreeClassificationModel(RemoteModelRef(m))` of a tree of an ensemble,
+    # `LocalLDAModel(RemoteModelRef(...))` of `toLocal`): its `JavaModel.__init__` makes its uid
+    # and its param maps, of the defaults in the order in which its classes set them, which is
+    # not of their names (as the maps of a fit or a load are, of `_resetUid`).
+    import pyspark.ml.classification as classification_reference
+    import pyspark.ml.clustering as clustering_reference
+    from pyspark.ml.connect import classification, clustering
+
+    spark, service = ml_mock
+    forest = classification.RandomForestClassifier(numTrees=1)
+    _answer_fit(service, forest, ref="forest-model")
+    (tree,) = forest.fit(spark.range(1)).trees
+    service.execute_payload_queue = [_operator_info("lda-model"), _operator_info("local-model")]
+    local = clustering.LDA(k=2, optimizer="em").fit(spark.range(1)).toLocal()
+    for model, reference in [
+        (tree, classification_reference.DecisionTreeClassificationModel),
+        (local, clustering_reference.LocalLDAModel),
+    ]:
+        name = reference.__name__
+        assert type(model).__name__ == name and model.uid.startswith(name + "_")
+        order = [p.name for p in reference()._defaultParamMap]
+        assert order != sorted(order)
+        assert [p.name for p in model._defaultParamMap] == order and not model._paramMap
+    assert _relation(tree.transform(spark.range(1))).ml_relation.transform.obj_ref.id == "tree-1"
+    assert _relation(local.transform(spark.range(1))).ml_relation.transform.obj_ref.id == "local-model"
+
+
+def test_the_model_of_a_one_vs_rest_fit_is_of_its_constructor_and_warns_as_pysparks(ml_mock):
+    # PySpark's `OneVsRest._fit` makes its model of `OneVsRestModel(models)`, whose constructor sets
+    # the defaults in the order of its MRO, and then of `_copyValues`, which sets the params of the
+    # estimator in the order of their names. Of a classifier of no `weightCol`, it warns of its
+    # `warnings.warn(...)` first: of that line of `pyspark/ml/classification.py` and of the module
+    # `pyspark.ml.classification`, whose filters take it.
+    import inspect
+    import warnings
+
+    import pyspark.ml.classification as reference
+    from pyspark.ml.connect import classification
+
+    spark, service = ml_mock
+    base = classification.MultilayerPerceptronClassifier(layers=[1, 2])
+    estimator = classification.OneVsRest(classifier=base, weightCol="w", featuresCol="f")
+    function = reference.OneVsRest._fit
+    lines, start = inspect.getsourcelines(function)
+    line = start + next(i for i, text in enumerate(lines) if "warnings.warn(" in text)
+    _answer_fit(service, estimator, ref="class-model")
+    service.query_payload = _label_query_result(estimator)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = estimator.fit(spark.range(1))
+    (warning,) = caught
+    assert warning.category is UserWarning
+    assert str(warning.message) == f"weightCol is ignored, as it is not supported by {base.uid} now."
+    assert (warning.filename, warning.lineno) == (function.__code__.co_filename, line)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings("ignore", category=UserWarning, module="pyspark.ml.classification")
+        estimator.fit(spark.range(1))
+    service.query_payload = None
+    assert caught == []
+    order = ["predictionCol", "featuresCol", "labelCol", "rawPredictionCol"]
+    assert [p.name for p in reference.OneVsRestModel([])._defaultParamMap] == order
+    assert [p.name for p in model._defaultParamMap] == order
+    assert [p.name for p in model._paramMap] == ["classifier", "featuresCol", "weightCol"]
+    assert [p.name for p in classification.OneVsRestModel(model.models)._defaultParamMap] == order
+
+
 @pytest.mark.parametrize("name", ["LDA", "PowerIterationClustering"])
 def test_remaining_clustering_signatures_and_native_exports(name):
     import inspect
@@ -4676,6 +4783,54 @@ def test_remaining_clustering_signatures_and_native_exports(name):
         assert parameters[param].kind == inspect.Parameter.KEYWORD_ONLY
         assert parameters[param].default == default
         assert hasattr(cls, "set" + param[0].upper() + param[1:])
+
+
+def test_the_dataframe_methods_of_models_and_summaries_send_their_positional_arguments_only(ml_mock):
+    # PySpark's `try_remote_attribute_relation` of `LDAModel.describeTopics`,
+    # `Word2VecModel.getVectors` and the `residuals` of a GLR summary sends the positional
+    # arguments of a call only: it drops keyword arguments, and checks no arity, in a lazy
+    # DataFrame of no request, which the server rejects when it is analyzed of arguments that its
+    # method does not take.
+    from pyspark.ml.connect import clustering, feature, regression
+
+    spark, service = ml_mock
+    frame = spark.range(1)
+    service.execute_payload = _operator_info("lda-model")
+    lda = clustering.LDA(k=2).fit(frame)
+    service.execute_payload = _operator_info("word2vec-model")
+    word2vec = feature.Word2Vec(inputCol="text").fit(frame)
+    service.execute_payload = _operator_info("glr-model")
+    summary = regression.GeneralizedLinearRegression().fit(frame).summary
+    sent = _requests_but_deletes(service)
+    cases = [
+        (lambda: lda.describeTopics(), "lda-model", ["describeTopics"], []),
+        (lambda: lda.describeTopics(1), "lda-model", ["describeTopics"], [("integer", 1)]),
+        (lambda: lda.describeTopics(maxTermsPerTopic=1), "lda-model", ["describeTopics"], []),
+        (lambda: lda.describeTopics(1, 2, x=3), "lda-model", ["describeTopics"], [("integer", 1), ("integer", 2)]),
+        (lambda: word2vec.getVectors(x=1), "word2vec-model", ["getVectors"], []),
+        (lambda: word2vec.getVectors(1), "word2vec-model", ["getVectors"], [("integer", 1)]),
+        (lambda: summary.residuals(), "glr-model", ["summary", "residuals"], []),
+        (lambda: summary.residuals(residualsType="pearson"), "glr-model", ["summary", "residuals"], []),
+        (
+            lambda: summary.residuals("pearson", 1),
+            "glr-model",
+            ["summary", "residuals"],
+            [("string", "pearson"), ("integer", 1)],
+        ),
+    ]
+    for call, ref, methods, args in cases:
+        fetch = _relation(call()).ml_relation.fetch
+        assert fetch.obj_ref.id == ref
+        assert [method.method for method in fetch.methods] == methods
+        assert [_literal_value(arg.param) for arg in fetch.methods[-1].args] == args
+    assert _requests_but_deletes(service) == sent
+    # Of no server-side object, PySpark's AssertionError of any arguments.
+    for call in [
+        lambda: clustering.LocalLDAModel().describeTopics(1, 2, x=3),
+        lambda: feature.Word2VecModel().getVectors(1, x=2),
+    ]:
+        with pytest.raises(AssertionError):
+            call()
 
 
 def test_pic_helper_request_matches_official_and_is_lazy(ml_mock):

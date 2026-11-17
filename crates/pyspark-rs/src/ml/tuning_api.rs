@@ -202,6 +202,15 @@ macro_rules! validator {
                 self.values.unset(name);
                 Ok(())
             }
+
+            /// The maps in the order of PySpark's: the defaults in the order in which the
+            /// constructor sets them (or of their names, of a load or a copy), and the set params
+            /// in the order of their first setting.
+            fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+                let defaults = self.values.default_names(<Self as Validator>::DEFAULTS);
+                let set = self.values.set.iter().map(|(name, _)| *name).collect();
+                Some((defaults, set))
+            }
         }
 
         impl params_api::NativeInstance for $ty {

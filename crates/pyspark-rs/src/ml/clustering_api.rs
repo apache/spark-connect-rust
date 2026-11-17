@@ -136,13 +136,20 @@ native_model! {
 
     /// The sum of the squared distances of the points of `dataset` to their cluster centers, as
     /// `BisectingKMeansModel.computeCost`: deprecated since 3.0.0, so it raises PySpark's
-    /// FutureWarning first, and then fetches the cost from the server.
+    /// FutureWarning first, attributed as PySpark's is, to the line of its `warnings.warn` in
+    /// `pyspark.ml.clustering` (see `_native_classes._warn_as`), and then fetches the cost from
+    /// the server.
     #[pyo3(name = "computeCost")]
     fn compute_cost(slf: &Bound<'_, Self>, dataset: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        py.import("warnings")?.call_method1(
-            "warn",
+        let pysparks = py
+            .import("pyspark.ml.clustering")?
+            .getattr("BisectingKMeansModel")?
+            .getattr("computeCost")?;
+        py.import("pyspark.ml._native_classes")?.call_method1(
+            "_warn_as",
             (
+                pysparks,
                 "Deprecated in 3.0.0. It will be removed in future versions. Use \
                  ClusteringEvaluator instead. You can also get the cost on the training \
                  dataset in the summary.",
@@ -374,12 +381,7 @@ native_model! {
     ];
     relations: [];
     relation_methods: [
-        "describeTopics" => (
-            describe_topics,
-            "describeTopics",
-            (maxTermsPerTopic = 10),
-            "($self, maxTermsPerTopic=10)"
-        ),
+        "describeTopics" => (describe_topics, "describeTopics", "($self, maxTermsPerTopic=10)"),
     ];
     summary: None;
     cached: [];
@@ -407,14 +409,21 @@ macro_rules! lda_model {
                 PyLDAModel::__fitted_with(py, model, df, summary, Self::__make)
             }
 
-            /// The model of the server-side object `object` that a fetch returns (as
-            /// `native_model!`'s `of_object`), of the base class.
+            /// The model of the server-side object that `object` gives of the uid of the model,
+            /// of the constructor of its class and then of the object (as `native_model!`'s
+            /// `of_constructor`).
             #[allow(dead_code)]
-            pub(crate) fn of_object(
-                py: Python<'_>,
-                object: spark_connect::ml::MlRef,
-            ) -> PyResult<PyLDAModel> {
-                PyLDAModel::__of_object_with(py, $jvm, $name, object, Self::__make)
+            pub(crate) fn of_constructor<'py>(
+                py: Python<'py>,
+                object: impl FnOnce(&str) -> PyResult<spark_connect::ml::MlRef>,
+            ) -> PyResult<Bound<'py, Self>> {
+                let class = crate::ml::object::public_class::<Self>(py)
+                    .unwrap_or_else(|| py.get_type::<Self>());
+                let model = class.call0()?.cast_into::<Self>()?;
+                let uid = model.as_super().try_borrow()?.core.uid();
+                let object = object(&uid)?;
+                model.as_super().try_borrow_mut()?.core.bind(object);
+                Ok(model)
             }
 
             fn __from_read(
@@ -485,16 +494,17 @@ macro_rules! lda_model {
 }
 
 /// The LocalLDAModel that `DistributedLDAModel.toLocal` returns, of the server's object of the
-/// model `model`: of a fresh uid and no params. The cache of `functools.cache` is kept by the
-/// model (see [`object::ModelCore::cached_method`]).
+/// model `model`, as PySpark's `LocalLDAModel(RemoteModelRef(...))`: of the constructor of the
+/// class, of a fresh uid and no params. The cache of `functools.cache` is kept by the model (see
+/// [`object::ModelCore::cached_method`]).
 fn local_model_of_distributed(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
     let target = model.target()?;
     let object = object::fetch_py(py, &target, "toLocal", &[])?
         .into_object()
         .to_pyerr()?;
-    Ok(PyLocalLDAModel::of_object(py, object)?
-        .into_object(py)?
-        .into_any())
+    Ok(PyLocalLDAModel::of_constructor(py, |_| Ok(object))?
+        .into_any()
+        .unbind())
 }
 
 lda_model! {

@@ -40,6 +40,13 @@ pub struct PyOneVsRestModel {
     /// The `models` attribute, which PySpark keeps as a plain attribute: the object that the fit,
     /// the load, the copy, the constructor or an assignment gives.
     models: Mutex<Option<Py<PyAny>>>,
+    /// The order of the defaults of PySpark's `_defaultParamMap` of the model: of its
+    /// constructor (`MODEL_DEFAULTS`) of a fit and of `OneVsRestModel(models)`, and of the names of
+    /// the params (none) of a load, as its `_resetUid` makes them.
+    default_order: &'static [&'static str],
+    /// The order of the set params of a load (the classifier, then the params of the metadata in
+    /// its order); none of a fit, whose `_copyValues` sets them in the order of their names.
+    set_order: params_api::SetOrder,
 }
 
 impl PyOneVsRestModel {
@@ -59,6 +66,8 @@ impl PyOneVsRestModel {
             raw: vec![("classifier", classifier)],
             fit: Some(fit),
             models: Mutex::new(None),
+            default_order: MODEL_DEFAULTS,
+            set_order: params_api::SetOrder::default(),
         };
         // As PySpark's classifier fits make their models, with their summaries, during the fit.
         let models = build_submodels(py, &this)?;
@@ -317,6 +326,7 @@ impl params_api::ParamsHolder for PyOneVsRestModel {
             }
             value => object::put_model_param(py, params, name, value)?,
         };
+        self.set_order.put(name);
         Ok(())
     }
 
@@ -333,7 +343,14 @@ impl params_api::ParamsHolder for PyOneVsRestModel {
         self.raw.retain(|(n, _)| *n != name);
         let params = self.core.model.params().clone().clear_param(name);
         *self.core.model.params_mut() = params;
+        self.set_order.unset(name);
         Ok(())
+    }
+
+    /// The defaults in the order of the constructor (of a fit and of `OneVsRestModel(models)`) or
+    /// of the names (of a load), and the set params in the order of their setting.
+    fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+        Some((self.default_order.to_vec(), self.set_order.names()))
     }
 }
 
@@ -351,6 +368,8 @@ impl params_api::NativeInstance for PyOneVsRestModel {
                 raw,
                 fit: self.fit.clone(),
                 models: Mutex::new(self.models_value(py)),
+                default_order: self.default_order,
+                set_order: self.set_order.clone(),
             },
         )
     }
@@ -407,6 +426,8 @@ native_pymethods! {
             raw: Vec::new(),
             fit: None,
             models: Mutex::new(Some(models)),
+            default_order: MODEL_DEFAULTS,
+            set_order: params_api::SetOrder::default(),
         })
     }
 
@@ -505,18 +526,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 const ONE_VS_REST_CLASS: &str = "pyspark.ml.classification.OneVsRest";
 const ONE_VS_REST_MODEL_CLASS: &str = "pyspark.ml.classification.OneVsRestModel";
 
-/// The params of a OneVsRest that its metadata has of their defaults, in the order of PySpark's
-/// `_defaultParamMap` of the estimator (see the core's `ESTIMATOR_DEFAULTS`).
-const ESTIMATOR_DEFAULTS: &[&str] = &[
-    "parallelism",
-    "predictionCol",
-    "featuresCol",
-    "labelCol",
-    "rawPredictionCol",
-];
-
-/// The params of a OneVsRestModel that its metadata has of their defaults, in the order of
-/// PySpark's `_defaultParamMap` of the model (see the core's `MODEL_DEFAULTS`).
+/// The params of a OneVsRestModel that have a default, in the order in which PySpark's constructor
+/// of the model sets them in its `_defaultParamMap` (see the core's `MODEL_DEFAULTS`).
 const MODEL_DEFAULTS: &[&str] = &[
     "predictionCol",
     "featuresCol",
@@ -524,28 +535,34 @@ const MODEL_DEFAULTS: &[&str] = &[
     "rawPredictionCol",
 ];
 
-/// The `paramMap` and the `defaultParamMap` of a OneVsRest or its model `slf`, as
-/// `DefaultParamsWriter` makes them: of each of `defaults` in its order, the set value or the
-/// default (`extractParamMap`), and then the set `weightCol`, which has no default. The classifier
-/// is no param of these, which its own writer saves.
-fn param_maps<'py, T: params_api::ParamsHolder>(
-    slf: &Bound<'py, T>,
-    defaults: &[&str],
+/// The `paramMap` and the `defaultParamMap` of the metadata of a OneVsRest or its model
+/// `instance`, as `DefaultParamsWriter` makes them of PySpark's maps of it, in their order: of
+/// `extractParamMap()` (the defaults, of their set values, then the other set params) but the
+/// classifier, which its own writer saves (`extractJsonParams`), and of `_defaultParamMap`. So a
+/// OneVsRest of its constructor writes its params in the order of the constructor's defaults, and
+/// one of a load or a copy in the order of their names.
+fn param_maps<'py>(
+    instance: &Bound<'py, PyAny>,
 ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
-    let py = slf.py();
+    let py = instance.py();
     let param_map = PyDict::new(py);
-    let default_map = PyDict::new(py);
-    for &name in defaults {
-        let Some(default) = params_api::default_of(slf, name)? else {
-            continue;
-        };
-        let set = params_api::ParamsHolder::set_value(&*slf.try_borrow()?, py, name)?;
-        default_map.set_item(name, &default)?;
-        param_map.set_item(name, set.unwrap_or(default))?;
+    for (param, value) in instance
+        .call_method0("extractParamMap")?
+        .cast_into::<PyDict>()?
+        .iter()
+    {
+        let name = param.getattr("name")?;
+        if name.extract::<String>()? != "classifier" {
+            param_map.set_item(name, value)?;
+        }
     }
-    let weight = params_api::ParamsHolder::set_value(&*slf.try_borrow()?, py, "weightCol")?;
-    if let Some(weight) = weight {
-        param_map.set_item("weightCol", weight)?;
+    let default_map = PyDict::new(py);
+    for (param, value) in instance
+        .getattr("_defaultParamMap")?
+        .cast_into::<PyDict>()?
+        .iter()
+    {
+        default_map.set_item(param.getattr("name")?, value)?;
     }
     Ok((param_map, default_map))
 }
@@ -622,7 +639,7 @@ pub(crate) fn save_one_vs_rest(
     _options: &std::collections::HashMap<String, String>,
 ) -> PyResult<()> {
     validate_one_vs_rest(instance, false)?;
-    let (param_map, default_map) = param_maps(instance.cast::<PyOneVsRest>()?, ESTIMATOR_DEFAULTS)?;
+    let (param_map, default_map) = param_maps(instance)?;
     let uid: String = instance.getattr("uid")?.extract()?;
     save_metadata_at(
         instance.py(),
@@ -651,8 +668,7 @@ fn save_one_vs_rest_model(
     _options: &std::collections::HashMap<String, String>,
 ) -> PyResult<()> {
     validate_one_vs_rest(instance, true)?;
-    let (param_map, default_map) =
-        param_maps(instance.cast::<PyOneVsRestModel>()?, MODEL_DEFAULTS)?;
+    let (param_map, default_map) = param_maps(instance)?;
     let uid: String = instance.getattr("uid")?.extract()?;
     let models = instance.getattr("models")?;
     save_metadata_at(
@@ -731,6 +747,7 @@ pub(crate) fn load_one_vs_rest(
         PyOneVsRest {
             inner: OneVsRest::new(),
             raw: Vec::new(),
+            set_order: params_api::SetOrder::default(),
         },
     )?;
     params_api::ParamsHolder::put(
@@ -815,11 +832,15 @@ fn load_one_vs_rest_model(
             "OneVsRestModel",
         )?,
     };
+    // As `ovaModel.set(ovaModel.classifier, classifier)` after the `_resetUid` of the load, whose
+    // defaults are of the names of the params, and before the params of the metadata.
     let model = PyOneVsRestModel {
         core,
         raw: vec![("classifier", classifier.unbind())],
         fit: None,
         models: Mutex::new(Some(models.into_any().unbind())),
+        default_order: &[],
+        set_order: params_api::SetOrder::of(&["classifier"]),
     };
     let model = crate::ml::object::new_object(py, model)?;
     let uid = metadata_str(&metadata.get_item("uid")?)?;

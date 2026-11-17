@@ -301,16 +301,31 @@ PySpark class has them:
   `np.float32` raises PySpark's TypeError of `toFloat`), `extractParamMap()` is in PySpark's order
   (the order that the params were set; the defaults of a new object in the order that its
   constructors set them), and an assignment of `uid` keeps the Params of the old uid, as PySpark's
-  does. `clear` does nothing over Spark Connect, as PySpark's `JavaParams.clear`. The native
-  object's params are made those of the maps before each native member reads them (a fit, a
-  transform, an evaluation, a writer, a model's members), and so are those of the objects that it
+  does. The maps of the objects that this client makes are in PySpark's order too: of the
+  constructor of the class (the defaults in the order of its MRO, which is not of their names) of
+  a model of no server-side object, of the model of an object that a fetch returns (a tree of an
+  ensemble, `toLocal`), of a model of a class method (`StringIndexerModel.from_labels`), of the
+  `Bucketizer` of a QuantileDiscretizer's fit (of its keywords), and of the model of a validator's
+  or a OneVsRest's fit; of the names of the params of the model of a JVM estimator's fit and of a
+  load, which PySpark's `_resetUid` rebuilds (the set params of a load of PySpark's Python format,
+  a OneVsRest's or a validator's, are then in the order of its metadata), and of a copy of
+  `Params.copy`. `clear` does nothing over Spark Connect, as PySpark's `JavaParams.clear`, of any
+  positional arguments. The native object's params are made those of the maps before each native
+  member reads them (a fit, a transform, an evaluation, a writer, a model's members), and so are
+  those of the objects that it
   holds (an OneVsRest's classifier, a Pipeline's stages, a validator's estimator, evaluator and the
   values of its grids, a PipelineModel's stages, an OneVsRestModel's models, a validator model's
   best and sub-models). A writer reads them at its `save`, as PySpark's `RemoteMLWriter` reads
   those of its `_instance`.
   The maps of an object that this client makes (of a fit, a load, a native copy) are made of the
-  native object's values at their first read. The native members have PySpark's docstrings and
-  signatures. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
+  native object's values at their first read. The native members have PySpark's docstrings,
+  signatures, modules and qualified names, of the class of PySpark's that defines the member
+  (`JavaMLWritable.write`, `JavaPredictionModel.predict`), and Python binds a call of one as it
+  binds PySpark's function, of the parameters of the wrapper of its decorator (`JavaParams.clear`
+  of `try_remote_intercept` takes any positional arguments, a DataFrame method of
+  `try_remote_attribute_relation` any arguments): a call that does not bind raises PySpark's
+  message (`JavaMLWritable.write() takes 1 positional argument but 2 were given`) before the
+  native member runs. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
   converters and defaults of the official class (`crates/pyspark-rs/src/ml/ml_params.json`,
   captured from pyspark-client 4.3.0 by `scripts/capture_ml_api_golden.py`), and a getter per
   param (`getMaxIter`).
@@ -359,7 +374,18 @@ PySpark class has them:
   `predict(vector)`, `clusterCenters()`, ...), which read the server's model object as PySpark's
   `_call_java` does, its setters, and `__repr__`, the server's description of the model. The
   `__str__` of an RFormulaModel names its resolved formula, of the server, as PySpark's does
-  (`RFormulaModel(ResolvedRFormula(label=y, terms=[x], hasIntercept=true)) (uid=...)`).
+  (`RFormulaModel(ResolvedRFormula(label=y, terms=[x], hasIntercept=true)) (uid=...)`). Its
+  DataFrame methods (`LDAModel.describeTopics`, `Word2VecModel.getVectors` and `findSynonyms`,
+  the LSH models' `approxNearestNeighbors` and `approxSimilarityJoin`, ALSModel's
+  `recommendFor*`, and the `residuals` of a GeneralizedLinearRegressionSummary) send the
+  positional arguments of a call only, as PySpark's `try_remote_attribute_relation` does over
+  Spark Connect: they drop keyword arguments (`describeTopics(maxTermsPerTopic=1)` describes the
+  server's 10 terms, `residuals(residualsType="pearson")` gives the deviance residuals), and check
+  no arity, so a call of other arguments than the server's method takes fails on the server when
+  the DataFrame is analyzed. The model of an object that a fetch returns (a tree of an ensemble,
+  `toLocal`) is of the constructor of its class, as PySpark's
+  `DecisionTreeClassificationModel(RemoteModelRef(...))`: of a new uid, of its defaults and no set
+  params.
 - **Summaries**: the training summary of a fit (`summary`, `hasSummary`), the same object on every
   call as PySpark's `_summary`, and the summary of `evaluate`; a loaded model has none, and raises
   PySpark's `RuntimeError`. Their DataFrames (`predictions`, `roc`, `cluster`, ...) are of the
@@ -380,9 +406,10 @@ PySpark class has them:
     its own. A call that does not bind raises PySpark's message (`LogisticRegression.__init__() got
     an unexpected keyword argument 'foo'`, `JavaModel.__init__() takes from 1 to 2 positional
     arguments but 3 were given`).
-  - An object of a subclass of an estimator, transformer or evaluator has a uid of the subclass's
-    name (`Identifiable._randomUID`), and the defaults of that uid and name (`outputCol`, `seed`).
-    A subclass of a model class keeps the uid of the model class's name.
+  - An object of a subclass of an estimator, transformer or evaluator, or of a model class of
+    PySpark's `JavaModel`, has a uid of the subclass's name (`Identifiable._randomUID`), and the
+    defaults of that uid and name (`outputCol`, `seed`). A subclass of PipelineModel,
+    OneVsRestModel or a validator's model keeps the uid of its class's name.
   - `fit`, `fitMultiple`, `transform`, `evaluate`, `save` and `load` are PySpark's own (of
     `Estimator`, `Transformer`, `Evaluator`, `MLWritable` and `MLReadable`), with PySpark's
     signatures and docstrings. They run the object's `_fit`, `_transform`, `_evaluate`, `copy`,
@@ -420,9 +447,10 @@ PySpark class has them:
     shares its `RemoteModelRef` without a reference of its own, so the garbage collection of the
     copy releases the object of the original (`CONNECT_ML.CACHE_INVALID` at its next use).
 - **A model of no server-side object**: a model class constructs as PySpark's
-  `JavaModel(java_model=None)` (`KMeansModel()`, `LDAModel()`), a model of a new uid of its class
-  and of its params, none set, whose Params API, `copy` and `write()` work, and whose members of
-  the server, `__repr__`, a transform and a save raise PySpark's bare `AssertionError`, as does the
+  `JavaModel(java_model=None)` (`KMeansModel()`, `LDAModel()`), of PySpark's `JavaModel.__init__`,
+  a model of a new uid of its class and of its params, none set, whose Params API, `copy` and
+  `write()` work, and whose members of the server, `__repr__`, a transform and a save raise
+  PySpark's bare `AssertionError`, as does the
   `params` walk of a model of `functools.cached_property` members (`trees`), and so its
   `explainParams` and `copy`. Another `java_model` is the `AssertionError` of PySpark's over Spark
   Connect, which takes its `RemoteModelRef` only.
@@ -1310,6 +1338,10 @@ the copy, so their requests do not warn again, where PySpark's warn at each. Suc
 origin of the `and` of the conditions of a join of a list of Columns of that time too, where
 PySpark gives it the call site of each request that builds it, as it does in the drop-in otherwise.
 
+The `FutureWarning` of `BisectingKMeansModel.computeCost` is attributed as PySpark's is, to the
+line of its `warnings.warn` in `pyspark/ml/clustering.py` and to the module
+`pyspark.ml.clustering`, of its registry of shown warnings, so the filters of that module match it.
+
 The `TypeError` for a bad keyword argument of a method that takes no `**options` is PyO3's, which
 CPython words differently in two cases. For a key that is not a str, as `df.limit(1, **{1: 2})`,
 CPython says "keywords must be strings", where the drop-in says "DataFrame.limit() got an
@@ -1575,8 +1607,9 @@ The Rust model's members and persistence are in "Native regression models (Rust 
 full API of `pyspark.ml` (see "Native ML classes of the full pyspark.ml API"): the Params API,
 `coefficients`, `intercept`, `numFeatures`, `predict` of a vector, the training summary (of the
 training dataset, as PySpark's, with `residuals(residualsType)` and the statistics of the
-coefficients), `evaluate`, and save and load. As with PySpark, the `repr` of a model whose `link` is
-not set fails on the server.
+coefficients), `evaluate`, and save and load. As PySpark's over Spark Connect, `residuals` sends its
+positional arguments only: `residuals(residualsType="pearson")` gives the deviance residuals. As
+with PySpark, the `repr` of a model whose `link` is not set fails on the server.
 
 ## Native GaussianMixture
 
@@ -1686,7 +1719,9 @@ classifier unchanged. Instance weights are forwarded to each class's fit when th
 classifier is a `HasWeightCol` of PySpark, which every native classifier is but the
 perceptron (FMClassifier included). For the perceptron, Python warns
 `weightCol is ignored, as it is not supported by <uid> now.`, with the classifier's
-uid, as PySpark does, and fits without the weights.
+uid, as PySpark does, and fits without the weights. The warning is attributed as PySpark's is, to
+the line of its `warnings.warn` in `pyspark/ml/classification.py` and to the module
+`pyspark.ml.classification`, whose filters match it.
 
 A fit runs the steps of PySpark's `OneVsRest._fit`, in its order and of its requests, in Rust and
 in Python, but for the reads of each class's model that PySpark's makes after its fit (`numClasses`
@@ -1748,7 +1783,10 @@ PySpark's `OneVsRestModel(models)`, and its `set_classifier` sets the classifier
 Persistence is of PySpark's Python format, in Rust and in Python, as PySpark's `OneVsRestWriter`,
 `OneVsRestModelWriter` and their readers write it: `OneVsRest::write().save(path)` and
 `OneVsRest::load(session, path)`, and the same for `OneVsRestModel`. The metadata of the estimator
-has its params without the classifier, which is saved at `classifier`; the metadata of the model
+has its params without the classifier, which is saved at `classifier`, in the order of the maps of
+the Python object that it saves, as PySpark's `extractJsonParams` writes them (of the
+constructor's defaults of a OneVsRest of its constructor, of the names of a load or a copy); the
+metadata of the model
 also has `numClasses`, and each submodel is saved at `model_<index>` by its own writer. What each
 of PySpark and this client saves, the other loads, with the same uids, params and predictions, and
 the metadata files equal PySpark's apart from their timestamps and uids. As PySpark's readers, the
@@ -1855,7 +1893,9 @@ The Rust models' members and persistence are in "Native clustering models (Rust 
 `LDA`, `LDAModel`, `LocalLDAModel` and `DistributedLDAModel` follow the full API of `pyspark.ml`
 (see "Native ML classes of the full pyspark.ml API"): the Params API, the members of an LDA model
 (`describeTopics`, `topicsMatrix`, `logLikelihood`, `logPerplexity`, `vocabSize`, `isDistributed` and
-`estimatedDocConcentration`), `toLocal` (the same `LocalLDAModel` on every call, as PySpark's),
+`estimatedDocConcentration`; `describeTopics` sends its positional arguments only, as PySpark's
+over Spark Connect, so `describeTopics(maxTermsPerTopic=1)` describes the server's 10 terms),
+`toLocal` (the same `LocalLDAModel` on every call, as PySpark's, of the constructor of its class),
 `trainingLogLikelihood`, `logPrior` and `getCheckpointFiles` of a distributed model, and save and
 load. `PowerIterationClustering` has its uid and the Params API, and saves and loads as PySpark's
 does: as the params of the server's `PowerIterationClusteringWrapper`. `LDAModel` is the base class
@@ -1892,10 +1932,19 @@ one of 19 typed model classes, with PySpark's members: getters and setters, attr
 methods `CountVectorizerModel.from_vocabulary` and `StringIndexerModel.from_labels` and
 `from_arrays_of_labels`. Over Spark Connect, PySpark's relation decorator
 (`try_remote_attribute_relation`) drops every keyword argument of `approxNearestNeighbors`,
-`approxSimilarityJoin` and `findSynonyms`, and ours does too, as PySpark's behavior over Spark
-Connect: a `distCol` given by keyword is ignored (the column stays `distCol`), and a call whose
-positional arguments are not all given fails at the server, as official's does. `QuantileDiscretizer`'s fit returns a `Bucketizer` of a new uid, with its splits and
-its input and output columns, as PySpark's `_create_model` does. Transformed DataFrames retain
+`approxSimilarityJoin`, `getVectors` and `findSynonyms`, and ours does too, as PySpark's behavior
+over Spark Connect: a `distCol` given by keyword is ignored (the column stays `distCol`), and a call
+whose positional arguments are not all given, or of more (`getVectors(1)`), fails at the server,
+as official's does. The class methods take their arguments in PySpark's order: an empty
+vocabulary raises the `ValueError` of `from_vocabulary` (of its `len`) first; then the model of
+the class's constructor gets the object that the ML helper builds of its uid and of `list(...)` of
+the labels of any iterable (a str, a set, the keys of a dict), sent as PySpark's `serialize` sends
+them (`(list(labels), ArrayType(StringType()))` of `from_labels`, whose literal asserts each
+string), after the assertion of an active session; and then the setters of the given params,
+whose `TypeConverters` raise their `TypeError` after the request. `QuantileDiscretizer`'s fit
+returns a `Bucketizer` of a new uid, with its splits and its input and output columns, of its
+keyword constructor, as PySpark's `_create_model` does, and of the defaults of the discretizer
+that `_copyValues` gives it (an `outputCol` of the discretizer's uid). Transformed DataFrames retain
 their fitted models and upstream input plans. The Rust wrapper of the discretizer's splits is named
 `QuantileDiscretizerModel`. Training-only parameters are omitted from model transforms.
 Multi-column parameters, nested Bucketizer splits, vector-valued ElementwiseProduct weights,
