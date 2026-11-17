@@ -94,6 +94,10 @@ impl ChannelBuilder {
                 )],
             ));
         }
+        // As `urllib.parse.urlsplit`, with which PySpark's builder reads the URL once it has
+        // checked its scheme, and which removes every ASCII tab, CR and LF from it (bpo-43882):
+        // `user_agent=my<LF>agent` is `myagent`, and `local<TAB>host` is `localhost`.
+        let url = &url.replace(['\t', '\r', '\n'], "");
         let rest = &url["sc://".len()..];
 
         // Split authority from the remainder at the first of '/', '?', '#'.
@@ -301,14 +305,25 @@ impl ChannelBuilder {
         Ok(())
     }
 
-    /// The user-agent string, matching Python's format and 2048-char cap.
+    /// The user agent, as PySpark's `ChannelBuilder.userAgent`: the `user_agent` parameter, else
+    /// `SPARK_CONNECT_USER_AGENT`, else `_SPARK_CONNECT_PYTHON`, followed by the versions. As
+    /// that property raises, it is `SparkConnectException` when it is longer than 2048
+    /// characters after URL escaping, and the `UnicodeEncodeError` of `urllib.parse.quote` for a
+    /// variable that is not Unicode, of which Python's `os.environ` keeps surrogates.
     pub fn user_agent(&self) -> Result<String> {
-        let ua = self
-            .params
-            .get(PARAM_USER_AGENT)
-            .cloned()
-            .or_else(|| std::env::var("SPARK_CONNECT_USER_AGENT").ok())
-            .unwrap_or_else(|| "_SPARK_CONNECT_PYTHON".to_string());
+        let ua = match self.params.get(PARAM_USER_AGENT) {
+            Some(ua) => ua.clone(),
+            None => match std::env::var_os("SPARK_CONNECT_USER_AGENT") {
+                Some(ua) => ua.into_string().map_err(|ua| {
+                    let utf32le: Vec<u8> = environ_code_points(&ua)
+                        .into_iter()
+                        .flat_map(u32::to_le_bytes)
+                        .collect();
+                    SparkError::unencodable_str(&utf32le)
+                })?,
+                None => "_SPARK_CONNECT_PYTHON".to_string(),
+            },
+        };
         let ua_len = quote_len(&ua);
         if ua_len > 2048 {
             return Err(SparkError::connect_exception_msg(format!(
@@ -366,6 +381,32 @@ fn os_name(os: &str) -> &str {
         "hurd" => "gnu",
         os => os,
     }
+}
+
+/// The code points of the str that Python's `os.environ` gives for `value`, the value of a
+/// variable that is not Unicode: on Windows, its UTF-16 units, a lone surrogate kept.
+#[cfg(windows)]
+fn environ_code_points(value: &std::ffi::OsStr) -> Vec<u32> {
+    use std::os::windows::ffi::OsStrExt;
+    char::decode_utf16(value.encode_wide())
+        .map(|unit| unit.map_or_else(|lone| u32::from(lone.unpaired_surrogate()), u32::from))
+        .collect()
+}
+
+/// The code points of the str that Python's `os.environ` gives for `value`, the value of a
+/// variable that is not Unicode: elsewhere, its bytes decoded as UTF-8 with `surrogateescape`,
+/// which gives each byte of an invalid sequence as the surrogate `U+DC00` plus the byte. The
+/// bytes are those that `std::os::unix::ffi::OsStrExt::as_bytes` gives on Unix.
+#[cfg(not(windows))]
+fn environ_code_points(value: &std::ffi::OsStr) -> Vec<u32> {
+    value
+        .as_encoded_bytes()
+        .utf8_chunks()
+        .flat_map(|chunk| {
+            let valid = chunk.valid().chars().map(u32::from);
+            valid.chain(chunk.invalid().iter().map(|&byte| 0xDC00 | u32::from(byte)))
+        })
+        .collect()
 }
 
 /// `text` as Python's `int(text)` reads it: an optional sign and digits, which single
@@ -919,6 +960,25 @@ mod tests {
     }
 
     #[test]
+    fn tabs_and_line_breaks_are_removed_from_the_url_as_urllib_does() {
+        // As `urlsplit`, which removes every ASCII tab, CR and LF of the URL once PySpark has
+        // checked its scheme: of the host, the port and the parameters alike. The other control
+        // characters are kept.
+        let c = ChannelBuilder::parse(
+            "sc://local\thost:15\n002/;user_agent=my\r\nagent;x-hdr=a\tb;x-ctl=\u{b}v\u{c}",
+        )
+        .unwrap();
+        assert_eq!(c.endpoint(), "localhost:15002");
+        assert_eq!(c.get("user_agent"), Some("myagent"));
+        assert_eq!(c.get("x-hdr"), Some("ab"));
+        assert_eq!(c.get("x-ctl"), Some("\u{b}v\u{c}"));
+        for url in ["s\tc://localhost", "sc:/\t/localhost"] {
+            let e = ChannelBuilder::parse(url).unwrap_err();
+            assert_eq!(e.error_class, "INVALID_CONNECT_URL", "{url:?}");
+        }
+    }
+
+    #[test]
     fn a_too_long_user_agent_is_a_connect_exception() {
         // PySpark raises a SparkConnectException of this message, not a RuntimeError.
         let _env = set_env(&[("SPARK_CONNECT_USER_AGENT", None)]);
@@ -937,6 +997,37 @@ mod tests {
             "'user_agent' parameter should not exceed 2048 characters after URL escaping, \
              found 2049 characters."
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_user_agent_of_the_environment_that_is_not_unicode_is_an_unencodable_str() {
+        // Python's `os.environ` gives the bytes that are not UTF-8 as surrogate escapes, which
+        // the `urllib.parse.quote` of PySpark's `userAgent` cannot encode: its UnicodeEncodeError
+        // is raised, of the str that `os.environ` gives, rather than the default user agent.
+        use std::os::unix::ffi::OsStrExt;
+        let _env = set_env(&[("SPARK_CONNECT_USER_AGENT", None)]);
+        let value = std::ffi::OsStr::from_bytes(b"caf\xc3\xa9 \xff\xe2\x82a");
+        std::env::set_var("SPARK_CONNECT_USER_AGENT", value);
+        let e = ChannelBuilder::parse("sc://localhost")
+            .unwrap()
+            .user_agent()
+            .unwrap_err();
+        assert_eq!(e.kind, crate::error::SparkErrorKind::UnicodeEncode);
+        let code_points: Vec<u32> = e
+            .unencodable_value()
+            .unwrap()
+            .chunks(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
+        let expected = [
+            'c' as u32, 'a' as u32, 'f' as u32, 0xe9, ' ' as u32, 0xdcff, 0xdce2, 0xdc82,
+            'a' as u32,
+        ];
+        assert_eq!(code_points, expected);
+        // The parameter wins over the variable, which is then not read.
+        let c = ChannelBuilder::parse("sc://localhost/;user_agent=abc").unwrap();
+        assert!(c.user_agent().unwrap().starts_with("abc spark/"));
     }
 
     #[test]
