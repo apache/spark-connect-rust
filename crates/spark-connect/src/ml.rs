@@ -1,4 +1,5 @@
-//! ML module mirroring `pyspark.ml.connect.base` and related ML classes.
+//! ML module mirroring `pyspark.ml` over Spark Connect: its estimators, transformers, models and
+//! evaluators, which send the `MlCommand`s of `pyspark.ml.util`'s `try_remote_*` wrappers.
 //!
 //! This module provides the foundation for machine learning in Spark Connect:
 //! - `Params`: parameter management for ML operators
@@ -1033,7 +1034,7 @@ impl MlOperator {
 
 /// Base trait for ML Estimators that fit to data and produce Models.
 ///
-/// Mirrors `pyspark.ml.connect.base.Estimator`.
+/// Mirrors `pyspark.ml.base.Estimator`, whose fit over Spark Connect is `try_remote_fit`'s.
 pub trait Estimator: Send + Sync {
     /// Get the operator definition for this estimator.
     fn operator(&self) -> &MlOperator;
@@ -1083,7 +1084,8 @@ pub trait Estimator: Send + Sync {
 
 /// Base trait for ML Transformers that apply transformations to data.
 ///
-/// Mirrors `pyspark.ml.connect.base.Transformer`.
+/// Mirrors `pyspark.ml.base.Transformer`, whose transform over Spark Connect is
+/// `try_remote_transform_relation`'s.
 pub trait Transformer: Send + Sync {
     /// Get the operator definition for this transformer.
     fn operator(&self) -> &MlOperator;
@@ -1143,7 +1145,7 @@ pub trait Transformer: Send + Sync {
 
 /// Base trait for ML Models (result of fitting an Estimator).
 ///
-/// Mirrors `pyspark.ml.connect.base.Model`.
+/// Mirrors `pyspark.ml.base.Model`.
 pub trait Model: Transformer + AsAny {
     /// Clone this model into a boxed trait object.
     fn clone_box(&self) -> Box<dyn Model>;
@@ -1239,7 +1241,8 @@ pub trait PredictionModel: Model {
 
 /// Base trait for ML Evaluators that measure model quality.
 ///
-/// Mirrors `pyspark.ml.connect.base.Evaluator`.
+/// Mirrors `pyspark.ml.evaluation.Evaluator`, whose evaluate over Spark Connect is
+/// `try_remote_evaluate`'s.
 pub trait Evaluator: Send + Sync {
     /// Get the operator definition for this evaluator.
     fn operator(&self) -> &MlOperator;
@@ -1343,7 +1346,7 @@ pub fn ml_string_array(
 /// Run an evaluator against a dataset via the ML `Evaluate` command and return the
 /// scalar metric.
 ///
-/// Mirrors `pyspark.ml.connect` evaluator.evaluate: build an `MlCommand::Evaluate`
+/// Mirrors `pyspark.ml.util.try_remote_evaluate`: build an `MlCommand::Evaluate`
 /// carrying the evaluator operator, its params, and the dataset relation, submit
 /// it, and read the returned metric literal from the `MlCommandResult`.
 fn evaluate_via_command(
