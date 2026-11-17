@@ -245,10 +245,12 @@ one job does three things:
   `e2e_*` files, such as `e2e_functions` and `e2e_streaming`, and the `e2e_*` ML live tests, such
   as `e2e_kmeans` and `e2e_random_forest`) against a live Connect server, merged into one report.
 - **Offline Python suite**: builds the extension and runs the offline test files that its step
-  names under `coverage.py`: `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py`, and
-  the `*_offline.py` files of the ML suites. No other workflow runs these files, so this step is
-  their gate: a failing test fails the job. `-rs` prints every skipped test with its reason. The
-  scope of the Python number is the hand-written shim, as `python/.coveragerc` defines it.
+  names under `coverage.py`: `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py`, the
+  `*_offline.py` files of the ML suites, and `test_type_stubs_offline.py`, which runs mypy, at the
+  version that the job pins, on a user's application. No other workflow runs these files, so this
+  step is their gate: a failing test fails the job. `-rs` prints every skipped test with its
+  reason. The scope of the Python number is the hand-written shim, as `python/.coveragerc`
+  defines it.
 - **Coverage floors**: the last step fails the job when a number is below its floor,
   `RUST_COVERAGE_FLOOR` (Rust line coverage) or `PYTHON_COVERAGE_FLOOR` (Python line and
   branch coverage), both set in the `env` block of the workflow. The step runs after the

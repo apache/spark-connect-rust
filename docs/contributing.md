@@ -204,6 +204,23 @@ CI runs the same command with `--check`:
 python scripts/gen_fn_dispatch.py --pyspark-src "$SPARK_HOME/python"
 ```
 
+The type stubs (`.pyi`) of the modules whose classes are native or whose functions are made at
+import time, such as `python/pyspark/sql/functions/*.pyi` and `python/pyspark/sql/dataframe.pyi`,
+are generated from PySpark 4.3.0's modules, so that type checkers see PySpark's API. A stub
+re-exports a name of another module only when the drop-in's module has it, so regenerate them
+after a change to the generator, to the tracked version or to the names of a module of the
+drop-in; the generator also writes their block of ruff excludes in `pyproject.toml`, and CI runs
+it with `--check`:
+
+```bash
+python scripts/gen_type_stubs.py --pyspark-src "$SPARK_HOME/python"
+```
+
+A module that comes to re-export a native class gets a stub when you add it to `STUB_MODULES` of
+the generator, and a public name that the drop-in's module has and PySpark's does not goes into its
+`EXTRAS`. `python/tests/test_type_stubs_offline.py` fails on a name that a stub misses, and runs
+mypy on a user's application.
+
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).
 
