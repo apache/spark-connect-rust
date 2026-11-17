@@ -127,7 +127,7 @@ def _case(layout, count):
         held = _Held(lambda row: row > 0, data[0])
         return data, ["c"], _Held(lambda values: values >= 1, value), held, RecursionError
     assert layout == "pandas rows"
-    pytest.importorskip("pandas")
+    pd = pytest.importorskip("pandas")
     # Each row and each cell is a step: of four cells a row, four of five checkpoints fall on
     # cells.
     count //= 2
@@ -135,7 +135,11 @@ def _case(layout, count):
     columns = [[f"{name} {i}" for i in range(count)] for name in names]
     last = object()
     columns[-1][-1] = last
-    frame = _customized_frame(dict(zip(names, columns)))
+    # Columns of objects keep the cells as given, which pandas 3 would otherwise keep as its `str`
+    # dtype, of no reference to them.
+    frame = _customized_frame({
+        name: pd.Series(column, dtype=object) for name, column in zip(names, columns)
+    })
     schema = T.StructType([T.StructField(name, T.StringType()) for name in names])
     # The rows of the frame refer to its cells until the conversion ends. The last cell, which
     # fails, is not one of those that `_OneHeld` compares, of which this would hold one.
@@ -161,18 +165,24 @@ class TestLocalDataConversionInterrupts:
         data, schema, _, _, failure = _case(layout, 8)
         with pytest.raises(failure):
             spark.createDataFrame(data, schema)
-        data, schema, in_part, held, failure = _case(layout, _COUNT)
-        in_part.arm()
-        held.arm()
-        probe = LocalDataConversionProbe(in_part, held, cancel=cancel)
-        interrupted = False
-        with probe:
-            try:
-                with pytest.raises(failure):
-                    probe.convert(lambda: spark.createDataFrame(data, schema))
-            except KeyboardInterrupt:
-                interrupted = True
-        assert not probe.failures, probe.failures
+        # The other thread takes the GIL at the checkpoints that the operating system schedules
+        # it at, of which only some fall in the part: a conversion in which it read the part at
+        # none is run again, a few times. With no checkpoint, it reads it in none.
+        for _ in range(5):
+            data, schema, in_part, held, failure = _case(layout, _COUNT)
+            in_part.arm()
+            held.arm()
+            probe = LocalDataConversionProbe(in_part, held, cancel=cancel)
+            interrupted = False
+            with probe:
+                try:
+                    with pytest.raises(failure):
+                        probe.convert(lambda: spark.createDataFrame(data, schema))
+                except KeyboardInterrupt:
+                    interrupted = True
+            assert not probe.failures, probe.failures
+            if "progress" in probe.observed:
+                break
         progress = probe.observed.get("progress")
         assert progress is not None, probe.observed
         assert progress["captured_at"] < probe.observed["conversion_ended_at"], probe.observed
