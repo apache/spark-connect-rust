@@ -124,6 +124,10 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<containers::MapContainer>(),
     )?;
     m.add(
+        "ProtoMessageMapContainer",
+        py.get_type::<containers::MessageMapContainer>(),
+    )?;
+    m.add(
         "ProtoDescriptor",
         py.get_type::<descriptors::PyDescriptor>(),
     )?;

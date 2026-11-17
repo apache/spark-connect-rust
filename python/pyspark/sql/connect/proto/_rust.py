@@ -51,6 +51,7 @@ DecodeError = _pyspark.ProtoDecodeError
 RepeatedScalarContainer = _pyspark.ProtoRepeatedScalarContainer
 RepeatedCompositeContainer = _pyspark.ProtoRepeatedCompositeContainer
 MapContainer = _pyspark.ProtoMapContainer
+MessageMapContainer = _pyspark.ProtoMessageMapContainer
 
 # As upb's containers: a repeated field is a MutableSequence, and a map a MutableMapping.
 collections.abc.MutableSequence.register(RepeatedScalarContainer)
@@ -359,6 +360,9 @@ def _make_class(full_name: str, qualname: str, module_name: str) -> type:
         },
     )
     _CLASSES[full_name] = cls
+    # As upb's classes: the number of each field, as ``Literal.STRING_FIELD_NUMBER``.
+    for field in descriptor.fields:
+        setattr(cls, field.name.upper() + "_FIELD_NUMBER", field.number)
     for nested in descriptor.nested_types:
         setattr(
             cls,
@@ -529,6 +533,32 @@ def _add_files_to_protobuf() -> None:
             pool.AddSerializedFile(_pyspark._proto_file_descriptor(file_name).serialized_pb)
         except Exception:  # pragma: no cover  # noqa: BLE001 - other descriptors of its names
             pass
+    _register_classes_in_protobuf(pool)
+
+
+def _register_classes_in_protobuf(pool: _Any) -> None:
+    """Register the classes of the messages of the files of the descriptor set of the runtime
+    (``_EMBEDDED_FILES``) in protobuf's default symbol database, by the descriptors of the default
+    pool, as protobuf's builder registers the classes of its generated modules
+    (``RegisterMessage``): ``symbol_database.Default().GetSymbol`` then gives them, which is how
+    PySpark's pickle of a message of a nested type (``Expression.Literal``) loads, through
+    protobuf's ``_InternalConstructMessage`` of the full name of its type. The database's own
+    classes (of the well-known types) stay. So do those of the files that the hook added to the
+    runtime for a plugin's module, when the package installs again: protobuf's lookups give
+    protobuf's classes of them (see ``_hook_protobuf_builder``)."""
+    try:
+        from google.protobuf import symbol_database
+
+        registered = symbol_database.Default()._classes
+    except Exception:  # pragma: no cover  # noqa: BLE001 - a protobuf without the database
+        return
+    for full_name, cls in _CLASSES.items():
+        try:
+            descriptor = pool.FindMessageTypeByName(full_name)
+        except KeyError:  # pragma: no cover - a file that the pool refused
+            continue
+        if descriptor.file.name in _EMBEDDED_FILES:
+            registered.setdefault(descriptor, cls)
 
 
 # The files of the descriptor set of the runtime, and those of them of the protos of Spark Connect.

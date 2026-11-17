@@ -43,6 +43,16 @@ pub(crate) struct ConversionBudget {
 }
 
 impl ConversionBudget {
+    /// A budget whose first checkpoint is after a full budget of steps, as for an operation that
+    /// is most often short, of which the many calls of a Python loop would each take one: the
+    /// operations of the messages of `pyspark.sql.connect.proto`, such as the parse, the copy and
+    /// the merge of a message, a step for each message.
+    pub(crate) fn full() -> Self {
+        ConversionBudget {
+            steps_until_checkpoint: AtomicUsize::new(CONVERSION_STEPS_PER_CHECKPOINT),
+        }
+    }
+
     /// One step of the conversion, which is a checkpoint when the budget is spent.
     #[inline]
     pub(crate) fn step(&self, py: Python<'_>) -> PyResult<()> {
