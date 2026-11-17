@@ -1803,6 +1803,78 @@ def test_udf_functions_are_pickled_when_their_plans_are_built_as_pyspark(session
         unpicklable.schema
 
 
+def test_deep_copies_copy_the_functions_of_udfs_as_pyspark(session):
+    # As PySpark's copy.deepcopy of a Column, a DataFrame, grouped data and a table argument,
+    # which deep-copies the function of each UDF with the memo of the call: a callable object, a
+    # bound method and a partial are copies, which a change of the original does not reach; a
+    # closure is the function itself, which runs with the value that it reads at the action.
+    import copy
+    import functools
+
+    from pyspark.sql.functions import udf, udtf
+
+    base = session.range(1, 2)
+
+    # Of the test, so that cloudpickle pickles it by value, for the Python worker of the server.
+    class Scale:
+        def __init__(self, factor):
+            self.factor = factor
+
+        def __call__(self, x):
+            return x * self.factor
+
+        def scaled(self, x):
+            return x * self.factor
+
+    @udtf(returnType="v long")
+    class Echo:
+        def eval(self, row):
+            yield (row["v"],)
+
+    def values(frame):
+        return [row[-1] for row in frame.collect()]
+
+    def callables():
+        scale, method, box, closure_box = Scale(10), Scale(10), [10], [10]
+
+        def closure(x):
+            return x * closure_box[0]
+
+        def change():
+            scale.factor = method.factor = box[0] = closure_box[0] = 100
+
+        return [
+            (scale, 10),
+            (method.scaled, 10),
+            (functools.partial(lambda x, box: x * box[0], box=box), 10),
+            (closure, 100),
+        ], change
+
+    holders = [
+        (lambda u: u("id"), lambda held: base.select(held)),
+        (lambda u: base.select(u("id").alias("v")), lambda held: held),
+        (lambda u: base.groupBy(u("id").alias("v")), lambda held: held.count().select("v")),
+        (lambda u: base.select(u("id").alias("v")).asTable(), Echo),
+    ]
+    for index in range(4):
+        for hold, plan_of in holders:
+            made, change = callables()
+            function, copied = made[index]
+            original = hold(udf(function, "long"))
+            deep = copy.deepcopy(original)
+            change()
+            assert values(plan_of(original)) == [100]
+            assert values(plan_of(deep)) == [copied]
+
+    # The copies of one deep copy share the copy of the callable object, as they share it.
+    scale = Scale(10)
+    u = udf(scale, "long")
+    column, frame, copied_scale = copy.deepcopy([u("id"), base.select(u("id")), scale])
+    copied_scale.factor = 7
+    scale.factor = 100
+    assert values(base.select(column)) == [7] and values(frame) == [7]
+
+
 def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     # As PySpark's, the functions are of pyspark.sql.functions.builtin: a UDF that captures one
     # pickles it by its name, of which the Python worker of the server imports PySpark's.

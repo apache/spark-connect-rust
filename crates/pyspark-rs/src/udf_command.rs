@@ -15,7 +15,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::PyBytes;
-use spark_connect::udf::CommandPickler;
+use spark_connect::udf::{CommandPickler, PicklerCopies};
 
 /// The command of a UDF or UDTF as the shims give it: the bytes of its pickle, which are sent as
 /// they are, or the pickler of a function of no arguments that returns them, which a request calls
@@ -35,24 +35,84 @@ impl UdfCommand {
     }
 }
 
+/// The object of the pickler of a command of the binding: a Python function of no arguments that
+/// returns the command, or an object that `CloudPickleSerializer().dumps` pickles, which the
+/// garbage collector sees through the DataFrame or the Column that holds it, and which a deep copy
+/// of them copies.
+struct PythonCommand {
+    object: Py<PyAny>,
+    calls: bool,
+}
+
+impl PythonCommand {
+    /// The pickler of this command.
+    fn pickler(self) -> CommandPickler {
+        CommandPickler::new(self, PythonCommand::pickle)
+    }
+
+    /// The command, which the function returns, or the pickle of the object.
+    fn pickle(&self) -> spark_connect_core::error::Result<Vec<u8>> {
+        Python::attach(|py| {
+            let object = self.object.bind(py);
+            if self.calls {
+                command_of(&object.call0()?)
+            } else {
+                crate::dataframe::py_cloudpickle(py, object)
+            }
+        })
+        .map_err(crate::errors::callback_error)
+    }
+}
+
 /// The pickler of `pickle`, a Python function of no arguments that returns the command, as the
 /// shims pickle the function of a UDF with `CloudPickleSerializer().dumps`, and that of a UDTF as
-/// `PythonUDTF.to_plan` does, of its error `UDTF_SERIALIZATION_ERROR`. Its object is `pickle`,
-/// which the garbage collector sees through the DataFrame or the Column that holds it.
+/// `PythonUDTF.to_plan` does, of its error `UDTF_SERIALIZATION_ERROR`.
 fn function_pickler(pickle: Py<PyAny>) -> CommandPickler {
-    CommandPickler::new(pickle, |pickle: &Py<PyAny>| {
-        Python::attach(|py| command_of(&pickle.bind(py).call0()?))
-            .map_err(crate::errors::callback_error)
-    })
+    PythonCommand {
+        object: pickle,
+        calls: true,
+    }
+    .pickler()
 }
 
 /// The pickler of `object`, which a request pickles with `CloudPickleSerializer().dumps`, as
 /// PySpark's `PythonUDF.to_plan` pickles the `(func, output_type)` of a map or group-map function.
 pub(crate) fn object_pickler(object: Py<PyAny>) -> CommandPickler {
-    CommandPickler::new(object, |object: &Py<PyAny>| {
-        Python::attach(|py| crate::dataframe::py_cloudpickle(py, object.bind(py)))
-            .map_err(crate::errors::callback_error)
-    })
+    PythonCommand {
+        object,
+        calls: false,
+    }
+    .pickler()
+}
+
+/// The copies of `picklers` of a deep copy of a Column, a table argument or a DataFrame: the
+/// pickler of `copy.deepcopy` of the object of each, with `memo`, in turn, as PySpark's deep copy
+/// of their expressions and plans deep-copies the function of each UDF, of its `PythonUDF`, with
+/// the memo of the call. So a function, of which `copy.deepcopy` gives the function itself, is
+/// shared with the original, and a callable object, a bound method and a `functools.partial` are
+/// copies, which the copies of the call share.
+pub(crate) fn deep_copied_picklers(
+    py: Python<'_>,
+    picklers: Vec<CommandPickler>,
+    memo: &Bound<'_, PyAny>,
+) -> PyResult<PicklerCopies> {
+    let mut copies = PicklerCopies::new();
+    if picklers.is_empty() {
+        return Ok(copies);
+    }
+    let deepcopy = py.import("copy")?.getattr("deepcopy")?;
+    for pickler in picklers {
+        let Some(command) = pickler.object().downcast_ref::<PythonCommand>() else {
+            continue;
+        };
+        let object = deepcopy.call1((command.object.bind(py), memo))?;
+        let copy = PythonCommand {
+            object: object.unbind(),
+            calls: command.calls,
+        };
+        copies.insert(&pickler, copy.pickler());
+    }
+    Ok(copies)
 }
 
 /// The Python objects of the picklers of `objects`, of the UDFs of a DataFrame or a Column that
@@ -62,8 +122,8 @@ pub(crate) fn visit_pickler_objects(
     visit: &pyo3::PyVisit<'_>,
 ) -> Result<(), pyo3::PyTraverseError> {
     for object in objects {
-        if let Some(object) = object.downcast_ref::<Py<PyAny>>() {
-            visit.call(object)?;
+        if let Some(command) = object.downcast_ref::<PythonCommand>() {
+            visit.call(&command.object)?;
         }
     }
     Ok(())

@@ -1557,6 +1557,44 @@ impl DataFrame {
         Ok(copy)
     }
 
+    /// The picklers of the UDFs and the UDTFs of the plan of this DataFrame, each once, in the
+    /// order of the build of a request, which a deep copy of the DataFrame copies. Not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn picklers(&self) -> Vec<crate::udf::CommandPickler> {
+        crate::udf::all_picklers(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
+    }
+
+    /// As [`DataFrame::deep_copy_with`], of `copies`, the copies of the picklers of the UDFs of the
+    /// plan, as PySpark's deep copy copies the functions of the UDFs of its plan: the copy is of
+    /// this plan with the copies of its picklers and of its Observations, of the same plan IDs,
+    /// which pickles the copied functions at each request, as PySpark's copy does. A copy in
+    /// another session, of plan IDs of its own, is that of [`DataFrame::deep_copy_with`], whose
+    /// relation carries the plan IDs. Not a stable API.
+    #[doc(hidden)]
+    pub fn deep_copy_with_pickler_copies(
+        &self,
+        session: SparkSession,
+        observations: Vec<(String, crate::observation::Observation)>,
+        copies: &crate::udf::PicklerCopies,
+    ) -> Result<DataFrame> {
+        if copies.is_empty()
+            || !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared())
+        {
+            return self.deep_copy_with(session, observations);
+        }
+        let plan = crate::udf::PicklerRebuild::new(copies, &observations)
+            .plan(&self.plan, Some(session.plan_ids()))
+            .unwrap_or_else(|| Arc::clone(&self.plan));
+        Ok(DataFrame {
+            session,
+            plan,
+            schema_cache: Arc::new(Mutex::new(self.cached_schema())),
+            is_local_cache: Arc::new(Mutex::new(None)),
+            execution: Arc::new(Mutex::new(None)),
+        })
+    }
+
     /// The levels of the plan of this DataFrame, as a pickled DataFrame records them for
     /// [`DataFrame::from_sent_relation_levels`]. Not a stable API.
     #[doc(hidden)]
@@ -3020,11 +3058,14 @@ impl DataFrame {
         &self,
         subquery_type: crate::expression::SubqueryType,
     ) -> crate::expression::SubqueryExpression {
-        crate::expression::SubqueryExpression::new(
-            Arc::clone(&self.plan),
-            self.session.plan_ids().id_of(&self.plan),
-            subquery_type,
-        )
+        crate::expression::SubqueryExpression {
+            plan_ids: Some(Arc::clone(self.session.plan_ids_shared())),
+            ..crate::expression::SubqueryExpression::new(
+                Arc::clone(&self.plan),
+                self.session.plan_ids().id_of(&self.plan),
+                subquery_type,
+            )
+        }
     }
 
     /// The scalar subquery of this DataFrame, which returns one row of one column, as a
@@ -6328,6 +6369,66 @@ mod plan_construction_tests {
             other.plan_ids().id_of(&moved.plan),
             spark.plan_ids().id_of(&df.plan)
         );
+    }
+
+    /// As PySpark's `copy.deepcopy` of a DataFrame of UDFs, which copies the functions of the UDFs
+    /// of its plan with the plan: the plan of the copy holds the copies of the picklers and of the
+    /// Observations that it is given, of the plan IDs of the DataFrame, so its requests pickle
+    /// the copies and its actions set the copied Observations. A copy in another session is of
+    /// the relation, as a copy without UDFs.
+    #[test]
+    fn a_deep_copy_of_copies_of_picklers_holds_them_of_the_plan_ids_as_pyspark_deep_copies() {
+        use crate::observation::Observation;
+        use crate::udf::{CommandPickler, CommonInlineUserDefinedFunctionExpression};
+        use crate::udf::{PicklerCopies, PythonUDFPayload};
+        let spark = session();
+        let observation = Observation::new("c");
+        let observed = observe_count(&spark.range(3).unwrap(), &observation);
+        let pickler = CommandPickler::new("f", |_| Ok(b"<original>".to_vec()));
+        let udf = CommonInlineUserDefinedFunctionExpression::new(
+            "f".to_string(),
+            true,
+            vec![],
+            PythonUDFPayload::pickled_at_build(DataType::Long, 100, pickler.clone(), "3.11".into()),
+        );
+        let df = observed.select([Column::new(
+            ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into(),
+        )]);
+        let mut copies = PicklerCopies::new();
+        copies.insert(
+            &pickler,
+            CommandPickler::new("f'", |_| Ok(b"<copied>".to_vec())),
+        );
+        let given = observation.detached();
+        let copy = df
+            .deep_copy_with_pickler_copies(
+                spark.clone(),
+                vec![("c".into(), given.clone())],
+                &copies,
+            )
+            .unwrap();
+        use prost::Message;
+        let sent = |frame: &DataFrame| frame.relation().unwrap().encode_to_vec();
+        let contains = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|w| w == part);
+        assert!(contains(&sent(&copy), b"<copied>") && !contains(&sent(&copy), b"<original>"));
+        assert!(contains(&sent(&df), b"<original>"));
+        let ids = spark.plan_ids();
+        assert_eq!(ids.id_of(&copy.plan), ids.id_of(&df.plan));
+        let held = copy.observations();
+        assert!(held.len() == 1 && held[0].1.same(&given));
+        report_count(&copy, 3);
+        assert_eq!(counts(&given), [3]);
+        assert!(counts(&observation).is_empty());
+        // Of no copies, or in another session: the copy of the relation.
+        let other = spark.new_session();
+        let moved = df
+            .deep_copy_with_pickler_copies(other, Vec::new(), &copies)
+            .unwrap();
+        assert!(matches!(moved.plan.as_ref(), LogicalPlan::Raw { .. }));
+        let plain = df
+            .deep_copy_with_pickler_copies(spark.clone(), Vec::new(), &PicklerCopies::new())
+            .unwrap();
+        assert!(matches!(plain.plan.as_ref(), LogicalPlan::Raw { .. }));
     }
 
     /// As PySpark's unpickled plan, which has copies of the Observations of the pickled one: a

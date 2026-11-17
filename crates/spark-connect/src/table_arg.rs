@@ -48,6 +48,24 @@ impl TableArg {
         }
     }
 
+    /// The picklers of the UDFs of the plan and of the expressions of this table argument, each
+    /// once, which a deep copy of it copies. Not a stable API.
+    #[doc(hidden)]
+    pub fn picklers(&self) -> Vec<crate::udf::CommandPickler> {
+        crate::udf::all_picklers(vec![crate::udf::PicklerHolder::Subquery(&self.subquery)])
+    }
+
+    /// This table argument with the copies `copies` of its picklers, as PySpark's deep copy of a
+    /// table argument copies the functions of the UDFs of its plan: its plan and its expressions
+    /// are rebuilt above each pickler that has a copy, and its plan keeps its plan ID. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn with_pickler_copies(&self, copies: &crate::udf::PicklerCopies) -> TableArg {
+        let mut subquery = self.subquery.clone();
+        crate::udf::PicklerRebuild::new(copies, &[]).subquery(&mut subquery);
+        TableArg { subquery }
+    }
+
     /// Check if partitioning has been applied.
     fn is_partitioned(&self) -> bool {
         !self.subquery.partition_spec.is_empty() || self.is_single_partition()
@@ -324,6 +342,79 @@ mod tests {
             "SubqueryExpression(plan=<plan 7>, type=table_arg, partition_spec=[a], \
              order_spec=[b])"
         );
+    }
+
+    /// As PySpark's `copy.deepcopy` of a table argument, which copies its plan with the functions
+    /// of its UDFs: the copy of a table argument of a DataFrame of a UDF holds the copy of its
+    /// pickler, and its plan, rebuilt, keeps the plan ID that its subquery refers to, which the
+    /// request of a UDTF of it sends the plan of.
+    #[test]
+    fn a_deep_copy_holds_the_copies_of_the_picklers_of_its_plan_of_its_plan_id() {
+        use crate::expression::ExpressionNode;
+        use crate::udf::{CommandPickler, CommonInlineUserDefinedFunctionExpression};
+        use crate::udf::{PicklerCopies, PythonUDFPayload};
+        use prost::Message;
+        let spark = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session");
+        let pickler = CommandPickler::new("f", |_| Ok(b"<original>".to_vec()));
+        let udf = CommonInlineUserDefinedFunctionExpression::new(
+            "f".to_string(),
+            true,
+            vec![],
+            PythonUDFPayload::pickled_at_build(
+                crate::types::DataType::Long,
+                100,
+                pickler.clone(),
+                "3.11".into(),
+            ),
+        );
+        let df = spark.range(1).unwrap().select([Column::new(
+            ExpressionNode::CommonInlineUserDefinedFunction(Box::new(udf)).into(),
+        )]);
+        let table = TableArg::new(df);
+        assert_eq!(table.picklers(), std::slice::from_ref(&pickler));
+        let mut copies = PicklerCopies::new();
+        copies.insert(
+            &pickler,
+            CommandPickler::new("f'", |_| Ok(b"<copied>".to_vec())),
+        );
+        let copy = table.with_pickler_copies(&copies);
+        assert!(!std::sync::Arc::ptr_eq(
+            &copy.subquery.plan,
+            &table.subquery.plan
+        ));
+        assert_eq!(copy.subquery.plan_id, table.subquery.plan_id);
+        let call = |table: &TableArg| {
+            let udtf = spark.tvf().udtf(
+                "t",
+                [table.to_column()],
+                None,
+                300,
+                vec![],
+                "3.11".into(),
+                false,
+            );
+            udtf.relation().unwrap()
+        };
+        let Some(proto::relation::RelType::WithRelations(with)) = call(&copy).rel_type else {
+            panic!("a WithRelations");
+        };
+        let reference = &with.references[0];
+        assert_eq!(
+            reference.common.as_ref().and_then(|common| common.plan_id),
+            Some(table.subquery.plan_id)
+        );
+        let bytes = reference.encode_to_vec();
+        let contains = |part: &[u8]| bytes.windows(part.len()).any(|w| w == part);
+        assert!(contains(b"<copied>") && !contains(b"<original>"));
+        // Without copies, the same table argument.
+        let same = table.with_pickler_copies(&PicklerCopies::new());
+        assert!(std::sync::Arc::ptr_eq(
+            &same.subquery.plan,
+            &table.subquery.plan
+        ));
     }
 
     #[test]
