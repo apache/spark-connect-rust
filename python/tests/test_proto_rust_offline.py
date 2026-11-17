@@ -38,6 +38,9 @@ import random
 import subprocess
 import sys
 import textwrap
+import threading
+import time
+import warnings
 
 import pytest
 from pyspark import _pyspark
@@ -262,6 +265,240 @@ def test_random_messages_of_every_type_encode_parse_and_print_as_upb(upb, seed):
     assert not problems, problems[:10]
 
 
+def _varint(n, length=None):
+    """The varint of `n`, in `length` bytes (an overlong one) if given."""
+    out = bytearray()
+    while True:
+        out.append(n & 0x7F)
+        n >>= 7
+        if not n and (length is None or len(out) >= length):
+            return bytes(out)
+        out[-1] |= 0x80
+
+
+def _tag(number, wire_type, length=None):
+    return _varint((number << 3) | wire_type, length)
+
+
+def _field(number, payload):
+    """The field `number` of the length-delimited `payload`."""
+    return _tag(number, 2) + _varint(len(payload)) + payload
+
+
+def _parsed(cls, data):
+    """What a message of `cls` that parses `data` is: its bytes, text and size, or the error."""
+
+    def parse():
+        message = cls.FromString(data)
+        return message.SerializeToString(deterministic=True), str(message), message.ByteSize()
+
+    return _outcome(parse)
+
+
+def test_tags_of_more_than_32_bits_or_five_bytes_are_corrupt_as_upbs(upb):
+    # upb reads a tag as a varint of at most five bytes that holds 32 bits, so a field number of
+    # 2^29 or more is corrupt, rather than cut to its bits (2^32 + 1 as field 1) or kept as an
+    # unknown field: of a field, of a group and its fields, and of the fields of a map entry. A
+    # field number of 0 is corrupt, but among the fields of a group. A failure in a message that
+    # the message holds is the error of the message parsed, which names its type.
+    group, end = _tag(5, 3), _tag(5, 4)
+    fields = [
+        _tag(2**32 + 1, 0) + _varint(5),
+        _tag(2**32, 0) + _varint(5),
+        _tag(2**31, 0) + _varint(5),
+        _tag(2**29, 0) + _varint(5),
+        _tag(2**29 - 1, 0) + _varint(5),
+        _tag(2**61 + 1, 0) + _varint(5),
+        _tag(1, 0, length=5) + _varint(5),
+        _tag(1, 0, length=6) + _varint(5),
+        _tag(2**29 - 1, 0, length=6) + _varint(5),
+        _tag(2**29 - 1, 7),
+        _tag(0, 0) + _varint(5),
+        end,
+        _tag(2**29 + 3, 3) + _tag(2**29 + 3, 4),
+        _tag(2**29 - 1, 3) + _tag(2**29 - 1, 4),
+        group + _tag(2**29, 0) + _varint(1) + end,
+        group + _tag(2**29 - 1, 0) + _varint(1) + end,
+        group + _tag(1, 0, length=6) + _varint(1) + end,
+        group + _tag(0, 0) + _varint(1) + end,
+        group + _tag(1, 7) + end,
+        group + _varint(((2**32 + 5) << 3) | 4),
+        group + _tag(5, 4, length=5),
+        group + _tag(5, 4, length=6),
+        group + _tag(6, 4),
+    ]
+    for data in fields:
+        expected = _parsed(upb("spark.connect.Ints"), data)
+        assert _parsed(ours("spark.connect.Ints"), data) == expected, data.hex()
+    key, value = _field(1, b"k"), _field(2, b"v")
+    entries = [
+        _tag(2**32 + 1, 2) + _varint(1) + b"k" + value,
+        _tag(2**29, 2) + _varint(1) + b"k" + value,
+        key + _tag(2**32 + 2, 2) + _varint(1) + b"v",
+        _tag(1, 2, length=5) + _varint(1) + b"k" + value,
+        _tag(1, 2, length=6) + _varint(1) + b"k" + value,
+        key + value + _tag(0, 0) + _varint(1),
+        key + value + _tag(3, 3) + _tag(0, 0) + _varint(1) + _tag(3, 4),
+    ]
+    for entry in entries:
+        data = _field(3, entry)  # an entry of Read.DataSource.options
+        expected = _parsed(upb("spark.connect.Read.DataSource"), data)
+        assert _parsed(ours("spark.connect.Read.DataSource"), data) == expected, entry.hex()
+    corrupt = _tag(2**29, 0) + _varint(1)
+    for full_name, data in [
+        ("spark.connect.Plan", _field(1, corrupt)),  # of its root
+        ("spark.connect.Plan", _field(1, _field(2, _field(2, _field(2, b"\xff"))))),  # bad UTF-8
+        ("spark.connect.Plan", _field(1, b"\x0a\x05")),  # truncated
+        ("spark.connect.SQL", _field(4, _field(1, b"a") + _field(2, corrupt))),  # of a map value
+        ("spark.connect.Expression.UnresolvedFunction", _field(2, corrupt)),  # of a repeated one
+    ]:
+        assert _parsed(ours(full_name), data) == _parsed(upb(full_name), data), data.hex()
+
+
+def test_map_entries_of_fields_of_no_field_of_their_type_are_unknown_fields_as_upbs(upb):
+    # upb decodes a map entry as a message of the entry type and sets its key and value in the
+    # map, but not when the entry has a field that the type has no field for, or a key or a value
+    # of another wire type (which upb reads as such a field): the message keeps the entry in its
+    # unknown fields, among the others, encoded again as upb encodes the entry message (its key
+    # and value, a scalar of the default not, then those fields), and DiscardUnknownFields drops
+    # it. A key, a value or an entry that is not there is the default, and the last of a key or a
+    # value that is there twice wins, as of the fields of a message.
+    def parsed(cls, full_name, field, data, before=None):
+        def parse():
+            message = cls(full_name)()
+            if before:
+                before(getattr(message, field))
+            message.MergeFromString(data)
+            found = [_comparable(getattr(message, field)), message.ByteSize(), str(message)]
+            found.append(message.SerializeToString(deterministic=True))
+            message.DiscardUnknownFields()
+            return found + [message.SerializeToString(deterministic=True)]
+
+        return _outcome(parse)
+
+    key, value, unknown = _field(1, b"k"), _field(2, b"v"), _tag(3, 0) + _varint(7)
+    string_entries = [
+        key + value,
+        key + value + unknown,
+        unknown + key + value,
+        key + unknown + value,
+        unknown,
+        b"",
+        key,
+        value,
+        value + key,
+        key + value + _tag(4, 1) + bytes(8),
+        key + value + _tag(4, 5) + bytes(4),
+        key + value + _field(5, b"\xff"),  # not read as UTF-8
+        key + value + _tag(6, 3) + _tag(1, 0) + _varint(1) + _tag(6, 4),
+        key + value + _tag(2**29 - 1, 0) + _varint(1),
+        _tag(1, 0) + _varint(5) + value,  # a key of another wire type
+        _tag(1, 5) + b"abcd" + value,
+        _tag(1, 3) + _tag(1, 4) + value,
+        key + _tag(1, 0) + _varint(5) + value,
+        key + _tag(2, 0) + _varint(5),  # a value of another wire type
+        key + _tag(2, 3) + _tag(2, 4),
+        _field(1, b"") + value + unknown,
+        key + _field(2, b"") + unknown,
+        _field(1, b"") + _field(2, b"") + unknown,
+        _field(1, b"a") + _field(1, b"b") + value + unknown,
+        key + _field(2, b"x") + _field(2, b"y") + unknown,
+        _tag(1, 2, length=2) + _varint(1) + b"k" + value + unknown,
+        key + value + _tag(3, 4),
+        key + value + _tag(5, 2) + _varint(5) + b"ab",
+        _field(1, b"\xff") + value + unknown,
+    ]
+    data_source = "spark.connect.Read.DataSource"
+    for entry in string_entries:
+        data = _field(3, entry)
+        expected = parsed(upb, data_source, "options", data)
+        assert parsed(ours, data_source, "options", data) == expected, entry.hex()
+    # Among the other unknown fields of the message, and into a map that has the key.
+    data = _tag(9, 0) + _varint(1) + _field(3, key + value + unknown) + _tag(10, 0) + _varint(2)
+    data += _field(3, _field(1, b"a") + value) + _field(3, _field(1, b"b") + value + unknown)
+    assert parsed(ours, data_source, "options", data) == parsed(upb, data_source, "options", data)
+
+    def set_k(options):
+        options["k"] = "old"
+
+    data = _field(3, key + value + unknown)
+    expected = parsed(upb, data_source, "options", data, before=set_k)
+    assert parsed(ours, data_source, "options", data, before=set_k) == expected
+
+    name, unknown = _field(1, b"a"), _tag(5, 0) + _varint(1)
+    message_entries = [
+        name + _field(2, b""),
+        name + _field(2, b"") + unknown,
+        name + unknown,  # of no value, which is then not written
+        unknown,
+        name,
+        name + _tag(2, 0) + _varint(1),
+        name + _tag(2, 0) + _varint(1) + _field(2, b""),
+        name + _field(2, _tag(999, 0) + _varint(1)),  # of an unknown field of the value
+        name + _field(2, _tag(999, 0) + _varint(1)) + unknown,
+        name + _field(2, _field(1, b"\x10\x03")) + _field(2, _field(1, b"\x18\x01")) + unknown,
+        name + _field(2, _field(1, _tag(3, 0) + _varint(7))) + unknown,
+        _tag(1, 0) + _varint(5) + _field(2, b""),
+        name + _field(2, b"\xff") + unknown,
+    ]
+    for entry in message_entries:
+        data = _field(4, entry)  # an entry of SQL.named_arguments, of Expression values
+        expected = parsed(upb, "spark.connect.SQL", "named_arguments", data)
+        assert parsed(ours, "spark.connect.SQL", "named_arguments", data) == expected, entry.hex()
+
+
+_UNKNOWN = _tag(999, 0) + _varint(1)
+
+
+def _messages_of_levels(cls, levels, shape):
+    """A message of `levels` levels and its messages of every level, by depth: Relations of
+    limits ("message"), whose last has a SQL of a map value too ("map"), or Expressions of a
+    function of one argument, of a repeated field ("repeated")."""
+    if shape == "repeated":
+        root = cls("spark.connect.Expression")()
+        messages, current = [root], root
+        for _ in range(levels):
+            function = current.unresolved_function
+            current = function.arguments.add()
+            messages += [function, current]
+        return root, messages
+    root = cls("spark.connect.Relation")()
+    messages, current = [root], root
+    for _ in range(levels):
+        limit = current.limit
+        limit.limit = 1
+        current = limit.input
+        messages += [limit, current]
+    if shape == "map":
+        sql = current.sql
+        messages += [sql, sql.named_arguments["a"]]
+    return root, messages
+
+
+def test_discard_unknown_fields_discards_those_of_63_levels_as_upbs(upb):
+    # upb's DiscardUnknownFields discards the unknown fields of the message and of its messages
+    # down to 62 levels below it (upb_Message_DiscardUnknown of a maximum depth of 64), of message
+    # fields, repeated fields and map values, and leaves those of the deeper messages.
+    def discarded(cls, levels, shape, start):
+        root, messages = _messages_of_levels(cls, levels, shape)
+        for message in messages:
+            message.MergeFromString(_UNKNOWN)
+        messages[start].DiscardUnknownFields()
+        return root.SerializeToString(deterministic=True)
+
+    for case in [
+        (10, "message", 0),
+        (40, "message", 0),
+        (100, "message", 0),
+        (60, "message", 41),
+        (40, "repeated", 0),
+        (30, "map", 0),
+        (31, "map", 0),
+        (32, "map", 0),
+    ]:
+        assert discarded(ours, *case) == discarded(upb, *case), case
+
+
 _LOCKSTEP_TYPES = [
     "spark.connect.Relation",
     "spark.connect.Expression",
@@ -479,8 +716,11 @@ _SEQUENCE_CASES = [
     ("[3]", lambda c: c[3]),
     ("[::-1]", lambda c: c[::-1]),
     ('["a"]', lambda c: c["a"]),
+    ("[2**100]", lambda c: c[2**100]),
+    ("del [2**100]", lambda c: c.__delitem__(2**100)),
     ("== list", lambda c: c == list(c)),
     ("in", lambda c: c[0] in c),
+    ("in, of no __contains__", lambda c: hasattr(c, "__contains__")),
     ("hash", hash),
     ("+ list", lambda c: c + []),
     ("deepcopy", copy.deepcopy),
@@ -505,6 +745,14 @@ _SCALAR_SEQUENCE_CASES = [
     ("append object", lambda c: c.append(object())),
     ("setitem", lambda c: (c.__setitem__(0, c[1]), list(c))),
     ("setitem extended slice", lambda c: c.__setitem__(slice(None, None, 2), [c[0]])),
+    # As upb's: a slice of another length first moves the items after it, and then the values are
+    # set in turn, so one that fails leaves those before it set.
+    ("setitem slice, failing", lambda c: c.__setitem__(slice(0, 2), [c[2], object()])),
+    ("setitem longer slice, failing", lambda c: c.__setitem__(slice(0, 1), [c[2], c[1], object()])),
+    ("setitem shorter slice, failing", lambda c: c.__setitem__(slice(0, 2), [object()])),
+    ("setitem extended slice of a generator", lambda c: c.__setitem__(slice(None, None, 2), (v for v in c[:2]))),
+    ("setitem slice of 5", lambda c: c.__setitem__(slice(0, 1), 5)),
+    ("extend, failing", lambda c: c.extend([c[0], object()])),
     ("count", lambda c: c.count(c[0])),
     ("index", lambda c: c.index(c[0])),
 ]
@@ -516,6 +764,8 @@ _MESSAGE_SEQUENCE_CASES = [
     ("append other type", lambda c: (_outcome(lambda: c.append(c[0].unresolved_attribute)), len(c))),
     ("insert 5", lambda c: c.insert(0, 5)),
     ("setitem", lambda c: c.__setitem__(0, c[1])),
+    ('setitem ["a"]', lambda c: c.__setitem__("a", c[1])),
+    ("setitem 9", lambda c: c.__setitem__(9, c[1])),
     ("remove", lambda c: (c.remove(c[1]), len(c))),
 ]
 
@@ -611,6 +861,215 @@ def test_containers_and_messages_behave_as_upbs(upb, make, cases):
         )
 
 
+class _Index:
+    """An object whose `__index__` is what `index` gives, which may use a container first."""
+
+    def __init__(self, index):
+        self.index = index
+
+    def __index__(self):
+        return self.index()
+
+
+class _Equal:
+    """An object whose `__eq__` is `result` of anything, after it runs `effect`."""
+
+    def __init__(self, result, effect):
+        self.result, self.effect = result, effect
+
+    def __eq__(self, other):
+        self.effect()
+        return self.result
+
+
+def _then(values, effect):
+    """The values of `values`, each followed by `effect`."""
+    for value in values:
+        yield value
+        effect()
+
+
+def _then_raising(values, effect):
+    """The values of `_then`, then a KeyError."""
+    yield from _then(values, effect)
+    raise KeyError("values")
+
+
+def _extend_of_a_list_its_value_appends_to(container):
+    values = [2]
+    values.insert(0, _Index(lambda: values.append(5) or 1))
+    container.extend(values)
+
+
+def _pop_out_of_range(container, effect):
+    """`container.pop(9)` of a container of fewer items, whose warning runs `effect`."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("always")
+        warnings.showwarning = lambda *args, **kwargs: effect()
+        return container.pop(9)
+
+
+def _name(expression):
+    return expression.unresolved_attribute.unparsed_identifier
+
+
+# Python code that a method of a container of the ints 3, 4, ... runs, which uses the container.
+_PYTHON_CODE_OF_INTS = [
+    # The __index__ of a value: upb converts it, then appends, inserts or sets it in the container
+    # as it is by then, where a write past its end is lost.
+    ("append, reading the length", [], lambda c: c.append(_Index(lambda: len(c)))),
+    ("append, appending", [3], lambda c: c.append(_Index(lambda: c.append(7) or 1))),
+    ("append, clearing", [3], lambda c: c.append(_Index(lambda: c.clear() or 1))),
+    ("insert, appending", [3, 4], lambda c: c.insert(0, _Index(lambda: c.append(7) or 1))),
+    ("set, appending", [3], lambda c: c.__setitem__(0, _Index(lambda: c.append(7) or 1))),
+    ("set, clearing", [3, 4], lambda c: c.__setitem__(1, _Index(lambda: c.clear() or 9))),
+    ("set, popping", [3, 4], lambda c: c.__setitem__(-1, _Index(lambda: c.pop() and 9))),
+    ("set a slice, appending", [3, 4], lambda c: c.__setitem__(slice(0, 1), [_Index(lambda: c.append(7) or 1)])),
+    ("extend, appending", [3], lambda c: c.extend([_Index(lambda i=i: c.append(7) or i) for i in (1, 2)])),
+    ("extend, clearing and failing", [3, 4], lambda c: c.extend([_Index(lambda: c.clear() or 1), "x"])),
+    ("extend, of a list that a value appends to", [3], _extend_of_a_list_its_value_appends_to),
+    # The __index__ of an index or of a bound of a slice: upb reads the length of the container
+    # before it, and checks the index against that.
+    ("insert at, appending", [3, 4], lambda c: c.insert(_Index(lambda: c.append(7) or 5), 1)),
+    ("insert at, clearing", [3, 4], lambda c: c.insert(_Index(lambda: c.clear() or 1), 1)),
+    ("get at, appending", [3], lambda c: c[_Index(lambda: c.append(7) or 1)]),
+    ("get from, appending", [3], lambda c: c[_Index(lambda: c.append(7) or 0) :]),
+    ("set at, appending", [3], lambda c: c.__setitem__(_Index(lambda: c.append(7) or 1), 5)),
+    ("set at, clearing", [3, 4], lambda c: c.__setitem__(_Index(lambda: c.clear() or 1), 5)),
+    ("set from, appending", [3, 4], lambda c: c.__setitem__(slice(_Index(lambda: c.append(7) or 0), 1), [5])),
+    ("delete at, appending", [3], lambda c: c.__delitem__(_Index(lambda: c.append(7) or 1))),
+    ("delete from, appending", [3, 4], lambda c: c.__delitem__(slice(_Index(lambda: c.append(7) or 0), 1))),
+    ("pop at, appending", [3, 4], lambda c: c.pop(_Index(lambda: c.append(7) or 0))),
+    ("pop at, clearing", [3, 4], lambda c: c.pop(_Index(lambda: c.clear() or 0))),
+    ("pop past the end, warning and appending", [3, 4], lambda c: _pop_out_of_range(c, lambda: c.append(7))),
+    ("pop past the end, warning and clearing", [3, 4], lambda c: _pop_out_of_range(c, c.clear)),
+    # An iterable: upb takes its values (of PySequence_Fast) before it appends or sets them, and
+    # an extend that fails leaves the container of the length that it had.
+    ("extend, of a generator that appends", [], lambda c: c.extend(c.append(1) or v for v in [2])),
+    ("extend, of a generator that appends after", [], lambda c: c.extend(_then([1, 2], lambda: c.append(9)))),
+    ("extend, of a generator that clears", [3], lambda c: c.extend(_then([1, 2], c.clear))),
+    ("extend, of a generator that appends and fails", [3], lambda c: c.extend(_then_raising([1], lambda: c.append(9)))),
+    ("set a slice, of a generator that appends", [3, 4], lambda c: c.__setitem__(slice(0, 1), (c.append(8) or v for v in [5, 6]))),
+    ("set an extended slice, of a generator that appends", [3, 4, 5], lambda c: c.__setitem__(slice(None, None, 2), (c.append(1) or v for v in [7, 8]))),
+    # An __eq__: upb's remove compares the items of the container as it is, among as many as it
+    # had, `in` reads them in turn, and == compares a list of them.
+    ("remove, appending", [3, 4], lambda c: c.remove(_Equal(True, lambda: c.append(7)))),
+    ("remove, popping", [3, 4, 5], lambda c: c.remove(_Equal(False, c.pop))),
+    ("in, clearing", [3, 4], lambda c: _Equal(False, c.clear) in c),
+    ("==, appending", [3, 4], lambda c: c == [_Equal(True, lambda: c.append(7))] * 2),
+    ("==, clearing", [3, 4], lambda c: c == [_Equal(True, c.clear)] * 2),
+    # The key of a sort: upb sets the sorted items at their positions of the container as it is.
+    ("sort, appending", [3, 1, 2], lambda c: c.sort(key=lambda v: c.append(9) or v)),
+    ("sort, popping", [3, 1, 2], lambda c: c.sort(key=lambda v: c.pop() and v)),
+]  # fmt: skip
+
+# Where upb then reads or writes past the end of the array of a container that the Python code
+# cleared (it reads a stale item, or the process ends): a read raises upb's IndexError, and an
+# assignment, an insertion or a deletion takes the container as it is.
+_PYTHON_CODE_OF_INTS_PAST_THE_END = [
+    ("get at, clearing", [3, 4], lambda c: c[_Index(lambda: c.clear() or 1)], ("raise", "IndexError", "list index out of range"), []),
+    ("get from, clearing", [3, 4], lambda c: c[_Index(lambda: c.clear() or 0) :], ("ok", []), []),
+    ("insert, clearing", [3, 4], lambda c: c.insert(5, _Index(lambda: c.clear() or 1)), ("ok", None), [1]),
+    ("set a slice, clearing", [3, 4, 5], lambda c: c.__setitem__(slice(0, 1), _then([5, 6], c.clear)), ("ok", None), [5, 6]),
+    ("delete at, clearing", [3, 4], lambda c: c.__delitem__(_Index(lambda: c.clear() or 1)), ("ok", None), []),
+    ("delete from, clearing", [3, 4], lambda c: c.__delitem__(slice(_Index(lambda: c.clear() or 0), 2)), ("ok", None), []),
+    ("remove, clearing", [3, 4], lambda c: c.remove(_Equal(True, c.clear)), ("ok", None), []),
+]  # fmt: skip
+
+# The same of a container of the messages a, b and c.
+_PYTHON_CODE_OF_MESSAGES = [
+    ("sort, adding", lambda c: c.sort(key=lambda e: (c.add(), _name(e))[1])),
+    ("sort, popping", lambda c: c.sort(key=lambda e: (len(c) > 1 and c.pop(), _name(e))[1])),
+    ("sort, clearing", lambda c: c.sort(key=lambda e: (c.clear(), _name(e))[1])),
+    ("remove, adding", lambda c: c.remove(_Equal(True, c.add))),
+    ("remove, popping", lambda c: c.remove(_Equal(False, c.pop))),
+    ("==, adding", lambda c: c == [_Equal(True, c.add)] * 3),
+    ("get at, adding", lambda c: c[_Index(lambda: (c.add(), 3)[1])]),
+    ("insert at, adding", lambda c: c.insert(_Index(lambda: (c.add(), 5)[1]), c[0])),
+    ("delete at, adding", lambda c: c.__delitem__(_Index(lambda: (c.add(), 3)[1]))),
+    ("delete from, adding", lambda c: c.__delitem__(slice(_Index(lambda: (c.add(), 0)[1]), 1))),
+    ("pop past the end, warning and adding", lambda c: _pop_out_of_range(c, c.add)),
+    ("pop past the end, warning and clearing", lambda c: _pop_out_of_range(c, c.clear)),
+]  # fmt: skip
+
+_PYTHON_CODE_OF_MESSAGES_PAST_THE_END = [
+    ("remove, clearing", lambda c: c.remove(_Equal(True, c.clear))),
+    ("delete at, clearing", lambda c: c.__delitem__(_Index(lambda: (c.clear(), 1)[1]))),
+]
+
+# The same of a map of the strings a: 1 and b: 2.
+_PYTHON_CODE_OF_MAPS = [
+    ("==, setting", lambda c: c == {"a": _Equal(True, lambda: c.__setitem__("z", "9")), "b": "2"}),
+    ("==, clearing", lambda c: c == {"a": _Equal(True, c.clear), "b": "2"}),
+    ("update, of a generator that sets", lambda c: c.update((c.__setitem__("g", "0") or p) for p in [("x", "1"), ("y", "2")])),
+    ("MergeFrom, of a generator that sets", lambda c: c.MergeFrom((c.__setitem__("g", "0") or p) for p in [("x", "1")])),
+    ("update, of keys that clear", lambda c: c.update(type("M", (), {"keys": lambda self: c.clear() or ["x"], "__getitem__": lambda self, k: "1"})())),
+]  # fmt: skip
+
+
+@pytest.mark.filterwarnings("ignore:pop index out of range:FutureWarning")
+def test_containers_that_their_python_code_changes_behave_as_upbs(upb):
+    # The Python code that a method of a container runs (the __index__ of a value, of an index or
+    # of a bound of a slice, an iterable, an __eq__, the key of a sort, a warning) may use the
+    # container, as upb's allow, and the method then changes the container as it is, in upb's
+    # order: none raises PyO3's PanicException ("Already borrowed", a BaseException), of a borrow
+    # of the container that it held while the code ran. Nor does one of another thread.
+    def run(cls, full_name, field, items, fn):
+        message = cls(full_name)(**{field: items})
+        container = getattr(message, field)
+        outcome = _outcome(lambda: fn(container))
+        return outcome, _comparable(container), message.SerializeToString(deterministic=True)
+
+    for label, items, fn in _PYTHON_CODE_OF_INTS:
+        expected = run(upb, "spark.connect.Ints", "values", items, fn)
+        assert run(ours, "spark.connect.Ints", "values", items, fn) == expected, label
+    for label, items, fn, outcome, after in _PYTHON_CODE_OF_INTS_PAST_THE_END:
+        found = run(ours, "spark.connect.Ints", "values", items, fn)
+        assert found[:2] == (outcome, ("repeated", after)), label
+    arguments = [{"unresolved_attribute": {"unparsed_identifier": n}} for n in "abc"]
+    function = "spark.connect.Expression.UnresolvedFunction"
+    for label, fn in _PYTHON_CODE_OF_MESSAGES:
+        expected = run(upb, function, "arguments", arguments, fn)
+        assert run(ours, function, "arguments", arguments, fn) == expected, label
+    for label, fn in _PYTHON_CODE_OF_MESSAGES_PAST_THE_END:
+        found = run(ours, function, "arguments", arguments, fn)
+        assert found[:2] == (("ok", None), ("repeated", [])), label
+    options = {"a": "1", "b": "2"}
+    for label, fn in _PYTHON_CODE_OF_MAPS:
+        expected = run(upb, "spark.connect.Read.DataSource", "options", options, fn)
+        assert run(ours, "spark.connect.Read.DataSource", "options", options, fn) == expected, label
+
+    # One thread extends a container of the values of a slow generator while another appends.
+    def extend_while_appending(cls):
+        message = cls("spark.connect.Ints")()
+        errors = []
+
+        def slowly():
+            for i in range(200):
+                time.sleep(0.0002)
+                yield i
+
+        def append():
+            for i in range(50):
+                try:
+                    message.values.append(i)
+                except BaseException as e:  # a PanicException is one
+                    errors.append(type(e).__name__)
+                    return
+                time.sleep(0.0005)
+
+        thread = threading.Thread(target=append)
+        thread.start()
+        try:
+            message.values.extend(slowly())
+        except BaseException as e:
+            errors.append(type(e).__name__)
+        thread.join()
+        return errors, len(message.values)
+
+    assert extend_while_appending(ours) == extend_while_appending(upb) == ([], 250)
+
+
 _UNSET_CHILD_OPERATIONS = {
     "SerializeToString": lambda c: c.SerializeToString(),
     "ListFields": lambda c: c.ListFields(),
@@ -661,6 +1120,17 @@ def test_unset_children_set_in_their_parents_as_upbs(upb):
     for label, operation in _UNSET_CHILD_OPERATIONS.items():
         assert run(ours, operation) == run(upb, operation), label
 
+    # An assignment to an item of a repeated message field sets its unset message too, and then
+    # fails, of its index or not.
+    def assign(cls, index):
+        relation = cls("spark.connect.Relation")()
+        expressions = relation.project.expressions
+        outcome = _outcome(lambda: expressions.__setitem__(index, cls("spark.connect.Expression")()))
+        return outcome, relation.HasField("project")
+
+    for index in (0, "a"):
+        assert assign(ours, index) == assign(upb, index), index
+
     # An unset child of a member of a oneof stays that member's after another member is set, a
     # merge of its parent sets it, and a copy of its parent that has no such field leaves it so.
     for cls in (upb, ours):
@@ -676,6 +1146,96 @@ def test_unset_children_set_in_their_parents_as_upbs(upb):
         relation.MergeFrom(source)
         sql.query += "!"
         assert relation.sql.query == "q!"
+
+
+def _nested_limits(levels):
+    """The mapping of the fields of a Relation of `levels` limits."""
+    fields = {}
+    for _ in range(levels):
+        fields = {"limit": {"limit": 1, "input": fields}}
+    return fields
+
+
+def _nested_arguments(levels):
+    """The mapping of the fields of an Expression of `levels` functions of one argument."""
+    fields = {}
+    for _ in range(levels):
+        fields = {"unresolved_function": {"function_name": "f", "arguments": [fields]}}
+    return fields
+
+
+def _relation_bytes(levels, unknown_at):
+    """The bytes of a Relation of `levels` limits (`Relation{limit: Limit{input: Relation{...},
+    limit: 1}}`), the Relation of each level that `unknown_at` takes of the unknown field 999."""
+    data = _UNKNOWN if unknown_at(levels) else b""
+    for level in reversed(range(levels)):
+        limit = _field(1, data) + _tag(2, 0) + _varint(1)
+        data = _field(8, limit) + (_UNKNOWN if unknown_at(level) else b"")
+    return data
+
+
+def test_messages_of_nested_mappings_build_as_upbs(upb):
+    # A constructor, add(**kwargs) and a map of messages take a mapping of the fields of a
+    # message, whose message fields take mappings too, a mapping a level: as upb's, here of 300
+    # levels (see test_deep_messages_discard_and_build_on_a_small_stack for thousands).
+    def built(cls):
+        relation = cls("spark.connect.Relation")(**_nested_limits(300))
+        function = cls("spark.connect.Expression.UnresolvedFunction")()
+        function.arguments.add(**_nested_arguments(300))
+        sql = cls("spark.connect.SQL")(named_arguments={"a": _nested_arguments(300)})
+        return [m.SerializeToString(deterministic=True) for m in (relation, function, sql)]
+
+    assert built(ours) == built(upb)
+
+
+def test_deep_messages_discard_and_build_on_a_small_stack():
+    # DiscardUnknownFields of a message of thousands of levels (here parsed, which upb refuses
+    # past 100 levels) and the messages of mappings nested as deep finish on a thread of a small
+    # stack, as upb's (which builds a message of 1,000 levels of mappings on it, of the same
+    # bytes), where they recursed over the levels on the stack and overflowed it from 1,500 and
+    # 200 levels. A stack overflow ends the process, so they run in one of their own.
+    script = textwrap.dedent(
+        """
+        import threading
+
+        import pyspark.sql.connect.proto as proto
+        from tests.test_proto_rust_offline import (
+            _nested_arguments,
+            _nested_limits,
+            _relation_bytes,
+        )
+
+        LEVELS = 5000
+        results = []
+
+
+        def run():
+            relation = proto.Relation.FromString(_relation_bytes(LEVELS, lambda level: True))
+            relation.DiscardUnknownFields()
+            # As upb's: the Relations of 64 levels below it or deeper keep their unknown fields.
+            kept = _relation_bytes(LEVELS, lambda level: 2 * level >= 64)
+            results.append(relation.SerializeToString() == kept)
+            built = proto.Relation(**_nested_limits(LEVELS))
+            results.append(built.SerializeToString() == _relation_bytes(LEVELS, lambda level: False))
+            function = proto.Expression.UnresolvedFunction()
+            function.arguments.add(**_nested_arguments(LEVELS))
+            sql = proto.SQL(named_arguments={"a": _nested_arguments(LEVELS)})
+            results.append(sql.named_arguments["a"] == function.arguments[0])
+
+
+        threading.stack_size(512 * 1024)
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        print(results)
+        """
+    )
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, cwd=root
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert result.stdout.strip() == "[True, True, True]", result.stderr[-3000:]
 
 
 _AWKWARD_VALUES = [
