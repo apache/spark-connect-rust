@@ -11,10 +11,17 @@ use spark_connect::row::{StructValue, Value};
 /// Functions that deserialize user-defined or spatial values in each result field.
 pub(crate) type FieldConverters = Arc<Vec<Option<Py<PyAny>>>>;
 
-static CREATE_ROW: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static ROW_CONSTRUCTOR: PyOnceLock<RowConstructor> = PyOnceLock::new();
 static DATETIME_OBJECTS: PyOnceLock<DateTimeObjects> = PyOnceLock::new();
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static CONVERSION_CHECKPOINT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 const ROW_SOURCE: &std::ffi::CStr = pyo3::ffi::c_str!(include_str!("row.py"));
+const CONVERSION_STEPS_PER_INTERRUPT_CHECK: usize = 1024;
+
+struct RowConstructor {
+    row_type: Py<PyAny>,
+    tuple_new: Py<PyAny>,
+}
 
 /// Python classes and immutable epoch values used for every collected date/time value.
 /// Resolving them once avoids repeated imports and module attribute lookups per field.
@@ -76,14 +83,30 @@ pub(crate) struct NestedFieldNames {
     fields: HashMap<Vec<NestedFieldPath>, Py<PyList>>,
     /// The schema paths of the maps whose keys have a user-defined type.
     udt_key_maps: HashSet<Vec<NestedFieldPath>>,
+    steps_until_interrupt_check: usize,
 }
 
 impl NestedFieldNames {
+    fn check_interrupts(&mut self, py: Python<'_>) -> PyResult<()> {
+        if self.steps_until_interrupt_check == 0 {
+            let checkpoint = CONVERSION_CHECKPOINT.get_or_try_init(py, || -> PyResult<_> {
+                let globals = PyDict::new(py);
+                Ok(py.eval(c"lambda: None", Some(&globals), None)?.unbind())
+            })?;
+            checkpoint.bind(py).call0()?;
+            py.check_signals()?;
+            self.steps_until_interrupt_check = CONVERSION_STEPS_PER_INTERRUPT_CHECK;
+        }
+        self.steps_until_interrupt_check -= 1;
+        Ok(())
+    }
+
     /// Release names when an iterator closes, including when materialization fails.
     pub(crate) fn clear(&mut self) {
         self.path.clear();
         self.fields.clear();
         self.udt_key_maps.clear();
+        self.steps_until_interrupt_check = 0;
     }
 
     /// Record the maps of `schema` whose keys have a user-defined type. Their keys are
@@ -101,6 +124,7 @@ impl NestedFieldNames {
         binary_as_bytes: bool,
         path: NestedFieldPath,
     ) -> PyResult<Bound<'py, PyAny>> {
+        self.check_interrupts(py)?;
         self.path.push(path);
         let result = value_to_py(py, value, binary_as_bytes, self);
         self.path.pop();
@@ -177,6 +201,7 @@ pub(crate) fn row_values_to_py(
     binary_as_bytes: bool,
     nested_fields: &mut NestedFieldNames,
 ) -> PyResult<Py<PyAny>> {
+    nested_fields.check_interrupts(py)?;
     let values = values
         .iter()
         .enumerate()
@@ -196,15 +221,22 @@ pub(crate) fn row_values_to_py(
             }
         })
         .collect::<PyResult<Vec<_>>>()?;
-    let create_row = CREATE_ROW.get_or_try_init(py, || {
-        py.import("pyspark.sql.types")?
-            .getattr("_create_row")
-            .map(Bound::unbind)
+    let constructor = ROW_CONSTRUCTOR.get_or_try_init(py, || -> PyResult<_> {
+        Ok(RowConstructor {
+            row_type: py.import("pyspark.sql.types")?.getattr("Row")?.unbind(),
+            tuple_new: py.get_type::<PyTuple>().getattr("__new__")?.unbind(),
+        })
     })?;
-    Ok(create_row
+    // Values already have their positional order and field names. Avoid running the
+    // Python argument-parsing and attribute-assignment methods for every result row.
+    let row = constructor
+        .tuple_new
         .bind(py)
-        .call1((fields, PyTuple::new(py, values)?))?
-        .unbind())
+        .call1((constructor.row_type.bind(py), PyTuple::new(py, values)?))?;
+    row.getattr("__dict__")?
+        .cast::<PyDict>()?
+        .set_item("__fields__", fields)?;
+    Ok(row.unbind())
 }
 
 /// `datetime.datetime(1970, 1, 1)`, the epoch of Spark's timestamps, without a time zone.

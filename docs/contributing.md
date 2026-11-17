@@ -204,6 +204,9 @@ CI runs the same command with `--check`:
 python scripts/gen_fn_dispatch.py --pyspark-src "$SPARK_HOME/python"
 ```
 
+For local collection measurements and their interpretation, see
+[Row conversion throughput and responsiveness](row-conversion-benchmark.md).
+
 ## Style
 
 ```bash
