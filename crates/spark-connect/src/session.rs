@@ -76,11 +76,21 @@ fn forget_thread_tags(
 /// `inheritable_thread_target` share the copy of the `thread_local` of the client of the thread
 /// that decorated their function. The tags that one of them adds or removes are those of all.
 #[derive(Clone, Default)]
-pub struct SharedTags(Arc<Mutex<Vec<String>>>);
+pub struct SharedTags(Arc<Mutex<Vec<Tag>>>);
+
+/// An operation tag: its text, or the UTF-32 little-endian bytes of a str of Python that UTF-8
+/// cannot encode, such as one of a lone surrogate, which PySpark's client keeps as a tag, and
+/// with which each request that carries the tags fails (see
+/// [`SparkSession::add_unencodable_tag`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Tag {
+    Text(String),
+    Unencodable(Vec<u8>),
+}
 
 impl ThreadTags {
     /// The tags of the current thread.
-    fn current(&self) -> Vec<String> {
+    fn current(&self) -> Vec<Tag> {
         let shared = self
             .by_thread
             .lock()
@@ -94,7 +104,7 @@ impl ThreadTags {
 
     /// Change the tags of the current thread, and forget a thread without tags that it shares
     /// with no other.
-    fn update(&self, change: impl FnOnce(&mut Vec<String>)) {
+    fn update(&self, change: impl FnOnce(&mut Vec<Tag>)) {
         let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
         let thread = std::thread::current().id();
         if !by_thread.contains_key(&thread) {
@@ -286,12 +296,26 @@ impl SparkSession {
     /// be empty or contain a comma (see [`SparkSession::check_tag`]).
     pub fn add_tag(&self, tag: &str) -> Result<()> {
         Self::check_tag(tag)?;
+        self.add(Tag::Text(tag.to_string()));
+        Ok(())
+    }
+
+    /// Add a tag of a str of Python that UTF-8 cannot encode, given as the UTF-32 little-endian
+    /// bytes of its code points, as PySpark's client adds it to the tags of the thread: each
+    /// execution that the thread starts then fails with the `UnicodeEncodeError` of the tag,
+    /// when its request is built, after its plan, until the tag is removed. The caller checks the
+    /// tag as [`SparkSession::check_tag`] checks one of text. Not a stable API.
+    #[doc(hidden)]
+    pub fn add_unencodable_tag(&self, utf32le: Vec<u8>) {
+        self.add(Tag::Unencodable(utf32le));
+    }
+
+    fn add(&self, tag: Tag) {
         self.tags.update(|tags| {
-            if !tags.iter().any(|t| t == tag) {
-                tags.push(tag.to_string());
+            if !tags.contains(&tag) {
+                tags.push(tag);
             }
         });
-        Ok(())
     }
 
     /// The errors of a tag, as PySpark Connect's `_throw_if_invalid_tag`: `VALUE_ALLOWED` for a
@@ -315,12 +339,42 @@ impl SparkSession {
 
     /// Remove a tag that this thread added. Mirrors `SparkSession.removeTag`.
     pub fn remove_tag(&self, tag: &str) {
-        self.tags.update(|tags| tags.retain(|t| t != tag));
+        self.tags
+            .update(|tags| tags.retain(|t| !matches!(t, Tag::Text(text) if text == tag)));
+    }
+
+    /// Remove a tag of [`SparkSession::add_unencodable_tag`] of these bytes. Not a stable API.
+    #[doc(hidden)]
+    pub fn remove_unencodable_tag(&self, utf32le: &[u8]) {
+        self.tags.update(|tags| {
+            tags.retain(|t| !matches!(t, Tag::Unencodable(bytes) if bytes == utf32le))
+        });
     }
 
     /// Get the tags that this thread set on this session. Mirrors `SparkSession.getTags`.
     pub fn get_tags(&self) -> Vec<String> {
-        self.tags.current()
+        self.tags
+            .current()
+            .into_iter()
+            .filter_map(|tag| match tag {
+                Tag::Text(text) => Some(text),
+                Tag::Unencodable(_) => None,
+            })
+            .collect()
+    }
+
+    /// The tags of [`SparkSession::add_unencodable_tag`] of this thread, as their bytes, which
+    /// [`SparkSession::get_tags`] does not give. Not a stable API.
+    #[doc(hidden)]
+    pub fn unencodable_tags(&self) -> Vec<Vec<u8>> {
+        self.tags
+            .current()
+            .into_iter()
+            .filter_map(|tag| match tag {
+                Tag::Unencodable(bytes) => Some(bytes),
+                Tag::Text(_) => None,
+            })
+            .collect()
     }
 
     /// Clear the tags that this thread set on this session. Mirrors `SparkSession.clearTags`:
@@ -470,9 +524,17 @@ impl SparkSession {
     }
 
     /// Internal accessor used by the execute-request builders to attach the tags of the
-    /// current thread, which builds the request.
-    pub(crate) fn tags(&self) -> Vec<String> {
-        self.tags.current()
+    /// current thread, which builds the request: a tag that UTF-8 cannot encode fails the
+    /// request with its `UnicodeEncodeError`, as protobuf's string field does in PySpark.
+    pub(crate) fn tags(&self) -> Result<Vec<String>> {
+        self.tags
+            .current()
+            .into_iter()
+            .map(|tag| match tag {
+                Tag::Text(text) => Ok(text),
+                Tag::Unencodable(bytes) => Err(SparkError::unencodable_str(&bytes)),
+            })
+            .collect()
     }
 
     /// Start a brand-new session over the same connection. Mirrors
@@ -3240,7 +3302,7 @@ mod tests {
         let child = std::thread::spawn(move || {
             let before = other.get_tags();
             other.add_tag("child").unwrap();
-            let added = (other.get_tags(), other.tags());
+            let added = (other.get_tags(), other.tags().unwrap());
             other.remove_tag("child");
             (before, added, other.get_tags())
         })
@@ -3249,10 +3311,33 @@ mod tests {
         let child_tags = vec!["child".to_string()];
         assert_eq!(child, (vec![], (child_tags.clone(), child_tags), vec![]));
         assert_eq!(spark.get_tags(), vec!["main".to_string()]);
-        assert_eq!(spark.tags(), vec!["main".to_string()]);
+        assert_eq!(spark.tags().unwrap(), vec!["main".to_string()]);
         spark.clear_tags();
         assert!(spark.get_tags().is_empty());
         assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+    }
+
+    /// A tag of a str that UTF-8 cannot encode, as PySpark's client keeps it: the requests that
+    /// carry the tags fail with its error until it is removed, and it is not a tag of text.
+    #[test]
+    fn an_unencodable_tag_fails_the_requests_until_it_is_removed() {
+        let spark = session();
+        spark.add_tag("a").unwrap();
+        let surrogate = [0x61, 0, 0, 0, 0x00, 0xd8, 0, 0];
+        spark.add_unencodable_tag(surrogate.to_vec());
+        spark.add_unencodable_tag(surrogate.to_vec());
+        let error = spark.tags().unwrap_err();
+        assert_eq!(
+            error.kind,
+            spark_connect_core::error::SparkErrorKind::UnicodeEncode
+        );
+        assert_eq!(error.unencodable_value(), Some(surrogate.to_vec()));
+        assert_eq!(spark.get_tags(), vec!["a".to_string()]);
+        assert_eq!(spark.unencodable_tags(), vec![surrogate.to_vec()]);
+        spark.remove_tag("a");
+        spark.remove_unencodable_tag(&surrogate);
+        assert!(spark.tags().unwrap().is_empty());
+        assert!(spark.unencodable_tags().is_empty());
     }
 
     #[test]

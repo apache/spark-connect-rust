@@ -291,7 +291,7 @@ impl PyDataFrame {
                 if c.is_instance_of::<PyString>() {
                     // As PySpark's `F._to_col`, by `col`, of its origin.
                     let _origin = crate::origin::with_origin("col")?;
-                    return Ok(spark_connect::functions::col(&c.extract::<String>()?));
+                    return crate::plan_args::col(c);
                 }
                 if c.is_instance_of::<PyInt>() && !c.is_instance_of::<PyBool>() {
                     let ordinal: i64 = c.extract()?;
@@ -351,7 +351,7 @@ impl PyDataFrame {
             } else if c.is_instance_of::<PyString>() {
                 // As PySpark's `F._to_col`, by `col`, of its origin.
                 let _origin = crate::origin::with_origin("col")?;
-                spark_connect::functions::col(&c.extract::<String>()?)
+                crate::plan_args::col(&c)?
             } else {
                 return Err(not_expected_type(&c, "col", "Column, int or str"));
             };
@@ -442,8 +442,12 @@ fn not_positive_partitions(num_partitions: &Bound<'_, PyAny>) -> PyResult<PyErr>
 }
 
 /// The `subset` of `dropDuplicates` and `dropDuplicatesWithinWatermark`, as PySpark's: None,
-/// or a list or tuple of column names.
-fn deduplicate_subset(subset: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<String>>> {
+/// or a list or tuple of column names, which its `Deduplicate` plan sets when it builds the plan
+/// (`args`).
+fn deduplicate_subset(
+    args: &mut crate::plan_args::PlanArgs,
+    subset: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Vec<String>>> {
     let Some(subset) = subset else {
         return Ok(None);
     };
@@ -455,7 +459,7 @@ fn deduplicate_subset(subset: Option<&Bound<'_, PyAny>>) -> PyResult<Option<Vec<
         .map(|column| {
             let column = column?;
             if column.is_instance_of::<pyo3::types::PyString>() {
-                column.extract()
+                args.str(&column)
             } else {
                 Err(not_expected_type(&column, "subset", "str"))
             }
@@ -484,16 +488,13 @@ pub(crate) fn to_columns_as_given(
         // Try as PyColumn first
         if let Ok(pycol) = arg.extract::<Bound<'_, PyColumn>>() {
             cols.push(pycol.borrow().column.clone());
+        } else if arg.is_instance_of::<pyo3::types::PyString>() {
+            // A column name, as PySpark's `F._to_col`, by `col`, of its origin.
+            let _origin = crate::origin::with_origin("col")?;
+            cols.push(crate::plan_args::col(&arg)?);
         } else {
-            // Try as string (column name)
-            if let Ok(name) = arg.extract::<String>() {
-                // As PySpark's `F._to_col`, by `col`, of its origin.
-                let _origin = crate::origin::with_origin("col")?;
-                cols.push(spark_connect::functions::col(&name));
-            } else {
-                // As PySpark's `_to_cols`.
-                return Err(not_expected_type(&arg, "cols", "Column or str"));
-            }
+            // As PySpark's `_to_cols`.
+            return Err(not_expected_type(&arg, "cols", "Column or str"));
         }
     }
     Ok(cols)
@@ -519,11 +520,24 @@ fn parse_join_type(
     let Some(how) = how.filter(|how| !how.is_none()) else {
         return Ok(JoinType::Inner);
     };
-    let normalized = how
-        .extract::<String>()
-        .ok()
-        .map(|how| how.to_lowercase().replace('_', ""));
-    let join_type = match normalized.as_deref() {
+    // As PySpark's `how.lower().replace("_", "")` of a str, in Python: of a str that UTF-8
+    // cannot encode too, which is no join type, and which the error names as it is.
+    let normalized = if how.is_instance_of::<pyo3::types::PyString>() {
+        Some(
+            how.call_method0("lower")?
+                .call_method1("replace", ("_", ""))?,
+        )
+    } else {
+        None
+    };
+    let text = normalized.as_ref().and_then(|normalized| {
+        normalized
+            .cast::<pyo3::types::PyString>()
+            .ok()?
+            .to_cow()
+            .ok()
+    });
+    let join_type = match text.as_deref() {
         Some("inner") => Some(JoinType::Inner),
         Some("cross") => Some(JoinType::Cross),
         Some("left" | "leftouter") => Some(JoinType::LeftOuter),
@@ -536,20 +550,23 @@ fn parse_join_type(
     if let Some(join_type) = join_type {
         return Ok(join_type);
     }
-    let typ = match normalized {
-        Some(normalized) => normalized,
-        None => how.str()?.to_string(),
-    };
+    let typ = normalized.unwrap_or_else(|| how.clone());
     let supported = if lateral {
         LATERAL_JOIN_TYPES_SUPPORTED
     } else {
         JOIN_TYPES_SUPPORTED
     };
-    Err(crate::column::raise_pyspark(
+    Err(crate::errors::raise_pyspark_of(
         py,
         "AnalysisException",
         "UNSUPPORTED_JOIN_TYPE",
-        &[("typ", typ.as_str()), ("supported", supported)],
+        &[
+            ("typ", &typ),
+            (
+                "supported",
+                pyo3::types::PyString::new(py, supported).as_any(),
+            ),
+        ],
     ))
 }
 
@@ -566,23 +583,36 @@ fn no_to_plan(obj: &Bound<'_, PyAny>) -> PyErr {
     ))
 }
 
+/// [`no_to_plan`] of `obj` as the error of the core, which the requests of a plan raise, as
+/// PySpark's `Join` plan reads `to_plan` of `on` when it builds the plan.
+fn no_to_plan_error(obj: &Bound<'_, PyAny>) -> PyResult<spark_connect_core::error::SparkError> {
+    let typ = obj.get_type().name()?.to_string();
+    Ok(spark_connect_core::error::SparkError::builtin_attribute(
+        format!("'{typ}' object has no attribute 'to_plan'"),
+    ))
+}
+
 /// The join condition of `_joinAsOf` for its `on`, as PySpark's `AsOfJoin` plan sends it: a
 /// name or a list of names (`using_columns`), or a Column or a list of Columns, which are
-/// joined on their conjunction (`join_expr`). The names of a list whose first item is a name
-/// are set in the repeated string field as they are, as [`crate::str_argument`] converts them.
+/// joined on their conjunction (`join_expr`). The plan builds them when it builds the plan
+/// (`args`), as `DataFrame.join` does its condition: the names in the repeated string field as
+/// protobuf converts them, the conjunction of a list as `functools.reduce` of `&`, and the
+/// `to_plan` of an `on` of another type, which only a Column has.
 fn as_of_join_condition(
+    args: &mut crate::plan_args::PlanArgs,
     on: &Bound<'_, PyAny>,
 ) -> PyResult<(Option<spark_connect::column::Column>, Vec<String>)> {
     if let Ok(column) = on.extract::<PyRef<PyColumn>>() {
         return Ok((Some(column.column.clone()), Vec::new()));
     }
     if on.is_instance_of::<pyo3::types::PyString>() {
-        return Ok((None, vec![on.extract::<String>()?]));
+        return Ok((None, vec![args.str(on)?]));
     }
     // As PySpark's `_collect_references`, which iterates `on` first, and then its `to_plan`.
     if !on.is_instance_of::<PyList>() {
         on.try_iter()?;
-        return Err(no_to_plan(on));
+        args.record(no_to_plan_error(on)?);
+        return Ok((None, Vec::new()));
     }
     let list = on.cast::<PyList>()?;
     // An empty list is no condition at all.
@@ -590,23 +620,65 @@ fn as_of_join_condition(
         return Ok((None, Vec::new()));
     };
     if first.is_instance_of::<pyo3::types::PyString>() {
-        let names = list
-            .iter()
-            .map(|item| crate::str_argument(&item))
-            .collect::<PyResult<Vec<_>>>()?;
-        return Ok((None, names));
+        return Ok((None, args.strs(list.iter())?));
     }
-    let mut condition: Option<spark_connect::column::Column> = None;
-    for item in list.iter() {
-        let Ok(col) = item.extract::<PyRef<PyColumn>>() else {
-            return Err(no_to_plan(&item));
-        };
-        condition = Some(match condition {
-            None => col.column.clone(),
-            Some(left) => plan_conjunction(left, col.column.clone()),
-        });
+    Ok((list_conjunction(args, list)?, Vec::new()))
+}
+
+/// The conjunction of the conditions of `list`, the `on` of a join or an as-of join whose first
+/// item is not a name, as PySpark's `Join` and `AsOfJoin` plans make it when they are built,
+/// `functools.reduce(lambda c1, c2: c1 & c2, on)`: of Columns, the [`plan_conjunction`] of them,
+/// of a Column and an item that the `&` of a Column takes as a literal, the `and` of it, and of
+/// an item that is not a Column, its own `&`. The error of an `&`, such as the `AttributeError`
+/// of the `_expr` of an object that is neither a Column nor a literal, or of the `to_plan` of a
+/// conjunction that is not a Column, fails the requests of the plan (`args`).
+fn list_conjunction(
+    args: &mut crate::plan_args::PlanArgs,
+    list: &Bound<'_, PyList>,
+) -> PyResult<Option<spark_connect::column::Column>> {
+    let py = list.py();
+    let mut items = list.iter();
+    let Some(mut reduced) = items.next() else {
+        return Ok(None);
+    };
+    let mut column = reduced
+        .extract::<PyRef<PyColumn>>()
+        .ok()
+        .map(|column| column.column.clone());
+    for item in items {
+        match column.take() {
+            Some(left) => {
+                let right = match item.extract::<PyRef<PyColumn>>() {
+                    Ok(right) => right.column.clone(),
+                    Err(_) => match crate::column::operand_column(&item) {
+                        Ok(right) => right,
+                        Err(err) => {
+                            args.raised(py, err)?;
+                            return Ok(None);
+                        }
+                    },
+                };
+                column = Some(plan_conjunction(left, right));
+            }
+            None => match reduced.bitand(&item) {
+                Ok(result) => {
+                    column = result
+                        .extract::<PyRef<PyColumn>>()
+                        .ok()
+                        .map(|column| column.column.clone());
+                    reduced = result;
+                }
+                Err(err) => {
+                    args.raised(py, err)?;
+                    return Ok(None);
+                }
+            },
+        }
     }
-    Ok((condition, Vec::new()))
+    if column.is_none() {
+        args.record(no_to_plan_error(&reduced)?);
+    }
+    Ok(column)
 }
 
 /// The conjunction `left & right` of the conditions of a join of a list of Columns, as PySpark's
@@ -632,25 +704,30 @@ fn as_of_column(
     if let Ok(column) = column.extract::<PyRef<PyColumn>>() {
         return Ok(column.column.clone());
     }
-    if !column.is_instance_of::<pyo3::types::PyString>() {
-        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-    }
-    Ok(df.col(&column.extract::<String>()?))
+    crate::plan_args::df_col(df, column, false)
 }
 
-/// Resolve a filter/where condition: a Column, or a SQL string parsed via `expr`.
+/// Resolve a filter/where condition: a Column, or a SQL string parsed via `expr`, as PySpark's
+/// `filter`, whose `Filter` plan collects the subqueries of anything else by its `foreach`: an
+/// object without one raises the `AttributeError` of it.
 fn cond_column(condition: &Bound<'_, PyAny>) -> PyResult<spark_connect::column::Column> {
     if let Ok(c) = condition.extract::<PyRef<PyColumn>>() {
-        Ok(c.column.clone())
-    } else {
-        let s: String = condition.extract()?;
-        Ok(spark_connect::functions::expr(&s))
+        return Ok(c.column.clone());
     }
+    if condition.is_instance_of::<pyo3::types::PyString>() {
+        return crate::plan_args::expr(condition);
+    }
+    condition.getattr("foreach")?;
+    Err(no_to_plan(condition))
 }
 
 /// An argument of `withWatermark`, as PySpark's: `NOT_EXPECTED_TYPE` for an empty one, or one
-/// whose type is not str.
-fn watermark_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<String> {
+/// whose type is not str. Its `WithWatermark` plan sets it when it builds the plan (`args`).
+fn watermark_argument(
+    args: &mut crate::plan_args::PlanArgs,
+    value: &Bound<'_, PyAny>,
+    name: &str,
+) -> PyResult<String> {
     if !value.is_truthy()?
         || !value
             .get_type()
@@ -658,7 +735,7 @@ fn watermark_argument(value: &Bound<'_, PyAny>, name: &str) -> PyResult<String> 
     {
         return Err(not_expected_type(value, name, "str"));
     }
-    value.extract()
+    args.str(value)
 }
 
 #[pymethods]
@@ -867,15 +944,14 @@ impl PyDataFrame {
             }
             _ => expr,
         };
+        // Each of `F.expr`, which asserts a str.
         let mut columns = Vec::new();
         for element in &expr {
             if element.is_instance_of::<pyo3::types::PyString>() {
-                columns.push(spark_connect::functions::expr(
-                    &element.extract::<String>()?,
-                ));
+                columns.push(crate::plan_args::expr(element)?);
             } else {
                 for e in element.try_iter()? {
-                    columns.push(spark_connect::functions::expr(&e?.extract::<String>()?));
+                    columns.push(crate::plan_args::expr(&e?)?);
                 }
             }
         }
@@ -903,19 +979,37 @@ impl PyDataFrame {
         ))
     }
 
-    /// Add or replace a column, of a Column, as PySpark's `DataFrame.withColumn`.
-    fn withColumn(&self, colName: &str, col: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    /// Add or replace a column, of a Column, as PySpark's `DataFrame.withColumn`, which checks
+    /// the Column first. Its `WithColumns` plan asserts a str name, and sets it when it builds
+    /// the plan, after the Column.
+    fn withColumn(
+        &self,
+        colName: &Bound<'_, PyAny>,
+        col: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
         let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() else {
             return Err(not_expected_type(col, "col", "Column"));
         };
-        Ok(PyDataFrame::new(
-            self.dataframe.with_column(colName, column.column.clone()),
-        ))
+        if !colName.is_instance_of::<pyo3::types::PyString>() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        let mut args = crate::plan_args::PlanArgs::new();
+        let name = args.str(colName)?;
+        Ok(PyDataFrame::new(args.plan(
+            self.dataframe.with_column(&name, column.column.clone()),
+        )))
     }
 
-    /// Rename a column.
-    fn withColumnRenamed(&self, existing: &str, new: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.with_column_renamed(existing, new))
+    /// Rename a column, as PySpark's, which renames of the dict `{existing: new}`, so an
+    /// `existing` that is not hashable raises the `TypeError` of the dict.
+    fn withColumnRenamed(
+        &self,
+        existing: &Bound<'_, PyAny>,
+        new: &Bound<'_, PyAny>,
+    ) -> PyResult<PyDataFrame> {
+        let renames = PyDict::new(existing.py());
+        renames.set_item(existing, new)?;
+        self.with_columns_renamed(renames.as_any())
     }
 
     /// Add or replace multiple columns from a {name: Column} mapping, as PySpark's
@@ -939,22 +1033,15 @@ impl PyDataFrame {
         }
         // A name that UTF-8 cannot encode fails the plan when it is sent, with the error of its
         // encoding, which the first of them gives.
-        let mut plan_error = None;
+        let mut args = crate::plan_args::PlanArgs::new();
         let mut pairs = Vec::with_capacity(cols_map.len());
         for (name, column) in cols_map.iter() {
             let column = column.extract::<PyRef<'_, PyColumn>>()?;
-            match unbuildable_str_error(&name)? {
-                Some(error) => {
-                    plan_error.get_or_insert(error);
-                }
-                None => pairs.push((name.extract::<String>()?, column.column.clone())),
-            }
+            pairs.push((args.str(&name)?, column.column.clone()));
         }
-        let df = self.dataframe.with_columns(pairs);
-        Ok(PyDataFrame::new(match plan_error {
-            Some(error) => df.unbuildable(error),
-            None => df,
-        }))
+        Ok(PyDataFrame::new(
+            args.plan(self.dataframe.with_columns(pairs)),
+        ))
     }
 
     /// Specify a relation hint (e.g. "broadcast"), with optional parameters. Reference
@@ -1020,21 +1107,26 @@ impl PyDataFrame {
             }
             expressions.push(crate::functions::to_column(p)?.expression().clone());
         }
-        let name: String = name.extract()?;
+        // Its `Hint` plan sets the name when it builds the plan, before the parameters.
+        let mut args = crate::plan_args::PlanArgs::new();
+        let name = args.str(name)?;
+        let args = args.before(&mut expressions);
         Ok(PyDataFrame::new(
-            self.dataframe.hint_expressions(&name, expressions),
+            args.plan(self.dataframe.hint_expressions(&name, expressions)),
         ))
     }
 
     /// Drop columns, of Columns or column names, as PySpark's `DataFrame.drop`.
     #[pyo3(signature = (*cols))]
     fn drop(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
+        // Its `Drop` plan sets the names when it builds the plan.
+        let mut args = crate::plan_args::PlanArgs::new();
         let (mut columns, mut names) = (Vec::new(), Vec::new());
         for column in &cols {
             if let Ok(column) = column.extract::<PyRef<'_, PyColumn>>() {
                 columns.push(column.column.clone());
             } else if column.is_instance_of::<pyo3::types::PyString>() {
-                names.push(column.extract::<String>()?);
+                names.push(args.str(column)?);
             } else {
                 return Err(crate::column::raise_pyspark(
                     py,
@@ -1048,9 +1140,8 @@ impl PyDataFrame {
                 ));
             }
         }
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
         Ok(PyDataFrame::new(
-            self.dataframe.drop_columns(columns, names),
+            args.plan(self.dataframe.drop_columns(columns, names)),
         ))
     }
 
@@ -1083,11 +1174,14 @@ impl PyDataFrame {
     /// Remove duplicate rows, optionally on specific columns.
     #[pyo3(signature = (subset=None))]
     fn dropDuplicates(&self, subset: Option<&Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let subset = deduplicate_subset(subset)?;
+        let mut args = crate::plan_args::PlanArgs::new();
+        let subset = deduplicate_subset(&mut args, subset)?;
         let col_refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|names| names.iter().map(|s| s.as_str()).collect());
-        Ok(PyDataFrame::new(self.dataframe.drop_duplicates(col_refs)))
+        Ok(PyDataFrame::new(
+            args.plan(self.dataframe.drop_duplicates(col_refs)),
+        ))
     }
 
     /// Sort rows. `ascending` (a bool or list of bools, via kwargs) mirrors reference
@@ -1153,12 +1247,16 @@ impl PyDataFrame {
                 join_type,
             )));
         }
-        if let Ok(name) = on.extract::<String>() {
-            return Ok(PyDataFrame::new(self.dataframe.join_using(
+        // The names are set in the repeated string field of its `Join` plan as they are when it
+        // builds the plan, as protobuf takes them: bytes of UTF-8 too.
+        let mut args = crate::plan_args::PlanArgs::new();
+        if on.is_instance_of::<pyo3::types::PyString>() {
+            let name = args.str(&on)?;
+            return Ok(PyDataFrame::new(args.plan(self.dataframe.join_using(
                 &other.dataframe,
                 vec![name],
                 join_type,
-            )));
+            ))));
         }
         if let Ok(list) = on.cast::<PyList>() {
             // An empty list is no condition at all.
@@ -1170,30 +1268,30 @@ impl PyDataFrame {
                 )));
             };
             if first.is_instance_of::<pyo3::types::PyString>() {
-                let names = list.extract::<Vec<String>>()?;
-                return Ok(PyDataFrame::new(self.dataframe.join_using(
+                let names = args.strs(list.iter())?;
+                return Ok(PyDataFrame::new(args.plan(self.dataframe.join_using(
                     &other.dataframe,
                     names,
                     join_type,
-                )));
+                ))));
             }
-            let mut condition: Option<spark_connect::column::Column> = None;
-            for item in list.iter() {
-                let Ok(col) = item.extract::<PyRef<PyColumn>>() else {
-                    return Err(no_to_plan(&item));
-                };
-                condition = Some(match condition {
-                    None => col.column.clone(),
-                    Some(left) => plan_conjunction(left, col.column.clone()),
-                });
-            }
-            return Ok(PyDataFrame::new(self.dataframe.join(
+            // A list of conditions is their conjunction, which its `Join` plan computes when it
+            // builds the plan.
+            let condition = list_conjunction(&mut args, list)?;
+            return Ok(PyDataFrame::new(args.plan(self.dataframe.join(
                 &other.dataframe,
                 condition,
                 join_type,
-            )));
+            ))));
         }
-        Err(no_to_plan(&on))
+        // A tuple, or another iterable that is not a list: its plan reads `to_plan` of it when
+        // it builds the plan.
+        args.record(no_to_plan_error(&on)?);
+        Ok(PyDataFrame::new(args.plan(self.dataframe.join(
+            &other.dataframe,
+            None,
+            join_type,
+        ))))
     }
 
     /// `DataFrame._joinAsOf(other, leftAsOfColumn, rightAsOfColumn, on=None, how=None, *,
@@ -1233,26 +1331,15 @@ impl PyDataFrame {
         // As PySpark's `_check_same_session`, first.
         let other = self.same_session(other)?;
         // As PySpark's `assert isinstance(how, str)`. A str that UTF-8 cannot encode is one, and
-        // fails the plan with the error of its encoding, when PySpark sends it. The plan's
-        // values are converted in the order of its protobuf fields, which gives the first error.
-        let mut plan_error = None;
-        let join_type = match how.filter(|how| !how.is_none()) {
-            None => AsOfJoinType::Inner,
-            Some(how) if how.is_instance_of::<pyo3::types::PyString>() => {
-                match unbuildable_str_error(&how)? {
-                    Some(error) => {
-                        plan_error = Some(error);
-                        AsOfJoinType::Inner
-                    }
-                    None => AsOfJoinType::parse(&how.extract::<String>()?),
-                }
-            }
-            Some(_) => {
+        // fails the plan with the error of its encoding, when PySpark sends it.
+        let how = how.filter(|how| !how.is_none());
+        if let Some(how) = &how {
+            if !how.is_instance_of::<pyo3::types::PyString>() {
                 return Err(pyo3::exceptions::PyAssertionError::new_err(
                     "how should be a string",
                 ));
             }
-        };
+        }
         let tolerance = match tolerance.filter(|tolerance| !tolerance.is_none()) {
             None => None,
             Some(tolerance) => {
@@ -1266,37 +1353,29 @@ impl PyDataFrame {
         // iterates `on`.
         let left_as_of = as_of_column(&self.dataframe, leftAsOfColumn)?;
         let right_as_of = as_of_column(&other.dataframe, rightAsOfColumn)?;
+        // The plan's values are converted in the order of its protobuf fields, in which its
+        // `AsOfJoin` plan sets them when it builds the plan, which gives the first error.
+        let mut args = crate::plan_args::PlanArgs::new();
         let (on, using_columns) = match on.filter(|on| !on.is_none()) {
             None => (None, Vec::new()),
-            Some(on) => as_of_join_condition(&on)?,
+            Some(on) => as_of_join_condition(&mut args, &on)?,
+        };
+        let join_type = match &how {
+            None => AsOfJoinType::Inner,
+            Some(how) => AsOfJoinType::parse(&args.str(how)?),
         };
         // The flag is a protobuf bool, which PySpark sets as the plan is sent.
+        let py = leftAsOfColumn.py();
         let allow_exact_matches = match &allowExactMatches {
             DefaultedOption::Omitted => true,
-            DefaultedOption::Given(allow) => {
-                let allow = allow.bind(leftAsOfColumn.py());
-                match proto_bool(allow) {
-                    Ok(allow) => allow,
-                    Err(err) => {
-                        plan_error.get_or_insert(unbuildable_error(allow.py(), err)?);
-                        false
-                    }
-                }
-            }
+            DefaultedOption::Given(allow) => args.converted(py, proto_bool(allow.bind(py)))?,
         };
         // PySpark does not check `direction`, so its errors come last, as those of protobuf's
         // string field when the plan is sent.
         let direction = match &direction {
             DefaultedOption::Omitted => AsOfJoinDirection::Backward,
             DefaultedOption::Given(direction) => {
-                let direction = direction.bind(leftAsOfColumn.py());
-                match unbuildable_str_error(direction)? {
-                    Some(error) => {
-                        plan_error.get_or_insert(error);
-                        AsOfJoinDirection::Backward
-                    }
-                    None => AsOfJoinDirection::parse(&crate::options::str_argument(direction)?),
-                }
+                AsOfJoinDirection::parse(&args.str(direction.bind(py))?)
             }
         };
         let options = AsOfJoinOptions {
@@ -1313,10 +1392,7 @@ impl PyDataFrame {
             .dataframe
             .as_of_join(&other.dataframe, options)
             .to_pyerr()?;
-        Ok(PyDataFrame::new(match plan_error {
-            Some(error) => df.unbuildable(error),
-            None => df,
-        }))
+        Ok(PyDataFrame::new(args.plan(df)))
     }
 
     /// Cross join.
@@ -1334,13 +1410,24 @@ impl PyDataFrame {
         &self,
         py: Python<'_>,
         other: &Bound<'_, PyAny>,
-        on: Option<PyRef<PyColumn>>,
+        on: Option<Bound<'_, PyAny>>,
         how: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        // As PySpark's `_check_same_session`, first.
+        // As PySpark's `_check_same_session`, first. Its `LateralJoin` plan then collects the
+        // subqueries of `on` by its `foreach`, which an object that is not a Column lacks, before
+        // it checks `how`.
         let other = self.same_session(other)?;
+        let on_col = match on {
+            None => None,
+            Some(on) => match on.extract::<PyRef<PyColumn>>() {
+                Ok(column) => Some(column.column.clone()),
+                Err(_) => {
+                    on.getattr("foreach")?;
+                    return Err(no_to_plan(&on));
+                }
+            },
+        };
         let join_type = parse_join_type(py, how.as_ref(), true)?;
-        let on_col = on.map(|c| c.column.clone());
         Ok(PyDataFrame::new(self.dataframe.lateral_join(
             &other.dataframe,
             on_col,
@@ -1360,7 +1447,7 @@ impl PyDataFrame {
                 column.column.clone()
             } else if c.is_instance_of::<pyo3::types::PyString>() {
                 let _origin = crate::origin::with_origin("col")?;
-                spark_connect::functions::col(&c.extract::<String>()?)
+                crate::plan_args::col(c)?
             } else {
                 return Err(not_expected_type(c, "col", "Column or str"));
             }),
@@ -1469,7 +1556,7 @@ impl PyDataFrame {
             c.borrow().column.clone()
         } else if partitionIdCol.is_instance_of::<pyo3::types::PyString>() {
             let _origin = crate::origin::with_origin("col")?;
-            spark_connect::functions::col(&partitionIdCol.extract::<String>()?)
+            crate::plan_args::col(partitionIdCol)?
         } else {
             return Err(not_expected_type(partitionIdCol, "col", "Column or str"));
         };
@@ -1629,21 +1716,25 @@ impl PyDataFrame {
     /// Convert to DataFrame with new column names.
     #[pyo3(signature = (*cols))]
     fn toDF(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        // As PySpark's, of strings.
+        // As PySpark's, of strings, which its `ToDF` plan sets when it builds the plan.
+        let mut args = crate::plan_args::PlanArgs::new();
         let mut names = Vec::with_capacity(cols.len());
         for col in &cols {
             if !col.is_instance_of::<pyo3::types::PyString>() {
                 return Err(not_expected_type(col, "cols", "list[str]"));
             }
-            names.push(col.extract::<String>()?);
+            names.push(args.str(col)?);
         }
-        let name_refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        Ok(PyDataFrame::new(self.dataframe.to_df(name_refs)))
+        Ok(PyDataFrame::new(args.plan(self.dataframe.to_df(names))))
     }
 
-    /// Alias this DataFrame.
-    fn alias(&self, alias: &str) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.alias(alias))
+    /// Alias this DataFrame, as PySpark's, whose `SubqueryAlias` plan sets the alias when it
+    /// builds the plan, as protobuf's string field takes it: bytes of UTF-8 too, and anything
+    /// else fails the requests of the DataFrame.
+    fn alias(&self, alias: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let mut args = crate::plan_args::PlanArgs::new();
+        let alias = args.str(alias)?;
+        Ok(PyDataFrame::new(args.plan(self.dataframe.alias(&alias))))
     }
 
     /// Group by columns for aggregation.
@@ -1738,13 +1829,14 @@ impl PyDataFrame {
         &self,
         subset: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
-        let subset = deduplicate_subset(subset)?;
+        let mut args = crate::plan_args::PlanArgs::new();
+        let subset = deduplicate_subset(&mut args, subset)?;
         let refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|names| names.iter().map(|s| s.as_str()).collect());
-        Ok(PyDataFrame::new(
+        Ok(PyDataFrame::new(args.plan(
             self.dataframe.drop_duplicates_within_watermark(refs),
-        ))
+        )))
     }
 
     /// `DataFrame.toJSON`, as PySpark Connect's: a DataFrame of each row as a JSON object
@@ -1806,12 +1898,16 @@ impl PyDataFrame {
         let Ok(cols_map) = colsMap.cast::<PyDict>() else {
             return Err(not_expected_type(colsMap, "colsMap", "dict"));
         };
+        // Its `WithColumnsRenamed` plan sets the names of each rename, the old one first, in its
+        // string fields when it builds the plan, as protobuf takes them: bytes of UTF-8 too.
+        let mut args = crate::plan_args::PlanArgs::new();
         let mut renames = Vec::with_capacity(cols_map.len());
         for (existing, new) in cols_map.iter() {
-            renames.push((existing.extract::<String>()?, new.extract::<String>()?));
+            let existing = args.str(&existing)?;
+            renames.push((existing, args.str(&new)?));
         }
         Ok(PyDataFrame::new(
-            self.dataframe.with_columns_renamed(renames),
+            args.plan(self.dataframe.with_columns_renamed(renames)),
         ))
     }
 
@@ -1823,26 +1919,29 @@ impl PyDataFrame {
         if !colName.is_instance_of::<pyo3::types::PyString>() {
             return Err(not_expected_type(colName, "colName", "str"));
         }
-        Ok(PyColumn::new(
-            self.dataframe.col_regex(&colName.extract::<String>()?),
-        ))
+        // Its `UnresolvedRegex` sets the name when it builds the plan.
+        let mut args = crate::plan_args::PlanArgs::new();
+        let name = args.str(colName)?;
+        Ok(PyColumn::new(args.column(self.dataframe.col_regex(&name))))
     }
 
     /// Basic statistics for the given columns (count/mean/stddev/min/max), of column names or
     /// a list of them, as PySpark's `DataFrame.describe`.
     #[pyo3(signature = (*cols))]
     fn describe(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let cols = crate::stat_arguments::describe_columns(&cols)?;
-        let refs: Vec<&str> = cols.iter().map(|s| s.as_str()).collect();
-        Ok(PyDataFrame::new(self.dataframe.describe(refs)))
+        let mut args = crate::plan_args::PlanArgs::new();
+        let cols = crate::stat_arguments::describe_columns(&mut args, &cols)?;
+        Ok(PyDataFrame::new(args.plan(self.dataframe.describe(cols))))
     }
 
     /// Summary statistics (percentiles etc.), of strings, as PySpark's `DataFrame.summary`.
     #[pyo3(signature = (*statistics))]
     fn summary(&self, statistics: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
-        let statistics = crate::stat_arguments::summary_statistics(&statistics)?;
-        let refs: Vec<&str> = statistics.iter().map(|s| s.as_str()).collect();
-        Ok(PyDataFrame::new(self.dataframe.summary(refs)))
+        let mut args = crate::plan_args::PlanArgs::new();
+        let statistics = crate::stat_arguments::summary_statistics(&mut args, &statistics)?;
+        Ok(PyDataFrame::new(
+            args.plan(self.dataframe.summary(statistics)),
+        ))
     }
 
     /// Persist with the default MEMORY_AND_DISK storage level.
@@ -1917,9 +2016,12 @@ impl PyDataFrame {
                 }
                 .to_string()
             }
-            (Some(arg), None) | (None, Some(arg)) if arg.is_instance_of::<PyString>() => {
-                arg.extract()?
-            }
+            // A mode that UTF-8 cannot encode is none of the modes, which the core refuses.
+            (Some(arg), None) | (None, Some(arg)) if arg.is_instance_of::<PyString>() => arg
+                .cast::<PyString>()?
+                .to_cow()
+                .map(|mode| mode.into_owned())
+                .unwrap_or_default(),
             (Some(arg), None) | (None, Some(arg)) => {
                 return Err(crate::column::raise_pyspark(
                     py,
@@ -2058,8 +2160,13 @@ impl PyDataFrame {
             return crate::observation::observe(py, &self.dataframe, observation, columns);
         }
         if observation.is_instance_of::<pyo3::types::PyString>() {
-            let name: String = observation.extract()?;
-            return Ok(PyDataFrame::new(self.dataframe.observe(&name, columns)));
+            // Its `CollectMetrics` plan sets the name when it builds the plan, before the metrics.
+            let mut args = crate::plan_args::PlanArgs::new();
+            let name = args.str(observation)?;
+            let args = args.before(&mut columns);
+            return Ok(PyDataFrame::new(
+                args.plan(self.dataframe.observe(&name, columns)),
+            ));
         }
         let type_name = observation.get_type().name()?.to_string();
         Err(crate::column::raise_pyspark(
@@ -2264,18 +2371,28 @@ impl PyDataFrame {
     fn with_metadata(
         &self,
         py: Python<'_>,
-        columnName: &str,
+        columnName: &Bound<'_, PyAny>,
         metadata: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         if !metadata.is_instance_of::<PyDict>() {
             return Err(not_expected_type(metadata, "metadata", "dict"));
         }
+        // As PySpark's, which takes `self[columnName]` and `json.dumps(metadata)`, in this order,
+        // for its `WithColumns` plan, which asserts a str name, and sets it when it builds the
+        // plan. So an item that `__getitem__` does not take fails first, and an int reads the
+        // columns before the assertion fails.
+        self.__getitem__(py, columnName)?;
         let json: String = py
             .import("json")?
             .call_method1("dumps", (metadata,))?
             .extract()?;
+        if !columnName.is_instance_of::<pyo3::types::PyString>() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        let mut args = crate::plan_args::PlanArgs::new();
+        let name = args.str(columnName)?;
         Ok(PyDataFrame::new(
-            self.dataframe.with_metadata_json(columnName, &json),
+            args.plan(self.dataframe.with_metadata_json(&name, &json)),
         ))
     }
 
@@ -2287,11 +2404,12 @@ impl PyDataFrame {
         eventTime: &Bound<'_, PyAny>,
         delayThreshold: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
-        let event_time = watermark_argument(eventTime, "eventTime")?;
-        let delay_threshold = watermark_argument(delayThreshold, "delayThreshold")?;
-        Ok(PyDataFrame::new(
+        let mut args = crate::plan_args::PlanArgs::new();
+        let event_time = watermark_argument(&mut args, eventTime, "eventTime")?;
+        let delay_threshold = watermark_argument(&mut args, delayThreshold, "delayThreshold")?;
+        Ok(PyDataFrame::new(args.plan(
             self.dataframe.with_watermark(&event_time, &delay_threshold),
-        ))
+        )))
     }
 
     /// Randomly split into multiple DataFrames by the given weights.
@@ -2504,8 +2622,8 @@ impl PyDataFrame {
         &self,
         ids: &Bound<'_, PyAny>,
         values: Option<&Bound<'_, PyAny>>,
-        variableColumnName: &str,
-        valueColumnName: &str,
+        variableColumnName: &Bound<'_, PyAny>,
+        valueColumnName: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         if ids.is_none() {
             return Err(pyo3::exceptions::PyAssertionError::new_err(
@@ -2514,11 +2632,13 @@ impl PyDataFrame {
         }
         let ids = unpivot_columns(ids)?;
         let values = values.map(unpivot_columns).transpose()?;
-        Ok(PyDataFrame::new(self.dataframe.unpivot(
-            ids,
-            values,
-            variableColumnName,
-            valueColumnName,
+        // The names are of the string fields of its `Unpivot` plan, which sets them as they
+        // are when it builds the plan, after the columns.
+        let mut args = crate::plan_args::PlanArgs::new();
+        let variable = args.str(variableColumnName)?;
+        let value = args.str(valueColumnName)?;
+        Ok(PyDataFrame::new(args.plan(
+            self.dataframe.unpivot(ids, values, &variable, &value),
         )))
     }
 
@@ -2528,8 +2648,8 @@ impl PyDataFrame {
         &self,
         ids: &Bound<'_, PyAny>,
         values: Option<&Bound<'_, PyAny>>,
-        variableColumnName: &str,
-        valueColumnName: &str,
+        variableColumnName: &Bound<'_, PyAny>,
+        valueColumnName: &Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         self.unpivot(ids, values, variableColumnName, valueColumnName)
     }
@@ -2556,7 +2676,32 @@ impl PyDataFrame {
     /// JVM attribute names raise JVM_ATTRIBUTE_NOT_SUPPORTED. Dunder names that are not
     /// columns raise ATTRIBUTE_NOT_SUPPORTED; with PYSPARK_VALIDATE_COLUMN_NAME_LEGACY=1,
     /// all non-column names do. Single-underscore names otherwise resolve to columns.
-    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<PyColumn> {
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        name: &Bound<'_, pyo3::types::PyString>,
+    ) -> PyResult<PyColumn> {
+        // A name that UTF-8 cannot encode is none of those below, nor a column of the server,
+        // which the validation reads: it is the column of the name, which fails its requests, as
+        // PySpark's `_col`, unless it is validated.
+        let Ok(text) = name.to_cow() else {
+            let legacy = std::env::var("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY").as_deref() == Ok("1");
+            if legacy || name.call_method1("startswith", ("__",))?.is_truthy()? {
+                self.column_names(py)?;
+                return Err(crate::errors::raise_pyspark_of(
+                    py,
+                    "PySparkAttributeError",
+                    "ATTRIBUTE_NOT_SUPPORTED",
+                    &[("attr_name", name.as_any())],
+                ));
+            }
+            return Ok(PyColumn::new(crate::plan_args::df_col(
+                &self.dataframe,
+                name.as_any(),
+                false,
+            )?));
+        };
+        let name = text.as_ref();
         // As PySpark Connect's: the attributes of the JVM of a classic DataFrame are not
         // supported, and a name is validated as a column only for a dunder name, which Python
         // may look up for an attribute, or with PYSPARK_VALIDATE_COLUMN_NAME_LEGACY.
@@ -2583,7 +2728,11 @@ impl PyDataFrame {
     /// Private bridge used by pyspark.sql.dataframe.DataFrame.__getattr__ for
     /// explicit column lookup. The __getattr__ special method itself is exposed
     /// only as a slot; this ordinary method remains callable by the public base.
-    fn _get_column_by_attribute(&self, py: Python<'_>, name: &str) -> PyResult<PyColumn> {
+    fn _get_column_by_attribute(
+        &self,
+        py: Python<'_>,
+        name: &Bound<'_, pyo3::types::PyString>,
+    ) -> PyResult<PyColumn> {
         self.__getattr__(py, name)
     }
 
@@ -3189,12 +3338,13 @@ impl PyDataFrame {
     fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use pyo3::IntoPyObjectExt;
 
-        let name = if let Ok(name) = item.cast::<pyo3::types::PyString>() {
-            let name = name.to_cow()?;
-            let column = if name == "*" {
+        let name = if item.is_instance_of::<pyo3::types::PyString>() {
+            // The star of this DataFrame, or its column of the name, `_col(item)`, which sets the
+            // name when it builds the plan.
+            let column = if item.eq("*")? {
                 self.dataframe.star()
             } else {
-                self.dataframe.col(&name)
+                crate::plan_args::df_col(&self.dataframe, item, false)?
             };
             return PyColumn::new(column).into_py_any(py);
         } else if item.is_instance_of::<PyColumn>() {
@@ -3231,8 +3381,12 @@ impl PyDataFrame {
     /// Private column accessor used by pandas-on-Spark (`sdf._col(name)`); mirrors the
     /// connect DataFrame's `_col`, the column of this DataFrame by its plan ID. Backtick-quoted
     /// names arrive from `scol_for`.
-    fn _col(&self, item: &str) -> PyColumn {
-        PyColumn::new(self.dataframe.col(item))
+    fn _col(&self, item: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+        Ok(PyColumn::new(crate::plan_args::df_col(
+            &self.dataframe,
+            item,
+            false,
+        )?))
     }
 
     /// As PySpark's `DataFrame.__repr__`: the table of `_show_string` when the session's
@@ -3476,10 +3630,11 @@ impl PyDataFrame {
         if !colName.is_instance_of::<pyo3::types::PyString>() {
             return Err(not_expected_type(colName, "colName", "str"));
         }
-        Ok(PyColumn::new(
-            self.dataframe
-                .metadata_column(&colName.extract::<String>()?),
-        ))
+        Ok(PyColumn::new(crate::plan_args::df_col(
+            &self.dataframe,
+            colName,
+            true,
+        )?))
     }
 }
 
@@ -3667,16 +3822,14 @@ fn replace_values(
         ));
     }
     // The names of a list or a tuple are set in the repeated string field of the plan as they
-    // are, as `crate::str_argument` converts them.
-    let subset: Option<Vec<String>> = match subset {
+    // are, as protobuf converts them, when its `NAReplace` plan builds the plan, before the
+    // replacements (`args`).
+    let mut args = crate::plan_args::PlanArgs::new();
+    let subset: Option<Bound<'_, PyAny>> = match subset {
         None => None,
-        Some(subset) if subset.is_instance_of::<PyString>() => Some(vec![subset.extract()?]),
-        Some(subset) if is_sequence(subset) => Some(
-            subset
-                .try_iter()?
-                .map(|name| crate::str_argument(&name?))
-                .collect::<PyResult<_>>()?,
-        ),
+        Some(subset) if subset.is_instance_of::<PyString>() || is_sequence(subset) => {
+            Some(subset.clone())
+        }
         Some(subset) => {
             return Err(raise(
                 "PySparkTypeError",
@@ -3735,13 +3888,19 @@ fn replace_values(
         return Err(raise("PySparkValueError", "MIXED_TYPE_REPLACEMENT", &[]));
     }
 
-    let literal = |v: &Bound<'_, PyAny>| -> PyResult<LiteralExpression> {
+    let subset = match subset {
+        None => None,
+        Some(subset) if subset.is_instance_of::<PyString>() => Some(vec![args.str(&subset)?]),
+        Some(subset) => Some(args.strs(subset.try_iter()?.collect::<PyResult<Vec<_>>>()?)?),
+    };
+    // The literals of `F.lit`, whose strings the plan sets when it builds the plan.
+    let mut literal = |v: &Bound<'_, PyAny>| -> PyResult<LiteralExpression> {
         Ok(if v.is_none() {
             LiteralExpression::null(spark_connect::types::DataType::Null)
         } else if v.is_instance_of::<PyBool>() {
             LiteralExpression::boolean(v.extract()?)
         } else if v.is_instance_of::<PyString>() {
-            LiteralExpression::string(v.extract::<String>()?)
+            LiteralExpression::string(args.str(v)?)
         } else {
             // As `float(v)`, for an int as well.
             LiteralExpression::double(v.extract()?)
@@ -3755,7 +3914,7 @@ fn replace_values(
         .as_ref()
         .map(|subset| subset.iter().map(String::as_str).collect());
     Ok(PyDataFrame::new(
-        dataframe.replace_literals(replacements, subset),
+        args.plan(dataframe.replace_literals(replacements, subset)),
     ))
 }
 
@@ -3777,7 +3936,7 @@ pub(crate) fn column_or_name(col: &Bound<'_, PyAny>) -> PyResult<spark_connect::
     if col.is_instance_of::<pyo3::types::PyString>() {
         // As PySpark's `F._to_col`, by `col`, of its origin.
         let _origin = crate::origin::with_origin("col")?;
-        return Ok(spark_connect::functions::col(&col.extract::<String>()?));
+        return crate::plan_args::col(col);
     }
     Err(not_expected_type(col, "col", "Column or str"))
 }

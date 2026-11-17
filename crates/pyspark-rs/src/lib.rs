@@ -31,6 +31,7 @@ mod origin;
 mod pandas_input;
 mod pbmsg;
 mod pipelines;
+mod plan_args;
 mod profiler;
 mod progress;
 mod pyarrow_export;

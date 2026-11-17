@@ -1187,8 +1187,11 @@ so a Column of 600 to 744 levels pickles in the drop-in only.
 
 A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
 builds the Column or the window: the frame bounds of `Window.rowsBetween` and `rangeBetween`, and a
-`StructField` given as the type of `cast`, `try_cast` or the return type of a UDF. Their errors are
-PySpark's, raised at the call rather than when the plan is built.
+`StructField` given as the return type of a UDF. Their errors are PySpark's, raised at the call
+rather than when the plan is built. The type of `cast` and `try_cast` is converted when the plan is
+built, as in PySpark: a `StructField`, also one nested in the type, the base `DataType()` and a
+Python subclass of it make a Column that renders as the `simpleString` of the type, and whose plans
+raise PySpark's `UNSUPPORTED_OPERATION`.
 
 `Column.alias` and `Column.name` raise PySpark's errors when PySpark's `ColumnAlias` raises them.
 At the call, they raise the metadata of several names (`ONLY_ALLOWED_FOR_SINGLE_COLUMN`) and other
@@ -1201,8 +1204,10 @@ keywords. When a request builds the plan, they raise:
 So a Column that is not used raises none of these. The `__repr__` of an alias of a name that is not
 a `str` (bytes too) raises the `TypeError` of PySpark's join of the names. A Column of such an
 alias copies and pickles, and its copy raises the same errors, also on a Python worker of the
-server. A name of lone surrogates shows escaped in the `__repr__`, where PySpark's shows it as it
-is.
+server. A str of lone surrogates, of a name or of another value of a Column (see below), shows
+escaped in the `__repr__` of the Column (`a\ud800b`), where PySpark's shows it as it is: in upper
+case (`\UD800`) in the type of a cast, which the `__repr__` upper-cases, and escaped twice in a list
+literal of `Column.otherwise` or `getItem`, which shows the `repr` of its strs.
 
 An `Observation` or a `SparkSession.Hook`, of the class or of a subclass, that PySpark pickled at
 protocol 0 or 1 raises a `TypeError` when the drop-in unpickles it, as CPython's
@@ -1298,9 +1303,57 @@ request that carries it, which is not always the call that takes it. The error i
 - a `withColumns` name, or an as-of join's `how` or `direction`, fails the DataFrame when its plan
   is built, at its first request, such as `collect` or `columns`. A `direction` of bytes that are
   not UTF-8 fails there with PySpark's `UnicodeDecodeError`, as protobuf's string field gives it;
+- the names, SQL strings and literal strs of Columns fail each DataFrame whose plan has the Column
+  when its plan is built, while the Column is made, renders, copies and pickles: those of `F.col`,
+  `F.expr`, `F.lit` and the other functions, `df[name]`, `df.name`, `colRegex`, `metadataColumn`,
+  the field of `getField`, `withField` and `dropFields`, the function of `call_function` and
+  `call_udf`, the type of `cast` and `try_cast`, and the column names and keywords of a UDF or UDTF
+  call;
+- so do the arguments of the methods of a DataFrame, of its `na` and `stat`, and of grouped data
+  that their plans set as they are given, such as the alias of `alias`, the names of
+  `withColumn(s)Renamed`, `withMetadata`, `toDF`, `drop`, `dropDuplicates`, `withWatermark`,
+  `unpivot`, `describe`, `summary`, `crosstab`, `freqItems` and the NA functions, a hint, the
+  name of `observe`, the names of a using join, and the functions of `agg` of a dict, and the
+  name of an `Observation`, which fails the DataFrames that it observes;
+- a tag of `addTag` fails each execution that the thread starts, as its request is built after its
+  plan, until `removeTag` removes it; a request without tags, such as that of `df.schema`, is sent.
+  `getTags` gives the tag as it is;
 - a key or a value of `SparkSession.builder.config`, or an `appName`, fails `getOrCreate`;
 - a `DataStreamWriter`'s fails the call that takes it, as PySpark sets that writer's request as it
   goes.
+
+Such a str is not one of the modes of `explain`, of the `how` of `dropna`, of the join types of
+`join` and `lateralJoin`, nor a column of `sum`, `avg`, `min` and `max` of grouped data: they raise
+PySpark's `VALUE_NOT_ALLOWED`, `UNSUPPORTED_JOIN_TYPE` and `NOT_NUMERIC_COLUMNS`, of the str as it
+is. `explain` builds the plan first, so the error of a plan that fails to build comes first.
+
+So it is for the other values that a plan sets as they are given, which protobuf converts when it
+builds the plan: a string field takes bytes of UTF-8, such as `alias(b"q")`, and refuses another
+object with the `TypeError` "bad argument type for built-in operation", such as the alias 5 or
+None, the names of `withColumnRenamed(1, "z")`, `unpivot`, `describe(b"ab")` (of its ints),
+`freqItems(["a", 1])`, the `subset` of `na.replace`, and a using join on `["a", 1]`; an int field
+refuses an int beyond it with a `ValueError`, such as `fillna(2**70)`, `dropna(thresh=2**40)` and
+the arguments of `spark.range` and `spark.tvf.range` after their `int()`, and a bool with a
+`TypeError`, such as `dropna(thresh=True)`; a double field refuses a str, such as the `support` of
+`freqItems`. A join on a tuple, or on a list of conditions whose `&` fails, such as of a Column and
+an object that is neither a Column nor a literal, raises the `AttributeError` of `to_plan` or of
+`&`, which PySpark computes when it builds the plan, such as the `PySparkAttributeError` of the
+`_expr` of a Row; an exception of `&` of another class, such as a `KeyError` of an object's
+`__getattr__`, is raised by the join. Of several such values, the requests raise the
+error of the first in the order in which PySpark builds the plan: the input of a plan before the
+plan, but for the partitioning of a repartition, which comes first, and the name of a hint or an
+observation before its expressions; the order of the other values of one plan can differ. As in
+PySpark, a DataFrame of such a plan raises at its requests, `schema` and `collect()` among them,
+and the call raises none. Of a join on a tuple, or on a list of conditions whose `&` fails,
+`schema` gives a Column, as in PySpark: the property raises an `AttributeError`, after which Python
+calls the `__getattr__` of the DataFrame. It is the Column of `schema`, where PySpark's is of
+`_schema`, and `columns` gives the Column of `columns`, where PySpark's raises `NOT_ITERABLE`.
+
+A DataFrame whose plan fails to build raises that error when it is pickled, also by cloudpickle,
+where PySpark's cloudpickle pickles it, of a copy that raises the error at its requests. `alias`, a
+hint, `dropDuplicates`, `observe`, `filter`, `sort`, `sortWithinPartitions` and the repartitions of
+such a value keep the cached schema of the DataFrame that they are of, as PySpark copies it, so
+their `schema` is known without a request, and their other requests raise the error.
 
 A str that a later call unsets or replaces is no longer in the request, in the same cases as in
 PySpark. A stream reader's option of None leaves its option as it was, as PySpark's does. An option

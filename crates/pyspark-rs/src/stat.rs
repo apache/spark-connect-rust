@@ -149,10 +149,10 @@ pub(crate) fn sample_by_arguments(
     let py = col.py();
     let type_name =
         |obj: &Bound<'_, PyAny>| -> PyResult<String> { Ok(obj.get_type().name()?.to_string()) };
-    let col = if let Ok(name) = col.cast::<PyString>() {
+    let col = if col.is_instance_of::<PyString>() {
         // As PySpark's `F._to_col`, by `col`, of its origin.
         let _origin = crate::origin::with_origin("col")?;
-        spark_connect::functions::col(&name.to_cow()?)
+        crate::plan_args::col(col)?
     } else if let Ok(column) = col.extract::<PyRef<'_, PyColumn>>() {
         column.column.clone()
     } else {

@@ -112,6 +112,24 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
+- **The `__repr__` of a Column of a str that UTF-8 cannot encode** (intentional; the expressions
+  of the core hold UTF-8). Such a str, of a name, a SQL string or a literal, fails the plans of the
+  Column when they are built, as in PySpark, and its lone surrogates show escaped in the `__repr__`
+  (`\ud800`), where PySpark's shows the str as it is (see `docs/compatibility.md`).
+- **The pickle of a DataFrame whose plan fails to build** (tracked). `pickle` and cloudpickle of a
+  DataFrame of a value that its plan does not take, such as `df.alias("a\ud800")` or
+  `df.limit(2.0)`, raise the error of the plan, as the pickle holds the relation; PySpark's
+  cloudpickle pickles its plan, whose copy raises the error at its requests.
+- **`schema` and `columns` of a join on a tuple** (intentional). As in PySpark, the plan fails with
+  the `AttributeError` of `to_plan` of the tuple when it is built, and `schema`, a property, then
+  gives a Column of the `__getattr__` of the DataFrame: of `schema`, where PySpark's is of
+  `_schema`; `columns` gives the Column of `columns`, where PySpark's raises `NOT_ITERABLE`.
+- **An exception of the `&` of a join's list of conditions that is not of a class that the plan
+  carries** (intentional; a plan of the core carries an error, not a Python object). Python's
+  `AttributeError`, `TypeError`, `ValueError` and `OverflowError`, and PySpark's error classes,
+  such as the `PySparkAttributeError` of a Row, fail the plan when it is built, as in PySpark.
+  Another, such as a `KeyError` that the `__getattr__` of an operand raises, is raised by `join`
+  or `_joinAsOf`, where PySpark raises it when it builds the plan.
 - **`toArrow` and `toPandas` of a string that is not valid UTF-8** (intentional). PySpark's
   `toArrow` returns a table whose string column holds the invalid bytes, which pyarrow's
   full validation rejects, and its `toPandas` raises pyarrow's `ArrowException`. This

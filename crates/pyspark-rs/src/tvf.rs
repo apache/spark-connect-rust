@@ -62,8 +62,9 @@ impl PyTableValuedFunction {
         step: crate::session::RangeStep,
         numPartitions: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let mut args = crate::plan_args::PlanArgs::new();
         let (start, end, step, num_partitions) =
-            crate::session::range_arguments(start, end, step, numPartitions)?;
+            crate::session::range_arguments(&mut args, start, end, step, numPartitions)?;
         let df = py
             .detach(|| {
                 self.inner
@@ -71,7 +72,7 @@ impl PyTableValuedFunction {
                     .map_err(Box::new)
             })
             .to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        Ok(PyDataFrame::new(args.plan(df)))
     }
 
     fn explode(&self, py: Python<'_>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
