@@ -159,7 +159,8 @@ local-relation settings, the pandas and inference settings, and Arrow's large ty
 conversion path takes its settings from that request, including the relation's cache
 threshold, and empty data reads none. The Rust API's `create_dataframe` and
 `create_dataframe_from_columns` read the same settings in one request, once they have converted
-their rows or columns, and apply the cache threshold at any size too.
+their rows or columns, and apply the cache threshold at any size too. Of no rows, or columns of
+no rows, they send the schema alone and read none, as PySpark's empty data does.
 Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
 use this importer, preserving integer precision and null masks without Python
 rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the

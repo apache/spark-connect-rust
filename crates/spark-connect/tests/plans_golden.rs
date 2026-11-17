@@ -8,11 +8,11 @@
 
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use spark_connect::column::col;
 use spark_connect::expression::{Expression, ExpressionNode};
-use spark_connect::plan::{self, AggregateGroupType, JoinType, LogicalPlan, SetOpType};
+use spark_connect::plan::{self, AggregateGroupType, JoinType, SetOpType};
 use spark_connect_proto as proto;
 
 /// Recursively clear fields that vary run-to-run and are not client-authored:
@@ -262,7 +262,8 @@ fn load_goldens() -> HashMap<String, proto::Plan> {
     })
 }
 
-fn build(name: &str) -> Option<LogicalPlan> {
+/// The relation of the case `name`, of the plan that its builders build.
+fn build(name: &str) -> Option<proto::Relation> {
     let plan = match name {
         "range" => plan::range(0, 10, 1),
         "range_start_end_step" => plan::range(2, 20, 3),
@@ -275,12 +276,15 @@ fn build(name: &str) -> Option<LogicalPlan> {
             let range = plan::range(0, 10, 1);
             plan::filter(range, col("id").gt(spark_connect::column::lit(3)))
         }
+        // As PySpark's `select("*")`, of the name, which the API takes as `F.col` does.
         "select_star" => {
-            let range = plan::range(0, 10, 1);
-            let star_col = spark_connect::column::Column::new(
-                ExpressionNode::UnresolvedStar(None, None).into(),
-            );
-            plan::project(range, vec![star_col])
+            // The channel connects lazily: building plans needs no server.
+            let spark = spark_connect::SparkSession::builder()
+                .remote("sc://127.0.0.1:1")
+                .get_or_create()
+                .unwrap();
+            let df = spark.range(10).unwrap().select(["*"]);
+            return Some(df.to_relation().unwrap());
         }
         "select_alias" => {
             let range = plan::range(0, 10, 1);
@@ -372,9 +376,10 @@ fn build(name: &str) -> Option<LogicalPlan> {
                 .alias("k")
                 .expression()
                 .clone();
+            // As PySpark's `F.count("*")`, of the star that `col` makes of the name.
             let agg_count = spark_connect::column::Column::new(Expression::function(
                 "count",
-                vec![ExpressionNode::UnresolvedStar(None, None).into()],
+                vec![col("*").expression().clone()],
             ))
             .alias("c")
             .expression()
@@ -602,7 +607,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         _ => return None,
     };
-    Some(plan)
+    Some(plan.to_proto())
 }
 
 const REQUIRED: &[&str] = &[
@@ -668,8 +673,8 @@ fn all_46_golden_plan_cases_pass() {
             }
         };
 
-        let plan_obj = build(name).unwrap_or_else(|| panic!("no builder for required case {name}"));
-        let plan_proto = plan_obj.to_proto();
+        let plan_proto =
+            build(name).unwrap_or_else(|| panic!("no builder for required case {name}"));
         let mut actual_plan = proto::Plan::default();
         actual_plan.op_type = Some(proto::plan::OpType::Root(plan_proto));
 
@@ -696,6 +701,13 @@ fn all_46_golden_plan_cases_pass() {
         46,
         "expected exactly 46 cases, got {}",
         REQUIRED.len()
+    );
+    // A case of each golden: a plan that the capture adds fails until it has its case.
+    let cases: BTreeSet<&str> = REQUIRED.iter().copied().collect();
+    let golden_names: BTreeSet<&str> = goldens.keys().map(String::as_str).collect();
+    assert_eq!(
+        cases, golden_names,
+        "the cases differ from those of the golden"
     );
     println!("all {} golden plan cases passed", REQUIRED.len());
 }

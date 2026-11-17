@@ -252,12 +252,14 @@ impl SaveMode {
         }
     }
 
-    /// Parse SaveMode from string.
+    /// Parse SaveMode from string, in any case, as PySpark Connect's `WriteOperation` does:
+    /// `append`, `overwrite`, `error` or `ignore`. Unlike classic PySpark's writer, which passes
+    /// the mode to the JVM, it takes no `errorifexists`.
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "append" => Some(SaveMode::Append),
             "overwrite" => Some(SaveMode::Overwrite),
-            "error" | "errorifexists" => Some(SaveMode::ErrorIfExists),
+            "error" => Some(SaveMode::ErrorIfExists),
             "ignore" => Some(SaveMode::Ignore),
             _ => None,
         }
@@ -413,9 +415,9 @@ impl DataFrameWriter {
         self
     }
 
-    /// Set the save mode: `append`, `overwrite`, `error` (or `errorifexists`) or `ignore`, in
-    /// any case. As PySpark's, the write fails with `UNSUPPORTED_OPERATION` when the last mode
-    /// set is any other string.
+    /// Set the save mode: `append`, `overwrite`, `error` or `ignore`, in any case. As PySpark
+    /// Connect's, the write fails with `UNSUPPORTED_OPERATION` when the last mode set is any
+    /// other string, `errorifexists` too, before it sends anything.
     pub fn mode(mut self, mode: &str) -> Self {
         match SaveMode::from_str(mode) {
             Some(m) => {
@@ -837,8 +839,8 @@ mod tests {
 
     #[test]
     fn v1_write_operation_of_an_unsupported_mode_fails() {
-        // As PySpark's: the last mode set decides, in any case, and any other string fails the
-        // write with UNSUPPORTED_OPERATION.
+        // As PySpark Connect's: the last mode set decides, in any case, and any other string
+        // fails the write with UNSUPPORTED_OPERATION, `errorifexists` too.
         let spark = session();
         let df = spark.range(3).unwrap();
         let path = || {
@@ -846,7 +848,14 @@ mod tests {
                 "/tmp/out".to_string(),
             ))
         };
-        for mode in ["bad", "default", "", " append"] {
+        for mode in [
+            "bad",
+            "default",
+            "",
+            " append",
+            "errorifexists",
+            "ErrorIfExists",
+        ] {
             let err = df
                 .write()
                 .mode("append")
@@ -863,7 +872,7 @@ mod tests {
             ("APPEND", SaveMode::Append),
             ("Overwrite", SaveMode::Overwrite),
             ("error", SaveMode::ErrorIfExists),
-            ("errorifexists", SaveMode::ErrorIfExists),
+            ("ERROR", SaveMode::ErrorIfExists),
             ("ignore", SaveMode::Ignore),
         ] {
             let op = df

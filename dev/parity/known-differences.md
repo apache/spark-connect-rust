@@ -120,6 +120,14 @@ difference is intentional or tracked for a fix.
   DataFrame of a value that its plan does not take, such as `df.alias("a\ud800")` or
   `df.limit(2.0)`, raise the error of the plan, as the pickle holds the relation; PySpark's
   cloudpickle pickles its plan, whose copy raises the error at its requests.
+- **The removal of the relation of a dropped checkpoint** (intentional; a drop does not wait).
+  As PySpark's `CachedRemoteRelation.__del__`, the drop of the last DataFrame of a checkpoint
+  sends one ExecutePlan of the removal, which is not reattachable and goes to no hook, with the
+  tags and the user context extensions of the thread that drops it. PySpark's finalizer waits
+  for the server; this client sends it without waiting, as a drop may run on a thread of the
+  transport's runtime, or in a finalizer that holds the GIL, which another thread may need to
+  read the responses of the same connection. The relation may still be on the server for a
+  moment after the drop.
 - **`schema` and `columns` of a join on a tuple** (intentional). As in PySpark, the plan fails with
   the `AttributeError` of `to_plan` of the tuple when it is built, and `schema`, a property, then
   gives a Column of the `__getattr__` of the DataFrame: of `schema`, where PySpark's is of
