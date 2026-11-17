@@ -34,21 +34,23 @@ import _ml_fetch_pair_cases
 import numpy as np
 import pytest
 from _mock_connect_server import mock_connect_session
-from pyspark.loose_version import LooseVersion
+from _native_classes import native_module
 
-# The generated pyspark.sql.connect.proto, of Apache Spark v4.3.0, needs protobuf >= 6.33.5.
-_protobuf = pytest.importorskip("google.protobuf")
-if LooseVersion(_protobuf.__version__) < LooseVersion("6.33.5"):
-    pytest.skip("pyspark.sql.connect.proto needs protobuf >= 6.33.5", allow_module_level=True)
+# The text format of protobuf, which the tests read and write the messages of
+# pyspark.sql.connect.proto with (the drop-in's Rust protobuf runtime, which needs no protobuf).
+pytest.importorskip("google.protobuf")
 
 import pyspark.sql.connect.proto as pb2  # noqa: E402
 from google.protobuf import text_format  # noqa: E402
-from pyspark import _pyspark  # noqa: E402
 from pyspark.errors import PySparkTypeError, PySparkValueError  # noqa: E402
 from pyspark.ml.linalg import DenseMatrix, DenseVector, SparseMatrix, SparseVector  # noqa: E402
 from pyspark.sql import SparkSession  # noqa: E402
 from pyspark.sql import functions as F  # noqa: E402
 from pyspark.sql import types as T  # noqa: E402
+
+# None in official PySpark, which runs the tests of the modules that import this one's helpers as
+# the reference (test_evaluation_api_offline).
+_pyspark = native_module()
 
 
 @pytest.fixture(scope="module")
@@ -93,7 +95,7 @@ def _no_session_left_active_of_ml():
 
 def _text(message):
     # A message of the Rust protobuf runtime writes text_format's text itself.
-    if isinstance(message, _pyspark.ProtoMessage):
+    if _pyspark is not None and isinstance(message, _pyspark.ProtoMessage):
         return _pyspark._proto_message_to_string(message, as_one_line=True)
     return text_format.MessageToString(message, as_one_line=True)
 
@@ -1839,6 +1841,9 @@ def test_the_requests_of_an_ended_test_are_answered_but_not_recorded_in_a_later_
         assert service.execute_requests == []
         assert service.release_execute_requests == []
         assert service.analyze_requests == []
+        # Nor is it counted: the plan compression lookup of its first plan, and its ResultComplete.
+        assert service.plan_compression_lookups == 0
+        assert service.result_complete_operations == []
         spark.range(1).collect()
         deadline = time.time() + 5
         while not service.release_execute_requests and time.time() < deadline:
@@ -1875,6 +1880,55 @@ def test_the_late_deletes_of_an_ended_test_take_no_queued_response_of_a_later_te
         later = KMeans(k=2).fit(spark.range(1))
         assert later is not None
         assert service.execute_payload_queue == []
+    finally:
+        ended.stop()
+
+
+def test_the_late_requests_of_an_ended_test_take_no_queued_failure_or_gate_of_a_later_test(ml_mock):
+    # As the queued responses above: the late Delete of a model of a forgotten session takes no
+    # failure that the later test queued for its own request (`retry_info_failures`), and the
+    # release of a forgotten session does not open the gate that the later test holds its own
+    # execution at (`release_session_unblocks_execute`).
+    import threading
+    import time
+
+    from pyspark.ml.connect import KMeans
+
+    spark, service = ml_mock
+    ended = SparkSession.builder.remote(service.remote).create()
+    try:
+        service.execute_payload = _operator_info("model-of-an-ended-test")
+        model = KMeans(k=2).fit(ended.range(1))
+        service.forget_session(ended.session_id)
+        service.reset()
+        service.retry_info_failures = [("RESOURCE_EXHAUSTED", 300)]
+        del model
+        gc.collect()
+        deadline = time.time() + 5
+        while service.forgotten_count(ended.session_id, "execute") == 0 and time.time() < deadline:
+            time.sleep(0.05)
+        assert service.forgotten_count(ended.session_id, "execute") == 1
+        assert service.retry_info_failures == [("RESOURCE_EXHAUSTED", 300)]
+        start = time.monotonic()
+        spark.range(3).count()
+        assert time.monotonic() - start >= 0.3
+        assert len(service.execute_requests) == 2 and not service.retry_info_failures
+
+        service.reset()
+        service.block_execute = True
+        service.release_session_unblocks_execute = True
+        done = threading.Event()
+        held = threading.Thread(target=lambda: (spark.range(1).collect(), done.set()), daemon=True)
+        held.start()
+        try:
+            assert service.wait_execute_started(1)
+            ended.stop()
+            assert service.forgotten_count(ended.session_id, "release_session") == 1
+            assert not done.wait(0.5), "the release of a forgotten session opened the gate"
+        finally:
+            service.release_response()
+            held.join(10)
+        assert done.is_set() and service.execute_gate_timeouts == 0
     finally:
         ended.stop()
 

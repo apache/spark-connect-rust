@@ -52,13 +52,18 @@ This workflow validates the pure-Rust implementation:
    `datafusion,polars`
 6. Audit for placeholder/deferred markers
 
-The same workflow has three more jobs:
+The same workflow has four more jobs:
 
+- **pyspark-rs unit tests**: `cargo test -p pyspark-rs --lib`, with Python 3.11. The extension is
+  not a default member, and its `pyo3` has the `extension-module` feature, which leaves libpython
+  unlinked, so the step links the test binary with the libpython of that Python.
 - **Core transport tests (aarch64 Linux)** (`ubuntu-24.04-arm`, 20-minute limit): runs
   `cargo test --locked -p apache-spark-connect-core --release --lib` for `aarch64-unknown-linux-gnu`
-- **WASM UDF feature**: installs the `wasm32-unknown-unknown` target and the Python packages
-  `cloudpickle`, `pyspark`, `wasmtime` and `pyarrow`. It runs the `wasm-udf` feature tests, builds
-  the WASM examples, and runs the ignored packer test and the WASM runner tests.
+- **WASM UDF feature**: installs the `wasm32-unknown-unknown` and `wasm32-wasip1` targets and the
+  Python packages `cloudpickle`, `pyspark`, `wasmtime` and `pyarrow`. It runs the `wasm-udf` feature
+  tests, builds the WASM examples, and runs the ignored tests that pack a UDF (`packer_produces` and
+  `to_expression_takes_any_columns`) and the WASM runner tests of `tests/wasm-udf` and
+  `tests/wasm-udf-wasi`.
 - **Minimum supported Rust**: `cargo +1.88 check --locked` on the published crates, with
   `RUSTFLAGS` cleared
 
@@ -76,7 +81,7 @@ Spark 4.3.0 Connect test suites against it. Its four jobs are:
   transport against a Spark 4.3.0 server
 - `connect-dropin` ("Connect drop-in"): the official Connect suites of `sql`, `ml`, `errors` and
   `logger`, run against our drop-in package
-- `connect-e2e` ("Rust behavioral e2e"): the Rust `e2e_*` tests and the WASM UDF test, against a
+- `connect-e2e` ("Rust behavioral e2e"): the Rust `e2e_*` tests and the WASM UDF tests, against a
   second server with reattach settings
 - `connect-benchmark` ("E2E benchmark vs reference"): `scripts/benchmark_e2e.py`, comparing our
   client with the pip-installed `pyspark==4.3.0`
@@ -118,11 +123,14 @@ python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-stat
   googleapis-common-protos cloudpickle zstandard py4j 'plotly<6.0.0' graphviz==0.20.3
 ```
 The drop-in job installs the same list. The workflow comments give the reason for the
-pandas 2.x pin: Spark 4.2's tests and Python workers are not compatible with pandas 3.x.
+pandas 2.x pin: Spark 4.3's tests and Python workers do not fully support pandas 3.x yet, as
+PySpark 4.3.0 warns.
 
 #### 4. Download & start Spark Connect server (4.3.0)
 - Downloads the official Spark 4.3.0 binary distribution with the Connect server bundled
-  (`spark-4.3.0-bin-hadoop3-connect.tgz`) from archive.apache.org into `~/spark-dist`, cached
+  (`spark-4.3.0-bin-hadoop3-connect.tgz`) into `~/spark-dist`, cached under the key of
+  `SPARK_VERSION`, with `scripts/download_spark_dist.sh`: from the Apache CDN (`dlcdn.apache.org`),
+  or else from archive.apache.org, which keeps every release but can be slow
 - Starts the server with `--driver-memory 3g` and
   `spark.sql.session.localRelationSizeLimit=1073741824` on `sc://localhost:15002`
 - Waits for readiness (a `/dev/tcp` port check, up to 90 seconds)
@@ -141,9 +149,13 @@ python scripts/run_official_tests.py \
 ```
 
 The runner injects our Rust transport into the official test files (see
-[official-tests.md](official-tests.md)). The same job then:
+[official-tests.md](official-tests.md)). Its first step is a guard that fails when a
+`python/tests/test_*_e2e.py` file is in no workflow's pytest list. The same job then:
 - runs the drop-in-facing live-server pytest files under `python/tests`
-  (`test_arrow_e2e.py`, `test_dropin_e2e.py` and the ML e2e files)
+  (`test_proto_rust_offline.py`, `test_arrow_e2e.py`, `test_dropin_e2e.py` and the ML e2e files)
+  in a virtual environment of only the drop-in's dependencies (pandas, pyarrow, numpy, pyyaml),
+  pytest and plotly, without protobuf, so that `pyspark.sql.connect.proto` is the Rust protobuf
+  runtime; `-rs` lists each skipped test with its reason
 - restarts the server in `local-cluster[2, 4, 1024]` mode and runs the resource and artifact
   files with `--only` and `--no-drift-check`
 
@@ -159,11 +171,14 @@ These logs are available in the workflow run artifacts for debugging failures.
   `scripts/run_official_tests.py --dropin --jobs 1` against the server started from `SPARK_HOME`.
   Its known failures are in `scripts/dropin_known_failures.txt`. Its logs are uploaded as the
   `dropin-official-py3.11` artifact.
-- **connect-e2e**: starts a second server with
-  `spark.connect.execute.reattachable.senderMaxStreamSize=1048576`, so that results over
-  1 MiB exercise the reattach path. It runs `cargo test -p apache-spark-connect` on the `e2e_*`
-  tests and a set of other integration tests with `--test-threads=1`, then the
-  `e2e_wasm_udf` test in `tests/wasm-udf`.
+- **connect-e2e**: its first step is the guard of the Rust live tests (see Test selection). It
+  starts a second server with `spark.connect.execute.reattachable.senderMaxStreamSize=1048576`,
+  so that results over 1 MiB exercise the reattach path. It runs `cargo test -p
+  apache-spark-connect` on the `e2e_*` tests and a set of other integration tests with
+  `--test-threads=1`, then the ignored live tests of the core client
+  (`cargo test -p apache-spark-connect-core --test integration_test -- --ignored`), the
+  `e2e_wasm_udf` test of `tests/wasm-udf` and the `e2e_python_worker_env` test of
+  `tests/wasm-udf-wasi`.
 - **connect-benchmark**: builds the extension and starts a server with default settings. It runs
   `scripts/benchmark_e2e.py --isolate` for the reference (pip-installed `pyspark==4.3.0`) and for
   ours (`PYTHONPATH=$(pwd)/python`), then `--compare`.
@@ -184,8 +199,11 @@ live-server tests" step of the `connect-parity` job of `build_python_connect.yml
 `connect-e2e` job and of the live pass of `coverage.yml`, which differ: `e2e_streaming`,
 `e2e_new_methods`, `e2e_ops_breadth` and `e2e_session_catalog` run only in `coverage.yml`, and
 `e2e_reattach_drop` only in `connect-e2e`. A Rust live test returns early without `SPARK_REMOTE`, so the guard step at the
-start of `connect-e2e` fails when a `crates/spark-connect/tests/e2e_*.rs` file is named by no
-workflow's `--test` list. That check is a name match only. The ML live tests that `connect-e2e`
+start of `connect-e2e` fails when a live test file is named by no workflow's `--test` list: an
+`e2e_*.rs` file of a crate or of `tests/wasm-udf*`, and any other test file that reads
+`SPARK_REMOTE`, itself or by the `should_run` or `live_session` of its common module (such as
+`raw_relation`, `types_roundtrip` and the core's `integration_test`). That check is a name match
+only. The ML live tests that `connect-e2e`
 runs are also in the `--test` list of the live pass of `coverage.yml`'s Rust coverage report,
 which has to be kept in sync by hand. The two lists are not the same otherwise: each also has
 targets that the other does not run. See [official-tests.md](official-tests.md) for the
@@ -245,10 +263,12 @@ one job does three things:
   `e2e_*` files, such as `e2e_functions` and `e2e_streaming`, and the `e2e_*` ML live tests, such
   as `e2e_kmeans` and `e2e_random_forest`) against a live Connect server, merged into one report.
 - **Offline Python suite**: builds the extension and runs the offline test files that its step
-  names under `coverage.py`: `python/tests/test_dropin_offline.py`, `test_arrow_handoff.py`, and
-  the `*_offline.py` files of the ML suites. No other workflow runs these files, so this step is
-  their gate: a failing test fails the job. `-rs` prints every skipped test with its reason. The
-  scope of the Python number is the hand-written shim, as `python/.coveragerc` defines it.
+  names under `coverage.py`: every `python/tests/test_*_offline.py` file (those of the drop-in,
+  the Rust protobuf runtime, the ML suites, the exit hook and the settings of createDataFrame)
+  and `test_arrow_handoff.py`. No other workflow runs these files, so this step is
+  their gate: a failing test fails the job, and a guard step at the start of the job fails when
+  one of the files is not in the step's list. `-rs` prints every skipped test with its reason.
+  The scope of the Python number is the hand-written shim, as `python/.coveragerc` defines it.
 - **Coverage floors**: the last step fails the job when a number is below its floor,
   `RUST_COVERAGE_FLOOR` (Rust line coverage) or `PYTHON_COVERAGE_FLOOR` (Python line and
   branch coverage), both set in the `env` block of the workflow. The step runs after the

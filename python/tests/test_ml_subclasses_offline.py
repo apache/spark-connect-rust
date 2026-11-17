@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Python subclasses of the native ML classes, as of PySpark's classes: their constructors, uids,
 copies and dispatchers, and the errors of a call that does not bind. Official PySpark runs them
-too, as the reference (`_native_classes.native_class`)."""
+too, as the reference (`_native_classes.native_class`), and skips the tests of the native classes'
+own members."""
 
 import sys
 
 import pytest
-from _native_classes import native_class
+from _native_classes import native_class, native_module
 
 
 def _cls(module, name):
@@ -155,6 +156,8 @@ def test_the_modules_have_pysparks_readers_and_writers_of_the_python_format():
     # PySpark's own classes, which its modules have and their `__all__` does not name.
     import importlib
 
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
     helpers = {
         "pipeline": [
             "PipelineReader",
@@ -238,11 +241,12 @@ def test_the_params_take_numpy_values_as_pysparks_type_converters_do():
     message = 'Invalid param value given for param "regParam". Could not convert 0.5 to float'
     with pytest.raises(TypeError, match=f"^{message}$"):
         lr.setRegParam(np.float32(0.5))
-    lr._native_sync(
-        {p.name: v for p, v in lr._paramMap.items()},
-        {p.name: v for p, v in lr._defaultParamMap.items()},
-    )
-    assert lr._native_params()[0]["family"] == "multinomial"
+    if native_module() is not None:
+        lr._native_sync(
+            {p.name: v for p, v in lr._paramMap.items()},
+            {p.name: v for p, v in lr._defaultParamMap.items()},
+        )
+        assert lr._native_params()[0]["family"] == "multinomial"
     StringIndexer = _cls("feature", "StringIndexer")
     columns = StringIndexer(inputCols=[np.str_("a"), "b"]).getInputCols()
     assert [type(c) for c in columns] == [np.str_, str]
@@ -319,6 +323,8 @@ def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_ob
     # The native members of an object read the native objects that it holds (an OneVsRest's
     # classifier, a Pipeline's stages, a validator's estimator, evaluator and grids, a
     # PipelineModel's stages), whose params are of their own maps: they are synced with it.
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
     LR = _cls("classification", "LogisticRegression")
     OneVsRest = _cls("classification", "OneVsRest")
     Pipeline = _cls("pipeline", "Pipeline")
@@ -357,6 +363,8 @@ def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_ob
 def test_the_native_members_of_a_public_class_have_pysparks_docstrings_and_signatures():
     import inspect
 
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
     import pyspark.ml.classification as reference
 
     LR = _cls("classification", "LogisticRegression")
@@ -375,6 +383,8 @@ def test_the_native_members_of_a_public_class_have_pysparks_docstrings_and_signa
 def test_the_summaries_of_the_models_are_the_native_ones():
     # PySpark's `summary` of a model reads the `_summary` that its fit sets of its server-side
     # object (`super().summary` of LinearSVCModel's own): the native model fetches its own.
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
     import pyspark.ml.classification as reference
 
     for name in ["LinearSVCModel", "MultilayerPerceptronClassificationModel", "FMClassificationModel"]:

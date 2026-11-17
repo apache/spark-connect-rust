@@ -9,25 +9,13 @@ stop words), as the server of the capture did.
 """
 
 import json
-import os
 from pathlib import Path
 
 import pytest
 from _feature_api_cases import ESTIMATORS, TRANSFORMERS, classes, offline_cases
 from _mock_connect_server import mock_connect_session
-from pyspark.loose_version import LooseVersion
-
-# The generated pyspark.sql.connect.proto, of Apache Spark v4.3.0, needs protobuf >= 6.33.5.
-_protobuf = pytest.importorskip("google.protobuf")
-if LooseVersion(_protobuf.__version__) < LooseVersion("6.33.5"):
-    # In CI this module must run, so an old protobuf fails the job rather than skipping it.
-    _reason = "pyspark.sql.connect.proto needs protobuf >= 6.33.5"
-    if os.environ.get("CI"):
-        pytest.fail(_reason, pytrace=False)
-    pytest.skip(_reason, allow_module_level=True)
-
-from pyspark.sql import SparkSession  # noqa: E402
-from pyspark.sql.connect import proto as pb2  # noqa: E402
+from pyspark.sql import SparkSession
+from pyspark.sql.connect import proto as pb2
 
 # The English stop words that `StopWordsRemover.loadDefaultStopWords("english")` returns on the
 # server of the capture.

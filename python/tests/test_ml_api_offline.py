@@ -22,7 +22,7 @@ from pathlib import Path
 
 import pytest
 from _ml_api_cases import CLASSES, params_api_cases
-from _native_classes import native_class
+from _native_classes import native_class, native_module
 
 ROOT = Path(__file__).resolve().parents[2]
 API = json.loads((ROOT / "tests/golden/ml_api.json").read_text())
@@ -311,9 +311,7 @@ def test_params_are_pyspark_mls(spec):
 def test_param_grid_builder_is_pysparks():
     # The ParamGridBuilder of the native validators is PySpark's own class, whose param maps of
     # the Params of any class they take.
-    try:
-        import pyspark._pyspark  # noqa: F401
-    except ImportError:
+    if native_module() is None:
         pytest.skip("of this client's native classes")
     from pyspark.ml import tuning
     from pyspark.ml.connect import tuning as native
@@ -353,9 +351,7 @@ _PYSPARKS_BASES = {
 def test_modules_have_the_names_of_pyspark_mls_modules(module):
     # The __all__ of a native module is PySpark's, in its order, and its abstract base classes are
     # PySpark's own, of which the native classes are subclasses.
-    try:
-        import pyspark._pyspark  # noqa: F401
-    except ImportError:
+    if native_module() is None:
         pytest.skip("of this client's native classes")
     official = importlib.import_module("pyspark.ml." + module)
     native = importlib.import_module("pyspark.ml.connect." + module)
@@ -413,11 +409,11 @@ def test_native_classes_are_of_pyspark_mls_bases_on_a_fresh_import():
     # the user's.
     code = """
 import importlib
-try:
-    import pyspark._pyspark  # noqa: F401
-    module = importlib.import_module("pyspark.ml.connect.classification")
-except ImportError:
+from _native_classes import native_module
+if native_module() is None:
     module = importlib.import_module("pyspark.ml.classification")
+else:
+    module = importlib.import_module("pyspark.ml.connect.classification")
 from pyspark.ml.base import Estimator, Model
 from pyspark.ml.param import Params
 print(isinstance(module.LinearSVC(), Estimator), isinstance(module.LinearSVC(), Params),

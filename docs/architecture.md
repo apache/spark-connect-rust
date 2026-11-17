@@ -62,6 +62,8 @@ A Cargo workspace of library crates, plus a Python skin:
 | `apache-spark-connect-proto` | `crates/spark-connect-proto` | Generated `spark.connect.*` gRPC/protobuf types |
 | `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
 | `apache-spark-connect` | `crates/spark-connect` | The DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, types |
+| `apache-spark-connect-macros` | `crates/spark-connect-macros` | The `#[spark_wasm_udf]` procedural macro of a Rust UDF |
+| `apache-spark-connect-build` | `crates/spark-connect-build` | The `build.rs` helper that compiles a crate's Rust UDFs to a WebAssembly module |
 | `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
 | Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
 
@@ -72,6 +74,8 @@ flowchart LR
     SC --> PYO3["pyspark-rs (PyO3)"]
     PYO3 --> SKIN["python/pyspark skin"]
     SC --> RUSTAPP["your Rust app"]
+    MACROS["spark-connect-macros (UDF macro)"] --> RUSTAPP
+    BUILD["spark-connect-build (UDF build.rs)"] --> RUSTAPP
 ```
 
 ## A query's lifecycle
@@ -230,8 +234,9 @@ See [Rust UDFs via WebAssembly](udfs.md) for the full story.
 3. **Correctness is gated in CI** - golden-proto tests guard plan building; the
    official Apache Spark Connect test suite guards transport and Arrow paths (see
    the CI notes under `dev/design/`).
-4. **Version = Spark version** - the crate/wheel version tracks the Spark release
-   it targets, so the number tells you which Spark it speaks.
+4. **Version = Spark version** - a release's crate/wheel version is that of the Spark
+   release it targets, so the number tells you which Spark it speaks. `master` carries the
+   next development version.
 
 For the deeper design write-ups (design notes, CI, the official test suite, and
 acceptance criteria), see [`dev/design/`](https://github.com/apache/spark-connect-rust/tree/master/dev/design)

@@ -95,11 +95,16 @@ fn values_compare_as_the_goldens_record_them() {
         &json!({"class": "IllegalArgumentException", "message": "requirement failed: no"}),
         "classified",
     );
-    // A golden error of no message matches no error.
+    // A golden error of no message matches no error, nor one of a JVM class and no message.
     let empty = std::panic::catch_unwind(|| {
         assert_error("any error", &json!({"class": "X", "message": ""}), "empty")
     });
     assert!(empty.is_err());
+    let class_only = std::panic::catch_unwind(|| {
+        let golden = json!({"class": "UnknownException", "message": "(java.lang.X) "});
+        assert_error("any error", &golden, "class only")
+    });
+    assert!(class_only.is_err());
 
     // Params compare by their values: an integer of any width, and a NaN.
     let saved = Params::new()
