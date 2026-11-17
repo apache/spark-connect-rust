@@ -1030,8 +1030,13 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
 
 - its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`, and
   it has one map container type where upb has a scalar one and a message one;
-- it parses and prints messages of any depth, where upb refuses more than 100 nested messages
-  and `text_format` exceeds Python's recursion limit;
+- it parses, prints and builds (of nested dicts) messages of any depth, where upb refuses to
+  parse more than 100 nested messages, its constructor overflows the stack of a thread from
+  thousands of nested dicts, and `text_format` exceeds Python's recursion limit;
+- where Python code that a method of a container runs (an `__index__`, an `__eq__`, an iterable)
+  shortens the container, a read past its end raises `IndexError` and an insertion or a deletion
+  takes the container as it is, where upb reads or writes past the end of its array, which can
+  end the process;
 - the iteration order of a map is the order of insertion, where upb's is that of its hash table.
   Serialization and the text format write the entries in upb's order of the keys;
 - `GetOptions()` of a descriptor gives `protobuf`'s `descriptor_pb2` options, as upb's does, so

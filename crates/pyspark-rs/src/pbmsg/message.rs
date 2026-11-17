@@ -27,11 +27,15 @@ use pyo3::types::{
 };
 use pyo3::IntoPyObjectExt;
 
-use super::containers::{MapContainer, RepeatedComposite, RepeatedScalar};
+use super::containers::{MapContainer, MapValue, RepeatedComposite, RepeatedScalar};
 use super::descriptors::{field_descriptor_object, PyDescriptor};
 use super::pool::{pool, FieldDesc, Kind, MessageDesc};
 use super::scalar::Scalar;
 use super::{codec, grow, text};
+
+/// The maximum depth of upb's `DiscardUnknownFields`, which passes it to
+/// `upb_Message_DiscardUnknown`.
+const DISCARD_UNKNOWN_DEPTH: u32 = 64;
 
 /// The value of a set field.
 pub(crate) enum Slot {
@@ -701,12 +705,18 @@ impl PyMessage {
     }
 
     /// Set the fields of the items of `mapping`, as the constructor and a mapping for a message
-    /// field do. None leaves a field unset.
+    /// field do. None leaves a field unset. A mapping of a message field sets the fields of its
+    /// message through here too, one level of a recursion as deep as the mappings nest, on a stack
+    /// with room for it.
     pub(crate) fn init_from_mapping(
         &mut self,
         py: Python<'_>,
         mapping: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        grow(|| self.set_fields_of(py, mapping))
+    }
+
+    fn set_fields_of(&mut self, py: Python<'_>, mapping: &Bound<'_, PyAny>) -> PyResult<()> {
         let desc = self.desc.clone();
         let items = mapping.call_method0("items")?;
         for item in items.try_iter()? {
@@ -764,21 +774,35 @@ impl PyMessage {
         Ok(())
     }
 
-    fn discard_unknown(&mut self, py: Python<'_>) -> PyResult<()> {
-        self.unknown.clear();
-        for slot in self.slots.iter().flatten() {
-            match slot {
-                Slot::Message(c) => c.bind(py).borrow_mut().discard_unknown(py)?,
-                Slot::Composite(c) => {
-                    for m in &c.bind(py).borrow().items {
-                        m.bind(py).borrow_mut().discard_unknown(py)?;
-                    }
-                }
-                Slot::Map(c) => c.bind(py).borrow().discard_unknown(py)?,
-                _ => {}
-            }
+    /// Discard the unknown fields of the message and of its messages, as upb's
+    /// `_upb_Message_DiscardUnknown` does at `depth`: it gives up once `depth`, less one for
+    /// each level, is 0, so the messages of that level and below keep theirs.
+    fn discard_unknown(&mut self, py: Python<'_>, depth: u32) {
+        let depth = depth.saturating_sub(1);
+        if depth == 0 {
+            return;
         }
-        Ok(())
+        grow(|| {
+            self.unknown.clear();
+            for slot in self.slots.iter().flatten() {
+                match slot {
+                    Slot::Message(child) => child.bind(py).borrow_mut().discard_unknown(py, depth),
+                    Slot::Composite(c) => {
+                        for child in &c.bind(py).borrow().items {
+                            child.bind(py).borrow_mut().discard_unknown(py, depth);
+                        }
+                    }
+                    Slot::Map(c) => {
+                        for (_, value) in &c.bind(py).borrow().entries {
+                            if let MapValue::Message(child) = value {
+                                child.bind(py).borrow_mut().discard_unknown(py, depth);
+                            }
+                        }
+                    }
+                    Slot::Scalar(_) | Slot::Repeated(_) => {}
+                }
+            }
+        })
     }
 
     fn field_index(&self, name: &str) -> PyResult<usize> {
@@ -827,19 +851,7 @@ fn copy_slot(py: Python<'_>, slot: &Slot) -> PyResult<Slot> {
     Ok(match slot {
         Slot::Scalar(v) => Slot::Scalar(v.clone()),
         Slot::Message(c) => Slot::Message(duplicate(py, c.bind(py))?.unbind()),
-        Slot::Repeated(c) => {
-            let c = c.bind(py).borrow();
-            Slot::Repeated(Py::new(
-                py,
-                RepeatedScalar::new(
-                    c.kind,
-                    c.field.clone(),
-                    c.enum_type.clone(),
-                    c.items.clone(),
-                    None,
-                ),
-            )?)
-        }
+        Slot::Repeated(c) => Slot::Repeated(Py::new(py, c.bind(py).borrow().copy())?),
         Slot::Composite(c) => {
             let c = c.bind(py).borrow();
             let items = c
@@ -1210,11 +1222,15 @@ impl PyMessage {
         Vec::new()
     }
 
+    /// As upb's, which discards the unknown fields of the message and of its messages down to
+    /// 62 levels below it (`upb_Message_DiscardUnknown` of a maximum depth of 64): those of the
+    /// deeper messages stay.
     #[pyo3(name = "DiscardUnknownFields")]
     fn discard_unknown_fields(slf: &Bound<'_, Self>) -> PyResult<()> {
         let py = slf.py();
         mark_present(slf)?;
-        slf.borrow_mut().discard_unknown(py)
+        slf.borrow_mut().discard_unknown(py, DISCARD_UNKNOWN_DEPTH);
+        Ok(())
     }
 
     #[pyo3(name = "SetInParent")]
