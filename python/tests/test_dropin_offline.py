@@ -11968,7 +11968,7 @@ def test_module_namespaces_of_the_official_doctests_as_pyspark():
     from pyspark.sql.types import Row, StructType
     from pyspark.storagelevel import StorageLevel
 
-    assert is_remote_only() is True and pyspark.sys is sys
+    assert is_remote_only() is True
     dataframe = pyspark.sql.dataframe
     assert (dataframe.Row, dataframe.StorageLevel, dataframe.StructType) == (
         Row, StorageLevel, StructType

@@ -23,8 +23,6 @@ with ``object.__new__``.  A concrete frame must still be allocated by the native
 its Rust payload cannot be initialized by Python's object allocator.
 """
 
-import random  # noqa: F401
-import sys  # noqa: F401
 from abc import ABCMeta
 from functools import wraps
 from inspect import signature
