@@ -1759,6 +1759,50 @@ def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
         assert isinstance(error.value.operation_id, str) and error.value.operation_id
 
 
+def test_udf_functions_are_pickled_when_their_plans_are_built_as_pyspark(session):
+    # As PySpark's PythonUDF.to_plan and PythonUDTF.to_plan: the function of a UDF, a pandas UDF,
+    # a UDTF or a map or group-map function is pickled each time a request builds a plan that
+    # holds it. So a value that the function reads, changed after the function was applied and
+    # before the action, is the value that the action runs with, and so for each later action;
+    # and a function that does not pickle raises from the first request, not from the call.
+    import pickle
+    import threading
+
+    import pandas as pd
+    from pyspark.sql.functions import pandas_udf, udf, udtf
+
+    state = {"factor": 1}
+    df = session.range(1, 3)
+
+    @pandas_udf("long")
+    def scaled(s: pd.Series) -> pd.Series:
+        return s * state["factor"]
+
+    @udtf(returnType="v: long")
+    class Scaled:
+        def eval(self, x):
+            yield (x * state["factor"],)
+
+    grouped = df.groupBy("id")
+    frames = [
+        df.select(udf(lambda x: x * state["factor"], "long")("id")),
+        df.select(scaled("id")),
+        df.lateralJoin(Scaled(F.col("id").outer())).select("v"),
+        df.mapInPandas(lambda it: (p * state["factor"] for p in it), "id long"),
+        grouped.applyInPandas(lambda p: p * state["factor"], "id long"),
+        grouped.cogroup(grouped).applyInPandas(lambda left, _: left * state["factor"], "id long"),
+    ]
+    for factor in (10, 100):
+        state["factor"] = factor
+        for frame in frames:
+            assert sorted(row[0] for row in frame.collect()) == [factor, 2 * factor]
+
+    lock = threading.Lock()
+    unpicklable = df.select(udf(lambda x: (lock, x)[1], "long")("id"))
+    with pytest.raises(pickle.PicklingError, match="^Could not serialize object: TypeError"):
+        unpicklable.schema
+
+
 def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     # As PySpark's, the functions are of pyspark.sql.functions.builtin: a UDF that captures one
     # pickles it by its name, of which the Python worker of the server imports PySpark's.

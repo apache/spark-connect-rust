@@ -50,6 +50,7 @@ mod tablearg;
 mod transport;
 mod tvf;
 mod types;
+mod udf_command;
 mod udtf_analyze;
 mod values;
 mod window;

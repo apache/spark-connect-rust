@@ -231,6 +231,35 @@ difference is intentional or tracked for a fix.
   concrete-class differences; inherited signature and annotation differences remain.
   These results do not establish complete DataFrame or ML parity.
 
+## UDFs
+
+As PySpark's `PythonUDF.to_plan` and `PythonUDTF.to_plan`, each request pickles the function of
+each UDF, UDTF and map or group-map function of its plan when it builds the plan (see
+`docs/compatibility.md`). These cases still differ, all of copies and pickles:
+
+- **A pickled Column or DataFrame** (intentional). It carries the commands that its functions
+  pickled to when it was pickled, in the protobuf of its expression or relation, which the
+  server's Python worker unpickles without the native client. PySpark's carries the functions,
+  which its requests pickle again: a value that a function reads, changed after the pickle, is
+  seen by PySpark's unpickled Column of a function that `pickle` pickles by reference, such as a
+  module-level function of `__main__`, but not by this client's. So `pickle.dumps` of a Column of
+  a UDF of a lambda pickles, where PySpark's raises the `PicklingError` of the lambda, and that of
+  a function that does not pickle by value raises its `PicklingError`, where PySpark's pickles a
+  module-level function by reference.
+- **A deep copy of a DataFrame** (tracked). It is a DataFrame of the relation of the copied one, so
+  that its Observations are copies, as PySpark's, and so it carries the commands that the
+  functions pickled to when it was copied, where PySpark's deep copy holds the functions, which its
+  requests pickle again. `copy.copy` of a Column or a DataFrame, and `copy.deepcopy` of a Column,
+  share the functions, as PySpark's do.
+- **The UDFs of a `mergeInto` clause** (tracked). Its condition and assignments are pickled when
+  the clause is added, as PySpark's `_build_merge_action` builds them, and again when `merge` runs,
+  whose command carries the second pickle; PySpark's carries the first.
+- **Garbage collection** (tracked). A DataFrame or a Column reports the functions of its UDFs that
+  it alone holds to Python's garbage collector. A function that a Column and a DataFrame of it
+  share, or two DataFrames, is reported by neither, so that no reference is counted twice: a
+  reference cycle through it, such as through a bound method of an object that keeps both the
+  Column and the DataFrame, is not collected, where PySpark collects it.
+
 ## Session and client (Connect)
 
 - **Custom gRPC channels** (intentional; the transport is native). `ChannelBuilder` and

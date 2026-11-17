@@ -122,6 +122,7 @@ fn common_inline_udtf_to_proto_with_and_without_return_type() {
         eval_type: 200,
         command: vec![1, 2, 3],
         python_ver: "3.11".to_string(),
+        pickler: None,
     };
     assert!(with_rt.to_proto().rel_type.is_some());
 
@@ -133,6 +134,7 @@ fn common_inline_udtf_to_proto_with_and_without_return_type() {
         eval_type: 201,
         command: vec![],
         python_ver: "3.12".to_string(),
+        pickler: None,
     };
     assert!(no_rt.to_proto().rel_type.is_some());
 }
@@ -165,6 +167,7 @@ fn common_inline_udtf_preserves_return_schema() {
             eval_type: 300,
             command: vec![1, 2, 3],
             python_ver: "3.12".to_string(),
+            pickler: None,
         };
         let Some(relation::RelType::CommonInlineUserDefinedTableFunction(call)) =
             plan.to_proto().rel_type

@@ -55,6 +55,35 @@ impl TableValuedFunction {
             eval_type,
             command,
             python_ver,
+            pickler: None,
+        };
+        DataFrame::new(self.session.clone(), plan)
+    }
+
+    /// As [`TableValuedFunction::udtf`], of a UDTF whose command `pickler` pickles each time a
+    /// request builds the plan of the DataFrame, as PySpark's `PythonUDTF.to_plan` pickles the
+    /// handler class for each plan that it builds. Not a stable API.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn udtf_pickled_at_build<C: Into<Column>>(
+        &self,
+        name: &str,
+        arguments: impl IntoIterator<Item = C>,
+        return_type: Option<DataType>,
+        eval_type: i32,
+        pickler: crate::udf::CommandPickler,
+        python_ver: String,
+        deterministic: bool,
+    ) -> DataFrame {
+        let plan = LogicalPlan::CommonInlineUdtf {
+            function_name: name.to_string(),
+            deterministic,
+            arguments: expressions_of(arguments),
+            return_type,
+            eval_type,
+            command: Vec::new(),
+            python_ver,
+            pickler: Some(pickler),
         };
         DataFrame::new(self.session.clone(), plan)
     }
