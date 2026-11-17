@@ -568,22 +568,30 @@ def test_types_of_the_abstract_types_pickle_as_pysparks(made, pickled):
 
 def test_the_abstract_types_have_no_proto_nor_arrow_type_as_pysparks():
     # PySpark's `pyspark_types_to_proto_types` has no proto of a type of its class only, of which
-    # it raises UNSUPPORTED_OPERATION, also in a struct, an array or a map. The drop-in raises it
-    # where it converts the type, at the call of `cast`, where PySpark raises it when the plan of
-    # the Column is built (see docs/compatibility.md).
+    # it raises UNSUPPORTED_OPERATION, also in a struct, an array or a map. `cast` and `try_cast`
+    # convert their type when the plan is built, as PySpark's: the Column renders the type's
+    # `simpleString`, and its plan raises the error (see docs/compatibility.md).
     from pyspark.sql.connect.types import pyspark_types_to_proto_types
 
-    for t, shown in [
-        (T.AtomicType(), "AtomicType()"),
-        (T.ArrayType(T.DataType()), "DataType()"),
-        (T.MapType(T.StringType(), T.IntegralType()), "IntegralType()"),
-        (T.StructType([T.StructField("a", T.NumericType())]), "NumericType()"),
-    ]:
-        for convert in (pyspark_types_to_proto_types, F.col("a").cast, F.col("a").try_cast):
+    cases = [
+        (T.AtomicType(), "AtomicType()", "ATOMIC"),
+        (T.ArrayType(T.DataType()), "DataType()", "ARRAY<DATA>"),
+        (T.MapType(T.StringType(), T.IntegralType()), "IntegralType()", "MAP<STRING,INTEGRAL>"),
+        (T.StructType([T.StructField("a", T.NumericType())]), "NumericType()", "STRUCT<A:NUMERIC>"),
+    ]
+    with mock_connect_session() as (spark, _):
+        for t, shown, rendered in cases:
             with pytest.raises(PySparkValueError) as e:
-                convert(t)
+                pyspark_types_to_proto_types(t)
             assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
             assert e.value.getMessageParameters() == {"operation": f"data type {shown}"}
+            for name, cast in (("CAST", F.col("a").cast), ("TRY_CAST", F.col("a").try_cast)):
+                c = cast(t)
+                assert repr(c) == f"Column<'{name}(a AS {rendered})'>"
+                with pytest.raises(PySparkValueError) as e:
+                    spark.range(1).select(c).schema
+                assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+                assert e.value.getMessageParameters() == {"operation": f"data type {shown}"}
     # Nor an Arrow type, of which PySpark's conversion of local rows raises its error, and the
     # plan of `DataFrame.to` raises UNSUPPORTED_OPERATION at the action, as PySpark's.
     from pyspark.errors import PySparkTypeError

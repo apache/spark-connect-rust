@@ -218,6 +218,30 @@ def test_feature_stages_and_fitted_models_reject_pandas_before_requests(ml_mock,
         assert _requests_but_deletes(service) == sent
 
 
+def test_the_bucketizer_of_a_quantile_discretizer_is_of_its_constructor_as_pysparks(ml_mock):
+    # As PySpark's `_create_model`, the Bucketizer of a fit is of its keyword constructor
+    # (`Bucketizer(splits=..., inputCol=..., outputCol=..., handleInvalid=...)`, of the splits that
+    # the fit fetches), of a new uid and of PySpark's param maps, in the order of the keywords; the
+    # `_copyValues` of `try_remote_fit` then gives it the params and the defaults of the
+    # discretizer that it has (the `outputCol` default of the discretizer's uid) in their places.
+    spark, service = ml_mock
+    service.execute_payload = _operator_info("discretizer-model")
+    _splits_payloads(service)
+    discretizer = feature.QuantileDiscretizer(numBuckets=2, inputCol="x")
+    model = discretizer.fit(spark.range(1))
+    assert type(model) is feature.Bucketizer and model.uid.startswith("Bucketizer_")
+    assert [p.name for p in model._defaultParamMap] == ["outputCol", "handleInvalid"]
+    assert [p.name for p in model._paramMap] == ["splits", "inputCol", "outputCol", "handleInvalid"]
+    assert model.getSplits() == [0.0, 0.5, 1.0] and model.getInputCol() == "x"
+    assert model.getOutputCol() == discretizer.uid + "__output"
+    assert model._defaultParamMap[model.outputCol] == discretizer.uid + "__output"
+    model = feature.QuantileDiscretizer(
+        numBucketsArray=[2, 2], inputCols=["x", "y"], outputCols=["a", "b"]
+    ).fit(spark.range(1))
+    assert [p.name for p in model._paramMap] == ["splitsArray", "inputCols", "outputCols", "handleInvalid"]
+    assert model.getSplitsArray() == [[0.0, 0.5, 1.0], [0.0, 0.5, 1.0]]
+
+
 @pytest.mark.parametrize("values", [[], [[], [0., 1.]]])
 def test_bucketizer_rejects_uninferrable_nested_splits_without_request(ml_mock, values):
     from pyspark.errors import PySparkTypeError
@@ -271,6 +295,147 @@ def test_elementwise_product_sparse_vector_parameter(ml_mock):
     stage = feature.ElementwiseProduct(scalingVec=vector)
     expected = serialize_param(vector, spark.client)
     assert wire(stage, "ElementwiseProduct", spark, service).params["scalingVec"].SerializeToString() == expected.SerializeToString()
+
+
+def test_stop_words_remover_fetches_its_defaults_once_as_pyspark(ml_mock):
+    # As PySpark's constructor, which fetches the default locale and then the English stop words
+    # of the active session for its `_setDefault`, of which the native object takes them: a
+    # construction sends these two requests once, of a subclass too; a load sends its Read and
+    # then them, as of its stage of `py_type()`; a copy, the getters and the param map send none.
+    spark, service = ml_mock
+    defaults = ["stopWordsRemoverGetDefaultOrUS", "stopWordsRemoverLoadDefaultStopWords"]
+
+    def sent_since(start):
+        return [
+            command.ml_command.fetch.methods[-1].method
+            if command.ml_command.HasField("fetch")
+            else command.ml_command.WhichOneof("command")
+            for command in _commands_but_deletes(service, start)
+        ]
+
+    makers = [
+        feature.StopWordsRemover,
+        lambda: feature.StopWordsRemover(inputCol="a", locale="fr"),
+        type("Remover", (feature.StopWordsRemover,), {}),
+    ]
+    for make in makers:
+        sent = len(service.execute_requests)
+        stage = make()
+        assert sent_since(sent) == defaults
+        sent = len(service.execute_requests)
+        assert stage.getStopWords() == ["the", "a"] and stage.getCaseSensitive() is False
+        assert stage.copy().getLocale() == stage.getLocale()
+        assert stage.extractParamMap()[stage.stopWords] == ["the", "a"]
+        assert sent_since(sent) == []
+    service.execute_payload = _ml_result(
+        operator_info=pb2.MlCommandResult.MlOperatorInfo(
+            name="org.apache.spark.ml.feature.StopWordsRemover",
+            uid="StopWordsRemover_0123456789ab",
+            params=pb2.MlParams(params={"inputCol": pb2.Expression.Literal(string="a")}),
+        )
+    )
+    sent = len(service.execute_requests)
+    loaded = feature.StopWordsRemover.load("stop-words-remover")
+    assert sent_since(sent) == ["read", *defaults]
+    assert (loaded.uid, loaded.getInputCol(), loaded.getLocale()) == (
+        "StopWordsRemover_0123456789ab",
+        "a",
+        "en_US",
+    )
+    sent = len(service.execute_requests)
+    loaded.copy()
+    assert sent_since(sent) == []
+
+
+def test_the_class_methods_build_their_models_as_pysparks(ml_mock):
+    # As PySpark's `CountVectorizerModel.from_vocabulary`, `StringIndexerModel.from_labels` and
+    # `from_arrays_of_labels` over Spark Connect: of the model of the class's constructor (its uid
+    # and PySpark's param maps), which gets the object that the ML helper builds of its uid and of
+    # `list(...)` of the labels (`(list(labels), ArrayType(StringType()))`, as PySpark's `serialize`
+    # sends it, whose literal asserts each string); then the setters of the given params, whose
+    # `TypeConverters` raise their TypeError after the request, and the size of the vocabulary.
+    from pyspark.ml.connect.serialize import serialize
+    from pyspark.sql.types import ArrayType
+
+    spark, service = ml_mock
+    service.payload_for_request = {}
+    service.execute_payload = _operator_info("built-model")
+
+    def built(make, method, labels):
+        sent = len(service.execute_requests)
+        model = make()
+        (command,) = _commands_but_deletes(service, sent)
+        assert command.ml_command.fetch.obj_ref.id == "______ML_CONNECT_HELPER______"
+        (sent_method,) = command.ml_command.fetch.methods
+        assert sent_method.method == method
+        assert list(sent_method.args) == serialize(spark.client, model.uid, labels)
+        return model
+
+    vocabulary = built(
+        lambda: feature.CountVectorizerModel.from_vocabulary("ab", "x", outputCol="o", minTF=1.0, binary=True),
+        "countVectorizerModelFromVocabulary",
+        ["a", "b"],
+    )
+    assert vocabulary.uid.startswith("CountVectorizerModel_") and vocabulary.getVocabSize() == 2
+    assert [p.name for p in vocabulary._defaultParamMap] == ["outputCol", "minTF", "minDF", "maxDF", "vocabSize", "binary"]
+    assert [p.name for p in vocabulary._paramMap] == ["inputCol", "outputCol", "minTF", "binary", "vocabSize"]
+    strings = ArrayType(StringType())
+    for labels, listed in [("ab", ["a", "b"]), ({"a": 1}.keys(), ["a"]), (iter(["a"]), ["a"]), ([], [])]:
+        model = built(
+            lambda: feature.StringIndexerModel.from_labels(labels, "x", outputCol="o", handleInvalid="keep"),
+            "stringIndexerModelFromLabels",
+            (listed, strings),
+        )
+        assert type(model) is feature.StringIndexerModel and model.uid.startswith("StringIndexerModel_")
+        assert [p.name for p in model._defaultParamMap] == ["outputCol", "handleInvalid", "stringOrderType"]
+        assert [p.name for p in model._paramMap] == ["inputCol", "outputCol", "handleInvalid"]
+    model = built(
+        lambda: feature.StringIndexerModel.from_arrays_of_labels(["ab", iter(["c"])], ("x", "y")),
+        "stringIndexerModelFromLabelsArray",
+        ([["a", "b"], ["c"]], ArrayType(strings)),
+    )
+    assert [p.name for p in model._paramMap] == ["inputCols"] and model.getInputCols() == ["x", "y"]
+    assert feature.StringIndexerModel.from_labels(["a"], None).getInputCol() is None
+    # Before any request: an empty vocabulary, a value of no `list`, and a label of no string.
+    for make, error in [
+        (lambda: feature.CountVectorizerModel.from_vocabulary([], "x"), ValueError),
+        (lambda: feature.StringIndexerModel.from_labels(5, "x"), TypeError),
+        (lambda: feature.CountVectorizerModel.from_vocabulary(["a", 1], "x"), AssertionError),
+        (lambda: feature.StringIndexerModel.from_labels(["a", 1], "x"), AssertionError),
+        (lambda: feature.StringIndexerModel.from_arrays_of_labels([["a", 1]], ["x"]), AssertionError),
+    ]:
+        sent = _requests_but_deletes(service)
+        with pytest.raises(error):
+            make()
+        assert _requests_but_deletes(service) == sent
+    # After the request, of the setters.
+    for make, param in [
+        (lambda: feature.StringIndexerModel.from_labels(["a"], 1), "inputCol"),
+        (lambda: feature.StringIndexerModel.from_arrays_of_labels([["a"]], "x"), "inputCols"),
+        (lambda: feature.CountVectorizerModel.from_vocabulary(["a"], "x", binary=1), "binary"),
+    ]:
+        sent = _requests_but_deletes(service)
+        with pytest.raises(TypeError, match=f'^Invalid param value given for param "{param}"'):
+            make()
+        assert _requests_but_deletes(service) == sent + 1
+
+
+def test_the_class_methods_check_their_arguments_in_pysparks_order_without_a_session():
+    # As PySpark's: `from_vocabulary` raises the ValueError of an empty vocabulary (or the
+    # TypeError of its `len`) first; then a class method makes the `list` of its labels, of its
+    # TypeError; then the ML helper call asserts an active session, before the labels are sent.
+    assert SparkSession.getActiveSession() is None
+    for make, error in [
+        (lambda: feature.CountVectorizerModel.from_vocabulary([], "x"), ValueError),
+        (lambda: feature.CountVectorizerModel.from_vocabulary(iter(["a"]), "x"), TypeError),
+        (lambda: feature.StringIndexerModel.from_labels(None, "x"), TypeError),
+        (lambda: feature.StringIndexerModel.from_arrays_of_labels([5], ["x"]), TypeError),
+        (lambda: feature.CountVectorizerModel.from_vocabulary(["a", 1], "x"), AssertionError),
+        (lambda: feature.StringIndexerModel.from_labels("abc", 1), AssertionError),
+    ]:
+        with pytest.raises(error) as raised:
+            make()
+        assert type(raised.value) is error
 
 
 def test_stop_words_remover_load_default_stop_words_fetches_the_ml_helper(ml_mock):

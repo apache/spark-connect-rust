@@ -697,6 +697,16 @@ def _upstream_eligible(ref_builtin, names):
         eligible = kept
 
 
+def _alias_target(ref_builtin, name, names):
+    """The function of `names` that `name` is bound to in PySpark Connect, as ``negate =
+    negative``: the name of its function, when that is another of `names`, or None."""
+    fn = getattr(ref_builtin, name, None)
+    target = getattr(fn, "__name__", name)
+    if target != name and target in names and getattr(ref_builtin, target, None) is fn:
+        return target
+    return None
+
+
 def _is_literal(value):
     try:
         return ast.literal_eval(repr(value)) == value
@@ -784,9 +794,20 @@ def render_wrappers(names: list[str], ref_builtin, ref_functions, *, upstream_ex
             "which functions.py relies on"
         )
 
+    # The aliases of PySpark Connect, as ``power = pow``, are bound to their functions after
+    # them, as PySpark binds them: an alias is the function, of its name.
+    generated = set(names)
+    aliases = {}
+    for name in names:
+        target = _alias_target(ref_builtin, name, generated)
+        if target is not None:
+            aliases[name] = target
+
     python_wrappers = []
     n_typed = n_upstream = 0
     for name in names:
+        if name in aliases:
+            continue
         if name in upstream:
             python_wrappers.append(_upstream_def(name, _upstream_impl(ref_builtin, name)))
             n_upstream += 1
@@ -806,11 +827,17 @@ def render_wrappers(names: list[str], ref_builtin, ref_functions, *, upstream_ex
             python_wrappers.append(f'{name} = _create_wrapper("{name}")')
 
     helpers = [_upstream_def(h, getattr(ref_builtin, h)) for h in UPSTREAM_HELPERS]
+    alias_block = ""
+    if aliases:
+        alias_block = "\n\n\n# The aliases of PySpark, bound to their functions.\n" + "\n".join(
+            f"{name} = {target}" for name, target in aliases.items()
+        )
     code = (
         _MODULE_HEADER
         + "\n\n\n".join(helpers)
         + "\n\n\n# Generated functions.\n"
         + "\n".join(python_wrappers)
+        + alias_block
         + "\n\n\n__all__ = [\n"
         + "".join(f'    "{n}",\n' for n in names)
         + "]\n"

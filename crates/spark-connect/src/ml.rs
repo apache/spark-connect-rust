@@ -1,4 +1,5 @@
-//! ML module mirroring `pyspark.ml.connect.base` and related ML classes.
+//! ML module mirroring `pyspark.ml` over Spark Connect: its estimators, transformers, models and
+//! evaluators, which send the `MlCommand`s of `pyspark.ml.util`'s `try_remote_*` wrappers.
 //!
 //! This module provides the foundation for machine learning in Spark Connect:
 //! - `Params`: parameter management for ML operators
@@ -350,13 +351,43 @@ impl MlMatrix {
 pub struct Params {
     /// User-supplied parameters as name -> Literal mappings
     params: HashMap<String, proto::Expression>,
+    /// The params of a value that PySpark cannot send, by name, of the error that PySpark's
+    /// serialization of the params raises of it (see [`Params::sendable`]). The value stays in
+    /// `params`, which its getter reads, as PySpark's `_paramMap` keeps it.
+    unsendable: std::collections::BTreeMap<String, SparkError>,
+}
+
+/// The error of an `assert` of PySpark that fails, a bare `AssertionError` in PySpark (such as the
+/// one of its `LiteralExpression` of a value that it does not take), of the message `message`,
+/// which says what failed.
+fn assertion_error(message: String) -> SparkError {
+    SparkError {
+        kind: SparkErrorKind::AssertionError,
+        ..SparkError::value_msg(message)
+    }
 }
 
 impl Params {
     /// Create a new empty Params collection.
     pub fn new() -> Self {
-        Params {
-            params: HashMap::new(),
+        Params::default()
+    }
+
+    /// Set the param `name` to `expr`, a value that PySpark sends, in place of any value that it
+    /// cannot send.
+    fn put(&mut self, name: &str, expr: proto::Expression) {
+        self.unsendable.remove(name);
+        self.params.insert(name.to_string(), expr);
+    }
+
+    /// The params as [`Params::to_proto`] serializes them, to be sent, as PySpark's
+    /// `serialize_ml_params` serializes a fit's, transform's, evaluate's or save's: the error that
+    /// it raises of a param of a value that it cannot send (such as a list of ints of a
+    /// [`Params::set_param_int_array`]), of the first of them by name, before any request.
+    pub fn sendable(&self) -> spark_connect_core::error::Result<proto::MlParams> {
+        match self.unsendable.values().next() {
+            Some(error) => Err(error.clone()),
+            None => Ok(self.to_proto()),
         }
     }
 
@@ -366,7 +397,7 @@ impl Params {
         let mut lit = proto::expression::Literal::default();
         lit.literal_type = Some(proto::expression::literal::LiteralType::Long(value));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -377,8 +408,8 @@ impl Params {
             literal_type: Some(proto::expression::literal::LiteralType::Integer(value)),
             ..Default::default()
         };
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -416,8 +447,8 @@ impl Params {
             elements,
         }
         .to_literal_proto();
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -426,7 +457,8 @@ impl Params {
         self
     }
 
-    /// Set a parameter to an array of 32-bit integers, as PySpark sends a list of ints.
+    /// Set a parameter to an array of 32-bit integers, as PySpark sends a list of ints that fit
+    /// 32 bits: an array literal of `integer` elements.
     pub fn set_param_int32_array(self, name: &str, values: impl IntoIterator<Item = i32>) -> Self {
         self.set_param_int_array(name, values.into_iter().map(i64::from))
     }
@@ -443,8 +475,8 @@ impl Params {
             elements: values.into_iter().map(LiteralExpression::Double).collect(),
         }
         .to_literal_proto();
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -453,55 +485,68 @@ impl Params {
         self
     }
 
-    /// Set a parameter to an integer array, preserving PySpark's literal width.
-    #[allow(deprecated)] // Matches the array representation of PySpark's ML parameters.
+    /// Set a parameter to an array of integers, as PySpark sends a list of ints: of the type of
+    /// its first element, as `LiteralExpression._infer_type` types a list, so of `integer`
+    /// elements when the first fits 32 bits, else of `long` ones (which the server reads as the 32
+    /// bits of each, into a JVM `Array[Int]`, as it reads PySpark's). Each element is a
+    /// `LiteralExpression` of that type, whose `assert` fails of an element out of its range: of
+    /// a first element that fits 32 bits and another that does not, PySpark sends nothing, and
+    /// neither does this. The list is kept, for its getter, and a fit, transform, evaluate or
+    /// save returns the `AssertionError` (see [`Params::sendable`]). A list of no element has no
+    /// type to infer, which PySpark refuses (`CANNOT_INFER_ARRAY_ELEMENT_TYPE`); it is sent as an
+    /// array of `integer` elements.
     pub fn set_param_int_array(
         mut self,
         name: &str,
         values: impl IntoIterator<Item = i64>,
     ) -> Self {
-        use proto::expression::literal::LiteralType as L;
         let values: Vec<i64> = values.into_iter().collect();
-        let narrow = values.iter().all(|v| i32::try_from(*v).is_ok());
-        let elements = values
-            .into_iter()
-            .map(|v| proto::expression::Literal {
-                literal_type: Some(if narrow {
-                    L::Integer(v as i32)
-                } else {
-                    L::Long(v)
-                }),
-                ..Default::default()
-            })
-            .collect();
-        let literal = proto::expression::Literal {
-            literal_type: Some(L::Array(proto::expression::literal::Array {
-                element_type: Some(
-                    if narrow {
-                        DataType::Integer
-                    } else {
-                        DataType::Long
-                    }
-                    .to_proto(),
-                ),
-                elements,
-            })),
-            ..Default::default()
+        // The type of the first element (`_infer_type`): an `integer` when it fits 32 bits.
+        let narrow = values.first().is_none_or(|v| i32::try_from(*v).is_ok());
+        let out_of_range = if narrow {
+            values.iter().copied().find(|v| i32::try_from(*v).is_err())
+        } else {
+            None
         };
-        self.params.insert(
-            name.into(),
+        let (element_type, elements) = match out_of_range {
+            None if narrow => (
+                DataType::Integer,
+                values
+                    .iter()
+                    .map(|v| LiteralExpression::Integer(*v as i32))
+                    .collect(),
+            ),
+            _ => (
+                DataType::Long,
+                values.iter().map(|v| LiteralExpression::Long(*v)).collect(),
+            ),
+        };
+        let literal = LiteralExpression::Array {
+            element_type: Box::new(element_type),
+            elements,
+        }
+        .to_literal_proto();
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
             },
         );
+        if let Some(value) = out_of_range {
+            let error = assertion_error(format!(
+                "{name}: the element {value} of the list of ints is out of the range of an \
+                 integer, the type of its first element, as PySpark's LiteralExpression asserts"
+            ));
+            self.unsendable.insert(name.to_string(), error);
+        }
         self
     }
 
     /// Set a vector parameter using Spark's VectorUDT representation.
     pub fn set_param_vector(mut self, name: &str, value: impl Into<MlVector>) -> Self {
-        self.params.insert(
-            name.into(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(
                     value.into().to_literal(),
@@ -515,8 +560,8 @@ impl Params {
     /// Set a matrix parameter using Spark's MatrixUDT representation, as PySpark sends a
     /// `DenseMatrix` or a `SparseMatrix` (see [`MlMatrix`]).
     pub fn set_param_matrix(mut self, name: &str, value: impl Into<MlMatrix>) -> Self {
-        self.params.insert(
-            name.into(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(
                     value.into().to_literal(),
@@ -533,7 +578,7 @@ impl Params {
         let mut lit = proto::expression::Literal::default();
         lit.literal_type = Some(proto::expression::literal::LiteralType::Double(value));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -545,7 +590,7 @@ impl Params {
             value.to_string(),
         ));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -555,7 +600,7 @@ impl Params {
         let mut lit = proto::expression::Literal::default();
         lit.literal_type = Some(proto::expression::literal::LiteralType::Boolean(value));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -569,6 +614,23 @@ impl Params {
                 .filter(|(name, _)| keep(name))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
+            unsendable: self
+                .unsendable
+                .iter()
+                .filter(|(name, _)| keep(name))
+                .map(|(name, error)| (name.clone(), error.clone()))
+                .collect(),
+        }
+    }
+
+    /// The params of `self` with those of `other` set over them, as a copy of PySpark of a param
+    /// map sets its values.
+    pub fn extend_from(&mut self, other: &Params) {
+        for (name, value) in &other.params {
+            self.put(name, value.clone());
+        }
+        for (name, error) in &other.unsendable {
+            self.unsendable.insert(name.clone(), error.clone());
         }
     }
 
@@ -576,6 +638,7 @@ impl Params {
     /// PySpark's `Params.clear` does.
     pub fn clear_param(mut self, name: &str) -> Self {
         self.params.remove(name);
+        self.unsendable.remove(name);
         self
     }
 
@@ -587,8 +650,8 @@ impl Params {
             )),
             ..Default::default()
         };
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -616,8 +679,8 @@ impl Params {
 
     /// Set a parameter to a literal, preserving its wire type.
     pub fn set_param_literal(mut self, name: &str, literal: proto::expression::Literal) -> Self {
-        self.params.insert(
-            name.into(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -871,7 +934,10 @@ impl Params {
             e.expr_type = Some(proto::expression::ExprType::Literal(lit.clone()));
             params.insert(name.clone(), e);
         }
-        Params { params }
+        Params {
+            params,
+            unsendable: Default::default(),
+        }
     }
 }
 
@@ -968,7 +1034,7 @@ impl MlOperator {
 
 /// Base trait for ML Estimators that fit to data and produce Models.
 ///
-/// Mirrors `pyspark.ml.connect.base.Estimator`.
+/// Mirrors `pyspark.ml.base.Estimator`, whose fit over Spark Connect is `try_remote_fit`'s.
 pub trait Estimator: Send + Sync {
     /// Get the operator definition for this estimator.
     fn operator(&self) -> &MlOperator;
@@ -1018,7 +1084,8 @@ pub trait Estimator: Send + Sync {
 
 /// Base trait for ML Transformers that apply transformations to data.
 ///
-/// Mirrors `pyspark.ml.connect.base.Transformer`.
+/// Mirrors `pyspark.ml.base.Transformer`, whose transform over Spark Connect is
+/// `try_remote_transform_relation`'s.
 pub trait Transformer: Send + Sync {
     /// Get the operator definition for this transformer.
     fn operator(&self) -> &MlOperator;
@@ -1068,7 +1135,7 @@ pub trait Transformer: Send + Sync {
             self.operator().to_proto(),
         ));
         transform.input = Some(Box::new(input.relation()?));
-        transform.params = Some(self.params().to_proto());
+        transform.params = Some(self.params().sendable()?);
 
         let mut ml_relation = proto::MlRelation::default();
         ml_relation.ml_type = Some(proto::ml_relation::MlType::Transform(Box::new(transform)));
@@ -1078,7 +1145,7 @@ pub trait Transformer: Send + Sync {
 
 /// Base trait for ML Models (result of fitting an Estimator).
 ///
-/// Mirrors `pyspark.ml.connect.base.Model`.
+/// Mirrors `pyspark.ml.base.Model`.
 pub trait Model: Transformer + AsAny {
     /// Clone this model into a boxed trait object.
     fn clone_box(&self) -> Box<dyn Model>;
@@ -1088,6 +1155,21 @@ pub trait Model: Transformer + AsAny {
     /// single object, such as a pipeline model.
     fn ml_ref(&self) -> Option<&MlRef> {
         None
+    }
+
+    /// The warning that the server sent with the model of its fit (`warning_message`): of a tree
+    /// model whose training stopped early because it grew beyond the threshold of the memory
+    /// control of the server's ML cache (of the session's
+    /// `spark.connect.session.connectML.mlCache.memoryControl.maxModelSize`), such as "The random
+    /// forest training stops early because the model size (35016 bytes) exceeds threshold (24000
+    /// bytes).", the warnings of the fit a line each (of a boosting tree, the forest's of its tree
+    /// before its own). PySpark's `try_remote_fit` logs it to the `pyspark.ml.util` logger, at
+    /// WARNING; the Rust client keeps it on the model, and hands it to the handler of
+    /// [`SparkSession::set_ml_fit_warning_handler`] as the fit's result arrives. None of a model
+    /// of a fit without a warning, of a load or a fetch, and of a model of no single server-side
+    /// object, such as a pipeline model, whose stages have their own.
+    fn fit_warning(&self) -> Option<&str> {
+        self.ml_ref().and_then(MlRef::fit_warning)
     }
 
     /// The target of the methods of the model's server-side object, or an error of a model that
@@ -1144,12 +1226,18 @@ impl dyn Model {
 /// the features, and the prediction of a single vector, of the model's server-side object.
 pub trait PredictionModel: Model {
     /// The number of features that the model was trained on (`numFeatures`), or -1 if unknown.
+    /// PySpark reads the server's int as a Python int of any size: one out of the range of an
+    /// `i32` is an error, rather than truncated.
     fn num_features(&self) -> spark_connect_core::error::Result<i32> {
         let value = fetch(&self.model_target()?, "numFeatures", vec![])?.into_value()?;
-        value
-            .as_i64()
-            .map(|v| v as i32)
-            .ok_or_else(|| SparkError::value_msg(format!("numFeatures is not an int: {value:?}")))
+        let num_features = value.as_i64().ok_or_else(|| {
+            SparkError::value_msg(format!("numFeatures is not an int: {value:?}"))
+        })?;
+        i32::try_from(num_features).map_err(|_| {
+            SparkError::value_msg(format!(
+                "numFeatures of the model is out of the range of an int: {num_features}"
+            ))
+        })
     }
 
     /// The prediction of a single vector of features (`predict`).
@@ -1168,7 +1256,8 @@ pub trait PredictionModel: Model {
 
 /// Base trait for ML Evaluators that measure model quality.
 ///
-/// Mirrors `pyspark.ml.connect.base.Evaluator`.
+/// Mirrors `pyspark.ml.evaluation.Evaluator`, whose evaluate over Spark Connect is
+/// `try_remote_evaluate`'s.
 pub trait Evaluator: Send + Sync {
     /// Get the operator definition for this evaluator.
     fn operator(&self) -> &MlOperator;
@@ -1272,7 +1361,7 @@ pub fn ml_string_array(
 /// Run an evaluator against a dataset via the ML `Evaluate` command and return the
 /// scalar metric.
 ///
-/// Mirrors `pyspark.ml.connect` evaluator.evaluate: build an `MlCommand::Evaluate`
+/// Mirrors `pyspark.ml.util.try_remote_evaluate`: build an `MlCommand::Evaluate`
 /// carrying the evaluator operator, its params, and the dataset relation, submit
 /// it, and read the returned metric literal from the `MlCommandResult`.
 fn evaluate_via_command(
@@ -1283,7 +1372,7 @@ fn evaluate_via_command(
     let dataset = df.relation()?;
     let evaluate = proto::ml_command::Evaluate {
         evaluator: Some(operator.to_proto()),
-        params: Some(params.to_proto()),
+        params: Some(params.sendable()?),
         dataset: Some(dataset),
     };
     let mut ml_command = proto::MlCommand::default();
@@ -1803,7 +1892,11 @@ ml_params! {
     }
 }
 
-/// Submit training data and parameters and read the fitted operator metadata.
+/// Submit training data and parameters and read the fitted operator metadata. The warning of the
+/// fit that the server sends with it (`warning_message`, of a tree training that the memory
+/// control of the server's ML cache stopped early) goes to the handler of the session, before the
+/// model is made of the metadata: as PySpark's `try_remote_fit` logs it of a non-empty
+/// `warning_message`, before it makes the model (see [`SparkSession::set_ml_fit_warning_handler`]).
 fn fit_via_command(
     operator: &MlOperator,
     params: &Params,
@@ -1812,7 +1905,7 @@ fn fit_via_command(
     let command = proto::MlCommand {
         command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
             estimator: Some(operator.to_proto()),
-            params: Some(params.to_proto()),
+            params: Some(params.sendable()?),
             dataset: Some(df.relation()?),
         })),
     };
@@ -1827,6 +1920,9 @@ fn fit_via_command(
             if let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) =
                 result.result_type
             {
+                if let Some(warning) = fit_warning_of(&info) {
+                    df.session.report_ml_fit_warning(warning)?;
+                }
                 return Ok(info);
             }
         }
@@ -1835,6 +1931,14 @@ fn fit_via_command(
         "{}.fit: server returned no fitted model",
         operator.name
     )))
+}
+
+/// The warning of the fit of `info`, the server's `warning_message`, when it is not empty: as
+/// PySpark's `if warning_msg := getattr(model_info, "warning_message", None)` takes it.
+fn fit_warning_of(info: &proto::ml_command_result::MlOperatorInfo) -> Option<&str> {
+    info.warning_message
+        .as_deref()
+        .filter(|warning| !warning.is_empty())
 }
 
 /// A server-side ML object: a fitted model, or another object that a fetch returns (a submodel, a
@@ -1850,6 +1954,8 @@ type CachedModel = MlRef;
 struct CachedModelRef {
     model_ref: proto::ObjectRef,
     session: SparkSession,
+    /// The warning that the server sent with the model of a fit (see [`MlRef::fit_warning`]).
+    fit_warning: Option<String>,
 }
 
 impl std::fmt::Debug for CachedModelRef {
@@ -1882,6 +1988,7 @@ impl CachedModel {
                 Ok(Self(Arc::new(CachedModelRef {
                     model_ref: reference.clone(),
                     session: session.clone(),
+                    fit_warning: fit_warning_of(info).map(str::to_string),
                 })))
             }
             _ => Err(spark_connect_core::error::SparkError::connect_msg(format!(
@@ -1902,7 +2009,7 @@ impl CachedModel {
                         self.0.model_ref.clone(),
                     )),
                     input: Some(Box::new(df.relation()?)),
-                    params: Some(params.to_proto()),
+                    params: Some(params.sendable()?),
                 },
             ))),
             ..Default::default()
@@ -2498,8 +2605,8 @@ impl Classifier {
 
 /// Multiclass reduction that fits one native binary classifier per class.
 ///
-/// As in PySpark, class indices run from zero through the maximum label. Fits use
-/// independent snapshots of the base classifier and at most `parallelism` threads.
+/// As in PySpark, the classes are `int(max label) + 1`, of Python's `int`. Fits use independent
+/// snapshots of the base classifier and at most `parallelism` threads.
 #[derive(Debug, Clone)]
 pub struct OneVsRest {
     operator: MlOperator,
@@ -2537,82 +2644,80 @@ impl OneVsRest {
         }
     }
 
-    /// The error of a column param of a fit that is set to a null, which a fit raises first.
-    pub fn check_required_params(&self) -> spark_connect_core::error::Result<()> {
-        for name in [
-            "featuresCol",
-            "labelCol",
-            "predictionCol",
-            "rawPredictionCol",
-        ] {
-            if matches!(
-                self.params.literal(name),
-                Some(proto::expression::literal::LiteralType::Null(_))
-            ) {
-                return Err(SparkError::value_msg(format!(
-                    "OneVsRest parameter {name} cannot be null"
-                )));
-            }
+    /// The column param `name` of a fit, as its getter gives it: the set string, or `default`
+    /// when it is not set; None when it is set to a null.
+    fn column_param<'a>(&'a self, name: &str, default: &'a str) -> Option<&'a str> {
+        match self.params.literal(name) {
+            Some(proto::expression::literal::LiteralType::Null(_)) => None,
+            _ => Some(self.params.string_or(name, default)),
         }
-        Ok(())
     }
 
-    /// The largest label of `df`, of which a fit takes its number of classes. As PySpark's fit,
-    /// it reads it first, with `dataset.agg({labelCol: "max"})`: None when `df` has no rows or only
-    /// null labels.
-    pub fn max_label(&self, df: &DataFrame) -> spark_connect_core::error::Result<Option<f64>> {
-        let rows = df
-            .agg([crate::functions::max(
-                ml_exact_column(self.label_col()).cast(DataType::Double),
-            )])
-            .collect()?;
-        Ok(rows.first().and_then(|r| r.get(0)).and_then(|v| v.as_f64()))
-    }
-
-    /// Fit one binary classifier of each of `num_classes` classes on `df`, `threads` at a time:
-    /// the fit after its checks, with the class count of [`Self::max_label`].
-    pub fn fit_classes(
+    /// The largest label of `df`, of which PySpark's `OneVsRest._fit` takes its classes, as
+    /// `int(max) + 1`. As PySpark's, it reads it first, as
+    /// `dataset.agg({labelCol: "max"}).head()["max(" + labelCol + ")"]`: the field of that name
+    /// of the first row of the aggregate of the label column as named (which the server resolves
+    /// and names), of the column's own type, so of a string column its greatest string. It is a
+    /// null when `df` has no rows or only null labels. A label column set to a null raises the
+    /// AttributeError of PySpark's `F.col(None)` (of `str.endswith`), before any request.
+    pub fn max_label(
         &self,
         df: &DataFrame,
+    ) -> spark_connect_core::error::Result<crate::row::Value> {
+        let label = self
+            .column_param("labelCol", "label")
+            .ok_or_else(|| SparkError {
+                kind: SparkErrorKind::AttributeError,
+                ..SparkError::value_msg("'NoneType' object has no attribute 'endswith'")
+            })?;
+        let rows = df
+            .agg([crate::functions::max(crate::functions::col(label))])
+            .limit(1)
+            .collect()?;
+        // `head()` of no row is None, whose subscript raises this TypeError.
+        let row = rows.first().ok_or_else(|| SparkError {
+            kind: SparkErrorKind::BuiltinTypeError,
+            ..SparkError::value_msg("'NoneType' object is not subscriptable")
+        })?;
+        // As `Row.__getitem__` of a name that the row has not.
+        let key = format!("max({label})");
+        row.get_by_name(&key)
+            .cloned()
+            .ok_or_else(|| SparkError::value("KEY_NOT_EXISTS", &[("key", &key)]))
+    }
+
+    /// The fits of the classifier of each of `num_classes` classes on `training`, `threads` at a
+    /// time, as the tasks of PySpark's `OneVsRest._fit` run in its pool. `training` is the
+    /// dataset of the label, the features and the weight columns of the fit, as cached
+    /// (PySpark's `multiclassLabeled`). The binary training set of the class `index` is `training`
+    /// with the binary label `mc2b$<index>`, `1.0` of the rows whose label (the column of
+    /// `training`, `multiclassLabeled[labelCol]`) is `float(index)` and `0.0` of the others. Its
+    /// classifier is a copy of the classifier with the binary label as its `labelCol`, and the
+    /// estimator's `featuresCol` and `predictionCol` (as set, a null too, else their defaults), and
+    /// `weight` as its `weightCol`, the weight column of a classifier that takes one.
+    ///
+    /// The model of the fits, of the classes' models in the order of the classes, and the binary
+    /// training set of each class, which its model's training summary is of.
+    pub fn fit_classes(
+        &self,
+        training: &DataFrame,
         num_classes: usize,
         threads: usize,
-    ) -> spark_connect_core::error::Result<OneVsRestModel> {
+        weight: Option<&str>,
+    ) -> spark_connect_core::error::Result<(OneVsRestModel, Vec<DataFrame>)> {
         use crate::column::{lit_double, when};
         use std::sync::atomic::{AtomicUsize, Ordering};
         let classifier = self
             .classifier
             .as_ref()
-            .ok_or_else(|| SparkError::value_msg("OneVsRest requires a native classifier"))?;
+            .ok_or_else(|| classifier_unset(&self.operator.uid))?;
         let count = num_classes;
-        let weight = self
-            .weight_col()
-            .filter(|name| !name.is_empty() && classifier.supports_weight());
-        let mut columns = vec![
-            ml_exact_column(self.label_col()),
-            ml_exact_column(self.features_col()),
-        ];
-        if let Some(weight) = weight {
-            columns.push(ml_exact_column(weight));
-        }
-        let training = df.select(columns);
-        let level = df.storage_level()?;
-        let _cache = OneVsRestTrainingCache(if !level.use_memory && !level.use_disk {
-            Some(training.persist(proto::StorageLevel {
-                use_memory: true,
-                use_disk: true,
-                replication: 1,
-                ..Default::default()
-            })?)
-        } else {
-            None
-        });
+        let label = self.label_col();
         let next = AtomicUsize::new(0);
         let results = std::thread::scope(|scope| {
             let mut workers = Vec::new();
             for _ in 0..threads.min(count) {
                 let next = &next;
-                let training = &training;
-                let this = &self;
                 workers.push(scope.spawn(move || {
                     let mut results = Vec::new();
                     loop {
@@ -2626,7 +2731,7 @@ impl OneVsRest {
                         let binary = training.with_column(
                             &binary_label,
                             when(
-                                ml_exact_column(this.label_col()).eq(lit_double(index as f64)),
+                                training.col(label).eq(lit_double(index as f64)),
                                 lit_double(1.0),
                             )
                             .otherwise(lit_double(0.0)),
@@ -2634,14 +2739,24 @@ impl OneVsRest {
                         let mut base = classifier.clone();
                         let estimator = base.estimator_mut();
                         let mut params = std::mem::take(estimator.params_mut())
-                            .set_param_string("labelCol", &binary_label)
-                            .set_param_string("featuresCol", this.features_col())
-                            .set_param_string("predictionCol", this.prediction_col());
+                            .set_param_string("labelCol", &binary_label);
+                        // The values of the estimator's getters, which a null is too.
+                        for (name, default) in
+                            [("featuresCol", "features"), ("predictionCol", "prediction")]
+                        {
+                            match self.params.get_param(name) {
+                                Some(value) => {
+                                    params.params.insert(name.to_string(), value.clone());
+                                }
+                                None => params = params.set_param_string(name, default),
+                            }
+                        }
                         if let Some(weight) = weight {
                             params = params.set_param_string("weightCol", weight);
                         }
                         *estimator.params_mut() = params;
-                        results.push((index, estimator.fit(&binary)));
+                        let model = estimator.fit(&binary);
+                        results.push((index, model, binary));
                     }
                     results
                 }));
@@ -2657,22 +2772,27 @@ impl OneVsRest {
             Ok::<_, SparkError>(results)
         })?;
         let mut results = results;
-        results.sort_by_key(|(index, _)| *index);
-        let models = results
-            .into_iter()
-            .map(|(_, model)| model)
-            .collect::<spark_connect_core::error::Result<Vec<_>>>()?;
-        Ok(OneVsRestModel {
+        results.sort_by_key(|(index, _, _)| *index);
+        let mut models = Vec::with_capacity(count);
+        let mut datasets = Vec::with_capacity(count);
+        for (_, model, binary) in results {
+            models.push(model?);
+            datasets.push(binary);
+        }
+        let model = OneVsRestModel {
             operator: MlOperator::with_uid(
                 "org.apache.spark.ml.classification.OneVsRestModel",
                 &self.operator.uid,
                 OperatorType::Model,
             ),
-            params: self.params.clone(),
+            // The estimator's params, as `_copyValues` copies them, but `parallelism`, which a
+            // model has not.
+            params: self.params.clone().clear_param("parallelism"),
             models,
-            session_id: df.session.session_id().to_string(),
+            session_id: training.session.session_id().to_string(),
             classifier: self.classifier.clone(),
-        })
+        };
+        Ok((model, datasets))
     }
 }
 
@@ -2682,18 +2802,27 @@ impl Default for OneVsRest {
     }
 }
 
-// Release only the cache created for this fit, including after a failed binary fit.
-struct OneVsRestTrainingCache(Option<DataFrame>);
-impl Drop for OneVsRestTrainingCache {
-    fn drop(&mut self) {
-        if let Some(df) = &self.0 {
-            let _ = df.unpersist(false);
-        }
+/// PySpark's KeyError of the fit of a OneVsRest of the uid `uid` whose classifier is not set
+/// (`getClassifier`), of the repr of the param.
+fn classifier_unset(uid: &str) -> SparkError {
+    SparkError {
+        kind: SparkErrorKind::KeyError,
+        ..SparkError::value_msg(format!(
+            "Param(parent='{uid}', name='classifier', doc='base binary classifier')"
+        ))
     }
 }
 
-fn ml_exact_column(name: &str) -> crate::column::Column {
-    crate::column::col(&format!("`{}`", name.replace('`', "``")))
+/// The storage level of PySpark's `StorageLevel.MEMORY_AND_DISK`, at which `OneVsRest._fit` and
+/// `OneVsRestModel._transform` cache a dataset that is not persisted.
+fn memory_and_disk() -> proto::StorageLevel {
+    proto::StorageLevel {
+        use_disk: true,
+        use_memory: true,
+        use_off_heap: false,
+        deserialized: false,
+        replication: 1,
+    }
 }
 
 impl Estimator for OneVsRest {
@@ -2726,40 +2855,70 @@ impl Estimator for OneVsRest {
         Ok(())
     }
 
-    /// The writer of PySpark's Python format, as `OneVsRestWriter` (see [`OneVsRest::writer`]).
+    /// The writer of PySpark's Python format, as `OneVsRestWriter` (see `OneVsRest::writer`).
     fn write(&self) -> MlWriter {
         self.writer()
     }
 }
 
 impl OneVsRest {
-    /// Fit the typed OneVsRest model, of one fitted binary classifier per class.
+    /// Fit the typed OneVsRest model, of one fitted binary classifier per class, as PySpark's
+    /// `OneVsRest._fit` fits it, in its order:
+    /// - the classifier, of which a fit of none raises PySpark's KeyError of the param;
+    /// - the classes, `int(max) + 1` of the max label of [`Self::max_label`], of Python's `int`
+    ///   and its errors: a TypeError of a null (of no rows), a ValueError of NaN or of a string
+    ///   that is no integer, an OverflowError of an infinity; and a fraction truncated, so that a
+    ///   max label of -0.5 fits one class;
+    /// - the dataset of the label, the features and, of a classifier that takes weights, the
+    ///   weight columns (`dataset.select(labelCol, featuresCol[, weightCol])`), cached while the
+    ///   classes fit when `df` is not persisted, as `_cache_spark_dataset(...,
+    ///   StorageLevel.MEMORY_AND_DISK)` caches it: persisted, or of a copy saved under
+    ///   `SPARKML_TEMP_DFS_PATH` when that is set, which the ML helper deletes after;
+    /// - in the cache, PySpark's list of the tasks of the classes, of at most `i32::MAX` of them
+    ///   here, and its pool of `min(parallelism, classes)` threads, which needs one at least
+    ///   ("Number of processes must be at least 1", of a negative max label too), and the fits of
+    ///   the classes ([`Self::fit_classes`]).
     pub fn fit(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<OneVsRestModel> {
-        // The params are checked before any request. The Python client, which raises PySpark's
-        // errors in PySpark's order, reads the max label first, with `max_label` and `fit_classes`.
-        self.check_required_params()?;
-        let parallelism = self.parallelism_i64().ok_or_else(|| {
-            SparkError::value_msg("OneVsRest parameter parallelism cannot be null")
-        })?;
-        if self.classifier.is_none() {
-            return Err(SparkError::value_msg(
-                "OneVsRest requires a native classifier",
-            ));
+        self.ensure_operator();
+        let classifier = self
+            .classifier
+            .as_ref()
+            .ok_or_else(|| classifier_unset(&self.operator.uid))?;
+        let supports_weight = classifier.supports_weight();
+        let num_classes = classification_api::python_int(&self.max_label(df)?)?.saturating_add(1);
+        let label = self.label_col();
+        // `dataset.select(labelCol, None)` raises PySpark's TypeError of a column that is None.
+        let features = self
+            .column_param("featuresCol", "features")
+            .ok_or_else(|| {
+                SparkError::classed(
+                    SparkErrorKind::TypeError,
+                    "NOT_EXPECTED_TYPE",
+                    &[
+                        ("arg_name", "cols"),
+                        ("expected_type", "Column or str"),
+                        ("arg_type", "NoneType"),
+                    ],
+                )
+            })?;
+        // `weightCol` when it is set to a non-empty name and the classifier is a `HasWeightCol`.
+        let weight = self
+            .weight_col()
+            .filter(|name| !name.is_empty() && supports_weight);
+        let mut columns = vec![
+            crate::functions::col(label),
+            crate::functions::col(features),
+        ];
+        if let Some(weight) = weight {
+            columns.push(crate::functions::col(weight));
         }
-        if parallelism < 1 {
-            return Err(SparkError::value_msg("parallelism must be at least 1"));
-        }
-        let max = self.max_label(df)?.ok_or_else(|| {
-            SparkError::value_msg("OneVsRest cannot fit an empty or null-labeled dataset")
-        })?;
-        if !max.is_finite() || max < 0.0 || max >= i32::MAX as f64 {
-            return Err(SparkError::value_msg(
-                "OneVsRest requires a finite nonnegative maximum class label",
-            ));
-        }
-        let count = max as usize + 1;
-        // At most one thread of each class, as PySpark's ThreadPool(min(parallelism, classes)).
-        self.fit_classes(df, count, parallelism.min(count as i64) as usize)
+        let training = df.select(columns);
+        let enable = is_storage_level_none(&df.storage_level()?);
+        validators::with_cached_at(&training, memory_and_disk(), enable, |cached| {
+            let threads = classification_api::class_threads(num_classes, self.parallelism_i64())?;
+            let (model, _) = self.fit_classes(cached, num_classes as usize, threads, weight)?;
+            Ok(model)
+        })
     }
 }
 
@@ -2809,17 +2968,8 @@ impl OneVsRestModel {
             df.with_column(&acc, array(Vec::<Column>::new()).cast_str("array<double>"));
         // PySpark persists the dataset when its input is not persisted, at MEMORY_AND_DISK.
         let enable = is_storage_level_none(&df.storage_level()?);
-        let aggregated = validators::with_cached_at(
-            &new_dataset,
-            proto::StorageLevel {
-                use_disk: true,
-                use_memory: true,
-                use_off_heap: false,
-                deserialized: false,
-                replication: 1,
-            },
-            enable,
-            |cached| {
+        let aggregated =
+            validators::with_cached_at(&new_dataset, memory_and_disk(), enable, |cached| {
                 let mut aggregated = cached.clone();
                 for base in &self.models {
                     let tmp = format!("mbc$tmp{}", Uuid::new_v4());
@@ -2842,8 +2992,7 @@ impl OneVsRestModel {
                         .with_column_renamed(&tmp, &acc);
                 }
                 Ok(aggregated)
-            },
-        )?;
+            })?;
         let mut result = aggregated;
         if !raw.is_empty() {
             result = result.with_column(
@@ -2972,6 +3121,22 @@ impl Transformer for OneVsRestModel {
     fn transform_impl(&mut self, df: &DataFrame) -> spark_connect_core::error::Result<DataFrame> {
         self.transformed(df)
     }
+
+    /// The values of `map` of its own params, and of each of its models' (a copy of each with
+    /// `map`, as `OneVsRestModel.copy` copies them: `[model.copy(extra) for model in
+    /// self.models]`), so that a value of a param of the classifier's uid, the models' own, sets
+    /// it in each model, as of `model.transform(dataset, {lr.featuresCol: "f2"})`.
+    fn apply_param_map(&mut self, map: &ParamMap) -> spark_connect_core::error::Result<()> {
+        self.ensure_operator();
+        let class = self.operator().name.clone();
+        let uid = self.operator().uid.clone();
+        meta::apply_pairs(self.params_mut(), &class, &uid, map)?;
+        for model in &mut self.models {
+            model.apply_param_map(map)?;
+        }
+        Ok(())
+    }
+
     fn build_ml_relation(
         &self,
         df: &DataFrame,
@@ -3006,7 +3171,7 @@ impl Model for OneVsRestModel {
     }
 
     /// The writer of PySpark's Python format, as `OneVsRestModelWriter` (see
-    /// [`OneVsRestModel::writer`]).
+    /// `OneVsRestModel::writer`).
     fn write(&self) -> spark_connect_core::error::Result<MlWriter> {
         Ok(self.writer())
     }
@@ -5774,6 +5939,90 @@ mod tests {
     }
 
     #[test]
+    fn int_arrays_are_of_the_type_of_their_first_element_or_unsendable_as_pyspark() {
+        // As PySpark's `LiteralExpression._from_value` of a list of ints: of the type of its first
+        // element, an `Integer` when it fits 32 bits, else a `Long`, of every element. Of a first
+        // element that fits 32 bits and another that does not, PySpark sends nothing: the `assert`
+        // of the element's `LiteralExpression` fails. The list is kept for its getter, and a fit, a
+        // transform and a save return the `AssertionError` (`sendable`), before any request.
+        let array = |element_type: DataType, elements: Vec<LiteralExpression>| {
+            LiteralExpression::Array {
+                element_type: Box::new(element_type),
+                elements,
+            }
+            .to_literal_proto()
+        };
+        let sent = |values: &[i64]| {
+            Params::new()
+                .set_param_int_array("indices", values.iter().copied())
+                .sendable()
+                .map(|params| params.params["indices"].clone())
+        };
+        let (min, max) = (i64::from(i32::MIN), i64::from(i32::MAX));
+        assert_eq!(
+            sent(&[min, max]).unwrap(),
+            array(
+                DataType::Integer,
+                vec![
+                    LiteralExpression::Integer(i32::MIN),
+                    LiteralExpression::Integer(i32::MAX)
+                ]
+            )
+        );
+        assert_eq!(
+            sent(&[1 << 33, 2]).unwrap(),
+            array(
+                DataType::Long,
+                vec![LiteralExpression::Long(1 << 33), LiteralExpression::Long(2)]
+            )
+        );
+        assert_eq!(sent(&[]).unwrap(), array(DataType::Integer, Vec::new()));
+        for values in [[2, max + 1], [2, min - 1], [0, i64::MAX]] {
+            let error = sent(&values).unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::AssertionError, "{values:?}");
+        }
+        // The getter reads the list. Set again or cleared, the param is sent; a copy of the params
+        // of the class keeps it unsendable.
+        let slicer = VectorSlicer::new().set_indices([0, 1 << 33]);
+        assert_eq!(slicer.indices(), Some(vec![0, 1 << 33]));
+        assert!(slicer.params().sendable().is_err());
+        assert!(slicer
+            .clone()
+            .set_indices([0, 2])
+            .params()
+            .sendable()
+            .is_ok());
+        let params = slicer.params().clone();
+        assert!(params.clone().clear_param("indices").sendable().is_ok());
+        assert!(params
+            .retain_names(|name| name != "indices")
+            .sendable()
+            .is_ok());
+        assert!(params.retain_names(|_| true).sendable().is_err());
+        let mut merged = Params::new();
+        merged.extend_from(&params);
+        assert!(merged.sendable().is_err());
+        merged.extend_from(&Params::new().set_param_int_array("indices", [0]));
+        assert!(merged.sendable().is_ok());
+        // A fit, a transform and a save of a session whose server is unreachable return it before
+        // any request.
+        let session = unreachable_session();
+        let df = session.range(1).unwrap();
+        let mut slicer = slicer;
+        let errors = [
+            Transformer::transform(&mut slicer, &df).map(|_| ()),
+            QuantileDiscretizer::new()
+                .set_num_buckets_array([2, 1 << 33])
+                .fit(&df)
+                .map(|_| ()),
+            slicer.write().session(&session).save("/unsent"),
+        ];
+        for error in errors {
+            assert_eq!(error.unwrap_err().kind, SparkErrorKind::AssertionError);
+        }
+    }
+
+    #[test]
     #[allow(deprecated)]
     fn test_string_array_param_has_the_default_collation() {
         // As PySpark infers the type of a list of strings: a string of the UTF8_BINARY collation.
@@ -6099,6 +6348,19 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("session")
+    }
+
+    /// A session of an unreachable server, without retries: a request fails at once, of the
+    /// error of its connection, so the error of a check before any request is the check's.
+    fn unreachable_session() -> SparkSession {
+        let builder = spark_connect_core::channel::ChannelBuilder::parse("sc://127.0.0.1:1")
+            .expect("a valid URL");
+        let mut client = spark_connect_core::runtime::block_on(
+            spark_connect_core::client::SparkConnectClient::connect(&builder),
+        )
+        .expect("a client");
+        client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
+        SparkSession::new(client)
     }
 
     /// The model that a fit of the server returns as the object `id`, cached for `s`.
@@ -6836,20 +7098,34 @@ mod tests {
     }
 
     #[test]
-    fn one_vs_rest_rejects_null_client_parameters_before_requests() {
+    fn one_vs_rest_raises_pysparks_errors_of_no_classifier_and_a_null_label_before_requests() {
+        // PySpark's `_fit` reads the classifier first, whose KeyError of the param an unset one
+        // raises, and then `F.col(labelCol)` of its max query, of which a None label raises the
+        // AttributeError of `endswith`: both before any request, of a session of no server. The
+        // other params set to a null fail where PySpark's do, after the max query (see the e2e
+        // tests).
         let session = offline_session();
         let df = session.range(1).unwrap();
-        for name in [
-            "featuresCol",
-            "labelCol",
-            "predictionCol",
-            "rawPredictionCol",
-            "parallelism",
-        ] {
-            let mut estimator = OneVsRest::new().set_classifier(LinearSVC::new());
-            *estimator.params_mut() = Params::new().set_param_null(name);
-            assert!(estimator.fit(&df).is_err());
-        }
+        let mut unset = OneVsRest::new();
+        let uid = Estimator::operator(&unset).uid.clone();
+        let Err(error) = unset.fit(&df) else {
+            panic!("a fit of no classifier");
+        };
+        assert_eq!(error.kind, SparkErrorKind::KeyError);
+        assert_eq!(
+            error.to_string(),
+            format!("Param(parent='{uid}', name='classifier', doc='base binary classifier')")
+        );
+        let mut estimator = OneVsRest::new().set_classifier(LinearSVC::new());
+        *estimator.params_mut() = Params::new().set_param_null("labelCol");
+        let Err(error) = estimator.fit(&df) else {
+            panic!("a fit of a null label");
+        };
+        assert_eq!(error.kind, SparkErrorKind::AttributeError);
+        assert_eq!(
+            error.to_string(),
+            "'NoneType' object has no attribute 'endswith'"
+        );
     }
 
     #[test]

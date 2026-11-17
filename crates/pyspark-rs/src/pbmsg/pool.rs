@@ -150,8 +150,8 @@ pub(crate) struct FieldDesc {
     pub(crate) oneof: Option<usize>,
     pub(crate) proto3_optional: bool,
     pub(crate) packed: bool,
-    /// The key and value of a map field.
-    pub(crate) map: Option<MapDesc>,
+    /// The key and value of a map field, which its maps share.
+    pub(crate) map: Option<Arc<MapDesc>>,
     /// Whether the field has options, such as `deprecated`, as protobuf's `has_options` tells.
     pub(crate) has_options: bool,
 }
@@ -357,7 +357,7 @@ impl Pool {
         }
 
         // The map fields: repeated fields of a map entry message.
-        let entries: HashMap<String, MapDesc> = messages
+        let entries: HashMap<String, Arc<MapDesc>> = messages
             .iter()
             .filter(|m| m.map_entry)
             .map(|m| {
@@ -369,7 +369,7 @@ impl Pool {
                     value: value.map_or(Kind::String, |f| f.kind),
                     value_type: value.map_or(String::new(), |f| f.type_name.clone()),
                 };
-                (m.full_name.clone(), map)
+                (m.full_name.clone(), Arc::new(map))
             })
             .collect();
         for message in &mut messages {

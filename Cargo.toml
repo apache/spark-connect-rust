@@ -91,11 +91,10 @@ prost-types = "0.14"
 
 # async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
-tokio-stream = "0.1"
 futures = "0.3"
 
 # Arrow (result decoding).
-arrow = { version = "59", default-features = false, features = ["ipc", "ipc_compression", "prettyprint"] }
+arrow = { version = "59", default-features = false, features = ["ipc", "ipc_compression"] }
 
 # DataFusion for the optional to_datafusion() conversion.
 # Pinned to 55 for arrow 59 compatibility. 55 needs Rust 1.94, so only the `datafusion` feature
@@ -112,6 +111,5 @@ pyo3 = { version = "0.29", features = ["extension-module", "abi3-py39"] }
 
 # misc
 bytes = "1"
-thiserror = "2"
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"

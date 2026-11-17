@@ -478,7 +478,7 @@ For every method matching a pyspark name:
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
   the progress data structure is not.
 - **The pandas-parity gate runs OFFICIAL pyspark over our TRANSPORT — not our drop-in classes.**
-  `.github/workflows/pandas-parity.yml` puts the apache/spark v4.2.0 checkout on `PYTHONPATH` and
+  `.github/workflows/pandas-parity.yml` puts the apache/spark v4.3.0 checkout on `PYTHONPATH` and
   loads `scripts/rust_transport_plugin.py`, which monkeypatches `SparkConnectClient` so official
   pyspark builds every proto (Column/lit/isin/createDataFrame) and only the gRPC transport is ours.
   **So Rust Column/lit/`__repr__` changes do NOT move this gate** — a failure here is in the transport
@@ -497,7 +497,7 @@ For every method matching a pyspark name:
     on the resample/describe tests, whose data includes the 2021-03-14 02:00 spring-forward gap. UTC
     also matches how Apache runs its PYTHON connect tests (the runner's UTC); the pom.xml
     `America/Los_Angeles` is only for the JVM/Scala maven-surefire tests, not the python connect server.
-  - **Pin pandas to the supported range (`>=2.2,<3.0`).** v4.2.0 pandas-on-Spark warns pandas ≥ 3.0.0
+  - **Pin pandas to the supported range (`>=2.2,<3.0`).** v4.3.0 pandas-on-Spark warns pandas ≥ 3.0.0
     is unsupported and has 3.0-only branches that misbehave (e.g. `test_frame_loc_setitem` no-ops a
     reordered multi-column `.loc` assignment). Also add test-only deps the suite needs (scipy for the
     corr tests, pyyaml for pipelines) — matching Apache's own pandas test environment.

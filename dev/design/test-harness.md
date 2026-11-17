@@ -1,5 +1,9 @@
 # Running the official Spark Connect tests against our client
 
+This note records how the harness was designed, when the project tracked Spark 4.2.0: its
+paths and its baseline counts are those of that version. The harness now runs the official
+tests of the pinned version, 4.3.0 (see [official-tests.md](official-tests.md)).
+
 ## The problem (verified)
 
 The official connect test files live inside the reference `pyspark` package tree and

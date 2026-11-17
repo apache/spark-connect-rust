@@ -1022,10 +1022,12 @@ impl PyDataStreamReader {
                 ("recursiveFileLookup", recursiveFileLookup),
             ],
         )?;
-        // Like PySpark, the options stay on the reader, and the format of a str path.
+        // Like PySpark, the options stay on the reader, and the format of a str path. The load
+        // is of the options set here: the core's `text` would set its own `wholetext`.
         let (path, path_error) = self.format_path(&r, "text", path)?;
         let error = self.plan_error().or(path_error);
-        Ok(PyDataFrame::new(with_plan_error(r.text(&path), error)))
+        let df = r.format("text").load(Some(&path));
+        Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 }
 
@@ -1778,28 +1780,35 @@ impl PyStreamingQuery {
 
 #[pymethods]
 impl PyStreamingQuery {
-    /// The shallow copy of a streaming query, as PySpark's `copy.copy`: of the same query.
-    fn __copy__(&self) -> PyStreamingQuery {
-        PyStreamingQuery::new(self.inner.clone())
+    /// The shallow copy of a streaming query, as PySpark's `copy.copy`: of the same query, with
+    /// the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let copy = Py::new(py, PyStreamingQuery::new(slf.borrow().inner.clone()))?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of a streaming query, as PySpark's pickle of its session and its state, which
-    /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// `_of_state` gives back, with the instance attributes of the query.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::state_reduce;
 
-        let session = crate::session::session_object(py, &self.inner.spark_session())?;
+        let py = slf.py();
+        let this = slf.borrow();
+        let session = crate::session::session_object(py, &this.inner.spark_session())?;
 
         let args = PyTuple::new(
             py,
             [
                 session.into_bound(py).into_any(),
-                self.inner.id().into_pyobject(py)?.into_any(),
-                self.inner.run_id().into_pyobject(py)?.into_any(),
-                self.inner.name().into_pyobject(py)?.into_any(),
+                this.inner.id().into_pyobject(py)?.into_any(),
+                this.inner.run_id().into_pyobject(py)?.into_any(),
+                this.inner.name().into_pyobject(py)?.into_any(),
             ],
         )?;
-        state_reduce(py, "streaming_query_reduce", args)
+        let reduced = state_reduce(py, "streaming_query_reduce", args)?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
     }
 
     /// A streaming query of its state, as `__reduce__` gives it: of the session `session`, the
@@ -1998,20 +2007,37 @@ impl PyStreamingQueryListenerBus {
 #[pymethods]
 impl PyStreamingQueryManager {
     /// The shallow copy of a streaming query manager, as PySpark's `copy.copy`: of the same
-    /// session and listener bus.
-    fn __copy__(&self) -> PyStreamingQueryManager {
-        PyStreamingQueryManager {
-            inner: self.inner.clone(),
-            session: self.session.clone(),
-        }
+    /// session and listener bus, with the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyStreamingQueryManager {
+                inner: this.inner.clone(),
+                session: this.session.clone(),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
-    /// A streaming query manager does not pickle, as PySpark's, whose listener bus holds a lock
-    /// that pickle cannot copy.
-    fn __reduce__(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "cannot pickle '_thread.lock' object",
-        ))
+    /// The reduce of a streaming query manager, as PySpark's pickle of its `__dict__`, of its
+    /// session and then of its listener bus, which holds a lock that nothing copies: `streams` of
+    /// the session, with a state of a lock and the instance attributes of the manager. So no copy
+    /// but the shallow one succeeds, and each fails as PySpark's does: a pickle at the session,
+    /// of its creator, and cloudpickle and `copy.deepcopy` at the lock, which cloudpickle's
+    /// protocols 0 and 1 pickle by its class, which then fails to unpickle.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let session = crate::session::session_object(py, &slf.borrow().session)?;
+        let reduced =
+            crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "streams")?;
+        let state = PyDict::new(py);
+        state.set_item("_sqlb", py.import("threading")?.call_method0("Lock")?)?;
+        state.call_method1("update", (slf.getattr("__dict__")?,))?;
+        let state = [reduced.get_item(0)?, reduced.get_item(1)?, state.into_any()];
+        Ok(PyTuple::new(py, state)?.into_any())
     }
 
     #[getter]

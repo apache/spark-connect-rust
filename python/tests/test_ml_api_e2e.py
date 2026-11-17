@@ -122,6 +122,80 @@ def test_objects_of_this_client_are_of_the_classes_of_pyspark_mls_modules(sessio
     assert PySparkPipelineModel.load(path + "/pyspark-pipeline").transform(df).count() == 12
 
 
+def test_the_param_maps_of_the_model_of_a_validator_are_in_pysparks_order(session):
+    # The model of a validator's fit is of the constructor of PySpark's class
+    # (`CrossValidatorModel(bestModel, ...)`), whose defaults are in the order of its MRO
+    # (test_ml_api_offline.py), and then of the `_copyValues` of the validator, which sets its
+    # params in the order of their names.
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    rows = [(float(i % 2), Vectors.dense([float(i), float(i % 3)])) for i in range(12)]
+    df = session.createDataFrame(rows, ["label", "features"]).coalesce(1)
+    lr = cls("classification", "LogisticRegression")(maxIter=2)
+    grid = ParamGridBuilder().addGrid(lr.regParam, [0.1]).build()
+    evaluator = cls("evaluation", "BinaryClassificationEvaluator")()
+    shared = {"estimator": lr, "estimatorParamMaps": grid, "evaluator": evaluator, "seed": 1}
+    for name, extra, defaults, given in [
+        ("CrossValidator", {"numFolds": 2}, ["seed", "numFolds", "foldCol"], ["numFolds", "seed"]),
+        ("TrainValidationSplit", {}, ["seed", "trainRatio"], ["seed"]),
+    ]:
+        model = cls("tuning", name)(**shared, **extra).fit(df)
+        assert [p.name for p in model._defaultParamMap] == defaults, name
+        assert [p.name for p in model._paramMap] == ["estimator", "estimatorParamMaps", "evaluator", *given], name
+        assert [p.name for p in model.extractParamMap()][: len(defaults)] == defaults, name
+
+
+def test_the_param_maps_and_the_metadata_of_a_one_vs_rest_are_in_pysparks_order(session):
+    # A OneVsRest's model of a fit and of `OneVsRestModel(models)` has the defaults of the
+    # constructor in its order (test_ml_offline.py). A load is of `_resetUid`, of the defaults in
+    # the order of their names, and sets the classifier and then the params of the metadata in its
+    # order; a save writes the metadata of `extractParamMap()` and `_defaultParamMap` in their
+    # order, so of the constructor's of a OneVsRest of its constructor, and of the names of a load
+    # or a copy.
+    import glob
+
+    from pyspark.ml.linalg import Vectors
+
+    def cls(name):
+        return native_class("pyspark.ml.connect.classification", name, "pyspark.ml.classification")
+
+    def maps(obj):
+        return [p.name for p in obj._defaultParamMap], [p.name for p in obj._paramMap]
+
+    def metadata(path):
+        (part,) = glob.glob(os.path.join(path, "metadata", "part-*"))
+        with open(part) as file:
+            saved = json.load(file)
+        return list(saved["paramMap"]), list(saved["defaultParamMap"])
+
+    rows = [(float(i % 3), Vectors.dense([float(i % 3) + 0.1 * i, float(i % 2)]), 1.0) for i in range(12)]
+    df = session.createDataFrame(rows, ["label", "features", "w"]).coalesce(1)
+    path = tempfile.mkdtemp(prefix="ml-one-vs-rest-order-")
+    estimator = cls("OneVsRest")(classifier=cls("LogisticRegression")(maxIter=2), weightCol="w")
+    model = estimator.fit(df)
+    constructor = ["parallelism", "predictionCol", "featuresCol", "labelCol", "rawPredictionCol"]
+    names = sorted(constructor)
+    model_constructor, model_names = constructor[1:], sorted(constructor[1:])
+    assert maps(model) == (model_constructor, ["classifier", "weightCol"])
+    for obj, at, (params, defaults) in [
+        (estimator, "/estimator", (constructor + ["weightCol"], constructor)),
+        (model, "/model", (model_constructor + ["weightCol"], model_constructor)),
+    ]:
+        obj.write().overwrite().save(path + at)
+        assert metadata(path + at) == (params, defaults)
+        loaded = type(obj).load(path + at)
+        assert maps(loaded) == (names if obj is estimator else model_names, ["classifier", *params])
+        loaded.write().overwrite().save(path + at + "-again")
+        resaved = names if obj is estimator else model_names
+        assert metadata(path + at + "-again") == (resaved + ["weightCol"], resaved)
+        obj.copy().write().overwrite().save(path + at + "-copy")
+        assert metadata(path + at + "-copy") == (resaved + ["weightCol"], resaved)
+
+
 def test_a_subclass_reads_the_jvm_class_of_its_python_name(session):
     # PySpark's RemoteMLReader names the JVM class of a load of the Python class (its module, of
     # org.apache.spark for pyspark, and its name), so a subclass of the user's reads a class that

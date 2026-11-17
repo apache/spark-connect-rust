@@ -121,12 +121,12 @@ jobs:
         id: spark-download
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
-          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+          if [ ! -d "${HOME}/spark-dist/spark-${SPARK_VERSION}-bin-hadoop3"* ]; then
             scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
-          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name "spark-${SPARK_VERSION}-bin-hadoop3*" | head -1)
           echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)

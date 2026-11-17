@@ -490,6 +490,7 @@ def _one_vs_rest_live(rec, spark, base):
     rec("fit_without_classifier", lambda: _unset_one_vs_rest().fit(df))
     _one_vs_rest_parity_cases(rec, est, model, df)
     _one_vs_rest_persistence(rec, est, model, df, base)
+    _one_vs_rest_fit_cases(rec, spark, df, base)
     _one_vs_rest_plain_classifier_cases(rec, df, base)
 
 
@@ -647,6 +648,15 @@ def _one_vs_rest_persistence(rec, est, model, df, base):
     rec("model_metadata", lambda: _metadata(base + "/ovrm"))
     loaded_model = type(model).load(base + "/ovrm")
     rec("model_loaded_uid", lambda: loaded_model.uid == model.uid)
+    client = df.sparkSession.client
+
+    def cached_of_load():
+        # The objects of the server's ML cache that a load adds: of each of its models, once.
+        before = set(client._get_ml_cache_info())
+        again = type(model).load(base + "/ovrm")
+        return len(set(client._get_ml_cache_info()) - before), len(again.models)
+
+    rec("model_load_cached_objects", cached_of_load)
     rec("model_loaded_len", lambda: len(loaded_model.models))
     rec(
         "model_loaded_models_types",
@@ -676,7 +686,111 @@ def _one_vs_rest_persistence(rec, est, model, df, base):
         lambda: _native("OneVsRest")().write().overwrite().save(base + "/none"),
     )
     shutil.rmtree(base, ignore_errors=True)
+    _one_vs_rest_jvm_class_cases(rec, est, model, df, base)
     _one_vs_rest_validator(rec, df, base)
+
+
+def _one_vs_rest_fit_cases(rec, spark, df, base):
+    """The cases of PySpark's `OneVsRest._fit` of a native classifier, in its order: the classes
+    of Python's `int` of the max label that `dataset.agg({labelCol: "max"}).head()` reads, of the
+    label column as named and of its own type; the errors of the labels before the pool of
+    `min(parallelism, numClasses)` threads; the dataset cached under `SPARKML_TEMP_DFS_PATH`; and
+    the fits of a Python subclass of a native classifier, whose `_fit` PySpark runs for each
+    class."""
+    from pyspark.ml.functions import array_to_vector
+    from pyspark.sql import functions as F
+
+    def frame(label, rows=4):
+        return (
+            spark.sql(
+                "SELECT array(CAST(id % 3 AS DOUBLE), CAST(id % 2 AS DOUBLE)) AS xs, "
+                f"{label} AS label FROM range({rows})"
+            )
+            .withColumn("features", array_to_vector(F.col("xs")))
+            .drop("xs")
+        )
+
+    def fit(dataset, **kwargs):
+        classifier = _native("LogisticRegression")(maxIter=2)
+        return _native("OneVsRest")(classifier=classifier, **kwargs).fit(dataset)
+
+    for tag, label, rows in [
+        ("null", "CAST(NULL AS DOUBLE)", 4),
+        ("no_rows", "CAST(id AS DOUBLE)", 0),
+        ("nan", "CASE WHEN id = 3 THEN double('NaN') ELSE CAST(id % 2 AS DOUBLE) END", 4),
+        ("infinity", "CASE WHEN id = 3 THEN double('Infinity') ELSE CAST(id % 2 AS DOUBLE) END", 4),
+        ("minus_half", "CAST(-0.5 - id AS DOUBLE)", 4),
+        ("minus_one", "CAST(-1 - id AS DOUBLE)", 4),
+        ("letters", "element_at(array('b', 'a'), CAST(id % 2 + 1 AS INT))", 4),
+        ("digit_strings", "element_at(array('0', '1', '2', '10'), CAST(id % 4 + 1 AS INT))", 8),
+        ("decimals", "CAST(id % 2 + 0.5 AS DECIMAL(3, 1))", 4),
+        ("ints", "CAST(id % 3 AS INT)", 6),
+    ]:
+        rec("fit_max_" + tag, lambda label=label, rows=rows: len(fit(frame(label, rows)).models))
+    # The greatest string "9" of these fits ten classes, so that the row of "10" is of none.
+    strings = (
+        spark.sql(
+            "SELECT array(1.0D, 0.0D) AS xs, '10' AS label UNION ALL "
+            "SELECT array(0.0D, 1.0D), '9' UNION ALL SELECT array(1.0D, 1.0D), '0'"
+        )
+        .withColumn("features", array_to_vector(F.col("xs")))
+        .drop("xs")
+    )
+    rec(
+        "fit_max_greatest_string_predictions",
+        lambda: [r.prediction for r in fit(strings).transform(strings).collect()],
+    )
+    labels = frame("CAST(id % 2 AS DOUBLE)")
+    rec(
+        "fit_dotted_label",
+        lambda: fit(labels.withColumnRenamed("label", "my.label"), labelCol="my.label"),
+    )
+    rec("fit_parallelism_0", lambda: fit(labels, parallelism=0))
+    rec("fit_parallelism_0_of_no_rows", lambda: fit(labels.limit(0), parallelism=0))
+    rec("fit_parallelism_none", lambda: fit(labels, parallelism=None))
+    rec("fit_parallelism_beyond_long", lambda: len(fit(labels, parallelism=2**64).models))
+    # The dataset of the fit is saved under SPARKML_TEMP_DFS_PATH and deleted after the fits.
+    temp = os.path.join(base, "temp-dfs")
+    os.makedirs(temp, exist_ok=True)
+    previous = os.environ.get("SPARKML_TEMP_DFS_PATH")
+    os.environ["SPARKML_TEMP_DFS_PATH"] = temp
+    try:
+        rec("fit_temp_dfs_models", lambda: len(fit(df).models))
+        rec("fit_temp_dfs_left", lambda: os.listdir(temp))
+    finally:
+        if previous is None:
+            del os.environ["SPARKML_TEMP_DFS_PATH"]
+        else:
+            os.environ["SPARKML_TEMP_DFS_PATH"] = previous
+    # A Python subclass of a native classifier, whose `_fit` the fit of each class runs.
+    calls = []
+
+    class Overriding(_native("LogisticRegression")):
+        def _fit(self, dataset):
+            calls.append((self.getLabelCol(), dataset.count()))
+            return super()._fit(dataset)
+
+    subclassed = _native("OneVsRest")(classifier=Overriding(maxIter=5)).fit(df)
+    rec("subclass_fit_calls", lambda: sorted(calls))
+    rec("subclass_model_class", lambda: (type(subclassed).__name__, type(subclassed).__module__))
+    rec("subclass_models_types", lambda: [type(s).__name__ for s in subclassed.models])
+    rec("subclass_transform", lambda: subclassed.transform(df))
+
+    class Limiting(_native("LinearSVC")):
+        def _fit(self, dataset):
+            return super()._fit(dataset.limit(2))
+
+    limiting = Limiting(maxIter=2)
+
+    def limiting_fit():
+        # The server's error names the label column of the classifier's uid, `<uid>__labelCol`.
+        try:
+            _native("OneVsRest")(classifier=limiting).fit(df)
+        except Exception as e:  # noqa: BLE001 - the error is the case
+            return type(e).__name__, str(e).split("\n")[0].replace(limiting.uid, "<uid>")
+        return None
+
+    rec("subclass_limiting_fit", limiting_fit)
 
 
 def _one_vs_rest_plain_classifier_cases(rec, df, base):
@@ -737,6 +851,69 @@ def _one_vs_rest_plain_classifier_cases(rec, df, base):
     rec(
         "plain_model_loaded_models_types",
         lambda: [type(s).__name__ for s in type(model).load(base + "/plainm").models],
+    )
+    shutil.rmtree(base, ignore_errors=True)
+
+
+def _rewrite_class(path, cls):
+    """Rewrite the class of the metadata of the save at `path` to the JVM's class `cls`, as classic
+    PySpark's `JavaMLWriter` saves a OneVsRest of a Java classifier, in the same layout."""
+    import glob
+
+    for part in glob.glob(path + "/metadata/part-*"):
+        with open(part) as f:
+            metadata = json.loads(f.read())
+        metadata["class"] = cls
+        with open(part, "w") as f:
+            f.write(json.dumps(metadata, separators=(",", ":")) + "\n")
+        crc = os.path.join(os.path.dirname(part), "." + os.path.basename(part) + ".crc")
+        if os.path.exists(crc):
+            os.remove(crc)
+
+
+def _one_vs_rest_jvm_class_cases(rec, est, model, df, base):
+    """The cases of the loads of the estimator `est` and of its `model` saved of the metadata of the
+    JVM's class names, which PySpark's readers load as of their Python format (`loadMetadata` of no
+    expected class), also as the stage of a pipeline; and of a `parallelism` beyond a long, which
+    PySpark saves and loads as it is."""
+    jvm = "org.apache.spark.ml.classification."
+    rec("jvm_est_save", lambda: est.write().overwrite().save(base + "/jvm"))
+    _rewrite_class(base + "/jvm", jvm + "OneVsRest")
+    rec(
+        "jvm_est_load",
+        lambda: (lambda o: (type(o).__name__, o.uid == est.uid, _params_of(o)))(
+            type(est).load(base + "/jvm")
+        ),
+    )
+    rec("jvm_model_save", lambda: model.write().overwrite().save(base + "/jvmm"))
+    _rewrite_class(base + "/jvmm", jvm + "OneVsRestModel")
+    loaded = type(model).load(base + "/jvmm")
+    rec("jvm_model_load", lambda: (type(loaded).__name__, loaded.uid == model.uid, len(loaded.models)))
+    rec("jvm_model_load_params", lambda: _params_of(loaded))
+    rec("jvm_model_load_transform", lambda: loaded.transform(df))
+    pipeline_model_class = native_class(
+        "pyspark.ml.connect.pipeline", "PipelineModel", "pyspark.ml.pipeline"
+    )
+    pipeline_model = pipeline_model_class(stages=[model])
+    rec("jvm_pipeline_save", lambda: pipeline_model.write().overwrite().save(base + "/jvmp"))
+    (stage,) = os.listdir(base + "/jvmp/stages")
+    _rewrite_class(base + "/jvmp/stages/" + stage, jvm + "OneVsRestModel")
+    loaded_pipeline = pipeline_model_class.load(base + "/jvmp")
+    rec(
+        "jvm_pipeline_load",
+        lambda: [(type(s).__name__, len(s.models)) for s in loaded_pipeline.stages],
+    )
+    rec("jvm_pipeline_load_transform", lambda: loaded_pipeline.transform(df))
+    big = _native("OneVsRest")(classifier=est.getClassifier(), parallelism=2**64)
+    rec("parallelism_beyond_long", lambda: big.getParallelism())
+    rec("parallelism_beyond_long_save", lambda: big.write().overwrite().save(base + "/big"))
+    rec(
+        "parallelism_beyond_long_metadata",
+        lambda: _metadata(base + "/big")["paramMap"]["parallelism"],
+    )
+    rec(
+        "parallelism_beyond_long_load",
+        lambda: type(big).load(base + "/big").getParallelism(),
     )
     shutil.rmtree(base, ignore_errors=True)
 

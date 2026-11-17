@@ -3,9 +3,62 @@
 //! These tests verify that streaming DataStreamReader and DataStreamWriter
 //! build correct proto structures. They don't require a remote connection.
 
+use std::collections::HashMap;
+
 use spark_connect::plan::LogicalPlan;
 use spark_connect::readwriter::ReadType;
+use spark_connect::{DataFrame, SparkSession};
 use spark_connect_proto as proto;
+
+/// The data source of the streaming read of `df`.
+fn stream_data_source(df: &DataFrame) -> proto::read::DataSource {
+    match df.to_relation().unwrap().rel_type {
+        Some(proto::relation::RelType::Read(read)) => {
+            assert!(read.is_streaming);
+            match read.read_type {
+                Some(proto::read::ReadType::DataSource(data_source)) => data_source,
+                other => panic!("not a data source: {other:?}"),
+            }
+        }
+        other => panic!("not a read: {other:?}"),
+    }
+}
+
+/// The reads of the stream reader, as PySpark 4.3.0's `DataStreamReader` builds them: of a reader
+/// of no schema, the schema `""` (its `_schema` is `""`, which its `DataSource` sends), and of
+/// `text`, the `wholetext` of its `wholetext=False`, also over an earlier one, which its `option`
+/// writes as `str(False)`.
+#[test]
+fn stream_reads_send_pysparks_schema_and_options() {
+    // The channel connects lazily: building plans needs no server.
+    let spark = SparkSession::builder()
+        .remote("sc://127.0.0.1:1")
+        .get_or_create()
+        .unwrap();
+    let rate = stream_data_source(&spark.read_stream().format("rate").load(None));
+    assert_eq!(
+        (rate.format.as_deref(), rate.schema.as_deref()),
+        (Some("rate"), Some(""))
+    );
+    assert!(rate.options.is_empty() && rate.paths.is_empty());
+    let text = stream_data_source(
+        &spark
+            .read_stream()
+            .option("wholetext", "true")
+            .text("data/s"),
+    );
+    assert_eq!(
+        (text.format.as_deref(), text.schema.as_deref()),
+        (Some("text"), Some(""))
+    );
+    let wholetext = HashMap::from([("wholetext".to_string(), "False".to_string())]);
+    assert_eq!(
+        (text.options, text.paths),
+        (wholetext, vec!["data/s".to_string()])
+    );
+    let csv = stream_data_source(&spark.read_stream().schema("a INT").csv("data/s"));
+    assert_eq!(csv.schema.as_deref(), Some("a INT"));
+}
 
 /// Verify a basic streaming read plan builds correctly.
 #[test]

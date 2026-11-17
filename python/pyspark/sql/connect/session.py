@@ -21,9 +21,20 @@ Apache Spark), whose builder makes a session of this class, which it is not a su
 """
 from typing import Callable
 
-from pyspark._pyspark import SparkSession
+from pyspark._pyspark import SparkSession, _install_builder
+from pyspark.sql.session import SparkSession as _PySparkSession
+from pyspark.sql.session import classproperty as _classproperty
 
 __all__ = ["SparkSession"]
+
+# As PySpark Connect's `SparkSession.builder`, of its class body: PySpark's classproperty, whose
+# each access, of the class or of a session, is a new builder, with the docstring of the classic
+# builder. The native class takes it from here (`_install_builder`), as the class of
+# pyspark.sql.session cannot be imported while the extension loads.
+_builder = _classproperty(lambda cls: cls.Builder())
+_builder.__doc__ = _PySparkSession.builder.__doc__
+_install_builder(_builder)
+del _builder
 
 
 def _reduce_session(session_id: str) -> tuple[Callable[[str], "SparkSession"], tuple[str]]:

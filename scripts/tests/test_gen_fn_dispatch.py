@@ -23,6 +23,7 @@ functions_generated.py against one.
 import importlib.util
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -204,6 +205,26 @@ class PlanTests(unittest.TestCase):
         for message, overrides in cases.items():
             with self.subTest(message), self.assertRaisesRegex(gen.GeneratorError, message):
                 plan(**overrides)
+
+
+class AliasTests(unittest.TestCase):
+    """The aliases of PySpark Connect, of a stand-in for its builtin module."""
+
+    def test_an_alias_is_bound_to_its_function(self):
+        def negative(col):
+            return col
+
+        def pow(col1, col2):
+            return col1
+
+        reference = types.SimpleNamespace(negate=negative, negative=negative, pow=pow, power=pow)
+        names = {"negate", "negative", "pow", "power"}
+        self.assertEqual(gen._alias_target(reference, "negate", names), "negative")
+        self.assertEqual(gen._alias_target(reference, "power", names), "pow")
+        self.assertIsNone(gen._alias_target(reference, "negative", names))
+        # An alias of a function without a wrapper of the module is a wrapper of its own.
+        self.assertIsNone(gen._alias_target(reference, "power", {"power"}))
+        self.assertIsNone(gen._alias_target(reference, "missing", names))
 
 
 class CheckedInTests(unittest.TestCase):

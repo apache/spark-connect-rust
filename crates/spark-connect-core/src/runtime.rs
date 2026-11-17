@@ -35,7 +35,7 @@ pub fn get_runtime() -> &'static Runtime {
 /// either flavor: the call blocks the calling thread until the future completes. Inside a
 /// multi-thread runtime the thread is blocked in place; inside a `current_thread` runtime it
 /// cannot block in place, so the future runs on a thread of its own, which the calling thread
-/// waits for (see [`block_on_other_thread`]).
+/// waits for (see `block_on_other_thread`).
 ///
 /// Also called from a callback that runs inside the runtime (a progress handler, or a
 /// session hook of the executions), which may run a query itself: as PySpark does, the

@@ -4,7 +4,7 @@ mod common;
 use common::live_session;
 use spark_connect::column::{col, lit_double, lit_string};
 use spark_connect::expression::Expression;
-use spark_connect::ml::{Estimator, Model, RandomForestRegressor, Transformer};
+use spark_connect::ml::{Estimator, Model, RandomForestRegressor, Transformer, TreeEnsembleModel};
 use spark_connect::{Column, DataFrame, SparkSession};
 
 fn vectors(s: &SparkSession, sql: &str, name: &str) -> DataFrame {
@@ -188,6 +188,55 @@ fn random_forest_regressor_bootstrap_sampling_is_reproducible() {
         .iter()
         .all(|x| x.is_finite() && *x >= -3.0 && *x <= 8.0));
     assert!(actual[0] < actual[39]);
+    s.stop().unwrap();
+}
+
+#[test]
+fn random_forest_regressor_keeps_the_warning_of_a_fit_that_memory_control_stopped_early() {
+    // The server stops the training of a tree model early when the model outgrows the threshold of
+    // the memory control of its ML cache, of the session's maxModelSize (2/5 of it: 24000 bytes of
+    // 60000), and sends a warning with the model, which PySpark's try_remote_fit logs: the model
+    // keeps it, and the session's handler gets it. Without the conf, the fit is not stopped. The
+    // conf is of a session of its own; the server sets the threshold of each ML command of a
+    // session (a global of Spark's TreeConfig), so the live tests run on one thread.
+    let Some(s) = live_session() else {
+        return;
+    };
+    let handed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = handed.clone();
+    s.set_ml_fit_warning_handler(move |warning| {
+        sink.lock().unwrap().push(warning.to_string());
+        Ok(())
+    });
+    let data = vectors(
+        &s,
+        "SELECT array(sin(id), cos(id), sin(2 * id), cos(3 * id)) AS xs, sin(5 * id) AS label
+         FROM range(200)",
+        "features",
+    );
+    let forest = || {
+        RandomForestRegressor::new()
+            .set_num_trees(20)
+            .set_max_depth(6)
+            .set_seed(1)
+    };
+    let full = forest().fit(&data).unwrap();
+    assert_eq!(full.fit_warning(), None);
+    let max_model_size = "spark.connect.session.connectML.mlCache.memoryControl.maxModelSize";
+    s.conf().set(max_model_size, "60000").unwrap();
+    let stopped = forest().fit(&data).unwrap();
+    s.conf().unset(max_model_size).unwrap();
+    let warning = stopped
+        .fit_warning()
+        .expect("the warning of the fit")
+        .to_string();
+    let size = warning
+        .strip_prefix("The random forest training stops early because the model size (")
+        .and_then(|rest| rest.strip_suffix(" bytes) exceeds threshold (24000 bytes)."))
+        .and_then(|size| size.parse::<u64>().ok());
+    assert!(size.is_some_and(|size| size > 24000), "{warning}");
+    assert_eq!(*handed.lock().unwrap(), [warning]);
+    assert!(stopped.total_num_nodes().unwrap() < full.total_num_nodes().unwrap());
     s.stop().unwrap();
 }
 

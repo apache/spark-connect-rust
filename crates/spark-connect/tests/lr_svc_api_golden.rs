@@ -212,12 +212,8 @@ fn check_summary_members(
 fn check_member(server: &ReplayServer, entry: &Value, actual: Member, label: &str) {
     match entry.get("error") {
         Some(error) => {
-            let message = error["message"].as_str().unwrap();
-            let error = actual.expect_err(&format!("{label}: expected an error"));
-            assert!(
-                error.to_string().contains(message),
-                "{label}: {error} does not carry {message}"
-            );
+            let actual = actual.expect_err(&format!("{label}: expected an error"));
+            ml_golden::assert_error(&actual.to_string(), error, label);
         }
         None => assert_close(
             &actual.unwrap_or_else(|error| panic!("{label}: {error}")),
@@ -561,6 +557,43 @@ fn linear_svc_model_matches_official_pyspark() {
         &|key| linear_svc_evaluate_member(&evaluated, key),
         family,
     );
+}
+
+/// `numFeatures` of a `Long`, as PySpark reads any integer literal into a Python int of any size,
+/// which an `i32` holds only within its range: `num_features` returns the int that fits, and an
+/// error, rather than the truncated int, of one that does not. The golden entry of LinearSVC's
+/// `numFeatures`, with the result's `Integer` replaced by a `Long`.
+#[test]
+fn num_features_of_a_long_is_its_int_or_an_error_out_of_the_range_of_an_int() {
+    use proto::expression::literal::LiteralType as L;
+    let models = golden(MODELS);
+    let fit = &models["fits"]["LinearSVC"];
+    let entry = &models["models"]["LinearSVC"]["members"]["numFeatures"];
+    assert_eq!(entry["value"], json!(2));
+    for (value, expected) in [
+        (2, Ok(2)),
+        (i64::from(i32::MIN), Ok(i32::MIN)),
+        (
+            (1 << 40) + 2,
+            Err("numFeatures of the model is out of the range of an int: 1099511627778"),
+        ),
+    ] {
+        let result = proto::MlCommandResult {
+            result_type: Some(proto::ml_command_result::ResultType::Param(
+                proto::expression::Literal {
+                    literal_type: Some(L::Long(value)),
+                    ..Default::default()
+                },
+            )),
+        };
+        let mut long = entry.clone();
+        long["results"] = json!([STANDARD.encode(result.encode_to_vec())]);
+        let (server, session) = ReplayServer::start(&[&fit["fit"], &long]);
+        let model = fit_linear_svc(&server, &session, &models["datasets"], fit);
+        let actual = model.num_features().map_err(|error| error.to_string());
+        assert_commands(&server, &long, "numFeatures");
+        assert_eq!(actual, expected.map_err(str::to_string), "{value}");
+    }
 }
 
 /// The persistence of an estimator and of its model: `load`, then `save` of the loaded object,

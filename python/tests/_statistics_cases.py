@@ -19,13 +19,24 @@ ARGUMENTS = json.loads(
 )
 
 
+# The classes of pyspark.ml.stat, whose module has no `__all__`, as PySpark's has none.
+CLASSES = [
+    "ChiSquareTest",
+    "Correlation",
+    "KolmogorovSmirnovTest",
+    "Summarizer",
+    "SummaryBuilder",
+    "MultivariateGaussian",
+]
+
+
 def api():
     from pyspark.ml import stat
 
     if not REFERENCE:
         from pyspark import _pyspark
 
-        for name in stat.__all__:
+        for name in CLASSES:
             assert getattr(stat, name).__module__ == "pyspark.ml.stat"
             if name == "MultivariateGaussian":
                 # PySpark's plain holder, kept in Python as PySpark's.

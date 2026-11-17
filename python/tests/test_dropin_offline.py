@@ -39,6 +39,7 @@ from _mock_connect_server import (
 from binary_configuration_cases import TestBinaryConfiguration  # noqa: F401
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 from interval_input_cases import IntervalInputConversionTests  # noqa: F401
+from local_data_conversion_cases import TestLocalDataConversionInterrupts  # noqa: F401
 from pyspark.sql import Row, SparkSession
 from pyspark.sql import types as T
 from row_conversion_cases import TestRowConversionInterrupts as TestRowConversionInterrupts
@@ -805,6 +806,45 @@ def test_struct_field_as_a_type_fails_where_pyspark_fails(mock_connect):
         "[NOT_EXPECTED_TYPE] Argument `schema` should be list, None or StructType, "
         "got StructField."
     )
+
+
+def test_casts_to_types_that_pyspark_does_not_convert_fail_when_the_plan_is_built(mock_connect):
+    # As PySpark's `CastExpression`, whose `to_plan` converts its type with
+    # `pyspark_types_to_proto_types` when a request builds the plan: a DataType of none of its
+    # types, as `DataType()` or a Python subclass, or a StructField, also one nested in a type,
+    # makes a Column, which renders as the `simpleString` of the type, and whose plans raise the
+    # UNSUPPORTED_OPERATION of the type that the conversion fails on.
+    import pyspark.sql.types as T
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    class MyType(T.DataType):
+        pass
+
+    class Own(T.DataType):
+        def simpleString(self):
+            return "own_type"
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    field = T.StructField("b", T.IntegerType())
+    for data_type, text, unsupported in [
+        (MyType(), "MY", "MyType()"),
+        (T.DataType(), "DATA", "DataType()"),
+        (Own(), "OWN_TYPE", "Own()"),
+        (field, "B:INT", repr(field)),
+        (T.ArrayType(field), "ARRAY<B:INT>", repr(field)),
+        (T.StructType([T.StructField("x", field)]), "STRUCT<X:B:INT>", repr(field)),
+    ]:
+        for cast, name in ((F.col("id").cast, "CAST"), (F.col("id").try_cast, "TRY_CAST")):
+            column = cast(data_type)
+            assert repr(column) == f"Column<'{name}(id AS {text})'>"
+            with pytest.raises(PySparkValueError) as error:
+                df.select(column).schema
+            assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+            assert str(error.value) == (
+                f"[UNSUPPORTED_OPERATION] data type {unsupported} is not supported.")
+    assert service.analyze_requests == []
 
 
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
@@ -1985,6 +2025,52 @@ def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
         spark.clearTags()
 
 
+def test_tags_that_utf8_cannot_encode_fail_the_executions_that_carry_them_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's `addTag`, which checks the tag with `"," in tag` and `len(tag)`, and keeps it
+    # in the set of the tags of the thread: a str that UTF-8 cannot encode is a tag, of getTags,
+    # and each execution that carries it fails with the UnicodeEncodeError of its encoding, when
+    # its request is built after its plan, until removeTag removes it. A schema, whose request
+    # has no tags, is analyzed. An int or bytes raises the TypeError of `in`, and a list that of
+    # the set, which does not hash it.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
+    spark.addTag(bad)
+    try:
+        assert spark.getTags() == {bad}
+        with pytest.raises(UnicodeEncodeError) as error:
+            spark.range(1).collect()
+        assert str(error.value) == message
+        assert service.execute_requests == []
+        # The plan is built first, as PySpark builds it before the request.
+        with pytest.raises(UnicodeEncodeError) as error:
+            spark.range(1).select(F.col("b\ud801")).collect()
+        assert "'\\ud801' in position 1" in str(error.value)
+        assert spark.range(1).schema is not None
+    finally:
+        spark.removeTag(bad)
+    assert spark.getTags() == set()
+    spark.range(1).collect()
+    assert len(service.execute_requests) == 1
+    for tag, message in [
+        (5, "argument of type 'int' is not iterable"),
+        (b"x", "a bytes-like object is required, not 'str'"),
+        (["x"], "unhashable type: 'list'"),
+    ]:
+        for method in (spark.addTag, spark.removeTag):
+            with pytest.raises(TypeError) as error:
+                method(tag)
+            assert str(error.value) == message
+    with pytest.raises(PySparkValueError) as error:
+        spark.addTag("a,\ud800")
+    assert error.value.getCondition() == "VALUE_ALLOWED"
+
+
 def test_session_builders_set_their_options_and_validate_their_urls_as_pyspark(monkeypatch):
     # As PySpark's SparkSession.Builder: SparkSession.builder is a new builder of each access,
     # whose methods set their option on it and return it, and a master with a remote raises
@@ -2379,8 +2465,9 @@ def test_functions_exports_fresh_process():
             # As in PySpark, distinct from those of pyspark.sql.functions, which are deprecated
             # and call them.
             assert all(getattr(part, name) is not getattr(F, name) for name in part.__all__)
-            assert F.random is F.rand
-            assert F.column is not F.col
+            # The aliases are their functions, as PySpark binds them.
+            assert F.random is F.rand and F.column is F.col
+            assert F.negate is F.negative and F.power is F.pow
             assert list(inspect.signature(F.first).parameters) == ["col", "ignorenulls"]
             assert list(inspect.signature(F.split).parameters) == ["str", "pattern", "limit"]
             return F.__all__.copy()
@@ -3741,6 +3828,24 @@ def test_channel_builder_parses_the_connection_string_and_the_session_honors_it_
         session.stop()
 
 
+def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
+    # As PySpark Connect's ChannelBuilder, DefaultChannelBuilder, PlanObservedMetrics and
+    # SparkConnectClient, of pyspark.sql.connect.client.core, which names them: their repr and a
+    # pickle by reference name them there.
+    from pyspark.sql.connect import client
+    from pyspark.sql.connect.client import core
+
+    for name in ["ChannelBuilder", "DefaultChannelBuilder", "PlanObservedMetrics",
+                 "SparkConnectClient"]:
+        cls = getattr(client, name)
+        assert (cls.__module__, cls.__qualname__) == ("pyspark.sql.connect.client.core", name)
+        assert getattr(core, name) is cls
+        assert pickle.loads(pickle.dumps(cls)) is cls
+    assert repr(client.DefaultChannelBuilder("sc://localhost")).startswith(
+        "<pyspark.sql.connect.client.core.DefaultChannelBuilder object at 0x")
+    assert core.__all__ == ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
+
+
 def test_session_constructor_and_its_flags_as_pyspark_connect():
     import threading
 
@@ -3958,14 +4063,170 @@ def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connec
     assert len(options[1]) == 1 and len(options[2]) == 1 and 3 not in options
 
 
-def test_udtf_handlers_are_pickled_when_used_as_pyspark(mock_connect, tmp_path):
-    # As PySpark Connect's PythonUDTF: the handler is pickled when the UDTF is used, so a
-    # handler that does not pickle raises there, a PySparkPicklingError of
-    # UDTF_SERIALIZATION_ERROR of its PicklingError.
+def _late_pickled_cases():
+    # The DataFrame of each API that holds a Python function of `box`, which returns box[0], and
+    # the command of its function in the root of a request. A function pickles its closure by
+    # value, so the command holds box[0] as it is when the function is pickled.
+    from collections.abc import Iterator
+
+    import pandas as pd
+    import pyarrow as pa
+    from pyspark.sql import functions as F
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    def udf_command(root):
+        return root.project.expressions[0].common_inline_user_defined_function.python_udf.command
+
+    def scalar_pandas(box):
+        def f(s: pd.Series) -> pd.Series:
+            return box[0]
+
+        return f
+
+    def iterator_pandas(box):
+        def f(it: Iterator[pd.Series]) -> Iterator[pd.Series]:
+            yield box[0]
+
+        return f
+
+    def scalar_arrow(box):
+        def f(a: pa.Array) -> pa.Array:
+            return box[0]
+
+        return f
+
+    def aggregate_pandas(box):
+        def f(s: pd.Series) -> int:
+            return box[0]
+
+        return f
+
+    def handler(box):
+        class Handler:
+            def eval(self, x):
+                yield (box[0],)
+
+        return Handler
+
+    class Processor(StatefulProcessor):
+        def __init__(self, box):
+            self.box = box
+
+        def init(self, handle):
+            pass
+
+        def handleInputRows(self, key, rows, timerValues):
+            yield from rows
+
+        def close(self):
+            pass
+
+    def map_command(root):
+        return root.map_partitions.func.python_udf.command
+
+    def group_command(root):
+        return root.group_map.func.python_udf.command
+
+    def cogroup_command(root):
+        return root.co_group_map.func.python_udf.command
+
+    def udtf_command(root):
+        return root.common_inline_user_defined_table_function.python_udtf.command
+
+    def grouped(df):
+        return df.groupBy("id")
+
+    return {
+        "udf": (lambda df, box: df.select(F.udf(lambda x: box[0], "long")("id")), udf_command),
+        "arrow-optimized udf": (
+            lambda df, box: df.select(F.udf(lambda x: box[0], "long", useArrow=True)("id")),
+            udf_command),
+        "pandas_udf": (lambda df, box: df.select(F.pandas_udf(scalar_pandas(box), "long")("id")),
+                       udf_command),
+        "pandas_udf of iterators": (
+            lambda df, box: df.select(F.pandas_udf(iterator_pandas(box), "long")("id")),
+            udf_command),
+        "arrow_udf": (lambda df, box: df.select(F.arrow_udf(scalar_arrow(box), "long")("id")),
+                      udf_command),
+        "grouped aggregate pandas_udf": (
+            lambda df, box: df.groupBy().agg(F.pandas_udf(aggregate_pandas(box), "long")("id")),
+            lambda root: root.aggregate.aggregate_expressions[0]
+            .common_inline_user_defined_function.python_udf.command),
+        "udtf": (lambda df, box: F.udtf(handler(box), returnType="v: long")(F.lit(1)),
+                 udtf_command),
+        "udtf of a table argument": (
+            lambda df, box: F.udtf(handler(box), returnType="v: long")(df.asTable()),
+            lambda root: udtf_command(root.with_relations.root)),
+        "udtf of a lateral join": (
+            lambda df, box: df.lateralJoin(
+                F.udtf(handler(box), returnType="v: long")(F.col("id").outer())),
+            lambda root: udtf_command(root.lateral_join.right)),
+        "mapInPandas": (lambda df, box: df.mapInPandas(lambda it: box[0], "id long"), map_command),
+        "mapInArrow": (lambda df, box: df.mapInArrow(lambda it: box[0], "id long"), map_command),
+        "applyInPandas": (lambda df, box: grouped(df).applyInPandas(lambda p: box[0], "id long"),
+                          group_command),
+        "applyInArrow": (lambda df, box: grouped(df).applyInArrow(lambda t: box[0], "id long"),
+                         group_command),
+        "cogroup applyInPandas": (
+            lambda df, box: grouped(df).cogroup(grouped(df)).applyInPandas(
+                lambda left, right: box[0], "id long"),
+            cogroup_command),
+        "cogroup applyInArrow": (
+            lambda df, box: grouped(df).cogroup(grouped(df)).applyInArrow(
+                lambda left, right: box[0], "id long"),
+            cogroup_command),
+        "applyInPandasWithState": (
+            lambda df, box: grouped(df).applyInPandasWithState(
+                lambda key, pdfs, state: box[0], "id long", "c long", "append", "NoTimeout"),
+            lambda root: root.apply_in_pandas_with_state.func.python_udf.command),
+        "transformWithStateInPandas": (
+            lambda df, box: grouped(df).transformWithStateInPandas(
+                Processor(box), "id long", "append", "None"),
+            group_command),
+        "transformWithState": (
+            lambda df, box: grouped(df).transformWithState(
+                Processor(box), "id long", "append", "None"),
+            group_command),
+        "transformWithState of an initial state": (
+            lambda df, box: grouped(df).transformWithState(
+                Processor(box), "id long", "append", "None", initialState=grouped(df)),
+            group_command),
+    }
+
+
+@pytest.mark.parametrize("case", list(_late_pickled_cases()))
+def test_the_functions_of_udfs_are_pickled_when_their_plans_are_built_as_pyspark(
+    mock_connect, case
+):
+    # As PySpark's PythonUDF.to_plan and PythonUDTF.to_plan, which pickle the function of a UDF,
+    # a pandas or Arrow UDF, a UDTF, or a map or group-map function each time they build a plan
+    # that holds it: each request carries the function as it is when the request is built, with
+    # the values that it reads then, not as it was when it was applied.
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    make, command_of = _late_pickled_cases()[case]
+    box = ["<applied>"]
+    frame = make(spark.range(2), box)
+    for value, before in (("<first>", b"<applied>"), ("<second>", b"<first>")):
+        box[0] = value
+        frame.explain()
+        # AnalyzePlanRequest.explain of the plan of the DataFrame.
+        root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
+        command = command_of(root)
+        assert value.encode() in command and before not in command
+
+
+def test_udtf_handlers_are_pickled_when_plans_are_built_as_pyspark(mock_connect, tmp_path):
+    # As PySpark Connect's PythonUDTF.to_plan: the handler is pickled each time a request builds
+    # a plan of the UDTF, so the call of a handler that does not pickle gives a DataFrame, and
+    # each request of it, in a lateral join too, raises a PySparkPicklingError of
+    # UDTF_SERIALIZATION_ERROR of its PicklingError, with no request sent. The registration, a
+    # command, pickles the handler when it is called, and raises there.
     from pyspark.errors import PySparkPicklingError
     from pyspark.sql.functions import udtf
 
-    spark, _ = mock_connect
+    spark, service = mock_connect
     file_obj = open(tmp_path / "file.txt", "w")
     try:
 
@@ -3975,7 +4236,16 @@ def test_udtf_handlers_are_pickled_when_used_as_pyspark(mock_connect, tmp_path):
                 file_obj
                 yield (1,)
 
-        for use in (lambda: Unpicklable(), lambda: spark.udtf.register("unpicklable", Unpicklable)):
+        df = Unpicklable()
+        lateral = spark.range(1).lateralJoin(Unpicklable())
+        sent = (len(service.analyze_requests), len(service.execute_requests))
+        uses = [
+            lambda: df.schema,
+            lambda: df.collect(),
+            lambda: lateral.schema,
+            lambda: spark.udtf.register("unpicklable", Unpicklable),
+        ]
+        for use in uses:
             with pytest.raises(PySparkPicklingError) as error:
                 use()
             assert error.value.getCondition() == "UDTF_SERIALIZATION_ERROR"
@@ -3984,6 +4254,8 @@ def test_udtf_handlers_are_pickled_when_used_as_pyspark(mock_connect, tmp_path):
                 "message": "Please check the stack trace and make sure the function is "
                 "serializable.",
             }
+            assert type(error.value.__context__) is pickle.PicklingError
+        assert (len(service.analyze_requests), len(service.execute_requests)) == sent
     finally:
         file_obj.close()
 
@@ -5126,9 +5398,10 @@ def test_na_and_stat_functions_check_their_arguments_as_pyspark():
 
 
 def test_dropna_thresh_that_the_proto_refuses_is_refused_as_pyspark():
-    # As PySpark sends `thresh` as a proto int, after it checks `how` and `subset`: a bool, which
-    # is an int, is the TypeError of protobuf's default (upb) backend, since protobuf 7.34, and an
-    # int out of the range of an int32 a ValueError.
+    # As PySpark sends `thresh` as a proto int, after it checks `how` and `subset`, when its
+    # `NADrop` plan is built: a bool, which is an int, is the TypeError of protobuf's default
+    # (upb) backend, since protobuf 7.34, and an int out of the range of an int32 a ValueError,
+    # which the requests of the DataFrame raise.
     from pyspark.errors import PySparkTypeError
     from pyspark.sql import DataFrame
 
@@ -5144,10 +5417,13 @@ def test_dropna_thresh_that_the_proto_refuses_is_refused_as_pyspark():
          "Value out of range: 1099511627776"),
     )
     for call, error_type, message in cases:
-        with pytest.raises(error_type) as error:
-            call()
-        assert type(error.value) is error_type
-        assert str(error.value) == message
+        plan = call()
+        assert isinstance(plan, DataFrame)
+        for request in (lambda: plan.schema, plan.collect):
+            with pytest.raises(error_type) as error:
+                request()
+            assert type(error.value) is error_type
+            assert str(error.value) == message
     # The `subset` is checked before the `thresh` is sent.
     with pytest.raises(PySparkTypeError) as error:
         df.dropna(thresh=True, subset=1)
@@ -5290,6 +5566,50 @@ def test_counts_that_the_proto_refuses_are_refused_as_pyspark():
             call()
         assert error.value.getCondition() == condition
         assert error.value.getMessageParameters() == parameters
+
+
+def test_counts_and_seeds_that_fail_the_plan_keep_the_cached_schema_as_pyspark(mock_connect):
+    # As PySpark's limit, coalesce, repartition, repartitionByRange, repartitionById, sample and
+    # randomSplit, which copy the _cached_schema of their input: of a count or a seed that the
+    # proto refuses, whose plan fails each request, the schema is that of the input once the
+    # input has one, with no request, while the actions still fail. offset and sampleBy do not
+    # copy it, so their schema is that of their plan, which fails before a request, as it does
+    # for all of them before the input has a schema.
+    spark, service = mock_connect
+    df = spark.range(3)
+    keeping = [
+        lambda d: d.limit(2.0),
+        lambda d: d.limit(2**40),
+        lambda d: d.coalesce(2**40),
+        lambda d: d.repartition(2**40),
+        lambda d: d.repartition(2**40, "id"),
+        lambda d: d.repartitionByRange(2**40, "id"),
+        lambda d: d.repartitionById(2**40, "id"),
+        lambda d: d.sample(fraction=0.5, seed=2**70),
+        lambda d: d.sample(True, 0.5, 2**70),
+        lambda d: d.randomSplit([0.5, 0.5], seed=2**70)[0],
+        lambda d: d.randomSplit([0.5, 0.5], seed=2**70)[1],
+    ]
+    dropping = [lambda d: d.offset(2**40), lambda d: d.sampleBy("id", {0: 0.5}, seed=2**70)]
+    for make in keeping + dropping:
+        with pytest.raises((TypeError, ValueError)):
+            make(df).schema
+    assert service.analyze_requests == []
+    schema = df.schema
+    assert len(service.analyze_requests) == 1
+    for make in keeping:
+        plan = make(df)
+        assert plan.schema == schema
+        assert plan.columns == ["id"]
+        # A transformation that keeps the schema keeps it again.
+        assert plan.limit(1).columns == ["id"]
+        with pytest.raises((TypeError, ValueError)):
+            plan.collect()
+    for make in dropping:
+        with pytest.raises(ValueError, match="Value out of range"):
+            make(df).columns
+    assert len(service.analyze_requests) == 1
+    assert service.execute_requests == []
 
 
 def test_counts_are_sent_by_their_index_as_pyspark(mock_connect):
@@ -8063,8 +8383,10 @@ def test_replace_and_unpivot_check_their_arguments_as_pyspark():
 
 
 def test_range_and_table_valued_functions_take_their_arguments_as_pyspark(mock_connect):
-    # As PySpark's: spark.range and spark.tvf.range take the int() of their arguments, and the
-    # table-valued functions of spark.tvf take Columns or column names, as F._to_col does.
+    # As PySpark's: spark.range and spark.tvf.range take the int() of their arguments, whose
+    # `Range` plan sets them in its proto fields when it is built, which refuse an int beyond
+    # them, and the table-valued functions of spark.tvf take Columns or column names, as
+    # F._to_col does.
     import re
 
     from pyspark.errors import PySparkTypeError, PySparkValueError
@@ -8089,12 +8411,23 @@ def test_range_and_table_valued_functions_take_their_arguments_as_pyspark(mock_c
         (("x",), ValueError, "invalid literal for int()"),
         ((None,), TypeError, "int() argument must be"),
         ((0, 5, None), TypeError, "int() argument must be"),
-        ((2**63,), ValueError, "Value out of range: 9223372036854775808"),
-        ((0, 3, 1, 2**31), ValueError, "Value out of range: 2147483648"),
     ]:
         for range_ in (spark.range, spark.tvf.range):
             with pytest.raises(error, match=re.escape(message)):
                 range_(*args)
+    sent_before = len(service.execute_requests)
+    for args, message in [
+        ((2**63,), "Value out of range: 9223372036854775808"),
+        ((2**63, 2**64), "Value out of range: 9223372036854775808"),
+        ((0, 3, -(2**63) - 1), "Value out of range: -9223372036854775809"),
+        ((0, 3, 1, 2**31), "Value out of range: 2147483648"),
+    ]:
+        for range_ in (spark.range, spark.tvf.range):
+            plan = range_(*args)
+            with pytest.raises(ValueError) as error:
+                plan.collect()
+            assert type(error.value) is ValueError and str(error.value) == message
+    assert len(service.execute_requests) == sent_before
     spark.tvf.json_tuple(F.lit('{"a": 1}'), "a").collect()
     # Relation.unresolved_table_valued_function=43: arguments=2, of the column `a`, an
     # Expression.unresolved_attribute=2 of UnresolvedAttribute.unparsed_identifier=1.
@@ -8245,7 +8578,7 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_
     # As PySpark, whose protobuf string fields raise the UnicodeEncodeError, a ValueError, of a str
     # that UTF-8 cannot encode (a lone surrogate), in protobuf's default (upb) backend: an option
     # is not sent as another text (another path), and a fill value raises the error of its
-    # encoding rather than a TypeError of its type.
+    # encoding rather than a TypeError of its type, when its `NAFill` plan is built.
     spark, service = mock_connect
     bad = "a\ud800b"
     message = re.escape(
@@ -8257,8 +8590,10 @@ def test_strings_that_utf8_cannot_encode_raise_value_error_as_options_and_fills_
         lambda: df.fillna({bad: 1}),
         lambda: df.fillna("x", subset=[bad]),
     ]:
+        plan = call()
         with pytest.raises(UnicodeEncodeError, match=message):
-            call()
+            plan.collect()
+    assert service.execute_requests == []
 
 
 def test_strings_that_utf8_cannot_encode_raise_value_error_in_option_keys_conf_and_names_as_pyspark(
@@ -8777,6 +9112,300 @@ def test_reader_formats_are_kept_until_load_as_pyspark(mock_connect):
     # Read.data_source=2 -> DataSource.format=1.
     data_source = parse_message(_sent_relation(service.analyze_requests[-1], 2)[2][0])
     assert data_source[1] == [b"parquet"]
+
+
+def test_dataframe_arguments_that_utf8_cannot_encode_fail_when_the_plan_is_built_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's plans, which keep the names, the strs of literals and the SQL strings that
+    # the methods of a DataFrame and of grouped data take, and set them in their protobuf string
+    # fields when a request builds the plan: a str that UTF-8 cannot encode makes a DataFrame,
+    # whose requests, as `df.schema` and `collect()`, fail with the UnicodeEncodeError of its
+    # encoding, and are not sent.
+    from pyspark.sql import DataFrame, Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
+    calls = [
+        lambda df: df.alias(bad),
+        lambda df: df.select(bad),
+        lambda df: df.select(["id", bad]),
+        lambda df: df.selectExpr(bad),
+        lambda df: df.selectExpr(["id", bad]),
+        lambda df: df.filter(bad),
+        lambda df: df.where(bad),
+        lambda df: df.withColumn(bad, F.lit(1)),
+        lambda df: df.withColumnRenamed(bad, "z"),
+        lambda df: df.withColumnRenamed("id", bad),
+        lambda df: df.withColumnsRenamed({"id": bad}),
+        lambda df: df.withMetadata(bad, {"k": 1}),
+        lambda df: df.hint(bad),
+        lambda df: df.hint("broadcast", bad),
+        lambda df: df.hint("broadcast", ["x", bad]),
+        lambda df: df.drop(bad),
+        lambda df: df.drop("id", bad),
+        lambda df: df.dropDuplicates([bad]),
+        lambda df: df.drop_duplicates([bad]),
+        lambda df: df.dropDuplicatesWithinWatermark([bad]),
+        lambda df: df.toDF(bad),
+        lambda df: df.withWatermark(bad, "1 second"),
+        lambda df: df.withWatermark("id", bad),
+        lambda df: df.unpivot(bad, ["id"], "var", "val"),
+        lambda df: df.unpivot("id", [bad], "var", "val"),
+        lambda df: df.unpivot("id", ["id"], bad, "val"),
+        lambda df: df.melt("id", ["id"], "var", bad),
+        lambda df: df.transpose(bad),
+        lambda df: df.observe(bad, F.count(F.lit(1))),
+        lambda df: df.observe("o", F.max(bad)),
+        lambda df: df.observe(Observation(bad), F.count(F.lit(1))),
+        lambda df: df.groupBy(bad).count(),
+        lambda df: df.groupby(["id", bad]).count(),
+        lambda df: df.rollup(bad).count(),
+        lambda df: df.cube(bad).count(),
+        lambda df: df.groupingSets([[bad]], bad).count(),
+        lambda df: df.groupBy("id").agg({bad: "max"}),
+        lambda df: df.groupBy("id").agg({"id": bad}),
+        lambda df: df.agg({bad: "max"}),
+        lambda df: df.agg({"id": bad}),
+        lambda df: df.groupBy("id").pivot(bad).count(),
+        lambda df: df.groupBy("id").pivot("id", ["x", bad]).count(),
+        lambda df: df.sort(bad),
+        lambda df: df.orderBy(bad, ascending=False),
+        lambda df: df.sortWithinPartitions(bad),
+        lambda df: df.describe(bad),
+        lambda df: df.describe(["id", bad]),
+        lambda df: df.summary(bad),
+        lambda df: df.fillna(bad),
+        lambda df: df.na.fill({bad: 1}),
+        lambda df: df.na.fill({"id": bad}),
+        lambda df: df.na.fill(1, subset=[bad]),
+        lambda df: df.na.drop(subset=[bad]),
+        lambda df: df.dropna(subset=bad),
+        lambda df: df.na.replace("x", bad),
+        lambda df: df.replace(bad, "x"),
+        lambda df: df.na.replace("x", "y", subset=[bad]),
+        lambda df: df.crosstab(bad, "id"),
+        lambda df: df.stat.crosstab("id", bad),
+        lambda df: df.freqItems([bad]),
+        lambda df: df.stat.freqItems((bad,)),
+        lambda df: df.sampleBy(bad, {0: 0.5}, 1),
+        lambda df: df.stat.sampleBy("id", {bad: 0.5}, 1),
+        lambda df: df.join(df, bad),
+        lambda df: df.join(df, ["id", bad]),
+        lambda df: df.join(df, F.col(bad) == F.col("id")),
+        lambda df: df._joinAsOf(df, "id", "id", on=bad),
+        lambda df: df.repartition(bad),
+        lambda df: df.repartition(2, bad),
+        lambda df: df.repartitionByRange(bad),
+        lambda df: df.repartitionByRange(2, bad),
+        lambda df: df.repartitionById(2, bad),
+    ]
+    for call in calls:
+        df = spark.range(1)
+        plan = call(df)
+        assert isinstance(plan, DataFrame)
+        for request in (lambda: plan.schema, plan.collect):
+            with pytest.raises(UnicodeEncodeError) as error:
+                request()
+            assert type(error.value) is UnicodeEncodeError
+            assert str(error.value) == message
+    # The one request is the `isStreaming` of the DataFrame that the Observation observes, which
+    # PySpark's `Observation._on` asks.
+    assert len(service.analyze_requests) == 1 and service.execute_requests == []
+
+
+def test_dataframes_of_values_that_fail_keep_the_cached_schema_that_pyspark_copies(mock_connect):
+    # As PySpark's alias, hint, dropDuplicates, observe, filter, sort, sortWithinPartitions and
+    # repartitions, which copy the `_cached_schema` of their input: of a value that their plan
+    # fails to build, `schema` gives the cached schema without a request, and their other
+    # requests raise the error. withColumnRenamed, toDF and the other plans, which do not copy
+    # it, raise the error at `schema` too.
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    df = spark.range(1)
+    schema = df.schema
+    sent = len(service.analyze_requests)
+    copies = [
+        df.alias(bad),
+        df.hint(bad),
+        df.dropDuplicates([bad]),
+        df.observe(bad, F.count(F.lit(1))),
+        df.filter(bad),
+        df.where(F.col(bad) > 0),
+        df.sort(bad),
+        df.sortWithinPartitions(bad),
+        df.repartition(bad),
+        df.repartitionByRange(2, bad),
+        df.repartitionById(2, bad),
+    ]
+    for plan in copies:
+        assert plan.schema == schema
+        with pytest.raises(UnicodeEncodeError):
+            plan.collect()
+    assert len(service.analyze_requests) == sent
+    # The observation of an Observation asks whether its DataFrame is streaming, as PySpark's.
+    observed = df.observe(Observation(bad), F.count(F.lit(1)))
+    assert observed.schema == schema
+    for plan in (df.withColumnRenamed(bad, "z"), df.toDF(bad), df.drop(bad), df.describe(bad)):
+        with pytest.raises(UnicodeEncodeError):
+            plan.schema
+    assert service.execute_requests == []
+
+
+def test_dataframe_values_that_protobuf_refuses_fail_when_the_plan_is_built_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's plans, which set these values in their protobuf fields as they are given when
+    # a request builds the plan, as protobuf's default (upb) backend converts them: a string field
+    # takes bytes of UTF-8 too, and refuses another object with a TypeError; an int field refuses
+    # an int beyond it with a ValueError; a double field a str with a TypeError. A join on a list
+    # of conditions is their conjunction, of `&`, and a join on a tuple reads its `to_plan`, when
+    # the plan is built: of an operand that is a Row, `&` raises the PySparkAttributeError of its
+    # `_expr`.
+    from pyspark.errors import PySparkAttributeError
+    from pyspark.sql import DataFrame, Row
+
+    spark, service = mock_connect
+    bad_type = "bad argument type for built-in operation"
+    not_supported = "[ATTRIBUTE_NOT_SUPPORTED] Attribute `_expr` is not supported."
+    refused = "Field spark.connect.NADrop.min_non_nulls: Expected an int, got a boolean."
+    calls = [
+        (lambda df: df.alias(5), TypeError, bad_type),
+        (lambda df: df.alias(None), TypeError, bad_type),
+        (lambda df: df.alias(b"\xff"), UnicodeDecodeError,
+         "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte"),
+        (lambda df: df.withColumnRenamed(1, "z"), TypeError, bad_type),
+        (lambda df: df.withColumnRenamed("id", None), TypeError, bad_type),
+        (lambda df: df.withColumnsRenamed({"id": 1}), TypeError, bad_type),
+        (lambda df: df.unpivot("id", ["id"], 1, "val"), TypeError, bad_type),
+        (lambda df: df.melt("id", ["id"], "var", None), TypeError, bad_type),
+        (lambda df: df.describe(b"ab"), TypeError, bad_type),
+        (lambda df: df.freqItems(["id", 1]), TypeError, bad_type),
+        (lambda df: df.freqItems(["id"], support="x"), TypeError, "must be real number, not str"),
+        (lambda df: df.fillna(2**70), ValueError, "Value out of range: 1180591620717411303424"),
+        (lambda df: df.na.fill({"id": 2**70}), ValueError,
+         "Value out of range: 1180591620717411303424"),
+        (lambda df: df.dropna(thresh=True), TypeError, refused),
+        (lambda df: df.dropna(thresh=2**40), ValueError, "Value out of range: 1099511627776"),
+        (lambda df: df.na.replace(1, 2, subset=[1]), TypeError, bad_type),
+        (lambda df: df.join(df, on=["id", 1]), TypeError, bad_type),
+        (lambda df: df.join(df, on=("id",)), AttributeError,
+         "'tuple' object has no attribute 'to_plan'"),
+        (lambda df: df.join(df, on=[df.id == df.id, object()]), AttributeError,
+         "'object' object has no attribute '_expr'"),
+        (lambda df: df.join(df, on=[df.id == df.id, Row(a=1)]), PySparkAttributeError,
+         not_supported),
+        (lambda df: df._joinAsOf(df, "id", "id", on=[Row(a=1), df.id == df.id]),
+         PySparkAttributeError, not_supported),
+        (lambda df: df._joinAsOf(df, "id", "id", on=("id",)), AttributeError,
+         "'tuple' object has no attribute 'to_plan'"),
+        (lambda df: spark.range(2**70), ValueError, "Value out of range: 1180591620717411303424"),
+        (lambda df: spark.range(0, 10, 2**70), ValueError,
+         "Value out of range: 1180591620717411303424"),
+        (lambda df: spark.range(0, 10, 1, 2**40), ValueError,
+         "Value out of range: 1099511627776"),
+        (lambda df: spark.tvf.range(2**70), ValueError,
+         "Value out of range: 1180591620717411303424"),
+    ]
+    for call, error_type, message in calls:
+        plan = call(spark.range(1))
+        assert isinstance(plan, DataFrame), message
+        with pytest.raises(error_type) as error:
+            plan.collect()
+        assert type(error.value) is error_type, message
+        assert str(error.value) == message
+    assert service.analyze_requests == [] and service.execute_requests == []
+    # A string field takes bytes of UTF-8, which PySpark sends as their str.
+    from pyspark.sql.connect.proto import Relation
+
+    df = spark.range(1)
+    relation = Relation.FromString(df.alias(b"q")._relation_bytes())
+    assert relation.subquery_alias.alias == "q"
+    relation = Relation.FromString(df.withColumnRenamed(b"id", b"z")._relation_bytes())
+    assert [(r.col_name, r.new_col_name) for r in relation.with_columns_renamed.renames] == [
+        ("id", "z")]
+    relation = Relation.FromString(df.unpivot("id", ["id"], b"var", "val")._relation_bytes())
+    assert relation.unpivot.variable_column_name == "var"
+    relation = Relation.FromString(df.join(df, on=["id", b"id"])._relation_bytes())
+    assert list(relation.join.using_columns) == ["id", "id"]
+    # A condition and a str are the conjunction of the condition and the literal of the str.
+    relation = Relation.FromString(df.join(df, on=[df.id == df.id, "x"])._relation_bytes())
+    condition = relation.join.join_condition.unresolved_function
+    assert condition.function_name == "and"
+    assert condition.arguments[1].literal.string == "x"
+
+
+def test_dataframe_arguments_raise_the_errors_of_pyspark_in_its_order(mock_connect):
+    # As PySpark's: `withColumn` checks the Column before its `WithColumns` plan asserts a str
+    # name; `withMetadata` takes `self[columnName]` first, of the NOT_EXPECTED_TYPE of bytes; a
+    # str that UTF-8 cannot encode is no explain mode, no `how` of `dropna`, and no join type,
+    # which the error names as it is; `explain` builds the plan before it checks the mode.
+    from pyspark.errors import AnalysisException, PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    bad = "a\ud800b"
+    for call in (lambda: df.withColumn(1, F.lit(1)), lambda: df.withColumn(None, F.lit(1))):
+        with pytest.raises(AssertionError) as error:
+            call()
+        assert type(error.value) is AssertionError and str(error.value) == ""
+    for call, arg_name, arg_type in [
+        (lambda: df.withColumn(1, 5), "col", "int"),
+        (lambda: df.withMetadata(b"id", {"k": 1}), "item", "bytes"),
+    ]:
+        with pytest.raises(PySparkTypeError) as error:
+            call()
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters()["arg_name"] == arg_name
+        assert error.value.getMessageParameters()["arg_type"] == arg_type
+    for call, arg_name in [
+        (lambda: df.explain(bad), "explain_mode"),
+        (lambda: df.explain(mode=bad), "explain_mode"),
+        (lambda: df.dropna(how=bad), "how"),
+    ]:
+        with pytest.raises(PySparkValueError) as error:
+            call()
+        assert error.value.getCondition() == "VALUE_NOT_ALLOWED"
+        assert error.value.getMessageParameters()["arg_name"] == arg_name
+    with pytest.raises(UnicodeEncodeError):
+        df.filter(bad).explain("formatted ")
+    for join in (lambda: df.join(df, "id", bad), lambda: df.lateralJoin(df, how=bad)):
+        with pytest.raises(AnalysisException) as error:
+            join()
+        assert error.value.getCondition() == "UNSUPPORTED_JOIN_TYPE"
+        assert error.value.getMessageParameters()["typ"] == bad
+
+
+def test_plans_fail_with_the_first_error_of_pysparks_build_order(mock_connect):
+    # As PySpark's plans, which build their input before themselves, but for a repartition, which
+    # builds its partitioning first, and set the name of a hint or of an observation before their
+    # expressions, and the name of a column after its Column: of two values that UTF-8 cannot
+    # encode, the request raises the error of the first.
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    first, second = "a\ud800", "a\ud801"
+    for plan, character in [
+        (df.select(F.col(first)).alias(second), "\\ud800"),
+        (df.alias(first).select(F.col(second)), "\\ud800"),
+        (df.hint(first, second), "\\ud800"),
+        (df.observe(first, F.max(second)), "\\ud800"),
+        (df.withColumn(second, F.col(first)), "\\ud800"),
+        (df.toDF(first).withColumnRenamed(second, "z"), "\\ud800"),
+        (df.alias(second).repartition(F.col(first)), "\\ud800"),
+        (df.alias(second).repartitionByRange(3, F.col(first)), "\\ud800"),
+        (df.alias(second).repartitionById(3, F.col(first)), "\\ud800"),
+    ]:
+        with pytest.raises(UnicodeEncodeError) as error:
+            plan.collect()
+        assert f"character '{character}' in position 1" in str(error.value)
 
 
 def test_with_columns_asserts_its_mapping_as_pyspark(mock_connect):
@@ -9884,10 +10513,11 @@ def test_protobuf_string_fields_take_bytes_and_refuse_other_objects_as_pyspark(m
         lambda: spark.conf.isModifiable(1),
         lambda: spark.sql(None),
         lambda: spark.sql(1),
-        lambda: df._joinAsOf(spark.range(1), "id", "id", on=["id", 1]),
-        lambda: df._joinAsOf(spark.range(1), "id", "id", on=["id", None]),
-        lambda: df.replace(1, 2, subset=["id", 1]),
-        lambda: df.replace(1, 2, subset=("id", bytearray(b"id"))),
+        # The names of these plans are set when the plan is built, which their requests raise.
+        lambda: df._joinAsOf(spark.range(1), "id", "id", on=["id", 1]).collect(),
+        lambda: df._joinAsOf(spark.range(1), "id", "id", on=["id", None]).schema,
+        lambda: df.replace(1, 2, subset=["id", 1]).collect(),
+        lambda: df.replace(1, 2, subset=("id", bytearray(b"id"))).schema,
     ]:
         with pytest.raises(TypeError) as error:
             call()
@@ -10121,17 +10751,93 @@ def test_functions_next_day():
     assert type(F.next_day(c, "Monday")).__name__ == "Column"
 
 
+def test_udf_functions_are_pickled_in_the_order_of_the_build_of_each_request_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's PythonUDF.to_plan: applying a UDF pickles nothing, each request pickles the
+    # function of each UDF of its plan as it builds the plan, in the order of the build, and a
+    # function that does not pickle raises the PicklingError of CloudPickleSerializer.dumps from
+    # each request, with no request sent. The error of an expression built before the UDF, such
+    # as an alias of a name that protobuf refuses, is raised first, and the function is not
+    # pickled. A copy of a Column shares its UDFs, pickled by the requests of the copy, as the
+    # copy of PySpark's Column shares the function; a pickle of the Column pickles the function
+    # with it.
+    import copy
+    import threading
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(2)
+    picklings = []
+
+    class Recorded:
+        def __init__(self, tag):
+            self.tag = tag
+
+        def __reduce__(self):
+            picklings.append(self.tag)
+            return (Recorded, (self.tag,))
+
+    def recording(tag):
+        recorded = Recorded(tag)
+        return F.udf(lambda x: (recorded, x)[1], "long")("id")
+
+    first, second = recording("first"), recording("second")
+    assert picklings == []
+    df.select(first, second, first.alias("again")).schema
+    assert picklings == ["first", "second", "first"]
+    del picklings[:]
+    for column in (copy.copy(first), copy.deepcopy(first)):
+        df.select(column).collect()
+    assert picklings == ["first", "first"]
+    del picklings[:]
+    with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+        df.select(F.col("id").alias("\ud800"), first).schema
+    assert picklings == []
+    with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+        df.select(first, F.col("id").alias("\ud800")).schema
+    assert picklings == ["first"]
+    del picklings[:]
+    CloudPickleSerializer().dumps(first)
+    assert picklings == ["first"]
+
+    lock = threading.Lock()
+    unpicklable = F.udf(lambda x: (lock, x)[1], "long")("id")
+    message = "^Could not serialize object: TypeError: cannot pickle '_thread.lock' object$"
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    del picklings[:]
+    plans = [
+        df.select(unpicklable),
+        df.select(copy.copy(unpicklable)),
+        df.select(copy.deepcopy(unpicklable)),
+        df.filter(unpicklable > 0).select(second),
+        df.select(second, unpicklable, first),
+    ]
+    for plan in plans:
+        for request in (lambda: plan.schema, lambda: plan.collect()):
+            with pytest.raises(pickle.PicklingError, match=message):
+                request()
+    assert picklings == ["second", "second"]
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+    with pytest.raises(pickle.PicklingError, match=message):
+        CloudPickleSerializer().dumps(unpicklable)
+
+
 def test_unpicklable_functions_raise_picklingerror_as_pyspark(mock_connect):
     # As PySpark's CloudPickleSerializer().dumps: a function of applyInPandas, applyInArrow,
     # mapInPandas, mapInArrow, cogroup, transformWithState(InPandas) or a data source class
     # that does not pickle raises pickle.PicklingError "Could not serialize object: ...", not
-    # the bare TypeError of cloudpickle.
+    # the bare TypeError of cloudpickle. As PySpark's `PythonUDF.to_plan`, a map or group-map
+    # function is pickled when a request builds the plan of its DataFrame, which raises then,
+    # with no request sent, and at each request; a data source when it is registered.
     import pickle
     import threading
 
     from pyspark.sql.datasource import DataSource
 
-    spark, _ = mock_connect
+    spark, service = mock_connect
     df = spark.range(2)
     grouped = df.groupBy("id")
     lock = threading.Lock()
@@ -10157,13 +10863,19 @@ def test_unpicklable_functions_raise_picklingerror_as_pyspark(mock_connect):
         lambda: grouped.cogroup(grouped).applyInArrow(lambda a, b: (lock, a)[1], "id long"),
         lambda: grouped.transformWithStateInPandas(Processor(), "id long", "append", "NoTimeMode"),
         lambda: grouped.transformWithState(Processor(), "id long", "append", "NoTimeMode"),
-        lambda: spark.dataSource.register(Source),
     ]
     for call in unpicklable:
-        with pytest.raises(pickle.PicklingError, match="^Could not serialize object: ") as e:
-            call()
-        assert type(e.value) is pickle.PicklingError
-        assert "cannot pickle" in str(e.value)
+        frame = call()
+        sent = (len(service.analyze_requests), len(service.execute_requests))
+        for _ in range(2):
+            with pytest.raises(pickle.PicklingError, match="^Could not serialize object: ") as e:
+                frame.collect()
+            assert type(e.value) is pickle.PicklingError
+            assert "cannot pickle" in str(e.value)
+        assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+    with pytest.raises(pickle.PicklingError, match="^Could not serialize object: ") as e:
+        spark.dataSource.register(Source)
+    assert type(e.value) is pickle.PicklingError
 
 
 def test_functions_quarter():
@@ -10760,6 +11472,59 @@ def test_cycles_through_instance_dicts_are_collected_as_pyspark(mock_connect):
         del obj
         gc.collect()
         assert freed() is None
+
+
+def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_connect):
+    # As PySpark's plans and expressions, of Python objects, which hold the function of a UDF
+    # until a request pickles it: a reference cycle through the function and the DataFrame or the
+    # Column that holds it, as through a bound method of an object that keeps it, is collected,
+    # of a UDF, a map function and a UDTF. A function that live Columns and DataFrames share is
+    # kept, and pickles at their requests.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    class Job:
+        def f(self, x):
+            return x
+
+    def udtf_of(job):
+        class Handler:
+            def eval(self, x):
+                yield (job is not None,)
+
+        return F.udtf(Handler, returnType="v: boolean")(F.lit(1))
+
+    holders = [
+        lambda job: df.select(F.udf(job.f, "long")("id")),
+        lambda job: F.udf(job.f, "long")("id"),
+        lambda job: df.mapInPandas(job.f, "id long"),
+        udtf_of,
+    ]
+    for holder in holders:
+        job = Job()
+        job.held = holder(job)
+        freed = weakref.ref(job)
+        del job
+        gc.collect()
+        assert freed() is None
+
+    state = ["<live>"]
+    shared = F.udf(lambda x: state[0], "long")("id")
+    kept = [df.select(shared), copy.copy(shared), copy.deepcopy(shared)]
+    for _ in range(3):
+        gc.collect()
+    for column in [shared] + kept[1:]:
+        df.select(column).explain()
+        root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
+        command = root.project.expressions[0].common_inline_user_defined_function.python_udf.command
+        assert b"<live>" in command
 
 
 def test_freed_instances_given_attributes_keep_no_memory_as_pyspark(mock_connect):
@@ -11850,6 +12615,36 @@ def test_observations_check_their_arguments_as_pyspark(mock_connect):
         assert error.value.getCondition() == "REUSE_OBSERVATION"
 
 
+def test_an_observation_of_a_name_that_utf8_cannot_encode_fails_its_plans_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's Observation, which keeps its name as it is given, and its `CollectMetrics`
+    # plan, which sets the name when a request builds the plan: a str that UTF-8 cannot encode is
+    # the name of the Observation, of its copies and of its pickles, and each DataFrame that it
+    # observes fails with the UnicodeEncodeError of its encoding.
+    import copy
+    import pickle
+
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    bad = "a\ud800b"
+    message = "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
+    observation = Observation(bad)
+    assert observation._name == bad
+    copies = (copy.copy(observation), copy.deepcopy(observation),
+              pickle.loads(pickle.dumps(observation)))
+    for each in (observation, *copies):
+        assert each._name == bad
+        observed = spark.range(1).observe(each, F.count(F.lit(1)))
+        for request in (lambda: observed.schema, observed.collect):
+            with pytest.raises(UnicodeEncodeError) as error:
+                request()
+            assert str(error.value) == message
+    assert service.execute_requests == []
+
+
 def test_row_usable_in_set_and_dict():
     """Equal Rows collapse in a set and work as dict keys."""
     from pyspark.sql import Row
@@ -11987,11 +12782,22 @@ def test_connect_import_path_modules_as_pyspark(mock_connect):
         function = getattr(connect_partitioning, name)
         assert function is not getattr(partitioning, name)
         assert function.__module__ == "pyspark.sql.connect.functions.partitioning"
+    # So are the Avro and the Protobuf functions, as PySpark Connect's own, which run as the
+    # classic ones do and pickle by reference to the modules of PySpark Connect.
     connect_avro = importlib.import_module("pyspark.sql.connect.avro.functions")
-    assert connect_avro.from_avro is avro.from_avro and connect_avro.to_avro is avro.to_avro
     connect_protobuf = importlib.import_module("pyspark.sql.connect.protobuf.functions")
-    assert connect_protobuf.from_protobuf is protobuf.from_protobuf
-    assert connect_protobuf.to_protobuf is protobuf.to_protobuf
+    for connect_module, module, names in [
+        (connect_avro, avro, ["from_avro", "to_avro"]),
+        (connect_protobuf, protobuf, ["from_protobuf", "to_protobuf"]),
+    ]:
+        for name in names:
+            function = getattr(connect_module, name)
+            assert function is not getattr(module, name)
+            assert function.__module__ == connect_module.__name__
+            assert function.__doc__ == getattr(module, name).__doc__
+            assert pickle.loads(pickle.dumps(function)) is function
+    assert str(connect_avro.to_avro("a")) == str(avro.to_avro("a"))
+    assert str(connect_protobuf.from_protobuf("a", "M")) == str(protobuf.from_protobuf("a", "M"))
     assert importlib.import_module("pyspark.sql.connect.table_arg").TableArg is TableArg
     typing_module = importlib.import_module("pyspark.sql.connect._typing")
     assert {"ColumnOrName", "DataTypeOrString", "LiteralType"} <= set(dir(typing_module))
@@ -12031,6 +12837,9 @@ def test_connect_import_path_modules_as_pyspark(mock_connect):
 
     DataSourceRegistration(spark).register(TestSource)
     assert service.execute_calls == 1
+    # Of the session's registration, which takes PySpark's keyword.
+    spark.dataSource.register(dataSource=TestSource)
+    assert service.execute_calls == 2
 
 
 def test_connect_utils_check_the_dependencies_of_the_client(tmp_path):
@@ -12269,6 +13078,44 @@ def test_dropin_version_is_spark_version():
     assert pyspark.__version__ == "4.3.0"
 
 
+def test_the_client_banner_names_the_version_of_the_package(mock_connect):
+    # The INFO log of the first session of a process names pyspark-client-rust's version, that of
+    # pyproject.toml, which the release checks against Cargo.toml's, and not pyspark.__version__,
+    # the version of Spark whose API the client mirrors.
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    _, service = mock_connect
+    pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+    version = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE).group(1)
+    script = textwrap.dedent('''
+        import logging
+        import sys
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                print(record.getMessage())
+
+        logger = logging.getLogger("pyspark")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(Collect())
+        from pyspark.sql import SparkSession
+
+        SparkSession.builder.remote(sys.argv[1]).getOrCreate().stop()
+    ''')
+    result = subprocess.run([sys.executable, "-c", script, service.remote], capture_output=True,
+                            text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    banners = [line for line in result.stdout.splitlines() if "active: Spark Connect" in line]
+    assert banners == [
+        f"pyspark-client-rust {version} active: Spark Connect client backed by the native Rust "
+        "engine (tonic), a drop-in for pyspark-client -- not the reference Python client. "
+        "https://apache.github.io/spark-connect-rust/which-client/"
+    ]
+
+
 def test_lit_takes_an_int_or_a_float_by_its_type_as_pyspark(mock_connect):
     # As PySpark's LiteralExpression._infer_type, which takes an int or a float by isinstance: an
     # object that only converts to one (__index__, __float__) is UNSUPPORTED_DATA_TYPE, while the
@@ -12317,25 +13164,125 @@ def test_lit_takes_an_int_or_a_float_by_its_type_as_pyspark(mock_connect):
         assert repr(F.lit(value)) == f"Column<'{text}'>"
 
 
+def test_columns_of_strs_that_utf8_cannot_encode_fail_when_the_plan_is_built_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's expressions, which keep a column name, a SQL string or the str of a literal as
+    # it is given, and set it in a protobuf string field when a request builds the plan: a str
+    # that UTF-8 cannot encode makes a Column, whose plans fail, at `df.schema` or `collect()`,
+    # with the UnicodeEncodeError of its encoding, and send no request. Its repr shows the str
+    # escaped, where PySpark's shows it as it is, and its copies and pickles fail as it does.
+    import copy
+    import pickle
+
+    from pyspark.sql import Column, Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    bad = "a\ud800b"
+    message = "'utf-8' codec can't encode character '\\ud800' in position %d: surrogates not allowed"
+    cases = [
+        (lambda: F.col(bad), r"a\ud800b"),
+        (lambda: F.column(bad), r"a\ud800b"),
+        (lambda: F.col(bad + ".*"), r"unresolvedstar(a\ud800b.*)"),
+        (lambda: F.expr(bad), r"a\ud800b"),
+        (lambda: F.lit(bad), r"a\ud800b"),
+        (lambda: F.lit([bad]), r"array(a\ud800b)"),
+        (lambda: F.col("id") == bad, r"==(id, a\ud800b)"),
+        (lambda: F.upper(bad), r"upper(a\ud800b)"),
+        (lambda: F.col(bad).desc(), r"a\ud800b DESC NULLS LAST"),
+        (lambda: df[bad], r"a\ud800b"),
+        (lambda: getattr(df, bad), r"a\ud800b"),
+        (lambda: df.colRegex(bad), r"UnresolvedRegex(a\ud800b)"),
+        (lambda: df.metadataColumn(bad), r"a\ud800b"),
+        (lambda: F.col("st").getField(bad), r"st['a\ud800b']"),
+        (lambda: F.col("st").withField(bad, F.lit(1)), r"update_field(st, a\ud800b, 1)"),
+        (lambda: F.col("st").dropFields(bad), r"drop_field(st, a\ud800b)"),
+        (lambda: F.call_function(bad), r"CallFunction('a\ud800b')"),
+        (lambda: F.call_udf(bad, "id"), r"a\ud800b(id)"),
+        (lambda: F.when(F.col("id") > 0, 1).otherwise([bad]), None),
+        (lambda: F.count(F.lit(1)).over(Window.partitionBy(bad)), None),
+        (lambda: F.count(F.lit(1)).over(Window.orderBy(bad)), None),
+    ]
+    for build, text in cases:
+        column = build()
+        assert isinstance(column, Column), text
+        if text is not None:
+            assert repr(column) == f"Column<'{text}'>"
+        pickled = pickle.loads(pickle.dumps(column))
+        for each in (column, copy.copy(column), copy.deepcopy(column), pickled):
+            for request in (lambda: df.select(each).schema, lambda: df.select(each).collect()):
+                with pytest.raises(UnicodeEncodeError) as error:
+                    request()
+                assert type(error.value) is UnicodeEncodeError
+                assert str(error.value) == message % 1, text
+    # The type of a cast is set after its child, as the unparsed type of a str.
+    cast = F.col("id").cast("int\ud800")
+    assert repr(cast) == r"Column<'CAST(id AS INT\UD800)'>"
+    for column in (cast, F.col("id").try_cast("int\ud800")):
+        with pytest.raises(UnicodeEncodeError) as error:
+            df.select(column).schema
+        assert str(error.value) == message % 3
+    assert service.analyze_requests == [] and service.execute_requests == []
+
+
+def test_column_names_and_sql_strings_raise_the_errors_of_pyspark_at_the_call(mock_connect):
+    # As PySpark's `F.col`, which compares the name to "*" and calls its `endswith(".*")`, so an
+    # int or None raises the AttributeError of `endswith`, and bytes its TypeError; and as its
+    # `SQLExpression`, which asserts a str for `F.expr`, `selectExpr` and `filter`. `filter` of
+    # an object that is neither a str nor a Column, and `lateralJoin` of an `on` that is not a
+    # Column, raise the AttributeError of the `foreach` of their plans, which collect the
+    # subqueries of their expressions. `agg` of a dict takes `F.col` of its keys.
+    spark, _ = mock_connect
+    df = spark.range(1)
+    from pyspark.sql import functions as F
+
+    endswith = "endswith first arg must be bytes or a tuple of bytes, not str"
+    for call, error_type, message in [
+        (lambda: F.col(5), AttributeError, "'int' object has no attribute 'endswith'"),
+        (lambda: F.col(None), AttributeError, "'NoneType' object has no attribute 'endswith'"),
+        (lambda: F.col(b"a"), TypeError, endswith),
+        (lambda: df.agg({b"a": "max"}), TypeError, endswith),
+        (lambda: df.groupBy().agg({5: "max"}), AttributeError,
+         "'int' object has no attribute 'endswith'"),
+        (lambda: F.expr(5), AssertionError, ""),
+        (lambda: F.expr(b"a"), AssertionError, ""),
+        (lambda: F.expr(None), AssertionError, ""),
+        (lambda: df.selectExpr(b"a"), AssertionError, ""),
+        (lambda: F.call_function(5), AssertionError, ""),
+        (lambda: df.filter(5), AttributeError, "'int' object has no attribute 'foreach'"),
+        (lambda: df.filter(b"id > 0"), AttributeError,
+         "'bytes' object has no attribute 'foreach'"),
+        (lambda: df.lateralJoin(df, on="id"), AttributeError,
+         "'str' object has no attribute 'foreach'"),
+    ]:
+        with pytest.raises(error_type) as error:
+            call()
+        assert type(error.value) is error_type, message
+        assert str(error.value) == message
+
+
 def test_a_str_that_utf8_cannot_encode_is_the_encode_error_of_protobuf_as_pyspark(mock_connect):
     # As PySpark's, whose protobuf string field rejects a str with a lone surrogate, in protobuf's
     # default (upb) backend: the UnicodeEncodeError of its encoding, of the position of the
-    # surrogate, for a literal and the arguments of sql.
+    # surrogate, when a request builds the plan of a literal, and at the call for the arguments
+    # of sql, whose request the call builds.
     from pyspark.sql import functions as F
 
     spark, service = mock_connect
     value, long_value = "a\ud800b", "x" * 2000 + "\ud800"
     message = "'utf-8' codec can't encode character '\\ud800' in position %d: surrogates not allowed"
-    for build, text in ((lambda: F.lit(value), message % 1),
-                        (lambda: F.col("id") == value, message % 1),
-                        (lambda: F.lit([value]), message % 1),
-                        (lambda: F.lit(long_value), message % 2000),
+    for build, text in ((lambda: spark.range(1).select(F.lit(value)).collect(), message % 1),
+                        (lambda: spark.range(1).filter(F.col("id") == value).schema, message % 1),
+                        (lambda: spark.range(1).select(F.lit([value])).schema, message % 1),
+                        (lambda: F.lit(long_value)._expr.to_plan(None), message % 2000),
                         (lambda: spark.sql("SELECT :x", args={"x": value}), message % 1),
                         (lambda: spark.sql("SELECT ?", args=[value]), message % 1)):
         with pytest.raises(UnicodeEncodeError) as error:
             build()
         assert type(error.value) is UnicodeEncodeError and str(error.value) == text
-    assert service.execute_requests == []
+    assert service.execute_requests == [] and service.analyze_requests == []
 
 
 def test_pandas_timestamp_literals_drop_their_nanoseconds_silently_as_pyspark(mock_connect):
@@ -12847,6 +13794,7 @@ def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
     from pyspark.errors import PySparkAssertionError
     from pyspark.sql import Observation
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation as ConnectObservation
 
     class Worker(pickle.Unpickler):
         # The classes that a worker's PySpark finds: a plain class for the Observation.
@@ -12865,15 +13813,20 @@ def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
         assert same[0] == same[1]
         return pickled[1]
 
-    # cloudpickle finds the module of a class only in sys.modules, which pyspark.sql fills with it,
-    # in a new process too.
-    script = "import sys, pyspark.sql\nprint('pyspark.sql.connect.observation' in sys.modules)\n"
+    # cloudpickle finds the module of a class only in sys.modules, where the Observation of
+    # pyspark.sql, PySpark's classic class, puts it as it makes an Observation of the class of
+    # that module, in a new process too.
+    script = (
+        "import sys\nfrom pyspark.sql import Observation\n"
+        "m = 'pyspark.sql.connect.observation'\n"
+        "print(m in sys.modules, type(Observation('o')).__module__ == m, m in sys.modules)\n"
+    )
     imported = subprocess.run([sys.executable], input=script, capture_output=True, text=True,
                               check=True)
-    assert imported.stdout.strip() == "True"
+    assert imported.stdout.strip() == "False True True"
     spark, service = mock_connect
     unused = pickle.loads(pickle.dumps(Observation("u")))
-    assert type(unused) is Observation and unused._name == "u"
+    assert type(unused) is ConnectObservation and unused._name == "u"
     assert on_worker(Observation("u")) == {"_name": "u", "_result": None, "_error": None}
     spark.range(1).observe(unused, F.count(F.lit(1)).alias("c"))
     assert pickle.loads(pickle.dumps(unused)).get == {}
@@ -12890,7 +13843,7 @@ def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
     assert on_worker(observation) == {"_name": "o", "_result": {"c": 3}, "_error": None,
                                       "tag": "t"}
     assert pickle.loads(pickle.dumps(observation, protocol=2)).get == {"c": 3}
-    assert observation.__reduce_ex__(4)[:2] == (copyreg.__newobj__, (Observation,))
+    assert observation.__reduce_ex__(4)[:2] == (copyreg.__newobj__, (ConnectObservation,))
     with pytest.raises(PySparkAssertionError, match="REUSE_OBSERVATION"):
         spark.range(1).observe(restored, F.count(F.lit(1)).alias("c"))
     service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
@@ -12929,15 +13882,16 @@ def test_an_observation_pickles_at_every_protocol_as_pyspark(mock_connect):
     from pyspark.errors import PySparkAssertionError
     from pyspark.sql import Observation
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation as ConnectObservation
 
     spark, service = mock_connect
     protocols = range(pickle.HIGHEST_PROTOCOL + 1)
     observation = Observation("o")
     for protocol in protocols:
         unused = pickle.loads(pickle.dumps(observation, protocol=protocol))
-        assert type(unused) is Observation and unused._name == "o"
+        assert type(unused) is ConnectObservation and unused._name == "o"
         again = pickle.loads(pickle.dumps(unused, protocol=protocol))
-        assert type(again) is Observation and again._name == "o"
+        assert type(again) is ConnectObservation and again._name == "o"
         spark.range(1).observe(again, F.count(F.lit(1)).alias("c"))
 
     df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
@@ -12946,7 +13900,7 @@ def test_an_observation_pickles_at_every_protocol_as_pyspark(mock_connect):
     assert df.count() == 3
     for protocol in protocols:
         restored = pickle.loads(pickle.dumps(observation, protocol=protocol))
-        assert type(restored) is Observation and restored._name == "o"
+        assert type(restored) is ConnectObservation and restored._name == "o"
         assert restored.get == {"c": 3}
         twice = pickle.loads(pickle.dumps(restored, protocol=protocol))
         assert twice._name == "o" and twice.get == {"c": 3}
@@ -13285,6 +14239,9 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(
     from pyspark.sql import functions as F
 
     service.data_type = struct
+    # A DataFrame of its own, as toArrow keeps the schema of the analysis that it asks for, as
+    # PySpark's does.
+    df = spark.range(1)
     # repr reads the settings of the eager evaluation of the session, which the server has.
     service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
                      "spark.sql.repl.eagerEval.maxNumRows": "20",
@@ -13443,7 +14400,7 @@ def test_no_pyclass_reports_builtins_module():
         ("pyspark.sql.connect.merge", ["MergeIntoWriter"]),
         ("pyspark.sql.connect.streaming.readwriter", ["DataStreamReader", "DataStreamWriter"]),
         ("pyspark.sql.connect.streaming.query", ["StreamingQuery", "StreamingQueryManager"]),
-        ("pyspark.sql.conf", ["RuntimeConfig", "RuntimeConf"]),
+        ("pyspark.sql.conf", ["RuntimeConfig"]),
         ("pyspark.sql.tvf", ["TableValuedFunction"]),
     ],
 )
@@ -13698,6 +14655,52 @@ def test_session_hook_is_present_and_passthrough():
     hook = _SS.Hook()
     sentinel = object()
     assert hook.on_execute_plan(sentinel) is sentinel
+
+
+class _SessionHook(_SS.Hook):
+    def __init__(self, session):
+        self.session = session
+
+
+class _SlottedHook(_SS.Hook):
+    __slots__ = ("a", "b")
+
+
+def test_session_hook_is_nested_in_the_session_and_pickles_as_pyspark():
+    # As PySpark Connect's SparkSession.Hook, a plain class nested in SparkSession: it is named
+    # there, a hook takes attributes and weak references, and a hook of the class or of a
+    # subclass pickles and copies with its attributes at every protocol, and with the slots of a
+    # subclass at pickle's default one, as a plain object. A class without an __init__ of its own
+    # takes no arguments, as object.__new__ raises.
+    import copy
+    import weakref
+
+    hook_class = _SS.Hook
+    assert (hook_class.__module__, hook_class.__qualname__, hook_class.__name__) == (
+        "pyspark.sql.connect.session", "SparkSession.Hook", "Hook")
+    assert repr(hook_class) == "<class 'pyspark.sql.connect.session.SparkSession.Hook'>"
+    assert pickle.loads(pickle.dumps(hook_class)) is hook_class
+    hook = hook_class()
+    hook.tag = "t"
+    assert weakref.ref(hook)() is hook
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        restored = pickle.loads(pickle.dumps(hook, protocol=protocol))
+        assert type(restored) is hook_class and vars(restored) == {"tag": "t"}
+        restored = pickle.loads(pickle.dumps(_SessionHook(None), protocol=protocol))
+        assert type(restored) is _SessionHook and vars(restored) == {"session": None}
+    assert type(pickle.loads(pickle.dumps(hook_class()))) is hook_class
+    for copier in (copy.copy, copy.deepcopy):
+        copied = copier(_SessionHook([1]))
+        assert type(copied) is _SessionHook and copied.session == [1]
+    slotted = _SlottedHook()
+    slotted.a = 1
+    restored = pickle.loads(pickle.dumps(slotted))
+    assert type(restored) is _SlottedHook and restored.a == 1 and not hasattr(restored, "b")
+    with pytest.raises(TypeError, match=r"^Hook\(\) takes no arguments$"):
+        hook_class(1)
+    with pytest.raises(TypeError, match=r"^_SlottedHook\(\) takes no arguments$"):
+        _SlottedHook(a=1)
+    assert _SessionHook(session=2).session == 2
 
 
 def test_ml_vector_functions_build_their_columns_as_pyspark():
@@ -14632,6 +15635,76 @@ if __name__ == "__main__":
     result = subprocess.run(
         [sys.executable, "-c", code, tests], check=True, capture_output=True, text=True)
     assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
+
+
+def test_aggregates_range_partitions_and_join_conditions_carry_pysparks_origins():
+    # As PySpark's: count of grouped data is the `alias` of its count, whose count and literal
+    # have no origin; sum, avg, mean, min and max, and agg of a dict, give each column to
+    # `F.col`, and their functions have no origin; repartitionByRange sorts a column by its
+    # `asc`, whose sort order is of `asc_nulls_first`; and the plans of join and _joinAsOf of a
+    # list of Columns reduce them with `&` each time they are built, so their `and`s are of
+    # `__and__` at the call site of the request, not of the join. In a new interpreter, whose
+    # first column of a session reads spark.python.sql.dataFrameDebugging.enabled.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("grpc")
+    code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import mock_connect_session
+from pyspark.sql.connect import proto
+
+def origin(expression):
+    # The fragment of the python_origin of the expression, and the line of its call site.
+    if not expression.HasField("common"):
+        return None
+    python_origin = expression.common.origin.python_origin
+    return python_origin.fragment, int(python_origin.call_site.rsplit(":", 1)[1])
+
+def arguments(expression):
+    return [origin(argument) for argument in expression.unresolved_function.arguments]
+
+if __name__ == "__main__":
+    with mock_connect_session() as (spark, service):
+        df = spark.range(1)
+
+        def root(dataframe):
+            dataframe.collect()
+            return proto.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+
+        found = []
+        for grouped in (df.groupBy("id").count(), df.groupBy("id").pivot("id", [0]).count()):
+            found.append([origin(e) for e in root(grouped).aggregate.aggregate_expressions])
+        for function in ("sum", "avg", "mean", "min", "max"):
+            for columns in ((), ("id",)):
+                aggregate = root(getattr(df.groupBy("id"), function)(*columns)).aggregate
+                (expression,) = aggregate.aggregate_expressions
+                found.append((origin(expression), arguments(expression)))
+        (expression,) = root(df.groupBy("id").agg({"id": "max"})).aggregate.aggregate_expressions
+        found.append((origin(expression), arguments(expression)))
+        repartitioned = root(df.repartitionByRange(2, "id", df.id.desc()))
+        found.append([origin(e) for e in repartitioned.repartition_by_expression.partition_exprs])
+        joined = df.join(df, [df.id == df.id, df.id == df.id, df.id == df.id])
+        condition = root(joined).join.join_condition
+        found.append((origin(condition), arguments(condition)))
+        condition = root(df._joinAsOf(df, "id", "id", on=[df.id == df.id, df.id == df.id]))
+        condition = condition.as_of_join.join_expr
+        found.append((origin(condition), arguments(condition)))
+        print(found)
+"""
+    tests = str(Path(__file__).resolve().parent)
+    result = subprocess.run(
+        [sys.executable, "-c", code, tests], check=True, capture_output=True, text=True)
+    # The lines of the code above, as PySpark gives them for it: the requests are built at line
+    # 22, in `root`, so the `and`s of a join are of that line, and not of the line of the join.
+    assert result.stdout.strip().splitlines()[-1] == str([
+        [("alias", 26)], [("alias", 26)], *[(None, [("col", 30)])] * 10, (None, [("col", 33)]),
+        [("asc_nulls_first", 35), ("desc_nulls_last", 35)],
+        (("__and__", 22), [("__and__", 22), ("__eq__", 37)]),
+        (("__and__", 22), [("__eq__", 40), ("__eq__", 40)]),
+    ])
 
 
 def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
@@ -17933,6 +19006,14 @@ def test_grouped_aggregations_as_pyspark(mock_connect):
         df.groupBy("id").sum("nope")
     assert error.value.getCondition() == "NOT_NUMERIC_COLUMNS"
     assert error.value.getMessageParameters() == {"invalid_columns": "['nope']"}
+    # A name that UTF-8 cannot encode is no column of the schema: PySpark names it, as the str of
+    # the list of the names that are not of numeric columns shows it.
+    for aggregate in (lambda g: g.sum, lambda g: g.max, lambda g: g.avg):
+        with pytest.raises(PySparkTypeError) as error:
+            aggregate(df.groupBy("id"))("id", "a\ud800b", "nope")
+        assert error.value.getCondition() == "NOT_NUMERIC_COLUMNS"
+        assert error.value.getMessageParameters() == {
+            "invalid_columns": str(["a\ud800b", "nope"])}
     with pytest.raises(PySparkValueError) as error:
         df.agg()
     assert error.value.getCondition() == "CANNOT_BE_EMPTY"
@@ -18488,6 +19569,64 @@ def test_map_and_group_functions_reject_a_non_struct_return_type_as_pyspark(mock
     assert service.execute_requests == []
 
 
+def test_map_and_group_functions_parse_their_ddl_before_they_read_the_columns_as_pyspark(
+        mock_connect):
+    # As PySpark's mapInPandas, mapInArrow, applyInPandas and applyInArrow, which parse a DDL
+    # string (`_parse_ddl`) before they read the columns of the input, of an AnalyzePlan of its
+    # schema, so a parse that fails sends nothing more; and the functions of cogroups, which
+    # parse it and bind no columns, as they take the whole cogroups, so their inputs are not
+    # analyzed. The result keeps the parsed schema. A return type that is neither a DataType nor
+    # a str raises NOT_EXPECTED_TYPE, of the constructor of PySpark's UserDefinedFunction, before
+    # any request.
+    from pyspark.errors import PySparkException, PySparkTypeError
+
+    spark, service = mock_connect
+
+    def cogrouped():
+        return spark.range(2).groupBy("id").cogroup(spark.range(2).groupBy("id"))
+
+    calls = [
+        (lambda schema: spark.range(2).mapInPandas(lambda it: it, schema),
+         ["ddl_parse", "schema"]),
+        (lambda schema: spark.range(2).mapInArrow(lambda it: it, schema), ["ddl_parse", "schema"]),
+        (lambda schema: spark.range(2).groupBy("id").applyInPandas(lambda pdf: pdf, schema),
+         ["ddl_parse", "schema"]),
+        (lambda schema: spark.range(2).groupBy("id").applyInArrow(lambda table: table, schema),
+         ["ddl_parse", "schema"]),
+        (lambda schema: cogrouped().applyInPandas(lambda left, right: left, schema),
+         ["ddl_parse"]),
+        (lambda schema: cogrouped().applyInArrow(lambda left, right: left, schema), ["ddl_parse"]),
+    ]
+    for make, kinds in calls:
+        start = len(service.recorded_order)
+        result = make("id long")
+        assert _sent_kinds(service, start) == kinds
+        assert result.columns == ["id"]
+        assert _sent_kinds(service, start) == kinds
+        start = len(service.recorded_order)
+        with pytest.raises(PySparkTypeError) as e:
+            make(1)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "arg_name": "returnType", "expected_type": "DataType or str", "arg_type": "int"}
+        assert _sent_kinds(service, start) == []
+    # The parse is the first request, of which a failure is raised before the columns are read.
+    service.failure = "rpc"
+    for make, _ in calls:
+        start = len(service.recorded_order)
+        with pytest.raises(PySparkException, match="schema unavailable"):
+            make("id long")
+        assert _sent_kinds(service, start) == ["ddl_parse"]
+    service.failure = None
+    # Relation.co_group_map=32, CoGroupMap.func=5; Relation.map_partitions=28, MapPartitions.func
+    # =2; CommonInlineUserDefinedFunction.arguments=3.
+    for make, relation, function in [(calls[4][0], 32, 5), (calls[0][0], 28, 2)]:
+        make("id long").collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        arguments = parse_message(parse_message(parse_message(plan)[relation][0])[function][0])
+        assert len(arguments.get(3, [])) == (0 if relation == 32 else 1)
+
+
 @pytest.mark.parametrize("transform", [
     pytest.param(lambda df: df.selectExpr("id AS renamed"), id="select"),
     pytest.param(lambda df: df.zipWithIndex(), id="zipWithIndex"),
@@ -18804,27 +19943,46 @@ def test_arrow_input_array_and_map_struct_fields_allowed():
     assert names is None
 
 
-@pytest.mark.parametrize("schema,expected_length", [
-    pytest.param(T.StructType([T.StructField("x", T.IntegerType())]), "1", id="too-few-fields"),
+@pytest.mark.parametrize("schema,names", [
+    pytest.param(T.StructType([T.StructField("x", T.IntegerType())]), "['x']",
+                 id="too-few-fields"),
     pytest.param(T.StructType([
         T.StructField("x", T.LongType()), T.StructField("y", T.LongType()),
         T.StructField("z", T.LongType()),
-    ]), "3", id="too-many-fields"),
-    pytest.param(T.LongType(), "1", id="atomic-multiple-columns"),
+    ]), "['x', 'y', 'z']", id="too-many-fields"),
 ])
-def test_arrow_input_explicit_schema_width_errors(schema, expected_length):
+def test_arrow_input_explicit_struct_of_another_width_fails_the_cast(schema, names):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    # The first value would overflow the one-field IntegerType schema. As PySpark Connect's,
+    # the cast checks the names of the table against the struct's first, which fails it.
+    table = pa.table({"x": [2**40], "y": [2]})
+    with pytest.raises(ValueError) as error:
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert type(error.value) is ValueError
+    assert str(error.value) == (
+        f"Target schema's field names are not matching the table's field names: ['x', 'y'], {names}"
+    )
+    # A nested or timestamp column is localized first, whose assert fails, as PySpark's.
+    table = pa.table({"x": pa.array([0], pa.timestamp("us")), "y": [2]})
+    with pytest.raises(AssertionError):
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+
+
+def test_arrow_input_explicit_schema_width_errors():
     pa = pytest.importorskip("pyarrow")
     from pyspark.errors import PySparkValueError
     from pyspark.sql._arrow_input import prepare_table
 
-    # The first value would overflow the one-field IntegerType schema. Width
-    # validation must produce the structured Spark error before an Arrow cast.
+    # An atomic type types one column: as PySpark Connect's, the table is cast to the schema of
+    # its own types, and then has another number of columns.
     table = pa.table({"x": [2**40], "y": [2]})
     with pytest.raises(PySparkValueError) as error:
-        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+        prepare_table(table, T.LongType(), "TIMESTAMP_LTZ", "UTC", "false")
     assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
     assert error.value.getMessageParameters() == {
-        "expected_length": expected_length, "actual_length": "2",
+        "expected_length": "1", "actual_length": "2",
     }
 
 
@@ -19024,12 +20182,27 @@ def test_arrow_input_roundtrip_live_server():
         spark.stop()
 
 
+def _sent_kinds(service, start=0):
+    """The kinds of the requests that the server recorded from `start`, in order, but of the
+    ReleaseExecute requests, which the client sends without waiting for them: of an AnalyzePlan,
+    its analysis, such as "schema" or "ddl_parse"."""
+    import pyspark.sql.connect.proto as pb2
+
+    return [
+        pb2.AnalyzePlanRequest.FromString(data).WhichOneof("analyze") if kind == "analyze" else kind
+        for kind, data in service.recorded_order[start:]
+        if kind != "release_execute"
+    ]
+
+
 def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(mock_connect):
-    # As PySpark Connect's: toArrow casts the table of the result to the Arrow schema of its
-    # schema, of string and binary even of large var types, which raises for a type that
-    # PySpark does not convert to Arrow. The data of a server that sends no schema is as it is.
+    # As PySpark Connect's toArrow: the Arrow schema of `self.schema` first, of the AnalyzePlan
+    # that the DataFrame keeps, so `columns` asks nothing afterwards; then the table of the
+    # execution, cast to it, of string and binary even of large var types. A type that PySpark
+    # does not convert to Arrow, and duplicate names of the fields of a nested struct, raise
+    # before the query runs. `_to_table` gives the table of the execution as it is.
     import pyarrow as pa
-    from pyspark.errors import PySparkTypeError
+    from pyspark.errors import PySparkTypeError, UnsupportedOperationException
 
     spark, service = mock_connect
     table = pa.table({"s": pa.array(["x"], pa.large_string()),
@@ -19038,20 +20211,36 @@ def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(mock_connec
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
     # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2.
-    batch = message_field(2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
-
-    service.execute_payload = batch
-    assert spark.range(1).toArrow().schema == table.schema
-    # ExecutePlanResponse.schema=7.
-    service.execute_payload = message_field(7, ddl_data_type("s string, b binary")) + batch
-    result = spark.range(1).toArrow()
+    service.execute_payload = message_field(
+        2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+    service.data_type = ddl_data_type("s string, b binary")
+    df = spark.range(1)
+    result = df.toArrow()
     assert result.schema == pa.schema([("s", pa.string()), ("b", pa.binary())])
     assert result.to_pylist() == [{"s": "x", "b": b"y"}]
-    service.execute_payload = message_field(7, ddl_data_type("v interval year to month")) + batch
-    with pytest.raises(PySparkTypeError) as e:
-        spark.range(1).toArrow()
-    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
-    assert e.value.getMessageParameters() == {"data_type": "YearMonthIntervalType(0, 1)"}
+    assert _sent_kinds(service) == ["schema", "execute"]
+    assert df.columns == ["s", "b"]
+    assert _sent_kinds(service) == ["schema", "execute"]
+    raw, sent_schema = spark.range(1)._to_table()
+    assert raw.schema == table.schema and sent_schema is None
+    # DataType.calendar_interval=17; Struct.fields=1, StructField: name=1, data_type=2.
+    calendar = message_field(21, message_field(
+        1, message_field(1, "v") + message_field(2, message_field(17, b"")) + varint_field(3, 1)))
+    executions = len(service.execute_requests)
+    for data_type, error, condition, parameters in [
+        (ddl_data_type("v interval year to month"), PySparkTypeError,
+         "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION", {"data_type": "YearMonthIntervalType(0, 1)"}),
+        (calendar, PySparkTypeError, "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+         {"data_type": "CalendarIntervalType()"}),
+        (ddl_data_type("v struct<a: int, a: int>"), UnsupportedOperationException,
+         "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT", {"field_names": "['a', 'a']"}),
+    ]:
+        service.data_type = data_type
+        with pytest.raises(error) as e:
+            spark.range(1).toArrow()
+        assert e.value.getCondition() == condition
+        assert e.value.getMessageParameters() == parameters
+    assert len(service.execute_requests) == executions
 
 
 @pytest.mark.parametrize("kind", ["slice", "dictionary", "decimal", "null", "struct", "nul"])
@@ -19793,8 +20982,9 @@ def test_column_value_primitives_skip_numpy_probes(monkeypatch, method):
         for value, wire in zip(values, expected):
             # Serialized literals also distinguish signed zero and compare NaN reliably.
             assert literal(value).SerializeToString() == wire
+        # A str that UTF-8 cannot encode is a literal, whose plan fails when it is built.
         with pytest.raises(UnicodeEncodeError):
-            build("\ud800")
+            literal("\ud800")
         for value in [*subclasses, IntegerEnum.VALUE, 2**63, -(2**63) - 1]:
             with pytest.raises(RuntimeError, match="NumPy probe reached"):
                 build(value)
@@ -19815,7 +21005,7 @@ def test_int_literals_beyond_a_long_raise_value_not_between_as_pyspark():
     # As PySpark's LiteralExpression._infer_type: an int beyond the range of a long is an error,
     # not a double, which would make `col == 2**63` match the rows of the longs next to it. The
     # maximum is JVM_SHORT_MAX, as PySpark writes it. fillna sends the value as a proto literal,
-    # which raises ValueError for it.
+    # which raises ValueError for it when the plan is built.
     from pyspark.errors import PySparkValueError
     from pyspark.sql import functions as F
 
@@ -19837,8 +21027,10 @@ def test_int_literals_beyond_a_long_raise_value_not_between_as_pyspark():
         assert e.value.getCondition() == "VALUE_NOT_BETWEEN"
         assert e.value.getMessageParameters() == {
             "arg_name": "value", "min": "-9223372036854775808", "max": "32767"}
+    # fillna sets its value in the long field of a literal when its plan is built, which raises.
+    filled = df.fillna(2**70)
     with pytest.raises(ValueError, match="Value out of range: 1180591620717411303424"):
-        df.fillna(2**70)
+        filled.collect()
     # The bounds of a long, and a float beyond them, are fine.
     assert F.lit(2**63 - 1) is not None and F.lit(-(2**63)) is not None
     assert F.lit(2.0**70) is not None
@@ -20245,6 +21437,29 @@ def test_udf_register_takes_user_defined_functions_as_pyspark(mock_connect):
     # A UDF registers under the name and is returned as it was given.
     assert spark.udf.register("f3", plain) is plain
     assert b"f3" in service.execute_requests[-1]
+
+
+def test_udf_register_parses_a_ddl_return_type_for_its_wrapper_and_its_command_as_pyspark(
+        mock_connect):
+    # As PySpark's register of a function with a DDL string: the wrapper that it returns parses
+    # the type, and the registration takes the str as it was given, which its PythonUDF parses
+    # again for the command, whose pickle has the parsed type; a DataType is not parsed.
+    from pyspark import cloudpickle
+
+    spark, service = mock_connect
+    start = len(service.recorded_order)
+    wrapper = spark.udf.register("f", lambda x: x, "long")
+    assert _sent_kinds(service, start) == ["ddl_parse", "ddl_parse", "execute"]
+    assert wrapper.returnType == T.LongType()
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.register_function=1;
+    # CommonInlineUserDefinedFunction.python_udf=4, PythonUDF.command=3.
+    command = parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0])
+    udf = parse_message(parse_message(command[1][0])[4][0])
+    _, return_type = cloudpickle.loads(udf[3][0])
+    assert return_type == T.LongType()
+    start = len(service.recorded_order)
+    spark.udf.register("g", lambda x: x, T.LongType())
+    assert _sent_kinds(service, start) == ["execute"]
 
 
 @pytest.mark.parametrize("func, condition", [
@@ -21370,6 +22585,95 @@ def test_window_and_lambda_reprs_as_pyspark():
         repr(F.transform("a", lambda x: x + 1)))
 
 
+def test_windows_of_no_partitions_warn_at_each_plan_build_as_pyspark(mock_connect):
+    # As PySpark's WindowExpression.to_plan, which warns with warnings.warn as it builds the plan
+    # of a window expression of no partitions: a UserWarning of pyspark.sql.connect.expressions
+    # at each request that builds such an expression, for each of them, and none when the
+    # Column or the DataFrame is made, for a window of partitions, or for a pickle, which keeps
+    # the plan objects without building them. A warning of one place, which the default filter
+    # shows once, and which the error filter raises from the request, before it is sent.
+    import warnings
+
+    import cloudpickle
+    import pyspark.sql.connect.expressions as expressions
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    message = (
+        "WARN WindowExpression: No Partition Defined for Window operation! Moving all data to a "
+        "single partition, this can cause serious performance degradation.")
+    ordered = Window.orderBy("id")
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        unpartitioned = F.row_number().over(ordered)
+        df = spark.range(3).select(
+            unpartitioned, F.rank().over(ordered), F.max("id").over(Window.partitionBy("id")))
+        cloudpickle.dumps(df)
+        cloudpickle.dumps(unpartitioned)
+        assert record == []
+        df.schema
+        df.columns
+        df.collect()
+    assert [str(warning.message) for warning in record] == [message] * 4
+    assert {(warning.category, warning.filename) for warning in record} == {
+        (UserWarning, expressions.__file__)}
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("default")
+        df.collect()
+        df.collect()
+    assert len(record) == 1
+    requests = len(service.execute_requests)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(UserWarning, match="^WARN WindowExpression: No Partition Defined"):
+            df.collect()
+    assert len(service.execute_requests) == requests
+
+
+def test_windows_of_no_partitions_warn_once_a_request_of_udfs_as_pyspark(mock_connect):
+    # As PySpark's client, which builds the plan of a request once, pickling the functions of its
+    # UDFs as it builds it: a plan of a UDF warns once of a window of no partitions at each
+    # request, whether the UDF comes before or after the window in the build, as a plan of no
+    # UDF does, though the drop-in builds a plan of UDFs twice (the second takes the commands
+    # that the first pickled).
+    import warnings
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    plus_one = F.udf(lambda x: x + 1, "long")
+    window = F.row_number().over(Window.orderBy(F.lit(1))).alias("r")
+    frames = [
+        spark.range(3).select(plus_one("id").alias("a")).select("a", window),
+        spark.range(3).select("id", window).select(plus_one("id").alias("a"), "r"),
+        spark.range(3).select(plus_one("id").alias("a"), window),
+    ]
+    for df in frames:
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            df.schema
+            df.collect()
+        assert sum("No Partition Defined" in str(warning.message) for warning in record) == 2
+
+
+def test_chained_partition_by_and_order_by_replace_the_spec_as_pyspark():
+    # As PySpark's WindowSpec.partitionBy and orderBy (connect/window.py), which make a spec of the
+    # new partitioning or ordering in place of the old one and keep the other parts, as Spark's
+    # WindowSpec does: a chained call partitions or orders by the columns of the last one only.
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    assert repr(Window.partitionBy("a").partitionBy("b")) == "WindowSpec(PartitionBy(b))"
+    assert repr(Window.orderBy("a").orderBy(F.col("b").desc(), "a")) == (
+        "WindowSpec(OrderBy(b DESC NULLS LAST, a ASC NULLS FIRST))")
+    assert repr(
+        Window.partitionBy("a").orderBy("c").rowsBetween(-1, 0).partitionBy("b").orderBy("d")
+    ) == "WindowSpec(PartitionBy(b), OrderBy(d ASC NULLS FIRST), WindowFrame(ROW_FRAME, -1, 0))"
+    assert repr(Window.partitionBy("a").partitionBy()) == "WindowSpec()"
+
+
 def test_window_frames_and_columns_are_checked_as_pyspark():
     # As PySpark's: a start of -sys.maxsize or less is unbounded preceding and an end of
     # sys.maxsize or more unbounded following; a row frame raises VALUE_NOT_BETWEEN for a
@@ -22131,7 +23435,11 @@ def _collect_mock_result(mock_connect, table, schema_ddl):
     spark, service = mock_connect
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
+        # As the server, which sends a record batch of no rows for an empty result, of which
+        # write_table writes none.
+        for record_batch in table.to_batches() or [
+                pa.RecordBatch.from_pylist([], schema=table.schema)]:
+            writer.write_batch(record_batch)
     batch = varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes())
     service.execute_payload = message_field(7, ddl_data_type(schema_ddl)) + message_field(2, batch)
     return spark.range(1)
@@ -22611,6 +23919,187 @@ def test_pandas_conversion_and_its_imports_are_pyspark_modules():
 
     assert callable(_convert_arrow_table_to_pandas) and callable(captured.convert_exception)
     assert inspect.isgeneratorfunction(pyspark.util._load_from_socket.__wrapped__)
+
+
+@pytest.mark.parametrize("convert", [
+    pytest.param(lambda df: df.toPandas(), id="toPandas"),
+    pytest.param(lambda df: list(df.toLocalIterator()), id="toLocalIterator"),
+])
+def test_conversions_build_their_plan_before_they_read_their_settings_as_pyspark(
+        mock_connect, convert):
+    # As PySpark's toPandas and toLocalIterator, which build the plan (`to_proto`) before they
+    # read the settings of the conversion: a plan that does not build raises its error before
+    # any request, and the first plan of a session reads the plan compression settings of the
+    # server before those settings, which are read before the execution.
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    # The settings that toPandas reads.
+    service.confs = {"spark.sql.session.timeZone": "UTC",
+                     "spark.sql.execution.pandas.structHandlingMode": "legacy",
+                     "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false"}
+    _two_row_range_results(service)
+    start = len(service.recorded_order)
+    with pytest.raises(UnicodeEncodeError):
+        convert(spark.range(1).withColumns({"\ud800": F.lit(1)}))
+    assert _sent_kinds(service, start) == []
+    fresh = SparkSession.builder.remote(service.remote).create()
+    try:
+        start = len(service.recorded_order)
+        lookups = len(service.plan_compression_lookup_positions)
+        convert(fresh.range(2))
+        assert _sent_kinds(service, start) == ["config", "execute"]
+        assert service.plan_compression_lookup_positions[lookups:] == [start]
+    finally:
+        fresh.stop()
+
+
+def _year_month_responses():
+    # The responses of a result of a year-month interval: ExecutePlanResponse.schema=7, and
+    # arrow_batch=2 (ArrowBatch.row_count=1, data=2) of an IPC stream of a record batch of no
+    # rows, as the server sends for an empty result, or of none.
+    import pyarrow as pa
+
+    def arrow_batch(write):
+        sink = pa.BufferOutputStream()
+        schema = pa.schema([("ym", pa.int32())])
+        with pa.ipc.new_stream(sink, schema) as writer:
+            write(writer, schema)
+        return message_field(2, varint_field(1, 0) + message_field(2, sink.getvalue().to_pybytes()))
+
+    no_rows = arrow_batch(lambda writer, schema: writer.write_batch(
+        pa.record_batch([pa.array([], pa.int32())], schema=schema)))
+    return message_field(7, ddl_data_type("ym interval year")), no_rows, arrow_batch(
+        lambda writer, schema: None)
+
+
+def test_local_iterator_raises_the_year_month_error_with_the_first_record_batch_as_pyspark(
+        mock_connect):
+    # As PySpark's toLocalIterator, which converts each record batch of the result as it
+    # arrives: a year-month interval raises NOT_IMPLEMENTED with the first one, also of no rows,
+    # as the server sends for an empty result, before the error of a later response. An
+    # execution that fails before any record batch raises its own error, and one that sends
+    # none, or an Arrow batch without one, yields no rows. The cases agree with PySpark 4.3.0.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    spark, service = mock_connect
+    schema, no_rows, no_record_batch = _year_month_responses()
+    service.stream_failure = "INTERNAL"
+    for payloads in ([schema], [schema, no_record_batch]):
+        service.execute_payloads = payloads
+        with pytest.raises(SparkConnectGrpcException, match="stream dropped"):
+            list(spark.range(1).toLocalIterator())
+    for failure in ("INTERNAL", None):
+        service.stream_failure = failure
+        service.execute_payloads = [schema, no_rows]
+        with pytest.raises(PySparkNotImplementedError) as e:
+            list(spark.range(1).toLocalIterator())
+        assert e.value.getCondition() == "NOT_IMPLEMENTED"
+        assert e.value.getMessageParameters() == {
+            "feature": "Collecting a year-month interval value in Spark Connect"}
+    for payloads in ([schema], [schema, no_record_batch]):
+        service.execute_payloads = payloads
+        assert list(spark.range(1).toLocalIterator()) == []
+
+
+def test_local_iterator_gives_calendar_intervals_as_pyarrow_month_day_nano_as_pyspark(
+        mock_connect):
+    # As PySpark's toLocalIterator, whose conversion of the rows has no converter of a calendar
+    # interval, so its values are those of pyarrow's `to_pylist()`: a pyarrow.MonthDayNano, also
+    # in arrays, maps and structs. A string that reads as one stays a str. Its collect raises,
+    # as `from_arrow_schema` has no type of the Arrow interval.
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    interval = pa.month_day_nano_interval()
+    nanos = pa.MonthDayNano
+    table = pa.table({
+        "c": pa.array([nanos([14, 25, 18367500000000]), None], interval),
+        "a": pa.array([[nanos([1, 0, 0])], None], pa.list_(interval)),
+        "s": pa.array([{"x": nanos([0, 0, 1])}, None], pa.struct([("x", interval)])),
+        "m": pa.array([[("k", nanos([-1, -2, -3]))], None], pa.map_(pa.string(), interval)),
+        "t": ["14 months 25 days 18367500000000 ns", None],
+    })
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # DataType.calendar_interval=17, string=11, array=20 (Array.element_type=1, contains_null=2),
+    # struct=21 (Struct.fields=1; StructField: name=1, data_type=2, nullable=3), map=22
+    # (Map.key_type=1, value_type=2, value_contains_null=3).
+    calendar, string = message_field(17, b""), message_field(11, b"")
+
+    def field(name, data_type):
+        return message_field(1, message_field(1, name) + message_field(2, data_type)
+                             + varint_field(3, 1))
+
+    schema = message_field(21, field("c", calendar)
+                           + field("a", message_field(20, message_field(1, calendar)
+                                                      + varint_field(2, 1)))
+                           + field("s", message_field(21, field("x", calendar)))
+                           + field("m", message_field(22, message_field(1, string)
+                                                      + message_field(2, calendar)
+                                                      + varint_field(3, 1)))
+                           + field("t", string))
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, schema) + message_field(
+        2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+    first, second = spark.range(1).toLocalIterator()
+    assert type(first.c) is nanos and first.c == nanos([14, 25, 18367500000000])
+    assert type(first.a[0]) is nanos and first.a == [nanos([1, 0, 0])]
+    assert type(first.s.x) is nanos and first.s.x == nanos([0, 0, 1])
+    assert first.m == {"k": nanos([-1, -2, -3])} and type(first.m["k"]) is nanos
+    assert first.t == "14 months 25 days 18367500000000 ns"
+    assert tuple(second) == (None,) * 5
+    with pytest.raises(PySparkTypeError) as e:
+        spark.range(1).collect()
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+
+
+def test_local_iterator_converts_the_rows_of_a_fetched_batch_with_the_gil_held(mock_connect):
+    # As PySpark's toLocalIterator, which converts a batch in Python: the rows of a batch that
+    # the iterator holds are converted with the GIL held, and only the fetch of a batch waits for
+    # the server without it. With a switch interval longer than the test, a thread that waits for
+    # the GIL runs only when the iterator releases it, which no row after the first does here.
+    import sys
+    import threading
+
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    table = pa.table({"id": pa.array(range(3000), pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, struct_schema("id")) + message_field(
+        2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+    rows = spark.range(3000).toLocalIterator()
+    ticks = []
+    stop = threading.Event()
+
+    def tick():
+        while not stop.is_set():
+            ticks.append(None)
+            time.sleep(0)
+
+    interval = sys.getswitchinterval()
+    thread = threading.Thread(target=tick, daemon=True)
+    sys.setswitchinterval(100)
+    try:
+        thread.start()
+        assert next(rows).id == 0
+        before = len(ticks)
+        assert [next(rows).id for _ in range(2998)] == list(range(1, 2999))
+        held = len(ticks) - before
+    finally:
+        stop.set()
+        sys.setswitchinterval(interval)
+        thread.join()
+    assert held == 0
+    assert [row.id for row in rows] == [2999]
 
 
 def test_to_local_iterator_executes_with_its_first_row_as_pyspark(mock_connect):
@@ -24008,7 +25497,14 @@ def test_tests_restore_the_sigint_handler_that_a_background_start_ignores():
     assert result.stdout.strip() == "interrupted"
 
 
-def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):
+@pytest.mark.parametrize("action", [
+    pytest.param(lambda df: df.collect(), id="collect"),
+    # Of the plans that are built, and so look the plan compression up, before their settings.
+    pytest.param(lambda df: df.toPandas(), id="toPandas"),
+    pytest.param(lambda df: list(df.toLocalIterator()), id="toLocalIterator"),
+])
+def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(
+        mock_connect, action):
     # As PySpark's: the Config lookup of the plan compression of the first plan is a blocked call
     # with no execution in flight, which a signal ends at once, so no execution is started.
     import signal
@@ -24022,7 +25518,7 @@ def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):
-            spark.range(3).collect()
+            action(spark.range(3))
     finally:
         timer.cancel()
         service.release_response()
@@ -24754,11 +26250,13 @@ def test_join_on_lists_join_on_their_conjunction_or_names_as_pyspark(mock_connec
 
 
 @pytest.mark.parametrize(("how", "typ"), [
-    ("foo", "foo"), ("", ""), ("left semi", "left semi"), ("LEFT_SEMI_X", "leftsemix"), (1, "1"),
+    ("foo", "foo"), ("", ""), ("left semi", "left semi"), ("LEFT_SEMI_X", "leftsemix"), (1, 1),
+    ("A\ud800_B", "a\ud800b"),
 ])
 def test_join_types_that_are_not_accepted_raise_as_pyspark(offline_spark, how, typ):
     # As PySpark's plan.Join: the AnalysisException of UNSUPPORTED_JOIN_TYPE, raised locally,
-    # which names the type as it is normalized (or its str() when it is not a str).
+    # which names the type as it is normalized by `lower()` and `replace("_", "")` in Python, a
+    # str that UTF-8 cannot encode too, or the object itself when it is not a str.
     from pyspark.errors import AnalysisException
 
     df = offline_spark.range(3)
@@ -25555,6 +27053,47 @@ def test_apply_in_pandas_with_state_sends_its_relation_as_pyspark(mock_connect):
     assert (apply[6][0], apply[7][0]) == (b"update", b"NoTimeout")
     # CommonInlineUserDefinedFunction.python_udf=4 -> PythonUDF.eval_type=2.
     assert parse_message(parse_message(apply[3][0])[4][0])[2][0] == 208
+
+
+def test_apply_in_pandas_with_state_sends_its_schemas_as_given_as_pyspark(mock_connect):
+    # As PySpark's: the output schema is the return type of the function, whose DDL string is
+    # parsed once the columns of the input are read, and both schemas are sent as they are given,
+    # for the server to parse, so the state schema is not parsed. A state schema that protobuf
+    # does not take as a str fails each request of the DataFrame with its TypeError, as PySpark's
+    # plan fails to build, and bytes are sent as their UTF-8. An output schema that is neither a
+    # DataType nor a str raises NOT_EXPECTED_TYPE before any request.
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+
+    def stateful(output, state):
+        return spark.range(3).groupBy("id").applyInPandasWithState(
+            lambda key, frames, s: frames, output, state, "append", "NoTimeout")
+
+    def sent_schemas():
+        # plan=3 -> root=1 -> apply_in_pandas_with_state=34: output_schema=4, state_schema=5.
+        root = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        apply = parse_message(parse_message(root)[34][0])
+        return apply[4][0].decode(), apply[5][0].decode()
+
+    start = len(service.recorded_order)
+    df = stateful("id long", "c long")
+    assert _sent_kinds(service, start) == ["schema", "ddl_parse"]
+    df.collect()
+    assert sent_schemas() == ("id long", "c long")
+    stateful("id long", b"c long").collect()
+    assert sent_schemas() == ("id long", "c long")
+    for state in (1, None):
+        df = stateful("id long", state)
+        start = len(service.recorded_order)
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            df.schema
+        assert _sent_kinds(service, start) == []
+    start = len(service.recorded_order)
+    with pytest.raises(PySparkTypeError) as e:
+        stateful(1, "c long")
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert _sent_kinds(service, start) == []
 
 
 @pytest.mark.parametrize("read", [
@@ -27249,18 +28788,67 @@ def test_copies_of_the_objects_as_pyspark(mock_connect, name):
         assert type(copy.deepcopy(obj)) is type(obj)
 
 
+@pytest.mark.parametrize(
+    "name", tuple(name for name in _COPYABLE_OBJECTS if name != "df") + tuple(_UNCOPYABLE_MESSAGES))
+def test_copies_and_pickles_keep_the_instance_attributes_as_pyspark(mock_connect, name):
+    # As PySpark's plain objects, which copy and pickle their __dict__: a shallow copy shares the
+    # attributes that were set on the object, and a deep copy and cloudpickle copy them, where
+    # they copy at all. (A DataFrame copies the state of its __reduce__, without them, in both.)
+    import copy
+
+    import cloudpickle
+
+    spark, _ = mock_connect
+    obj = _copy_objects(spark)[name]()
+    obj.foo = [1, 2]
+    assert copy.copy(obj).foo is obj.foo
+    if name in _UNCOPYABLE_MESSAGES:
+        return
+    deep = copy.deepcopy(obj)
+    assert deep.foo == [1, 2]
+    assert deep.foo is not obj.foo or deep is obj
+    assert pickle.loads(cloudpickle.dumps(obj)).foo == [1, 2]
+
+
+@pytest.mark.parametrize("name", tuple(_UNCOPYABLE_MESSAGES))
+def test_plain_pickles_of_the_uncopyable_objects_fail_as_pyspark(mock_connect, name):
+    # As PySpark's pickle of their __dict__, which fails at the first value that it cannot
+    # pickle: the client of the conf and of a merge builder or action, and the session of the
+    # stream manager, before its listener bus, whose creator is a local function.
+    spark, _ = mock_connect
+    obj = _copy_objects(spark)[name]()
+    obj.foo = 1
+    if name == "streams":
+        error = AttributeError, "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'"
+    else:
+        error = TypeError, _UNCOPYABLE_MESSAGES[name]
+    with pytest.raises(error[0], match=f"^{re.escape(error[1])}$"):
+        pickle.dumps(obj)
+
+
 @pytest.mark.parametrize("protocol", range(6))
 @pytest.mark.parametrize("name", _COPYABLE_OBJECTS + tuple(_UNCOPYABLE_MESSAGES))
 def test_pickles_of_the_objects_at_every_protocol_as_pyspark(mock_connect, name, protocol):
     # As PySpark's cloudpickle of these objects at every protocol: each pickles and unpickles
     # with the active session, except the conf, merge builder and stream manager, which raise
-    # the TypeError that their deep copy raises.
+    # the TypeError that their deep copy raises, of the thread-local state of their client or the
+    # lock of their listener bus. Pickle's protocols 0 and 1 name the thread-local `_local`, and
+    # cloudpickle pickles the class of the lock there, which fails to unpickle.
     import cloudpickle
 
     spark, _ = mock_connect
     obj = _copy_objects(spark)[name]()
+    if name == "streams" and protocol < 2:
+        data = cloudpickle.dumps(obj, protocol)
+        message = "cannot set '__doc__' attribute of immutable type '_thread.lock'"
+        with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
+            pickle.loads(data)
+        return
     if name in _UNCOPYABLE_MESSAGES:
-        with pytest.raises(TypeError, match=re.escape(_UNCOPYABLE_MESSAGES[name])):
+        message = _UNCOPYABLE_MESSAGES[name]
+        if protocol < 2:
+            message = message.replace("_thread._local", "_local")
+        with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
             cloudpickle.dumps(obj, protocol)
         return
     data = cloudpickle.dumps(obj, protocol)
@@ -27869,6 +29457,43 @@ def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
     rebuilt = pickle.loads(pickle.dumps(builder))
     assert type(rebuilt) is type(builder)
     assert ("k", "v") in rebuilt.__reduce__()[1][0]
+
+
+def test_builders_merge_actions_and_queries_keep_their_instance_attributes_as_pyspark(
+        mock_connect):
+    # As PySpark's plain classes of the session builder, of the actions of a merge builder and
+    # of a streaming query: an attribute can be set on one, which can be weakly referenced, and a
+    # copy shares the attribute, while a deep copy, a pickle and cloudpickle copy it, where they
+    # copy the object at all, as PySpark's do.
+    import copy
+    import weakref
+
+    import cloudpickle
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r"))
+    )
+    query = spark.readStream.format("rate").load().writeStream.format("noop").start()
+    merge = df.mergeInto("t", df.id == df.id)
+    actions = [merge.whenMatched(), merge.whenNotMatched(), merge.whenNotMatchedBySource()]
+    builder = SparkSession.builder.config("k", "v")
+    for obj in [builder, query, *actions]:
+        obj.foo = [1, 2]
+        assert weakref.ref(obj)() is obj
+        assert copy.copy(obj).foo is obj.foo
+    for obj in [builder, query]:
+        deep = copy.deepcopy(obj)
+        assert deep.foo == [1, 2] and deep.foo is not obj.foo
+        assert pickle.loads(cloudpickle.dumps(obj)).foo == [1, 2]
+    assert copy.copy(query).id == query.id
+    assert pickle.loads(pickle.dumps(builder)).foo == [1, 2]
+    for obj in actions:
+        with pytest.raises(TypeError, match="^cannot pickle '_thread._local' object$"):
+            copy.deepcopy(obj)
 
 
 def test_pivot_values_are_the_literal_columns_as_pyspark(mock_connect):

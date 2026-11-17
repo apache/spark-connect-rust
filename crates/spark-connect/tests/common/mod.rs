@@ -83,24 +83,123 @@ pub fn load_goldens<M: Message + Default>(
     out
 }
 
-/// Clears what varies from run to run in the relation of an ML golden: `common` of the
-/// relation itself and, for an `MlRelation` transform, the UID of its transformer. It does not
-/// descend into the inputs of the relation; `plans_golden.rs` has the recursive form for plans.
+/// A case of the ML goldens of `scripts/capture_ml_golden.py` (`ml.jsonl`, `ml_extra.jsonl`):
+/// the root relation of the plan of its transformed DataFrame, normalized by
+/// [`normalize_relation`], and the fit of its model, if it fits one: the ML commands of the fit
+/// and their results, an entry of the replay of `common/ml_golden.rs`.
+pub struct MlGolden {
+    pub relation: proto::Relation,
+    pub fit: Option<serde_json::Value>,
+}
+
+/// The cases of the ML golden `tests/golden/<file>` at the repository root, by name.
+pub fn load_ml_goldens(file: &str) -> HashMap<String, MlGolden> {
+    let path = format!("{}/../../tests/golden/{file}", env!("CARGO_MANIFEST_DIR"));
+    let text =
+        std::fs::read_to_string(path).unwrap_or_else(|_| panic!("golden file {file} missing"));
+    let mut goldens = HashMap::new();
+    for line in text.lines().filter(|line| !line.trim().is_empty()) {
+        let case: serde_json::Value = serde_json::from_str(line).unwrap();
+        let name = case["name"].as_str().unwrap().to_string();
+        let bytes = STANDARD.decode(case["b64"].as_str().unwrap()).unwrap();
+        let Some(proto::plan::OpType::Root(mut relation)) =
+            proto::Plan::decode(bytes.as_slice()).unwrap().op_type
+        else {
+            panic!("{name}: the golden has no root relation");
+        };
+        normalize_relation(&mut relation);
+        let fit = case.get("fit").cloned();
+        let golden = MlGolden { relation, fit };
+        assert!(
+            goldens.insert(name.clone(), golden).is_none(),
+            "{name} is in {file} twice"
+        );
+    }
+    goldens
+}
+
+/// The vector `[id, 1.0]` of a row of a range, as the ML goldens build their features:
+/// `array_to_vector(array(col("id").cast("double"), lit(1.0)))`.
+pub fn ml_features() -> spark_connect::Column {
+    use spark_connect::column::{col, lit_double};
+    use spark_connect::expression::Expression;
+    let array =
+        spark_connect::functions::array(vec![col("id").cast_str("double"), lit_double(1.0)]);
+    spark_connect::Column::new(Expression::function(
+        "array_to_vector",
+        vec![array.expression().clone()],
+    ))
+}
+
+/// The dataset of the ML goldens: a vector column `features` of [`ml_features`] for each id of
+/// a range of `rows`. It is a plan: building it sends no request.
+pub fn ml_vectors(session: &SparkSession, rows: i64) -> spark_connect::DataFrame {
+    session
+        .range(rows)
+        .unwrap()
+        .select(vec![ml_features().alias("features")])
+}
+
+/// Clears what varies from run to run in a relation of an ML golden, and in its inputs, as
+/// `scripts/capture_ml_golden.py` normalizes it: the `common` (plan ID and origin) of each
+/// relation and expression, the plan IDs of the attributes, and the uid of a transformer, an
+/// instance identifier, which the golden holds as a placeholder. The ObjectRef of a model stays:
+/// a replay of the golden's fit gives the model the golden's placeholder. A relation or an
+/// expression of a kind that the ML goldens do not have fails, rather than being compared as it
+/// was sent.
 pub fn normalize_relation(r: &mut proto::Relation) {
+    use proto::relation::RelType;
     r.common = None;
-    if let Some(proto::relation::RelType::MlRelation(ml_rel)) = &mut r.rel_type {
-        normalize_ml_relation(ml_rel);
+    match r.rel_type.as_mut() {
+        Some(RelType::MlRelation(ml_rel)) => match ml_rel.ml_type.as_mut() {
+            Some(proto::ml_relation::MlType::Transform(transform)) => {
+                if let Some(proto::ml_relation::transform::Operator::Transformer(op)) =
+                    transform.operator.as_mut()
+                {
+                    op.uid.clear();
+                }
+                if let Some(input) = transform.input.as_deref_mut() {
+                    normalize_relation(input);
+                }
+                // The values of `MlParams.params` are literals, with no plan ID or origin to clear.
+            }
+            other => panic!("an MlRelation that the ML goldens do not have: {other:?}"),
+        },
+        Some(RelType::Project(project)) => {
+            if let Some(input) = project.input.as_deref_mut() {
+                normalize_relation(input);
+            }
+            for expression in &mut project.expressions {
+                normalize_expression(expression);
+            }
+        }
+        Some(RelType::Range(_)) => {}
+        other => panic!("a relation that the ML goldens do not have: {other:?}"),
     }
 }
 
-fn normalize_ml_relation(ml_rel: &mut proto::MlRelation) {
-    if let Some(proto::ml_relation::MlType::Transform(transform)) = ml_rel.ml_type.as_mut() {
-        if let Some(proto::ml_relation::transform::Operator::Transformer(op)) =
-            transform.operator.as_mut()
-        {
-            // UIDs are instance identifiers, so they differ across runs.
-            op.uid.clear();
+/// [`normalize_relation`] of an expression.
+fn normalize_expression(e: &mut proto::Expression) {
+    use proto::expression::ExprType;
+    e.common = None;
+    match e.expr_type.as_mut() {
+        Some(ExprType::Alias(alias)) => {
+            if let Some(expr) = alias.expr.as_deref_mut() {
+                normalize_expression(expr);
+            }
         }
-        // The values of `MlParams.params` are literals, with no plan ID or origin to clear.
+        Some(ExprType::Cast(cast)) => {
+            if let Some(expr) = cast.expr.as_deref_mut() {
+                normalize_expression(expr);
+            }
+        }
+        Some(ExprType::UnresolvedFunction(function)) => {
+            for argument in &mut function.arguments {
+                normalize_expression(argument);
+            }
+        }
+        Some(ExprType::UnresolvedAttribute(attribute)) => attribute.plan_id = None,
+        Some(ExprType::Literal(_)) => {}
+        other => panic!("an expression that the ML goldens do not have: {other:?}"),
     }
 }

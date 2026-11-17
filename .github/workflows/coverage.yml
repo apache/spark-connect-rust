@@ -56,6 +56,21 @@ jobs:
         with:
           fetch-depth: 0  # Full history for badges branch operations
 
+      - name: Check that the offline suite runs every offline test file
+        # The offline suite runs only in this job, so an offline file that its list (the step
+        # "Offline Python test suite" below) does not name runs nowhere, as the guards of
+        # build_python_connect.yml check for the live tests.
+        run: |
+          missing=0
+          for f in python/tests/test_*_offline.py python/tests/test_arrow_handoff.py; do
+            name=$(basename "$f")
+            if ! grep -qE "^[[:space:]]+tests/${name}([[:space:]]|$)" .github/workflows/coverage.yml; then
+              echo "::error file=$f::$name is not in the offline suite of coverage.yml"
+              missing=1
+            fi
+          done
+          exit $missing
+
       - name: Install Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -110,12 +125,12 @@ jobs:
         id: spark-download
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
-          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+          if [ ! -d "${HOME}/spark-dist/spark-${SPARK_VERSION}-bin-hadoop3"* ]; then
             scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
-          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name "spark-${SPARK_VERSION}-bin-hadoop3*" | head -1)
           echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Start Spark Connect server

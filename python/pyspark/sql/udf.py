@@ -23,7 +23,7 @@ Mirrors pyspark.sql.connect.udf and pyspark.sql.functions.udf/pandas_udf.
 import functools
 import sys
 import warnings
-from typing import Callable, Optional, Any
+from typing import Callable, Optional, Any, Union
 
 from pyspark.errors import PySparkNotImplementedError, PySparkRuntimeError, PySparkTypeError
 from pyspark.sql.pandas.types import to_arrow_type
@@ -32,6 +32,14 @@ from pyspark.serializers import CloudPickleSerializer
 from pyspark.util import PythonEvalType
 
 __all__ = ["UDFRegistration"]
+
+
+def _pickled_command(func: Callable[..., Any], returnType: DataType) -> bytes:
+    """The command of a UDF of ``func`` and ``returnType``, as PySpark's ``PythonUDF.to_plan``
+    pickles it each time it builds a plan that holds the UDF: so the function is pickled as it is
+    then, with the globals that it reads, and one that does not pickle raises the
+    ``PicklingError`` of ``CloudPickleSerializer.dumps`` from the request."""
+    return CloudPickleSerializer().dumps((func, returnType))
 
 
 def _as_concrete_datatype(returnType: Any) -> DataType:
@@ -324,13 +332,14 @@ class UserDefinedFunction:
         named = list(kwargs.items())
 
         # As PySpark's PythonUDF, the command is the pickled (func, returnType) for the
-        # server-side Python worker, and pyfunc_make_udf builds the proto output type.
+        # server-side Python worker, which each request pickles when it builds the plan, as
+        # PySpark's `PythonUDF.to_plan` does, and pyfunc_make_udf builds the proto output type.
         return_type = self.returnType
         return _pyspark.functions.pyfunc_make_udf(
             self._name,
             return_type,
             self.evalType,
-            CloudPickleSerializer().dumps((self.func, return_type)),
+            functools.partial(_pickled_command, self.func, return_type),
             "%d.%d" % sys.version_info[:2],
             *cols,
             deterministic=self.deterministic,
@@ -594,19 +603,24 @@ class UDFRegistration:
                 f, returnType=returnType, evalType=PythonEvalType.SQL_BATCHED_UDF, name=name
             )
 
-            self._register_udf(py_udf.func, py_udf.returnType, name)
+            # As PySpark's: the registration takes the return type as given, not the one that
+            # the wrapper parsed, so a DDL string is parsed again for the command.
+            self._register_udf(py_udf.func, returnType, name)
             return py_udf
 
     def _register_udf(
         self,
         function: Callable[..., Any],
-        return_type: DataType,
+        return_type: Union[DataType, str],
         name: str,
         eval_type: int = PythonEvalType.SQL_BATCHED_UDF,
         deterministic: bool = True,
     ) -> None:
         # As PySpark's SparkConnectClient.register_udf: the PythonUDF command is the pickled
-        # (function, return type).
+        # (function, return type), of a DDL string as the server of the session parses it, as
+        # its PythonUDF parses the str that it is given when it builds the command.
+        if isinstance(return_type, str):
+            return_type = self.sparkSession._parse_ddl(return_type)
         self.sparkSession._registerPythonUdf(
             name,
             return_type,

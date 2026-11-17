@@ -14,9 +14,8 @@ pub(crate) type FieldConverters = Arc<Vec<Option<Py<PyAny>>>>;
 static ROW_CONSTRUCTOR: PyOnceLock<RowConstructor> = PyOnceLock::new();
 static DATETIME_OBJECTS: PyOnceLock<DateTimeObjects> = PyOnceLock::new();
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-static CONVERSION_CHECKPOINT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+static MONTH_DAY_NANO: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 const ROW_SOURCE: &std::ffi::CStr = pyo3::ffi::c_str!(include_str!("row.py"));
-const CONVERSION_STEPS_PER_INTERRUPT_CHECK: usize = 1024;
 
 struct RowConstructor {
     row_type: Py<PyAny>,
@@ -83,37 +82,38 @@ pub(crate) struct NestedFieldNames {
     fields: HashMap<Vec<NestedFieldPath>, Py<PyList>>,
     /// The schema paths of the maps whose keys have a user-defined type.
     udt_key_maps: HashSet<Vec<NestedFieldPath>>,
-    steps_until_interrupt_check: usize,
+    /// The schema paths of the calendar intervals.
+    calendar_intervals: HashSet<Vec<NestedFieldPath>>,
+    /// The checkpoints of the conversion, of a step for each row and each value in it.
+    budget: crate::interrupt::ConversionBudget,
 }
 
 impl NestedFieldNames {
-    fn check_interrupts(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.steps_until_interrupt_check == 0 {
-            let checkpoint = CONVERSION_CHECKPOINT.get_or_try_init(py, || -> PyResult<_> {
-                let globals = PyDict::new(py);
-                Ok(py.eval(c"lambda: None", Some(&globals), None)?.unbind())
-            })?;
-            checkpoint.bind(py).call0()?;
-            py.check_signals()?;
-            self.steps_until_interrupt_check = CONVERSION_STEPS_PER_INTERRUPT_CHECK;
-        }
-        self.steps_until_interrupt_check -= 1;
-        Ok(())
-    }
-
     /// Release names when an iterator closes, including when materialization fails.
     pub(crate) fn clear(&mut self) {
         self.path.clear();
         self.fields.clear();
         self.udt_key_maps.clear();
-        self.steps_until_interrupt_check = 0;
+        self.calendar_intervals.clear();
+        self.budget.reset();
     }
 
-    /// Record the maps of `schema` whose keys have a user-defined type. Their keys are
-    /// deserialized by the converters, so such a map is passed on as its (key, value) pairs.
-    pub(crate) fn note_udt_key_maps(&mut self, schema: &spark_connect::types::DataType) {
+    /// Record the paths of `schema` whose values convert by their type: the maps whose keys
+    /// have a user-defined type, whose keys are deserialized by the converters, so such a map is
+    /// passed on as its (key, value) pairs; and the calendar intervals.
+    pub(crate) fn note_schema(&mut self, schema: &spark_connect::types::DataType) {
         let mut path = Vec::new();
-        collect_udt_key_maps(schema, &mut path, &mut self.udt_key_maps);
+        collect_typed_paths(
+            schema,
+            &mut path,
+            &mut self.udt_key_maps,
+            &mut self.calendar_intervals,
+        );
+    }
+
+    /// Whether the value at this path is a calendar interval.
+    fn at_calendar_interval(&self) -> bool {
+        !self.calendar_intervals.is_empty() && self.calendar_intervals.contains(&self.path)
     }
 
     /// Convert one schema step below this path, restoring it even if conversion fails.
@@ -124,7 +124,7 @@ impl NestedFieldNames {
         binary_as_bytes: bool,
         path: NestedFieldPath,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.check_interrupts(py)?;
+        self.budget.step(py)?;
         self.path.push(path);
         let result = value_to_py(py, value, binary_as_bytes, self);
         self.path.pop();
@@ -147,25 +147,27 @@ impl NestedFieldNames {
     }
 }
 
-/// Collect the paths of the maps in `data_type` whose keys have a user-defined type, along
-/// the same steps that `value_to_py` takes through the values.
-fn collect_udt_key_maps(
+/// Collect the paths of the maps in `data_type` whose keys have a user-defined type into
+/// `udt_key_maps`, and of its calendar intervals into `calendar_intervals`, along the same steps
+/// that `value_to_py` takes through the values.
+fn collect_typed_paths(
     data_type: &spark_connect::types::DataType,
     path: &mut Vec<NestedFieldPath>,
-    out: &mut HashSet<Vec<NestedFieldPath>>,
+    udt_key_maps: &mut HashSet<Vec<NestedFieldPath>>,
+    calendar_intervals: &mut HashSet<Vec<NestedFieldPath>>,
 ) {
     use spark_connect::types::DataType;
     match data_type {
         DataType::Struct { fields } => {
             for (index, field) in fields.iter().enumerate() {
                 path.push(NestedFieldPath::Field(index));
-                collect_udt_key_maps(&field.data_type, path, out);
+                collect_typed_paths(&field.data_type, path, udt_key_maps, calendar_intervals);
                 path.pop();
             }
         }
         DataType::Array { element_type, .. } => {
             path.push(NestedFieldPath::ArrayElement);
-            collect_udt_key_maps(element_type, path, out);
+            collect_typed_paths(element_type, path, udt_key_maps, calendar_intervals);
             path.pop();
         }
         DataType::Map {
@@ -174,21 +176,36 @@ fn collect_udt_key_maps(
             ..
         } => {
             if crate::types::has_udt(key_type) {
-                out.insert(path.clone());
+                udt_key_maps.insert(path.clone());
             }
             path.push(NestedFieldPath::MapKey);
-            collect_udt_key_maps(key_type, path, out);
+            collect_typed_paths(key_type, path, udt_key_maps, calendar_intervals);
             path.pop();
             path.push(NestedFieldPath::MapValue);
-            collect_udt_key_maps(value_type, path, out);
+            collect_typed_paths(value_type, path, udt_key_maps, calendar_intervals);
             path.pop();
         }
         DataType::Udt {
             sql_type: Some(sql_type),
             ..
-        } => collect_udt_key_maps(sql_type, path, out),
+        } => collect_typed_paths(sql_type, path, udt_key_maps, calendar_intervals),
+        DataType::CalendarInterval => {
+            calendar_intervals.insert(path.clone());
+        }
         _ => {}
     }
+}
+
+/// The `pyarrow.MonthDayNano` of a calendar interval of `months`, `days` and `nanoseconds`.
+fn month_day_nano(py: Python<'_>, parts: (i32, i32, i64)) -> PyResult<Bound<'_, PyAny>> {
+    MONTH_DAY_NANO
+        .get_or_try_init(py, || {
+            py.import("pyarrow")?
+                .getattr("MonthDayNano")
+                .map(Bound::unbind)
+        })?
+        .bind(py)
+        .call1((parts,))
 }
 
 /// Build a Row from named values, deserializing user-defined fields with `converters`.
@@ -201,7 +218,7 @@ pub(crate) fn row_values_to_py(
     binary_as_bytes: bool,
     nested_fields: &mut NestedFieldNames,
 ) -> PyResult<Py<PyAny>> {
-    nested_fields.check_interrupts(py)?;
+    nested_fields.budget.step(py)?;
     let values = values
         .iter()
         .enumerate()
@@ -283,6 +300,15 @@ fn value_to_py<'py>(
         Value::Long(n) => (*n).into_pyobject(py)?.into_any(),
         Value::Float(f) => (*f as f64).into_pyobject(py)?.into_any(),
         Value::Double(f) => (*f).into_pyobject(py)?.into_any(),
+        // A calendar interval, of the text that the core gives of it: PySpark's conversion of
+        // the rows has no converter of this type, so it is the value of pyarrow's `to_pylist()`,
+        // a `pyarrow.MonthDayNano`, also in arrays, maps and structs.
+        Value::String(s) if nested_fields.at_calendar_interval() => {
+            match v.calendar_interval_parts() {
+                Some(parts) => month_day_nano(py, parts)?,
+                None => s.as_str().into_pyobject(py)?.into_any(),
+            }
+        }
         Value::String(s) => s.as_str().into_pyobject(py)?.into_any(),
         Value::Binary(b) if binary_as_bytes => PyBytes::new(py, b).into_any(),
         Value::Binary(b) => PyByteArray::new(py, b).into_any(),
