@@ -122,6 +122,20 @@ difference is intentional or tracked for a fix.
   Arrow decode. `collect` raises PySpark's `UnicodeDecodeError` for the bytes of the first
   invalid string (the Rust API's `collect` returns `SparkErrorKind::UnicodeDecode`).
 
+- **What a plan build does for a pickle or a deep copy** (intentional; DESIGN). A pickled
+  DataFrame or Column, and a deep copy of a DataFrame, carry the relation that the drop-in
+  builds for them, where PySpark's keep their plan objects and build them at each request.
+  So the requests of an unpickled DataFrame or Column, or of a deep copy, do not warn of a
+  window of no partitions (`WARN WindowExpression: No Partition Defined ...`), which
+  PySpark's do at each build, and the `and` of the conditions of a join of a list of
+  Columns keeps the origin of its call site at the pickle or the copy, where PySpark's has
+  the call site of each request. The pickle itself does not warn, as PySpark's does not.
+  The `plan` of `DataFrame._plan` is a placeholder of the relation (see "Plan logging of a
+  deep DataFrame" below), so it does not warn, and a request of a plan over it warns once,
+  where PySpark's warns at both. The `UserWarning` is of `pyspark.sql.connect.expressions`,
+  as PySpark's, but of a line of the drop-in's module, where PySpark's is of line 1126 of its
+  own.
+
 - **Public base and native MRO.** `pyspark.sql.DataFrame` is implemented as a
   Python base/factory, allowing subclasses such as
   `pyspark.testing.mlutils.MockDataset` to allocate their own Python state with
@@ -240,6 +254,14 @@ difference is intentional or tracked for a fix.
 - **`_closed`** (tracked). Reading `_closed` gives the session's stopped state. Setting it
   to True closes the session, as a test's stand-in for the client's close. Setting it to
   False does not reopen a closed session.
+- **The `__dict__` of the objects of a session** (intentional; the state is native). The
+  readers, writers, builders and the other objects of a session or a DataFrame hold their
+  state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
+  which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
+  holds there (`vars(spark.streams)` is empty, where PySpark's has `_session` and `_sqlb`).
+- **Shallow copy of a session builder** (tracked). `copy.copy(SparkSession.builder)` has
+  options of its own, where PySpark's shares its `_options` dict and its hook factories
+  with the builder that it copies, so that a `config` of either one is seen by both.
 - **Session registry lock** (intentional). `SparkSession._lock` is a `threading.RLock`
   for the Python code that takes it. The drop-in serializes its own session creation with
   a Rust lock, not with this one.

@@ -41,16 +41,22 @@ impl PyDataSourceRegistration {
     }
 
     /// The shallow copy of the data source registration, as PySpark's `copy.copy`: of the same
-    /// session.
-    fn __copy__(&self, py: Python<'_>) -> PyDataSourceRegistration {
-        PyDataSourceRegistration::new(self.session.clone_ref(py))
+    /// session, with the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let session = slf.borrow().session.clone_ref(py);
+        let copy = Py::new(py, PyDataSourceRegistration::new(session))?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of the data source registration, as PySpark's: `dataSource` of its session,
-    /// which unpickles with it.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
-        let session = self.session.clone_ref(py).into_bound(py).into_any();
-        crate::reduce::getattr_reduce(py, session, "dataSource")
+    /// which unpickles with it, and its instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let session = slf.borrow().session.clone_ref(py).into_bound(py).into_any();
+        let reduced = crate::reduce::getattr_reduce(py, session, "dataSource")?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
     }
 
     /// The session of the registration, as PySpark's `DataSourceRegistration.sparkSession`.

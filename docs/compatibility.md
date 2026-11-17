@@ -1237,6 +1237,15 @@ even for a count of one: the drop-in says "takes 1 positional arguments but 3 we
 A warning that the Rust core raises, such as the
 `FutureWarning` of `registerTempTable`, is attributed to the caller's frame and module, so a
 `warnings.filterwarnings(..., module="pyspark")` does not match it, as it matches PySpark's.
+The warning of a window of no partitions, `WARN WindowExpression: No Partition Defined for Window
+operation! ...`, is PySpark's: a `UserWarning` of `pyspark.sql.connect.expressions`, of one line of
+that module, which the default filter shows once, at each request that builds the plan of such a
+window, as PySpark warns as it builds the plan. Its line is that of the drop-in's module. A pickle
+of a DataFrame or a Column does not warn, as PySpark's builds no plan; but a DataFrame or a Column
+that is unpickled, and a deep copy of a DataFrame, send the plan that was built for the pickle or
+the copy, so their requests do not warn again, where PySpark's warn at each. Such a plan keeps the
+origin of the `and` of the conditions of a join of a list of Columns of that time too, where
+PySpark gives it the call site of each request that builds it, as it does in the drop-in otherwise.
 
 The `TypeError` for a bad keyword argument of a method that takes no `**options` is PyO3's, which
 CPython words differently in two cases. For a key that is not a str, as `df.limit(1, **{1: 2})`,
@@ -1324,6 +1333,15 @@ for the copy, and one more for the DataFrame in a deep copy when it has no schem
 session fails the copy with `SparkConnectException`, as PySpark's does. One difference remains:
 PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` by reading the columns, which
 the drop-in does not, since it defines `__deepcopy__` itself.
+
+The other objects of a session above, a streaming query and `SparkSession.builder` keep the
+attributes that are set on them through copies and pickles, as PySpark's copy and pickle their
+`__dict__`: a shallow copy shares them, and a deep copy, a pickle and cloudpickle copy them, where
+they copy the object at all. Where PySpark's fail, the drop-in's fail with the same errors, such as
+the `AttributeError` of the creator of the session of a plain pickle of `spark.streams`, and the
+`TypeError` of its lock of a deep copy and of cloudpickle. Their `__dict__` holds only those
+attributes, where PySpark's holds the state of the object too, as the `_options` of a builder: so a
+shallow copy of a builder has options of its own, where PySpark's shares its `_options` dict.
 
 A table name that is neither a str nor bytes, and bytes that are not UTF-8, give a DataFrame of
 `read.table`, `readStream.table` and `changes`, whose plan raises protobuf's `TypeError` or the

@@ -792,11 +792,12 @@ impl PyColumn {
         // Of an expression that a request fails to build, as PySpark's Column of an alias of a
         // name that protobuf refuses: its proto of what this client builds, and the errors of
         // a request and of the `__repr__` of it, which the unpickled Column raises as it did.
-        let (expression, levels, unbuildable) = this
-            .column
-            .expression()
-            .try_to_proto_with_levels_and_unbuildable()
-            .to_pyerr()?;
+        let (expression, levels, unbuildable) = crate::origin::pickling(|| {
+            this.column
+                .expression()
+                .try_to_proto_with_levels_and_unbuildable()
+        })
+        .to_pyerr()?;
         let build_error = unbuildable
             .as_ref()
             .map(|error| error_description(py, error))

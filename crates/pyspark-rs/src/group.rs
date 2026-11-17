@@ -136,9 +136,12 @@ pub(crate) fn dict_aggregates(
         let Ok(function) = function.extract::<String>() else {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         };
-        // As PySpark's `agg` of a dict, by `col`, of its origin.
-        let _origin = crate::origin::with_origin("col")?;
-        let c = spark_connect::functions::col(&column);
+        // As PySpark's `agg` of a dict, `F._invoke_function(func, F.col(name))`: the column is of
+        // `col`, of its origin, and the function is of none.
+        let c = {
+            let _origin = crate::origin::with_origin("col")?;
+            spark_connect::functions::col(&column)
+        };
         // Build func(col) as an unresolved function resolved server-side, so aggregate names
         // (max/min/sum/avg/count/...) all work regardless of whether they are in the generated
         // dispatch.
@@ -167,12 +170,24 @@ impl PyGroupedData {
             }
             names.push(col.extract::<String>()?);
         }
-        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
         let grouped = &self.grouped_data;
-        interruptible(py, &grouped.spark_session(), || {
-            grouped.numeric_agg(function, refs)
-        })
-        .map(PyDataFrame::new)
+        let names = interruptible(py, &grouped.spark_session(), || {
+            grouped.numeric_agg_columns(names)
+        })?;
+        // As PySpark's `F._invoke_function(function, F.col(c))` of each column: the column is of
+        // `col`, of its origin, and the function is of none.
+        let mut expressions = Vec::with_capacity(names.len());
+        for name in &names {
+            let column = {
+                let _origin = crate::origin::with_origin("col")?;
+                spark_connect::col(name)
+            };
+            expressions.push(spark_connect::expression::Expression::function(
+                function,
+                vec![column.expression().clone()],
+            ));
+        }
+        Ok(PyDataFrame::new(grouped.agg(expressions)))
     }
 }
 
@@ -346,9 +361,18 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Count rows in each group.
+    /// Count rows in each group, as PySpark's `agg(F._invoke_function("count", F.lit(1))
+    /// .alias("count"))`: the alias is of `alias`, of its origin, and the count is of none.
     fn count(&self) -> PyResult<PyDataFrame> {
-        let df = self.grouped_data.count();
+        use spark_connect::expression::{Expression, LiteralExpression};
+        let count = spark_connect::functions::count(spark_connect::Column::new(
+            Expression::literal(LiteralExpression::int(1)),
+        ));
+        let counted = {
+            let _origin = crate::origin::with_origin("alias")?;
+            count.alias("count")
+        };
+        let df = self.grouped_data.agg(vec![counted.expression().clone()]);
         Ok(PyDataFrame::new(df))
     }
 
@@ -726,26 +750,37 @@ pub struct PyCoGroupedData {
 
 #[pymethods]
 impl PyCoGroupedData {
-    /// The shallow copy of cogrouped ops, as PySpark's `copy.copy`: of the same two groups.
-    fn __copy__(&self, py: Python<'_>) -> PyCoGroupedData {
-        PyCoGroupedData {
-            inner: self.inner.clone(),
-            left: self.left.clone_ref(py),
-            right: self.right.clone_ref(py),
-        }
+    /// The shallow copy of cogrouped ops, as PySpark's `copy.copy`: of the same two groups, with
+    /// the instance attributes of these.
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Bound::new(
+            py,
+            PyCoGroupedData {
+                inner: this.inner.clone(),
+                left: this.left.clone_ref(py),
+                right: this.right.clone_ref(py),
+            },
+        )?;
+        copy_instance_state(copy.as_any(), slf.as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of cogrouped ops, as PySpark's pickle of its two grouped data, which
-    /// `_of_state` gives back.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    /// `_of_state` gives back, and of its instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
         let args = PyTuple::new(
             py,
             [
-                self.left.clone_ref(py).into_any().into_bound(py),
-                self.right.clone_ref(py).into_any().into_bound(py),
+                this.left.clone_ref(py).into_any().into_bound(py),
+                this.right.clone_ref(py).into_any().into_bound(py),
             ],
         )?;
-        crate::reduce::state_reduce(py, "cogrouped_reduce", args)
+        let reduce = crate::reduce::state_reduce(py, "cogrouped_reduce", args)?;
+        reduce_with_state(&reduce, slf.as_any())
     }
 
     /// The cogrouped ops of two grouped data, as `__reduce__` gives them back.
