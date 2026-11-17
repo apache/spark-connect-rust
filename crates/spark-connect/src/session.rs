@@ -1456,7 +1456,7 @@ impl SparkSession {
             &[],
             return_type,
             eval_type,
-            command,
+            (command, None),
             python_ver,
         );
         crate::dataframe::execute_command_unreported(

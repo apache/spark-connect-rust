@@ -770,7 +770,10 @@ impl PyDataFrame {
     /// sees: the Python objects that only this DataFrame keeps alive, the plans of `pyspark.ml`
     /// that `DataFrame(plan, session)` keeps, are reported to the collector. So a reference cycle
     /// through this DataFrame is freed, as PySpark frees it: a `pyspark.ml` model whose summary
-    /// keeps `model.transform(dataset)`, whose plan keeps the model, is released then.
+    /// keeps `model.transform(dataset)`, whose plan keeps the model, is released then. So are the
+    /// functions of its UDFs, which a request pickles when it builds the plan, as the plan of
+    /// PySpark keeps them: a function may keep the DataFrame, as a bound method of an object that
+    /// keeps it does.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
@@ -780,6 +783,10 @@ impl PyDataFrame {
                 visit.call(object)?;
             }
         }
+        crate::udf_command::visit_pickler_objects(
+            self.dataframe.exclusive_pickler_objects(),
+            &visit,
+        )?;
         if let Some(schema) = &self.schema_object {
             visit.call(schema)?;
         }
@@ -6017,8 +6024,9 @@ fn udf_name(func: &Bound<'_, PyAny>) -> PyResult<String> {
     }
 }
 
-/// Build a map/group UDF expression: cloudpickle `(func, schema)` as the command and
-/// carry the resolved schema as the output type (mirrors the scalar UDF command layout).
+/// Build a map/group UDF expression: its command is `(func, schema)`, cloudpickled by each
+/// request that builds the plan, and it carries the resolved schema as the output type (mirrors
+/// the scalar UDF command layout).
 /// The return type is resolved here, after the caller read the columns of the input, as the
 /// `returnType` of PySpark's `UserDefinedFunction` parses a DDL string when the map node builds
 /// the function, which `applyInPandasWithState` and `transformWithState` do.
@@ -6066,9 +6074,12 @@ pub(crate) fn map_udf_of(
     } else {
         schema.clone()
     };
+    // As PySpark's `PythonUDF.to_plan`, the function is pickled each time a request builds the
+    // plan, not here.
     let tup = PyTuple::new(py, [func.clone(), pickled_type])?;
-    let command = py_cloudpickle(py, tup.as_any())?;
-    let payload = PythonUDFPayload::new(return_type, eval_type_id, command, py_version(py));
+    let pickler = crate::udf_command::object_pickler(tup.into_any().unbind());
+    let payload =
+        PythonUDFPayload::pickled_at_build(return_type, eval_type_id, pickler, py_version(py));
     // The worker reconstructs the input pandas/Arrow DataFrame of a map or group function from
     // the UDF's argument columns; without them the input columns are unnamed (KeyError in the
     // user fn). Mirror the reference Connect client, which passes the child's columns as the

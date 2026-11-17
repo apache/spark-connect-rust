@@ -61,6 +61,139 @@ thread_local! {
     /// in one.
     static UNRENDERABLE_EXPRESSION_ERROR: RefCell<Option<SparkError>> = const { RefCell::new(None) };
     static RENDERING_TRIED: Cell<bool> = const { Cell::new(false) };
+    /// The commands of the UDFs that this thread serializes since the start of the innermost
+    /// [`with_expression_depth_bound`], which their client pickles (see [`pickled_command`]).
+    static UDF_COMMANDS: RefCell<UdfCommands> = const { RefCell::new(UdfCommands::new()) };
+}
+
+/// The commands of the UDFs of a plan that a request builds, of their
+/// [`CommandPickler`](crate::udf::CommandPickler)s.
+///
+/// PySpark's client pickles the function of each UDF as it builds the plan, in the order of the
+/// build, and the first error of the build, of a pickling or of another expression that it fails
+/// to build, is raised. Here the plan is built twice when it has UDFs of picklers: the first build
+/// meets the picklers, in that order, up to the first expression that it does not build; they are
+/// called in turn once it is done, on the stack of the caller of the request, outside the
+/// recursion of the build, so the Python code of a pickling runs where PySpark's does; and when
+/// none fails and no expression failed after them, the second build takes their commands, in the
+/// same order. A build is deterministic, so the two meet the same UDFs.
+#[derive(Default)]
+struct UdfCommands {
+    /// The picklers that the first build met, in the order of the build.
+    met: Vec<crate::udf::CommandPickler>,
+    /// The commands that they gave, which the second build takes in turn.
+    pickled: std::collections::VecDeque<Vec<u8>>,
+    /// Whether this is the second build, which takes `pickled`.
+    pickled_build: bool,
+}
+
+impl UdfCommands {
+    const fn new() -> Self {
+        UdfCommands {
+            met: Vec::new(),
+            pickled: std::collections::VecDeque::new(),
+            pickled_build: false,
+        }
+    }
+}
+
+/// The command of the UDF of `pickler` in the plan that this thread builds. In a request (a
+/// [`with_expression_depth_bound`]), the first build of the plan meets the pickler, unless an
+/// expression before it failed to build, as PySpark's client raises its error before it pickles
+/// the functions after it; the second build takes the command that it gave (see [`UdfCommands`]).
+/// Outside a request, as the Rust API's `to_proto` builds a plan, it is pickled now, and is empty
+/// if it fails.
+pub(crate) fn pickled_command(pickler: &crate::udf::CommandPickler) -> Vec<u8> {
+    if !EXPRESSION_DEPTH_BOUNDED.with(Cell::get) {
+        return pickler.pickle().unwrap_or_default();
+    }
+    UDF_COMMANDS.with(|commands| {
+        let mut commands = commands.borrow_mut();
+        if commands.pickled_build {
+            return commands.pickled.pop_front().unwrap_or_default();
+        }
+        if UNBUILDABLE_EXPRESSION_ERROR.with(|slot| slot.borrow().is_none()) {
+            commands.met.push(pickler.clone());
+        }
+        Vec::new()
+    })
+}
+
+/// Whether this thread is in the second build of the plan of a request, which takes the commands
+/// that the first build's picklers gave (see [`UdfCommands`]): what PySpark's client does once as
+/// it builds the plan, the first build did.
+fn in_pickled_build() -> bool {
+    UDF_COMMANDS.with(|commands| commands.borrow().pickled_build)
+}
+
+/// The commands of `picklers`, each pickled in turn, or the error of the first that fails, after
+/// which none is pickled, as PySpark's build stops at it.
+fn pickle_in_turn(
+    picklers: Vec<crate::udf::CommandPickler>,
+) -> Result<std::collections::VecDeque<Vec<u8>>> {
+    picklers
+        .iter()
+        .map(crate::udf::CommandPickler::pickle)
+        .collect()
+}
+
+impl ExpressionNode {
+    /// The expressions, the UDFs and the plans right below this node, whose picklers
+    /// [`crate::udf::exclusive_pickler_objects`] visits.
+    pub(crate) fn push_pickler_holders<'a>(
+        &'a self,
+        pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
+    ) {
+        use crate::udf::PicklerHolder::{Expression as Of, Plan, Udf};
+        match self {
+            ExpressionNode::Literal(_)
+            | ExpressionNode::ColumnReference(_)
+            | ExpressionNode::UnresolvedStar(..)
+            | ExpressionNode::UnresolvedRegex(..)
+            | ExpressionNode::SQLExpression(_)
+            | ExpressionNode::UnresolvedNamedLambdaVariable(_)
+            | ExpressionNode::Sent(_) => {}
+            ExpressionNode::UnresolvedFunction(function) => {
+                pending.extend(function.args.iter().map(Of));
+            }
+            ExpressionNode::Alias(alias) => pending.push(Of(&alias.child)),
+            ExpressionNode::Cast(cast) => pending.push(Of(&cast.child)),
+            ExpressionNode::DirectShufflePartitionId(child) => pending.push(Of(child)),
+            ExpressionNode::SortOrder(sort) => pending.push(Of(&sort.child)),
+            ExpressionNode::CaseWhen(case_when) => {
+                for (condition, value) in &case_when.branches {
+                    pending.extend([Of(condition), Of(value)]);
+                }
+                pending.extend(case_when.else_expr.iter().map(Of));
+            }
+            ExpressionNode::UnresolvedExtractValue(extract) => {
+                pending.extend([Of(&extract.child), Of(&extract.extraction)]);
+            }
+            ExpressionNode::UpdateFields(update) => {
+                pending.push(Of(&update.struct_expression));
+                pending.extend(update.value_expression.iter().map(Of));
+            }
+            ExpressionNode::CallFunction(call) => pending.extend(call.arguments.iter().map(Of)),
+            ExpressionNode::WindowExpression(window) => {
+                pending.push(Of(&window.window_function));
+                pending.extend(window.partition_spec.iter().map(Of));
+                pending.extend(window.order_spec.iter().map(|sort| Of(&sort.child)));
+            }
+            ExpressionNode::LambdaFunction(lambda) => pending.push(Of(&lambda.function)),
+            ExpressionNode::CommonInlineUserDefinedFunction(udf) => pending.push(Udf(udf)),
+            ExpressionNode::NamedArgument(argument) => pending.push(Of(&argument.value)),
+            ExpressionNode::Subquery(subquery) => {
+                if Arc::strong_count(&subquery.plan) == 1 {
+                    pending.push(Plan(&subquery.plan));
+                }
+                pending.extend(subquery.partition_spec.iter().map(Of));
+                pending.extend(subquery.order_spec.iter().map(Of));
+                pending.extend(subquery.in_subquery_values.iter().map(Of));
+            }
+            ExpressionNode::Unbuildable(unbuildable) => pending.push(Of(&unbuildable.expression)),
+            ExpressionNode::PlanBuildOrigin(made) => pending.push(Of(&made.expression)),
+        }
+    }
 }
 
 /// Record `error`, of an expression or a plan (`LogicalPlan::Unbuildable`) that the serialization
@@ -113,6 +246,7 @@ struct DepthBoundScope {
     outer_bounded: bool,
     outer_deepest: usize,
     outer_unbuildable: Option<SparkError>,
+    outer_commands: UdfCommands,
 }
 
 impl DepthBoundScope {
@@ -121,6 +255,8 @@ impl DepthBoundScope {
             outer_bounded: EXPRESSION_DEPTH_BOUNDED.with(|bounded| bounded.replace(true)),
             outer_deepest: DEEPEST_EXPRESSION_LEVEL.with(|deepest| deepest.replace(0)),
             outer_unbuildable: UNBUILDABLE_EXPRESSION_ERROR.with(|slot| slot.borrow_mut().take()),
+            outer_commands: UDF_COMMANDS
+                .with(|commands| std::mem::take(&mut *commands.borrow_mut())),
         }
     }
 
@@ -133,6 +269,22 @@ impl DepthBoundScope {
     fn deepest(&self) -> usize {
         DEEPEST_EXPRESSION_LEVEL.with(Cell::get)
     }
+
+    /// The picklers that the build met since the scope was entered.
+    fn met_picklers(&self) -> Vec<crate::udf::CommandPickler> {
+        UDF_COMMANDS.with(|commands| std::mem::take(&mut commands.borrow_mut().met))
+    }
+
+    /// Make the next build take `pickled`, the commands of the picklers that the first met.
+    fn build_with(&self, pickled: std::collections::VecDeque<Vec<u8>>) {
+        UDF_COMMANDS.with(|commands| {
+            *commands.borrow_mut() = UdfCommands {
+                pickled,
+                pickled_build: true,
+                ..UdfCommands::new()
+            }
+        });
+    }
 }
 
 impl Drop for DepthBoundScope {
@@ -141,6 +293,8 @@ impl Drop for DepthBoundScope {
         DEEPEST_EXPRESSION_LEVEL.with(|deepest| deepest.set(deepest.get().max(self.outer_deepest)));
         let outer = self.outer_unbuildable.take();
         UNBUILDABLE_EXPRESSION_ERROR.with(|slot| *slot.borrow_mut() = outer);
+        let outer = std::mem::take(&mut self.outer_commands);
+        UDF_COMMANDS.with(|commands| *commands.borrow_mut() = outer);
     }
 }
 
@@ -154,13 +308,14 @@ pub(crate) fn with_stack_for_a_level<T>(f: impl FnOnce() -> T) -> T {
 /// does if one of them is deeper than [`MAX_EXPRESSION_DEPTH`]: with a `RecursionError`, instead
 /// of a request that overflows the stack or that the server cannot parse. Within it, an
 /// expression is serialized down to the bound only: its proto is dropped and encoded by
-/// recursing too, so it must not be deeper.
-pub(crate) fn with_expression_depth_bound<T>(serialize: impl FnOnce() -> T) -> Result<T> {
+/// recursing too, so it must not be deeper. The commands of the UDFs of picklers are pickled as
+/// [`UdfCommands`] tells, so `serialize` may run twice.
+pub(crate) fn with_expression_depth_bound<T>(serialize: impl Fn() -> T) -> Result<T> {
     with_expression_levels(serialize).map(|(value, _)| value)
 }
 
 /// As [`with_expression_depth_bound`], and the levels that the expressions of `serialize` reach.
-fn with_expression_levels<T>(serialize: impl FnOnce() -> T) -> Result<(T, usize)> {
+fn with_expression_levels<T>(serialize: impl Fn() -> T) -> Result<(T, usize)> {
     let (value, levels, unbuildable) = with_expression_levels_and_unbuildable(serialize)?;
     // An expression that PySpark's client fails to build, which it raises as it builds the plan.
     if let Some(error) = unbuildable {
@@ -170,19 +325,35 @@ fn with_expression_levels<T>(serialize: impl FnOnce() -> T) -> Result<(T, usize)
 }
 
 /// As [`with_expression_levels`], of the error of the first expression that `serialize` does not
-/// build ([`Expression::unbuildable`]) kept apart, rather than raised.
+/// build ([`Expression::unbuildable`]), or of the first command that does not pickle, kept apart,
+/// rather than raised.
 fn with_expression_levels_and_unbuildable<T>(
-    serialize: impl FnOnce() -> T,
+    serialize: impl Fn() -> T,
 ) -> Result<(T, usize, Option<SparkError>)> {
     let scope = DepthBoundScope::enter();
-    let value = serialize();
+    let mut value = serialize();
     let levels = scope.deepest();
-    let unbuildable = scope.unbuildable();
+    let mut unbuildable = scope.unbuildable();
     if levels > MAX_EXPRESSION_DEPTH {
         return Err(SparkError::recursion_msg(format!(
             "maximum recursion depth exceeded while serializing an expression; an expression \
              may be at most {MAX_EXPRESSION_DEPTH} levels deep"
         )));
+    }
+    let picklers = scope.met_picklers();
+    if !picklers.is_empty() {
+        // The picklers come before the first expression that failed to build, if any: the first
+        // of them that fails is the error, else that expression's.
+        match pickle_in_turn(picklers) {
+            Err(error) => unbuildable = Some(error),
+            Ok(pickled) if unbuildable.is_none() => {
+                drop(value);
+                scope.build_with(pickled);
+                value = serialize();
+                unbuildable = scope.unbuildable();
+            }
+            Ok(_) => {}
+        }
     }
     Ok((value, levels, unbuildable))
 }
@@ -643,6 +814,19 @@ impl Expression {
     /// Borrow this expression's node without exposing mutable shared state.
     pub fn node(&self) -> &ExpressionNode {
         self.node.as_ref()
+    }
+
+    /// Whether no other expression shares the node of this one.
+    pub(crate) fn is_exclusive(&self) -> bool {
+        Arc::strong_count(&self.node) == 1
+    }
+
+    /// The objects of the picklers of the UDFs of this expression that it alone holds, which a
+    /// Python Column tells its garbage collector of (see
+    /// [`crate::udf::exclusive_pickler_objects`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Expression(self)])
     }
 
     /// Render this expression to a human-readable string, mirroring the
@@ -1743,8 +1927,9 @@ impl WindowExpressionWrapper {
         // Set the window function
         window.window_function = Some(Box::new(self.window_function.to_proto()));
 
-        // Set partition spec. PySpark's `to_plan` warns of a window of no partitions here.
-        if self.partition_spec.is_empty() {
+        // Set partition spec. PySpark's `to_plan` warns of a window of no partitions here, once a
+        // build: the second build of a plan of UDFs (see [`UdfCommands`]) warns no more.
+        if self.partition_spec.is_empty() && !in_pickled_build() {
             tell_plan_build_listener(|listener| listener.window_without_partitions());
         }
         window.partition_spec = self.partition_spec.iter().map(|e| e.to_proto()).collect();
@@ -2740,6 +2925,127 @@ mod tests {
         ));
         // A request of a plain expression fails no more.
         assert!(col("x").try_to_proto().is_ok());
+    }
+
+    /// A pickler that records `tag` in `calls` at each pickling, and gives the tag and the number
+    /// of the pickling, or, when it `fails`, the error of the tag.
+    fn recording_pickler(
+        calls: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+        tag: &'static str,
+        fails: bool,
+    ) -> crate::udf::CommandPickler {
+        let state = (std::sync::Arc::clone(calls), AtomicU32::new(0));
+        crate::udf::CommandPickler::new(state, move |(calls, count)| {
+            let n = count.fetch_add(1, Ordering::SeqCst);
+            calls.lock().unwrap().push(tag.to_string());
+            if fails {
+                return Err(type_error(tag));
+            }
+            Ok(format!("{tag}{n}").into_bytes())
+        })
+    }
+
+    /// A Python UDF of `x`, of the command of `pickler`.
+    fn pickled_udf(pickler: crate::udf::CommandPickler) -> Expression {
+        let payload = crate::udf::PythonUDFPayload::pickled_at_build(
+            DataType::Long,
+            crate::udf::eval_type::SQL_BATCHED_UDF,
+            pickler,
+            "3.11".to_string(),
+        );
+        ExpressionNode::CommonInlineUserDefinedFunction(Box::new(
+            CommonInlineUserDefinedFunctionExpression::new(
+                "f".to_string(),
+                true,
+                vec![col("x")],
+                payload,
+            ),
+        ))
+        .into()
+    }
+
+    /// The commands of the UDFs that are the arguments of the function `expression`.
+    fn argument_commands(expression: &proto::Expression) -> Vec<String> {
+        let Some(proto::expression::ExprType::UnresolvedFunction(function)) = &expression.expr_type
+        else {
+            panic!("a function");
+        };
+        function
+            .arguments
+            .iter()
+            .map(|argument| {
+                let Some(proto::expression::ExprType::CommonInlineUserDefinedFunction(udf)) =
+                    &argument.expr_type
+                else {
+                    panic!("a UDF");
+                };
+                let Some(proto::common_inline_user_defined_function::Function::PythonUdf(python)) =
+                    &udf.function
+                else {
+                    panic!("a Python UDF");
+                };
+                String::from_utf8(python.command.to_vec()).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_the_commands_of_udfs_are_pickled_at_each_request_in_pysparks_build_order() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let taken = || std::mem::take(&mut *calls.lock().unwrap());
+        let a = pickled_udf(recording_pickler(&calls, "a", false));
+        let b = pickled_udf(recording_pickler(&calls, "b", false));
+        // As PySpark's `PythonUDF.to_plan`, each request pickles each UDF as it builds the plan,
+        // in its order, a UDF that is twice in the plan twice, and again at the next request.
+        let both = Expression::function("struct", vec![a.clone(), b.clone(), a.clone()]);
+        let sent = both.try_to_proto().expect("picklable");
+        assert_eq!(argument_commands(&sent), ["a0", "b0", "a1"]);
+        assert_eq!(taken(), ["a", "b", "a"]);
+        let sent = both.try_to_proto().expect("picklable");
+        assert_eq!(argument_commands(&sent), ["a2", "b1", "a3"]);
+        assert_eq!(taken(), ["a", "b", "a"]);
+        // The first pickling that fails is the error of the request, after which none is
+        // pickled, as PySpark's build stops at it.
+        let bad = pickled_udf(recording_pickler(&calls, "bad", true));
+        let error = Expression::function("struct", vec![a.clone(), bad.clone(), b.clone()])
+            .try_to_proto()
+            .expect_err("a function that does not pickle");
+        assert_eq!(error.message, "bad");
+        assert_eq!(taken(), ["a", "bad"]);
+        // An expression that fails to build before the UDFs is the error, and none is pickled;
+        // after them, they are pickled first.
+        let names = unbuildable_alias(col("x"), "", Some(type_error("names")), None, None);
+        let error = Expression::function("struct", vec![names.clone(), a.clone()])
+            .try_to_proto()
+            .expect_err("names");
+        assert_eq!((error.message.as_str(), taken()), ("names", vec![]));
+        let error = Expression::function("struct", vec![a.clone(), names.clone()])
+            .try_to_proto()
+            .expect_err("names");
+        assert_eq!(
+            (error.message.as_str(), taken()),
+            ("names", vec!["a".into()])
+        );
+        let error = Expression::function("struct", vec![bad.clone(), names.clone()])
+            .try_to_proto()
+            .expect_err("bad");
+        assert_eq!(
+            (error.message.as_str(), taken()),
+            ("bad", vec!["bad".into()])
+        );
+        // The error of a pickling is kept apart, as that of an expression, for a pickled Column.
+        let (_, _, kept) = Expression::function("struct", vec![bad.clone()])
+            .try_to_proto_with_levels_and_unbuildable()
+            .expect("not too deep");
+        assert_eq!(kept.expect("the error").message, "bad");
+        assert_eq!(taken(), ["bad"]);
+        // Outside a request, as the Rust API's `to_proto`, the command is pickled as it is built.
+        let built = Expression::function("struct", vec![a.clone(), bad.clone()]).to_proto();
+        assert_eq!(argument_commands(&built), ["a6", ""]);
+        assert_eq!(taken(), ["a", "bad"]);
+        // A request of an expression without UDFs pickles nothing.
+        assert!(col("x").try_to_proto().is_ok());
+        assert!(taken().is_empty());
     }
 
     #[test]

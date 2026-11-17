@@ -46,11 +46,17 @@ pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<Strin
 )]
 pub struct PyColumn {
     pub(crate) column: Column,
+    /// Set once the value is written, so that `__traverse__` reads nothing else of an object that
+    /// the garbage collector traverses while it is created (see `PyDataFrame`).
+    gc_ready: std::sync::atomic::AtomicBool,
 }
 
 impl PyColumn {
     pub fn new(column: Column) -> Self {
-        PyColumn { column }
+        PyColumn {
+            column,
+            gc_ready: std::sync::atomic::AtomicBool::new(true),
+        }
     }
 }
 
@@ -751,6 +757,52 @@ impl PyColumn {
         self._expr().to_plan(py, session)
     }
 
+    /// As a Column of PySpark Connect, a Python object whose expression Python's garbage collector
+    /// sees: the functions of its UDFs, which a request pickles when it builds a plan of the
+    /// Column, as PySpark's expression keeps them, that only this Column keeps alive are reported
+    /// to the collector, so that a reference cycle through a function and the Column is freed, as
+    /// PySpark frees it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        crate::udf_command::visit_pickler_objects(
+            self.column.expression().exclusive_pickler_objects(),
+            &visit,
+        )
+    }
+
+    /// The shallow copy of a Column, as PySpark's `copy.copy`, which shares the expression of the
+    /// Column and the values of its attributes: so the functions of its UDFs are pickled when a
+    /// request builds a plan of the copy, as those of the Column, and not when it is copied.
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let copy = Bound::new(slf.py(), PyColumn::new(slf.get().column.clone()))?;
+        let state = crate::group::instance_state(slf.as_any())?;
+        if !state.is_none() {
+            copy.getattr("__dict__")?.call_method1("update", (state,))?;
+        }
+        Ok(copy)
+    }
+
+    /// The deep copy of a Column, as PySpark's `copy.deepcopy`: of the same expression, which
+    /// cannot change, as the functions of the UDFs of PySpark's deep copy are those of the Column,
+    /// and of deep copies of its attributes, with `memo`, which has the copy before them, as
+    /// `copy` reconstructs an object.
+    fn __deepcopy__<'py>(
+        slf: &Bound<'py, Self>,
+        memo: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let copy = Bound::new(py, PyColumn::new(slf.get().column.clone()))?;
+        let state = crate::group::instance_state(slf.as_any())?;
+        if !state.is_none() {
+            memo.set_item(slf.as_ptr() as usize, &copy)?;
+            let state = py.import("copy")?.call_method1("deepcopy", (state, memo))?;
+            copy.getattr("__dict__")?.call_method1("update", (state,))?;
+        }
+        Ok(copy)
+    }
+
     /// A Column pickles, as PySpark Connect's, which pickles its expression: of the bytes of the
     /// `spark.connect.Expression` of this column and of its rendering, of which the function of
     /// `pyspark.sql.connect.column._reduce_column` gives back the Column, also on a Python worker
@@ -761,7 +813,10 @@ impl PyColumn {
     /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
     /// A Column too deep to be sent is the `RecursionError` that PySpark's pickler raises for it.
     /// A user-set attribute of the instance is the reduce's state, as of a plain object, so
-    /// that `copy`, `deepcopy` and `pickle` keep it, as they do of PySpark's Column.
+    /// that `pickle` keeps it, as it does of PySpark's Column. The function of a UDF of the
+    /// Column is pickled now, into the command of the expression, as PySpark's pickle of the
+    /// Column pickles the function with it; one that does not pickle raises the error of its
+    /// pickling.
     fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let this = slf.borrow();
         // Of an expression that a request fails to build, as PySpark's Column of an alias of a
@@ -773,6 +828,12 @@ impl PyColumn {
                 .try_to_proto_with_levels_and_unbuildable()
         })
         .to_pyerr()?;
+        if let Some(exception) = unbuildable
+            .as_ref()
+            .and_then(crate::errors::callback_exception)
+        {
+            return Err(exception);
+        }
         let build_error = unbuildable
             .as_ref()
             .map(|error| error_description(py, error))

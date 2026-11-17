@@ -4063,14 +4063,170 @@ def test_subqueries_are_sent_with_the_plans_they_refer_to_as_pyspark(mock_connec
     assert len(options[1]) == 1 and len(options[2]) == 1 and 3 not in options
 
 
-def test_udtf_handlers_are_pickled_when_used_as_pyspark(mock_connect, tmp_path):
-    # As PySpark Connect's PythonUDTF: the handler is pickled when the UDTF is used, so a
-    # handler that does not pickle raises there, a PySparkPicklingError of
-    # UDTF_SERIALIZATION_ERROR of its PicklingError.
+def _late_pickled_cases():
+    # The DataFrame of each API that holds a Python function of `box`, which returns box[0], and
+    # the command of its function in the root of a request. A function pickles its closure by
+    # value, so the command holds box[0] as it is when the function is pickled.
+    from collections.abc import Iterator
+
+    import pandas as pd
+    import pyarrow as pa
+    from pyspark.sql import functions as F
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    def udf_command(root):
+        return root.project.expressions[0].common_inline_user_defined_function.python_udf.command
+
+    def scalar_pandas(box):
+        def f(s: pd.Series) -> pd.Series:
+            return box[0]
+
+        return f
+
+    def iterator_pandas(box):
+        def f(it: Iterator[pd.Series]) -> Iterator[pd.Series]:
+            yield box[0]
+
+        return f
+
+    def scalar_arrow(box):
+        def f(a: pa.Array) -> pa.Array:
+            return box[0]
+
+        return f
+
+    def aggregate_pandas(box):
+        def f(s: pd.Series) -> int:
+            return box[0]
+
+        return f
+
+    def handler(box):
+        class Handler:
+            def eval(self, x):
+                yield (box[0],)
+
+        return Handler
+
+    class Processor(StatefulProcessor):
+        def __init__(self, box):
+            self.box = box
+
+        def init(self, handle):
+            pass
+
+        def handleInputRows(self, key, rows, timerValues):
+            yield from rows
+
+        def close(self):
+            pass
+
+    def map_command(root):
+        return root.map_partitions.func.python_udf.command
+
+    def group_command(root):
+        return root.group_map.func.python_udf.command
+
+    def cogroup_command(root):
+        return root.co_group_map.func.python_udf.command
+
+    def udtf_command(root):
+        return root.common_inline_user_defined_table_function.python_udtf.command
+
+    def grouped(df):
+        return df.groupBy("id")
+
+    return {
+        "udf": (lambda df, box: df.select(F.udf(lambda x: box[0], "long")("id")), udf_command),
+        "arrow-optimized udf": (
+            lambda df, box: df.select(F.udf(lambda x: box[0], "long", useArrow=True)("id")),
+            udf_command),
+        "pandas_udf": (lambda df, box: df.select(F.pandas_udf(scalar_pandas(box), "long")("id")),
+                       udf_command),
+        "pandas_udf of iterators": (
+            lambda df, box: df.select(F.pandas_udf(iterator_pandas(box), "long")("id")),
+            udf_command),
+        "arrow_udf": (lambda df, box: df.select(F.arrow_udf(scalar_arrow(box), "long")("id")),
+                      udf_command),
+        "grouped aggregate pandas_udf": (
+            lambda df, box: df.groupBy().agg(F.pandas_udf(aggregate_pandas(box), "long")("id")),
+            lambda root: root.aggregate.aggregate_expressions[0]
+            .common_inline_user_defined_function.python_udf.command),
+        "udtf": (lambda df, box: F.udtf(handler(box), returnType="v: long")(F.lit(1)),
+                 udtf_command),
+        "udtf of a table argument": (
+            lambda df, box: F.udtf(handler(box), returnType="v: long")(df.asTable()),
+            lambda root: udtf_command(root.with_relations.root)),
+        "udtf of a lateral join": (
+            lambda df, box: df.lateralJoin(
+                F.udtf(handler(box), returnType="v: long")(F.col("id").outer())),
+            lambda root: udtf_command(root.lateral_join.right)),
+        "mapInPandas": (lambda df, box: df.mapInPandas(lambda it: box[0], "id long"), map_command),
+        "mapInArrow": (lambda df, box: df.mapInArrow(lambda it: box[0], "id long"), map_command),
+        "applyInPandas": (lambda df, box: grouped(df).applyInPandas(lambda p: box[0], "id long"),
+                          group_command),
+        "applyInArrow": (lambda df, box: grouped(df).applyInArrow(lambda t: box[0], "id long"),
+                         group_command),
+        "cogroup applyInPandas": (
+            lambda df, box: grouped(df).cogroup(grouped(df)).applyInPandas(
+                lambda left, right: box[0], "id long"),
+            cogroup_command),
+        "cogroup applyInArrow": (
+            lambda df, box: grouped(df).cogroup(grouped(df)).applyInArrow(
+                lambda left, right: box[0], "id long"),
+            cogroup_command),
+        "applyInPandasWithState": (
+            lambda df, box: grouped(df).applyInPandasWithState(
+                lambda key, pdfs, state: box[0], "id long", "c long", "append", "NoTimeout"),
+            lambda root: root.apply_in_pandas_with_state.func.python_udf.command),
+        "transformWithStateInPandas": (
+            lambda df, box: grouped(df).transformWithStateInPandas(
+                Processor(box), "id long", "append", "None"),
+            group_command),
+        "transformWithState": (
+            lambda df, box: grouped(df).transformWithState(
+                Processor(box), "id long", "append", "None"),
+            group_command),
+        "transformWithState of an initial state": (
+            lambda df, box: grouped(df).transformWithState(
+                Processor(box), "id long", "append", "None", initialState=grouped(df)),
+            group_command),
+    }
+
+
+@pytest.mark.parametrize("case", list(_late_pickled_cases()))
+def test_the_functions_of_udfs_are_pickled_when_their_plans_are_built_as_pyspark(
+    mock_connect, case
+):
+    # As PySpark's PythonUDF.to_plan and PythonUDTF.to_plan, which pickle the function of a UDF,
+    # a pandas or Arrow UDF, a UDTF, or a map or group-map function each time they build a plan
+    # that holds it: each request carries the function as it is when the request is built, with
+    # the values that it reads then, not as it was when it was applied.
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    make, command_of = _late_pickled_cases()[case]
+    box = ["<applied>"]
+    frame = make(spark.range(2), box)
+    for value, before in (("<first>", b"<applied>"), ("<second>", b"<first>")):
+        box[0] = value
+        frame.explain()
+        # AnalyzePlanRequest.explain of the plan of the DataFrame.
+        root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
+        command = command_of(root)
+        assert value.encode() in command and before not in command
+
+
+def test_udtf_handlers_are_pickled_when_plans_are_built_as_pyspark(mock_connect, tmp_path):
+    # As PySpark Connect's PythonUDTF.to_plan: the handler is pickled each time a request builds
+    # a plan of the UDTF, so the call of a handler that does not pickle gives a DataFrame, and
+    # each request of it, in a lateral join too, raises a PySparkPicklingError of
+    # UDTF_SERIALIZATION_ERROR of its PicklingError, with no request sent. The registration, a
+    # command, pickles the handler when it is called, and raises there.
     from pyspark.errors import PySparkPicklingError
     from pyspark.sql.functions import udtf
 
-    spark, _ = mock_connect
+    spark, service = mock_connect
     file_obj = open(tmp_path / "file.txt", "w")
     try:
 
@@ -4080,7 +4236,16 @@ def test_udtf_handlers_are_pickled_when_used_as_pyspark(mock_connect, tmp_path):
                 file_obj
                 yield (1,)
 
-        for use in (lambda: Unpicklable(), lambda: spark.udtf.register("unpicklable", Unpicklable)):
+        df = Unpicklable()
+        lateral = spark.range(1).lateralJoin(Unpicklable())
+        sent = (len(service.analyze_requests), len(service.execute_requests))
+        uses = [
+            lambda: df.schema,
+            lambda: df.collect(),
+            lambda: lateral.schema,
+            lambda: spark.udtf.register("unpicklable", Unpicklable),
+        ]
+        for use in uses:
             with pytest.raises(PySparkPicklingError) as error:
                 use()
             assert error.value.getCondition() == "UDTF_SERIALIZATION_ERROR"
@@ -4089,6 +4254,8 @@ def test_udtf_handlers_are_pickled_when_used_as_pyspark(mock_connect, tmp_path):
                 "message": "Please check the stack trace and make sure the function is "
                 "serializable.",
             }
+            assert type(error.value.__context__) is pickle.PicklingError
+        assert (len(service.analyze_requests), len(service.execute_requests)) == sent
     finally:
         file_obj.close()
 
@@ -10584,17 +10751,93 @@ def test_functions_next_day():
     assert type(F.next_day(c, "Monday")).__name__ == "Column"
 
 
+def test_udf_functions_are_pickled_in_the_order_of_the_build_of_each_request_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's PythonUDF.to_plan: applying a UDF pickles nothing, each request pickles the
+    # function of each UDF of its plan as it builds the plan, in the order of the build, and a
+    # function that does not pickle raises the PicklingError of CloudPickleSerializer.dumps from
+    # each request, with no request sent. The error of an expression built before the UDF, such
+    # as an alias of a name that protobuf refuses, is raised first, and the function is not
+    # pickled. A copy of a Column shares its UDFs, pickled by the requests of the copy, as the
+    # copy of PySpark's Column shares the function; a pickle of the Column pickles the function
+    # with it.
+    import copy
+    import threading
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(2)
+    picklings = []
+
+    class Recorded:
+        def __init__(self, tag):
+            self.tag = tag
+
+        def __reduce__(self):
+            picklings.append(self.tag)
+            return (Recorded, (self.tag,))
+
+    def recording(tag):
+        recorded = Recorded(tag)
+        return F.udf(lambda x: (recorded, x)[1], "long")("id")
+
+    first, second = recording("first"), recording("second")
+    assert picklings == []
+    df.select(first, second, first.alias("again")).schema
+    assert picklings == ["first", "second", "first"]
+    del picklings[:]
+    for column in (copy.copy(first), copy.deepcopy(first)):
+        df.select(column).collect()
+    assert picklings == ["first", "first"]
+    del picklings[:]
+    with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+        df.select(F.col("id").alias("\ud800"), first).schema
+    assert picklings == []
+    with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+        df.select(first, F.col("id").alias("\ud800")).schema
+    assert picklings == ["first"]
+    del picklings[:]
+    CloudPickleSerializer().dumps(first)
+    assert picklings == ["first"]
+
+    lock = threading.Lock()
+    unpicklable = F.udf(lambda x: (lock, x)[1], "long")("id")
+    message = "^Could not serialize object: TypeError: cannot pickle '_thread.lock' object$"
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    del picklings[:]
+    plans = [
+        df.select(unpicklable),
+        df.select(copy.copy(unpicklable)),
+        df.select(copy.deepcopy(unpicklable)),
+        df.filter(unpicklable > 0).select(second),
+        df.select(second, unpicklable, first),
+    ]
+    for plan in plans:
+        for request in (lambda: plan.schema, lambda: plan.collect()):
+            with pytest.raises(pickle.PicklingError, match=message):
+                request()
+    assert picklings == ["second", "second"]
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+    with pytest.raises(pickle.PicklingError, match=message):
+        CloudPickleSerializer().dumps(unpicklable)
+
+
 def test_unpicklable_functions_raise_picklingerror_as_pyspark(mock_connect):
     # As PySpark's CloudPickleSerializer().dumps: a function of applyInPandas, applyInArrow,
     # mapInPandas, mapInArrow, cogroup, transformWithState(InPandas) or a data source class
     # that does not pickle raises pickle.PicklingError "Could not serialize object: ...", not
-    # the bare TypeError of cloudpickle.
+    # the bare TypeError of cloudpickle. As PySpark's `PythonUDF.to_plan`, a map or group-map
+    # function is pickled when a request builds the plan of its DataFrame, which raises then,
+    # with no request sent, and at each request; a data source when it is registered.
     import pickle
     import threading
 
     from pyspark.sql.datasource import DataSource
 
-    spark, _ = mock_connect
+    spark, service = mock_connect
     df = spark.range(2)
     grouped = df.groupBy("id")
     lock = threading.Lock()
@@ -10620,13 +10863,19 @@ def test_unpicklable_functions_raise_picklingerror_as_pyspark(mock_connect):
         lambda: grouped.cogroup(grouped).applyInArrow(lambda a, b: (lock, a)[1], "id long"),
         lambda: grouped.transformWithStateInPandas(Processor(), "id long", "append", "NoTimeMode"),
         lambda: grouped.transformWithState(Processor(), "id long", "append", "NoTimeMode"),
-        lambda: spark.dataSource.register(Source),
     ]
     for call in unpicklable:
-        with pytest.raises(pickle.PicklingError, match="^Could not serialize object: ") as e:
-            call()
-        assert type(e.value) is pickle.PicklingError
-        assert "cannot pickle" in str(e.value)
+        frame = call()
+        sent = (len(service.analyze_requests), len(service.execute_requests))
+        for _ in range(2):
+            with pytest.raises(pickle.PicklingError, match="^Could not serialize object: ") as e:
+                frame.collect()
+            assert type(e.value) is pickle.PicklingError
+            assert "cannot pickle" in str(e.value)
+        assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+    with pytest.raises(pickle.PicklingError, match="^Could not serialize object: ") as e:
+        spark.dataSource.register(Source)
+    assert type(e.value) is pickle.PicklingError
 
 
 def test_functions_quarter():
@@ -11223,6 +11472,59 @@ def test_cycles_through_instance_dicts_are_collected_as_pyspark(mock_connect):
         del obj
         gc.collect()
         assert freed() is None
+
+
+def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_connect):
+    # As PySpark's plans and expressions, of Python objects, which hold the function of a UDF
+    # until a request pickles it: a reference cycle through the function and the DataFrame or the
+    # Column that holds it, as through a bound method of an object that keeps it, is collected,
+    # of a UDF, a map function and a UDTF. A function that live Columns and DataFrames share is
+    # kept, and pickles at their requests.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    df = spark.range(1)
+
+    class Job:
+        def f(self, x):
+            return x
+
+    def udtf_of(job):
+        class Handler:
+            def eval(self, x):
+                yield (job is not None,)
+
+        return F.udtf(Handler, returnType="v: boolean")(F.lit(1))
+
+    holders = [
+        lambda job: df.select(F.udf(job.f, "long")("id")),
+        lambda job: F.udf(job.f, "long")("id"),
+        lambda job: df.mapInPandas(job.f, "id long"),
+        udtf_of,
+    ]
+    for holder in holders:
+        job = Job()
+        job.held = holder(job)
+        freed = weakref.ref(job)
+        del job
+        gc.collect()
+        assert freed() is None
+
+    state = ["<live>"]
+    shared = F.udf(lambda x: state[0], "long")("id")
+    kept = [df.select(shared), copy.copy(shared), copy.deepcopy(shared)]
+    for _ in range(3):
+        gc.collect()
+    for column in [shared] + kept[1:]:
+        df.select(column).explain()
+        root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
+        command = root.project.expressions[0].common_inline_user_defined_function.python_udf.command
+        assert b"<live>" in command
 
 
 def test_freed_instances_given_attributes_keep_no_memory_as_pyspark(mock_connect):
@@ -22327,6 +22629,33 @@ def test_windows_of_no_partitions_warn_at_each_plan_build_as_pyspark(mock_connec
         with pytest.raises(UserWarning, match="^WARN WindowExpression: No Partition Defined"):
             df.collect()
     assert len(service.execute_requests) == requests
+
+
+def test_windows_of_no_partitions_warn_once_a_request_of_udfs_as_pyspark(mock_connect):
+    # As PySpark's client, which builds the plan of a request once, pickling the functions of its
+    # UDFs as it builds it: a plan of a UDF warns once of a window of no partitions at each
+    # request, whether the UDF comes before or after the window in the build, as a plan of no
+    # UDF does, though the drop-in builds a plan of UDFs twice (the second takes the commands
+    # that the first pickled).
+    import warnings
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    plus_one = F.udf(lambda x: x + 1, "long")
+    window = F.row_number().over(Window.orderBy(F.lit(1))).alias("r")
+    frames = [
+        spark.range(3).select(plus_one("id").alias("a")).select("a", window),
+        spark.range(3).select("id", window).select(plus_one("id").alias("a"), "r"),
+        spark.range(3).select(plus_one("id").alias("a"), window),
+    ]
+    for df in frames:
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            df.schema
+            df.collect()
+        assert sum("No Partition Defined" in str(warning.message) for warning in record) == 2
 
 
 def test_window_frames_and_columns_are_checked_as_pyspark():

@@ -23,18 +23,20 @@ mod dispatch {
 /// - name: str - name of the UDF
 /// - return_type: DataType - return type of the UDF
 /// - eval_type: int - evaluation type (from PythonEvalType)
-/// - command_bytes: bytes - cloudpickled command (usually (func, output_type))
+/// - command: bytes - cloudpickled command (usually (func, output_type)), or a function of no
+///   arguments that returns it, which each request that builds the plan calls, as PySpark's
+///   `PythonUDF.to_plan` pickles the function each time
 /// - python_ver: str - Python version (e.g., "3.9")
 /// - *args: Column - argument columns
 /// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=true, named_args=Vec::new()))]
+#[pyo3(signature = (name, return_type, eval_type, command, python_ver, *args, deterministic=true, named_args=Vec::new()))]
 #[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udf(
     name: String,
     return_type: &Bound<'_, PyAny>,
     eval_type: i32,
-    command_bytes: Vec<u8>,
+    command: &Bound<'_, PyAny>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
@@ -50,7 +52,14 @@ fn pyfunc_make_udf(
         .collect();
 
     // Create the Python UDF payload
-    let python_udf = PythonUDFPayload::new(return_data_type, eval_type, command_bytes, python_ver);
+    let python_udf = match crate::udf_command::UdfCommand::of(command) {
+        crate::udf_command::UdfCommand::Pickled(bytes) => {
+            PythonUDFPayload::new(return_data_type, eval_type, bytes, python_ver)
+        }
+        crate::udf_command::UdfCommand::AtBuild(pickler) => {
+            PythonUDFPayload::pickled_at_build(return_data_type, eval_type, pickler, python_ver)
+        }
+    };
 
     // Create the UDF expression
     let udf_expr =
@@ -109,21 +118,23 @@ fn udf_arguments(
 /// (a `CommonInlineUserDefinedTableFunction` relation) via the session's TVF.
 ///
 /// - session: the SparkSession the UDTF is evaluated against
-/// - name/return_type/eval_type/command_bytes/python_ver: as for `make_udf`
-///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF})
+/// - name/return_type/eval_type/command/python_ver: as for `make_udf`
+///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF}); a function
+///   for `command` pickles the handler class each time a request builds the plan, as PySpark's
+///   `PythonUDTF.to_plan` does
 /// - *args: Column arguments
 /// - deterministic: whether the UDTF is deterministic, which a PySpark UDTF is not unless
 ///   `asDeterministic()` makes it so
 /// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=false, named_args=Vec::new()))]
+#[pyo3(signature = (session, name, return_type, eval_type, command, python_ver, *args, deterministic=false, named_args=Vec::new()))]
 #[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udtf(
     session: PyRef<'_, PySparkSession>,
     name: String,
     return_type: Option<&Bound<'_, PyAny>>,
     eval_type: i32,
-    command_bytes: Vec<u8>,
+    command: &Bound<'_, PyAny>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
@@ -143,15 +154,27 @@ fn pyfunc_make_udtf(
             }
         })
         .transpose()?;
-    let df = session.session.tvf().udtf(
-        &name,
-        col_args,
-        rt,
-        eval_type,
-        command_bytes,
-        python_ver,
-        deterministic,
-    );
+    let tvf = session.session.tvf();
+    let df = match crate::udf_command::UdfCommand::of(command) {
+        crate::udf_command::UdfCommand::Pickled(bytes) => tvf.udtf(
+            &name,
+            col_args,
+            rt,
+            eval_type,
+            bytes,
+            python_ver,
+            deterministic,
+        ),
+        crate::udf_command::UdfCommand::AtBuild(pickler) => tvf.udtf_pickled_at_build(
+            &name,
+            col_args,
+            rt,
+            eval_type,
+            pickler,
+            python_ver,
+            deterministic,
+        ),
+    };
     Ok(PyDataFrame::new(df))
 }
 

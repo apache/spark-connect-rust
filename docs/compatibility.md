@@ -228,6 +228,12 @@ tells whether a record batch of the result has arrived, also one without rows.
 `SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
 before a plan is sent, as PySpark's client reads them when it builds its first plan.
 
+`PythonUDFPayload` and `LogicalPlan::CommonInlineUdtf` add a `pickler` field, which is not a
+stable API: the pickling of the command of a UDF or UDTF of the Python client, which a request
+calls each time it builds the plan, as PySpark pickles the function then. Code that constructs
+the struct or the variant directly sets it to `None`. `PythonUDFPayload::new` and
+`TableValuedFunction::udtf` are unchanged: a command of bytes is sent as it is.
+
 ## Native ML objects: fetch, summaries, save and load (Rust API)
 
 `spark_connect::ml` reads and writes the server-side objects of Spark Connect ML as PySpark 4.3.0
@@ -1238,7 +1244,9 @@ expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDe
 sends the plan, where the drop-in sends it and the server fails it at its own limit of 100 levels.
 A Column of 745 levels or more raises a `RecursionError` when it is pickled, of the drop-in's own
 message. PySpark's pickler raises one from about 600 levels, under Python's default recursion limit,
-so a Column of 600 to 744 levels pickles in the drop-in only.
+so a Column of 600 to 744 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a
+Column share its expression, so they copy a Column of any depth, as PySpark's `copy.copy` does;
+PySpark's `copy.deepcopy` raises a `RecursionError` from about 165 levels.
 
 A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
 builds the Column or the window: the frame bounds of `Window.rowsBetween` and `rangeBetween`, and a
@@ -1419,6 +1427,49 @@ PySpark. A stream reader's option of None leaves its option as it was, as PySpar
 key, a table property or a config key that is not a str fails at the same call as PySpark's, with
 the same error: an `AssertionError` at a reader's load of a path, and protobuf's `TypeError` where
 the request is built otherwise.
+
+The function of a UDF, of a pandas or Arrow UDF of any eval type, of a UDTF (called, of a table
+argument, in a lateral join) and of `mapInPandas`, `mapInArrow`, `applyInPandas`, `applyInArrow`,
+the cogroup's `applyInPandas` and `applyInArrow`, `applyInPandasWithState`,
+`transformWithStateInPandas` and `transformWithState` is pickled each time a request builds a plan
+that holds it, as PySpark's `PythonUDF.to_plan` and `PythonUDTF.to_plan` pickle it. So a value that
+the function reads, changed after the function was applied and before an action, is the value that
+the action runs with, and so for each later action. A function that does not pickle fails each
+request of the plan, from the first, such as `df.schema`, with PySpark's error, the `PicklingError`
+of `CloudPickleSerializer.dumps`, or `UDTF_SERIALIZATION_ERROR` of a UDTF, and no request is sent;
+the call that applies it does not fail. The functions are pickled in the order in which PySpark
+builds the plan, the initial state of `transformWithState` before its function and the arguments of
+a UDTF before its handler, and the first error of the build, of a pickling or of a value that the
+plan does not take, such as a str above, is raised. `spark.udf.register` and `spark.udtf.register`
+are commands, which pickle the function when they are called, as PySpark's do. A copy of a Column
+(`copy.copy` and `copy.deepcopy`), and `copy.copy` of a DataFrame, share the function, which the
+requests of the copy pickle. A request warns once of a window of no partitions, as PySpark's, though
+the drop-in builds the plan of a request twice when it has such functions, as it pickles them
+between the two builds: so where a function that does not pickle comes before such a window in the
+build, the drop-in warns of the window before it raises the error of the pickling, where PySpark
+raises it without the warning.
+
+A pickled Column or DataFrame, and a deep copy of a DataFrame, carry the commands that their
+functions pickled to when they were pickled or copied, as protobufs that the server's Python worker
+unpickles too, where PySpark's carry the functions, which their requests pickle again. So a value
+that a function reads, changed after that, is seen by PySpark's deep copy, and by its unpickled
+Column of a function that `pickle` pickles by reference, such as a function of `__main__`, but not
+by the drop-in's. `pickle.dumps` of a Column of a UDF of a function that does not pickle by value
+raises the `PicklingError` of its command, where PySpark's pickles a module-level function by
+reference, and `pickle.dumps` of the Column of a UDF of a lambda pickles, where PySpark's raises
+the `PicklingError` of the lambda. `CloudPickleSerializer.dumps` of such a Column raises the same
+error in both.
+
+A DataFrame or a Column reports the functions of its UDFs to Python's garbage collector, as
+PySpark's plan of Python objects is seen by it, so a reference cycle through a function and the
+DataFrame or the Column that holds it, such as through a bound method of an object that keeps the
+DataFrame, is collected. A function that a Column and a DataFrame of it share, or two DataFrames,
+is reported by neither, so that no reference is counted twice: a cycle through it is freed only
+when it is broken, where PySpark collects it.
+
+The condition and the assignments of a clause of `mergeInto` are pickled when the clause is added,
+which raises there, as PySpark's, and again when the merge runs, whose request carries the later
+pickle, where PySpark's carries the one of the clause.
 
 The drop-in has one class for each UDF and UDTF, the Connect class of `pyspark.sql.connect.udf`
 and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDefinedFunction` and

@@ -1362,6 +1362,19 @@ impl DataFrame {
         ))
     }
 
+    /// The objects of the picklers of the UDFs and the UDTFs of the plan of this DataFrame that
+    /// it alone keeps alive, as [`DataFrame::exclusive_relation_owners`] gives the owners of its
+    /// relations, which a Python wrapper reports to Python's garbage collector too: a function
+    /// of a UDF may keep the DataFrame of the UDF, as the bound method of an object that keeps
+    /// the DataFrame does (see `crate::udf::exclusive_pickler_objects`). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        if Arc::strong_count(&self.plan) != 1 {
+            return Vec::new();
+        }
+        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
+    }
+
     /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
     /// alone keeps alive: every `Arc` from its plan down to such an owner is held once, by this
     /// DataFrame. A Python wrapper reports them to Python's garbage collector, so that a
