@@ -108,19 +108,17 @@ RUFF_BLOCK_END = "    # --- generated type stubs: END ---\n"
 # the drop-in whose objects a user imports. The stub is at the path of PySpark's module, with
 # .pyi for .py (pyspark/sql/functions/__init__.pyi for the package pyspark.sql.functions).
 STUB_MODULES = (
-    # The modules of the native classes, which re-export them from pyspark._pyspark.
+    # The modules of the native classes, which re-export them from pyspark._pyspark. Not
+    # pyspark.sql.conf, merge, observation and tvf, whose classic classes are PySpark's annotated
+    # modules, vendored as they are (scripts/check_vendored_upstream.sh), which a stub would shadow.
     "pyspark.storagelevel",
     "pyspark.sql.catalog",
     "pyspark.sql.column",
-    "pyspark.sql.conf",
     "pyspark.sql.dataframe",
     "pyspark.sql.group",
-    "pyspark.sql.merge",
-    "pyspark.sql.observation",
     "pyspark.sql.pandas.group_ops",
     "pyspark.sql.readwriter",
     "pyspark.sql.table_arg",
-    "pyspark.sql.tvf",
     "pyspark.sql.types",
     "pyspark.sql.window",
     "pyspark.sql.streaming.query",
@@ -212,8 +210,6 @@ class Extra:
 
 
 EXTRAS = {
-    # The drop-in's RuntimeConfig is its native RuntimeConf, which the module also exports.
-    "pyspark.sql.conf": Extra("RuntimeConf = RuntimeConfig\n"),
     # The drop-in's pyspark.sql.connect.functions.builtin has every public name of its
     # pyspark.sql.functions.builtin (see pyspark/sql/connect/functions/_copies.py), with these,
     # which PySpark's module of PySpark Connect does not import.
