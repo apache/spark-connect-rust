@@ -1158,6 +1158,28 @@ unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's 
 class with a native base; protocols 2 and up, pickle's default, load in both clients, and PySpark
 loads the drop-in's at every protocol.
 
+So it is for the data types. PySpark's are plain classes, which pickle as their class and their
+`__dict__`: at the protocols 2 and up the drop-in makes its type of the class, without arguments,
+and sets the attributes, so a pickled `df.schema` loads with its fields, names, metadata,
+collations, nullable flags and parameters, as PySpark's types of them. The private `_crs` and
+`_alg` of PySpark's spatial types, which its constructors set of the SRID, are not attributes of
+the drop-in's. At protocol 0 or 1 the drop-in raises `TypeError: object.__new__(DecimalType) is not
+safe, use DecimalType.__new__()`. The drop-in's own types pickle, copy and deep-copy as
+`_parse_datatype_json_string` of their JSON, or, with a user-defined type or a nullable flag that is
+not a bool, of the types and flags they are made of, which the Python workers of the server load at
+every protocol. So such a pickle does not keep what PySpark's pickle of the `__dict__` keeps: an
+attribute that a user set, a `hasPrecisionInfo` that is not true, and the `names` and
+`_needConversion` of a `StructType` that an edit of its fields made differ.
+
+The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
+`DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr, JSON, `==` and hash show, also in the
+struct, array or map that holds it. A drop-in type holds only the values that its constructor
+makes, so the assignment of another, such as a str of `scale` or a field that an interval does not
+have, raises the constructor's error, where PySpark keeps any value, of which its repr or JSON may
+fail later. A set `srid` of a spatial type is of its JSON too, where PySpark's JSON stays that of
+the CRS of its constructor. The parameters are not entries of the `__dict__` of a type, so
+`vars(t)` is empty, where PySpark's has them.
+
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
 
