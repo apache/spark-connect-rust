@@ -39,8 +39,9 @@ hyper = "1"
 # The Basic credential and the percent-decoded userinfo of a proxy URI, already built for tonic.
 base64 = "0.22"
 percent-encoding = "2"
-# The tokio stream of a channel through a proxy, as tonic's own connector gives it to hyper.
-hyper-util = { version = "0.1", features = ["tokio"] }
+# The tokio stream of a channel through a proxy, as tonic's own connector gives it to hyper, and
+# the connector of a direct channel, tonic's own (whose `channel` feature builds it).
+hyper-util = { version = "0.1", features = ["client-legacy", "tokio"] }
 # Grows the stack for the clones and drops of the requests of deep plans.
 stacker = "0.1"
 

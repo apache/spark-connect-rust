@@ -563,6 +563,54 @@ async fn a_tls_handshake_that_stalls_in_the_tunnel_is_unavailable() {
     assert_eq!(proxy.connects().len(), 1);
 }
 
+/// A server that accepts TCP connections, holds them, and never answers. It returns its address
+/// and the count of the connections it accepted.
+async fn silent_server() -> (SocketAddr, Arc<Mutex<usize>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepted = Arc::new(Mutex::new(0));
+    let count = accepted.clone();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            *count.lock().unwrap() += 1;
+            held.push(stream);
+        }
+    });
+    (address, accepted)
+}
+
+#[tokio::test]
+async fn a_tls_handshake_that_stalls_on_a_direct_connection_is_unavailable() {
+    // As grpcio's connect deadline: the server accepts the TCP connection and never answers the
+    // TLS handshake. The connect timeout around the whole connection ends it as UNAVAILABLE,
+    // which is retried, as through a proxy, rather than the deadline of the call.
+    let env = EnvTurn::take().await;
+    let (address, accepted) = silent_server().await;
+    let start = Instant::now();
+    let error = env
+        .with(&[], async {
+            let mut client = client(&format!(
+                "sc://{address}/;use_ssl=true;token={TOKEN};session_id={SESSION}"
+            ))
+            .await;
+            client.set_retry_policy(RetryPolicy {
+                max_retries: Some(0),
+                ..RetryPolicy::default()
+            });
+            tokio::time::timeout(Duration::from_secs(40), client.config(config()))
+                .await
+                .expect("the connection is bounded")
+                .unwrap_err()
+        })
+        .await;
+    assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
+    // Past the bound of the TCP connection alone: it connected, and the handshake timed out.
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
+    assert_eq!(*accepted.lock().unwrap(), 1);
+}
+
 #[tokio::test]
 async fn an_unsupported_proxy_scheme_connects_directly() {
     let env = EnvTurn::take().await;
