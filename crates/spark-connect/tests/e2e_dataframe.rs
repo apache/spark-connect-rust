@@ -657,6 +657,76 @@ fn pivot_values_of_floats_and_year_month_intervals_match_discovered_pivots() {
     );
 }
 
+/// As PySpark's createDataFrame, whose `cache_threshold <= _table.nbytes` applies at any size:
+/// with a cache threshold of 64 bytes, a few short rows and columns are uploaded as cached
+/// artifacts, which the server reads back.
+#[test]
+fn create_dataframe_uploads_small_data_at_the_cache_threshold() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::row::{Row, Value};
+    use spark_connect::types::{DataType, StructField};
+    use spark_connect_proto::relation::RelType;
+
+    fn field(name: &str, data_type: DataType) -> StructField {
+        StructField {
+            name: name.into(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        }
+    }
+    let s = session();
+    s.conf()
+        .set("spark.sql.session.localRelationCacheThreshold", "64")
+        .unwrap();
+    let schema = DataType::Struct {
+        fields: vec![
+            field("a", DataType::Long),
+            field(
+                "s",
+                DataType::String {
+                    collation: "UTF8_BINARY".into(),
+                },
+            ),
+        ],
+    };
+    let rows: Vec<Row> = (0..20)
+        .map(|i| {
+            Row::new(
+                vec!["a".into(), "s".into()],
+                vec![Value::Long(i), Value::String(format!("s{i}"))],
+            )
+        })
+        .collect();
+    let frame = s.create_dataframe(rows.clone(), schema).unwrap();
+    let columns: Vec<arrow::array::ArrayRef> = vec![std::sync::Arc::new(
+        arrow::array::Int64Array::from_iter_values(0..20),
+    )];
+    let longs = DataType::Struct {
+        fields: vec![field("b", DataType::Long)],
+    };
+    let from_columns = s.create_dataframe_from_columns(columns, longs).unwrap();
+    s.conf()
+        .unset("spark.sql.session.localRelationCacheThreshold")
+        .unwrap();
+    for df in [&frame, &from_columns] {
+        assert!(matches!(
+            df.to_relation().unwrap().rel_type,
+            Some(RelType::ChunkedCachedLocalRelation(_))
+        ));
+    }
+    assert_eq!(frame.collect().unwrap(), rows);
+    let values: Vec<Value> = from_columns
+        .collect()
+        .unwrap()
+        .iter()
+        .map(|row| row.get(0).unwrap().clone())
+        .collect();
+    assert_eq!(values, (0..20).map(Value::Long).collect::<Vec<_>>());
+}
+
 /// Year-month intervals are collected as their months, in nested values too, and local rows of
 /// them are sent as Spark's Arrow conversion sends them.
 #[test]

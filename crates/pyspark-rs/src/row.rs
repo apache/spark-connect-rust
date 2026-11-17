@@ -14,10 +14,8 @@ pub(crate) type FieldConverters = Arc<Vec<Option<Py<PyAny>>>>;
 static ROW_CONSTRUCTOR: PyOnceLock<RowConstructor> = PyOnceLock::new();
 static DATETIME_OBJECTS: PyOnceLock<DateTimeObjects> = PyOnceLock::new();
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
-static CONVERSION_CHECKPOINT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static MONTH_DAY_NANO: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 const ROW_SOURCE: &std::ffi::CStr = pyo3::ffi::c_str!(include_str!("row.py"));
-const CONVERSION_STEPS_PER_INTERRUPT_CHECK: usize = 1024;
 
 struct RowConstructor {
     row_type: Py<PyAny>,
@@ -86,31 +84,18 @@ pub(crate) struct NestedFieldNames {
     udt_key_maps: HashSet<Vec<NestedFieldPath>>,
     /// The schema paths of the calendar intervals.
     calendar_intervals: HashSet<Vec<NestedFieldPath>>,
-    steps_until_interrupt_check: usize,
+    /// The checkpoints of the conversion, of a step for each row and each value in it.
+    budget: crate::interrupt::ConversionBudget,
 }
 
 impl NestedFieldNames {
-    fn check_interrupts(&mut self, py: Python<'_>) -> PyResult<()> {
-        if self.steps_until_interrupt_check == 0 {
-            let checkpoint = CONVERSION_CHECKPOINT.get_or_try_init(py, || -> PyResult<_> {
-                let globals = PyDict::new(py);
-                Ok(py.eval(c"lambda: None", Some(&globals), None)?.unbind())
-            })?;
-            checkpoint.bind(py).call0()?;
-            py.check_signals()?;
-            self.steps_until_interrupt_check = CONVERSION_STEPS_PER_INTERRUPT_CHECK;
-        }
-        self.steps_until_interrupt_check -= 1;
-        Ok(())
-    }
-
     /// Release names when an iterator closes, including when materialization fails.
     pub(crate) fn clear(&mut self) {
         self.path.clear();
         self.fields.clear();
         self.udt_key_maps.clear();
         self.calendar_intervals.clear();
-        self.steps_until_interrupt_check = 0;
+        self.budget.reset();
     }
 
     /// Record the paths of `schema` whose values convert by their type: the maps whose keys
@@ -139,7 +124,7 @@ impl NestedFieldNames {
         binary_as_bytes: bool,
         path: NestedFieldPath,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.check_interrupts(py)?;
+        self.budget.step(py)?;
         self.path.push(path);
         let result = value_to_py(py, value, binary_as_bytes, self);
         self.path.pop();
@@ -233,7 +218,7 @@ pub(crate) fn row_values_to_py(
     binary_as_bytes: bool,
     nested_fields: &mut NestedFieldNames,
 ) -> PyResult<Py<PyAny>> {
-    nested_fields.check_interrupts(py)?;
+    nested_fields.budget.step(py)?;
     let values = values
         .iter()
         .enumerate()

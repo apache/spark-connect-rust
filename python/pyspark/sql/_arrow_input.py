@@ -45,20 +45,6 @@ def prepare_table(table, schema, timestamp_type, timezone, large_types):
             raise PySparkValueError(errorClass="CANNOT_INFER_EMPTY_SCHEMA", messageParameters={})
         return table, schema, None
 
-    expected_columns = None
-    if isinstance(schema, StructType):
-        expected_columns = len(schema.fields)
-    elif isinstance(schema, AtomicType):
-        expected_columns = 1
-    if expected_columns is not None and expected_columns != table.num_columns:
-        raise PySparkValueError(
-            errorClass="AXIS_LENGTH_MISMATCH",
-            messageParameters={
-                "expected_length": str(expected_columns),
-                "actual_length": str(table.num_columns),
-            },
-        )
-
     if names is not None:
         names.extend(f"_{i + 1}" for i in range(len(names), table.num_columns))
     inferred = (
@@ -66,6 +52,9 @@ def prepare_table(table, schema, timestamp_type, timezone, large_types):
         if isinstance(schema, StructType)
         else from_arrow_schema(table.schema, prefer_timestamp_ntz=timestamp_type == "TIMESTAMP_NTZ")
     )
+    # A struct of other names than the table's, also of another number of fields, fails the
+    # cast with PyArrow's ValueError, or the assert of the localization of nested or timestamp
+    # columns before it, as PySpark Connect's.
     normalized = (
         _check_arrow_table_timestamps_localize(table, inferred, True, timezone)
         .cast(
@@ -78,11 +67,18 @@ def prepare_table(table, schema, timestamp_type, timezone, large_types):
         )
         .rename_columns(inferred.names)
     )
-    if names is not None and len(names) != normalized.num_columns:
+    # Then the number of columns of the schema, one of an atomic type, or of the names.
+    if isinstance(schema, StructType):
+        expected_columns = len(schema.fields)
+    elif isinstance(schema, AtomicType):
+        expected_columns = 1
+    else:
+        expected_columns = None if names is None else len(names)
+    if expected_columns is not None and expected_columns != normalized.num_columns:
         raise PySparkValueError(
             errorClass="AXIS_LENGTH_MISMATCH",
             messageParameters={
-                "expected_length": str(len(names)),
+                "expected_length": str(expected_columns),
                 "actual_length": str(normalized.num_columns),
             },
         )

@@ -39,6 +39,7 @@ from _mock_connect_server import (
 from binary_configuration_cases import TestBinaryConfiguration  # noqa: F401
 from day_time_interval_cases import DayTimeIntervalTests  # noqa: F401
 from interval_input_cases import IntervalInputConversionTests  # noqa: F401
+from local_data_conversion_cases import TestLocalDataConversionInterrupts  # noqa: F401
 from pyspark.sql import Row, SparkSession
 from pyspark.sql import types as T
 from row_conversion_cases import TestRowConversionInterrupts as TestRowConversionInterrupts
@@ -18989,27 +18990,46 @@ def test_arrow_input_array_and_map_struct_fields_allowed():
     assert names is None
 
 
-@pytest.mark.parametrize("schema,expected_length", [
-    pytest.param(T.StructType([T.StructField("x", T.IntegerType())]), "1", id="too-few-fields"),
+@pytest.mark.parametrize("schema,names", [
+    pytest.param(T.StructType([T.StructField("x", T.IntegerType())]), "['x']",
+                 id="too-few-fields"),
     pytest.param(T.StructType([
         T.StructField("x", T.LongType()), T.StructField("y", T.LongType()),
         T.StructField("z", T.LongType()),
-    ]), "3", id="too-many-fields"),
-    pytest.param(T.LongType(), "1", id="atomic-multiple-columns"),
+    ]), "['x', 'y', 'z']", id="too-many-fields"),
 ])
-def test_arrow_input_explicit_schema_width_errors(schema, expected_length):
+def test_arrow_input_explicit_struct_of_another_width_fails_the_cast(schema, names):
+    pa = pytest.importorskip("pyarrow")
+    from pyspark.sql._arrow_input import prepare_table
+
+    # The first value would overflow the one-field IntegerType schema. As PySpark Connect's,
+    # the cast checks the names of the table against the struct's first, which fails it.
+    table = pa.table({"x": [2**40], "y": [2]})
+    with pytest.raises(ValueError) as error:
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+    assert type(error.value) is ValueError
+    assert str(error.value) == (
+        f"Target schema's field names are not matching the table's field names: ['x', 'y'], {names}"
+    )
+    # A nested or timestamp column is localized first, whose assert fails, as PySpark's.
+    table = pa.table({"x": pa.array([0], pa.timestamp("us")), "y": [2]})
+    with pytest.raises(AssertionError):
+        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+
+
+def test_arrow_input_explicit_schema_width_errors():
     pa = pytest.importorskip("pyarrow")
     from pyspark.errors import PySparkValueError
     from pyspark.sql._arrow_input import prepare_table
 
-    # The first value would overflow the one-field IntegerType schema. Width
-    # validation must produce the structured Spark error before an Arrow cast.
+    # An atomic type types one column: as PySpark Connect's, the table is cast to the schema of
+    # its own types, and then has another number of columns.
     table = pa.table({"x": [2**40], "y": [2]})
     with pytest.raises(PySparkValueError) as error:
-        prepare_table(table, schema, "TIMESTAMP_LTZ", "UTC", "false")
+        prepare_table(table, T.LongType(), "TIMESTAMP_LTZ", "UTC", "false")
     assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
     assert error.value.getMessageParameters() == {
-        "expected_length": expected_length, "actual_length": "2",
+        "expected_length": "1", "actual_length": "2",
     }
 
 

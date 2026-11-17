@@ -1198,7 +1198,15 @@ impl PySparkSession {
             Some(options) => options,
             None => interruptible(py, &self.session, || self.session.arrow_input_options())?,
         };
-        let mut items: Vec<Bound<'_, PyAny>> = data.try_iter()?.collect::<PyResult<_>>()?;
+        // Each row, and each value that inference and the converters take, is a step of the
+        // budget, whose checkpoints let other threads run and signals interrupt the conversion,
+        // as PySpark's conversion, which is Python code, lets them.
+        let budget = crate::interrupt::ConversionBudget::default();
+        let mut items: Vec<Bound<'_, PyAny>> = Vec::new();
+        for item in data.try_iter()? {
+            budget.step(py)?;
+            items.push(item?);
+        }
         let Some(first) = items.first().cloned() else {
             // As PySpark takes the first row of data without a length.
             return Err(pyo3::exceptions::PyIndexError::new_err(
@@ -1209,6 +1217,7 @@ impl PySparkSession {
         // tuple, a list, a dict or an object, such as 1, are rows of that single value.
         let single = if first.is_instance_of::<PyDict>() {
             for item in items.iter_mut() {
+                budget.step(py)?;
                 if !item.is_none() {
                     *item = infer::sorted_dict(item)?;
                 }
@@ -1228,9 +1237,10 @@ impl PySparkSession {
             None => {
                 // Of the settings that were read with the others, before any conversion.
                 let confs = infer::InferenceConfs::of_options(&options);
-                let options = infer::Options::new(&confs);
+                let options = infer::Options::new(&confs, &budget);
                 let mut merged: Option<DataType> = None;
                 for item in &items {
+                    budget.step(py)?;
                     let row_type = if single {
                         let items = infer::positional(py, vec![item.clone()], cols.as_mut());
                         infer::infer_fields(py, items, options)?
@@ -1263,6 +1273,7 @@ impl PySparkSession {
         // As PySpark: every row is taken apart first, then each column is converted.
         let mut parts: Vec<Vec<Bound<'_, PyAny>>> = Vec::with_capacity(items.len());
         for item in &items {
+            budget.step(py)?;
             parts.push(if single {
                 if fields.len() != 1 {
                     return Err(infer::axis_length_mismatch(py, fields.len(), 1));
@@ -1285,23 +1296,35 @@ impl PySparkSession {
                 &[("data_type", &field.repr()?.to_cow()?)],
             ));
         }
-        let mut values: Vec<Vec<Value>> = (0..parts.len())
-            .map(|_| Vec::with_capacity(fields.len()))
-            .collect();
+        // The values of each row, whose vector its first value allocates, within the steps of the
+        // conversion.
+        let row_count = parts.len();
+        let mut values: Vec<Vec<Value>> = Vec::with_capacity(row_count);
         let mut late = infer::Late::default();
         {
             let _quanta = infer::DecimalQuanta::new();
             for (i, field) in fields.iter().enumerate() {
-                for (row, out) in parts.iter().zip(values.iter_mut()) {
-                    out.push(infer::convert(
+                for (index, row) in parts.iter().enumerate() {
+                    let value = infer::convert(
                         &row[i],
                         &field.data_type,
                         field.nullable,
                         &mut late,
-                    )?);
+                        &budget,
+                    )?;
+                    match values.get_mut(index) {
+                        Some(out) => out.push(value),
+                        None => {
+                            let mut out = Vec::with_capacity(fields.len());
+                            out.push(value);
+                            values.push(out);
+                        }
+                    }
                 }
             }
         }
+        // The rows of a struct of no fields have no values.
+        values.resize_with(row_count, Vec::new);
         // Then, as PySpark, the schema converts to Arrow, a field at a time and depth first,
         // which rejects a null type that is not nullable, and has no char, varchar, year-month
         // or calendar interval type.
@@ -1317,16 +1340,20 @@ impl PySparkSession {
             }
         }
         let names: std::sync::Arc<[String]> = fields.iter().map(|f| f.name.clone()).collect();
-        let rows: Vec<Row> = values
-            .into_iter()
-            .map(|values| StructValue::new(names.clone(), values).into())
-            .collect();
         let schema = DataType::Struct { fields };
+        // The rows are made of the values without the GIL.
         let df = interruptible(py, &self.session, || {
+            let rows: Vec<Row> = values
+                .into_iter()
+                .map(|values| StructValue::new(names.clone(), values).into())
+                .collect();
             self.session
                 .create_dataframe_with_options(rows, schema, &options)
                 .map_err(Box::new)
         })?;
+        // The rows taken apart, and the rows, are released a step at a time too.
+        budget.release(py, parts)?;
+        budget.release(py, items)?;
         // As pyspark, column names are applied with toDF. The local relation already carries
         // them, so this only changes the plan, which the server resolves into a Project that
         // is not local; it keeps isLocal() as in pyspark and is not redundant.
@@ -1339,9 +1366,12 @@ impl PySparkSession {
     }
 
     /// A DataFrame of a non-empty pandas DataFrame under an explicit struct schema of the
-    /// same width, converted as PySpark does: each column by its Arrow conversion (session
-    /// time zone, safe casts), then the table cast to the schema, which the importer
-    /// sends as Arrow. None when the width differs, which the row path reports.
+    /// same width, converted as PySpark does (`prepare_pandas_table`): each column by its Arrow
+    /// conversion (session time zone, safe casts), then the table cast to the schema, which the
+    /// importer sends as Arrow. None when the width differs, which the row path reports with
+    /// `AXIS_LENGTH_MISMATCH` rather than drop columns, as PySpark's conversion does
+    /// (`dev/parity/known-differences.md`), and for a frame that the row path converts: an
+    /// empty one, or a customized one.
     fn create_from_pandas_arrow(
         &self,
         py: Python<'_>,
@@ -1350,17 +1380,23 @@ impl PySparkSession {
         fields: &[StructField],
         options: Option<&spark_connect::ArrowInputOptions>,
     ) -> PyResult<Option<PyDataFrame>> {
-        if fields.is_empty() || data.len()? == 0 || data.getattr("columns")?.len()? != fields.len()
-        {
+        if data.len()? == 0 || data.getattr("columns")?.len()? != fields.len() {
             return Ok(None);
         }
-        // The caller's schema object is checked, before any configuration request is sent.
+        // The frame and the caller's schema object, whose customized classes keep the row path,
+        // but a frame of no columns under a struct of no fields, which is the table of its index
+        // whatever its class.
         let helper = py.import("pyspark.sql._pandas_input")?;
-        if !helper
-            .getattr("accepts_pandas_table")?
-            .call1((data, schema))?
-            .is_truthy()?
-        {
+        let accepted = if fields.is_empty() {
+            helper
+                .getattr("accepts_pandas_index_table")?
+                .call1((schema,))?
+        } else {
+            helper
+                .getattr("accepts_pandas_table")?
+                .call1((data, schema))?
+        };
+        if !accepted.is_truthy()? {
             return Ok(None);
         }
         // Of the settings that createDataFrame read in one request, as PySpark reads them.
@@ -1399,21 +1435,29 @@ impl PySparkSession {
         // not normalized again as an Arrow table of the caller, which may not repeat the names
         // of the fields of a struct (DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT).
         let spark_schema = crate::types::py_to_data_type(schema_py.bind(py))?;
+        // As PySpark's, which checks the number of columns of the table against the number of
+        // fields, which only the columns of the index of a frame of no columns can fail.
+        let actual: usize = table.getattr("num_columns")?.extract()?;
+        if actual != fields.len() {
+            return Err(crate::infer::axis_length_mismatch(py, fields.len(), actual));
+        }
         let batches = crate::pyarrow_import::table_batches(&table)?;
         let df = interruptible(py, &self.session, || {
             self.session
                 .create_dataframe_from_arrow_with_options(batches, Some(spark_schema), &options)
                 .map_err(Box::new)
         })?;
-        // As the other pandas paths, the explicit names are applied with toDF.
-        Ok(Some(PyDataFrame::new(
+        // As the other pandas paths, the explicit names are applied with toDF, when there are any.
+        Ok(Some(PyDataFrame::new(if fields.is_empty() {
+            df
+        } else {
             df.to_df(
                 fields
                     .iter()
                     .map(|field| field.name.as_str())
                     .collect::<Vec<_>>(),
-            ),
-        )))
+            )
+        })))
     }
 
     /// A DataFrame of a pandas DataFrame without a schema, or of names, as PySpark Connect
@@ -1686,7 +1730,11 @@ impl PySparkSession {
         };
         let has_row_columns = selected_row_columns.iter().any(|selected| *selected);
         let mut rows: Vec<Row> = Vec::with_capacity(row_count);
+        // Each row and each cell is a step of the budget of the conversion, as in
+        // `create_from_local`.
+        let budget = crate::interrupt::ConversionBudget::default();
         for row in data.iter() {
+            budget.step(py)?;
             if has_row_columns && rows.len() >= row_count {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "normalized pandas row count changed during conversion",
@@ -1697,6 +1745,7 @@ impl PySparkSession {
                 .enumerate()
                 .map(|(column_index, v)| {
                     let v = v?;
+                    budget.step(py)?;
                     if has_row_columns && column_index >= row_names.len() {
                         // Row detection validated plain list widths before column conversion.
                         // A hook can change a list before traversal discovers its final width.
@@ -2688,7 +2737,7 @@ impl PySparkSession {
         if schema.is_some_and(|s| s.extract::<PyRef<crate::types::PyStructType>>().is_ok()) {
             if let Spec::Struct(fields) = &spec {
                 if let Ok(data) = data.cast::<PyList>() {
-                    if let Some(columns) = exact_long_tuple_columns(data, fields) {
+                    if let Some(columns) = exact_long_tuple_columns(data, fields)? {
                         let schema = DataType::Struct {
                             fields: fields.clone(),
                         };
@@ -4038,11 +4087,12 @@ fn value_to_datatype(v: &Value) -> DataType {
 /// Build columns only for exact tuples of exact signed integers and None.
 /// Unsupported containers, values, overflow, widths and non-nullable nulls use
 /// schema-driven local conversion, preserving its validation and error ordering.
+/// Each row is a step of the budget of the conversion, as in `create_from_local`.
 #[inline(never)]
 fn exact_long_tuple_columns(
     data: &Bound<'_, PyList>,
     fields: &[StructField],
-) -> Option<Vec<arrow::array::ArrayRef>> {
+) -> PyResult<Option<Vec<arrow::array::ArrayRef>>> {
     use arrow::array::Int64Builder;
     use pyo3::types::{PyInt, PyTuple};
     use std::sync::Arc;
@@ -4052,41 +4102,43 @@ fn exact_long_tuple_columns(
         || fields.is_empty()
         || fields.iter().any(|field| field.data_type != DataType::Long)
     {
-        return None;
+        return Ok(None);
     }
     let mut builders: Vec<_> = fields
         .iter()
         .map(|_| Int64Builder::with_capacity(data.len()))
         .collect();
+    let budget = crate::interrupt::ConversionBudget::default();
     for item in data.iter() {
+        budget.step(data.py())?;
         let Ok(tuple) = item.cast_exact::<PyTuple>() else {
-            return None;
+            return Ok(None);
         };
         if tuple.len() != builders.len() {
-            return None;
+            return Ok(None);
         }
         for ((value, builder), field) in tuple.iter().zip(&mut builders).zip(fields) {
             if value.is_none() {
                 if !field.nullable {
-                    return None;
+                    return Ok(None);
                 }
                 builder.append_null();
             } else if let Ok(integer) = value.cast_exact::<PyInt>() {
                 let Ok(integer) = integer.extract::<i64>() else {
-                    return None;
+                    return Ok(None);
                 };
                 builder.append_value(integer);
             } else {
-                return None;
+                return Ok(None);
             }
         }
     }
-    Some(
+    Ok(Some(
         builders
             .iter_mut()
             .map(|builder| Arc::new(builder.finish()) as arrow::array::ArrayRef)
             .collect(),
-    )
+    ))
 }
 
 /// Convert a Python value to a Rust Value.

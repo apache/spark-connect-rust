@@ -157,7 +157,9 @@ conversions in one Config request before it converts any data, as PySpark's does
 that PySpark 4.3.0 reads, in its order (the timestamp type and the session time zone, the
 local-relation settings, the pandas and inference settings, and Arrow's large types). Every
 conversion path takes its settings from that request, including the relation's cache
-threshold, and empty data reads none.
+threshold, and empty data reads none. The Rust API's `create_dataframe` and
+`create_dataframe_from_columns` read the same settings in one request, once they have converted
+their rows or columns, and apply the cache threshold at any size too.
 Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
 use this importer, preserving integer precision and null masks without Python
 rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the

@@ -1913,6 +1913,38 @@ def test_create_dataframe_rows_column_names(session, data, schema, columns, rows
     assert df.isLocal() is (schema is None)
 
 
+def test_create_dataframe_of_a_struct_of_another_width(session):
+    # A pandas DataFrame of another width than a struct schema raises AXIS_LENGTH_MISMATCH,
+    # where PySpark's conversion drops the columns past the fields, fails the rename of fewer and
+    # takes the index of a frame of no columns as its columns (dev/parity/known-differences.md).
+    # As official PySpark 4.3.0's, a frame of no columns under a struct of no fields is the table
+    # of its index, which the struct then checks, and a pyarrow Table is cast to the struct,
+    # which checks its names.
+    pd = pytest.importorskip("pandas")
+    long_a = StructType([StructField("a", LongType())])
+    for frame, schema, expected, actual in [
+        (pd.DataFrame({"a": [1], "b": [2]}), long_a, "1", "2"),
+        (pd.DataFrame({"a": [1]}), "x long, y long", "2", "1"),
+        (pd.DataFrame({"a": [1, 2]}), StructType([]), "0", "1"),
+        (pd.DataFrame(index=[5, 6]), long_a, "1", "0"),
+        (pd.DataFrame(index=[0, 1]), StructType([]), "0", "1"),
+    ]:
+        with pytest.raises(PySparkValueError) as error:
+            session.createDataFrame(frame, schema)
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": expected, "actual_length": actual}
+    assert session.createDataFrame(
+        pd.DataFrame(index=range(2)), StructType([])).collect() == [Row(), Row()]
+    for schema, names in ((long_a, "['a']"), ("x long, y long, z long", "['x', 'y', 'z']")):
+        with pytest.raises(ValueError) as error:
+            session.createDataFrame(pa.table({"a": [1], "b": [2]}), schema)
+        assert type(error.value) is ValueError
+        assert str(error.value) == (
+            f"Target schema's field names are not matching the table's field names: ['a', 'b'], "
+            f"{names}")
+
+
 @pytest.mark.parametrize(
     "frame, schema, columns",
     [
