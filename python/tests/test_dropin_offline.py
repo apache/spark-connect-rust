@@ -79,10 +79,10 @@ def test_connect_resource_profile_module_offline(mock_connect):
     import pyspark.sql.connect.proto as pb2
     from pyspark.resource import (
         ExecutorResourceRequests,
-        ResourceProfile as ClientResourceProfile,
         ResourceProfileBuilder,
         TaskResourceRequests,
     )
+    from pyspark.resource import ResourceProfile as ClientResourceProfile
     from pyspark.sql.connect.resource.profile import ResourceProfile
 
     assert ResourceProfile is not ClientResourceProfile
