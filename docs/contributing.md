@@ -28,8 +28,12 @@ cargo test                  # unit + golden-proto tests
 cargo build -p examples     # the Rust-native examples
 ```
 
-Builder correctness is covered by **golden-proto tests**: plans, expressions, and
-all SQL functions are asserted byte-for-byte against captured reference protos.
+Builder correctness is covered by **golden-proto tests**: plans, expressions,
+all SQL functions, the reads, the catalog calls and ML transforms are asserted
+byte-for-byte against captured reference protos. The goldens under `tests/golden/`
+are captured from the official `pyspark-client` by the `scripts/capture_*_golden.py`
+scripts, against a Spark Connect server: run each with that client's Python, isolated,
+as `python -I scripts/capture_golden.py --remote sc://localhost:15002`.
 Transport and Arrow paths are exercised by the end-to-end tests below and by the
 official Apache Spark Connect test suite in CI - see the CI notes under
 [`dev/design/`](https://github.com/apache/spark-connect-rust/tree/master/dev/design).

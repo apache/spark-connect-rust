@@ -19,13 +19,17 @@ import argparse
 import base64
 import inspect
 import json
+import sys
 from pathlib import Path
 
+# The sibling script is importable when this one runs isolated (`python -I`) too.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 # reuse the normalizer from the sibling script
-from capture_golden import normalize  # type: ignore
-from pyspark.sql import SparkSession
-from pyspark.sql.connect import functions as F
-from pyspark.sql.connect.column import Column
+from capture_golden import normalize  # type: ignore  # noqa: E402
+from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql.connect import functions as F  # noqa: E402
+from pyspark.sql.connect.column import Column  # noqa: E402
 
 # Each candidate is a list of typed arg specs. Recorded in the golden so the
 # Rust side can reconstruct the exact same arguments deterministically.
