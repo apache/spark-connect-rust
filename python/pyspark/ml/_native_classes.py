@@ -27,6 +27,10 @@ behaves as a subclass of PySpark's:
 - `copy` is PySpark's own; `copy.copy` is the native class's `__copy__`, of the class of the object
   (a subclass) and a copy of the object's attributes, as `copy.copy` copies those of PySpark's.
 
+A public class of a native summary constructs of PySpark's own `JavaWrapper.__init__`, which keeps
+the `java_obj` in the object's attributes (`_java_obj`), which the native members read, and has
+properties and methods of PySpark's docstrings and signatures over the native members.
+
 A public class of a native class of params keeps them in PySpark's param maps (`_paramMap`,
 `_defaultParamMap`), in the object's attributes, and takes PySpark's own Python code over them (the
 Params API, the getters and setters, `setParams`, a `keyword_only` constructor) as it is. Before a
@@ -306,6 +310,14 @@ def _primitive(member, name, official):
 _NATIVE_ALWAYS = frozenset({"write", "read", "uid"})
 
 
+def _is_summary(official):
+    """Whether PySpark's class `official` is a summary: a Java wrapper of no params, whose
+    constructor is `JavaWrapper.__init__(java_obj=None)`."""
+    from pyspark.ml.wrapper import JavaWrapper
+
+    return _member_of(official, "__init__")[1] is JavaWrapper.__init__
+
+
 def _constructors(native, official, holder):
     """The `__new__` and `__init__` of the public class of `native` and PySpark's class
     `official`; `holder` has the public class, once made."""
@@ -327,6 +339,16 @@ def _constructors(native, official, holder):
             if args:
                 raise TypeError("Method __init__ forces keyword arguments.")
             checker(None, **kwargs)
+
+    elif _is_summary(official):
+        # PySpark's own `JavaWrapper.__init__` of a summary, which keeps its `java_obj` in the
+        # object's attributes (`_java_obj`), which the native members read, as PySpark's do: so a
+        # summary of a subclass reads the `java_obj` of its `super().__init__`, and a copy or a
+        # pickle keeps it with the other attributes.
+        __init__ = init
+
+        def check(*args, **kwargs):
+            checker(None, *args, **kwargs)
 
     else:
         # The native constructor takes the object of the arguments (a model's `java_model`, a
@@ -388,6 +410,8 @@ def _public_class(native, official, parents):
         pass
     if hasattr(native, "_native_sync"):
         _params_api(native, official, namespace)
+    elif _is_summary(official):
+        _summary_api(native, official, namespace)
     getnewargs = _newargs_of(official)
     if getnewargs is not None:
         namespace["__getnewargs__"] = getnewargs
@@ -444,6 +468,45 @@ def _params_api(native, official, namespace):
         namespace["write"] = _synced(native.write, "write", official)
 
 
+def _summary_api(native, official, namespace):
+    """The members of the public class of the native summary class `native` and PySpark's summary
+    class `official`, in `namespace`: the native class's members of PySpark's server-side object, of
+    PySpark's docstrings (and signatures), as of a class of params (see `_params_api`), of no params
+    to sync: a property of a native getter, as PySpark's are properties, and a method of a native
+    method."""
+    for name in dir(native):
+        if name.startswith("__"):
+            continue
+        _, member = _member_of(official, name)
+        if member is None:
+            continue
+        own = inspect.getattr_static(native, name)
+        kind = type(own).__name__
+        if kind == "getset_descriptor" and isinstance(member, property):
+            namespace[name] = _property_of(own, member.__doc__)
+        elif kind == "method_descriptor":
+            namespace[name] = _method_of(getattr(native, name), name, official)
+
+
+def _property_of(descriptor, doc):
+    """A property of the native getter `descriptor`, of PySpark's docstring `doc`."""
+
+    def fget(self):
+        return descriptor.__get__(self, type(self))
+
+    return property(fget, doc=doc)
+
+
+def _method_of(member, name, official):
+    """The native method `member` (`name`) of PySpark's class `official`, as PySpark names it and
+    documents it (see `_of_pysparks`)."""
+
+    def method(self, *args, **kwargs):
+        return member(self, *args, **kwargs)
+
+    return _of_pysparks(method, member, name, official)
+
+
 def _newargs_of(official):
     """The `__getnewargs__` of a class whose PySpark constructor takes the objects of the instance
     (a PipelineModel's `stages`, a CrossValidatorModel's `bestModel`, `avgMetrics`, ...), which
@@ -466,11 +529,10 @@ def _newargs_of(official):
     return __getnewargs__
 
 
-def publish(namespace, official_module, bases=None):
+def publish(namespace, official_module):
     """Replace each native class of the module of the globals `namespace` by its public class, of
-    PySpark's class of the same name of `official_module`; `bases` gives PySpark's class of a name
-    whose module this client does not vendor (`pyspark.ml.stat`)."""
-    official = importlib.import_module(official_module) if official_module else None
+    PySpark's class of the same name of `official_module`."""
+    official = importlib.import_module(official_module)
     natives = [
         (name, value)
         for name, value in list(namespace.items())
@@ -480,8 +542,8 @@ def publish(namespace, official_module, bases=None):
     natives.sort(key=lambda item: len(item[1].__mro__))
     published = {}
     for name, native in natives:
-        official_class = (bases or {}).get(name) or getattr(official, name, None)
-        if official_class is native or (official is None and official_class is None):
+        official_class = getattr(official, name, None)
+        if official_class is native:
             continue
         if official_class is None:
             # A module of pyspark.ml that is not imported in full yet (an import cycle) lacks it.

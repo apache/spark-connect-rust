@@ -510,6 +510,38 @@ impl MlTarget {
         self.summary_dataset.as_ref()
     }
 
+    /// Whether the summary dataset of this target reads the transform of a fitted model: the
+    /// plan of the transform of a model's object, or one that reads it, such as the transform of
+    /// the training dataset by the model of no params ([`summary_transform`]), or a training
+    /// dataset that a model of a Pipeline transformed. PySpark's plan of such a DataFrame keeps
+    /// the model (`__source_transformer__`), as the plans of the transforms of models of this
+    /// client keep their objects. Not a stable API.
+    #[doc(hidden)]
+    pub fn summary_dataset_reads_model(&self) -> bool {
+        let Some(dataset) = &self.summary_dataset else {
+            return false;
+        };
+        // A walk of the plan of its own stack, as a plan may be deeper than the thread's stack,
+        // which visits a plan that several plans read (a self-join) once.
+        let mut pending = vec![&dataset.plan];
+        let mut visited = std::collections::HashSet::new();
+        while let Some(plan) = pending.pop() {
+            if !visited.insert(Arc::as_ptr(plan)) {
+                continue;
+            }
+            if let LogicalPlan::MlTransform {
+                owner: Some(owner), ..
+            } = plan.as_ref()
+            {
+                if owner.0.downcast_ref::<CachedModelRef>().is_some() {
+                    return true;
+                }
+            }
+            pending.extend(plan.inputs());
+        }
+        false
+    }
+
     /// The object at the root of the target, unless it is the helper.
     pub fn root(&self) -> Option<&MlRef> {
         match &self.root {
@@ -1448,6 +1480,36 @@ mod tests {
         assert_eq!(names, ["summary", "accuracy"]);
         assert_eq!(MlTarget::helper(&session).id(), ML_CONNECT_HELPER_ID);
         std::mem::forget(model);
+    }
+
+    #[test]
+    fn summary_datasets_of_the_transforms_of_models_read_their_models() {
+        // As PySpark's plan of the transform of a model keeps the model: the summary dataset of a
+        // KMeans fit (the transform of the training dataset by the model) reads a model, and so
+        // does a dataset of it, of a self-join too; the training dataset, the transform of a
+        // transformer and a target of no summary dataset read none.
+        use crate::plan::JoinType;
+
+        let session = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let object = MlRef::from_id(&session, "fitted");
+        let train = session.range(3).expect("range");
+        let transformed = summary_transform(&object, &train).expect("transform");
+        let read =
+            |dataset: &DataFrame| training_summary(&object, dataset).summary_dataset_reads_model();
+        assert!(read(&transformed));
+        assert!(read(&transformed.limit(1)));
+        assert!(read(&transformed.join(&transformed, None, JoinType::Cross)));
+        assert!(!read(&train));
+        assert!(!read(&train.join(&train, None, JoinType::Cross)));
+        let binarized = crate::ml::Binarizer::new()
+            .transform(&train)
+            .expect("transform");
+        assert!(!read(&binarized));
+        assert!(!MlTarget::object(&object).summary_dataset_reads_model());
+        std::mem::forget((transformed, object));
     }
 
     #[test]

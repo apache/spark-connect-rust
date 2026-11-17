@@ -380,6 +380,31 @@ def test_the_native_members_of_a_public_class_have_pysparks_docstrings_and_signa
         assert member.__qualname__ == f"{pysparks.__name__}.{name}"
 
 
+def test_the_members_of_a_summary_have_pysparks_docstrings_and_signatures():
+    # As the native members of a class of params: a member of a summary is a property of a
+    # property of PySpark's (`r2`, `predictions`), and a method of a method (`fMeasureByLabel`,
+    # `residuals`), of PySpark's docstring and signature.
+    import importlib
+    import inspect
+
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
+    for module, names in _SUMMARY_MODULES.items():
+        reference = importlib.import_module(f"pyspark.ml.{module}")
+        for name in names:
+            public, pysparks = _cls(module, name), getattr(reference, name)
+            for member in [m for m in dir(pysparks) if not m.startswith("_")]:
+                theirs = inspect.getattr_static(pysparks, member)
+                if isinstance(theirs, property):
+                    ours = inspect.getattr_static(public, member)
+                    assert isinstance(ours, property), (name, member)
+                    assert ours.__doc__ == theirs.__doc__, (name, member)
+                else:
+                    ours = getattr(public, member)
+                    assert ours.__doc__ == theirs.__doc__, (name, member)
+                    assert inspect.signature(ours) == inspect.signature(theirs), (name, member)
+
+
 def test_the_summaries_of_the_models_are_the_native_ones():
     # PySpark's `summary` of a model reads the `_summary` that its fit sets of its server-side
     # object (`super().summary` of LinearSVCModel's own): the native model fetches its own.
@@ -434,6 +459,44 @@ def test_the_summaries_are_subclasses_of_the_summaries_of_pysparks_bases_of_thei
             for base in pysparks.__mro__[1:]:
                 if base.__module__ == reference.__name__ and base.__name__ in names:
                     assert _cls(module, base.__name__) in public.__mro__, (name, base.__name__)
+
+
+class _PicklableSummary(_cls("clustering", "KMeansSummary")):
+    """A subclass of a summary that `pickle` finds by its module and name, of the `java_obj` of its
+    `super().__init__`."""
+
+    def __init__(self):
+        super().__init__("abc.summary")
+        self.extra = 1
+
+
+def test_a_summary_keeps_its_java_obj_and_copies_and_pickles_as_a_plain_object():
+    # PySpark's `JavaWrapper.__init__` keeps the `java_obj` in the summary's attributes (of the
+    # `super().__init__` of a subclass), which its members read. A summary of no server-side
+    # object copies, copies deep and pickles, at every protocol, as a plain object: of its class
+    # and of its attributes, shared by a shallow copy.
+    import copy
+    import pickle
+
+    Summary = _cls("regression", "LinearRegressionSummary")
+    assert vars(Summary(java_obj="x")) == {"_java_obj": "x"}
+    for given in (None, "abc", "abc.summary"):
+        summary = Summary(given)
+        assert vars(summary) == {"_java_obj": given}
+        summary.tag = [1]
+        shallow, deep = copy.copy(summary), copy.deepcopy(summary)
+        pickled = [
+            pickle.loads(pickle.dumps(summary, protocol))
+            for protocol in range(pickle.HIGHEST_PROTOCOL + 1)
+        ]
+        for copied in [shallow, deep, *pickled]:
+            assert type(copied) is Summary, given
+            assert vars(copied) == {"_java_obj": given, "tag": [1]}, given
+        assert shallow.tag is summary.tag and deep.tag is not summary.tag
+    subclass = _PicklableSummary()
+    assert vars(subclass) == {"_java_obj": "abc.summary", "extra": 1}
+    for copied in (copy.deepcopy(subclass), pickle.loads(pickle.dumps(subclass))):
+        assert type(copied) is _PicklableSummary and vars(copied) == vars(subclass)
 
 
 def test_a_summary_constructs_as_pysparks_java_wrapper():

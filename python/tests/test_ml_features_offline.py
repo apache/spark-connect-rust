@@ -273,6 +273,56 @@ def test_elementwise_product_sparse_vector_parameter(ml_mock):
     assert wire(stage, "ElementwiseProduct", spark, service).params["scalingVec"].SerializeToString() == expected.SerializeToString()
 
 
+def test_stop_words_remover_fetches_its_defaults_once_as_pyspark(ml_mock):
+    # As PySpark's constructor, which fetches the default locale and then the English stop words
+    # of the active session for its `_setDefault`, of which the native object takes them: a
+    # construction sends these two requests once, of a subclass too; a load sends its Read and
+    # then them, as of its stage of `py_type()`; a copy, the getters and the param map send none.
+    spark, service = ml_mock
+    defaults = ["stopWordsRemoverGetDefaultOrUS", "stopWordsRemoverLoadDefaultStopWords"]
+
+    def sent_since(start):
+        return [
+            command.ml_command.fetch.methods[-1].method
+            if command.ml_command.HasField("fetch")
+            else command.ml_command.WhichOneof("command")
+            for command in _commands_but_deletes(service, start)
+        ]
+
+    makers = [
+        feature.StopWordsRemover,
+        lambda: feature.StopWordsRemover(inputCol="a", locale="fr"),
+        type("Remover", (feature.StopWordsRemover,), {}),
+    ]
+    for make in makers:
+        sent = len(service.execute_requests)
+        stage = make()
+        assert sent_since(sent) == defaults
+        sent = len(service.execute_requests)
+        assert stage.getStopWords() == ["the", "a"] and stage.getCaseSensitive() is False
+        assert stage.copy().getLocale() == stage.getLocale()
+        assert stage.extractParamMap()[stage.stopWords] == ["the", "a"]
+        assert sent_since(sent) == []
+    service.execute_payload = _ml_result(
+        operator_info=pb2.MlCommandResult.MlOperatorInfo(
+            name="org.apache.spark.ml.feature.StopWordsRemover",
+            uid="StopWordsRemover_0123456789ab",
+            params=pb2.MlParams(params={"inputCol": pb2.Expression.Literal(string="a")}),
+        )
+    )
+    sent = len(service.execute_requests)
+    loaded = feature.StopWordsRemover.load("stop-words-remover")
+    assert sent_since(sent) == ["read", *defaults]
+    assert (loaded.uid, loaded.getInputCol(), loaded.getLocale()) == (
+        "StopWordsRemover_0123456789ab",
+        "a",
+        "en_US",
+    )
+    sent = len(service.execute_requests)
+    loaded.copy()
+    assert sent_since(sent) == []
+
+
 def test_stop_words_remover_load_default_stop_words_fetches_the_ml_helper(ml_mock):
     # As PySpark's StopWordsRemover.loadDefaultStopWords on Spark Connect (invoke_helper_attr):
     # one MlCommand.Fetch of the ML helper object, of the method and of the literal of the
