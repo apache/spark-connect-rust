@@ -7124,6 +7124,48 @@ def _tuple_row_results(mock_connect, table, schema, method):
         frame.toLocalIterator(method == "prefetch"))
 
 
+@pytest.mark.parametrize("method", ["collect", "head_n", "take", "tail", "first", "head"])
+@pytest.mark.parametrize("size", [0, 1, 5])
+def test_collected_payloads_survive_native_row_release(mock_connect, method, size):
+    import pyarrow as pa
+    from _mock_connect_server import data_type_proto
+
+    # Cross Arrow batches and use heap-backed payloads, including nested values.
+    values = [None if i == 1 else str(i).zfill(2048) for i in range(size)]
+    blobs = [None if value is None else value.encode() for value in values]
+    children = [None if value is None else {"v": value} for value in values]
+    table = pa.table({
+        "text": pa.array(values, pa.string()),
+        "blob": pa.array(blobs, pa.binary()),
+        "child": pa.array(children, pa.struct([("v", pa.string())])),
+    })
+    schema = T.StructType([
+        T.StructField("text", T.StringType()),
+        T.StructField("blob", T.BinaryType()),
+        T.StructField("child", T.StructType([T.StructField("v", T.StringType())])),
+    ])
+    spark, service = mock_connect
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table, max_chunksize=2)
+    service.execute_payload = message_field(7, data_type_proto(schema.jsonValue())) + message_field(
+        2, varint_field(1, size) + message_field(2, sink.getvalue().to_pybytes()))
+    frame = spark.range(size)
+    if method in ("first", "head"):
+        result = getattr(frame, method)()
+        rows = [] if result is None else [result]
+        assert len(rows) == min(size, 1)
+    else:
+        rows = frame.head(size) if method == "head_n" else (
+            frame.collect() if method == "collect" else getattr(frame, method)(size))
+        assert len(rows) == size
+    for i, row in enumerate(rows):
+        assert type(row) is Row
+        assert row.text == values[i] and row.blob == blobs[i]
+        assert row.child == (None if values[i] is None else Row(v=values[i]))
+        assert pickle.loads(pickle.dumps(row)) == row
+
+
 @pytest.mark.parametrize("method", ["collect", "iterator", "prefetch"])
 def test_collected_tuple_rows_share_names_by_schema_path(mock_connect, method):
     import pyarrow as pa

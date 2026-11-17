@@ -2616,7 +2616,7 @@ impl PyDataFrame {
                 .collect_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
-        rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
     /// Return an iterator over rows without materializing the entire result in memory.
@@ -2852,7 +2852,13 @@ impl PyDataFrame {
                 .first_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
-        Ok(rows_to_py(py, &self.dataframe, row.as_slice(), schema.as_ref())?.pop())
+        Ok(rows_to_py(
+            py,
+            &self.dataframe,
+            row.into_iter().collect(),
+            schema.as_ref(),
+        )?
+        .pop())
     }
 
     /// The first row, or None, or with `n`, a list of the first `n` rows, as PySpark's `head`,
@@ -2876,7 +2882,7 @@ impl PyDataFrame {
                 .collect_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
-        rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
     /// Column names (a property, mirroring `DataFrame.columns`). A schema of `to` that is not a
@@ -2916,7 +2922,7 @@ impl PyDataFrame {
                 .collect_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
-        rows_to_py(py, &self.dataframe, &rows, schema.as_ref())
+        rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
     /// Sample a fraction of rows, as PySpark's `DataFrame.sample(withReplacement=None,
@@ -6195,7 +6201,7 @@ pub(crate) fn python_random_seed(py: Python<'_>) -> PyResult<i64> {
 fn rows_to_py(
     py: Python<'_>,
     dataframe: &DataFrame,
-    rows: &[spark_connect::row::Row],
+    rows: Vec<spark_connect::row::Row>,
     schema: Option<&spark_connect::types::DataType>,
 ) -> PyResult<Vec<Py<PyAny>>> {
     check_schema_conversion(py, schema)?;
@@ -6211,7 +6217,8 @@ fn rows_to_py(
     if let Some(schema) = schema {
         nested_fields.note_udt_key_maps(schema);
     }
-    rows.iter()
+    // Drop each native payload after conversion instead of retaining two full results.
+    rows.into_iter()
         .map(|row| {
             crate::row::row_values_to_py(
                 py,
