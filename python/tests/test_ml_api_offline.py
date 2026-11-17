@@ -379,13 +379,39 @@ _JAVA_MODEL_INIT = [["java_model", "POSITIONAL_OR_KEYWORD", "None"]]
 def test_models_construct_of_no_server_object_as_pyspark_mls(spec):
     # As PySpark's `JavaModel(java_model=None)`: a model of its params, none of them set, of a new
     # uid of its class and of no server-side object, whose members of the server raise
-    # (test_ml_api_e2e.py).
+    # (test_ml_api_e2e.py). Its constructor is PySpark's, whose classes set the defaults in the
+    # order of its MRO, of which `_defaultParamMap` and `extractParamMap()` are: that of an object
+    # of PySpark's class.
     cls = native_class(*spec)
+    official = getattr(importlib.import_module(spec[2]), spec[1])
+    order = [p.name for p in official()._defaultParamMap]
     assert API[spec[1]]["default_instance"]
     for model in (cls(), cls(None), cls(java_model=None)):
         assert type(model) is cls
         assert model.uid.startswith(spec[1] + "_") and len(model.uid) == len(spec[1]) + 13
         assert not any(model.isSet(p) for p in model.extractParamMap())
+        assert [p.name for p in model._defaultParamMap] == order
+        assert [p.name for p in model.extractParamMap()] == order
+
+
+@pytest.mark.parametrize(
+    "module,name,argument,expected",
+    [
+        ("tuning", "CrossValidatorModel", None, ["seed", "numFolds", "foldCol"]),
+        ("tuning", "TrainValidationSplitModel", None, ["seed", "trainRatio"]),
+        ("classification", "OneVsRestModel", [], ["predictionCol", "featuresCol", "labelCol", "rawPredictionCol"]),
+    ],
+)
+def test_meta_models_have_the_defaults_of_their_constructor_in_its_order(module, name, argument, expected):
+    # The constructor of PySpark's validator model and OneVsRestModel sets the defaults of its
+    # classes in the order of its MRO (`HasSeed`, then the class's), of which its `_defaultParamMap`
+    # is, of a model of the user's constructor and of a fit (test_ml_api_e2e.py); the `_resetUid`
+    # of a load rebuilds it of the names.
+    cls = native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+    official = getattr(importlib.import_module(f"pyspark.ml.{module}"), name)
+    assert [p.name for p in official(argument)._defaultParamMap] == expected
+    assert [p.name for p in cls(argument)._defaultParamMap] == expected
+    assert [p.name for p in cls(argument).extractParamMap()] == expected
 
 
 @pytest.mark.parametrize("spec", FULL, ids=lambda spec: spec[1])

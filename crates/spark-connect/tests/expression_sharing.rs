@@ -114,14 +114,24 @@ fn window_builders_share_expressions_without_mutating_the_specification() {
         )]);
     let extended = original
         .clone()
-        .partition_by(vec![col("other").expression().clone()])
         .rows_between(FrameBound::UnboundedPreceding, FrameBound::CurrentRow);
     assert_eq!(original.partition_spec.len(), 1);
     assert!(original.frame_spec.is_none());
-    assert_eq!(extended.partition_spec.len(), 2);
+    assert_eq!(extended.partition_spec.len(), 1);
     assert!(extended.frame_spec.is_some());
     assert_shared(&original.partition_spec[0], &extended.partition_spec[0]);
     assert_shared(&original.order_spec[0].child, &extended.order_spec[0].child);
+    // A chained partition_by replaces the partitioning, as PySpark's WindowSpec.partitionBy does,
+    // and shares the ordering that it keeps.
+    let other = col("other").expression().clone();
+    let repartitioned = original.clone().partition_by(vec![other.clone()]);
+    assert_eq!(original.partition_spec.len(), 1);
+    assert_shared(&repartitioned.partition_spec[0], &other);
+    assert_eq!(repartitioned.partition_spec.len(), 1);
+    assert_shared(
+        &original.order_spec[0].child,
+        &repartitioned.order_spec[0].child,
+    );
 
     let windowed = source.clone().over(extended);
     let ExpressionNode::WindowExpression(window) = windowed.expression().node() else {

@@ -54,10 +54,13 @@ def test_a_subclass_constructs_of_the_keywords_of_its_super_init():
 
 def test_a_subclass_has_a_uid_of_its_own_name_and_the_defaults_of_it():
     # `Identifiable._randomUID` names the uid after the class of the object, and the defaults of
-    # the uid (outputCol) and of the class's name (seed) follow it.
+    # the uid (outputCol) and of the class's name (seed) follow it: of the `JavaModel.__init__` of
+    # a model too.
     LR = _cls("classification", "LogisticRegression")
     DT = _cls("classification", "DecisionTreeClassifier")
     Binarizer = _cls("feature", "Binarizer")
+    DTModel = _cls("classification", "DecisionTreeClassificationModel")
+    IndexerModel = _cls("feature", "StringIndexerModel")
 
     class Sub(LR):
         pass
@@ -68,12 +71,26 @@ def test_a_subclass_has_a_uid_of_its_own_name_and_the_defaults_of_it():
     class Bin(Binarizer):
         pass
 
-    for obj, name in [(Sub(), "Sub"), (LR(), "LogisticRegression"), (Tree(), "Tree")]:
+    class Fitted(DTModel):
+        pass
+
+    class Indexer(IndexerModel):
+        pass
+
+    for obj, name in [
+        (Sub(), "Sub"),
+        (LR(), "LogisticRegression"),
+        (Tree(), "Tree"),
+        (Fitted(), "Fitted"),
+        (DTModel(), "DecisionTreeClassificationModel"),
+    ]:
         prefix, suffix = obj.uid.rsplit("_", 1)
         assert prefix == name and len(suffix) == 12
-    assert Tree().getSeed() == hash("Tree")
+    assert Tree().getSeed() == hash("Tree") and Fitted().getSeed() == hash("Fitted")
     b = Bin(threshold=0.5)
     assert b.uid.startswith("Bin_") and b.getOutputCol() == b.uid + "__output"
+    indexer = Indexer()
+    assert indexer.uid.startswith("Indexer_") and indexer.getOutputCol() == indexer.uid + "__output"
 
 
 def test_the_uid_is_assignable_as_pysparks():
@@ -361,23 +378,97 @@ def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_ob
 
 
 def test_the_native_members_of_a_public_class_have_pysparks_docstrings_and_signatures():
+    # PySpark's docstring, signature, module and qualified name of each member: of the class of
+    # PySpark's that defines it (`JavaMLWritable.write`, of the wrapper of `try_remote_write`), not
+    # of the class of the object.
     import inspect
 
-    if native_module() is None:
-        pytest.skip("of this client's native classes")
     import pyspark.ml.classification as reference
 
     LR = _cls("classification", "LogisticRegression")
     LRModel = _cls("classification", "LogisticRegressionModel")
-    for public, pysparks, name in [
-        (LR, reference.LogisticRegression, "write"),
-        (LRModel, reference.LogisticRegressionModel, "predict"),
-        (LRModel, reference.LogisticRegressionModel, "evaluate"),
+    for public, pysparks, name, qualname in [
+        (LR, reference.LogisticRegression, "write", "JavaMLWritable.write"),
+        (LR, reference.LogisticRegression, "_fit", "JavaEstimator._fit"),
+        (LR, reference.LogisticRegression, "clear", "JavaParams.clear"),
+        (LRModel, reference.LogisticRegressionModel, "predict", "JavaPredictionModel.predict"),
+        (LRModel, reference.LogisticRegressionModel, "predictRaw", "_JavaClassificationModel.predictRaw"),
+        (LRModel, reference.LogisticRegressionModel, "evaluate", "LogisticRegressionModel.evaluate"),
+        (LRModel, reference.LogisticRegressionModel, "_transform", "JavaTransformer._transform"),
     ]:
         member = getattr(public, name)
         assert member.__doc__ == getattr(pysparks, name).__doc__, name
         assert inspect.signature(member) == inspect.signature(getattr(pysparks, name)), name
-        assert member.__qualname__ == f"{pysparks.__name__}.{name}"
+        assert member.__qualname__ == qualname
+        assert member.__module__ == getattr(pysparks, name).__module__, name
+
+
+def test_the_native_members_bind_a_call_as_pysparks_functions():
+    # Python binds a call of a native member as it binds PySpark's function, of its parameters (of
+    # the wrapper of a decorator: `try_remote_intercept`'s `JavaParams.clear` takes any positional
+    # arguments, and does nothing over Spark Connect), and raises its messages, of its qualified
+    # name: before the native member runs, which a model of no server-side object fails.
+    from pyspark.ml.linalg import Vectors
+
+    lr = _cls("classification", "LogisticRegression")()
+    model = _cls("classification", "LogisticRegressionModel")()
+    value = Vectors.dense([1.0])
+    assert lr.clear() is None and lr.clear(lr.maxIter, 1) is None
+    cases = [
+        (lambda: model.predict(value, 1), "JavaPredictionModel.predict() takes 2 positional arguments but 3 were given"),
+        (lambda: model.predict(), "JavaPredictionModel.predict() missing 1 required positional argument: 'value'"),
+        (lambda: model.predictRaw(value=value, x=1), _unexpected("_JavaClassificationModel.predictRaw", "x")),
+        (lambda: model.evaluate(1, 2), "LogisticRegressionModel.evaluate() takes 2 positional arguments but 3 were given"),
+        (lambda: model._transform(), "JavaTransformer._transform() missing 1 required positional argument: 'dataset'"),
+        (lambda: lr.write(1), "JavaMLWritable.write() takes 1 positional argument but 2 were given"),
+        (lambda: lr._fit(1, 2), "JavaEstimator._fit() takes 2 positional arguments but 3 were given"),
+        (lambda: lr.clear(param=lr.maxIter), _unexpected("JavaParams.clear", "param")),
+    ]
+    with pytest.raises(AssertionError):
+        model.predict(value)
+    # The methods of a summary, of no params to sync, bind as PySpark's too: a relation method of
+    # `try_remote_attribute_relation` of any arguments, which then asserts an active session.
+    summary = _cls("classification", "LogisticRegressionSummary")()
+    with pytest.raises(AssertionError):
+        _cls("regression", "GeneralizedLinearRegressionSummary")().residuals(1, 2, x=3)
+    cases += [
+        (lambda: summary.fMeasureByLabel(1, 2), "_ClassificationSummary.fMeasureByLabel() takes from 1 to 2 positional arguments but 3 were given"),
+        (lambda: summary.weightedFMeasure(y=1), _unexpected("_ClassificationSummary.weightedFMeasure", "y")),
+    ]
+    if sys.version_info < (3, 10):
+        return
+    for call, message in cases:
+        with pytest.raises(TypeError) as error:
+            call()
+        assert str(error.value) == message
+
+
+def test_the_members_of_a_summary_have_pysparks_docstrings_and_signatures():
+    # As the native members of a class of params: a member of a summary is a property of a
+    # property of PySpark's (`r2`, `predictions`), and a method of a method (`fMeasureByLabel`,
+    # `residuals`), of PySpark's docstring and signature.
+    import importlib
+    import inspect
+
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
+    for module, names in _SUMMARY_MODULES.items():
+        reference = importlib.import_module(f"pyspark.ml.{module}")
+        for name in names:
+            public, pysparks = _cls(module, name), getattr(reference, name)
+            for member in [m for m in dir(pysparks) if not m.startswith("_")]:
+                theirs = inspect.getattr_static(pysparks, member)
+                if isinstance(theirs, property):
+                    ours = inspect.getattr_static(public, member)
+                    assert isinstance(ours, property), (name, member)
+                    assert ours.__doc__ == theirs.__doc__, (name, member)
+                else:
+                    ours = getattr(public, member)
+                    assert ours.__doc__ == theirs.__doc__, (name, member)
+                    assert inspect.signature(ours) == inspect.signature(theirs), (name, member)
+                    # Of the class of PySpark's that defines the method, and its module.
+                    assert ours.__qualname__ == theirs.__qualname__, (name, member)
+                    assert ours.__module__ == theirs.__module__, (name, member)
 
 
 def test_the_summaries_of_the_models_are_the_native_ones():
@@ -434,6 +525,44 @@ def test_the_summaries_are_subclasses_of_the_summaries_of_pysparks_bases_of_thei
             for base in pysparks.__mro__[1:]:
                 if base.__module__ == reference.__name__ and base.__name__ in names:
                     assert _cls(module, base.__name__) in public.__mro__, (name, base.__name__)
+
+
+class _PicklableSummary(_cls("clustering", "KMeansSummary")):
+    """A subclass of a summary that `pickle` finds by its module and name, of the `java_obj` of its
+    `super().__init__`."""
+
+    def __init__(self):
+        super().__init__("abc.summary")
+        self.extra = 1
+
+
+def test_a_summary_keeps_its_java_obj_and_copies_and_pickles_as_a_plain_object():
+    # PySpark's `JavaWrapper.__init__` keeps the `java_obj` in the summary's attributes (of the
+    # `super().__init__` of a subclass), which its members read. A summary of no server-side
+    # object copies, copies deep and pickles, at every protocol, as a plain object: of its class
+    # and of its attributes, shared by a shallow copy.
+    import copy
+    import pickle
+
+    Summary = _cls("regression", "LinearRegressionSummary")
+    assert vars(Summary(java_obj="x")) == {"_java_obj": "x"}
+    for given in (None, "abc", "abc.summary"):
+        summary = Summary(given)
+        assert vars(summary) == {"_java_obj": given}
+        summary.tag = [1]
+        shallow, deep = copy.copy(summary), copy.deepcopy(summary)
+        pickled = [
+            pickle.loads(pickle.dumps(summary, protocol))
+            for protocol in range(pickle.HIGHEST_PROTOCOL + 1)
+        ]
+        for copied in [shallow, deep, *pickled]:
+            assert type(copied) is Summary, given
+            assert vars(copied) == {"_java_obj": given, "tag": [1]}, given
+        assert shallow.tag is summary.tag and deep.tag is not summary.tag
+    subclass = _PicklableSummary()
+    assert vars(subclass) == {"_java_obj": "abc.summary", "extra": 1}
+    for copied in (copy.deepcopy(subclass), pickle.loads(pickle.dumps(subclass))):
+        assert type(copied) is _PicklableSummary and vars(copied) == vars(subclass)
 
 
 def test_a_summary_constructs_as_pysparks_java_wrapper():

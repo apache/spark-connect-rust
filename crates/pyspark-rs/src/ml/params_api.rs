@@ -197,13 +197,6 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
         let _ = name;
         Ok(())
     }
-    /// The kind of the param `name` that the class's setters convert its values of, where it is not
-    /// the kind of its converter (OneVsRest's `parallelism`, which PySpark compares but never
-    /// sends); None for the others.
-    fn param_kind(&self, name: &str) -> Option<Kind> {
-        let _ = name;
-        None
-    }
 
     /// The `params` walk of PySpark's `Params.params`, which `explainParams` and `copy` run too:
     /// it reads every attribute of the object but its properties, so the members of
@@ -212,6 +205,51 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
     fn walk(&self, py: Python<'_>) -> PyResult<()> {
         let _ = py;
         Ok(())
+    }
+
+    /// The names of the defaults and of the set params of the object, in the order of PySpark's
+    /// `_defaultParamMap` and `_paramMap` of it, where it is not the order of the names of the
+    /// params (see [`native_params`]): of a validator or a OneVsRest, whose constructor sets its
+    /// defaults in the order of PySpark's, and whose set params are in the order of their setting
+    /// (of the metadata of a load). None of the others, whose maps of a fit, a load or a copy are of
+    /// the names, as `_resetUid` and `Params.copy` rebuild them of `params`.
+    fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+        None
+    }
+}
+
+/// The names of the set params of an object in the order of their first setting, as PySpark's
+/// `_paramMap` (a dict, which keeps the place of a key that is set again) keeps them, of an object
+/// whose set params are not in the order of their names: a OneVsRest of a load, of the classifier
+/// and then of the order of the metadata (see `ParamsHolder::map_order`).
+#[derive(Clone, Default)]
+pub(super) struct SetOrder(Vec<&'static str>);
+
+impl SetOrder {
+    /// The order of the names `names`, set in their order.
+    pub(super) fn of(names: &[&'static str]) -> Self {
+        let mut order = Self::default();
+        for name in names {
+            order.put(name);
+        }
+        order
+    }
+
+    /// Set `name`: in its place, if it is set.
+    pub(super) fn put(&mut self, name: &'static str) {
+        if !self.0.contains(&name) {
+            self.0.push(name);
+        }
+    }
+
+    /// Unset `name`, as `del self._paramMap[param]`.
+    pub(super) fn unset(&mut self, name: &str) {
+        self.0.retain(|n| *n != name);
+    }
+
+    /// The names, in their order.
+    pub(super) fn names(&self) -> Vec<&'static str> {
+        self.0.clone()
     }
 }
 
@@ -253,6 +291,26 @@ pub(super) fn clone_own_defaults(py: Python<'_>, defaults: &OwnDefaults) -> OwnD
 /// param whose value PySpark cannot send, so that its getter returns it as PySpark's does.
 pub(super) fn unsendable_key(jvm: &str) -> String {
     format!("\u{0}unsendable:{jvm}")
+}
+
+/// The error that PySpark's serialization of the params raises of the value that `params` keeps
+/// of the param `jvm`, which it cannot send (see [`unsendable_key`]): the error of
+/// `LiteralExpression._from_value` of the value, as the values of the ML fetches raise it
+/// (`functions::to_value_column`). Of an int beyond a long, it is `VALUE_NOT_BETWEEN`; of a list of
+/// ints, the bare `AssertionError` of an element out of the range of the type of the first, the
+/// `VALUE_NOT_BETWEEN` of a first element beyond a long, or the `CANNOT_INFER_ARRAY_ELEMENT_TYPE`
+/// of no element.
+pub(super) fn unsendable_error(py: Python<'_>, params: &Params, jvm: &str) -> PyErr {
+    let error = || -> PyResult<PyErr> {
+        let Some(value) = literal_value(py, params, jvm)? else {
+            return Ok(crate::functions::value_not_between(py));
+        };
+        Ok(match crate::functions::to_value_column(value.bind(py)) {
+            Err(error) => error,
+            Ok(_) => crate::functions::value_not_between(py),
+        })
+    };
+    error().unwrap_or_else(|error| error)
 }
 
 /// The Python value of the literal of a set param of `params`, by its JVM name `jvm`.
@@ -537,8 +595,8 @@ fn class_default(slf: &Bound<'_, PyAny>, default: &serde_json::Value) -> PyResul
             .unbind());
     }
     if let Some(fetch) = default.get("server_default") {
-        // A default of the server that the object does not hold (its constructor fetches it, see
-        // `server_defaults`): fetched now.
+        // A default of the server that the object does not hold (PySpark's constructor fetches
+        // it, which sets it in the param maps that the native object takes): fetched now.
         return server_default(py, fetch);
     }
     if default.get("class_name_hash").is_some() {
@@ -588,27 +646,6 @@ fn server_default(py: Python<'_>, fetch: &serde_json::Value) -> PyResult<Py<PyAn
         spark_connect::ml::fetch(&target, attr, args).map_err(Box::new)
     })?;
     super::object::fetch_output_to_py(py, output)
-}
-
-/// The defaults of the class `class` that PySpark's constructor fetches of the server (the
-/// `{"server_default": [attr, args...]}` defaults of ml_params.json: the default stop words and
-/// the locale of StopWordsRemover), each the value of the ML helper's attribute `attr` of `args`,
-/// of the active session. A constructor holds them as its own (`put_own_default_in`), as
-/// PySpark's `_setDefault` of them, so that the construction of no active session raises the
-/// AssertionError of PySpark's.
-#[allow(dead_code)] // The constructor of StopWordsRemover holds them.
-pub(super) fn server_defaults(py: Python<'_>, class: &str) -> PyResult<OwnDefaults> {
-    let mut defaults = Vec::new();
-    for meta in all_params()
-        .get(class)
-        .map(Vec::as_slice)
-        .unwrap_or_default()
-    {
-        if let Some(fetch) = meta.default.as_ref().and_then(|d| d.get("server_default")) {
-            defaults.push((meta.name.as_str(), server_default(py, fetch)?));
-        }
-    }
-    Ok(defaults)
 }
 
 /// The default of the param `meta` of `slf`, as `_defaultParamMap` holds it: the one that `slf`
@@ -879,11 +916,7 @@ pub(super) fn set<T: ParamsHolder>(
                 error
             }
         })?;
-    let kind = slf
-        .try_borrow()?
-        .param_kind(&meta.name)
-        .or_else(|| kind_of_converter(&meta.converter))
-        .unwrap_or(Kind::Identity);
+    let kind = kind_of_converter(&meta.converter).unwrap_or(Kind::Identity);
     // Of a value that the converter has converted already, so that it does not fail again.
     let converted = convert(&meta.name, kind, &converted)?;
     slf.try_borrow_mut()?.put(py, meta.name.as_str(), converted)
@@ -897,11 +930,7 @@ pub(super) fn set_by_name<T: ParamsHolder>(
     value: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let meta = get_param_meta(slf.as_any(), name)?;
-    let kind = slf
-        .try_borrow()?
-        .param_kind(&meta.name)
-        .or_else(|| kind_of_converter(&meta.converter))
-        .unwrap_or(Kind::Identity);
+    let kind = kind_of_converter(&meta.converter).unwrap_or(Kind::Identity);
     let converted = convert(&meta.name, kind, value)?;
     slf.try_borrow_mut()?
         .put(slf.py(), meta.name.as_str(), converted)
@@ -996,18 +1025,37 @@ pub(super) fn shallow_copy<'py, T: NativeInstance>(
     Ok(that)
 }
 
-/// The values of the params of `slf` by name, in the order of the class's params: its set values,
-/// and its defaults (its own, else the class's), of which the public class makes PySpark's
-/// `_paramMap` and `_defaultParamMap` of an object that this client makes (a fit, a load).
+/// The values of the params of `slf` by name: its set values, and its defaults (its own, else the
+/// class's), of which the public class makes PySpark's `_paramMap` and `_defaultParamMap` of an
+/// object that this client makes (a fit, a load). They are in the order of the object's maps
+/// (`ParamsHolder::map_order`), else of the class's params, which is of their names.
 pub(super) fn native_params<'py, T: ParamsHolder>(
     slf: &Bound<'py, T>,
 ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
     let py = slf.py();
+    let params = params_of(slf.as_any())?;
+    let order = slf.try_borrow()?.map_order();
+    // The params of the names `first`, in their order, and then the others, in the class's.
+    let ordered = |first: Option<&Vec<&'static str>>| -> Vec<&ParamMeta> {
+        let mut metas: Vec<&ParamMeta> = first
+            .into_iter()
+            .flatten()
+            .filter_map(|name| params.iter().find(|meta| meta.name == *name))
+            .collect();
+        for meta in params {
+            if !metas.iter().any(|m| m.name == meta.name) {
+                metas.push(meta);
+            }
+        }
+        metas
+    };
     let (set, defaults) = (PyDict::new(py), PyDict::new(py));
-    for meta in params_of(slf.as_any())? {
+    for meta in ordered(order.as_ref().map(|(_, set)| set)) {
         if let Some(value) = set_value_of(slf, &meta.name)? {
             set.set_item(&meta.name, value)?;
         }
+    }
+    for meta in ordered(order.as_ref().map(|(defaults, _)| defaults)) {
         if let Some(value) = default_value(slf, meta)? {
             defaults.set_item(&meta.name, value)?;
         }
@@ -1017,20 +1065,29 @@ pub(super) fn native_params<'py, T: ParamsHolder>(
 
 /// Make the params of `slf` those of PySpark's `_paramMap` and `_defaultParamMap` of it, of the
 /// values `set` and `defaults` by name, before a request that sends them: the values of `set`, the
-/// others unset, and the defaults of `defaults` that the object holds of its own.
+/// others unset, and the defaults of `defaults` that the object holds of its own. The values of
+/// `set` are set in its order, of `_paramMap`, in which PySpark's serialization of the params reads
+/// them: the error of the first that it cannot send is the first of `_paramMap`'s (see
+/// `snapshot`).
 pub(super) fn sync_params<T: ParamsHolder>(
     slf: &Bound<'_, T>,
     set: &Bound<'_, PyDict>,
     defaults: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
-    for meta in params_of(slf.as_any())? {
-        match set.get_item(&meta.name)? {
-            Some(value) => set_by_name(slf, &meta.name, &value)?,
-            None => slf.try_borrow_mut()?.unset(meta.name.as_str())?,
+    let params = params_of(slf.as_any())?;
+    for meta in params {
+        if !set.contains(&meta.name)? {
+            slf.try_borrow_mut()?.unset(meta.name.as_str())?;
         }
         if let Some(value) = defaults.get_item(&meta.name)? {
             slf.try_borrow_mut()?
                 .put_own_default(meta.name.as_str(), value.unbind());
+        }
+    }
+    for (name, value) in set.iter() {
+        let name = name.extract::<String>()?;
+        if params.iter().any(|meta| meta.name == name) {
+            set_by_name(slf, &name, &value)?;
         }
     }
     Ok(())
@@ -1116,14 +1173,20 @@ pub(super) fn copy<'py, T: ParamsHolder + NativeInstance>(
     Ok(that)
 }
 
-/// The error that PySpark's serialization of the params of `slf` raises, if any, as `snapshot`
-/// raises it: `VALUE_NOT_BETWEEN` of an int that PySpark cannot send, and
-/// `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list without elements.
-fn serialization_error<T: Native>(py: Python<'_>, this: &T) -> Option<PyErr> {
-    if !this.unsendable().is_empty() {
-        return Some(crate::functions::value_not_between(py));
+/// The error that PySpark's serialization of the params `params` raises, if any, as `snapshot`
+/// raises it: of the first param of a value that PySpark cannot send, of the JVM name
+/// `unsendable` ([`unsendable_error`]), and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list without
+/// elements. It runs Python code: give it a copy of the params of an object that is not borrowed,
+/// so that a setter that another thread calls meanwhile does not fail.
+pub(super) fn params_error(
+    py: Python<'_>,
+    params: &Params,
+    unsendable: Option<&str>,
+) -> Option<PyErr> {
+    if let Some(jvm) = unsendable {
+        return Some(unsendable_error(py, params, jvm));
     }
-    if this.params().has_empty_array() {
+    if params.has_empty_array() {
         return Some(crate::column::raise_pyspark(
             py,
             "PySparkTypeError",
@@ -1144,14 +1207,16 @@ pub(super) fn operator_writer<T: Native + PyClass<Frozen = False>>(
 ) -> PyResult<super::object::PyMLWriter> {
     let py = slf.py();
     let uid: String = slf.as_any().getattr("uid")?.extract()?;
-    let this = slf.try_borrow()?;
+    let (params, unsendable) = {
+        let this = slf.try_borrow()?;
+        let unsendable = this.unsendable().first().map(|name| T::jvm_name(name));
+        (this.params().clone(), unsendable)
+    };
+    let error = params_error(py, &params, unsendable);
     let operator = spark_connect::ml::MlOperator::with_uid(jvm, &uid, op_type);
     Ok(
-        super::object::PyMLWriter::new(super::object::WriteTarget::Operator(
-            operator,
-            this.params().clone(),
-        ))
-        .with_error(serialization_error(py, &*this)),
+        super::object::PyMLWriter::new(super::object::WriteTarget::Operator(operator, params))
+            .with_error(error),
     )
 }
 

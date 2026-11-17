@@ -134,6 +134,22 @@ The fast-only negative-control run remains necessary to exclude progress caused
 by the one-shot callback's own interpreter entry or teardown. GC state,
 callbacks and handlers are restored even on errors or late signals.
 
+The same budget (`ConversionBudget` in `crates/pyspark-rs/src/interrupt.rs`) checkpoints the
+native conversion of the local data of `createDataFrame`, whose PySpark counterpart is
+Python code: the collection of the rows, the sorting of dict rows, inference, taking the
+rows apart, the converters and their values in arrays, maps and structs, the integer columns
+of an explicit schema, the cells of the native pandas row path, and the release of the rows.
+The rows are assembled into the relation without the GIL. Its offline regression cases
+(`python/tests/local_data_conversion_cases.py`, with the probe of
+`python/tests/_local_data_conversion_probe.py`) observe each of these parts but the integer
+columns, whose scan of a few hundred thousand rows is too short to observe, and the release,
+by the references that the conversion holds to the objects of the data, read with
+`sys.getrefcount`. The data of each case ends with a value that fails the conversion right
+after that part, without running Python code, so that no later part can be mistaken for it.
+They disable automatic GC during the conversion, whose finalizers and weakref callbacks run
+Python code, and warm up the caches of the conversion first. A build without these
+checkpoints fails every case.
+
 `python -m unittest discover -s scripts/tests -p test_row_conversion_probe.py` checks
 the instrumentation in isolated standard-library-only subprocesses, including late
 SIGINT during a join, error cleanup and optimized-mode correctness validation.

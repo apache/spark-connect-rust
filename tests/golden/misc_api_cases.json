@@ -1993,6 +1993,10 @@
      "(1, 6)"
     ]
    ],
+   "fit_dotted_label": [
+    "AnalysisException",
+    "[UNRESOLVED_COLUMN.WITH_SUGGESTION] A column, variable, or function parameter with name `my`.`label` cannot be resolved. Did you mean one of the following? [`my.label`, `features`]. SQLSTATE: 42703;"
+   ],
    "fit_list": [
     "ok",
     [
@@ -2018,6 +2022,78 @@
       "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
      ]
     }
+   ],
+   "fit_max_decimals": [
+    "ok",
+    "2"
+   ],
+   "fit_max_digit_strings": [
+    "ok",
+    "3"
+   ],
+   "fit_max_greatest_string_predictions": [
+    "ok",
+    [
+     0.0,
+     9.0,
+     0.0
+    ]
+   ],
+   "fit_max_infinity": [
+    "OverflowError",
+    "cannot convert float infinity to integer"
+   ],
+   "fit_max_ints": [
+    "ok",
+    "3"
+   ],
+   "fit_max_letters": [
+    "ValueError",
+    "invalid literal for int() with base 10: 'b'"
+   ],
+   "fit_max_minus_half": [
+    "ok",
+    "1"
+   ],
+   "fit_max_minus_one": [
+    "ValueError",
+    "Number of processes must be at least 1"
+   ],
+   "fit_max_nan": [
+    "ValueError",
+    "cannot convert float NaN to integer"
+   ],
+   "fit_max_no_rows": [
+    "TypeError",
+    "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"
+   ],
+   "fit_max_null": [
+    "TypeError",
+    "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"
+   ],
+   "fit_parallelism_0": [
+    "ValueError",
+    "Number of processes must be at least 1"
+   ],
+   "fit_parallelism_0_of_no_rows": [
+    "TypeError",
+    "int() argument must be a string, a bytes-like object or a real number, not 'NoneType'"
+   ],
+   "fit_parallelism_beyond_long": [
+    "ok",
+    "2"
+   ],
+   "fit_parallelism_none": [
+    "TypeError",
+    "'<' not supported between instances of 'int' and 'NoneType'"
+   ],
+   "fit_temp_dfs_left": [
+    "ok",
+    []
+   ],
+   "fit_temp_dfs_models": [
+    "ok",
+    "3"
    ],
    "fit_without_classifier": [
     "KeyError",
@@ -2050,6 +2126,79 @@
    "isinstance_model": [
     "ok",
     "(True, True)"
+   ],
+   "jvm_est_load": [
+    "ok",
+    "('OneVsRest', True, [('featuresCol', \"'features'\"), ('labelCol', \"'label'\"), ('parallelism', '1'), ('predictionCol', \"'prediction'\"), ('rawPredictionCol', \"'rawPrediction'\")])"
+   ],
+   "jvm_est_save": [
+    "ok",
+    "None"
+   ],
+   "jvm_model_load": [
+    "ok",
+    "('OneVsRestModel', True, 3)"
+   ],
+   "jvm_model_load_params": [
+    "ok",
+    [
+     "('featuresCol', \"'features'\")",
+     "('labelCol', \"'label'\")",
+     "('predictionCol', \"'prediction'\")",
+     "('rawPredictionCol', \"'rawPrediction'\")"
+    ]
+   ],
+   "jvm_model_load_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "jvm_model_save": [
+    "ok",
+    "None"
+   ],
+   "jvm_pipeline_load": [
+    "ok",
+    [
+     "('OneVsRestModel', 3)"
+    ]
+   ],
+   "jvm_pipeline_load_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([1.8621, -1.7576, -1.4334]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([1.1655, -1.0392, -1.605]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-2.3795, 1.8431, -1.4948]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-2.4105, 1.4884, -1.0106]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-1.1728, -1.722, 1.7533]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-1.8694, -1.0036, 1.5817]), 2.0)"
+     ]
+    }
+   ],
+   "jvm_pipeline_save": [
+    "ok",
+    "None"
    ],
    "map_rawPredictionCol_rq_transform_columns": [
     "AnalysisException",
@@ -2136,6 +2285,10 @@
    "model_isSet_parallelism": [
     "AttributeError",
     "'OneVsRestModel' object has no attribute 'parallelism'"
+   ],
+   "model_load_cached_objects": [
+    "ok",
+    "(3, 3)"
    ],
    "model_loaded_classifier": [
     "ok",
@@ -3164,6 +3317,22 @@
      "True"
     ]
    ],
+   "parallelism_beyond_long": [
+    "ok",
+    "18446744073709551616"
+   ],
+   "parallelism_beyond_long_load": [
+    "ok",
+    "18446744073709551616"
+   ],
+   "parallelism_beyond_long_metadata": [
+    "ok",
+    "18446744073709551616"
+   ],
+   "parallelism_beyond_long_save": [
+    "ok",
+    "None"
+   ],
    "plain_est_classifier_metadata": [
     "ok",
     "'org.apache.spark.ml.classification.LogisticRegression'"
@@ -3437,6 +3606,49 @@
    "save_without_classifier": [
     "KeyError",
     "Param(parent='OneVsRest_<uid>', name='classifier', doc='base binary classifier')"
+   ],
+   "subclass_fit_calls": [
+    "ok",
+    [
+     "('mc2b$0', 6)",
+     "('mc2b$1', 6)",
+     "('mc2b$2', 6)"
+    ]
+   ],
+   "subclass_limiting_fit": [
+    "ok",
+    "('IllegalArgumentException', 'requirement failed: LinearSVC only supports binary classification. 1 classes detected in <uid>__labelCol')"
+   ],
+   "subclass_model_class": [
+    "ok",
+    "('OneVsRestModel', 'pyspark.ml.classification')"
+   ],
+   "subclass_models_types": [
+    "ok",
+    [
+     "'LogisticRegressionModel'",
+     "'LogisticRegressionModel'",
+     "'LogisticRegressionModel'"
+    ]
+   ],
+   "subclass_transform": [
+    "ok",
+    {
+     "columns": [
+      "label",
+      "features",
+      "rawPrediction",
+      "prediction"
+     ],
+     "rows": [
+      "(0.0, DenseVector([0.0, 0.0]), DenseVector([4.9944, -5.908, -4.3661]), 0.0)",
+      "(0.0, DenseVector([0.1, 0.2]), DenseVector([3.6018, -3.7992, -5.0061]), 0.0)",
+      "(1.0, DenseVector([1.0, 1.0]), DenseVector([-4.2369, 4.6428, -5.3494]), 1.0)",
+      "(1.0, DenseVector([1.2, 0.9]), DenseVector([-4.6748, 3.5918, -3.9211]), 1.0)",
+      "(2.0, DenseVector([2.0, 0.0]), DenseVector([-4.0793, -5.8811, 4.5006]), 2.0)",
+      "(2.0, DenseVector([2.1, 0.2]), DenseVector([-5.4719, -3.7722, 3.8606]), 2.0)"
+     ]
+    }
    ],
    "transform": [
     "ok",

@@ -25,6 +25,7 @@ import datetime
 import decimal
 import enum
 import gc
+import logging
 import subprocess
 import sys
 import textwrap
@@ -131,12 +132,15 @@ def _operator_info(ref_id):
 
 def _label_query_result(obj):
     # The response of the query that the fit of obj makes of its labels: the maximum label of a
-    # OneVsRest, which it fits one model of each class of. The other native fits make no query.
+    # OneVsRest, which it fits one model of each class of, in the column `max(<labelCol>)` that the
+    # server names it, which PySpark's fit reads (`head()["max(" + labelCol + ")"]`). The other
+    # native fits make no query.
     import pyarrow as pa
 
     if type(obj).__name__ == "OneVsRest":
-        table = pa.table({"max": pa.array([1.0], pa.float64())})
-        return _arrow_result(table, T.StructType([T.StructField("max", T.DoubleType())]))
+        name = "max(" + obj.getLabelCol() + ")"
+        table = pa.table({name: pa.array([1.0], pa.float64())})
+        return _arrow_result(table, T.StructType([T.StructField(name, T.DoubleType())]))
     return None
 
 
@@ -1578,6 +1582,96 @@ def test_ml_connect_binary_evaluator_uses_standard_raw_prediction_parameters(ml_
         cls(probabilityCol="p")
 
 
+def test_ml_connect_int_lists_are_literals_of_the_type_of_their_first_element_as_pyspark(ml_mock):
+    # As PySpark's serialization of a list of ints (`toListInt`): LiteralExpression._from_value
+    # types the list by its first element, an integer when it fits 32 bits, else a long, and each
+    # element is a LiteralExpression of that type, whose assert fails of an element out of its
+    # range. The constructor, the setters, setParams and a copy take any list of ints, which the
+    # getter returns, and the next fit, transform or save raises, before any request, the bare
+    # AssertionError of such an element, the VALUE_NOT_BETWEEN of a first element beyond a long,
+    # and the CANNOT_INFER_ARRAY_ELEMENT_TYPE of no element: of the first param of `_paramMap` that
+    # it cannot send, as official pyspark-client 4.3.0 does of each of these.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    models = []
+    mlp = connect.MultilayerPerceptronClassifier
+    slicer = connect.VectorSlicer
+    sendable = [
+        ([2, 3, 2], "integer"),
+        ([-(2**31), 2**31 - 1], "integer"),
+        ([2**33, 3, 2], "long"),
+        ([2**40, -(2**63), 2**63 - 1], "long"),
+    ]
+    for values, element in sendable:
+        made = [
+            ("layers", mlp(layers=values)),
+            ("layers", mlp().setLayers(values)),
+            ("layers", mlp().setParams(layers=values)),
+            ("indices", slicer(indices=values)),
+            ("indices", slicer().setIndices(values)),
+        ]
+        for name, obj in made:
+            _, params = _native_request(spark, service, obj, models)
+            literal = params.params[name]
+            assert literal.array.element_type.WhichOneof("kind") == element, (name, values)
+            elements = literal.array.elements
+            assert [e.WhichOneof("literal_type") for e in elements] == [element] * len(values)
+            assert [getattr(e, element) for e in elements] == values
+    unsendable = [
+        ([2, 2**32 + 3, 2], AssertionError, None),
+        ([2, 2**64, 2], AssertionError, None),
+        ([2**40, 2**64], AssertionError, None),
+        ([2, -(2**31) - 1], AssertionError, None),
+        ([2**64, 2, 2], PySparkValueError, "VALUE_NOT_BETWEEN"),
+        ([], PySparkTypeError, "CANNOT_INFER_ARRAY_ELEMENT_TYPE"),
+    ]
+    df = spark.range(1)
+    sent = _requests_but_deletes(service)
+    for values, error_class, condition in unsendable:
+        made = [
+            ("getLayers", mlp(layers=values), "fit"),
+            ("getLayers", mlp().setLayers(values), "fit"),
+            ("getLayers", mlp().setParams(layers=values).copy(), "fit"),
+            ("getIndices", slicer(indices=values), "transform"),
+            ("getNumBucketsArray", connect.QuantileDiscretizer(numBucketsArray=values), "fit"),
+        ]
+        for getter, obj, call in made:
+            assert getattr(obj, getter)() == values
+            for run in [lambda: getattr(obj, call)(df), lambda: obj.write().save("/unsent/path")]:
+                with pytest.raises(error_class) as error:
+                    run()
+                if condition is None:
+                    assert type(error.value) is AssertionError and str(error.value) == ""
+                else:
+                    assert error.value.getCondition() == condition, (getter, values)
+    assert _requests_but_deletes(service) == sent
+    # A list that PySpark sends, set again, is sent.
+    estimator = mlp(layers=[2, 2**33])
+    assert estimator.setLayers([2, 3]) is estimator
+    assert _native_sent(spark, service, estimator, models)["layers"] == ("array", [2, 3])
+    # The error is that of the first param of `_paramMap` that PySpark cannot send.
+    for estimator, expected in [
+        (mlp(maxIter=2**64, layers=[2, 2**33]), PySparkValueError),
+        (mlp(layers=[2, 2**33], maxIter=2**64), AssertionError),
+        (mlp().setMaxIter(2**64).setLayers([2, 2**33]), PySparkValueError),
+        (mlp().setLayers([2, 2**33]).setMaxIter(2**64), AssertionError),
+    ]:
+        with pytest.raises(expected) as error:
+            estimator.fit(df)
+        assert type(error.value) is expected
+    # A model's copy of such a list keeps it, and its transform raises.
+    _native_request(spark, service, mlp(layers=[2, 3]), models)
+    model = models[-1]
+    copied = model.copy({model.layers: [2, 2**32 + 3]})
+    assert copied.getLayers() == [2, 2**32 + 3]
+    sent = _requests_but_deletes(service)
+    with pytest.raises(AssertionError) as error:
+        copied.transform(df)
+    assert type(error.value) is AssertionError
+    assert _requests_but_deletes(service) == sent
+
+
 def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
     # As PySpark: an int beyond a long is taken by the constructor and the setter, and the
     # next fit raises the VALUE_NOT_BETWEEN of PySpark's serialization of the params, before
@@ -1727,6 +1821,97 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
             **_defaults_sent(name),
             param: ("string", "changed"),
         }
+
+
+def test_the_dataframe_members_of_a_summary_of_its_constructor_read_its_summary_dataset(ml_mock):
+    # As PySpark's invoke_remote_attribute_relation: of a summary whose `java_obj` starts with the
+    # `summary` method (`"<id>.summary"`, as PySpark names the training summary of a fit), a
+    # DataFrame member reads the plan of the summary's `_summary_dataset`, which PySpark's fit sets,
+    # as the summary dataset of the relation: without one, the AttributeError of the attribute,
+    # before any request. The members of a value, of no DataFrame, read none.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    sent = _requests_but_deletes(service)
+    for summary, member in [
+        (connect.regression.LinearRegressionSummary("abc.summary"), lambda s: s.predictions),
+        (connect.clustering.KMeansSummary("abc.summary.x"), lambda s: s.cluster),
+        (
+            connect.classification.BinaryLogisticRegressionTrainingSummary("abc.summary"),
+            lambda s: s.roc,
+        ),
+        (
+            connect.regression.GeneralizedLinearRegressionSummary("abc.summary"),
+            lambda s: s.residuals(),
+        ),
+    ]:
+        with pytest.raises(AttributeError) as error:
+            member(summary)
+        assert str(error.value) == (
+            f"'{type(summary).__name__}' object has no attribute '_summary_dataset'"
+        )
+    assert _requests_but_deletes(service) == sent
+    dataset = spark.range(3)
+    summary = connect.regression.LinearRegressionSummary("abc.summary")
+    summary._summary_dataset = dataset
+    relation = _relation(summary.predictions).ml_relation
+    assert relation.fetch.obj_ref.id == "abc"
+    assert [method.method for method in relation.fetch.methods] == ["summary", "predictions"]
+    assert relation.model_summary_dataset == _relation(dataset)
+    for given in ("abc", "abc.x.summary"):
+        relation = _relation(connect.regression.LinearRegressionSummary(given).predictions)
+        assert not relation.ml_relation.HasField("model_summary_dataset"), given
+    summary._summary_dataset = 5
+    with pytest.raises(AttributeError, match="^'int' object has no attribute '_plan'$"):
+        summary.predictions
+    # The member of a value reads the `_java_obj` of the summary as it is at the call.
+    summary._java_obj = "def"
+    service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
+    sent = len(service.execute_requests)
+    assert summary.r2 == 0.5
+    (command,) = _commands_but_deletes(service, sent)
+    assert command.ml_command.fetch.obj_ref.id == "def"
+    assert [method.method for method in command.ml_command.fetch.methods] == ["r2"]
+
+
+def test_a_summary_of_a_fit_or_an_evaluation_is_not_pickled_as_pysparks(ml_mock):
+    # As PySpark's pickle of a summary of a server-side object, of the error of the first of its
+    # attributes that does not pickle: the TypeError of the lock of the RemoteModelRef of the
+    # model that the summary of an evaluation keeps (`__source_transformer__`), and that the
+    # summary dataset of a fit keeps when it reads a transform of a model (`_summary_dataset` of
+    # the clustering models, the transform of the training dataset by the model); else the
+    # AttributeError of the session of the training DataFrame, which it pickles after its plan.
+    # `copy.deepcopy` raises the TypeError of each, which copies the RemoteModelRef of the model.
+    import copy
+    import pickle
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    lock = "^cannot pickle '_thread.lock' object$"
+    session = "^Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'$"
+    service.execute_payload = _operator_info("model-of-a-summary")
+    kmeans = connect.clustering.KMeans(k=2).fit(frame)
+    regression = connect.regression.LinearRegression().fit(frame)
+    # The training dataset of a stage after a model of a Pipeline is a transform of the model.
+    after_model = connect.regression.LinearRegression().fit(kmeans.transform(frame).select("*"))
+    service.payload_for_request = {b"evaluate": _ml_result(summary="evaluated-summary")}
+    evaluated = regression.evaluate(frame)
+    assert type(evaluated).__name__ == "LinearRegressionSummary"
+    sent = _requests_but_deletes(service)
+    for summary, error, message in [
+        (kmeans.summary, TypeError, lock),
+        (regression.summary, AttributeError, session),
+        (after_model.summary, TypeError, lock),
+        (evaluated, TypeError, lock),
+    ]:
+        with pytest.raises(error, match=message):
+            pickle.dumps(summary)
+        with pytest.raises(TypeError, match=lock):
+            copy.deepcopy(summary)
+    assert _requests_but_deletes(service) == sent
 
 
 def test_native_models_released_while_their_session_stops_send_their_delete_as_pyspark(ml_mock):
@@ -2593,6 +2778,218 @@ def test_ml_fit_and_transform_send_the_messages_of_pyspark(ml_mock):
     reference = predictions["counts"]._expr.to_plan(None).unresolved_attribute
     assert reference.plan_id == relation.common.plan_id
     assert len(service.execute_requests) == 1
+
+
+def _fit_warning_result(ref, warning):
+    # The ExecutePlanResponse of a Fit whose model `ref` the server sends with the warning
+    # `warning` (MlOperatorInfo.warning_message), as of a tree training that the memory control of
+    # its ML cache stopped early.
+    return _ml_result(
+        operator_info=pb2.MlCommandResult.MlOperatorInfo(
+            obj_ref=pb2.ObjectRef(id=ref), warning_message=warning
+        )
+    )
+
+
+@pytest.fixture
+def fit_warning_mock(_ml_mock_server):
+    # A session of its own of the shared server, as of `ml_mock`, whose hook records the request of
+    # each execution, but the Delete of a released model (which is sent without waiting, at any
+    # time), with the records of the logger pyspark.ml.util, in their order, of any thread:
+    # ("request", <a fit or fetch of its class or method, or the plan's kind>) and ("log", record).
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    _, service = _ml_mock_server
+    service.reset()
+    events = []
+
+    class Recording(ConnectSession.Hook):
+        def on_execute_plan(self, request):
+            command = request.plan.command.ml_command
+            if command.HasField("fit"):
+                events.append(("request", "fit " + command.fit.estimator.name.split(".")[-1]))
+            elif command.HasField("fetch"):
+                methods = ".".join(method.method for method in command.fetch.methods)
+                events.append(("request", "fetch " + methods))
+            elif not command.HasField("delete"):
+                events.append(("request", request.plan.WhichOneof("op_type")))
+            return request
+
+    class Logged(logging.Handler):
+        def emit(self, record):
+            events.append(("log", record))
+
+    logger = logging.getLogger("pyspark.ml.util")
+    handler = Logged()
+    logger.addHandler(handler)
+    builder = ConnectSession.builder.remote(service.remote)
+    spark = builder._registerHook(lambda session: Recording()).create()
+    try:
+        yield spark, service, events
+    finally:
+        logger.removeHandler(handler)
+        service.forget_session(spark.session_id)
+        spark.stop()
+
+
+def test_ml_connect_fits_log_the_warning_of_the_server_as_pyspark(fit_warning_mock):
+    # As official PySpark 4.3.0's try_remote_fit: the warning that the server sends with the model
+    # of a fit (MlOperatorInfo.warning_message, of a tree training that the memory control of its
+    # ML cache stopped early) is logged by its `_logger.warning(warning_msg)`, to the logger
+    # pyspark.ml.util at WARNING, of the server's message as it is (of no arguments), from that
+    # line of pyspark/ml/util.py, once the result of the Fit has arrived and before the model is
+    # made of it (before the fetch of a forest's trees or of a discretizer's splits). So each fit
+    # logs its own: of a param map, of each map of a list and of fitMultiple, and of each stage of
+    # a Pipeline. A fit whose result has no warning, or an empty one, logs nothing, and so does a
+    # fetch whose result has one.
+    import inspect
+    import threading
+
+    import pyspark.ml.util as util
+    from pyspark.ml.connect.feature import QuantileDiscretizer, StringIndexer
+    from pyspark.ml.connect.pipeline import Pipeline
+    from pyspark.ml.connect.regression import RandomForestRegressor
+
+    spark, service, events = fit_warning_mock
+    df = spark.range(1)
+    lines, start = inspect.getsourcelines(util.try_remote_fit)
+    line = start + next(i for i, text in enumerate(lines) if "_logger.warning(" in text)
+    where = (util.try_remote_fit.__code__.co_filename, line, "wrapped")
+    forest = (
+        "The random forest training stops early because the model size (35016 bytes) exceeds "
+        "threshold (24000 bytes)."
+    )
+
+    def logged(fit, *payloads):
+        # The requests and the logged messages of `fit`, whose executions are answered by
+        # `payloads` in turn, in their order; each record is PySpark's.
+        service.execute_payload_queue = list(payloads)
+        del events[:]
+        fit()
+        seen = []
+        for kind, value in events:
+            if kind == "log":
+                assert (value.name, value.levelname) == ("pyspark.ml.util", "WARNING")
+                assert value.args == () and value.exc_info is None
+                assert value.thread == threading.get_ident()
+                assert (value.pathname, value.lineno, value.funcName) == where
+                value = value.msg
+            seen.append((kind, value))
+        return seen
+
+    # A forest's fit, whose model reads its trees, of a result of a warning that is no fit's.
+    trees = _fit_warning_result("tree-1", "not of a fit")
+    fit, read = ("request", "fit RandomForestRegressor"), ("request", "fetch trees")
+    first, second = _fit_warning_result("f", forest), _fit_warning_result("s", "second")
+    assert logged(lambda: RandomForestRegressor().fit(df), first, trees) == [
+        fit, ("log", forest), read
+    ]
+    estimator = RandomForestRegressor()
+    assert logged(lambda: estimator.fit(df, {estimator.maxDepth: 3}), first, trees) == [
+        fit, ("log", forest), read
+    ]
+    expected = [fit, ("log", forest), read, fit, ("log", "second"), read]
+    maps = [{}, {estimator.maxDepth: 3}]
+    assert logged(lambda: estimator.fit(df, maps), first, trees, second, trees) == expected
+    fits = lambda: list(estimator.fitMultiple(df, maps))  # noqa: E731
+    assert logged(fits, first, trees, second, trees) == expected
+
+    # A discretizer's fit, whose Bucketizer is made of the splits that it reads of its model.
+    doubles = [pb2.Expression.Literal(double=v) for v in [0.0, 0.5, 1.0]]
+    splits = pb2.Expression.Literal(array=pb2.Expression.Literal.Array(elements=doubles))
+    service.payload_for_request = {b"getSplits": _ml_result(param=splits)}
+    discretizer = QuantileDiscretizer(inputCol="id")
+    assert logged(lambda: discretizer.fit(df), _fit_warning_result("q", "of splits")) == [
+        ("request", "fit QuantileDiscretizer"),
+        ("log", "of splits"),
+        ("request", "fetch getSplits"),
+    ]
+    service.payload_for_request = {}
+
+    # The stages of a Pipeline, each of its own warning.
+    indexer = StringIndexer(inputCol="x", outputCol="y")
+    pipeline = Pipeline(stages=[RandomForestRegressor(predictionCol="p"), indexer])
+    of_indexer = _fit_warning_result("i", "of an indexer")
+    assert logged(lambda: pipeline.fit(df), first, trees, of_indexer) == [
+        fit, ("log", forest), read, ("request", "fit StringIndexer"), ("log", "of an indexer")
+    ]
+
+    # No warning, and an empty one.
+    for result in [_operator_info("plain"), _fit_warning_result("empty", "")]:
+        assert logged(lambda: indexer.fit(df), result) == [("request", "fit StringIndexer")]
+
+
+def test_ml_connect_one_vs_rest_logs_the_warning_of_each_class_fit_as_pyspark(fit_warning_mock):
+    # As official PySpark 4.3.0's OneVsRest._fit, whose `classifier.fit` of each class runs in a
+    # thread of its pool, of try_remote_fit: the warning of the Fit of each class is logged, of
+    # the logger pyspark.ml.util, on the thread that fits the class (not the caller's), once that
+    # Fit has returned and before the next class is fitted.
+    import threading
+
+    from pyspark.ml.connect.classification import DecisionTreeClassifier, OneVsRest
+
+    spark, service, events = fit_warning_mock
+    estimator = OneVsRest(classifier=DecisionTreeClassifier(), parallelism=1)
+    # The labels' maximum is 1.0: two classes, whose Fits are told apart by their binary labels.
+    service.query_payload = _label_query_result(estimator)
+    service.payload_for_request = {
+        b"mc2b$0": _fit_warning_result("class-0", "the warning of class 0"),
+        b"mc2b$1": _fit_warning_result("class-1", "the warning of class 1"),
+    }
+    try:
+        estimator.fit(spark.range(1))
+    finally:
+        service.query_payload = None
+    fit = ("request", "fit DecisionTreeClassifier")
+    assert [(kind, value if kind == "request" else value.msg) for kind, value in events] == [
+        ("request", "root"),
+        fit,
+        ("log", "the warning of class 0"),
+        fit,
+        ("log", "the warning of class 1"),
+    ]
+    for record in [value for kind, value in events if kind == "log"]:
+        assert (record.name, record.levelname) == ("pyspark.ml.util", "WARNING")
+        assert record.thread != threading.get_ident()
+
+
+def test_ml_connect_fit_raises_the_exception_of_logging_its_warning_as_pyspark(fit_warning_mock):
+    # As official PySpark 4.3.0: the exception of the logging of the warning of a fit, of a filter
+    # of the logger that raises, is the exception of the fit, as it is, which makes no model (it
+    # reads no trees).
+    from pyspark.ml.connect.regression import RandomForestRegressor
+
+    spark, service, events = fit_warning_mock
+
+    class Failing(logging.Filter):
+        def filter(self, record):
+            raise ValueError("the filter failed")
+
+    logger = logging.getLogger("pyspark.ml.util")
+    failing = Failing()
+    logger.addFilter(failing)
+    service.execute_payload_queue = [
+        _fit_warning_result("forest", "stopped early"),
+        _operator_info("tree-1"),
+    ]
+    try:
+        with pytest.raises(ValueError, match="the filter failed"):
+            RandomForestRegressor().fit(spark.range(1))
+    finally:
+        logger.removeFilter(failing)
+    assert events == [("request", "fit RandomForestRegressor")]
+
+
+def test_the_logging_of_a_fit_warning_needs_the_logging_call_of_pysparks_function():
+    # The warning of a fit is logged from the line of the `_logger.warning(...)` call of PySpark's
+    # try_remote_fit (`_native_classes._log_as`), of its nested `wrapped`: a function that makes no
+    # such call is a ValueError, rather than a record of another location.
+    import pyspark.ml.util as util
+    from pyspark.ml import _native_classes
+
+    with pytest.raises(ValueError) as error:
+        _native_classes._log_as(util.try_remote_transform_relation, "_logger", "a warning")
+    assert str(error.value) == "try_remote_transform_relation calls no _logger.warning"
 
 
 def test_ml_transformers_send_the_relation_of_pyspark(ml_mock):
@@ -3843,6 +4240,44 @@ def test_gaussian_mixture_native_parameters_match_official_fixture(ml_mock, use_
         assert params == pb2.MlParams.FromString(base64.b64decode(case["params_b64"]))
 
 
+def test_the_future_warning_of_compute_cost_is_attributed_as_pysparks():
+    # PySpark's `BisectingKMeansModel.computeCost` warns before its `_call_java`, of its
+    # `warnings.warn(...)`: of that line of `pyspark/ml/clustering.py` and of the module
+    # `pyspark.ml.clustering`, whose filters take it, and of its registry, of which the "default"
+    # action shows it once. A model of no server-side object then raises its AssertionError.
+    import inspect
+    import warnings
+
+    import pyspark.ml.clustering as reference
+    from pyspark.ml.connect import clustering
+
+    function = reference.BisectingKMeansModel.computeCost
+    lines, start = inspect.getsourcelines(function)
+    line = start + next(i for i, text in enumerate(lines) if "warnings.warn(" in text)
+    model = clustering.BisectingKMeansModel()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(AssertionError):
+            model.computeCost(None)
+    (warning,) = caught
+    assert warning.category is FutureWarning and str(warning.message).startswith("Deprecated in 3.0.0.")
+    assert (warning.filename, warning.lineno) == (function.__code__.co_filename, line)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings("ignore", category=FutureWarning, module="pyspark.ml.clustering")
+        with pytest.raises(AssertionError):
+            model.computeCost(None)
+    assert caught == []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.resetwarnings()
+        warnings.simplefilter("default")
+        vars(reference).pop("__warningregistry__", None)
+        for _ in range(2):
+            with pytest.raises(AssertionError):
+                model.computeCost(None)
+    assert len(caught) == 1
+
+
 @pytest.mark.parametrize("use_setters", [False, True], ids=["constructor", "setters"])
 def test_bisecting_kmeans_native_parameters_match_official_fixture(ml_mock, use_setters):
     import base64
@@ -4268,6 +4703,21 @@ def test_one_vs_rest_reads_the_dataset_before_its_parallelism(parallelism, use_s
         estimator.fit(None)
 
 
+@pytest.mark.parametrize("value", [2**64, -(2**64), 2**63, -(2**63) - 1, 7])
+def test_one_vs_rest_keeps_a_parallelism_of_any_size_as_pyspark(value):
+    # PySpark's `parallelism` is an int of any size, which its fit compares in Python and never
+    # sends, and which its writer saves as it is: the native object keeps it as it is too (an int
+    # beyond a long, of the repr that the core keeps of it), so that its getter, its save and its
+    # load are of the int itself.
+    from pyspark import _pyspark as native
+    from pyspark.ml.connect.classification import OneVsRest
+
+    assert native.OneVsRest(parallelism=value).getParallelism() == value
+    assert native.OneVsRest().setParallelism(value).getParallelism() == value
+    assert native.OneVsRest().setParams(parallelism=value).getParallelism() == value
+    assert OneVsRest(parallelism=value).getParallelism() == value
+
+
 @pytest.mark.parametrize("name", ["AFTSurvivalRegression", "IsotonicRegression", "FMRegressor"])
 @pytest.mark.parametrize("use_setters", [False, True])
 def test_remaining_regressor_native_parameters_match_official_fixture(ml_mock, name, use_setters):
@@ -4378,6 +4828,35 @@ def test_native_one_vs_rest_fit_of_pandas_is_pysparks(pandas_ml_input):
     assert error.value.args == expected.value.args
 
 
+def test_native_one_vs_rest_fits_a_subclass_of_a_native_classifier_by_pysparks_fit(ml_mock):
+    # The native fit takes a classifier of exactly a native class. PySpark's own OneVsRest._fit fits
+    # a Python subclass of one, of `classifier.fit(trainingDataset, paramMap)` for each class, so
+    # that the subclass's `_fit` runs, of the binary label of each class, and sends no fit of its
+    # own. Its model is PySpark's OneVsRestModel of the subclass's models.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.classification import OneVsRestModel
+    from pyspark.ml.connect.classification import LinearSVCModel
+
+    spark, service = ml_mock
+    calls = []
+
+    class Overriding(connect.LinearSVC):
+        def _fit(self, dataset):
+            calls.append(self.getLabelCol())
+            return LinearSVCModel()
+
+    estimator = connect.OneVsRest(classifier=Overriding())
+    service.query_payload = _label_query_result(estimator)
+    try:
+        model = estimator.fit(spark.range(1))
+    finally:
+        service.query_payload = None
+    assert sorted(calls) == ["mc2b$0", "mc2b$1"]
+    assert type(model) is OneVsRestModel
+    assert [type(m) for m in model.models] == [LinearSVCModel] * 2
+    assert not any(c.ml_command.HasField("fit") for c in _commands(service))
+
+
 def test_stop_words_remover_load_default_stop_words_asserts_an_active_session():
     # As PySpark's invoke_helper_attr, which asserts the active session of the ML helper call.
     from pyspark.ml.connect.feature import StopWordsRemover
@@ -4429,6 +4908,75 @@ def test_native_ml_rejects_pandas_before_any_requests(ml_mock, pandas_ml_input, 
         assert requests() == sent
 
 
+def test_the_models_of_objects_of_the_server_are_of_their_constructors_as_pysparks(ml_mock):
+    # PySpark makes the model of an object that a fetch returns of its class's constructor, of
+    # no params (`DecisionTreeClassificationModel(RemoteModelRef(m))` of a tree of an ensemble,
+    # `LocalLDAModel(RemoteModelRef(...))` of `toLocal`): its `JavaModel.__init__` makes its uid
+    # and its param maps, of the defaults in the order in which its classes set them, which is
+    # not of their names (as the maps of a fit or a load are, of `_resetUid`).
+    import pyspark.ml.classification as classification_reference
+    import pyspark.ml.clustering as clustering_reference
+    from pyspark.ml.connect import classification, clustering
+
+    spark, service = ml_mock
+    forest = classification.RandomForestClassifier(numTrees=1)
+    _answer_fit(service, forest, ref="forest-model")
+    (tree,) = forest.fit(spark.range(1)).trees
+    service.execute_payload_queue = [_operator_info("lda-model"), _operator_info("local-model")]
+    local = clustering.LDA(k=2, optimizer="em").fit(spark.range(1)).toLocal()
+    for model, reference in [
+        (tree, classification_reference.DecisionTreeClassificationModel),
+        (local, clustering_reference.LocalLDAModel),
+    ]:
+        name = reference.__name__
+        assert type(model).__name__ == name and model.uid.startswith(name + "_")
+        order = [p.name for p in reference()._defaultParamMap]
+        assert order != sorted(order)
+        assert [p.name for p in model._defaultParamMap] == order and not model._paramMap
+    assert _relation(tree.transform(spark.range(1))).ml_relation.transform.obj_ref.id == "tree-1"
+    assert _relation(local.transform(spark.range(1))).ml_relation.transform.obj_ref.id == "local-model"
+
+
+def test_the_model_of_a_one_vs_rest_fit_is_of_its_constructor_and_warns_as_pysparks(ml_mock):
+    # PySpark's `OneVsRest._fit` makes its model of `OneVsRestModel(models)`, whose constructor sets
+    # the defaults in the order of its MRO, and then of `_copyValues`, which sets the params of the
+    # estimator in the order of their names. Of a classifier of no `weightCol`, it warns of its
+    # `warnings.warn(...)` first: of that line of `pyspark/ml/classification.py` and of the module
+    # `pyspark.ml.classification`, whose filters take it.
+    import inspect
+    import warnings
+
+    import pyspark.ml.classification as reference
+    from pyspark.ml.connect import classification
+
+    spark, service = ml_mock
+    base = classification.MultilayerPerceptronClassifier(layers=[1, 2])
+    estimator = classification.OneVsRest(classifier=base, weightCol="w", featuresCol="f")
+    function = reference.OneVsRest._fit
+    lines, start = inspect.getsourcelines(function)
+    line = start + next(i for i, text in enumerate(lines) if "warnings.warn(" in text)
+    _answer_fit(service, estimator, ref="class-model")
+    service.query_payload = _label_query_result(estimator)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        model = estimator.fit(spark.range(1))
+    (warning,) = caught
+    assert warning.category is UserWarning
+    assert str(warning.message) == f"weightCol is ignored, as it is not supported by {base.uid} now."
+    assert (warning.filename, warning.lineno) == (function.__code__.co_filename, line)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        warnings.filterwarnings("ignore", category=UserWarning, module="pyspark.ml.classification")
+        estimator.fit(spark.range(1))
+    service.query_payload = None
+    assert caught == []
+    order = ["predictionCol", "featuresCol", "labelCol", "rawPredictionCol"]
+    assert [p.name for p in reference.OneVsRestModel([])._defaultParamMap] == order
+    assert [p.name for p in model._defaultParamMap] == order
+    assert [p.name for p in model._paramMap] == ["classifier", "featuresCol", "weightCol"]
+    assert [p.name for p in classification.OneVsRestModel(model.models)._defaultParamMap] == order
+
+
 @pytest.mark.parametrize("name", ["LDA", "PowerIterationClustering"])
 def test_remaining_clustering_signatures_and_native_exports(name):
     import inspect
@@ -4448,6 +4996,54 @@ def test_remaining_clustering_signatures_and_native_exports(name):
         assert parameters[param].kind == inspect.Parameter.KEYWORD_ONLY
         assert parameters[param].default == default
         assert hasattr(cls, "set" + param[0].upper() + param[1:])
+
+
+def test_the_dataframe_methods_of_models_and_summaries_send_their_positional_arguments_only(ml_mock):
+    # PySpark's `try_remote_attribute_relation` of `LDAModel.describeTopics`,
+    # `Word2VecModel.getVectors` and the `residuals` of a GLR summary sends the positional
+    # arguments of a call only: it drops keyword arguments, and checks no arity, in a lazy
+    # DataFrame of no request, which the server rejects when it is analyzed of arguments that its
+    # method does not take.
+    from pyspark.ml.connect import clustering, feature, regression
+
+    spark, service = ml_mock
+    frame = spark.range(1)
+    service.execute_payload = _operator_info("lda-model")
+    lda = clustering.LDA(k=2).fit(frame)
+    service.execute_payload = _operator_info("word2vec-model")
+    word2vec = feature.Word2Vec(inputCol="text").fit(frame)
+    service.execute_payload = _operator_info("glr-model")
+    summary = regression.GeneralizedLinearRegression().fit(frame).summary
+    sent = _requests_but_deletes(service)
+    cases = [
+        (lambda: lda.describeTopics(), "lda-model", ["describeTopics"], []),
+        (lambda: lda.describeTopics(1), "lda-model", ["describeTopics"], [("integer", 1)]),
+        (lambda: lda.describeTopics(maxTermsPerTopic=1), "lda-model", ["describeTopics"], []),
+        (lambda: lda.describeTopics(1, 2, x=3), "lda-model", ["describeTopics"], [("integer", 1), ("integer", 2)]),
+        (lambda: word2vec.getVectors(x=1), "word2vec-model", ["getVectors"], []),
+        (lambda: word2vec.getVectors(1), "word2vec-model", ["getVectors"], [("integer", 1)]),
+        (lambda: summary.residuals(), "glr-model", ["summary", "residuals"], []),
+        (lambda: summary.residuals(residualsType="pearson"), "glr-model", ["summary", "residuals"], []),
+        (
+            lambda: summary.residuals("pearson", 1),
+            "glr-model",
+            ["summary", "residuals"],
+            [("string", "pearson"), ("integer", 1)],
+        ),
+    ]
+    for call, ref, methods, args in cases:
+        fetch = _relation(call()).ml_relation.fetch
+        assert fetch.obj_ref.id == ref
+        assert [method.method for method in fetch.methods] == methods
+        assert [_literal_value(arg.param) for arg in fetch.methods[-1].args] == args
+    assert _requests_but_deletes(service) == sent
+    # Of no server-side object, PySpark's AssertionError of any arguments.
+    for call in [
+        lambda: clustering.LocalLDAModel().describeTopics(1, 2, x=3),
+        lambda: feature.Word2VecModel().getVectors(1, x=2),
+    ]:
+        with pytest.raises(AssertionError):
+            call()
 
 
 def test_pic_helper_request_matches_official_and_is_lazy(ml_mock):

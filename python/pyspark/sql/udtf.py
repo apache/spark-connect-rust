@@ -22,6 +22,7 @@ Mirrors pyspark.sql.connect.udtf and pyspark.sql.functions.udtf.
 
 from pyspark._pyspark import SkipRestOfInputTableException
 
+import functools
 import inspect
 import pickle
 import sys
@@ -199,6 +200,26 @@ def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Any]) -> None:
         )
 
 
+def _pickled_handler(func: Type) -> bytes:
+    """The command of a UDTF of the handler class ``func``, as PySpark Connect's
+    ``PythonUDTF.to_plan`` pickles it each time it builds a plan that holds the UDTF, and its
+    registration when it registers it: ``UDTF_SERIALIZATION_ERROR`` of the name of the class, of
+    a handler that does not pickle. Connect sends the schema separately, in
+    ``PythonUDTF.return_type``, so the command is only the handler class, unlike that of a scalar
+    UDF."""
+    try:
+        return CloudPickleSerializer().dumps(func)
+    except pickle.PicklingError:
+        raise PySparkPicklingError(
+            errorClass="UDTF_SERIALIZATION_ERROR",
+            messageParameters={
+                "name": func.__name__,
+                "message": "Please check the stack trace and "
+                "make sure the function is serializable.",
+            },
+        )
+
+
 class UserDefinedTableFunction:
     """A user-defined table function: a Python handler class that yields rows.
 
@@ -241,21 +262,9 @@ class UserDefinedTableFunction:
 
     @property
     def command(self) -> bytes:
-        """The pickled handler class, as PySpark Connect's ``PythonUDTF.command``: pickled when
-        the UDTF is used, and ``UDTF_SERIALIZATION_ERROR`` of a handler that does not pickle.
-        Connect sends the schema separately, in ``PythonUDTF.return_type``, so the command is
-        only the handler class, unlike that of a scalar UDF."""
-        try:
-            return CloudPickleSerializer().dumps(self.func)
-        except pickle.PicklingError:
-            raise PySparkPicklingError(
-                errorClass="UDTF_SERIALIZATION_ERROR",
-                messageParameters={
-                    "name": self._name,
-                    "message": "Please check the stack trace and "
-                    "make sure the function is serializable.",
-                },
-            )
+        """The pickled handler class, as PySpark Connect's ``PythonUDTF.command``, which
+        ``register`` sends (see ``_pickled_handler``)."""
+        return _pickled_handler(self.func)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from pyspark import _pyspark
@@ -263,7 +272,8 @@ class UserDefinedTableFunction:
 
         # As PySpark's: an argument is ColumnOrName, so a bare string is a column name, of
         # which pyfunc_make_udtf makes a ColumnReference, and each keyword argument is a
-        # NamedArgumentExpression, after the positional ones.
+        # NamedArgumentExpression, after the positional ones. As its `PythonUDTF.to_plan`, each
+        # request pickles the handler class when it builds the plan of the DataFrame.
         cols = list(args)
         named = list(kwargs.items())
         return _pyspark.functions.pyfunc_make_udtf(
@@ -271,7 +281,7 @@ class UserDefinedTableFunction:
             self._name,
             self.returnType,
             self.evalType,
-            self.command,
+            functools.partial(_pickled_handler, self.func),
             self.python_ver,
             *cols,
             deterministic=self.deterministic,

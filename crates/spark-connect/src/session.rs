@@ -36,6 +36,10 @@ pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, FallibleProgressHandler)>
 pub type ObservationMetricsCheck =
     Arc<dyn Fn(&proto::execute_plan_response::ObservedMetrics) -> Result<()> + Send + Sync>;
 
+/// A handler of the warning of an ML fit, as [`SparkSession::set_ml_fit_warning_handler`] sets
+/// it.
+type MlFitWarningHandler = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
+
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
 #[derive(Debug, Clone, Default)]
@@ -76,11 +80,21 @@ fn forget_thread_tags(
 /// `inheritable_thread_target` share the copy of the `thread_local` of the client of the thread
 /// that decorated their function. The tags that one of them adds or removes are those of all.
 #[derive(Clone, Default)]
-pub struct SharedTags(Arc<Mutex<Vec<String>>>);
+pub struct SharedTags(Arc<Mutex<Vec<Tag>>>);
+
+/// An operation tag: its text, or the UTF-32 little-endian bytes of a str of Python that UTF-8
+/// cannot encode, such as one of a lone surrogate, which PySpark's client keeps as a tag, and
+/// with which each request that carries the tags fails (see
+/// [`SparkSession::add_unencodable_tag`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Tag {
+    Text(String),
+    Unencodable(Vec<u8>),
+}
 
 impl ThreadTags {
     /// The tags of the current thread.
-    fn current(&self) -> Vec<String> {
+    fn current(&self) -> Vec<Tag> {
         let shared = self
             .by_thread
             .lock()
@@ -94,7 +108,7 @@ impl ThreadTags {
 
     /// Change the tags of the current thread, and forget a thread without tags that it shares
     /// with no other.
-    fn update(&self, change: impl FnOnce(&mut Vec<String>)) {
+    fn update(&self, change: impl FnOnce(&mut Vec<Tag>)) {
         let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
         let thread = std::thread::current().id();
         if !by_thread.contains_key(&thread) {
@@ -250,6 +264,8 @@ pub struct SparkSession {
     python_accumulators: PythonAccumulators,
     /// The check of the metrics of the Observations of its executions (shared across clones).
     observation_metrics_check: Arc<Mutex<Option<ObservationMetricsCheck>>>,
+    /// The handler of the warnings of its ML fits (shared across clones).
+    ml_fit_warning_handler: Arc<Mutex<Option<MlFitWarningHandler>>>,
     /// Whether this session was stopped, by `stop()` once its release ended, or by `close()`
     /// (shared across clones). Backs `is_stopped`.
     stopped: Arc<AtomicBool>,
@@ -273,6 +289,7 @@ impl SparkSession {
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             python_accumulators: PythonAccumulators::default(),
             observation_metrics_check: Arc::default(),
+            ml_fit_warning_handler: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
@@ -286,12 +303,26 @@ impl SparkSession {
     /// be empty or contain a comma (see [`SparkSession::check_tag`]).
     pub fn add_tag(&self, tag: &str) -> Result<()> {
         Self::check_tag(tag)?;
+        self.add(Tag::Text(tag.to_string()));
+        Ok(())
+    }
+
+    /// Add a tag of a str of Python that UTF-8 cannot encode, given as the UTF-32 little-endian
+    /// bytes of its code points, as PySpark's client adds it to the tags of the thread: each
+    /// execution that the thread starts then fails with the `UnicodeEncodeError` of the tag,
+    /// when its request is built, after its plan, until the tag is removed. The caller checks the
+    /// tag as [`SparkSession::check_tag`] checks one of text. Not a stable API.
+    #[doc(hidden)]
+    pub fn add_unencodable_tag(&self, utf32le: Vec<u8>) {
+        self.add(Tag::Unencodable(utf32le));
+    }
+
+    fn add(&self, tag: Tag) {
         self.tags.update(|tags| {
-            if !tags.iter().any(|t| t == tag) {
-                tags.push(tag.to_string());
+            if !tags.contains(&tag) {
+                tags.push(tag);
             }
         });
-        Ok(())
     }
 
     /// The errors of a tag, as PySpark Connect's `_throw_if_invalid_tag`: `VALUE_ALLOWED` for a
@@ -315,12 +346,42 @@ impl SparkSession {
 
     /// Remove a tag that this thread added. Mirrors `SparkSession.removeTag`.
     pub fn remove_tag(&self, tag: &str) {
-        self.tags.update(|tags| tags.retain(|t| t != tag));
+        self.tags
+            .update(|tags| tags.retain(|t| !matches!(t, Tag::Text(text) if text == tag)));
+    }
+
+    /// Remove a tag of [`SparkSession::add_unencodable_tag`] of these bytes. Not a stable API.
+    #[doc(hidden)]
+    pub fn remove_unencodable_tag(&self, utf32le: &[u8]) {
+        self.tags.update(|tags| {
+            tags.retain(|t| !matches!(t, Tag::Unencodable(bytes) if bytes == utf32le))
+        });
     }
 
     /// Get the tags that this thread set on this session. Mirrors `SparkSession.getTags`.
     pub fn get_tags(&self) -> Vec<String> {
-        self.tags.current()
+        self.tags
+            .current()
+            .into_iter()
+            .filter_map(|tag| match tag {
+                Tag::Text(text) => Some(text),
+                Tag::Unencodable(_) => None,
+            })
+            .collect()
+    }
+
+    /// The tags of [`SparkSession::add_unencodable_tag`] of this thread, as their bytes, which
+    /// [`SparkSession::get_tags`] does not give. Not a stable API.
+    #[doc(hidden)]
+    pub fn unencodable_tags(&self) -> Vec<Vec<u8>> {
+        self.tags
+            .current()
+            .into_iter()
+            .filter_map(|tag| match tag {
+                Tag::Unencodable(bytes) => Some(bytes),
+                Tag::Text(_) => None,
+            })
+            .collect()
     }
 
     /// Clear the tags that this thread set on this session. Mirrors `SparkSession.clearTags`:
@@ -470,9 +531,17 @@ impl SparkSession {
     }
 
     /// Internal accessor used by the execute-request builders to attach the tags of the
-    /// current thread, which builds the request.
-    pub(crate) fn tags(&self) -> Vec<String> {
-        self.tags.current()
+    /// current thread, which builds the request: a tag that UTF-8 cannot encode fails the
+    /// request with its `UnicodeEncodeError`, as protobuf's string field does in PySpark.
+    pub(crate) fn tags(&self) -> Result<Vec<String>> {
+        self.tags
+            .current()
+            .into_iter()
+            .map(|tag| match tag {
+                Tag::Text(text) => Ok(text),
+                Tag::Unencodable(bytes) => Err(SparkError::unencodable_str(&bytes)),
+            })
+            .collect()
     }
 
     /// Start a brand-new session over the same connection. Mirrors
@@ -488,6 +557,7 @@ impl SparkSession {
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             python_accumulators: PythonAccumulators::default(),
             observation_metrics_check: Arc::default(),
+            ml_fit_warning_handler: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
@@ -733,7 +803,12 @@ impl SparkSession {
 
     /// Create a DataFrame from a collection of Rows and a schema.
     ///
-    /// Mirrors `pyspark.sql.SparkSession.createDataFrame(rows, schema)`.
+    /// Mirrors `pyspark.sql.SparkSession.createDataFrame(rows, schema)`. As PySpark's, rows that
+    /// are not empty read the settings of `createDataFrame` of the server in one request, and a
+    /// relation of `spark.sql.session.localRelationCacheThreshold` bytes or more, of any size, is
+    /// uploaded as cached artifacts; a smaller one is inline. The rows are converted before that
+    /// request, so that rows that do not fit the schema fail without one. No rows send the
+    /// schema alone, with no request.
     pub fn create_dataframe(&self, rows: Vec<Row>, schema: DataType) -> Result<DataFrame> {
         self.create_dataframe_of(rows, schema, None)
     }
@@ -774,28 +849,32 @@ impl SparkSession {
         ))
     }
 
-    /// The local relation of `batch`: inline, without reading the server's configuration, when
-    /// it is smaller than [`LOCAL_RELATION_SETTINGS_BYTES`]; otherwise as the Arrow importer
-    /// sends one, which reads the server's local-relation settings and applies the cache
-    /// threshold and the size limit, as PySpark does. A single gRPC message cannot carry a
-    /// relation beyond the server's message size limit. With the settings given, which the
-    /// caller read already, no request reads them, and a relation of the cache threshold or
-    /// more is uploaded at any size, as PySpark's is.
+    /// The local relation of `batch`, as PySpark's `createDataFrame` sends one: of the server's
+    /// local-relation settings, which are read unless the caller read them already, a relation
+    /// of the cache threshold or more is uploaded as cached artifacts at any size, which fails
+    /// past the size limit; a smaller one is inline. Inline below [`INLINE_IPC_BYTES`], it is
+    /// the IPC stream of the batch; from it, as the Arrow importer writes one.
     fn local_relation(
         &self,
         batch: arrow::record_batch::RecordBatch,
         schema: DataType,
         options: Option<&crate::ArrowInputOptions>,
     ) -> Result<LogicalPlan> {
+        let fetched;
+        let options = match options {
+            Some(options) => options,
+            None => {
+                fetched = crate::ArrowInputOptions::from_client(&self.client)?;
+                &fetched
+            }
+        };
         let bytes = crate::arrow_input::batch_data_size(&batch);
-        let inline = bytes < LOCAL_RELATION_SETTINGS_BYTES
-            && options.is_none_or(|options| bytes < options.cache_threshold());
-        if !inline {
+        if bytes >= INLINE_IPC_BYTES || bytes >= options.cache_threshold() {
             return crate::arrow_input::create_relation(
                 &self.client,
                 vec![batch],
                 Some(schema),
-                options,
+                Some(options),
             );
         }
         Ok(LogicalPlan::LocalRelation {
@@ -804,10 +883,10 @@ impl SparkSession {
         })
     }
 
-    /// Create an inline local relation from columns with the same encoding as local rows.
-    ///
-    /// Unlike imported Arrow input, this path does not read server configuration or
-    /// upload artifacts. Callers must supply one column per struct field.
+    /// Create a DataFrame from columns, with the same encoding as local rows, and sent as
+    /// [`Self::create_dataframe`] sends rows: of the server's local-relation settings, read once,
+    /// inline, or uploaded at the cache threshold. Callers must supply one column per struct
+    /// field.
     pub fn create_dataframe_from_columns(
         &self,
         columns: Vec<arrow::array::ArrayRef>,
@@ -844,10 +923,10 @@ impl SparkSession {
     }
 
     /// Internal binding bridge for Arrow IPC already validated and encoded from
-    /// local rows or columns. Retains the row path's transport policy: inline, unless the
-    /// IPC is large enough to consult the server's local-relation settings.
-    /// Large IPC is decoded and its map field names normalized before re-encoding;
-    /// smaller IPC is passed through unchanged.
+    /// local rows or columns. Retains the row path's transport policy: of the server's
+    /// local-relation settings, read once, inline, or uploaded at the cache threshold.
+    /// IPC of [`INLINE_IPC_BYTES`] or more, or uploaded, is decoded and its map field names
+    /// normalized before re-encoding; smaller inline IPC is passed through unchanged.
     #[doc(hidden)]
     pub fn create_dataframe_from_inline_arrow_ipc(
         &self,
@@ -858,8 +937,8 @@ impl SparkSession {
     }
 
     /// Internal binding bridge: [`Self::create_dataframe_from_inline_arrow_ipc`] with the
-    /// settings that the caller read already (see [`Self::create_dataframe_with_options`]), so
-    /// that IPC of the cache threshold or more is uploaded at any size; not a stable API.
+    /// settings that the caller read already (see [`Self::create_dataframe_with_options`]); not
+    /// a stable API.
     #[doc(hidden)]
     pub fn create_dataframe_from_inline_arrow_ipc_with_options(
         &self,
@@ -876,8 +955,15 @@ impl SparkSession {
         schema: DataType,
         options: Option<&crate::ArrowInputOptions>,
     ) -> Result<DataFrame> {
-        let inline = data.len() < LOCAL_RELATION_SETTINGS_BYTES
-            && options.is_none_or(|options| data.len() < options.cache_threshold());
+        let fetched;
+        let options = match options {
+            Some(options) => options,
+            None => {
+                fetched = crate::ArrowInputOptions::from_client(&self.client)?;
+                &fetched
+            }
+        };
+        let inline = data.len() < INLINE_IPC_BYTES && data.len() < options.cache_threshold();
         let plan = if !inline {
             let reader =
                 arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
@@ -887,7 +973,7 @@ impl SparkSession {
             let batches = reader
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?;
-            crate::arrow_input::create_relation(&self.client, batches, Some(schema), options)?
+            crate::arrow_input::create_relation(&self.client, batches, Some(schema), Some(options))?
         } else {
             LogicalPlan::LocalRelation {
                 schema: Some(schema),
@@ -1378,7 +1464,7 @@ impl SparkSession {
             &[],
             return_type,
             eval_type,
-            command,
+            (command, None),
             python_ver,
         );
         crate::dataframe::execute_command_unreported(
@@ -1475,6 +1561,39 @@ impl SparkSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// Set the handler of the warnings of the ML fits of this session, and of its clones. The
+    /// server sends a warning with the model of a fit (`warning_message`) when the training of a
+    /// tree model stopped early because the model grew beyond the threshold of the memory control
+    /// of its ML cache (of the session's
+    /// `spark.connect.session.connectML.mlCache.memoryControl.maxModelSize`). The handler is
+    /// called with it on the thread of the fit, once the result of the fit has arrived and before
+    /// the model is made of it or any other request is sent, as PySpark's `try_remote_fit` logs
+    /// it then: of each fit, also of those of the stages of a pipeline, of the classes of a
+    /// OneVsRest and of a validator. An error that it returns is the error of the fit. Used by
+    /// the Python client to log the warnings as PySpark does; the fitted model keeps its warning
+    /// too, as [`Model::fit_warning`](crate::ml::Model::fit_warning) gives it.
+    pub fn set_ml_fit_warning_handler(
+        &self,
+        handler: impl Fn(&str) -> Result<()> + Send + Sync + 'static,
+    ) {
+        *self
+            .ml_fit_warning_handler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handler));
+    }
+
+    /// Hand the warning of an ML fit to the handler of the session (see
+    /// [`SparkSession::set_ml_fit_warning_handler`]), if one is set: its error is the fit's.
+    pub(crate) fn report_ml_fit_warning(&self, warning: &str) -> Result<()> {
+        // Called out of the lock, so that the handler may set another one.
+        let handler = self
+            .ml_fit_warning_handler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        handler.map_or(Ok(()), |handler| handler(warning))
     }
 
     /// Stop this Spark session.
@@ -1590,6 +1709,7 @@ impl Clone for SparkSession {
             progress_handler_id: Arc::clone(&self.progress_handler_id),
             python_accumulators: self.python_accumulators.clone(),
             observation_metrics_check: Arc::clone(&self.observation_metrics_check),
+            ml_fit_warning_handler: Arc::clone(&self.ml_fit_warning_handler),
             stopped: Arc::clone(&self.stopped),
             server_version: Arc::clone(&self.server_version),
             listener_bus: Arc::clone(&self.listener_bus),
@@ -1643,16 +1763,11 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
     ))
 }
 
-/// Convert Arrow RecordBatch data to IPC bytes.
-/// Used by createDataFrame to package local data.
-/// The size of a local relation, in Arrow data, from which `createDataFrame` reads the
-/// server's local-relation settings and sends the relation as the Arrow importer does: inline
-/// below `spark.sql.session.localRelationCacheThreshold`, uploaded at it, and failing past
-/// `spark.sql.session.localRelationSizeLimit`, as PySpark does. Smaller relations are sent
-/// inline without that RPC: 64 KiB is far below the server's gRPC message size limit (128 MiB
-/// by default), so a relation this small cannot be too large to send, and the RPC would cost
-/// more than the transfer.
-const LOCAL_RELATION_SETTINGS_BYTES: usize = 64 << 10;
+/// The size of a local relation of `createDataFrame`, in Arrow data, below which a relation under
+/// `spark.sql.session.localRelationCacheThreshold` is sent inline in the IPC that encoded it: the
+/// stream of the batch of its rows or columns, or the IPC that the binding gave. From it, the
+/// relation is sent as the Arrow importer sends one, which writes the IPC of its batches again.
+const INLINE_IPC_BYTES: usize = 64 << 10;
 
 /// Internal binding bridge for encoding already converted local rows. The Python
 /// binding also uses it for native columns beside imported pandas Arrow columns.
@@ -3229,7 +3344,7 @@ mod tests {
         let child = std::thread::spawn(move || {
             let before = other.get_tags();
             other.add_tag("child").unwrap();
-            let added = (other.get_tags(), other.tags());
+            let added = (other.get_tags(), other.tags().unwrap());
             other.remove_tag("child");
             (before, added, other.get_tags())
         })
@@ -3238,10 +3353,33 @@ mod tests {
         let child_tags = vec!["child".to_string()];
         assert_eq!(child, (vec![], (child_tags.clone(), child_tags), vec![]));
         assert_eq!(spark.get_tags(), vec!["main".to_string()]);
-        assert_eq!(spark.tags(), vec!["main".to_string()]);
+        assert_eq!(spark.tags().unwrap(), vec!["main".to_string()]);
         spark.clear_tags();
         assert!(spark.get_tags().is_empty());
         assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+    }
+
+    /// A tag of a str that UTF-8 cannot encode, as PySpark's client keeps it: the requests that
+    /// carry the tags fail with its error until it is removed, and it is not a tag of text.
+    #[test]
+    fn an_unencodable_tag_fails_the_requests_until_it_is_removed() {
+        let spark = session();
+        spark.add_tag("a").unwrap();
+        let surrogate = [0x61, 0, 0, 0, 0x00, 0xd8, 0, 0];
+        spark.add_unencodable_tag(surrogate.to_vec());
+        spark.add_unencodable_tag(surrogate.to_vec());
+        let error = spark.tags().unwrap_err();
+        assert_eq!(
+            error.kind,
+            spark_connect_core::error::SparkErrorKind::UnicodeEncode
+        );
+        assert_eq!(error.unencodable_value(), Some(surrogate.to_vec()));
+        assert_eq!(spark.get_tags(), vec!["a".to_string()]);
+        assert_eq!(spark.unencodable_tags(), vec![surrogate.to_vec()]);
+        spark.remove_tag("a");
+        spark.remove_unencodable_tag(&surrogate);
+        assert!(spark.tags().unwrap().is_empty());
+        assert!(spark.unencodable_tags().is_empty());
     }
 
     #[test]

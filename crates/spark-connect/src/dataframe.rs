@@ -1362,6 +1362,19 @@ impl DataFrame {
         ))
     }
 
+    /// The objects of the picklers of the UDFs and the UDTFs of the plan of this DataFrame that
+    /// it alone keeps alive, as [`DataFrame::exclusive_relation_owners`] gives the owners of its
+    /// relations, which a Python wrapper reports to Python's garbage collector too: a function
+    /// of a UDF may keep the DataFrame of the UDF, as the bound method of an object that keeps
+    /// the DataFrame does (see `crate::udf::exclusive_pickler_objects`). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        if Arc::strong_count(&self.plan) != 1 {
+            return Vec::new();
+        }
+        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
+    }
+
     /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
     /// alone keeps alive: every `Arc` from its plan down to such an owner is held once, by this
     /// DataFrame. A Python wrapper reports them to Python's garbage collector, so that a
@@ -1682,7 +1695,7 @@ impl DataFrame {
         let mut request = proto::ExecutePlanRequest::default();
         request.session_id = self.session.client().session_id().to_string();
         request.user_context = Some(proto::UserContext::default());
-        request.tags = self.session.tags();
+        request.tags = self.session.tags()?;
 
         let mut plan = proto::Plan::default();
         plan.op_type = Some(proto::plan::OpType::Root(relation));
@@ -1946,9 +1959,12 @@ impl DataFrame {
 
     /// The execution plan in an explain mode, mirroring `pyspark.sql.DataFrame._explain_string`
     /// of a mode, which PySpark Connect's client checks: one of "simple", "extended",
-    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error.
+    /// "codegen", "cost" and "formatted", else a `VALUE_NOT_ALLOWED` error, which it raises
+    /// once it has built the plan, so that the error of a plan that it fails to build comes
+    /// first.
     pub fn explain_string(&self, mode: &str) -> Result<String> {
         use proto::analyze_plan_request::explain::ExplainMode;
+        let relation = self.relation()?;
         let explain_mode = match mode {
             "simple" => ExplainMode::Simple,
             "extended" => ExplainMode::Extended,
@@ -1969,7 +1985,7 @@ impl DataFrame {
             }
         };
         let plan = proto::Plan {
-            op_type: Some(proto::plan::OpType::Root(self.relation()?)),
+            op_type: Some(proto::plan::OpType::Root(relation)),
         };
         let request = proto::AnalyzePlanRequest {
             session_id: self.session.client().session_id().to_string(),
@@ -2984,6 +3000,20 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
+    /// As [`DataFrame::unbuildable`], with the schema that this DataFrame cached. Mirrors a
+    /// `limit`, `coalesce`, `repartition`, `repartitionByRange`, `repartitionById`, `sample` or
+    /// `randomSplit` of a value that PySpark's client fails with when it builds the plan: these
+    /// copy the `_cached_schema` of their input, so the schema is known without a request, and
+    /// each request of the plan raises `error`. Not a stable API.
+    #[doc(hidden)]
+    pub fn unbuildable_with_cached_schema(&self, error: SparkError) -> DataFrame {
+        let plan = LogicalPlan::Unbuildable {
+            input: Arc::clone(&self.plan),
+            error,
+        };
+        self.with_cached_schema(plan)
+    }
+
     /// A subquery of `subquery_type` of this DataFrame's plan, which refers to the plan by
     /// its plan ID in the session.
     pub(crate) fn subquery(
@@ -3125,7 +3155,7 @@ fn execute_command_reporting(
     let mut request = proto::ExecutePlanRequest::default();
     request.session_id = session.client().session_id().to_string();
     request.user_context = Some(proto::UserContext::default());
-    request.tags = session.tags();
+    request.tags = session.tags()?;
     request.plan = Some(plan);
 
     let mut stream = if reported {
@@ -5323,6 +5353,38 @@ mod cache_tests {
             df.sort_within_partitions(["id"]).cached_schema().as_deref(),
             Some(&schema)
         );
+    }
+
+    #[test]
+    fn an_unbuildable_plan_keeps_the_cached_schema_only_where_pyspark_copies_it() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let error = || SparkError::value_msg("Value out of range: 1099511627776");
+        // Of no cached schema, both have none.
+        assert!(df
+            .unbuildable_with_cached_schema(error())
+            .cached_schema()
+            .is_none());
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+
+        // As PySpark's `limit` of a count that it fails to send, whose DataFrame copies the
+        // `_cached_schema` of its input: the schema needs no request, and a request fails.
+        let kept = df.unbuildable_with_cached_schema(error());
+        assert_eq!(kept.cached_schema().as_deref(), Some(&schema));
+        assert_eq!(kept.schema().unwrap(), schema);
+        assert_eq!(
+            kept.limit(1).cached_schema().as_deref(),
+            Some(&schema),
+            "a later transformation that keeps the schema keeps it too"
+        );
+        let failed = kept.collect().unwrap_err();
+        assert_eq!(failed.message(), "Value out of range: 1099511627776");
+        // As PySpark's `offset`, which does not copy it.
+        assert!(df.unbuildable(error()).cached_schema().is_none());
     }
 
     #[test]

@@ -46,7 +46,10 @@ crates/
   spark-connect         pure-Rust API mirroring pyspark: types, expressions,
                         column, plan, dataframe, functions, session, readwriter,
                         catalog, group, window, udf/udtf, streaming, observation
-  pyspark-rs            PyO3 bindings -> native module `_pyspark`
+  spark-connect-macros  procedural macros of the Rust WASM UDFs (#[spark_wasm_udf])
+  spark-connect-build   build.rs helper that compiles Rust WASM UDFs (embed_wasm_udf)
+  pyspark-rs            PyO3 bindings -> native module `_pyspark`, with the Rust
+                        protobuf runtime of `pyspark.sql.connect.proto` (src/pbmsg)
 python/
   pyspark/…             thin drop-in package; public modules re-export from
                         `_pyspark` so `from pyspark.sql import SparkSession` works
@@ -145,7 +148,12 @@ general invariant for arbitrary mutations of pandas internals.
 ## UDF strategy (full compatibility)
 
 Python/pandas UDFs are **serialized, not executed** on the client:
-1. `cloudpickle.dumps((func, return_type))` - called via PyO3 into CPython.
+1. `cloudpickle.dumps((func, return_type))` - called via PyO3 into CPython each time a request
+   builds a plan that holds the UDF, as PySpark's `PythonUDF.to_plan` pickles it: the payload holds
+   the `CommandPickler` of the binding, which the core calls after a first build of the plan, in
+   the order of the build, outside its recursion, and then builds the plan again with the commands
+   (`UdfCommands` of `spark_connect::expression`); the Rust API's payload holds the bytes of its
+   command.
 2. Wrap into `CommonInlineUserDefinedFunction` with `PythonUDF { command,
    output_type, eval_type, python_ver }`. `eval_type` distinguishes SQL_BATCHED,
    SQL_ARROW_BATCHED, pandas scalar/grouped-map/cogrouped-map, mapInPandas,

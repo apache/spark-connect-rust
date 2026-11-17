@@ -10,7 +10,8 @@ fn fetch_num_classes(py: Python<'_>, target: &spark_connect::ml::MlTarget) -> Py
 }
 
 /// The trees of a random forest, as PySpark's `trees` makes them: of the tree classifier's model
-/// class, each of its server-side object.
+/// class, each of the constructor of the class and of its server-side object
+/// (`DecisionTreeClassificationModel(RemoteModelRef(m))`).
 fn random_forest_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
     let target = model.target()?;
     let objects = object::fetch_py(py, &target, "trees", &[])?
@@ -19,17 +20,15 @@ fn random_forest_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py
     let trees = objects
         .into_iter()
         .map(|object| {
-            crate::ml::object::new_py(
-                py,
-                PyDecisionTreeClassificationModel::of_object(py, object)?,
-            )
+            PyDecisionTreeClassificationModel::of_constructor(py, |_| Ok(object)).map(Bound::unbind)
         })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyList::new(py, trees)?.into_any().unbind())
 }
 
 /// The trees of a gradient-boosted tree classifier, as PySpark's `trees` makes them: of the
-/// regression tree model class, each of its server-side object.
+/// regression tree model class, each of the constructor of the class and of its server-side
+/// object (`DecisionTreeRegressionModel(RemoteModelRef(m))`).
 fn gbt_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
     let target = model.target()?;
     let objects = object::fetch_py(py, &target, "trees", &[])?
@@ -38,10 +37,10 @@ fn gbt_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
     let trees = objects
         .into_iter()
         .map(|object| {
-            crate::ml::object::new_py(
-                py,
-                crate::ml::regression_api::PyDecisionTreeRegressionModel::of_object(py, object)?,
-            )
+            crate::ml::regression_api::PyDecisionTreeRegressionModel::of_constructor(py, |_| {
+                Ok(object)
+            })
+            .map(Bound::unbind)
         })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyList::new(py, trees)?.into_any().unbind())

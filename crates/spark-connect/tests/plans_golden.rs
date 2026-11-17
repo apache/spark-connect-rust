@@ -527,7 +527,7 @@ fn build(name: &str) -> Option<LogicalPlan> {
         }
         "sample" => {
             let range = plan::range(0, 10, 1);
-            plan::sample(range, 0.0, 0.5, false, Some(6749189490610701821))
+            plan::sample(range, 0.0, 0.5, false, Some(42))
         }
         "repartition" => {
             let range = plan::range(0, 10, 1);

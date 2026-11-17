@@ -178,7 +178,8 @@ These logs are available in the workflow run artifacts for debugging failures.
   `--test-threads=1`, then the ignored live tests of the core client
   (`cargo test -p apache-spark-connect-core --test integration_test -- --ignored`), the
   `e2e_wasm_udf` test of `tests/wasm-udf` and the `e2e_python_worker_env` test of
-  `tests/wasm-udf-wasi`.
+  `tests/wasm-udf-wasi`. The latter checks `spark.pythonWorkerEnv.*`, of Spark 4.4.0: against
+  the job's 4.3.0 server it prints that it skips, and checks nothing.
 - **connect-benchmark**: builds the extension and starts a server with default settings. It runs
   `scripts/benchmark_e2e.py --isolate` for the reference (pip-installed `pyspark==4.3.0`) and for
   ours (`PYTHONPATH=$(pwd)/python`), then `--compare`.

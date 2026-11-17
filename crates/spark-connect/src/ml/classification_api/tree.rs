@@ -11,13 +11,14 @@
 #[cfg(test)]
 mod golden_tests;
 
-use spark_connect_core::error::{Result, SparkError};
+use spark_connect_core::error::Result;
 
 use super::{
     BinaryClassificationSummary, ClassificationModel, ClassificationSummary, MlSummary,
     ProbabilisticClassificationModel, TrainingSummary,
 };
 use crate::dataframe::DataFrame;
+use crate::ml::regression_api::summary_or_error;
 use crate::ml::tree_api::{as_f64s, fetch_value};
 use crate::ml::{
     fetch, fit_via_command, java_string_hash, read_model, read_operator,
@@ -458,11 +459,10 @@ impl RandomForestClassificationModel {
     }
 
     /// The training summary (`summary`): the binary one when the model has two classes or fewer,
-    /// as PySpark chooses it by `numClasses`. Errors when the model has no training summary.
+    /// as PySpark chooses it by `numClasses`. A model without one (a loaded model) is the error of
+    /// PySpark's `summary`, before any request.
     pub fn summary(&self) -> Result<RandomForestTrainingSummary> {
-        let target = self.training_summary.clone().ok_or_else(|| {
-            SparkError::value_msg("the random forest model has no training summary")
-        })?;
+        let target = summary_or_error(&self.training_summary, "RandomForestClassificationModel")?;
         if self.num_classes()? <= 2 {
             Ok(RandomForestTrainingSummary::Binary(
                 BinaryRandomForestClassificationTrainingSummary::new(target),

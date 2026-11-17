@@ -1,59 +1,134 @@
 //! Golden parity test for additional ML operators and relations.
 //!
-//! Tests that Rust ML operator builders produce the exact same protobuf
-//! structures as the reference PySpark ML Connect client for newer operators.
-
-#![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
+//! The transforms of more Rust ML stages (feature transformers and estimators, a classifier and a
+//! pipeline) must serialize to the exact same protobuf that the reference PySpark client produces
+//! for the same transforms of `pyspark.ml`. The goldens live in `tests/golden/ml_extra.jsonl`
+//! (captured by `scripts/capture_ml_extra_golden.py`), and are compared as `ml_golden.rs` compares
+//! those of `ml.jsonl`: the fit of a model through the replay of its golden commands, and the
+//! relation of its transform. A case that is missing or mismatches FAILS the test.
 
 mod common;
+#[path = "common/ml_golden.rs"]
+mod ml_golden;
 
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::collections::{BTreeSet, HashMap};
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use prost::Message;
-
-use common::normalize_relation;
+use common::MlGolden;
+use ml_golden::{assert_commands, ReplayServer};
+use serde_json::json;
+use spark_connect::column::{col, lit};
 use spark_connect::ml::{
-    BinaryClassificationEvaluator, Estimator, Evaluator, LogisticRegression, MaxAbsScaler,
-    OperatorType, Pipeline, PipelineModel, RegressionEvaluator, StringIndexer, Transformer,
-    VectorAssembler,
+    BinaryClassificationEvaluator, ClassificationModel, Estimator, Evaluator, LogisticRegression,
+    MaxAbsScaler, OperatorType, Pipeline, PipelineModel, PipelineStage, RegressionEvaluator,
+    StringIndexer, Transformer, VectorAssembler,
 };
-use spark_connect_proto as proto;
+use spark_connect::{DataFrame, SparkSession};
 
-fn normalize_expression(e: &mut proto::Expression) {
-    e.common = None;
+/// Compares the case `name` of the golden: `case` runs the Rust stage of the case on a session of
+/// the replay of its golden fit, and gives the transformed DataFrame. The ML commands that it
+/// sends are the golden fit's (none of a transformer), and the relation of the DataFrame is that
+/// of PySpark's transform.
+fn check(
+    goldens: &HashMap<String, MlGolden>,
+    name: &str,
+    case: impl FnOnce(&SparkSession) -> DataFrame,
+) {
+    let golden = goldens
+        .get(name)
+        .unwrap_or_else(|| panic!("{name}: MISSING from ml_extra.jsonl"));
+    let fit = golden
+        .fit
+        .clone()
+        .unwrap_or_else(|| json!({"commands": [], "results": []}));
+    let (server, session) = ReplayServer::start(&[&fit]);
+    let transformed = case(&session);
+    assert_commands(&server, &fit, &format!("{name}: the fit"));
+    let mut relation = transformed.to_relation().unwrap();
+    common::normalize_relation(&mut relation);
+    assert_eq!(relation, golden.relation, "{name}");
 }
 
-fn load_ml_extra_goldens() -> HashMap<String, proto::Relation> {
-    let path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../tests/golden/ml_extra.jsonl"
-    );
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => {
-            eprintln!("warning: ML extra golden file not found at {}", path);
-            return HashMap::new();
-        }
-    };
+#[test]
+fn ml_transforms_match_official_pyspark() {
+    let goldens = common::load_ml_goldens("ml_extra.jsonl");
+    let cases = [
+        "vector_assembler_transform",
+        "string_indexer_transform",
+        "max_abs_scaler_transform",
+        "logistic_regression_transform",
+        "pipeline_transform",
+    ];
+    let names: BTreeSet<&str> = goldens.keys().map(String::as_str).collect();
+    assert_eq!(names, BTreeSet::from(cases), "the cases of ml_extra.jsonl");
 
-    let mut out = HashMap::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.unwrap();
-        if line.trim().is_empty() {
-            continue;
-        }
-        let obj: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let name = obj["name"].as_str().unwrap().to_string();
-        let b64 = obj["b64"].as_str().unwrap();
-        let bytes = STANDARD.decode(b64).unwrap();
-        let mut relation = proto::Relation::decode(&bytes[..]).unwrap();
-        normalize_relation(&mut relation);
-        out.insert(name, relation);
-    }
-    out
+    // A transformer, which sends no ML command: its transform names the transformer's class,
+    // where that of a fitted model names the model's object.
+    check(&goldens, "vector_assembler_transform", |session| {
+        let mut assembler = VectorAssembler::new()
+            .set_input_cols(vec!["features"])
+            .set_output_col("vector");
+        assembler
+            .transform(&common::ml_vectors(session, 3))
+            .unwrap()
+    });
+    check(&goldens, "string_indexer_transform", |session| {
+        let categories = session
+            .range(3)
+            .unwrap()
+            .select(vec![col("id").cast_str("string").alias("category")]);
+        let mut indexer = StringIndexer::new()
+            .set_input_col("category")
+            .set_output_col("category_index");
+        indexer
+            .fit(&categories)
+            .unwrap()
+            .transform(&categories)
+            .unwrap()
+    });
+    check(&goldens, "max_abs_scaler_transform", |session| {
+        let data = common::ml_vectors(session, 3);
+        let mut scaler = MaxAbsScaler::new()
+            .set_input_col("features")
+            .set_output_col("scaled_features");
+        scaler.fit(&data).unwrap().transform(&data).unwrap()
+    });
+    check(&goldens, "logistic_regression_transform", |session| {
+        let label = (col("id") % lit(2)).cast_str("double").alias("label");
+        let labelled = session
+            .range(4)
+            .unwrap()
+            .select(vec![common::ml_features().alias("features"), label]);
+        let mut lr = LogisticRegression::new()
+            .set_features_col("features")
+            .set_label_col("label")
+            .set_prediction_col("prediction");
+        let mut model = lr.fit(&labelled).unwrap();
+        // PySpark's fit reads `numClasses` right after the Fit, to choose the class of its
+        // training summary; the Rust model reads it when its summary is asked (see
+        // docs/compatibility.md), so the test reads it here, as the golden's second command.
+        model.num_classes().unwrap();
+        model.transform(&labelled).unwrap()
+    });
+    // A pipeline fits its estimator on the output of the transformer before it, and its model
+    // transforms by the stages in order.
+    check(&goldens, "pipeline_transform", |session| {
+        let data = common::ml_vectors(session, 3);
+        let assembler = VectorAssembler::new()
+            .set_input_cols(vec!["features"])
+            .set_output_col("vector");
+        let scaler = MaxAbsScaler::new()
+            .set_input_col("vector")
+            .set_output_col("scaled");
+        let mut pipeline = Pipeline::new().set_stages([
+            PipelineStage::transformer(assembler),
+            PipelineStage::estimator(scaler),
+        ]);
+        pipeline
+            .fit_pipeline(&data)
+            .unwrap()
+            .transform(&data)
+            .unwrap()
+    });
 }
 
 #[test]
@@ -172,19 +247,5 @@ fn test_operator_types_proto_roundtrip() {
         let proto_type = op_type.to_proto();
         let back = OperatorType::from_proto(proto_type as i32);
         assert_eq!(op_type, back);
-    }
-}
-
-#[test]
-fn test_ml_extra_golden_coverage() {
-    let goldens = load_ml_extra_goldens();
-    // If golden file exists, ensure we handle it correctly
-    if !goldens.is_empty() {
-        for name in goldens.keys() {
-            assert!(
-                !name.is_empty(),
-                "Golden relation should have a non-empty name"
-            );
-        }
     }
 }

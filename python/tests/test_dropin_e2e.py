@@ -1759,6 +1759,50 @@ def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
         assert isinstance(error.value.operation_id, str) and error.value.operation_id
 
 
+def test_udf_functions_are_pickled_when_their_plans_are_built_as_pyspark(session):
+    # As PySpark's PythonUDF.to_plan and PythonUDTF.to_plan: the function of a UDF, a pandas UDF,
+    # a UDTF or a map or group-map function is pickled each time a request builds a plan that
+    # holds it. So a value that the function reads, changed after the function was applied and
+    # before the action, is the value that the action runs with, and so for each later action;
+    # and a function that does not pickle raises from the first request, not from the call.
+    import pickle
+    import threading
+
+    import pandas as pd
+    from pyspark.sql.functions import pandas_udf, udf, udtf
+
+    state = {"factor": 1}
+    df = session.range(1, 3)
+
+    @pandas_udf("long")
+    def scaled(s: pd.Series) -> pd.Series:
+        return s * state["factor"]
+
+    @udtf(returnType="v: long")
+    class Scaled:
+        def eval(self, x):
+            yield (x * state["factor"],)
+
+    grouped = df.groupBy("id")
+    frames = [
+        df.select(udf(lambda x: x * state["factor"], "long")("id")),
+        df.select(scaled("id")),
+        df.lateralJoin(Scaled(F.col("id").outer())).select("v"),
+        df.mapInPandas(lambda it: (p * state["factor"] for p in it), "id long"),
+        grouped.applyInPandas(lambda p: p * state["factor"], "id long"),
+        grouped.cogroup(grouped).applyInPandas(lambda left, _: left * state["factor"], "id long"),
+    ]
+    for factor in (10, 100):
+        state["factor"] = factor
+        for frame in frames:
+            assert sorted(row[0] for row in frame.collect()) == [factor, 2 * factor]
+
+    lock = threading.Lock()
+    unpicklable = df.select(udf(lambda x: (lock, x)[1], "long")("id"))
+    with pytest.raises(pickle.PicklingError, match="^Could not serialize object: TypeError"):
+        unpicklable.schema
+
+
 def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     # As PySpark's, the functions are of pyspark.sql.functions.builtin: a UDF that captures one
     # pickles it by its name, of which the Python worker of the server imports PySpark's.
@@ -1911,6 +1955,38 @@ def test_create_dataframe_rows_column_names(session, data, schema, columns, rows
     assert df.columns == columns
     assert [tuple(r) for r in df.collect()] == rows
     assert df.isLocal() is (schema is None)
+
+
+def test_create_dataframe_of_a_struct_of_another_width(session):
+    # A pandas DataFrame of another width than a struct schema raises AXIS_LENGTH_MISMATCH,
+    # where PySpark's conversion drops the columns past the fields, fails the rename of fewer and
+    # takes the index of a frame of no columns as its columns (dev/parity/known-differences.md).
+    # As official PySpark 4.3.0's, a frame of no columns under a struct of no fields is the table
+    # of its index, which the struct then checks, and a pyarrow Table is cast to the struct,
+    # which checks its names.
+    pd = pytest.importorskip("pandas")
+    long_a = StructType([StructField("a", LongType())])
+    for frame, schema, expected, actual in [
+        (pd.DataFrame({"a": [1], "b": [2]}), long_a, "1", "2"),
+        (pd.DataFrame({"a": [1]}), "x long, y long", "2", "1"),
+        (pd.DataFrame({"a": [1, 2]}), StructType([]), "0", "1"),
+        (pd.DataFrame(index=[5, 6]), long_a, "1", "0"),
+        (pd.DataFrame(index=[0, 1]), StructType([]), "0", "1"),
+    ]:
+        with pytest.raises(PySparkValueError) as error:
+            session.createDataFrame(frame, schema)
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": expected, "actual_length": actual}
+    assert session.createDataFrame(
+        pd.DataFrame(index=range(2)), StructType([])).collect() == [Row(), Row()]
+    for schema, names in ((long_a, "['a']"), ("x long, y long, z long", "['x', 'y', 'z']")):
+        with pytest.raises(ValueError) as error:
+            session.createDataFrame(pa.table({"a": [1], "b": [2]}), schema)
+        assert type(error.value) is ValueError
+        assert str(error.value) == (
+            f"Target schema's field names are not matching the table's field names: ['a', 'b'], "
+            f"{names}")
 
 
 @pytest.mark.parametrize(
@@ -3603,6 +3679,20 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
     ):
         rows = df.select("o", F.row_number().over(window).alias("rn")).orderBy("rn").collect()
         assert [(r.o, r.rn) for r in rows] == expected
+
+
+def test_chained_window_specs_partition_and_order_by_their_last_columns_as_pyspark(session):
+    # As PySpark's WindowSpec.partitionBy and orderBy, of the columns of the last call only: a
+    # count over the rows of the last partitioning, and a row number of the last ordering.
+    from pyspark.sql import Window
+
+    df = session.createDataFrame([(1, 10), (2, 10), (3, 20)], ["a", "b"])
+    partitioned = Window.partitionBy("a").partitionBy("b")
+    rows = df.select("a", F.count("*").over(partitioned).alias("n")).orderBy("a").collect()
+    assert [r.n for r in rows] == [2, 2, 1]
+    ordered = Window.orderBy("a").orderBy(F.col("b").desc(), "a")
+    rows = df.select("a", F.row_number().over(ordered).alias("rn")).orderBy("a").collect()
+    assert [r.rn for r in rows] == [2, 3, 1]
 
 
 def test_create_dataframe_of_a_numpy_array_as_pyspark(session):

@@ -138,7 +138,7 @@ pub enum LogicalPlan {
     /// number of levels of the relation as a plan, with those of the plans of DataFrames that it
     /// holds (1 for a relation without them), which count for [`MAX_PLAN_DEPTH`]. `observations`
     /// are those of the DataFrames that the relation holds as its child, as PySpark's plans of
-    /// `pyspark.ml` collect them (see [`LogicalPlan::observations`]).
+    /// `pyspark.ml` collect them (see `LogicalPlan::observations`).
     Raw {
         relation: Box<proto::Relation>,
         owner: Option<RelationOwner>,
@@ -221,9 +221,12 @@ pub enum LogicalPlan {
         schema: DataType,
     },
     /// A plan that PySpark's client fails to build when a request sends it, with `error`: the
-    /// error is raised by each request of the plan, and the plan is not built, as PySpark's
+    /// error is raised by each request of the plan, and the plan is not sent, as PySpark's
     /// `DataFrame.to` of a schema that is not a DataType, and `unionByName` of a flag that a
-    /// protobuf bool does not take. The plans below it are built first, as PySpark builds them.
+    /// protobuf bool does not take. `input` is serialized first, and the error is recorded after
+    /// it, in the slot of the expressions that a request fails to build (see
+    /// [`crate::expression::Expression::unbuildable`]): a request raises the first error of
+    /// either kind, in the order in which PySpark builds the plan, its inputs before itself.
     Unbuildable {
         input: Arc<LogicalPlan>,
         error: SparkError,
@@ -499,6 +502,11 @@ pub enum LogicalPlan {
         eval_type: i32,
         command: Vec<u8>,
         python_ver: String,
+        /// The pickling of the command, which a request calls when it builds the plan, in place
+        /// of `command`, as PySpark's `PythonUDTF.to_plan` pickles the handler class for each
+        /// plan that it builds. Not a stable API.
+        #[doc(hidden)]
+        pickler: Option<crate::udf::CommandPickler>,
     },
 }
 
@@ -1202,10 +1210,9 @@ fn relation_with_ids_and_levels(
     ids: &PlanIds,
 ) -> Result<(proto::Relation, usize)> {
     // The levels of the plan itself are known before it is serialized; those of the plans of
-    // its subqueries are counted as they are serialized.
-    if let Some(error) = node.unbuildable_error() {
-        return Err(error);
-    }
+    // its subqueries are counted as they are serialized. A plan or an expression that a request
+    // fails to build raises its error after the serialization, the first of them in PySpark's
+    // order (`LogicalPlan::Unbuildable`).
     let depth = node.depth();
     if depth > MAX_PLAN_DEPTH {
         return Err(too_deep_a_plan(depth));
@@ -1458,6 +1465,177 @@ impl LogicalPlan {
         inputs_of!(self)
     }
 
+    /// The expressions, the UDFs and the pickler of the UDTF of this node, without those of its
+    /// inputs, whose picklers [`crate::udf::exclusive_pickler_objects`] visits.
+    pub(crate) fn push_own_pickler_holders<'a>(
+        &'a self,
+        pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
+    ) {
+        use crate::udf::PicklerHolder::{Expression as Of, Pickler, Udf};
+        let of_column = |column: &'a Column| Of(column.expression());
+        match self {
+            LogicalPlan::Sql {
+                pos_args,
+                named_args,
+                ..
+            } => {
+                pending.extend(pos_args.iter().map(Of));
+                pending.extend(named_args.values().map(Of));
+            }
+            LogicalPlan::Project { columns, .. } | LogicalPlan::WithColumns { columns, .. } => {
+                pending.extend(columns.iter().map(of_column));
+            }
+            LogicalPlan::Filter { condition, .. } => pending.push(of_column(condition)),
+            LogicalPlan::Aggregate {
+                grouping_expressions,
+                aggregate_expressions,
+                pivot_col,
+                pivot_values,
+                grouping_sets,
+                ..
+            } => {
+                pending.extend(grouping_expressions.iter().map(Of));
+                pending.extend(aggregate_expressions.iter().map(Of));
+                pending.extend(pivot_col.iter().map(Of));
+                pending.extend(pivot_values.iter().map(Of));
+                pending.extend(grouping_sets.iter().flatten().map(Of));
+            }
+            LogicalPlan::Join { on, .. } | LogicalPlan::LateralJoin { on, .. } => {
+                pending.extend(on.iter().map(of_column));
+            }
+            LogicalPlan::Sort {
+                order: expressions, ..
+            }
+            | LogicalPlan::RepartitionByExpression { expressions, .. }
+            | LogicalPlan::Drop { expressions, .. }
+            | LogicalPlan::Hint {
+                parameters: expressions,
+                ..
+            }
+            | LogicalPlan::RepartitionByRange {
+                partition_exprs: expressions,
+                ..
+            }
+            | LogicalPlan::Observe {
+                exprs: expressions, ..
+            }
+            | LogicalPlan::UnresolvedTableValuedFunction {
+                arguments: expressions,
+                ..
+            }
+            | LogicalPlan::Transpose {
+                index_columns: expressions,
+                ..
+            } => pending.extend(expressions.iter().map(Of)),
+            LogicalPlan::WithColumnMetadata { column, .. } => pending.push(Of(column)),
+            LogicalPlan::Unpivot { ids, values, .. } => {
+                pending.extend(ids.iter().chain(values.iter().flatten()).map(of_column));
+            }
+            LogicalPlan::StatSampleBy { col, fractions, .. } => {
+                pending.push(Of(col));
+                pending.extend(fractions.iter().map(|(stratum, _)| Of(stratum)));
+            }
+            LogicalPlan::MapPartitions { func, .. } => pending.push(Udf(func)),
+            LogicalPlan::GroupMap {
+                grouping_expressions,
+                func,
+                sorting_expressions,
+                initial_grouping_expressions,
+                ..
+            } => {
+                pending.push(Udf(func));
+                pending.extend(
+                    grouping_expressions
+                        .iter()
+                        .chain(sorting_expressions)
+                        .chain(initial_grouping_expressions)
+                        .map(Of),
+                );
+            }
+            LogicalPlan::ApplyInPandasWithState {
+                grouping_expressions,
+                func,
+                ..
+            } => {
+                pending.push(Udf(func));
+                pending.extend(grouping_expressions.iter().map(Of));
+            }
+            LogicalPlan::CoGroupMap {
+                input_grouping_expressions,
+                other_grouping_expressions,
+                func,
+                ..
+            } => {
+                pending.push(Udf(func));
+                pending.extend(
+                    input_grouping_expressions
+                        .iter()
+                        .chain(other_grouping_expressions)
+                        .map(Of),
+                );
+            }
+            LogicalPlan::AsOfJoin {
+                left_as_of,
+                right_as_of,
+                on,
+                tolerance,
+                ..
+            } => {
+                pending.extend([of_column(left_as_of), of_column(right_as_of)]);
+                pending.extend(on.iter().chain(tolerance).map(of_column));
+            }
+            LogicalPlan::NearestByJoin {
+                ranking_expression, ..
+            } => pending.push(Of(ranking_expression)),
+            LogicalPlan::CommonInlineUdtf {
+                arguments, pickler, ..
+            } => {
+                pending.extend(arguments.iter().map(Of));
+                pending.extend(pickler.iter().map(Pickler));
+            }
+            LogicalPlan::Range { .. }
+            | LogicalPlan::SetOperation { .. }
+            | LogicalPlan::Limit { .. }
+            | LogicalPlan::Offset { .. }
+            | LogicalPlan::Tail { .. }
+            | LogicalPlan::ShowString { .. }
+            | LogicalPlan::HtmlString { .. }
+            | LogicalPlan::Raw { .. }
+            | LogicalPlan::Deduplicate { .. }
+            | LogicalPlan::Sample { .. }
+            | LogicalPlan::Repartition { .. }
+            | LogicalPlan::WithColumnsRenamed { .. }
+            | LogicalPlan::ToDF { .. }
+            | LogicalPlan::ToSchema { .. }
+            | LogicalPlan::Unbuildable { .. }
+            | LogicalPlan::Parse { .. }
+            | LogicalPlan::NAFill { .. }
+            | LogicalPlan::NAFillColumns { .. }
+            | LogicalPlan::NADrop { .. }
+            | LogicalPlan::NAReplace { .. }
+            | LogicalPlan::Describe { .. }
+            | LogicalPlan::Summary { .. }
+            | LogicalPlan::ColRegex { .. }
+            | LogicalPlan::SubqueryAlias { .. }
+            | LogicalPlan::WithRelations { .. }
+            | LogicalPlan::LocalRelation { .. }
+            | LogicalPlan::ChunkedCachedLocalRelation { .. }
+            | LogicalPlan::CachedRemoteRelation { .. }
+            | LogicalPlan::CachedRelation { .. }
+            | LogicalPlan::Read { .. }
+            | LogicalPlan::RelationChanges { .. }
+            | LogicalPlan::WithWatermark { .. }
+            | LogicalPlan::StatCrosstab { .. }
+            | LogicalPlan::StatFreqItems { .. }
+            | LogicalPlan::StatApproxQuantile { .. }
+            | LogicalPlan::StatCorr { .. }
+            | LogicalPlan::StatCov { .. }
+            | LogicalPlan::Zip { .. }
+            | LogicalPlan::MlTransform { .. }
+            | LogicalPlan::Catalog { .. } => {}
+        }
+    }
+
     /// The Observations of this plan by their names, as PySpark's `LogicalPlan.observations`
     /// collects those whose metrics an action of the plan sets: of each `Observe` node of an
     /// [`Observation`](crate::observation::Observation) on the inputs that PySpark's plans hold
@@ -1564,34 +1742,6 @@ impl LogicalPlan {
         depths[&(self as *const LogicalPlan)]
     }
 
-    /// The error of the first [`LogicalPlan::Unbuildable`] of this plan, which a request raises
-    /// before it serializes the plan. The plans below a plan are built before it, the left ones
-    /// first, so the error of the deepest and leftmost of them is the one raised. Computed
-    /// without recursing, and once for each node that several plans share.
-    pub(crate) fn unbuildable_error(&self) -> Option<SparkError> {
-        let mut seen: std::collections::HashSet<*const LogicalPlan> = Default::default();
-        let mut pending: Vec<(&LogicalPlan, bool)> = vec![(self, false)];
-        while let Some((plan, inputs_done)) = pending.pop() {
-            if inputs_done {
-                if let LogicalPlan::Unbuildable { error, .. } = plan {
-                    return Some(error.clone());
-                }
-                continue;
-            }
-            if !seen.insert(plan as *const LogicalPlan) {
-                continue;
-            }
-            pending.push((plan, true));
-            pending.extend(
-                plan.inputs()
-                    .into_iter()
-                    .rev()
-                    .map(|input| (input.as_ref(), false)),
-            );
-        }
-        None
-    }
-
     /// Convert this logical plan to a `spark.connect.Relation` protobuf, without plan IDs.
     ///
     /// Any depth is serialized, on a stack that grows for its levels; but prost encodes and drops
@@ -1606,9 +1756,6 @@ impl LogicalPlan {
     /// subqueries, or with an expression deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`],
     /// is a `RecursionError`, as PySpark's serializer raises it, and its proto is not built.
     pub fn try_to_proto(&self) -> Result<proto::Relation> {
-        if let Some(error) = self.unbuildable_error() {
-            return Err(error);
-        }
         let depth = self.depth();
         if depth > MAX_PLAN_DEPTH {
             return Err(too_deep_a_plan(depth));
@@ -1986,6 +2133,11 @@ impl LogicalPlan {
                 expressions,
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
+                // The partition expressions before the input, as PySpark's plan builds them, so
+                // that an expression that a request fails to build raises its error first.
+                for expr in expressions {
+                    repart.partition_exprs.push(expr.to_proto());
+                }
                 repart.input = Some(Box::new(relation_of(input, plan_ids)));
                 // num_partitions is optional in the proto: <= 0 means "unset" so the
                 // server uses the default (the `df.repartition(*cols)` column-only form,
@@ -1995,9 +2147,6 @@ impl LogicalPlan {
                 } else {
                     None
                 };
-                for expr in expressions {
-                    repart.partition_exprs.push(expr.to_proto());
-                }
                 relation.rel_type = Some(proto::relation::RelType::RepartitionByExpression(
                     Box::new(repart),
                 ));
@@ -2072,10 +2221,11 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::ToDf(Box::new(to_df)));
             }
 
-            LogicalPlan::Unbuildable { input, .. } => {
-                // A request checks the error before it serializes the plan
-                // (`unbuildable_error`); this path serializes the input alone.
+            LogicalPlan::Unbuildable { input, error } => {
+                // The input, as PySpark builds it first, and then the error, which the request
+                // raises; the relation is not sent.
                 relation.rel_type = relation_of(input, plan_ids).rel_type;
+                crate::expression::record_unbuildable(error);
             }
 
             LogicalPlan::ToSchema { input, schema } => {
@@ -2367,12 +2517,13 @@ impl LogicalPlan {
                 partition_exprs,
             } => {
                 let mut repart = proto::RepartitionByExpression::default();
+                // The partition expressions before the input, as PySpark's plan builds them.
+                for expr in partition_exprs {
+                    repart.partition_exprs.push(expr.to_proto());
+                }
                 repart.input = Some(Box::new(relation_of(input, plan_ids)));
                 if let Some(n) = num_partitions {
                     repart.num_partitions = Some(*n);
-                }
-                for expr in partition_exprs {
-                    repart.partition_exprs.push(expr.to_proto());
                 }
                 relation.rel_type = Some(proto::relation::RelType::RepartitionByExpression(
                     Box::new(repart),
@@ -2534,15 +2685,17 @@ impl LogicalPlan {
                 for e in grouping_expressions {
                     gm.grouping_expressions.push(e.to_proto());
                 }
-                gm.func = Some(func.to_proto());
-                for e in sorting_expressions {
-                    gm.sorting_expressions.push(e.to_proto());
-                }
+                // As PySpark's transformWithState plan, which builds the initial state before the
+                // function, whose command it pickles then.
                 if let Some(ii) = initial_input {
                     gm.initial_input = Some(Box::new(relation_of(ii, plan_ids)));
                 }
                 for e in initial_grouping_expressions {
                     gm.initial_grouping_expressions.push(e.to_proto());
+                }
+                gm.func = Some(func.to_proto());
+                for e in sorting_expressions {
+                    gm.sorting_expressions.push(e.to_proto());
                 }
                 gm.is_map_groups_with_state = *is_map_groups_with_state;
                 gm.output_mode = output_mode.clone();
@@ -2629,6 +2782,7 @@ impl LogicalPlan {
                 eval_type,
                 command,
                 python_ver,
+                pickler,
             } => {
                 let f = common_inline_udtf(
                     function_name,
@@ -2636,7 +2790,7 @@ impl LogicalPlan {
                     arguments,
                     return_type.as_ref(),
                     *eval_type,
-                    command,
+                    (command, pickler.as_ref()),
                     python_ver,
                 );
                 relation.rel_type =
@@ -2650,26 +2804,28 @@ impl LogicalPlan {
 
 /// The `CommonInlineUserDefinedTableFunction` of a Python UDTF: of a call with `arguments`,
 /// or of its registration without any. Mirrors PySpark's `CommonInlineUserDefinedTableFunction`
-/// of a `PythonUDTF`.
+/// of a `PythonUDTF`, which builds the arguments before the UDTF, whose command is the bytes of
+/// `command`, or that of its pickler, pickled as the plan is built.
 pub(crate) fn common_inline_udtf(
     function_name: &str,
     deterministic: bool,
     arguments: &[Expression],
     return_type: Option<&DataType>,
     eval_type: i32,
-    command: &[u8],
+    command: (&[u8], Option<&crate::udf::CommandPickler>),
     python_ver: &str,
 ) -> proto::CommonInlineUserDefinedTableFunction {
+    let arguments = arguments.iter().map(Expression::to_proto).collect();
     let udtf = proto::PythonUdtf {
         return_type: return_type.map(DataType::to_proto),
         eval_type,
-        command: bytes::Bytes::copy_from_slice(command),
+        command: crate::udf::command_bytes(command.0, command.1),
         python_ver: python_ver.to_string(),
     };
     proto::CommonInlineUserDefinedTableFunction {
         function_name: function_name.to_string(),
         deterministic,
-        arguments: arguments.iter().map(Expression::to_proto).collect(),
+        arguments,
         function: Some(
             proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf),
         ),
@@ -3498,7 +3654,7 @@ mod inline_udtf_tests {
             &[],
             Some(&ddl),
             302,
-            b"pickled",
+            (b"pickled", None),
             "3.11",
         );
         assert_eq!(f.function_name, "count_udtf");
@@ -3512,13 +3668,143 @@ mod inline_udtf_tests {
         assert_eq!(udtf.eval_type, 302);
         assert_eq!(udtf.command.as_ref(), b"pickled");
         assert_eq!(udtf.python_ver, "3.11");
-        let dynamic = common_inline_udtf("dynamic", true, &[], None, 300, b"", "3.11");
+        let dynamic = common_inline_udtf("dynamic", true, &[], None, 300, (b"", None), "3.11");
         let Some(proto::common_inline_user_defined_table_function::Function::PythonUdtf(udtf)) =
             dynamic.function
         else {
             panic!("expected a PythonUDTF");
         };
         assert_eq!(udtf.return_type, None);
+    }
+
+    /// A pickler that records `tag` in `calls` at each pickling and gives it, or, when it
+    /// `fails`, the error of the tag.
+    fn recording_pickler(
+        calls: &Arc<Mutex<Vec<&'static str>>>,
+        tag: &'static str,
+        fails: bool,
+    ) -> crate::udf::CommandPickler {
+        crate::udf::CommandPickler::new(Arc::clone(calls), move |calls| {
+            calls.lock().unwrap().push(tag);
+            if fails {
+                return Err(SparkError::value_msg(tag));
+            }
+            Ok(tag.as_bytes().to_vec())
+        })
+    }
+
+    /// A Python UDF of no arguments, of the command of `pickler`.
+    fn pickled_udf(
+        pickler: crate::udf::CommandPickler,
+    ) -> CommonInlineUserDefinedFunctionExpression {
+        CommonInlineUserDefinedFunctionExpression::new(
+            "f".to_string(),
+            true,
+            vec![],
+            crate::udf::PythonUDFPayload::pickled_at_build(
+                DataType::Long,
+                crate::udf::eval_type::SQL_BATCHED_UDF,
+                pickler,
+                "3.11".to_string(),
+            ),
+        )
+    }
+
+    /// As PySpark's `CommonInlineUserDefinedTableFunction.plan`, which builds the arguments of a
+    /// UDTF before its `PythonUDTF`, whose `to_plan` pickles the handler class at each build:
+    /// an argument that fails to build is the error of a request, and the handler is not
+    /// pickled; otherwise each request pickles it.
+    #[test]
+    fn a_udtf_pickles_its_handler_after_its_arguments_at_each_request() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let udtf = |arguments: Vec<Expression>, fails: bool| LogicalPlan::CommonInlineUdtf {
+            function_name: "t".to_string(),
+            deterministic: false,
+            arguments,
+            return_type: None,
+            eval_type: 300,
+            command: Vec::new(),
+            python_ver: "3.11".to_string(),
+            pickler: Some(recording_pickler(&calls, "handler", fails)),
+        };
+        let command = |relation: proto::Relation| match relation.rel_type {
+            Some(proto::relation::RelType::CommonInlineUserDefinedTableFunction(call)) => {
+                match call.function {
+                    Some(
+                        proto::common_inline_user_defined_table_function::Function::PythonUdtf(
+                            udtf,
+                        ),
+                    ) => udtf.command.to_vec(),
+                    _ => panic!("expected a PythonUDTF"),
+                }
+            }
+            _ => panic!("expected an inline UDTF"),
+        };
+        let plain = udtf(vec![Expression::column("x")], false);
+        for _ in 0..2 {
+            assert_eq!(command(plain.try_to_proto().unwrap()), b"handler");
+        }
+        assert_eq!(*calls.lock().unwrap(), ["handler", "handler"]);
+        calls.lock().unwrap().clear();
+        let error = SparkError::value_msg("argument");
+        let argument = Expression::unbuildable(Expression::column("x"), Some(error), None, None);
+        let error = udtf(vec![argument], true).try_to_proto().unwrap_err();
+        assert_eq!(error.message, "argument");
+        assert!(calls.lock().unwrap().is_empty());
+        let error = udtf(vec![], true).try_to_proto().unwrap_err();
+        assert_eq!(error.message, "handler");
+        // Of the bytes of a command, as of the Rust API: sent as they are.
+        let bytes = LogicalPlan::CommonInlineUdtf {
+            function_name: "t".to_string(),
+            deterministic: false,
+            arguments: vec![],
+            return_type: None,
+            eval_type: 300,
+            command: b"pickled".to_vec(),
+            python_ver: "3.11".to_string(),
+            pickler: None,
+        };
+        calls.lock().unwrap().clear();
+        assert_eq!(command(bytes.try_to_proto().unwrap()), b"pickled");
+        assert!(calls.lock().unwrap().is_empty());
+    }
+
+    /// As PySpark's transformWithState plan, which builds its initial state before the function,
+    /// whose command it pickles then: the functions of the initial state are pickled first, and
+    /// one that does not pickle is the error, before the function is pickled.
+    #[test]
+    fn a_group_map_pickles_its_function_after_its_initial_state() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let group_map = |initial_fails: bool| {
+            let initial = LogicalPlan::Project {
+                input: Arc::new(range(0, 1, 1)),
+                columns: vec![Column::new(
+                    ExpressionNode::CommonInlineUserDefinedFunction(Box::new(pickled_udf(
+                        recording_pickler(&calls, "initial", initial_fails),
+                    )))
+                    .into(),
+                )],
+            };
+            LogicalPlan::GroupMap {
+                input: Arc::new(range(0, 1, 1)),
+                grouping_expressions: vec![Expression::column("id")],
+                func: pickled_udf(recording_pickler(&calls, "function", false)),
+                sorting_expressions: vec![],
+                initial_input: Some(Arc::new(initial)),
+                initial_grouping_expressions: vec![Expression::column("id")],
+                is_map_groups_with_state: None,
+                output_mode: Some("append".to_string()),
+                timeout_conf: None,
+                state_schema: None,
+                transform_with_state_info: None,
+            }
+        };
+        assert!(group_map(false).try_to_proto().is_ok());
+        assert_eq!(*calls.lock().unwrap(), ["initial", "function"]);
+        calls.lock().unwrap().clear();
+        let error = group_map(true).try_to_proto().unwrap_err();
+        assert_eq!(error.message, "initial");
+        assert_eq!(*calls.lock().unwrap(), ["initial"]);
     }
 }
 
@@ -4261,8 +4547,59 @@ mod deep_plan_tests {
             by_name: true,
             allow_missing_columns: false,
         };
-        let error = both.unbuildable_error().unwrap();
+        let error = both.try_to_proto().unwrap_err();
         assert!(error.message().contains("data type left"), "{error}");
-        assert!(range(0, 10, 1).unbuildable_error().is_none());
+        assert!(range(0, 10, 1).try_to_proto().is_ok());
+    }
+
+    /// An expression of a plan that a request fails to build, below an unbuildable plan,
+    /// raises its error first, as PySpark builds the input of a plan before the plan; and one
+    /// above it raises its error after that of the plan.
+    #[test]
+    fn unbuildable_plans_and_expressions_fail_in_the_order_of_pysparks_build() {
+        let unbuildable_column = |name: &str| {
+            let error = SparkError::classed(
+                SparkErrorKind::ValueError,
+                "UNSUPPORTED_OPERATION",
+                &[("operation", &format!("data type {name}"))],
+            );
+            crate::column::Column::new(Expression::unbuildable(
+                Expression::column(name),
+                Some(error),
+                None,
+                None,
+            ))
+        };
+        let filter = |input: Arc<LogicalPlan>, name: &str| {
+            Arc::new(LogicalPlan::Filter {
+                input,
+                condition: unbuildable_column(name),
+            })
+        };
+        let below = unbuildable(filter(Arc::new(range(0, 10, 1)), "inner"), "plan");
+        let error = relation_with_ids(&below, &PlanIds::new()).unwrap_err();
+        assert!(error.message().contains("data type inner"), "{error}");
+        let above = filter(unbuildable(Arc::new(range(0, 10, 1)), "plan"), "outer");
+        let error = relation_with_ids(&above, &PlanIds::new()).unwrap_err();
+        assert!(error.message().contains("data type plan"), "{error}");
+    }
+
+    /// The plan of a subquery that a request fails to build fails the request of the plan
+    /// that refers to it, as PySpark builds the plans of its references with the plan.
+    #[test]
+    fn an_unbuildable_plan_of_a_subquery_fails_the_request() {
+        let subquery = crate::expression::SubqueryExpression::new(
+            unbuildable(Arc::new(range(0, 10, 1)), "subquery"),
+            7,
+            crate::expression::SubqueryType::Scalar,
+        );
+        let plan = Arc::new(LogicalPlan::Project {
+            input: Arc::new(range(0, 1, 1)),
+            columns: vec![crate::column::Column::new(Expression::new(
+                ExpressionNode::Subquery(Box::new(subquery)),
+            ))],
+        });
+        let error = relation_with_ids(&plan, &PlanIds::new()).unwrap_err();
+        assert!(error.message().contains("data type subquery"), "{error}");
     }
 }

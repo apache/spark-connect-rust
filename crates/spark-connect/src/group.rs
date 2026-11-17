@@ -531,6 +531,28 @@ impl GroupedData {
         function: &str,
         columns: impl IntoIterator<Item = S>,
     ) -> Result<DataFrame> {
+        let expressions: Vec<Expression> = self
+            .numeric_agg_columns(columns)?
+            .iter()
+            .map(|name| {
+                Expression::function(
+                    function,
+                    vec![crate::column::col(name).expression().clone()],
+                )
+            })
+            .collect();
+        Ok(self.agg(expressions))
+    }
+
+    /// The names of the columns that [`GroupedData::numeric_agg`] aggregates of `columns`: each
+    /// of them, which must be a numeric column of the schema of the DataFrame, else
+    /// `NOT_NUMERIC_COLUMNS`, or every numeric column without any. The schema is requested
+    /// unless it is cached. Not a stable API.
+    #[doc(hidden)]
+    pub fn numeric_agg_columns<S: Into<String>>(
+        &self,
+        columns: impl IntoIterator<Item = S>,
+    ) -> Result<Vec<String>> {
         let columns: Vec<String> = columns.into_iter().map(Into::into).collect();
         let schema = self.dataframe.schema()?;
         let names: Vec<String> = if columns.is_empty() {
@@ -558,16 +580,15 @@ impl GroupedData {
             }
             columns.iter().map(|column| column.to_string()).collect()
         };
-        let expressions: Vec<Expression> = names
-            .iter()
-            .map(|name| {
-                Expression::function(
-                    function,
-                    vec![crate::column::col(name).expression().clone()],
-                )
-            })
-            .collect();
-        Ok(self.agg(expressions))
+        Ok(names)
+    }
+
+    /// Whether `name` is of a numeric column of the schema of the DataFrame that is grouped, as
+    /// PySpark's `verify_numeric_col_name`, which [`GroupedData::numeric_agg`] checks. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn is_numeric_column(&self, name: &str) -> Result<bool> {
+        verify_numeric_col_name(name, &self.dataframe.schema()?)
     }
 
     /// Sum values in each group, as `GroupedData.sum`: every numeric column without `columns`.
@@ -794,8 +815,10 @@ impl StatFunctions {
     ) -> Result<DataFrame> {
         use crate::expression::{ExpressionNode, LiteralExpression};
         for (stratum, _) in &fractions {
-            // The Python name of the type of the value that a literal stands for.
-            let item_type = match stratum.node() {
+            // The Python name of the type of the value that a literal stands for, of a literal
+            // that a request fails to build too, as PySpark's `F.lit` of a str that UTF-8 cannot
+            // encode.
+            let item_type = match stratum.built().node() {
                 ExpressionNode::Literal(literal) => match literal {
                     LiteralExpression::Boolean(_)
                     | LiteralExpression::Byte(_)

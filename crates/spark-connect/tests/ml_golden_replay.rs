@@ -7,6 +7,7 @@
 mod ml_golden;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::{Arc, Mutex};
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ml_golden::*;
@@ -14,10 +15,11 @@ use prost::Message;
 use serde_json::{json, Value as Json};
 use spark_connect::ml::{
     fetch, ClassificationModel, CountVectorizerModel, DecisionTreeClassifier, Estimator,
-    GBTClassifier, Imputer, LogisticRegression, MlTarget, Params, RandomForestClassifier,
-    StringIndexerModel, TreeEnsembleModel,
+    GBTClassifier, Imputer, LogisticRegression, MlRef, MlTarget, Model, OneVsRest, Params,
+    RandomForestClassifier, StringIndexerModel, SubModel, TreeEnsembleModel,
 };
-use spark_connect::DataFrame;
+use spark_connect::{DataFrame, SparkSession};
+use spark_connect_core::error::SparkError;
 use spark_connect_proto as proto;
 use spark_connect_proto::ml_command_result::ml_operator_info::Type;
 use spark_connect_proto::ml_relation::MlType;
@@ -318,6 +320,129 @@ fn tree_classifier_fits_send_the_golden_fit_commands() {
     }
 }
 
+/// The golden entry `entry` whose result `index`, of a Fit, has the warning `warning`, as the
+/// server sends the warning of a tree training that the memory control of its ML cache stopped
+/// early (`MlOperatorInfo.warning_message`).
+fn with_fit_warning(entry: &Json, index: usize, warning: &str) -> Json {
+    let mut entry = entry.clone();
+    let encoded = STANDARD
+        .decode(entry["results"][index].as_str().unwrap())
+        .unwrap();
+    let mut result = proto::MlCommandResult::decode(encoded.as_slice()).unwrap();
+    let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) =
+        result.result_type.as_mut()
+    else {
+        panic!("the golden result {index} is not of a fit");
+    };
+    info.warning_message = Some(warning.to_string());
+    entry["results"][index] = json!(STANDARD.encode(result.encode_to_vec()));
+    entry
+}
+
+/// The warnings that the fits of `session` hand over (`set_ml_fit_warning_handler`), each with
+/// the ML commands that `server` had received then and the thread that handed it over.
+type Handed = Arc<Mutex<Vec<(String, usize, std::thread::ThreadId)>>>;
+
+fn hand_over_warnings(session: &SparkSession, server: &Arc<ReplayServer>) -> Handed {
+    let handed = Handed::default();
+    let (server, sink) = (server.clone(), handed.clone());
+    session.set_ml_fit_warning_handler(move |warning| {
+        let received = server.pending_requests().len();
+        let thread = std::thread::current().id();
+        sink.lock()
+            .unwrap()
+            .push((warning.to_string(), received, thread));
+        Ok(())
+    });
+    handed
+}
+
+#[test]
+fn a_fit_hands_its_warning_over_before_its_model_is_read_and_the_model_keeps_it() {
+    // As PySpark's try_remote_fit logs the warning that the server sends with the model of a fit
+    // (of a tree training that the memory control of its ML cache stopped early), once the result
+    // of the Fit has arrived and before it makes the model: the session's handler gets it on the
+    // thread of the fit, when the server has received the Fit alone, before the classes and the
+    // trees of the forest are read. The model keeps it, and the trees that a fetch returns have
+    // none, as PySpark reads it of a fit only.
+    let models = fixture(MODELS);
+    let family = "RandomForestClassifier.binary";
+    let warning = "The random forest training stops early because the model size (35016 bytes) \
+                   exceeds threshold (24000 bytes).";
+    let fit = with_fit_warning(&models["fits"][family]["fit"], 0, warning);
+    let (server, session) = ReplayServer::start(&[&fit]);
+    let server = Arc::new(server);
+    let handed = hand_over_warnings(&session, &server);
+    let mut estimator = RandomForestClassifier::new();
+    *estimator.params_mut() = Params::from_proto(&golden_fit_params(&fit));
+    let dataset = models["fits"][family]["dataset"].as_str().unwrap();
+    let train = golden_dataset(&session, &models["datasets"], dataset);
+    let model = estimator.fit(&train).unwrap();
+    model.num_classes().unwrap();
+    let trees = model.trees().unwrap();
+    assert_commands(&server, &fit, family);
+    let this = std::thread::current().id();
+    assert_eq!(*handed.lock().unwrap(), [(warning.to_string(), 1, this)]);
+    assert_eq!(model.fit_warning(), Some(warning));
+    assert_eq!(model.ml_ref().and_then(MlRef::fit_warning), Some(warning));
+    assert!(!trees.is_empty() && trees.iter().all(|tree| tree.fit_warning().is_none()));
+}
+
+#[test]
+fn a_fit_of_no_warning_or_of_an_empty_one_hands_none_over() {
+    // As PySpark's `if warning_msg := getattr(model_info, "warning_message", None)`: a fit whose
+    // result has no warning, or an empty one, logs nothing.
+    let models = fixture(MODELS);
+    let golden = &models["fits"]["DecisionTreeClassifier"]["fit"];
+    for fit in [golden.clone(), with_fit_warning(golden, 0, "")] {
+        let (server, session) = ReplayServer::start(&[&fit]);
+        let server = Arc::new(server);
+        let handed = hand_over_warnings(&session, &server);
+        let mut estimator = DecisionTreeClassifier::new();
+        *estimator.params_mut() = Params::from_proto(&golden_fit_params(&fit));
+        let dataset = models["fits"]["DecisionTreeClassifier"]["dataset"]
+            .as_str()
+            .unwrap();
+        let train = golden_dataset(&session, &models["datasets"], dataset);
+        let model = estimator.fit(&train).unwrap();
+        assert_commands(&server, &fit, "DecisionTreeClassifier");
+        assert!(handed.lock().unwrap().is_empty());
+        assert_eq!(model.fit_warning(), None);
+    }
+}
+
+#[test]
+fn the_error_of_the_handler_of_a_fit_warning_is_the_error_of_the_fit() {
+    // As an exception of the logging of PySpark's try_remote_fit (of a filter that raises) is the
+    // exception of its fit, which makes no model.
+    let models = fixture(MODELS);
+    let fit = with_fit_warning(
+        &models["fits"]["DecisionTreeClassifier"]["fit"],
+        0,
+        "stopped early",
+    );
+    let (server, session) = ReplayServer::start(&[&fit]);
+    session.set_ml_fit_warning_handler(|warning| {
+        Err(SparkError::value_msg(format!(
+            "the handler of '{warning}' failed"
+        )))
+    });
+    let mut estimator = DecisionTreeClassifier::new();
+    *estimator.params_mut() = Params::from_proto(&golden_fit_params(&fit));
+    let dataset = models["fits"]["DecisionTreeClassifier"]["dataset"]
+        .as_str()
+        .unwrap();
+    let train = golden_dataset(&session, &models["datasets"], dataset);
+    let error = estimator.fit(&train).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("the handler of 'stopped early' failed"),
+        "{error}"
+    );
+    assert_commands(&server, &fit, "DecisionTreeClassifier");
+}
+
 #[test]
 fn one_vs_rest_class_fit_sends_the_golden_fit_command() {
     // A OneVsRest fit fits its classifier once per class: the golden's first command is the
@@ -339,6 +464,53 @@ fn one_vs_rest_class_fit_sends_the_golden_fit_command() {
     let train = golden_dataset(&session, &models["datasets"], "multi_train");
     classifier.fit(&train).unwrap();
     assert_commands(&server, &class_fit, "OneVsRest class fit");
+}
+
+#[test]
+fn one_vs_rest_class_fits_hand_their_warnings_over_on_their_threads() {
+    // The fits of the classes of PySpark's OneVsRest run `classifier.fit` in the threads of its
+    // pool, whose try_remote_fit logs the warning of each: the fit of each class hands its own
+    // over on the thread that fits the class, once its Fit has returned and before the next class
+    // fits, and the model of each class keeps its own. The golden's class Fits are its commands 0,
+    // 2 and 4; the Rust fits of the classes do not read the class counts after them, which
+    // PySpark's training summaries read, so the commands are not checked against the golden.
+    let models = fixture(MODELS);
+    let mut fit = models["fits"]["OneVsRest"]["fit"].clone();
+    for class in 0..3 {
+        fit = with_fit_warning(&fit, 2 * class, &format!("the warning of class {class}"));
+    }
+    let (server, session) = ReplayServer::start(&[&fit]);
+    let server = Arc::new(server);
+    let handed = hand_over_warnings(&session, &server);
+    let classifier = LogisticRegression::new()
+        .set_reg_param(0.01)
+        .set_max_iter(20);
+    let estimator = OneVsRest::new().set_classifier(classifier);
+    let train = golden_dataset(&session, &models["datasets"], "multi_train");
+    let (model, _) = estimator.fit_classes(&train, 3, 1, Some("weight")).unwrap();
+    let handed = handed.lock().unwrap().clone();
+    let this = std::thread::current().id();
+    assert!(handed.iter().all(|(_, _, thread)| *thread != this));
+    let handed: Vec<(String, usize)> = handed
+        .into_iter()
+        .map(|(warning, received, _)| (warning, received))
+        .collect();
+    let expected: Vec<(String, usize)> = (0..3)
+        .map(|class| (format!("the warning of class {class}"), class + 1))
+        .collect();
+    assert_eq!(handed, expected);
+    let kept: Vec<Option<String>> = model
+        .models()
+        .into_iter()
+        .map(|model| match model {
+            SubModel::LogisticRegression(model) => model.fit_warning().map(str::to_string),
+            _ => panic!("a class model of no LogisticRegressionModel"),
+        })
+        .collect();
+    let expected: Vec<Option<String>> = (0..3)
+        .map(|class| Some(format!("the warning of class {class}")))
+        .collect();
+    assert_eq!(kept, expected);
 }
 
 #[test]

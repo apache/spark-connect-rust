@@ -34,6 +34,7 @@ from typing import (
 
 import decimal
 import datetime
+import warnings
 from threading import Lock
 
 import numpy as np
@@ -508,3 +509,14 @@ class DistributedSequenceID(Expression):
 
     def __repr__(self) -> str:
         return "DistributedSequenceID()"
+
+
+def _warn_no_partition() -> None:
+    """Warn as PySpark's ``WindowExpression.to_plan`` warns when it builds the plan of a window
+    expression of no partitions, with ``warnings.warn`` of this module: the Rust core builds the
+    plan of a request, and calls this for each such expression of it."""
+    warnings.warn(
+        "WARN WindowExpression: No Partition Defined for Window operation! "
+        "Moving all data to a single partition, this can cause serious "
+        "performance degradation."
+    )
