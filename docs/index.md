@@ -75,8 +75,8 @@ runs unchanged.
 
 <div class="sc-card" markdown>
 ### Spark 4.3.0+
-The crate and wheel version tracks the Spark release it targets, so the version
-number tells you which Spark it speaks.
+A release's crate and wheel version is that of the Spark release it targets, so the
+version number tells you which Spark it speaks.
 </div>
 
 </div>

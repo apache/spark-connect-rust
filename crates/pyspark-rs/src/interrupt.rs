@@ -1,4 +1,5 @@
-//! Waits on the server that a signal of the process interrupts, as PySpark's waits are.
+//! Waits on the server that a signal of the process interrupts, as PySpark's waits are, and the
+//! checkpoints of the conversions that run in native code ([`ConversionBudget`]).
 //!
 //! The wait runs on the calling thread, as PySpark's does, so the progress handlers and the
 //! other callbacks of the execution run there too. The wait polls the signals of the process,
@@ -6,15 +7,83 @@
 //! execution in flight of the calling thread on the server; the wait then ends with the server's
 //! cancellation, and the exception of the handler is raised.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
+use pyo3::types::PyDict;
 use spark_connect::session::SparkSession;
 use spark_connect_core::error::SparkError;
 use spark_connect_core::runtime::{with_wait_watch, WaitWatch, Watch};
 
 use crate::errors::ResultExt;
+
+/// The steps of a conversion from one of its checkpoints to the next.
+const CONVERSION_STEPS_PER_CHECKPOINT: usize = 1024;
+
+/// A Python function that does nothing, whose call is the checkpoint of a conversion.
+static CONVERSION_CHECKPOINT: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+
+/// The checkpoints of a conversion between Python values and native ones that runs in native
+/// code, with the GIL and without a Python frame of its own, where PySpark's conversions run
+/// Python code: the Rows of a result, and the local data of `createDataFrame`. A step is a value,
+/// or a row, of the conversion. Every 1,024 steps, the first included, the call of a Python
+/// function lets the interpreter run its pending work, such as handing the GIL to another thread
+/// that waits for it, and the signals of the process are checked, so that the exception of a
+/// handler, as the KeyboardInterrupt of Ctrl-C, ends the conversion. The budget is of steps, not
+/// of time: the work of a step that is long, as a callback or the allocation of a large value,
+/// still holds the GIL.
+///
+/// The count is atomic only so that what holds a budget is `Sync`, as a pyclass must be; it is
+/// counted under the GIL, by one thread at a time.
+#[derive(Default)]
+pub(crate) struct ConversionBudget {
+    steps_until_checkpoint: AtomicUsize,
+}
+
+impl ConversionBudget {
+    /// One step of the conversion, which is a checkpoint when the budget is spent.
+    #[inline]
+    pub(crate) fn step(&self, py: Python<'_>) -> PyResult<()> {
+        let steps = self.steps_until_checkpoint.load(Ordering::Relaxed);
+        if steps > 0 {
+            self.steps_until_checkpoint
+                .store(steps - 1, Ordering::Relaxed);
+            return Ok(());
+        }
+        self.checkpoint(py)
+    }
+
+    #[cold]
+    fn checkpoint(&self, py: Python<'_>) -> PyResult<()> {
+        let checkpoint = CONVERSION_CHECKPOINT.get_or_try_init(py, || -> PyResult<_> {
+            let globals = PyDict::new(py);
+            Ok(py.eval(c"lambda: None", Some(&globals), None)?.unbind())
+        })?;
+        checkpoint.bind(py).call0()?;
+        py.check_signals()?;
+        self.steps_until_checkpoint
+            .store(CONVERSION_STEPS_PER_CHECKPOINT - 1, Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Make the next step a checkpoint, as the first step of a new conversion is.
+    pub(crate) fn reset(&self) {
+        self.steps_until_checkpoint.store(0, Ordering::Relaxed);
+    }
+
+    /// Release `values`, which hold Python references, a step for each: their release holds the
+    /// GIL too, as long as their conversion took to take them. A signal that ends the release
+    /// releases the rest of them at once.
+    pub(crate) fn release<T>(&self, py: Python<'_>, values: Vec<T>) -> PyResult<()> {
+        for value in values {
+            self.step(py)?;
+            drop(value);
+        }
+        Ok(())
+    }
+}
 
 /// The poll of the signals of one wait.
 struct SignalWatch {

@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import base64
 import json
+import sys
 from pathlib import Path
 
-from capture_golden import normalize  # type: ignore
-from pyspark.sql import SparkSession
-from pyspark.sql.connect import functions as F
+# The sibling script is importable when this one runs isolated (`python -I`) too.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from capture_golden import normalize  # type: ignore  # noqa: E402
+from pyspark.sql import SparkSession  # noqa: E402
+from pyspark.sql.connect import functions as F  # noqa: E402
 
 
 def cases(F):
@@ -38,8 +42,6 @@ def cases(F):
 
 
 def main() -> None:
-    import sys
-
     remote = sys.argv[1] if len(sys.argv) > 1 else "sc://localhost:15002"
     spark = SparkSession.builder.remote(remote).getOrCreate()
     recs = []

@@ -274,7 +274,7 @@ pub fn start_run(
     let mut request = proto::ExecutePlanRequest::default();
     request.session_id = session.client().session_id().to_string();
     request.user_context = Some(proto::UserContext::default());
-    request.tags = session.tags();
+    request.tags = session.tags()?;
     request.plan = Some(plan);
     Ok(PipelineRunStream {
         session: session.clone(),

@@ -33,6 +33,11 @@ impl Column {
         &self.expr
     }
 
+    /// The underlying Expression, to replace.
+    pub(crate) fn expression_mut(&mut self) -> &mut Expression {
+        &mut self.expr
+    }
+
     /// Mirrors `pyspark.sql.column.Column.alias`.
     pub fn alias(self, name: &str) -> Column {
         Column {
@@ -634,15 +639,23 @@ impl Not for Column {
 
 // Builder functions
 
-/// Mirrors `pyspark.sql.functions.col`.
+/// Mirrors `pyspark.sql.functions.col`: `"*"` and any `"prefix.*"` are an `UnresolvedStar`, of
+/// every column or of those of the table or the struct of the prefix, and any other name is the
+/// reference of its column. A name that an API takes for a column (`impl Into<Column>`) is
+/// converted so too, as PySpark Connect's APIs convert their names with `F.col`.
 pub fn col(name: &str) -> Column {
-    Column {
-        expr: Expression::column(name),
-    }
+    let expr = if name == "*" {
+        ExpressionNode::UnresolvedStar(None, None).into()
+    } else if name.ends_with(".*") {
+        ExpressionNode::UnresolvedStar(Some(name.to_string()), None).into()
+    } else {
+        Expression::column(name)
+    };
+    Column { expr }
 }
 
-// A string is accepted anywhere a `Column` is (resolved as a column reference), so the
-// ergonomic `impl IntoIterator<Item = impl Into<Column>>` APIs accept `["a", "b"]` too.
+// A string is accepted anywhere a `Column` is (as `col` converts it), so the ergonomic
+// `impl IntoIterator<Item = impl Into<Column>>` APIs accept `["a", "b"]` and `["*"]` too.
 impl From<&str> for Column {
     fn from(name: &str) -> Column {
         col(name)
@@ -965,6 +978,39 @@ mod tests {
             result.expr.node(),
             ExpressionNode::UnresolvedFunction(_)
         ));
+    }
+
+    #[test]
+    fn the_names_of_a_star_are_its_unresolved_star_as_pysparks_col() {
+        // As PySpark's `F.col`: `*` is the star of every column and `prefix.*` that of the table
+        // or the struct of the prefix, of `col` and of each name that an API takes for a column;
+        // any other name is the reference of its column.
+        let star = |target: Option<&str>| proto::Expression {
+            common: None,
+            expr_type: Some(proto::expression::ExprType::UnresolvedStar(
+                proto::expression::UnresolvedStar {
+                    unparsed_target: target.map(str::to_string),
+                    plan_id: None,
+                },
+            )),
+        };
+        let name = "s.*".to_string();
+        for (column, expected) in [
+            (col("*"), star(None)),
+            (col("t.*"), star(Some("t.*"))),
+            (Column::from("*"), star(None)),
+            (Column::from("s.*".to_string()), star(Some("s.*"))),
+            (Column::from(&name), star(Some("s.*"))),
+            (crate::functions::col("t.*"), star(Some("t.*"))),
+        ] {
+            assert_eq!(column.to_proto(), expected);
+        }
+        for column in [col("x"), col("*x"), col("a.b"), Column::from("x.*y")] {
+            assert!(matches!(
+                column.expr.node(),
+                ExpressionNode::ColumnReference(_)
+            ));
+        }
     }
 
     #[test]

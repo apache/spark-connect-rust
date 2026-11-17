@@ -33,18 +33,20 @@ def normalize(msg) -> None:
             msg.ClearField(field.name)
             continue
         if field.type == field.TYPE_MESSAGE:
-            if field.label == field.LABEL_REPEATED:
-                if field.message_type.GetOptions().map_entry:
-                    for k in value:
-                        v = value[k]
-                        if isinstance(v, Message):
-                            normalize(v)
-                else:
-                    for item in value:
-                        if isinstance(item, Message):
-                            normalize(item)
-            elif isinstance(value, Message):
+            # A singular field is a message; a repeated one or a map is a container of them. The
+            # value tells which, as protobuf 7 has no `FieldDescriptor.label`.
+            if isinstance(value, Message):
                 normalize(value)
+            elif field.message_type.GetOptions().map_entry:
+                # map<...>: values may be messages
+                for k in value:
+                    v = value[k]
+                    if isinstance(v, Message):
+                        normalize(v)
+            else:
+                for item in value:
+                    if isinstance(item, Message):
+                        normalize(item)
 
 
 def cap_expr(spark, name, col):

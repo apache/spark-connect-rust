@@ -138,6 +138,9 @@ class ChannelBuilder:
     parameters apply. A custom gRPC channel (``toChannel``), its interceptors and its channel
     options do not: the transport has no gRPC channel to give them to."""
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     PARAM_USE_SSL = "use_ssl"
     PARAM_TOKEN = "token"
     PARAM_USER_ID = "user_id"
@@ -329,6 +332,9 @@ class DefaultChannelBuilder(ChannelBuilder):
     True
     """
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     @staticmethod
     def default_port() -> int:
         # The port of a Spark Connect server, which the drop-in does not discover from a local
@@ -432,6 +438,9 @@ class PlanObservedMetrics(ObservedMetrics):
     """Observed metrics of one ``observe(...)`` node, as carried by
     ``DataFrame.executionInfo.flows``. Mirrors ``pyspark.sql.connect.client.core
     .PlanObservedMetrics``; the Rust transport has already decoded the literal values."""
+
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
 
     def __init__(self, name: str, metrics: list[Any], keys: list[str]):
         self._name = name

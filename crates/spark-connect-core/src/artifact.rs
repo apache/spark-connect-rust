@@ -18,7 +18,7 @@ use crate::error::Result;
 use crate::error::SparkError;
 
 /// Using the midpoint recommendation of 32KiB for chunk size as specified in
-/// https://github.com/grpc/grpc.github.io/issues/371.
+/// <https://github.com/grpc/grpc.github.io/issues/371>.
 pub const CHUNK_SIZE: usize = 32 * 1024;
 
 /// Local artifact data source (file or in-memory).

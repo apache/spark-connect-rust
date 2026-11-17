@@ -3,6 +3,8 @@
 mod common;
 #[path = "common/evaluators.rs"]
 mod evaluators;
+#[path = "common/ml_golden.rs"]
+mod ml_golden;
 
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
@@ -90,13 +92,7 @@ fn evaluators_preserve_sparks_parameter_and_input_validation() {
             continue;
         }
         let error = evaluator.evaluate(&frame).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains(case["message"].as_str().unwrap()),
-            "{}: {error}",
-            case["name"]
-        );
+        ml_golden::assert_error(&error.to_string(), case, case["name"].as_str().unwrap());
     }
     session.stop().unwrap();
 }

@@ -28,23 +28,80 @@ static IPYTHON_IMPORTS_TRIED: AtomicBool = AtomicBool::new(false);
 /// reached. A call site that cannot be read leaves the expression without an origin, as it is
 /// the same without one, unless its error is not an `Exception`, as a KeyboardInterrupt.
 pub(crate) fn with_origin(fragment: &str) -> PyResult<Option<OriginGuard>> {
-    Python::attach(|py| -> PyResult<Option<OriginGuard>> {
-        let utils = UTILS
-            .get_or_try_init(py, || py.import("pyspark.errors.utils").map(Bound::unbind))?
-            .bind(py);
-        if !utils.call_method0("is_debugging_enabled")?.is_truthy()? {
-            return Ok(None);
+    Python::attach(|py| Ok(origin_of(py, fragment)?.map(set_current)))
+}
+
+/// The origin that [`with_origin`] gives the expressions of `fragment` now, as PySpark's
+/// `_with_origin` makes it: None when DataFrame debugging is disabled, or when the call site
+/// cannot be read.
+fn origin_of(py: Python<'_>, fragment: &str) -> PyResult<Option<Origin>> {
+    let utils = UTILS
+        .get_or_try_init(py, || py.import("pyspark.errors.utils").map(Bound::unbind))?
+        .bind(py);
+    if !utils.call_method0("is_debugging_enabled")?.is_truthy()? {
+        return Ok(None);
+    }
+    let call_site = match call_site(py, 1) {
+        Ok(call_site) => call_site,
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    Ok(Some(Origin {
+        fragment: fragment.to_string(),
+        call_site,
+    }))
+}
+
+/// What the client does as a request builds a plan, where PySpark's client runs Python code in
+/// the user's process: it gives the origin of an expression that the plan makes then, of
+/// `_with_origin` at the call site of the request, such as the `__and__` of the conditions of a
+/// join of a list of Columns, and warns of a window of no partitions, with the `warnings.warn`
+/// of PySpark's `WindowExpression.to_plan`, from `pyspark.sql.connect.expressions`. Their
+/// exceptions are those of the request, as PySpark raises them out of its plan build, such as
+/// the `UserWarning` of a filter of `"error"`.
+struct PlanBuild;
+
+impl spark_connect::plan_build::PlanBuildListener for PlanBuild {
+    fn origin(&self, fragment: &str) -> spark_connect::Result<Option<Origin>> {
+        Python::attach(|py| origin_of(py, fragment)).map_err(crate::errors::callback_error)
+    }
+
+    fn window_without_partitions(&self) -> spark_connect::Result<()> {
+        if PICKLING.with(std::cell::Cell::get) {
+            return Ok(());
         }
-        let call_site = match call_site(py, 1) {
-            Ok(call_site) => call_site,
-            Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => return Ok(None),
-            Err(err) => return Err(err),
-        };
-        Ok(Some(set_current(Origin {
-            fragment: fragment.to_string(),
-            call_site,
-        })))
-    })
+        Python::attach(|py| {
+            py.import("pyspark.sql.connect.expressions")?
+                .call_method0("_warn_no_partition")?;
+            Ok(())
+        })
+        .map_err(crate::errors::callback_error)
+    }
+}
+
+/// Make the client the listener of the plans that the requests of the process build.
+pub(crate) fn listen_to_plan_builds() {
+    spark_connect::plan_build::set_listener(Some(std::sync::Arc::new(PlanBuild)));
+}
+
+thread_local! {
+    /// Whether this thread pickles a DataFrame or a Column, whose plan the client builds to keep
+    /// it in the pickle.
+    static PICKLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Run `pickle`, which builds the plan of a DataFrame or a Column to pickle it, without the
+/// warning of a window of no partitions: PySpark's pickle keeps its plan objects, and builds no
+/// plan.
+pub(crate) fn pickling<T>(pickle: impl FnOnce() -> T) -> T {
+    struct Pickling(bool);
+    impl Drop for Pickling {
+        fn drop(&mut self) {
+            PICKLING.with(|pickling| pickling.set(self.0));
+        }
+    }
+    let _outer = Pickling(PICKLING.with(|pickling| pickling.replace(true)));
+    pickle()
 }
 
 /// The call site of the first `depth` frames of user code, as `_capture_call_site(depth)` of

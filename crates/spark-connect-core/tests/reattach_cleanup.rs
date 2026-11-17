@@ -241,7 +241,12 @@ fn assert_metadata(metadata: &MetadataMap) {
     // As PySpark's, which sends the user ID in the user context only.
     assert!(metadata.get("user_id").is_none());
     assert_eq!(metadata.get("x-cleanup").unwrap(), "fixture-value");
-    assert!(metadata.get("user-agent").is_some());
+    // tonic's own header, as grpcio sends its own: the user agent is the client type.
+    let user_agent = metadata.get("user-agent").unwrap().to_str().unwrap();
+    assert!(
+        user_agent.starts_with("tonic/") && !user_agent.contains("spark/"),
+        "{user_agent}"
+    );
 }
 
 /// The loopback service: ExecutePlan, ReattachExecute and ReleaseExecute.

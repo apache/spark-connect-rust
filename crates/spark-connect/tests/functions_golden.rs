@@ -177,6 +177,7 @@ fn all_golden_function_cases_pass() {
         ("collation", collation(a())),
         ("collect_list", collect_list(a())),
         ("collect_set", collect_set(a())),
+        ("collect_union", collect_union(a())),
         ("column", column("x")),
         ("concat", concat(Vec::<Column>::new())),
         ("concat_ws", concat_ws([a()])),
@@ -192,6 +193,7 @@ fn all_golden_function_cases_pass() {
         ("count_distinct", count_distinct(a())),
         ("count_if", count_if(a())),
         ("count_min_sketch", count_min_sketch(a(), b(), c())),
+        ("counter_diff", counter_diff(a())),
         ("covar_pop", covar_pop(a(), b())),
         ("covar_samp", covar_samp(a(), b())),
         ("crc32", crc32(a())),
@@ -249,6 +251,7 @@ fn all_golden_function_cases_pass() {
         ("floor", floor(a())),
         ("format_number", format_number(a(), b())),
         ("format_string", format_string([a()])),
+        ("from_base32", from_base32(a())),
         ("from_csv", from_csv(a(), b())),
         ("from_json", from_json(a(), b())),
         ("from_unixtime", from_unixtime(a())),
@@ -267,6 +270,7 @@ fn all_golden_function_cases_pass() {
         ("hll_sketch_estimate", hll_sketch_estimate(a())),
         ("hll_union", hll_union(a(), b())),
         ("hll_union_agg", hll_union_agg(a())),
+        ("hmac", hmac(a(), b())),
         ("hour", hour(a())),
         ("hours", hours(a())),
         ("hypot", hypot(a(), b())),
@@ -284,6 +288,7 @@ fn all_golden_function_cases_pass() {
         ("isnan", isnan(a())),
         ("isnotnull", isnotnull(a())),
         ("isnull", isnull(a())),
+        ("jaro_winkler_similarity", jaro_winkler_similarity(a(), b())),
         ("java_method", java_method(Vec::<Column>::new())),
         ("json_array_length", json_array_length(a())),
         ("json_object_keys", json_object_keys(a())),
@@ -374,6 +379,7 @@ fn all_golden_function_cases_pass() {
         ("raise_error", raise_error(a())),
         ("rand", rand()),
         ("randn", randn()),
+        ("random", random()),
         ("randstr", randstr(a())),
         ("rank", rank()),
         ("reflect", reflect(Vec::<Column>::new())),
@@ -460,9 +466,11 @@ fn all_golden_function_cases_pass() {
         ("timestamp_diff", timestamp_diff(a(), b(), c())),
         ("timestamp_micros", timestamp_micros(a())),
         ("timestamp_millis", timestamp_millis(a())),
+        ("timestamp_nanos", timestamp_nanos(a())),
         ("timestamp_seconds", timestamp_seconds(a())),
         ("toDegrees", toDegrees(a())),
         ("toRadians", toRadians(a())),
+        ("to_base32", to_base32(a())),
         ("to_binary", to_binary(a())),
         ("to_char", to_char(a(), b())),
         ("to_csv", to_csv(a())),
@@ -498,7 +506,13 @@ fn all_golden_function_cases_pass() {
         ("try_to_timestamp", try_to_timestamp(a())),
         ("try_url_decode", try_url_decode(a())),
         ("try_validate_utf8", try_validate_utf8(a())),
+        (
+            "try_variant_array_append",
+            try_variant_array_append(a(), b(), c()),
+        ),
         ("try_variant_get", try_variant_get(a(), b(), c())),
+        ("try_variant_insert", try_variant_insert(a(), b(), c())),
+        ("try_variant_set", try_variant_set(a(), b(), c())),
         ("typeof", r#typeof(a())),
         ("ucase", ucase(a())),
         ("unbase64", unbase64(a())),
@@ -507,6 +521,7 @@ fn all_golden_function_cases_pass() {
         ("unix_date", unix_date(a())),
         ("unix_micros", unix_micros(a())),
         ("unix_millis", unix_millis(a())),
+        ("unix_nanos", unix_nanos(a())),
         ("unix_seconds", unix_seconds(a())),
         ("unix_timestamp", unix_timestamp()),
         ("unwrap_udt", unwrap_udt(a())),
@@ -518,7 +533,22 @@ fn all_golden_function_cases_pass() {
         ("var_pop", var_pop(a())),
         ("var_samp", var_samp(a())),
         ("variance", variance(a())),
+        ("variant_array_append", variant_array_append(a(), b(), c())),
+        ("variant_delete", variant_delete(a(), [b()])),
         ("variant_get", variant_get(a(), b(), c())),
+        ("variant_insert", variant_insert(a(), b(), c())),
+        ("variant_set", variant_set(a(), b(), c())),
+        ("variant_strip_nulls", variant_strip_nulls(a(), true)),
+        ("vector_avg", vector_avg(a())),
+        (
+            "vector_cosine_similarity",
+            vector_cosine_similarity(a(), b()),
+        ),
+        ("vector_inner_product", vector_inner_product(a(), b())),
+        ("vector_l2_distance", vector_l2_distance(a(), b())),
+        ("vector_norm", vector_norm(a())),
+        ("vector_normalize", vector_normalize(a())),
+        ("vector_sum", vector_sum(a())),
         ("version", version()),
         ("weekday", weekday(a())),
         ("weekofyear", weekofyear(a())),
@@ -681,6 +711,18 @@ fn all_golden_function_cases_pass() {
             "tuple_sketch_agg_integer",
             tuple_sketch_agg_integer(a(), b()),
         ),
+        ("tuple_union_agg_double", tuple_union_agg_double(a())),
+        ("tuple_union_agg_integer", tuple_union_agg_integer(a())),
+        ("tuple_union_double", tuple_union_double(a(), b())),
+        ("tuple_union_integer", tuple_union_integer(a(), b())),
+        (
+            "tuple_union_theta_double",
+            tuple_union_theta_double(a(), b()),
+        ),
+        (
+            "tuple_union_theta_integer",
+            tuple_union_theta_integer(a(), b()),
+        ),
         ("uuid", uuid()),
     ];
 
@@ -710,7 +752,13 @@ fn all_golden_function_cases_pass() {
         total,
         failures.join("\n")
     );
-    assert_eq!(total, 511, "expected exactly 511 cases, got {total}");
+    // A case of each golden: a function that the capture adds fails until it has its case.
+    assert_eq!(
+        total,
+        goldens.len(),
+        "expected a case of each of the {} goldens, got {total}",
+        goldens.len()
+    );
     println!("all {total} golden function cases passed");
 }
 

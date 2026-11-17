@@ -14,7 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Observation under the connect import path."""
-from pyspark.sql.observation import Observation
+"""Observation under the connect import path, as PySpark Connect's
+``pyspark.sql.connect.observation``: its ``Observation``, which the Rust extension implements.
+``pyspark.sql.Observation`` is PySpark's classic class, whose ``__new__`` makes one of this class,
+as in PySpark."""
+from pyspark._pyspark import Observation
 
 __all__ = ["Observation"]

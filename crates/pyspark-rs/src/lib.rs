@@ -32,6 +32,7 @@ mod origin;
 mod pandas_input;
 mod pbmsg;
 mod pipelines;
+mod plan_args;
 mod profiler;
 mod progress;
 mod pyarrow_export;
@@ -50,6 +51,7 @@ mod tablearg;
 mod transport;
 mod tvf;
 mod types;
+mod udf_command;
 mod udtf_analyze;
 mod values;
 mod window;
@@ -109,15 +111,20 @@ pub(crate) fn encode_on_grown_stack<M: prost::Message + Send>(message: M) -> Vec
 
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    origin::listen_to_plan_builds();
     m.add_class::<PySparkSession>()?;
     m.add_function(wrap_pyfunction!(session::_close_sessions_at_exit, m)?)?;
     m.add_function(wrap_pyfunction!(session::_refuse_releases, m)?)?;
     session::register_release_refusal(m)?;
+    m.add_function(wrap_pyfunction!(session::_install_builder, m)?)?;
     m.add_class::<PyHook>()?;
     m.add_class::<PySparkSessionBuilder>()?;
-    // As PySpark Connect's nested class: `<pyspark.sql.connect.session.SparkSession.Builder ...>`.
-    m.getattr("Builder")?
-        .setattr("__qualname__", "SparkSession.Builder")?;
+    // As PySpark Connect's classes nested in SparkSession, of which they are attributes:
+    // `<pyspark.sql.connect.session.SparkSession.Builder ...>`, and a pickle names them there.
+    for name in ["Builder", "Hook"] {
+        m.getattr(name)?
+            .setattr("__qualname__", format!("SparkSession.{name}"))?;
+    }
     m.add_class::<PyDataFrame>()?;
     m.add_class::<PyDataFrameWriter>()?;
     m.add_class::<PyDataFrameWriterV2>()?;
@@ -308,19 +315,39 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-/// Give each class of the module the C name of a Python class, its bare `__name__`, which
-/// CPython's messages show: "'Column' object is not iterable", "unsupported operand type(s) for
-/// ^: 'bool' and 'Column'", as PySpark's. PyO3 makes it the dotted path of the class's module,
+/// Give each class of the module, and each native class outside it (`classes_outside_module`),
+/// the C name of a Python class, its bare `__name__`, which CPython's messages show: "'Column'
+/// object is not iterable", "unsupported operand type(s) for ^: 'bool' and 'Column'", as
+/// PySpark's. PyO3 makes it the dotted path of the class's module,
 /// "pyspark.sql.connect.column.Column". Setting `__name__` of a heap type sets that C name too;
 /// its `__module__` and `__qualname__`, and so its repr and its pickle, stay as they are.
 fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
-    for (_, value) in m.dict().iter() {
-        if let Ok(cls) = value.cast::<pyo3::types::PyType>() {
-            let name = cls.getattr(pyo3::intern!(py, "__name__"))?;
-            // A type whose name cannot be set, as an immutable type, keeps its C name.
-            let _ = cls.setattr(pyo3::intern!(py, "__name__"), name);
-        }
+    let module_classes = m
+        .dict()
+        .values()
+        .into_iter()
+        .filter_map(|value| value.cast_into::<pyo3::types::PyType>().ok());
+    for cls in module_classes.chain(classes_outside_module(py)) {
+        let name = cls.getattr(pyo3::intern!(py, "__name__"))?;
+        // A type whose name cannot be set, as an immutable type, keeps its C name.
+        let _ = cls.setattr(pyo3::intern!(py, "__name__"), name);
     }
     Ok(())
+}
+
+/// The native classes that are not attributes of the module, of objects that it makes: the
+/// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
+/// hook and the active session of the sessions (`SparkSession._active_session`), the tags and the
+/// user context extensions that threads share, and the listener bus of a stream manager.
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7] {
+    [
+        py.get_type::<column::PyColumnExpression>(),
+        py.get_type::<ml::params_api::PyParamAttribute>(),
+        py.get_type::<session::PyExitHook>(),
+        py.get_type::<session::PyActiveSession>(),
+        py.get_type::<session::PySharedTags>(),
+        py.get_type::<session::PySharedUserContextExtensions>(),
+        py.get_type::<streaming::PyStreamingQueryListenerBus>(),
+    ]
 }

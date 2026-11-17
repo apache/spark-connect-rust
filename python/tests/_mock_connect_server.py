@@ -303,7 +303,8 @@ def serve(connection):
         def __init__(self):
             self.listener_condition = Condition()
             self.listener_epoch = 0
-            # The sessions whose requests are answered but no longer recorded (see
+            # The sessions whose requests are answered but no longer recorded or counted, and take
+            # none of the responses, failures and gates that a test sets for its own requests (see
             # RemoteService.forget_session). A reset keeps them.
             self.forgotten_sessions = set()
 
@@ -319,6 +320,13 @@ def serve(connection):
                 self.forgotten_requests[kind] += 1
                 self.forgotten_requests_of_sessions[(session_id, kind)] += 1
                 return False
+
+        def is_forgotten(self, request):
+            # Whether the request is of a forgotten session, for a request that the server does not
+            # record of any session, such as the plan compression lookup.
+            session_id = parse_message(request).get(1, [b""])[0].decode()
+            with self.listener_condition:
+                return session_id in self.forgotten_sessions
 
         def reset(self):
             # Back to the state of a new server: the tests of a module share one.
@@ -371,6 +379,7 @@ def serve(connection):
             self.read_confs = []
             self.config_requests = []
             self.plan_compression_lookups = 0
+            self.plan_compression_lookup_positions = []
             self.config_failure = None
             self.block_config = False
             self.plan_compression_lookup_delay = 0
@@ -526,8 +535,9 @@ def serve(connection):
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
-        # Each (code name, delay in ms) of this list fails an ExecutePlan, once, as the server
-        # does for a failure with a google.rpc.RetryInfo that asks for the delay.
+        # Each (code name, delay in ms) of this list fails an ExecutePlan of a session that is not
+        # forgotten, once, as the server does for a failure with a google.rpc.RetryInfo that asks
+        # for the delay.
         retry_info_failures = ()
         # FetchErrorDetails returns `error_details` (raw FetchErrorDetailsResponse fields)
         # and records the error id asked for. Config Get returns the values in `confs`, or
@@ -562,6 +572,9 @@ def serve(connection):
         read_confs = []
         config_requests = []
         plan_compression_lookups = 0
+        # The position in `recorded_order` of each plan compression lookup: the number of the
+        # requests recorded before it, so that a test sees when it came.
+        plan_compression_lookup_positions = []
         config_failure = None
         block_config = False
         # The seconds that the plan compression lookup of the first plan of a session takes.
@@ -587,11 +600,13 @@ def serve(connection):
 
         def release_session(self, request, context):
             with self.listener_condition:
-                if self.is_recorded(request, "release_session"):
+                recorded = self.is_recorded(request, "release_session")
+                if recorded:
                     self.release_session_calls += 1
                 # Opt in only for the terminal callback-RPC regression. Ordinary tests
-                # retain independent response and session-release behavior.
-                if self.release_session_unblocks_execute:
+                # retain independent response and session-release behavior. The late release of
+                # a forgotten session leaves the gate of the test that runs as it is.
+                if recorded and self.release_session_unblocks_execute:
                     self.response_gate.set()
                 # ReleaseSessionRequest.session_id = 1.
                 session_id = parse_message(request).get(1, [b""])[0].decode()
@@ -746,14 +761,16 @@ def serve(connection):
                     context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
                 if not released:
                     with self.listener_condition:
-                        if execute_epoch == self.listener_epoch:
+                        if recorded and execute_epoch == self.listener_epoch:
                             self.execute_gate_timeouts += 1
                             self.listener_condition.notify_all()
                     context.abort(
                         grpc.StatusCode.DEADLINE_EXCEEDED,
                         "Python thread could not run while the statement ran",
                     )
-            if self.retry_info_failures:
+            # A request of a forgotten session takes no failure that the test that runs queued for
+            # its own, as it takes none of `execute_payload_queue` below.
+            if recorded and self.retry_info_failures:
                 code, delay_ms = self.retry_info_failures.pop(0)
                 status = retry_info_status(code, delay_ms)
                 context.set_trailing_metadata((("grpc-status-details-bin", status),))
@@ -830,7 +847,8 @@ def serve(connection):
                         grpc.StatusCode.DEADLINE_EXCEEDED,
                         "ResultComplete was not released by the test",
                     )
-            result_complete_operations.append(operation_id)
+            if recorded:
+                result_complete_operations.append(operation_id)
             yield header + message_field(13, f"r{len(payloads) + 1}") + message_field(14, b"")
 
         def warnings_fields(self):
@@ -901,8 +919,11 @@ def serve(connection):
             # not recorded, blocked or failed, so that the tests of the other requests count,
             # block and fail only their own.
             lookup = PLAN_COMPRESSION_LOOKUP in request
-            if lookup:
+            # The lookup of the first plan of a forgotten session is answered, but not counted.
+            if lookup and not self.is_forgotten(request):
                 self.plan_compression_lookups += 1
+                with self.listener_condition:
+                    self.plan_compression_lookup_positions.append(len(self.recorded_order))
             # The requests of a forgotten session are answered, but not recorded below.
             recorded = not lookup and self.is_recorded(request, "config")
             if recorded:
@@ -1101,7 +1122,10 @@ class RemoteService:
         # record them, for a test that ends with the session: a request that it sent without
         # waiting for it, such as the Delete of a released model or a ReleaseExecute, can reach
         # the server during a later test, which would count it as one of its own. The server
-        # counts them in `forgotten_requests`, by kind.
+        # counts them in `forgotten_requests`, by kind, and in no counter of the later test (its
+        # plan compression lookups, gate timeouts and operations of a ResultComplete); they take
+        # none of the responses and failures that it queues (`execute_payload_queue`,
+        # `retry_info_failures`), and a release of the session does not open its gate.
         self.connection.send(("forget_session", session_id))
         assert self.connection.poll(10), "Mock server did not respond"
         self.connection.recv()

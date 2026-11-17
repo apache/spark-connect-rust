@@ -7,15 +7,28 @@
 //! A message that an unset child holds sets the child in its parent when its container may
 //! change, as setting a field of the child does: as upb's containers, at the start of each method
 //! that may change it, even one that then fails.
+//!
+//! The Python code that a method runs (the `__index__` of a value or of an index, the iteration
+//! of an iterable, an `__eq__`, the key of a sort, a warning) may use the container, of this
+//! thread or of another, so no borrow of a container is held while it runs: a method reads what
+//! it needs of the container, runs the Python code, and then changes the container as it is by
+//! then, in upb's order. upb reads the length of a container before the `__index__` of an index
+//! runs, so an index is checked against the length from before. Where upb then reads or writes
+//! past the end of a container that the Python code shortened, a read is upb's `IndexError`, a
+//! write is lost (as upb's is) and an insertion or a deletion takes the container as it is.
+
+use std::sync::Arc;
 
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::{
     PyAttributeError, PyFutureWarning, PyIndexError, PyKeyError, PyNotImplementedError,
     PyTypeError, PyValueError,
 };
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{
-    PyDict, PyIterator, PyList, PySlice, PyTuple, PyType, PyWeakrefMethods, PyWeakrefReference,
+    PyDict, PyInt, PyIterator, PyList, PySlice, PyTuple, PyType, PyWeakrefMethods,
+    PyWeakrefReference,
 };
 use pyo3::IntoPyObjectExt;
 
@@ -43,51 +56,164 @@ fn touch(py: Python<'_>, owner: &Owner) -> PyResult<()> {
     Ok(())
 }
 
-/// The position of `index` in a sequence of `len` items, as a list's subscription takes it.
-fn position(index: isize, len: usize) -> PyResult<usize> {
-    let i = if index < 0 {
-        index + len as isize
-    } else {
-        index
-    };
-    if i < 0 || i as usize >= len {
-        Err(PyIndexError::new_err("list index out of range"))
-    } else {
-        Ok(i as usize)
-    }
+/// upb's error of an index past the end of a container.
+fn out_of_range() -> PyErr {
+    PyIndexError::new_err("list index out of range")
 }
 
-/// The index of a subscription that is not a slice, with upb's TypeError of a value that is not
-/// an int.
-fn index_of_key(key: &Bound<'_, PyAny>) -> PyResult<isize> {
-    key.extract::<isize>().map_err(|err| {
-        if err.is_instance_of::<PyTypeError>(key.py()) {
-            PyTypeError::new_err("list indices must be integers")
-        } else {
-            err
+/// A subscript of a container, as upb's `PyUpb_IndexToRange` reads one of a container of `len`
+/// items: an index in its range, or the start, step and length of a slice.
+enum Subscript {
+    Index(usize),
+    Slice {
+        start: isize,
+        step: isize,
+        count: usize,
+    },
+}
+
+impl Subscript {
+    /// The subscript `key` of a container of `len` items, read after `len`, as upb reads them:
+    /// the `__index__` of the key or of the bounds of a slice runs then. A key that is not an
+    /// int, or is not one of an index, is upb's `TypeError` "list indices must be integers".
+    fn of(key: &Bound<'_, PyAny>, len: usize) -> PyResult<Subscript> {
+        if let Ok(slice) = key.cast::<PySlice>() {
+            let indices = slice.indices(len as isize)?;
+            return Ok(Subscript::Slice {
+                start: indices.start,
+                step: indices.step,
+                count: indices.slicelength,
+            });
         }
-    })
+        let index = key
+            .extract::<isize>()
+            .map_err(|_| PyTypeError::new_err("list indices must be integers"))?;
+        let at = if index < 0 {
+            index + len as isize
+        } else {
+            index
+        };
+        if at < 0 || at as usize >= len {
+            return Err(out_of_range());
+        }
+        Ok(Subscript::Index(at as usize))
+    }
+
+    /// The positions of the subscript, in its order.
+    fn positions(&self) -> impl Iterator<Item = usize> {
+        let (start, step, count) = match *self {
+            Subscript::Index(at) => (at as isize, 1, 1),
+            Subscript::Slice { start, step, count } => (start, step, count),
+        };
+        (0..count as isize).map(move |k| (start + k * step) as usize)
+    }
+
+    /// The item of an index of `items`, or the list of the items of a slice, of those that
+    /// `items` still has, each of `to_py`.
+    fn get<T>(
+        &self,
+        py: Python<'_>,
+        items: &[T],
+        to_py: impl Fn(&T) -> PyResult<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        if let Subscript::Index(at) = *self {
+            return to_py(items.get(at).ok_or_else(out_of_range)?);
+        }
+        let values = self
+            .positions()
+            .filter_map(|at| items.get(at))
+            .map(to_py)
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, values)?.into_any().unbind())
+    }
+
+    /// Remove the items of `items` at the positions of the subscript that `items` still has, and
+    /// give them back.
+    fn remove_from<T>(&self, items: &mut Vec<T>) -> Vec<T> {
+        if let Subscript::Index(at) = *self {
+            return if at < items.len() {
+                vec![items.remove(at)]
+            } else {
+                Vec::new()
+            };
+        }
+        let mut gone = vec![false; items.len()];
+        for at in self.positions() {
+            if let Some(g) = gone.get_mut(at) {
+                *g = true;
+            }
+        }
+        let mut removed = Vec::new();
+        let kept = std::mem::take(items)
+            .into_iter()
+            .zip(gone)
+            .filter_map(|(item, gone)| {
+                if gone {
+                    removed.push(item);
+                    None
+                } else {
+                    Some(item)
+                }
+            })
+            .collect();
+        *items = kept;
+        removed
+    }
 }
 
-/// upb's error of assigning `got` values to an extended slice of `want` items (of its message).
-fn check_extended_slice(
-    key: &Bound<'_, PyAny>,
-    len: usize,
-    value: &Bound<'_, PyAny>,
-) -> PyResult<()> {
-    let slice = key.cast::<PySlice>()?;
-    let indices = slice.indices(len as isize)?;
-    if indices.step == 1 {
-        return Ok(());
+/// The item at `at` of `items`, of `to_py`, with upb's `IndexError` of a position past their end
+/// (of a container that Python code shortened).
+fn item_at<T>(
+    items: &[T],
+    at: usize,
+    to_py: impl Fn(&T) -> PyResult<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    match items.get(at) {
+        Some(item) => to_py(item),
+        None => Err(PyIndexError::new_err(format!(
+            "list index ({at}) out of range"
+        ))),
     }
-    let got = value.len()?;
-    if got != indices.slicelength {
-        return Err(PyValueError::new_err(format!(
-            "attempt to assign sequence of  {got} to extended slice of size {}",
-            indices.slicelength
-        )));
+}
+
+/// The item at `at` of `items`, removed, with upb's `IndexError` of a position past their end
+/// (of a container that the warning of `pop_position` shortened).
+fn remove_at<T>(items: &mut Vec<T>, at: usize) -> PyResult<T> {
+    if at < items.len() {
+        Ok(items.remove(at))
+    } else {
+        Err(PyIndexError::new_err(format!(
+            "list index ({at}) out of range"
+        )))
     }
-    Ok(())
+}
+
+/// The values of `value`, as upb's methods that take several values read them, of CPython's
+/// `PySequence_Fast`: a list or a tuple as it is (a list whose length is read again for each
+/// value, so a value that a conversion appends to it is taken too), else a list of the items of
+/// its iterator, with upb's `TypeError` of a value that is not iterable.
+fn sequence_fast<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    unsafe {
+        Bound::from_owned_ptr_or_err(
+            value.py(),
+            ffi::PySequence_Fast(value.as_ptr(), c"must assign iterable".as_ptr()),
+        )
+    }
+}
+
+/// The value at `i` of `values`, a list or a tuple of [`sequence_fast`], if it has one there by
+/// now.
+fn fast_item<'py>(values: &Bound<'py, PyAny>, i: usize) -> Option<Bound<'py, PyAny>> {
+    match values.cast::<PyList>() {
+        Ok(list) => list.get_item(i).ok(),
+        Err(_) => values.cast::<PyTuple>().ok()?.get_item(i).ok(),
+    }
+}
+
+/// Whether `a` equals `b`, as `PyObject_RichCompareBool` tells it, as upb's `remove` compares:
+/// an object equals itself, without its `__eq__`.
+fn compares_equal(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(a.is(b) || a.eq(b)?)
 }
 
 /// The position that `pop(index)` takes an item of, as upb's: an index out of range warns, and
@@ -189,17 +315,59 @@ fn verify_message(value: &Bound<'_, PyAny>) -> PyResult<()> {
     )))
 }
 
+/// The field of a container of scalars, which its values are converted for: the kind of the
+/// field, its full name, which the error of a value names, and the full name of its enum, of an
+/// enum field.
+pub(crate) struct ScalarField {
+    kind: Kind,
+    name: String,
+    enum_type: String,
+}
+
+impl ScalarField {
+    fn convert(&self, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+        Scalar::from_py(self.kind, &self.name, &self.enum_type, value)
+    }
+}
+
+/// Make the `count` items of `items` from `start` `given` items, as upb's assignment of a slice
+/// of another length moves the items after the slice (`upb_Array_Resize`, then `upb_Array_Move`):
+/// they follow the `given` positions, which keep the items that the container had there (the
+/// default of `kind` where it had none) until the assignment sets them. A container that is
+/// shorter than the slice by now (where upb's count of the items after the slice wraps around)
+/// has the part of the slice that it still has made `given` items. The start of the slice, in the
+/// container as it is.
+fn resize_slice(
+    items: &mut Vec<Scalar>,
+    start: usize,
+    count: usize,
+    given: usize,
+    kind: Kind,
+) -> usize {
+    let len = items.len();
+    let start = start.min(len);
+    let count = count.min(len - start);
+    let (from, to) = (start + count, start + given);
+    if to > from {
+        let tail = items[from..].to_vec();
+        items.truncate(to.min(len));
+        items.resize(to, Scalar::default_of(kind));
+        items.extend(tail);
+    } else {
+        items.drain(to..from);
+    }
+    start
+}
+
 #[pyclass(
     sequence,
     module = "pyspark.sql.connect.proto",
     name = "RepeatedScalarContainer"
 )]
 pub struct RepeatedScalar {
-    pub(crate) kind: Kind,
-    /// The full name of the field, which an error of a value names.
-    pub(crate) field: String,
-    /// The full name of the enum of an enum field.
-    pub(crate) enum_type: String,
+    /// The field of the container, which its methods convert values for, with no borrow of the
+    /// container held.
+    field: Arc<ScalarField>,
     pub(crate) items: Vec<Scalar>,
     owner: Owner,
 }
@@ -213,16 +381,27 @@ impl RepeatedScalar {
         owner: Owner,
     ) -> Self {
         RepeatedScalar {
-            kind,
-            field,
-            enum_type,
+            field: Arc::new(ScalarField {
+                kind,
+                name: field,
+                enum_type,
+            }),
             items,
             owner,
         }
     }
 
-    fn convert(&self, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
-        Scalar::from_py(self.kind, &self.field, &self.enum_type, value)
+    /// A copy of the container, held by no message.
+    pub(crate) fn copy(&self) -> Self {
+        RepeatedScalar {
+            field: self.field.clone(),
+            items: self.items.clone(),
+            owner: None,
+        }
+    }
+
+    fn field_of(slf: &Bound<'_, Self>) -> Arc<ScalarField> {
+        slf.borrow().field.clone()
     }
 
     fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
@@ -234,20 +413,69 @@ impl RepeatedScalar {
         PyList::new(py, values)
     }
 
-    /// Replace the items with the values of `list`, each checked as `append` checks it.
-    fn set_from_list(&mut self, list: &Bound<'_, PyList>) -> PyResult<()> {
-        self.items = list
-            .iter()
-            .map(|v| self.convert(&v))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(())
-    }
-
     /// Set the message of the container in its parent, as upb's methods that may change a
     /// container do first.
     fn reify(slf: &Bound<'_, Self>) -> PyResult<()> {
         let owner = owner_of(slf.py(), &slf.borrow().owner);
         touch(slf.py(), &owner)
+    }
+
+    /// Append the values of `values` (of `PySequence_Fast`), each converted in turn.
+    fn append_values(
+        slf: &Bound<'_, Self>,
+        field: &ScalarField,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let values = sequence_fast(values)?;
+        let mut i = 0;
+        while let Some(value) = fast_item(&values, i) {
+            let v = field.convert(&value)?;
+            slf.borrow_mut().items.push(v);
+            i += 1;
+        }
+        Ok(())
+    }
+
+    /// Set the item at `at` to `value`, as upb's `upb_Array_Set`, whose write past the end of a
+    /// container that the Python code of a conversion shortened is lost.
+    fn set_at(slf: &Bound<'_, Self>, at: usize, value: Scalar) {
+        if let Some(item) = slf.borrow_mut().items.get_mut(at) {
+            *item = value;
+        }
+    }
+
+    /// Assign the values of `value` to the slice of `start`, `step` and `count` (read of the
+    /// container before), as upb's: the values (of `PySequence_Fast`), then for a slice of a step
+    /// of 1 and of another length the items after it moved, then each value converted and set in
+    /// turn, so a value that fails leaves those before it set.
+    fn assign_slice(
+        slf: &Bound<'_, Self>,
+        field: &ScalarField,
+        start: isize,
+        step: isize,
+        count: usize,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let values = sequence_fast(value)?;
+        let given = values.len()?;
+        let (mut start, mut count) = (start, count);
+        if given != count {
+            if step != 1 {
+                return Err(PyValueError::new_err(format!(
+                    "attempt to assign sequence of  {given} to extended slice of size {count}"
+                )));
+            }
+            let mut me = slf.borrow_mut();
+            start = resize_slice(&mut me.items, start as usize, count, given, field.kind) as isize;
+            count = given;
+        }
+        for k in 0..count {
+            // A value of a list that a conversion shortened is upb's error of `PySequence_GetItem`.
+            let value = fast_item(&values, k).ok_or_else(out_of_range)?;
+            let v = field.convert(&value)?;
+            Self::set_at(slf, (start + k as isize * step) as usize, v);
+        }
+        Ok(())
     }
 }
 
@@ -255,34 +483,37 @@ impl RepeatedScalar {
 impl RepeatedScalar {
     fn append(slf: &Bound<'_, Self>, value: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
-        let mut me = slf.borrow_mut();
-        let v = me.convert(value)?;
-        me.items.push(v);
+        let v = Self::field_of(slf).convert(value)?;
+        slf.borrow_mut().items.push(v);
         Ok(())
     }
 
+    /// As upb's: the values of `elem_seq` (of `PySequence_Fast`, so those of an iterator to its
+    /// end first), each converted and appended in turn. A failure, of the iteration too, leaves
+    /// the container of the length that it had: upb resizes it, so a position that Python code
+    /// removed meanwhile holds the default.
     fn extend(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
-        let values = {
-            let me = slf.borrow();
-            let mut values = Vec::new();
-            let items = elem_seq
-                .try_iter()
-                .map_err(|_| PyTypeError::new_err("must assign iterable"))?;
-            for v in items {
-                values.push(me.convert(&v?)?);
-            }
-            values
-        };
-        slf.borrow_mut().items.extend(values);
-        Ok(())
+        let field = Self::field_of(slf);
+        let start = slf.borrow().items.len();
+        let extended = Self::append_values(slf, &field, elem_seq);
+        if extended.is_err() {
+            slf.borrow_mut()
+                .items
+                .resize(start, Scalar::default_of(field.kind));
+        }
+        extended
     }
 
+    /// As upb's: the position of `key` in the container as it is, then the value converted. A
+    /// conversion that shortened the container leaves the position past its end (where upb's
+    /// insert writes out of its bounds), so the value goes at its end.
     fn insert(slf: &Bound<'_, Self>, key: isize, value: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
+        let at = insert_position(key, slf.borrow().items.len());
+        let v = Self::field_of(slf).convert(value)?;
         let mut me = slf.borrow_mut();
-        let v = me.convert(value)?;
-        let at = insert_position(key, me.items.len());
+        let at = at.min(me.items.len());
         me.items.insert(at, v);
         Ok(())
     }
@@ -293,18 +524,24 @@ impl RepeatedScalar {
         Self::reify(slf)?;
         let len = slf.borrow().items.len();
         let at = pop_position(py, key, len)?;
-        let value = slf.borrow_mut().items.remove(at);
+        let value = remove_at(&mut slf.borrow_mut().items, at)?;
         value.to_py(py)
     }
 
+    /// As upb's: the first item that equals `elem`, as Python compares them, among as many items
+    /// as the container had, each of the container as it is when it is compared (an `__eq__` may
+    /// change it).
     fn remove(slf: &Bound<'_, Self>, elem: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         Self::reify(slf)?;
-        // As upb's: the first item that equals `elem`, as Python compares them.
-        let values = slf.borrow().to_list(py)?;
-        for (at, value) in values.iter().enumerate() {
-            if value.eq(elem)? {
-                slf.borrow_mut().items.remove(at);
+        let len = slf.borrow().items.len();
+        for at in 0..len {
+            let item = item_at(&slf.borrow().items, at, |v| v.to_py(py))?;
+            if compares_equal(item.bind(py), elem)? {
+                let mut me = slf.borrow_mut();
+                if at < me.items.len() {
+                    me.items.remove(at);
+                }
                 return Ok(());
             }
         }
@@ -317,18 +554,25 @@ impl RepeatedScalar {
         Ok(())
     }
 
+    /// As upb's: the items, sorted as a list, then set at their positions in the container as it
+    /// is by then, so items that a key appended stay after them, and positions that it removed are
+    /// not written. No change of an unset container (an empty one), so no change of its message.
     #[pyo3(signature = (*args, **kwargs))]
     fn sort(
         slf: &Bound<'_, Self>,
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        // As upb's: no change of an unset container (an empty one), so no change of its message.
         let py = slf.py();
         let list = slf.borrow().to_list(py)?;
         let kwargs = sort_kwargs(py, kwargs)?;
         list.call_method("sort", args, Some(&kwargs))?;
-        slf.borrow_mut().set_from_list(&list)
+        let field = Self::field_of(slf);
+        for (at, value) in list.iter().enumerate() {
+            let v = field.convert(&value)?;
+            Self::set_at(slf, at, v);
+        }
+        Ok(())
     }
 
     /// As upb's: no change of an unset container (an empty one), so no change of its message.
@@ -346,13 +590,7 @@ impl RepeatedScalar {
     #[pyo3(signature = (memo=None))]
     fn __deepcopy__(&self, memo: Option<&Bound<'_, PyAny>>) -> Self {
         let _ = memo;
-        RepeatedScalar::new(
-            self.kind,
-            self.field.clone(),
-            self.enum_type.clone(),
-            self.items.clone(),
-            None,
-        )
+        self.copy()
     }
 
     fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -363,12 +601,16 @@ impl RepeatedScalar {
         self.items.len()
     }
 
-    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if key.cast::<PySlice>().is_ok() {
-            return Ok(self.to_list(py)?.as_any().get_item(key)?.unbind());
+    fn __getitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        // The index of an int runs no Python code, so the length and the item are read at once.
+        if key.is_exact_instance_of::<PyInt>() {
+            let me = slf.borrow();
+            return Subscript::of(key, me.items.len())?.get(py, &me.items, |v| v.to_py(py));
         }
-        let at = position(index_of_key(key)?, self.items.len())?;
-        self.items[at].to_py(py)
+        let len = slf.borrow().items.len();
+        let subscript = Subscript::of(key, len)?;
+        subscript.get(py, &slf.borrow().items, |v| v.to_py(py))
     }
 
     fn __setitem__(
@@ -376,53 +618,42 @@ impl RepeatedScalar {
         key: &Bound<'_, PyAny>,
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let py = slf.py();
         Self::reify(slf)?;
-        let mut me = slf.borrow_mut();
-        if key.cast::<PySlice>().is_ok() {
-            check_extended_slice(key, me.items.len(), value)?;
-            let list = me.to_list(py)?;
-            list.as_any().set_item(key, value)?;
-            me.set_from_list(&list)
-        } else {
-            let at = position(index_of_key(key)?, me.items.len())?;
-            let v = me.convert(value)?;
-            me.items[at] = v;
-            Ok(())
+        let field = Self::field_of(slf);
+        let len = slf.borrow().items.len();
+        match Subscript::of(key, len)? {
+            Subscript::Index(at) => {
+                let v = field.convert(value)?;
+                Self::set_at(slf, at, v);
+                Ok(())
+            }
+            Subscript::Slice { start, step, count } => {
+                Self::assign_slice(slf, &field, start, step, count, value)
+            }
         }
     }
 
     fn __delitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<()> {
-        let py = slf.py();
         Self::reify(slf)?;
-        let mut me = slf.borrow_mut();
-        if key.cast::<PySlice>().is_ok() {
-            let list = me.to_list(py)?;
-            list.as_any().del_item(key)?;
-            me.set_from_list(&list)
-        } else {
-            let at = position(index_of_key(key)?, me.items.len())?;
-            me.items.remove(at);
-            Ok(())
-        }
-    }
-
-    fn __contains__(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
-        self.to_list(py)?.contains(value)
+        let len = slf.borrow().items.len();
+        let subscript = Subscript::of(key, len)?;
+        subscript.remove_from(&mut slf.borrow_mut().items);
+        Ok(())
     }
 
     /// As upb's: the list of the items compared with `other`, or with the list of the items of
-    /// `other` when it is a container of the same kind.
+    /// `other` when it is a container of the same kind. (`in` reads the items in turn, of the
+    /// container as it is, as upb's, which have no `__contains__`.)
     fn __richcmp__(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         other: &Bound<'_, PyAny>,
         op: CompareOp,
     ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
             return Ok(py.NotImplemented());
         }
-        let mine = self.to_list(py)?;
+        let mine = slf.borrow().to_list(py)?;
         let other = match other.cast::<RepeatedScalar>() {
             Ok(other) => other.borrow().to_list(py)?.into_any(),
             Err(_) => other.clone(),
@@ -485,14 +716,6 @@ impl RepeatedComposite {
         let owner = owner_of(slf.py(), &slf.borrow().owner);
         touch(slf.py(), &owner)
     }
-
-    fn set_from_list(&mut self, list: &Bound<'_, PyList>) -> PyResult<()> {
-        self.items = list
-            .iter()
-            .map(|m| Ok(m.cast_into::<PyMessage>()?.unbind()))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(())
-    }
 }
 
 #[pymethods]
@@ -526,6 +749,8 @@ impl RepeatedComposite {
         Ok(())
     }
 
+    /// As upb's: each value of the iterator of `elem_seq` appended as it comes, so a failure
+    /// leaves the values before it appended.
     fn extend(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
         for value in elem_seq.try_iter()? {
@@ -534,13 +759,21 @@ impl RepeatedComposite {
         Ok(())
     }
 
+    /// As upb's: the position of `key` in the container as it is, then the copy of `value`,
+    /// which goes at the end of a container that is shorter by then.
     fn insert(slf: &Bound<'_, Self>, key: isize, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         Self::reify(slf)?;
-        let message_type = slf.borrow().message_type.clone();
+        let (message_type, at) = {
+            let me = slf.borrow();
+            (
+                me.message_type.clone(),
+                insert_position(key, me.items.len()),
+            )
+        };
         let copy = message_copy(py, &message_type, value)?;
         let mut me = slf.borrow_mut();
-        let at = insert_position(key, me.items.len());
+        let at = at.min(me.items.len());
         me.items.insert(at, copy.unbind());
         Ok(())
     }
@@ -551,16 +784,23 @@ impl RepeatedComposite {
         Self::reify(slf)?;
         let len = slf.borrow().items.len();
         let at = pop_position(py, key, len)?;
-        Ok(slf.borrow_mut().items.remove(at))
+        remove_at(&mut slf.borrow_mut().items, at)
     }
 
+    /// As upb's: the first message that equals `elem`, among as many as the container had, each
+    /// of the container as it is when it is compared.
     fn remove(slf: &Bound<'_, Self>, elem: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         Self::reify(slf)?;
-        let items = slf.borrow().to_list(py)?;
-        for (at, item) in items.iter().enumerate() {
-            if item.eq(elem)? {
-                slf.borrow_mut().items.remove(at);
+        let len = slf.borrow().items.len();
+        for at in 0..len {
+            let item = item_at(&slf.borrow().items, at, |m| Ok(m.clone_ref(py).into_any()))?;
+            if compares_equal(item.bind(py), elem)? {
+                // A message removed is dropped once the container is no longer borrowed.
+                let _removed = {
+                    let mut me = slf.borrow_mut();
+                    (at < me.items.len()).then(|| me.items.remove(at))
+                };
                 return Ok(());
             }
         }
@@ -573,6 +813,8 @@ impl RepeatedComposite {
         Ok(())
     }
 
+    /// As upb's: the messages, sorted as a list, then set at their positions in the container as
+    /// it is by then (see the `sort` of the container of scalars).
     #[pyo3(signature = (*args, **kwargs))]
     fn sort(
         slf: &Bound<'_, Self>,
@@ -584,12 +826,20 @@ impl RepeatedComposite {
         let list = slf.borrow().to_list(py)?;
         let kwargs = sort_kwargs(py, kwargs)?;
         list.call_method("sort", args, Some(&kwargs))?;
-        slf.borrow_mut().set_from_list(&list)
+        let sorted = list
+            .iter()
+            .map(|m| Ok(m.cast_into::<PyMessage>()?.unbind()))
+            .collect::<PyResult<Vec<_>>>()?;
+        // The list holds the messages that the assignment replaces, so none is freed here.
+        for (item, message) in slf.borrow_mut().items.iter_mut().zip(sorted) {
+            *item = message;
+        }
+        Ok(())
     }
 
     /// As upb's: no change of an unset container (an empty one), so no change of its message.
     fn clear(slf: &Bound<'_, Self>) -> PyResult<()> {
-        slf.borrow_mut().items.clear();
+        let _items = std::mem::take(&mut slf.borrow_mut().items);
         Ok(())
     }
 
@@ -618,48 +868,52 @@ impl RepeatedComposite {
         self.items.len()
     }
 
-    fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        if key.cast::<PySlice>().is_ok() {
-            return Ok(self.to_list(py)?.as_any().get_item(key)?.unbind());
+    fn __getitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let item = |m: &Py<PyMessage>| Ok(m.clone_ref(py).into_any());
+        // The index of an int runs no Python code, so the length and the item are read at once.
+        if key.is_exact_instance_of::<PyInt>() {
+            let me = slf.borrow();
+            return Subscript::of(key, me.items.len())?.get(py, &me.items, item);
         }
-        let at = position(index_of_key(key)?, self.items.len())?;
-        Ok(self.items[at].clone_ref(py).into_any())
+        let len = slf.borrow().items.len();
+        let subscript = Subscript::of(key, len)?;
+        subscript.get(py, &slf.borrow().items, item)
     }
 
-    fn __setitem__(&self, key: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        let _ = (key, value);
+    /// As upb's: the message is set in its parent and the subscript is read, and then nothing is
+    /// assigned.
+    fn __setitem__(
+        slf: &Bound<'_, Self>,
+        key: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+    ) -> PyResult<()> {
+        let _ = value;
+        Self::reify(slf)?;
+        let len = slf.borrow().items.len();
+        Subscript::of(key, len)?;
         Err(PyTypeError::new_err("does not support assignment"))
     }
 
     fn __delitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<()> {
-        let py = slf.py();
         Self::reify(slf)?;
-        let mut me = slf.borrow_mut();
-        if key.cast::<PySlice>().is_ok() {
-            let list = me.to_list(py)?;
-            list.as_any().del_item(key)?;
-            me.set_from_list(&list)
-        } else {
-            let at = position(index_of_key(key)?, me.items.len())?;
-            me.items.remove(at);
-            Ok(())
-        }
-    }
-
-    fn __contains__(&self, py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
-        self.to_list(py)?.contains(value)
+        let len = slf.borrow().items.len();
+        let subscript = Subscript::of(key, len)?;
+        // The messages removed are dropped once the container is no longer borrowed.
+        let _removed = subscript.remove_from(&mut slf.borrow_mut().items);
+        Ok(())
     }
 
     fn __richcmp__(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         other: &Bound<'_, PyAny>,
         op: CompareOp,
     ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         if !matches!(op, CompareOp::Eq | CompareOp::Ne) {
             return Ok(py.NotImplemented());
         }
-        let mine = self.to_list(py)?;
+        let mine = slf.borrow().to_list(py)?;
         let other = match other.cast::<RepeatedComposite>() {
             Ok(other) => other.borrow().to_list(py)?.into_any(),
             Err(_) => other.clone(),
@@ -681,17 +935,34 @@ pub(crate) enum MapValue {
     Message(Py<PyMessage>),
 }
 
+/// The key of `key` for a map of `map`, with the errors of its entry's `key` field.
+fn key_of(map: &MapDesc, key: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+    Scalar::from_py(map.key, &format!("{}.key", map.entry), "", key)
+}
+
+/// The value of `value` for a map of `map` of scalars, with the errors of its entry's `value`.
+fn value_of(map: &MapDesc, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
+    Scalar::from_py(
+        map.value,
+        &format!("{}.value", map.entry),
+        &map.value_type,
+        value,
+    )
+}
+
 #[pyclass(mapping, module = "pyspark.sql.connect.proto", name = "MapContainer")]
 pub struct MapContainer {
     field_name: String,
-    pub(crate) map: MapDesc,
+    /// The key and value of the map, which its methods convert keys and values for, with no
+    /// borrow of the map held.
+    pub(crate) map: Arc<MapDesc>,
     /// The entries, in the order of their insertion.
     pub(crate) entries: Vec<(Scalar, MapValue)>,
     owner: Owner,
 }
 
 impl MapContainer {
-    pub(crate) fn new(field_name: String, map: MapDesc, owner: Owner) -> Self {
+    pub(crate) fn new(field_name: String, map: Arc<MapDesc>, owner: Owner) -> Self {
         MapContainer {
             field_name,
             map,
@@ -700,21 +971,8 @@ impl MapContainer {
         }
     }
 
-    fn is_message(&self) -> bool {
-        self.map.value == Kind::Message
-    }
-
-    fn key_of(&self, key: &Bound<'_, PyAny>) -> PyResult<Scalar> {
-        Scalar::from_py(self.map.key, &format!("{}.key", self.map.entry), "", key)
-    }
-
-    fn value_of(&self, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
-        Scalar::from_py(
-            self.map.value,
-            &format!("{}.value", self.map.entry),
-            &self.map.value_type,
-            value,
-        )
+    fn map_of(slf: &Bound<'_, Self>) -> Arc<MapDesc> {
+        slf.borrow().map.clone()
     }
 
     fn find(&self, key: &Scalar) -> Option<usize> {
@@ -726,11 +984,15 @@ impl MapContainer {
         touch(slf.py(), &owner)
     }
 
-    /// Set the value of `key`, replacing the one it has.
-    pub(crate) fn insert(&mut self, key: Scalar, value: MapValue) {
+    /// Set the value of `key`, replacing the one it has, which it gives back (to drop once the
+    /// map is no longer borrowed).
+    pub(crate) fn insert(&mut self, key: Scalar, value: MapValue) -> Option<MapValue> {
         match self.find(&key) {
-            Some(at) => self.entries[at].1 = value,
-            None => self.entries.push((key, value)),
+            Some(at) => Some(std::mem::replace(&mut self.entries[at].1, value)),
+            None => {
+                self.entries.push((key, value));
+                None
+            }
         }
     }
 
@@ -739,6 +1001,14 @@ impl MapContainer {
             MapValue::Scalar(v) => v.to_py(py),
             MapValue::Message(m) => Ok(m.clone_ref(py).into_any()),
         }
+    }
+
+    /// The value of `key` in the map, if it has one.
+    fn lookup(slf: &Bound<'_, Self>, key: &Scalar) -> PyResult<Option<Py<PyAny>>> {
+        let me = slf.borrow();
+        me.find(key)
+            .map(|at| Self::value_to_py(slf.py(), &me.entries[at].1))
+            .transpose()
     }
 
     fn copy_value(py: Python<'_>, value: &MapValue) -> PyResult<MapValue> {
@@ -776,10 +1046,13 @@ impl MapContainer {
                 .map(|(k, v)| Ok((k.clone(), Self::copy_value(py, v)?)))
                 .collect::<PyResult<Vec<_>>>()?
         };
-        let mut t = target.borrow_mut();
-        for (k, v) in copies {
-            t.insert(k, v);
-        }
+        let _replaced: Vec<MapValue> = {
+            let mut t = target.borrow_mut();
+            copies
+                .into_iter()
+                .filter_map(|(k, v)| t.insert(k, v))
+                .collect()
+        };
         Ok(())
     }
 
@@ -821,29 +1094,17 @@ impl MapContainer {
         target: &Bound<'_, Self>,
         mapping: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
+        let map = Self::map_of(target);
         let items = mapping.call_method0("items")?;
         for item in items.try_iter()? {
             let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
-            let (key, value) = {
-                let t = target.borrow();
-                let key = t.key_of(&key)?;
-                let value = if t.is_message() {
-                    MapValue::Message(message_from_value(py, &t.map.value_type, &value)?.unbind())
-                } else {
-                    MapValue::Scalar(t.value_of(&value)?)
-                };
-                (key, value)
+            let key = key_of(&map, &key)?;
+            let value = if map.value == Kind::Message {
+                MapValue::Message(message_from_value(py, &map.value_type, &value)?.unbind())
+            } else {
+                MapValue::Scalar(value_of(&map, &value)?)
             };
-            target.borrow_mut().insert(key, value);
-        }
-        Ok(())
-    }
-
-    pub(crate) fn discard_unknown(&self, py: Python<'_>) -> PyResult<()> {
-        for (_, value) in &self.entries {
-            if let MapValue::Message(m) = value {
-                m.bind(py).call_method0("DiscardUnknownFields")?;
-            }
+            let _replaced = target.borrow_mut().insert(key, value);
         }
         Ok(())
     }
@@ -852,27 +1113,24 @@ impl MapContainer {
     /// map) when the map has none, as upb's `map[key]` does.
     fn get_or_insert(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let (key, value_type, value_kind, is_message) = {
-            let me = slf.borrow();
-            let key = me.key_of(key)?;
-            if let Some(at) = me.find(&key) {
-                return Self::value_to_py(py, &me.entries[at].1);
-            }
-            (
-                key,
-                me.map.value_type.clone(),
-                me.map.value,
-                me.is_message(),
-            )
-        };
+        let map = Self::map_of(slf);
+        let key = key_of(&map, key)?;
+        if let Some(value) = Self::lookup(slf, &key)? {
+            return Ok(value);
+        }
         Self::reify(slf)?;
-        let value = if is_message {
-            MapValue::Message(new_instance(py, &value_type)?.unbind())
+        let value = if map.value == Kind::Message {
+            MapValue::Message(new_instance(py, &map.value_type)?.unbind())
         } else {
-            MapValue::Scalar(Scalar::default_of(value_kind))
+            MapValue::Scalar(Scalar::default_of(map.value))
         };
+        let mut me = slf.borrow_mut();
+        // The value of the key, if Python code that making the value ran has set one.
+        if let Some(at) = me.find(&key) {
+            return Self::value_to_py(py, &me.entries[at].1);
+        }
         let out = Self::value_to_py(py, &value)?;
-        slf.borrow_mut().entries.push((key, value));
+        me.entries.push((key, value));
         Ok(out)
     }
 
@@ -906,30 +1164,33 @@ impl MapContainer {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         Self::reify(slf)?;
-        let mut me = slf.borrow_mut();
-        let key = me.key_of(key)?;
-        if me.is_message() {
+        let map = Self::map_of(slf);
+        let key = key_of(&map, key)?;
+        if map.value == Kind::Message {
             return Err(PyValueError::new_err("Message objects may not be assigned"));
         }
-        let value = MapValue::Scalar(me.value_of(value)?);
-        me.insert(key, value);
+        let value = MapValue::Scalar(value_of(&map, value)?);
+        let _replaced = slf.borrow_mut().insert(key, value);
         Ok(())
     }
 
     fn __delitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
-        let mut me = slf.borrow_mut();
-        let k = me.key_of(key)?;
-        let at = me
-            .find(&k)
-            .ok_or_else(|| PyKeyError::new_err("Key not present in map"))?;
-        me.entries.remove(at);
+        let key = key_of(&Self::map_of(slf), key)?;
+        // The entry removed is dropped once the map is no longer borrowed.
+        let _removed = {
+            let mut me = slf.borrow_mut();
+            let at = me
+                .find(&key)
+                .ok_or_else(|| PyKeyError::new_err("Key not present in map"))?;
+            me.entries.remove(at)
+        };
         Ok(())
     }
 
-    fn __contains__(&self, key: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let key = self.key_of(key)?;
-        Ok(self.find(&key).is_some())
+    fn __contains__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let key = key_of(&Self::map_of(slf), key)?;
+        Ok(slf.borrow().find(&key).is_some())
     }
 
     fn __len__(&self) -> usize {
@@ -956,16 +1217,12 @@ impl MapContainer {
 
     #[pyo3(signature = (key, default=None))]
     fn get(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         key: &Bound<'_, PyAny>,
         default: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let k = self.key_of(key)?;
-        match self.find(&k) {
-            Some(at) => Self::value_to_py(py, &self.entries[at].1),
-            None => Ok(default.unwrap_or_else(|| py.None())),
-        }
+        let key = key_of(&Self::map_of(slf), key)?;
+        Ok(Self::lookup(slf, &key)?.unwrap_or_else(|| default.unwrap_or_else(|| slf.py().None())))
     }
 
     /// The value of `key`, removed, as `MutableMapping.pop` of upb's maps gives it: `map[key]`
@@ -985,9 +1242,10 @@ impl MapContainer {
     fn popitem<'py>(slf: &Bound<'py, Self>) -> PyResult<(Bound<'py, PyAny>, Py<PyAny>)> {
         let py = slf.py();
         let key = match slf.borrow().entries.first() {
-            Some((key, _)) => key.to_py(py)?.into_bound(py),
+            Some((key, _)) => key.clone(),
             None => return Err(PyKeyError::new_err(())),
         };
+        let key = key.to_py(py)?.into_bound(py);
         let value = Self::get_or_insert(slf, &key)?;
         Self::__delitem__(slf, &key)?;
         Ok((key, value))
@@ -999,8 +1257,8 @@ impl MapContainer {
         key: &Bound<'_, PyAny>,
         default: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let py = slf.py();
-        if slf.borrow().is_message() {
+        let map = Self::map_of(slf);
+        if map.value == Kind::Message {
             return Err(PyNotImplementedError::new_err(
                 "Set message map value directly is not supported.",
             ));
@@ -1010,12 +1268,8 @@ impl MapContainer {
                 "The value for scalar map setdefault must be set.",
             ));
         };
-        {
-            let me = slf.borrow();
-            let k = me.key_of(key)?;
-            if let Some(at) = me.find(&k) {
-                return Self::value_to_py(py, &me.entries[at].1);
-            }
+        if let Some(value) = Self::lookup(slf, &key_of(&map, key)?)? {
+            return Ok(value);
         }
         Self::__setitem__(slf, key, default)?;
         Ok(default.clone().unbind())
@@ -1023,7 +1277,8 @@ impl MapContainer {
 
     fn clear(slf: &Bound<'_, Self>) -> PyResult<()> {
         Self::reify(slf)?;
-        slf.borrow_mut().entries.clear();
+        // The entries are dropped once the map is no longer borrowed.
+        let _entries = std::mem::take(&mut slf.borrow_mut().entries);
         Ok(())
     }
 
@@ -1074,12 +1329,12 @@ impl MapContainer {
         if let Ok(other) = other.cast::<MapContainer>() {
             return Self::merge(py, slf, other);
         }
-        let is_message = slf.borrow().is_message();
+        let map = Self::map_of(slf);
         for pair in other.try_iter()? {
             let (key, value) = unpack_pair(&pair?)?;
-            if is_message {
+            if map.value == Kind::Message {
                 // upb converts the value as a scalar, which a message is not.
-                slf.borrow().key_of(&key)?;
+                key_of(&map, &key)?;
                 return Err(PyTypeError::new_err(
                     "bad argument type for built-in operation",
                 ));
@@ -1108,7 +1363,8 @@ impl MapContainer {
         let equal = if let Ok(other) = other.cast::<MapContainer>() {
             Self::equal(py, slf, other)?
         } else if other.cast::<PyDict>().is_ok() {
-            slf.borrow().to_dict(py)?.as_any().eq(other)?
+            let mine = slf.borrow().to_dict(py)?;
+            mine.as_any().eq(other)?
         } else {
             return Ok(py.NotImplemented());
         };

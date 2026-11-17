@@ -130,11 +130,16 @@ macro_rules! feature_transformer {
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
             // As PySpark's constructor: Python's binding of its keyword-only signature (a positional
-            // argument, an unexpected keyword), then the defaults that the active session fetches
-            // (`server_defaults`), then the keyword arguments, which their converters convert.
-            fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+            // argument, an unexpected keyword), then the keyword arguments, which their converters
+            // convert. The defaults that PySpark's constructor fetches of the active session (the
+            // locale and the stop words of StopWordsRemover) are those that its `__init__`, which
+            // the public class runs, sets (`_setDefault`), which the native object takes of the
+            // param maps (`_sync`): so a construction or a load sends PySpark's requests, once
+            // each. The object of no `__init__` of PySpark's fetches them where it reads them (see
+            // `params_api::class_default`).
+            fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
                 bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
-                let own_defaults = params_api::server_defaults(py, $name)?;
+                let own_defaults = Vec::new();
                 let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
@@ -271,11 +276,16 @@ macro_rules! feature_estimator {
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
             // As PySpark's constructor: Python's binding of its keyword-only signature (a positional
-            // argument, an unexpected keyword), then the defaults that the active session fetches
-            // (`server_defaults`), then the keyword arguments, which their converters convert.
-            fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+            // argument, an unexpected keyword), then the keyword arguments, which their converters
+            // convert. The defaults that PySpark's constructor fetches of the active session (the
+            // locale and the stop words of StopWordsRemover) are those that its `__init__`, which
+            // the public class runs, sets (`_setDefault`), which the native object takes of the
+            // param maps (`_sync`): so a construction or a load sends PySpark's requests, once
+            // each. The object of no `__init__` of PySpark's fetches them where it reads them (see
+            // `params_api::class_default`).
+            fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
                 bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
-                let own_defaults = params_api::server_defaults(py, $name)?;
+                let own_defaults = Vec::new();
                 let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
@@ -755,8 +765,11 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
 ],
 {
     /// Fit the discretizer, as PySpark's `QuantileDiscretizer.fit`: of its `_create_model`, a
-    /// `Bucketizer` (of a new uid) of the splits, `inputCol(s)`, `outputCol(s)` and `handleInvalid`
-    /// of the discretizer (see `QuantileDiscretizer::fit_bucketizer`).
+    /// `Bucketizer` of the splits, `inputCol(s)`, `outputCol(s)` and `handleInvalid` of the
+    /// discretizer (see `QuantileDiscretizer::fit_bucketizer`). As PySpark's, the Bucketizer is of
+    /// its keyword constructor, of a new uid and of PySpark's param maps (the keywords in the order
+    /// of its call), and then the `_copyValues` of `try_remote_fit` gives it the params and the
+    /// defaults of the discretizer that it has (the `outputCol` default of the discretizer's uid).
     #[pyo3(signature = (dataset, params=None))]
     fn fit(
         slf: &Bound<'_, Self>,
@@ -771,15 +784,24 @@ feature_estimator!(PyQuantileDiscretizer, QuantileDiscretizer, "QuantileDiscreti
             let bucketizer = interruptible(py, &session, || {
                 estimator.fit_bucketizer(&df).map_err(Box::new)
             })?;
-            crate::ml::object::new_py(
-                py,
-                PyBucketizer {
-                    inner: bucketizer,
-                    unsendable: Vec::new(),
-                    raw: Vec::new(),
-                    own_defaults: Vec::new(),
-                },
-            )
+            let names = if bucketizer.params().get_param("splits").is_some() {
+                ["splits", "inputCol", "outputCol", "handleInvalid"]
+            } else {
+                ["splitsArray", "inputCols", "outputCols", "handleInvalid"]
+            };
+            let kwargs = PyDict::new(py);
+            for name in names {
+                if let Some(value) = params_api::literal_value(py, bucketizer.params(), name)? {
+                    kwargs.set_item(name, value)?;
+                }
+            }
+            let class = crate::ml::object::public_class::<PyBucketizer>(py)
+                .unwrap_or_else(|| py.get_type::<PyBucketizer>());
+            let model = class.call((), Some(&kwargs))?;
+            if slf.as_any().hasattr("_copyValues")? {
+                slf.as_any().call_method1("_copyValues", (&model,))?;
+            }
+            Ok(model.cast_into::<PyBucketizer>()?.unbind())
         })
     }
 });

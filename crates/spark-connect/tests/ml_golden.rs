@@ -1,53 +1,47 @@
 //! Golden parity test for ML operators and relations.
 //!
-//! Tests that Rust ML operator builders produce the exact same protobuf
-//! the reference PySpark ML Connect client produces.
-
-#![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
+//! The transforms of the Rust ML API must serialize to the exact same protobuf that the reference
+//! PySpark client produces for the same transforms of `pyspark.ml`. The goldens live in
+//! `tests/golden/ml.jsonl` (captured by `scripts/capture_ml_golden.py`): the plan of each
+//! transformed DataFrame, and the ML commands of the fit of its model with their results, which
+//! the replay of `common/ml_golden.rs` serves here, so that no Spark server is needed. The plan IDs,
+//! origins and transformer uids of the relations are cleared on both sides
+//! (`common::normalize_relation`), and the fit's commands are compared as the replay normalizes
+//! them. A case that is missing or mismatches FAILS the test.
 
 mod common;
+#[path = "common/ml_golden.rs"]
+mod ml_golden;
 
-use std::collections::HashMap;
-use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::collections::BTreeSet;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use prost::Message;
+use ml_golden::{assert_commands, ReplayServer};
+use spark_connect::ml::{Estimator, MlOperator, OperatorType, Params, StandardScaler, Transformer};
 
-use common::normalize_relation;
-use spark_connect::ml::Estimator;
-use spark_connect::ml::{MlOperator, OperatorType, Params};
-use spark_connect_proto as proto;
-
-fn normalize_expression(e: &mut proto::Expression) {
-    e.common = None;
-}
-
-fn load_ml_goldens() -> HashMap<String, proto::Relation> {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/golden/ml.jsonl");
-    let file = match File::open(path) {
-        Ok(f) => f,
-        Err(_) => {
-            eprintln!("warning: ML golden file not found at {}", path);
-            return HashMap::new();
-        }
-    };
-
-    let mut out = HashMap::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.unwrap();
-        if line.trim().is_empty() {
-            continue;
-        }
-        let obj: serde_json::Value = serde_json::from_str(&line).unwrap();
-        let name = obj["name"].as_str().unwrap().to_string();
-        let b64 = obj["b64"].as_str().unwrap();
-        let bytes = STANDARD.decode(b64).unwrap();
-        let mut relation = proto::Relation::decode(&bytes[..]).unwrap();
-        normalize_relation(&mut relation);
-        out.insert(name, relation);
-    }
-    out
+/// The StandardScaler of the capture, fitted on its vectors through the replay of the golden fit,
+/// sends PySpark's Fit, and transforms the vectors into the relation of PySpark's transform: of
+/// the model's object, the vectors as its input, and the params of the fit.
+#[test]
+fn standard_scaler_transform_matches_official_pyspark() {
+    let goldens = common::load_ml_goldens("ml.jsonl");
+    let names: BTreeSet<&str> = goldens.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["standard_scaler_transform"]),
+        "the cases of ml.jsonl"
+    );
+    let golden = &goldens["standard_scaler_transform"];
+    let fit = golden.fit.as_ref().expect("the golden fits a model");
+    let (server, session) = ReplayServer::start(&[fit]);
+    let data = common::ml_vectors(&session, 3);
+    let mut scaler = StandardScaler::new()
+        .set_input_col("features")
+        .set_output_col("scaled_features");
+    let mut model = scaler.fit(&data).unwrap();
+    assert_commands(&server, fit, "standard_scaler_transform: the fit");
+    let mut relation = model.transform(&data).unwrap().to_relation().unwrap();
+    common::normalize_relation(&mut relation);
+    assert_eq!(relation, golden.relation, "standard_scaler_transform");
 }
 
 #[test]
@@ -100,66 +94,4 @@ fn test_standard_scaler_operator_name() {
     let op = scaler.operator();
     assert_eq!(op.name, "org.apache.spark.ml.feature.StandardScaler");
     assert_eq!(op.op_type, OperatorType::Estimator);
-}
-
-#[test]
-fn test_ml_transform_relation_structure() {
-    // Test: ML relation structure is correct (without running a real fit)
-    // This verifies that the MlRelation proto is built correctly,
-    // even if we can't capture from a live server.
-
-    let op = MlOperator::new(
-        "org.apache.spark.ml.feature.StandardScaler",
-        OperatorType::Transformer,
-    );
-
-    let mut transform = proto::ml_relation::Transform::default();
-    transform.operator = Some(proto::ml_relation::transform::Operator::Transformer(
-        op.to_proto(),
-    ));
-    transform.params = Some(
-        Params::new()
-            .set_param_string("inputCol", "features")
-            .to_proto(),
-    );
-
-    // This would normally come from a Range or other source relation
-    let mut range = proto::Range::default();
-    range.start = Some(0);
-    range.end = 10;
-    range.step = 1;
-    let mut input = proto::Relation::default();
-    input.rel_type = Some(proto::relation::RelType::Range(range));
-    transform.input = Some(Box::new(input));
-
-    let mut ml_relation = proto::MlRelation::default();
-    ml_relation.ml_type = Some(proto::ml_relation::MlType::Transform(Box::new(transform)));
-
-    let mut relation = proto::Relation::default();
-    relation.rel_type = Some(proto::relation::RelType::MlRelation(Box::new(ml_relation)));
-
-    // Verify structure
-    assert!(relation.rel_type.is_some());
-    if let Some(proto::relation::RelType::MlRelation(ml)) = &relation.rel_type {
-        assert!(ml.ml_type.is_some());
-        if let Some(proto::ml_relation::MlType::Transform(t)) = &ml.ml_type {
-            assert!(t.operator.is_some());
-            assert!(t.input.is_some());
-            assert!(t.params.is_some());
-        } else {
-            panic!("Expected Transform in MlRelation");
-        }
-    } else {
-        panic!("Expected MlRelation in Relation");
-    }
-}
-
-#[test]
-fn test_ml_golden_coverage() {
-    // Load golden file and ensure we have test cases
-    let goldens = load_ml_goldens();
-    // If golden file exists, verify we have at least one case
-    if !goldens.is_empty() {
-        assert!(goldens.contains_key("standard_scaler_transform"));
-    }
 }

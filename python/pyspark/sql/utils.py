@@ -42,6 +42,8 @@ from pyspark.errors import (  # noqa: F401
 from pyspark.errors.exceptions.captured import CapturedException  # noqa: F401
 
 if TYPE_CHECKING:
+    from py4j.java_gateway import JavaObject, JVMView
+
     from pyspark.pandas._typing import IndexOpsLike, SeriesOrIndex
 
 
@@ -59,6 +61,14 @@ def to_str(value: Any) -> Optional[str]:
         return value
     else:
         return str(value)
+
+
+def to_scala_map(jvm: "JVMView", dic: dict) -> "JavaObject":
+    """
+    Convert a dict into a Scala Map.
+    """
+    assert jvm is not None
+    return jvm.PythonUtils.toScalaMap(dic)
 
 
 def enum_to_value(value: Any) -> Any:

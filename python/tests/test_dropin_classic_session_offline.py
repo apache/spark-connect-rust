@@ -101,6 +101,40 @@ def test_the_connect_builder_is_pyspark_connects(connect, monkeypatch):
     assert type(ConnectSession.builder).__module__ == "pyspark.sql.connect.session"
 
 
+def test_the_builder_of_the_connect_class_is_pysparks_classproperty(connect):
+    # As PySpark Connect's `builder = classproperty(lambda cls: cls.Builder())`, of PySpark's
+    # classproperty of pyspark.sql.session, of the docstring of the classic builder: a new builder
+    # of each access, of the class or of a session.
+    import pyspark.sql.session as classic
+
+    spark, _ = connect
+    descriptor = inspect.getattr_static(ConnectSession, "builder")
+    assert type(descriptor) is classic.classproperty
+    assert pickle.loads(pickle.dumps(type(descriptor))) is classic.classproperty
+    assert type(descriptor.fget(ConnectSession)) is ConnectSession.Builder
+    assert descriptor.fget.__module__ == "pyspark.sql.connect.session"
+    assert descriptor.__doc__ == SparkSession.builder.__doc__
+    with pytest.raises(AttributeError, match=r"^'classproperty' object has no attribute 'nope'$"):
+        descriptor.nope
+    assert ConnectSession.builder is not ConnectSession.builder
+    assert type(spark.builder) is ConnectSession.Builder
+
+
+def test_only_the_classic_builder_enables_hive_support():
+    # As PySpark's: the classic builder sets spark.sql.catalogImplementation, which the session of
+    # Spark Connect does not take, and PySpark Connect's builder raises NOT_IMPLEMENTED.
+    from pyspark.errors import PySparkNotImplementedError
+
+    builder = SparkSession.builder.enableHiveSupport()
+    assert type(builder) is SparkSession.Builder
+    assert builder._options == {"spark.sql.catalogImplementation": "hive"}
+    with pytest.raises(PySparkNotImplementedError) as error:
+        ConnectSession.builder.enableHiveSupport()
+    assert error.value.getCondition() == "NOT_IMPLEMENTED"
+    assert error.value.getMessageParameters() == {"feature": "enableHiveSupport"}
+    assert str(error.value) == "[NOT_IMPLEMENTED] enableHiveSupport is not implemented."
+
+
 def test_the_classic_class_has_pysparks_signatures_and_docs():
     signature = inspect.signature(SparkSession.sql)
     assert list(signature.parameters) == ["self", "sqlQuery", "args", "kwargs"]
@@ -138,6 +172,30 @@ def test_the_functions_of_connect_are_of_its_modules(connect):
     assert CF.array_join.__doc__ == F.array_join.__doc__
     assert str(CF.col("a") + 1) == str(F.col("a") + 1)
     assert spark.range(1).select(CF.lit(1)).columns == spark.range(1).select(F.lit(1)).columns
+
+
+def test_the_aliases_of_functions_are_their_functions_as_pysparks():
+    import types
+
+    import pyspark.sql.connect.functions as CF
+    import pyspark.sql.connect.functions.builtin as CB
+    import pyspark.sql.functions as F
+
+    # As PySpark's pyspark.sql.functions and pyspark.sql.connect.functions, which bind
+    # column = col, negate = negative, power = pow and random = rand: an alias is its function, of
+    # the function's name, and a pickle names it by that name.
+    for module in (F, F.builtin, CF, CB):
+        for alias, name in [("column", "col"), ("negate", "negative"), ("power", "pow"),
+                            ("random", "rand")]:
+            function = getattr(module, alias)
+            assert function is getattr(module, name), (module.__name__, alias)
+            assert function.__name__ == name
+            assert pickle.loads(pickle.dumps(function)) is function
+    # So every function of the builtin module of Spark Connect pickles by reference to itself.
+    for name in dir(CB):
+        function = getattr(CB, name)
+        if not name.startswith("_") and isinstance(function, types.FunctionType):
+            assert pickle.loads(pickle.dumps(function)) is function, name
 
 
 def test_a_cogroup_is_of_pyspark_connects_class(connect):

@@ -264,7 +264,7 @@ pub(super) fn convert_param(converter: ParamConverter, value: &MlValue) -> Resul
         ParamConverter::Float => to_float(value)
             .map(MlValue::Double)
             .ok_or_else(|| could_not("float")),
-        ParamConverter::Int => to_int(value).ok_or_else(|| could_not("int")),
+        ParamConverter::Int => to_int(value).unwrap_or_else(|| Err(could_not("int"))),
         ParamConverter::String => match value {
             MlValue::String(s) => Ok(MlValue::String(s.clone())),
             other => Err(SparkError::value_msg(format!(
@@ -275,7 +275,7 @@ pub(super) fn convert_param(converter: ParamConverter, value: &MlValue) -> Resul
         ParamConverter::ListFloat => list_of(value, "list of floats", |v| {
             to_float(v).map(MlValue::Double)
         }),
-        ParamConverter::ListInt => list_of(value, "list of ints", to_int),
+        ParamConverter::ListInt => int_list_of(value),
         ParamConverter::ListString => list_of(value, "list of strings", |v| match v {
             MlValue::String(s) => Some(MlValue::String(s.clone())),
             _ => None,
@@ -321,20 +321,100 @@ fn to_float(value: &MlValue) -> Option<f64> {
     }
 }
 
-/// The int of a numeric value that is integral, as `TypeConverters.toInt`: an `Int` when it fits,
-/// else a `Long`.
-fn to_int(value: &MlValue) -> Option<MlValue> {
+/// The whole number of a numeric value that is integral, as `TypeConverters._is_integer` takes it
+/// and `int` converts it (an int, or a float that is whole: not a `bool`, NaN or an infinity), or
+/// None of another value. Python's `int` keeps a whole float beyond the range of a long, which
+/// PySpark's `LiteralExpression` cannot send: it is the `VALUE_NOT_BETWEEN` of `_infer_type`.
+fn whole_long(value: &MlValue) -> Option<Result<i64>> {
+    // 2^63, the least whole float beyond a long (`i64::MAX as f64` rounds to it).
+    const LONG_BOUND: f64 = 9_223_372_036_854_775_808.0;
     let whole = match value {
-        MlValue::Byte(v) | MlValue::Short(v) | MlValue::Int(v) => i64::from(*v),
-        MlValue::Long(v) => *v,
-        MlValue::Float(v) if f64::from(*v).fract() == 0.0 => f64::from(*v) as i64,
-        MlValue::Double(v) if v.is_finite() && v.fract() == 0.0 => *v as i64,
+        MlValue::Byte(v) | MlValue::Short(v) | MlValue::Int(v) => return Some(Ok(i64::from(*v))),
+        MlValue::Long(v) => return Some(Ok(*v)),
+        MlValue::Float(v) => f64::from(*v),
+        MlValue::Double(v) => *v,
         _ => return None,
     };
-    Some(match i32::try_from(whole) {
+    if !whole.is_finite() || whole.fract() != 0.0 {
+        return None;
+    }
+    Some(if (-LONG_BOUND..LONG_BOUND).contains(&whole) {
+        Ok(whole as i64)
+    } else {
+        Err(value_not_between())
+    })
+}
+
+/// PySpark's error of a Python int beyond the range of a long, which its `LiteralExpression`
+/// cannot send: `VALUE_NOT_BETWEEN`, whose maximum is `JVM_SHORT_MAX`, as PySpark writes it.
+fn value_not_between() -> SparkError {
+    SparkError::classed(
+        SparkErrorKind::ValueError,
+        "VALUE_NOT_BETWEEN",
+        &[
+            ("arg_name", "value"),
+            ("min", "-9223372036854775808"),
+            ("max", "32767"),
+        ],
+    )
+}
+
+/// The int of a numeric value that is integral, as `TypeConverters.toInt` converts it, of the
+/// literal that PySpark sends of it (`_infer_type`): an `Int` when it fits 32 bits, else a `Long`,
+/// and `VALUE_NOT_BETWEEN` beyond a long (see [`whole_long`]). None of another value.
+fn to_int(value: &MlValue) -> Option<Result<MlValue>> {
+    Some(whole_long(value)?.map(|whole| match i32::try_from(whole) {
         Ok(v) => MlValue::Int(v),
         Err(_) => MlValue::Long(whole),
-    })
+    }))
+}
+
+/// The list of ints of `value`, as `TypeConverters.toListInt` converts it, typed as PySpark's
+/// `LiteralExpression` sends a list: of the type of its first element (`_infer_type`), an `Int`
+/// when it fits 32 bits, else a `Long`, and `VALUE_NOT_BETWEEN` of a first element beyond a long.
+/// Each element is a literal of that type, whose `assert` fails of an element out of its range,
+/// an `AssertionError`. A list of no element stays one, whose literal is
+/// `CANNOT_INFER_ARRAY_ELEMENT_TYPE` (see [`MlValue::to_literal`]). A value that is no list of
+/// integral numbers is PySpark's `TypeError`.
+fn int_list_of(value: &MlValue) -> Result<MlValue> {
+    let fail = || {
+        SparkError::value_msg(format!(
+            "Could not convert {} to list of ints",
+            py_str(value)
+        ))
+    };
+    let MlValue::Array(items) = value else {
+        return Err(fail());
+    };
+    let wholes = items
+        .iter()
+        .map(|item| whole_long(item).ok_or_else(fail))
+        .collect::<Result<Vec<_>>>()?;
+    let Some(first) = wholes.first() else {
+        return Ok(MlValue::Array(Vec::new()));
+    };
+    let narrow = i32::try_from(first.clone()?).is_ok();
+    let (type_name, bits) = if narrow {
+        ("an integer", "32")
+    } else {
+        ("a long", "64")
+    };
+    wholes
+        .into_iter()
+        .zip(items)
+        .map(|(whole, item)| match whole {
+            Ok(v) if !narrow => Ok(MlValue::Long(v)),
+            Ok(v) if i32::try_from(v).is_ok() => Ok(MlValue::Int(v as i32)),
+            _ => Err(assertion_error(format!(
+                "the element {} of the list of ints {} is out of the range of {type_name} \
+                 ({bits} bits), the type of its first element, as PySpark's LiteralExpression \
+                 asserts",
+                py_str(item),
+                py_str(value)
+            ))),
+        })
+        .collect::<Result<Vec<_>>>()
+        .map(MlValue::Array)
 }
 
 /// The Python type of a value, as PySpark's messages name `type(value)`.
@@ -881,7 +961,7 @@ pub(super) fn python_class_of(class: &str) -> String {
 
 /// The stage saved at `path`, as `DefaultParamsReader.loadParamsInstance` reads it of the class of
 /// its metadata: a meta-algorithm of PySpark's Python format (of the JVM writer's class names too,
-/// see [`python_class_of`]), or an estimator, a transformer or a model of the server's class (an
+/// see `python_class_of`), or an estimator, a transformer or a model of the server's class (an
 /// [`OperatorEstimator`], an [`OperatorTransformer`] or an [`ObjectModel`]).
 pub fn load_stage(session: &SparkSession, path: &str) -> Result<PipelineStage> {
     let metadata = load_python_metadata(session, path)?;
@@ -1673,6 +1753,68 @@ mod tests {
             )
             .unwrap(),
             MlValue::Array(vec![MlValue::String("a".into())])
+        );
+    }
+
+    #[test]
+    fn grid_ints_that_pyspark_cannot_send_are_its_errors() {
+        // PySpark's `toInt` and `toListInt` keep a Python int of any size, which its
+        // `LiteralExpression` sends of `_infer_type`: a whole float beyond a long is the
+        // `VALUE_NOT_BETWEEN` of the fit, not a saturated long, and a list is of the type of its
+        // first element, whose `assert` fails of an element out of its range.
+        use MlValue::{Array, Bool, Double, Int, Long};
+        let svc = "org.apache.spark.ml.classification.LinearSVC";
+        let not_between = "[VALUE_NOT_BETWEEN] Value for `value` must be between \
+                           -9223372036854775808 and 32767.";
+        for value in [1e20, -1e20, 9_223_372_036_854_775_808.0, f64::MAX] {
+            let error = converted(svc, "maxIter", &Double(value)).unwrap_err();
+            assert_eq!(error.to_string(), not_between, "{value}");
+        }
+        assert_eq!(
+            converted(svc, "maxIter", &Double(-9_223_372_036_854_775_808.0)).unwrap(),
+            Long(i64::MIN)
+        );
+        let mut copy = LinearSVC::new();
+        let uid = copy.operator().uid.clone();
+        let map = ParamMap::new().put(&uid, "maxIter", Double(1e20));
+        let error = copy.apply_param_map(&map).unwrap_err();
+        assert_eq!(error.to_string(), not_between);
+        assert!(copy.params().get_param("maxIter").is_none());
+
+        let mlp = "org.apache.spark.ml.classification.MultilayerPerceptronClassifier";
+        let list = |values: Vec<MlValue>| converted(mlp, "layers", &Array(values));
+        assert_eq!(
+            list(vec![Int(2), Double(3.0)]).unwrap(),
+            Array(vec![Int(2), Int(3)])
+        );
+        let longs = list(vec![Long(1 << 33), Int(2)]).unwrap();
+        assert_eq!(longs, Array(vec![Long(1 << 33), Long(2)]));
+        let literal = longs.to_literal().unwrap();
+        let Some(proto::expression::literal::LiteralType::Array(array)) = literal.literal_type
+        else {
+            panic!("not an array: {literal:?}");
+        };
+        assert!(array.elements.iter().all(|element| matches!(
+            element.literal_type,
+            Some(proto::expression::literal::LiteralType::Long(_))
+        )));
+        assert_eq!(list(Vec::new()).unwrap(), Array(Vec::new()));
+        for values in [
+            vec![Int(2), Long(1 << 33)],
+            vec![Int(2), Double(1e20)],
+            vec![Long(1 << 33), Double(1e20)],
+        ] {
+            let error = list(values.clone()).unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::AssertionError, "{values:?}");
+        }
+        let error = list(vec![Double(1e20), Int(2)]).unwrap_err();
+        assert_eq!(error.to_string(), not_between);
+        let error = list(vec![Int(2), Bool(true)]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Could not convert [2, True] to list of ints"),
+            "{error}"
         );
     }
 

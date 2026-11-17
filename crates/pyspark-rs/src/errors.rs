@@ -28,6 +28,29 @@ pub(crate) fn raise_pyspark(
     build().unwrap_or_else(|e| e)
 }
 
+/// As [`raise_pyspark`], of parameters that are Python objects, as PySpark formats them into its
+/// message: a str that UTF-8 cannot encode, such as one of a lone surrogate, shows as it is.
+pub(crate) fn raise_pyspark_of(
+    py: Python<'_>,
+    class_name: &str,
+    error_class: &str,
+    params: &[(&str, &Bound<'_, PyAny>)],
+) -> PyErr {
+    let build = || -> PyResult<PyErr> {
+        let cls = py.import("pyspark.errors")?.getattr(class_name)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("errorClass", error_class)?;
+        let mp = PyDict::new(py);
+        for (k, v) in params {
+            mp.set_item(*k, v)?;
+        }
+        kwargs.set_item("messageParameters", mp)?;
+        let exc = cls.call((), Some(&kwargs))?;
+        Ok(PyErr::from_value(exc))
+    };
+    build().unwrap_or_else(|e| e)
+}
+
 /// PySpark's `NOT_EXPECTED_TYPE` error of the argument `name`, `value`, which should be of
 /// the type `expected`.
 pub(crate) fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: &str) -> PyErr {
@@ -56,6 +79,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         SparkErrorKind::BuiltinTypeError => "TypeError",
         SparkErrorKind::BuiltinOverflowError => "OverflowError",
         SparkErrorKind::BuiltinRuntimeError => "RuntimeError",
+        SparkErrorKind::BuiltinAttributeError => "AttributeError",
         SparkErrorKind::ValueError => "PySparkValueError",
         SparkErrorKind::BuiltinValueError => "ValueError",
         SparkErrorKind::TypeError => "PySparkTypeError",
@@ -348,6 +372,10 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
         // A builtin, as the thread pool of PySpark's releases raises it at interpreter shutdown.
         return exceptions::PyRuntimeError::new_err(err.message());
     }
+    if err.kind == SparkErrorKind::BuiltinAttributeError {
+        // A builtin, as PySpark's plan raises it for an argument that lacks a method it calls.
+        return exceptions::PyAttributeError::new_err(err.message());
+    }
     if let Some(value) = err.invalid_utf8_value() {
         return unicode_decode_error(&value, &err);
     }
@@ -442,6 +470,57 @@ fn classed_exception<'py>(
     kwargs.set_item("errorClass", error_class).ok()?;
     kwargs.set_item("messageParameters", parameters).ok()?;
     exc_class.call((), Some(&kwargs)).ok()
+}
+
+/// The error that raises `err` again, an exception of one of PySpark's error classes, such as
+/// the `PySparkAttributeError` that a Row raises of an attribute that it does not have: of its
+/// class, error class and message parameters, of which [`classed_exception`] builds the exception
+/// as PySpark built it. None for another exception, such as one of a subclass, or one without an
+/// error class or of message parameters that are not all str.
+pub(crate) fn pyspark_class_error(py: Python<'_>, err: &PyErr) -> PyResult<Option<SparkError>> {
+    const KINDS: [SparkErrorKind; 10] = [
+        SparkErrorKind::ValueError,
+        SparkErrorKind::TypeError,
+        SparkErrorKind::IndexError,
+        SparkErrorKind::AttributeError,
+        SparkErrorKind::KeyError,
+        SparkErrorKind::RuntimeError,
+        SparkErrorKind::NotImplementedError,
+        SparkErrorKind::AssertionError,
+        SparkErrorKind::PicklingError,
+        SparkErrorKind::ImportError,
+    ];
+    let errors_module = py.import("pyspark.errors")?;
+    let value = err.value(py);
+    let mut kind = None;
+    for candidate in KINDS {
+        let class = errors_module.getattr(kind_to_pyspark_class_name(candidate))?;
+        if value.get_type().is(&class) {
+            kind = Some(candidate);
+            break;
+        }
+    }
+    let Some(kind) = kind else {
+        return Ok(None);
+    };
+    let Ok(error_class) = value.call_method0("getCondition")?.extract::<String>() else {
+        return Ok(None);
+    };
+    let mut error = SparkError::classed(kind, &error_class, &[]);
+    let parameters = value.call_method0("getMessageParameters")?;
+    if !parameters.is_none() {
+        let Ok(parameters) = parameters.cast::<PyDict>() else {
+            return Ok(None);
+        };
+        for (key, parameter) in parameters.iter() {
+            let (Ok(key), Ok(parameter)) = (key.extract::<String>(), parameter.extract::<String>())
+            else {
+                return Ok(None);
+            };
+            error.params.insert(key, parameter);
+        }
+    }
+    Ok(Some(error))
 }
 
 /// Helper to convert Result<T, SparkError> to PyResult<T>.

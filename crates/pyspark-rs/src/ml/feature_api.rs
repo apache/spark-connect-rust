@@ -5,8 +5,7 @@
 #![allow(non_snake_case)]
 use super::*;
 use pyo3::types::{PyDict, PyTuple};
-use spark_connect::ml as core;
-use spark_connect::ml::{Model, ReadResult, Transformer};
+use spark_connect::ml::Model;
 
 /// The active session of the Python of a class method that builds a model (PySpark's
 /// `invoke_helper_attr` of a remote session), which raises the AssertionError of PySpark without
@@ -18,14 +17,55 @@ fn helper_session(py: Python<'_>) -> PyResult<spark_connect::SparkSession> {
     Ok(session)
 }
 
-/// The read of a model that a class method built: its object, uid and params, as a loaded
-/// model has them (see `ModelCore::loaded`).
-fn built<M: Model>(model: &M) -> ReadResult {
-    ReadResult {
-        object: model.ml_ref().cloned(),
-        uid: Transformer::operator(model).uid.clone(),
-        params: Transformer::params(model).clone(),
+/// The object that the ML helper's `method` builds of the uid `uid` of a model and of the Python
+/// value `arg`, as PySpark's `invoke_helper_attr(method, uid, arg)` returns it of a class method:
+/// it asserts an active session (of PySpark's AssertionError without one), then sends `arg` as
+/// PySpark's `serialize` sends it (see `object::fetch_arg_of`), whose errors it raises.
+fn helper_object(
+    py: Python<'_>,
+    method: &str,
+    uid: &str,
+    arg: Bound<'_, PyAny>,
+) -> PyResult<spark_connect::ml::MlRef> {
+    let session = helper_session(py)?;
+    let target = spark_connect::ml::MlTarget::helper(&session);
+    let args = [pyo3::types::PyString::new(py, uid).into_any(), arg];
+    object::fetch_py(py, &target, method, &args)?
+        .into_object()
+        .to_pyerr()
+}
+
+/// PySpark's `ArrayType(StringType())` of `depth` 1, and `ArrayType(ArrayType(StringType()))` of
+/// 2, the types of the labels that its class methods send.
+fn string_array_type(py: Python<'_>, depth: usize) -> PyResult<Bound<'_, PyAny>> {
+    let types = py.import("pyspark.sql.types")?;
+    let mut data_type = types.getattr("StringType")?.call0()?;
+    for _ in 0..depth {
+        data_type = types.getattr("ArrayType")?.call1((data_type,))?;
     }
+    Ok(data_type)
+}
+
+/// `list(value)`, as PySpark's class methods take the labels, the vocabulary and each array of
+/// labels: of any iterable, of the TypeError of `list` of another value.
+fn listed<'py>(value: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    value.py().get_type::<PyList>().call1((value,))
+}
+
+/// The model `model` of a class method of PySpark, of the setters that it calls after the server
+/// built its object: each setter of `setters` of a value that is not None, as PySpark's
+/// `model.setInputCol(inputCol)` and `if outputCol is not None: model.setOutputCol(outputCol)`,
+/// whose `TypeConverters` raise their TypeError then.
+fn set_given<'py>(
+    model: Bound<'py, PyAny>,
+    setters: &[(&str, Option<&Bound<'py, PyAny>>)],
+) -> PyResult<Bound<'py, PyAny>> {
+    for (setter, value) in setters {
+        if let Some(value) = value {
+            model.call_method1(*setter, (value,))?;
+        }
+    }
+    Ok(model)
 }
 
 native_model! {
@@ -138,30 +178,42 @@ native_model! {
     cached: [];
 
     /// `CountVectorizerModel.from_vocabulary`, as PySpark's `from_vocabulary`: the model that the
-    /// server builds of `vocabulary` (of a new uid), which transforms `inputCol`, with `outputCol`,
-    /// `minTF` and `binary` when they are given. An empty vocabulary raises PySpark's ValueError.
+    /// server builds of `vocabulary`, which transforms `inputCol`, with `outputCol`, `minTF` and
+    /// `binary` when they are given. In PySpark's order: an empty vocabulary raises PySpark's
+    /// ValueError (of `len`); the model of `CountVectorizerModel()` gets the object that the server
+    /// builds of its uid and of `list(vocabulary)` (see `helper_object`); then its setters set the
+    /// params, of their TypeErrors, and `vocabSize` the size of the vocabulary.
     #[classmethod]
     #[pyo3(signature = (vocabulary, inputCol, outputCol=None, minTF=None, binary=None))]
-    fn from_vocabulary(
-        cls: &Bound<'_, PyType>,
-        vocabulary: Vec<String>,
-        inputCol: String,
-        outputCol: Option<String>,
-        minTF: Option<f64>,
-        binary: Option<bool>,
-    ) -> PyResult<Py<PyAny>> {
+    fn from_vocabulary<'py>(
+        cls: &Bound<'py, PyType>,
+        vocabulary: &Bound<'py, PyAny>,
+        inputCol: &Bound<'py, PyAny>,
+        outputCol: Option<&Bound<'py, PyAny>>,
+        minTF: Option<&Bound<'py, PyAny>>,
+        binary: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let py = cls.py();
-        let session = helper_session(py)?;
-        let model = core::CountVectorizerModel::from_vocabulary(
-            &session,
-            vocabulary,
-            &inputCol,
-            outputCol.as_deref(),
-            minTF,
-            binary,
-        )
-        .to_pyerr()?;
-        PyCountVectorizerModel::__from_read(py, built(&model))
+        if vocabulary.len()? == 0 {
+            return Err(PyValueError::new_err("Vocabulary list cannot be empty"));
+        }
+        let model = PyCountVectorizerModel::of_constructor(py, |uid| {
+            let vocabulary = listed(vocabulary)?;
+            helper_object(py, "countVectorizerModelFromVocabulary", uid, vocabulary)
+        })?;
+        let model = set_given(
+            model.into_any(),
+            &[
+                ("setInputCol", Some(inputCol)),
+                ("setOutputCol", outputCol),
+                ("setMinTF", minTF),
+                ("setBinary", binary),
+            ],
+        )?;
+        let size = PyDict::new(py);
+        size.set_item("vocabSize", vocabulary.len()?)?;
+        model.call_method("_set", (), Some(&size))?;
+        Ok(model)
     }
 }
 
@@ -503,52 +555,66 @@ native_model! {
     summary: None;
     cached: [];
 
-    /// `StringIndexerModel.from_labels`, as PySpark's: the model that the server builds of `labels`
-    /// (of a new uid), which indexes `inputCol`, with `outputCol` and `handleInvalid` when given.
+    /// `StringIndexerModel.from_labels`, as PySpark's: the model that the server builds of `labels`,
+    /// which indexes `inputCol`, with `outputCol` and `handleInvalid` when given. In PySpark's
+    /// order: the model of `StringIndexerModel()` gets the object that the server builds of its uid
+    /// and of `(list(labels), ArrayType(StringType()))`, a literal of strings that asserts each of
+    /// them (see `helper_object`); then its setters set the params, of their TypeErrors.
     #[classmethod]
     #[pyo3(signature = (labels, inputCol, outputCol=None, handleInvalid=None))]
-    fn from_labels(
-        cls: &Bound<'_, PyType>,
-        labels: Vec<String>,
-        inputCol: String,
-        outputCol: Option<String>,
-        handleInvalid: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
+    fn from_labels<'py>(
+        cls: &Bound<'py, PyType>,
+        labels: &Bound<'py, PyAny>,
+        inputCol: &Bound<'py, PyAny>,
+        outputCol: Option<&Bound<'py, PyAny>>,
+        handleInvalid: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let py = cls.py();
-        let session = helper_session(py)?;
-        let model = core::StringIndexerModel::from_labels(
-            &session,
-            labels,
-            &inputCol,
-            outputCol.as_deref(),
-            handleInvalid.as_deref(),
+        let model = PyStringIndexerModel::of_constructor(py, |uid| {
+            let labels = (listed(labels)?, string_array_type(py, 1)?).into_pyobject(py)?;
+            helper_object(py, "stringIndexerModelFromLabels", uid, labels.into_any())
+        })?;
+        set_given(
+            model.into_any(),
+            &[
+                ("setInputCol", Some(inputCol)),
+                ("setOutputCol", outputCol),
+                ("setHandleInvalid", handleInvalid),
+            ],
         )
-        .to_pyerr()?;
-        PyStringIndexerModel::__from_read(py, built(&model))
     }
 
     /// `StringIndexerModel.from_arrays_of_labels`, as PySpark's: the model of the labels of each of
-    /// `inputCols`, with `outputCols` and `handleInvalid` when given.
+    /// `inputCols`, with `outputCols` and `handleInvalid` when given. In PySpark's order: the
+    /// model of `StringIndexerModel()` gets the object that the server builds of its uid and of
+    /// `([list(labels) for labels in arrayOfLabels], ArrayType(ArrayType(StringType())))`; then its
+    /// setters set the params, of their TypeErrors.
     #[classmethod]
     #[pyo3(signature = (arrayOfLabels, inputCols, outputCols=None, handleInvalid=None))]
-    fn from_arrays_of_labels(
-        cls: &Bound<'_, PyType>,
-        arrayOfLabels: Vec<Vec<String>>,
-        inputCols: Vec<String>,
-        outputCols: Option<Vec<String>>,
-        handleInvalid: Option<String>,
-    ) -> PyResult<Py<PyAny>> {
+    fn from_arrays_of_labels<'py>(
+        cls: &Bound<'py, PyType>,
+        arrayOfLabels: &Bound<'py, PyAny>,
+        inputCols: &Bound<'py, PyAny>,
+        outputCols: Option<&Bound<'py, PyAny>>,
+        handleInvalid: Option<&Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let py = cls.py();
-        let session = helper_session(py)?;
-        let model = core::StringIndexerModel::from_arrays_of_labels(
-            &session,
-            arrayOfLabels,
-            inputCols,
-            outputCols,
-            handleInvalid.as_deref(),
+        let model = PyStringIndexerModel::of_constructor(py, |uid| {
+            let arrays = arrayOfLabels
+                .try_iter()?
+                .map(|labels| listed(&labels?))
+                .collect::<PyResult<Vec<_>>>()?;
+            let arrays = (PyList::new(py, arrays)?, string_array_type(py, 2)?).into_pyobject(py)?;
+            helper_object(py, "stringIndexerModelFromLabelsArray", uid, arrays.into_any())
+        })?;
+        set_given(
+            model.into_any(),
+            &[
+                ("setInputCols", Some(inputCols)),
+                ("setOutputCols", outputCols),
+                ("setHandleInvalid", handleInvalid),
+            ],
         )
-        .to_pyerr()?;
-        PyStringIndexerModel::__from_read(py, built(&model))
     }
 }
 
@@ -745,11 +811,18 @@ native_model! {
     }
 
     /// `Word2VecModel.getVectors`: the DataFrame of each word and its vector, of the server's
-    /// `getVectors` (an attribute relation).
-    #[pyo3(name = "getVectors", text_signature = "($self)")]
-    fn get_vectors(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+    /// `getVectors` (an attribute relation) of the positional arguments only, as PySpark's
+    /// `try_remote_attribute_relation` sends them over Spark Connect, which drops keyword
+    /// arguments: a positional argument fails on the server when the result is analyzed.
+    #[pyo3(name = "getVectors", signature = (*args, **_kwargs), text_signature = "($self)")]
+    fn get_vectors(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        _kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<PyDataFrame> {
         let target = slf.try_borrow()?.core.target()?;
-        object::attribute_relation_py(&target, "getVectors", &[])
+        let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
+        object::attribute_relation_py(&target, "getVectors", &args)
     }
 
     /// `Word2VecModel.findSynonymsArray`, as PySpark's: the words and similarities of

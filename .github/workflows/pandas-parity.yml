@@ -101,7 +101,7 @@ jobs:
           python -m pip install --upgrade pip
           # scipy is required by the pandas-on-Spark correlation tests (corr method='spearman'/
           # 'kendall', corrwith); it is part of Apache Spark's own pandas test environment.
-          # pandas is pinned < 3.0.0: Spark 4.2.0's pandas-on-Spark code targets pandas 2.x and
+          # pandas is pinned < 3.0.0: Spark 4.3.0's pandas-on-Spark code targets pandas 2.x and
           # explicitly warns that >= 3.0.0 is not yet fully supported (e.g. test_frame_loc_setitem
           # hits an upstream pandas-3-only no-op branch). Testing the supported version, matching
           # Apache's own pandas test environment.
@@ -126,12 +126,12 @@ jobs:
         id: spark-download
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
-          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+          if [ ! -d "${HOME}/spark-dist/spark-${SPARK_VERSION}-bin-hadoop3"* ]; then
             scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
-          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name "spark-${SPARK_VERSION}-bin-hadoop3*" | head -1)
           echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)

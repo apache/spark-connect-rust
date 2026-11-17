@@ -62,6 +62,8 @@ A Cargo workspace of library crates, plus a Python skin:
 | `apache-spark-connect-proto` | `crates/spark-connect-proto` | Generated `spark.connect.*` gRPC/protobuf types |
 | `apache-spark-connect-core` | `crates/spark-connect-core` | Transport: channel, retries, reattach, artifacts, errors |
 | `apache-spark-connect` | `crates/spark-connect` | The DataFrame API: session, dataframe, column, functions, plan, group, catalog, window, readwriter, streaming, types |
+| `apache-spark-connect-macros` | `crates/spark-connect-macros` | The `#[spark_wasm_udf]` procedural macro of a Rust UDF |
+| `apache-spark-connect-build` | `crates/spark-connect-build` | The `build.rs` helper that compiles a crate's Rust UDFs to a WebAssembly module |
 | `pyspark-rs` | `crates/pyspark-rs` | PyO3 bindings - builds the `_pyspark` extension module |
 | Python skin | `python/pyspark` | The drop-in `pyspark` package (+ vendored `pyspark.pandas`, `cloudpickle`, `pyspark.testing`) |
 
@@ -72,6 +74,8 @@ flowchart LR
     SC --> PYO3["pyspark-rs (PyO3)"]
     PYO3 --> SKIN["python/pyspark skin"]
     SC --> RUSTAPP["your Rust app"]
+    MACROS["spark-connect-macros (UDF macro)"] --> RUSTAPP
+    BUILD["spark-connect-build (UDF build.rs)"] --> RUSTAPP
 ```
 
 ## A query's lifecycle
@@ -132,12 +136,15 @@ turns the cache off, on the server or for a session with `spark.conf.set`.
 
 ### Python Arrow table handoff
 
-`toArrow()` collects decoded batches and uses arrow-rs's `IntoPyArrow` for one
-boxed `RecordBatchReader`. Compatible value and offset buffers are shared;
-network decoding, sliced validity bitmaps, and pandas conversion may still copy.
-Batch schema consistency is validated before export. Field names or timezones
-containing NUL use IPC over the collected batches, without another RPC. Empty
-batch vectors retain the empty-schema behavior.
+`toArrow()` reads the Arrow schema of the analyzed `schema` of the DataFrame first, as
+PySpark's does, so that a type which PySpark does not convert to Arrow raises before the
+query runs. It then collects decoded batches, uses arrow-rs's `IntoPyArrow` for one
+boxed `RecordBatchReader`, and casts the table to that schema. Compatible value and offset
+buffers are shared; network decoding, sliced validity bitmaps, the cast and pandas
+conversion may still copy. Batch schema consistency is validated before export. Field
+names or timezones containing NUL use IPC over the collected batches, without another RPC.
+Empty batch vectors retain the empty-schema behavior. `_to_table()`, PySpark's private
+method, gives the table of this handoff as it is, with the schema that the server sent.
 
 `createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
 timestamp conversion helpers normalize the table, then arrow-rs imports its
@@ -150,7 +157,10 @@ conversions in one Config request before it converts any data, as PySpark's does
 that PySpark 4.3.0 reads, in its order (the timestamp type and the session time zone, the
 local-relation settings, the pandas and inference settings, and Arrow's large types). Every
 conversion path takes its settings from that request, including the relation's cache
-threshold, and empty data reads none.
+threshold, and empty data reads none. The Rust API's `create_dataframe` and
+`create_dataframe_from_columns` read the same settings in one request, once they have converted
+their rows or columns, and apply the cache threshold at any size too. Of no rows, or columns of
+no rows, they send the schema alone and read none, as PySpark's empty data does.
 Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
 use this importer, preserving integer precision and null masks without Python
 rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the
@@ -230,8 +240,9 @@ See [Rust UDFs via WebAssembly](udfs.md) for the full story.
 3. **Correctness is gated in CI** - golden-proto tests guard plan building; the
    official Apache Spark Connect test suite guards transport and Arrow paths (see
    the CI notes under `dev/design/`).
-4. **Version = Spark version** - the crate/wheel version tracks the Spark release
-   it targets, so the number tells you which Spark it speaks.
+4. **Version = Spark version** - a release's crate/wheel version is that of the Spark
+   release it targets, so the number tells you which Spark it speaks. `master` carries the
+   next development version.
 
 For the deeper design write-ups (design notes, CI, the official test suite, and
 acceptance criteria), see [`dev/design/`](https://github.com/apache/spark-connect-rust/tree/master/dev/design)

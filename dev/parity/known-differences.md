@@ -66,15 +66,12 @@ difference is intentional or tracked for a fix.
   Replacing a nested dict value containing a Row hashes its original key and may compare
   keys during lookup. Custom key hooks can therefore run during discovery; callback
   counts follow normal Python dict behavior, including collisions.
-  Adapted frames use the Arrow importer's session settings and transport policy:
-  `spark.sql.session.localRelationCacheThreshold` selects inline data or cached-artifact
-  upload, with the importer's size and chunk limits. Frames whose discovery finds neither
-  Rows nor an error retain native conversion and its upstream transport policy. For native
-  rows, Arrow data below 64 KiB stays inline without that settings RPC; at 64 KiB or more,
-  the upstream path reads the local-relation settings. For adapted frames, a failure
-  reading the shared settings is reported at the first selected column's position, so an
-  earlier invalid native column is reported first. Official PySpark reads configuration
-  before converting any column.
+  Adapted frames are sent through the Arrow importer, with its size and chunk limits; frames
+  whose discovery finds neither Rows nor an error retain native conversion. Both take the
+  settings that `createDataFrame` reads in one request before it converts any column, as
+  official PySpark does, so that `spark.sql.session.localRelationCacheThreshold` selects
+  inline data or cached-artifact upload at any size, and a failure of that read is raised
+  before any column.
 
   Other columns run native scalar conversion (`py_to_value`) at most once per cell.
   Decimal typing can read original objects again: column typing calls `as_tuple()` on
@@ -115,12 +112,55 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
+- **The `__repr__` of a Column of a str that UTF-8 cannot encode** (intentional; the expressions
+  of the core hold UTF-8). Such a str, of a name, a SQL string or a literal, fails the plans of the
+  Column when they are built, as in PySpark, and its lone surrogates show escaped in the `__repr__`
+  (`\ud800`), where PySpark's shows the str as it is (see `docs/compatibility.md`).
+- **The pickle of a DataFrame whose plan fails to build** (tracked). `pickle` and cloudpickle of a
+  DataFrame of a value that its plan does not take, such as `df.alias("a\ud800")` or
+  `df.limit(2.0)`, raise the error of the plan, as the pickle holds the relation; PySpark's
+  cloudpickle pickles its plan, whose copy raises the error at its requests.
+- **The removal of the relation of a dropped checkpoint** (intentional; a drop does not wait).
+  As PySpark's `CachedRemoteRelation.__del__`, the drop of the last DataFrame of a checkpoint
+  sends one ExecutePlan of the removal, which is not reattachable and goes to no hook, with the
+  tags and the user context extensions of the thread that drops it. PySpark's finalizer waits
+  for the server; this client sends it without waiting, as a drop may run on a thread of the
+  transport's runtime, or in a finalizer that holds the GIL, which another thread may need to
+  read the responses of the same connection. The relation may still be on the server for a
+  moment after the drop.
+- **`schema` and `columns` of a join on a tuple** (intentional). As in PySpark, the plan fails with
+  the `AttributeError` of `to_plan` of the tuple when it is built, and `schema`, a property, then
+  gives a Column of the `__getattr__` of the DataFrame: of `schema`, where PySpark's is of
+  `_schema`; `columns` gives the Column of `columns`, where PySpark's raises `NOT_ITERABLE`.
+- **An exception of the `&` of a join's list of conditions that is not of a class that the plan
+  carries** (intentional; a plan of the core carries an error, not a Python object). Python's
+  `AttributeError`, `TypeError`, `ValueError` and `OverflowError`, and PySpark's error classes,
+  such as the `PySparkAttributeError` of a Row, fail the plan when it is built, as in PySpark.
+  Another, such as a `KeyError` that the `__getattr__` of an operand raises, is raised by `join`
+  or `_joinAsOf`, where PySpark raises it when it builds the plan.
 - **`toArrow` and `toPandas` of a string that is not valid UTF-8** (intentional). PySpark's
   `toArrow` returns a table whose string column holds the invalid bytes, which pyarrow's
   full validation rejects, and its `toPandas` raises pyarrow's `ArrowException`. This
   client does not return invalid Arrow data: both raise a `PySparkRuntimeError` of the
   Arrow decode. `collect` raises PySpark's `UnicodeDecodeError` for the bytes of the first
   invalid string (the Rust API's `collect` returns `SparkErrorKind::UnicodeDecode`).
+
+- **What a plan build does for a pickle or a deep copy** (intentional; DESIGN). A pickled
+  DataFrame or Column, and a deep copy of a DataFrame whose plan holds no function of a UDF or
+  that is copied into another session, carry the relation that the drop-in builds for them,
+  where PySpark's keep their plan objects and build them at each request. (A deep copy of a
+  DataFrame of such functions in its session is a copy of its plan, of copies of them, which
+  its requests build, as PySpark's; see "A deep copy of a DataFrame into another session".)
+  So the requests of an unpickled DataFrame or Column, or of such a deep copy, do not warn of a
+  window of no partitions (`WARN WindowExpression: No Partition Defined ...`), which
+  PySpark's do at each build, and the `and` of the conditions of a join of a list of
+  Columns keeps the origin of its call site at the pickle or the copy, where PySpark's has
+  the call site of each request. The pickle itself does not warn, as PySpark's does not.
+  The `plan` of `DataFrame._plan` is a placeholder of the relation (see "Plan logging of a
+  deep DataFrame" below), so it does not warn, and a request of a plan over it warns once,
+  where PySpark's warns at both. The `UserWarning` is of `pyspark.sql.connect.expressions`,
+  as PySpark's, but of a line of the drop-in's module, where PySpark's is of line 1126 of its
+  own.
 
 - **Public base and native MRO.** `pyspark.sql.DataFrame` is implemented as a
   Python base/factory, allowing subclasses such as
@@ -202,6 +242,39 @@ difference is intentional or tracked for a fix.
   concrete-class differences; inherited signature and annotation differences remain.
   These results do not establish complete DataFrame or ML parity.
 
+## UDFs
+
+As PySpark's `PythonUDF.to_plan` and `PythonUDTF.to_plan`, each request pickles the function of
+each UDF, UDTF and map or group-map function of its plan when it builds the plan (see
+`docs/compatibility.md`). These cases still differ, all of copies and pickles:
+
+- **A pickled Column or DataFrame** (intentional). It carries the commands that its functions
+  pickled to when it was pickled, in the protobuf of its expression or relation, which the
+  server's Python worker unpickles without the native client. PySpark's carries the functions,
+  which its requests pickle again: a value that a function reads, changed after the pickle, is
+  seen by PySpark's unpickled Column of a function that `pickle` pickles by reference, such as a
+  module-level function of `__main__`, but not by this client's. So `pickle.dumps` of a Column of
+  a UDF of a lambda pickles, where PySpark's raises the `PicklingError` of the lambda, and that of
+  a function that does not pickle by value raises its `PicklingError`, where PySpark's pickles a
+  module-level function by reference.
+- **A deep copy of a DataFrame into another session** (tracked). A deep copy whose session copies
+  to another one, of a `memo` that maps it or of another active session of its ID, is a DataFrame
+  of the relation of the copied one, so that its Observations are copies, as PySpark's, and so it
+  carries the commands that the functions pickled to when it was copied, where PySpark's holds the
+  copies of the functions, which its requests pickle again. In the session of the DataFrame, the
+  copies of a DataFrame, a Column, grouped data and a table argument hold the functions as
+  PySpark's do: `copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo` of
+  the call, which gives a function itself, and a copy of a callable object, a bound method or a
+  `functools.partial`.
+- **The UDFs of a `mergeInto` clause** (tracked). Its condition and assignments are pickled when
+  the clause is added, as PySpark's `_build_merge_action` builds them, and again when `merge` runs,
+  whose command carries the second pickle; PySpark's carries the first.
+- **Garbage collection** (tracked). A DataFrame or a Column reports the functions of its UDFs that
+  it alone holds to Python's garbage collector. A function that a Column and a DataFrame of it
+  share, or two DataFrames, is reported by neither, so that no reference is counted twice: a
+  reference cycle through it, such as through a bound method of an object that keeps both the
+  Column and the DataFrame, is not collected, where PySpark collects it.
+
 ## Session and client (Connect)
 
 - **Custom gRPC channels** (intentional; the transport is native). `ChannelBuilder` and
@@ -210,7 +283,10 @@ difference is intentional or tracked for a fix.
   and `metadata()`. The transport reads them as a `sc://` URL, so they apply. The gRPC
   channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
   properties and `userAgent` read the parameters as PySpark does, but `userAgent` reports
-  PySpark's `python/<version>` where the transport sends `python/rust` as the client type.
+  PySpark's `python/<version>` where the transport sends `python/rust` as the client type. The
+  transport reads `SPARK_CONNECT_USER_AGENT` once, when the session is made, where PySpark's
+  requests read it each time: it does not read the environment of the process while Python
+  threads may change it.
   The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.
@@ -254,6 +330,14 @@ difference is intentional or tracked for a fix.
 - **`_closed`** (tracked). Reading `_closed` gives the session's stopped state. Setting it
   to True closes the session, as a test's stand-in for the client's close. Setting it to
   False does not reopen a closed session.
+- **The `__dict__` of the objects of a session** (intentional; the state is native). The
+  readers, writers, builders and the other objects of a session or a DataFrame hold their
+  state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
+  which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
+  holds there (`vars(spark.streams)` is empty, where PySpark's has `_session` and `_sqlb`).
+- **Shallow copy of a session builder** (tracked). `copy.copy(SparkSession.builder)` has
+  options of its own, where PySpark's shares its `_options` dict and its hook factories
+  with the builder that it copies, so that a `config` of either one is seen by both.
 - **Session registry lock** (intentional). `SparkSession._lock` is a `threading.RLock`
   for the Python code that takes it. The drop-in serializes its own session creation with
   a Rust lock, not with this one.
@@ -261,3 +345,27 @@ difference is intentional or tracked for a fix.
   hook_factories=...)` makes a session that is neither default nor active, as PySpark's
   constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
   takes precedence, as PySpark's does.
+
+## `pyspark.sql.connect.proto` and plugins
+
+- **Generated modules of a plugin's protos** (intentional; DESIGN). A module that protoc
+  generates of a proto3 file that imports the protos of Spark Connect, directly or through the
+  files it imports (Delta Lake's `delta/connect/relations.proto` and `commands.proto`), gets the
+  classes of the drop-in's Rust protobuf runtime when `protobuf`'s builder builds it, so its
+  message fields take the messages of `pyspark.sql.connect.proto` as they are, as PySpark's
+  plugins take PySpark's, and the server receives the plans of Delta Lake 4.0's `delete`,
+  `update` and `merge` as PySpark sends them: the core replaces the shallow placeholder of the
+  relation of a DataFrame, which `DataFrame._plan.plan(session)` gives, in the message of an
+  extension too. What stays different (see `docs/compatibility.md`):
+  - its classes are the runtime's, not subclasses of `google.protobuf.message.Message`, while its
+    `DESCRIPTOR`, its `_*` descriptors, its extensions and services stay `protobuf`'s, and
+    `protobuf`'s `message_factory` and `symbol_database` give `protobuf`'s classes of its types;
+  - a file that it imports that does not import the protos of Spark Connect (Delta Lake's
+    `delta/connect/base.proto`) keeps `protobuf`'s classes. A field of the runtime of one of its
+    types takes `protobuf`'s messages of the type, and gives a message of the runtime's class of
+    the type, not of the module's class, which upb gives, so `isinstance` with the module's class
+    is false, and the message pickles only within the message that holds it;
+  - a file that is not proto3, or that imports one or a well-known type other than `Any` and
+    `Timestamp`, keeps `protobuf`'s classes, which take the package's messages only through bytes
+    or dicts, as before. So does a module that builds before `pyspark.sql.connect.proto` is
+    imported, as only one that imports another copy of Spark's generated modules can.
