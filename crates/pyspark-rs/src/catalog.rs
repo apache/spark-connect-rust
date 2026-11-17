@@ -223,6 +223,14 @@ impl PyCatalog {
 
 #[pymethods]
 impl PyCatalog {
+    /// `Catalog(sparkSession)`, as PySpark Connect's: a catalog of the session, another object
+    /// than `spark.catalog`, which the session keeps.
+    #[new]
+    #[allow(non_snake_case)]
+    fn py_new(py: Python<'_>, sparkSession: Py<crate::session::PySparkSession>) -> Self {
+        PyCatalog::new(sparkSession.borrow(py).session.catalog())
+    }
+
     /// The shallow copy of the catalog, as PySpark's `copy.copy`: of the same session.
     fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
         let copy = Bound::new(slf.py(), PyCatalog::new(slf.borrow().catalog.clone()))?;
@@ -230,13 +238,14 @@ impl PyCatalog {
         Ok(copy)
     }
 
-    /// The reduce of the catalog, as PySpark's: `catalog` of its session, which unpickles with
-    /// it.
+    /// The reduce of the catalog, as PySpark's pickle of a plain object of its session: a new
+    /// `Catalog` of its session, which unpickles with it, and not the catalog that the session
+    /// keeps (`spark.catalog`), whose attributes a copy or an unpickle would otherwise change.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let session = crate::session::session_object(py, slf.borrow().catalog.spark_session())?;
-        let reduce =
-            crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "catalog")?;
+        let args = pyo3::types::PyTuple::new(py, [session.into_bound(py)])?;
+        let reduce = pyo3::types::PyTuple::new(py, [slf.get_type().into_any(), args.into_any()])?;
         crate::group::reduce_with_state(reduce.as_any(), slf.as_any())
     }
 

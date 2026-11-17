@@ -98,6 +98,29 @@ def test_table_arg_partitioned_and_ordered_still_builds(spark):
     assert _table(spark).withSinglePartition().orderBy("name") is not None
 
 
+def test_table_arg_to_plan_is_its_subquery_expression_as_pyspark(spark):
+    # As PySpark Connect's TableArg.to_plan(session), the Expression of its subquery expression: a
+    # table argument of the plan of the DataFrame, with its partitioning, ordering and single
+    # partition.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import functions as F
+
+    df = spark.range(1)
+    plain = df.asTable().to_plan(spark.client)
+    assert isinstance(plain, pb2.Expression)
+    assert plain.subquery_expression.subquery_type == (
+        pb2.SubqueryExpression.SUBQUERY_TYPE_TABLE_ARG)
+    assert not plain.subquery_expression.HasField("table_arg_options")
+    options = (
+        df.asTable().partitionBy("id").orderBy(F.col("id").desc()).to_plan(spark.client)
+        .subquery_expression.table_arg_options
+    )
+    assert options.partition_spec[0].unresolved_attribute.unparsed_identifier == "id"
+    assert options.order_spec[0].direction == pb2.Expression.SortOrder.SORT_DIRECTION_DESCENDING
+    single = df.asTable().withSinglePartition().to_plan(spark.client)
+    assert single.subquery_expression.table_arg_options.with_single_partition
+
+
 def test_table_arg_copy_keeps_user_attributes(spark):
     table = _table(spark)
     table.foo = [1, 2]

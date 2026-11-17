@@ -146,16 +146,58 @@ impl PyColumnExpression {
     /// too deep to be sent is the `RecursionError` that PySpark's `to_plan`, which recurses,
     /// raises.
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        use prost::Message;
         let _ = session;
-        let expression = self.column.try_to_proto().to_pyerr()?;
-        let bytes = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
-        Ok(py
-            .import("pyspark.sql.connect.proto")?
-            .getattr("Expression")?
-            .call_method1("FromString", (bytes,))?
-            .unbind())
+        expression_message(py, &self.column)
     }
+}
+
+/// `Column.__getattr__(column, item)` called as a function of the class: the `__getattr__` of the
+/// Column, which PySpark's attribute access of a name that a Column does not have calls.
+#[pyfunction]
+fn _column_getattr(
+    column: PyRef<'_, PyColumn>,
+    item: &Bound<'_, pyo3::types::PyString>,
+) -> PyResult<PyColumn> {
+    column.__getattr__(column.py(), item)
+}
+
+/// Make `__getattr__` a function of the class `Column`, as PySpark Connect's `Column.__getattr__`
+/// is, so that `Column.__getattr__(col, "a")` is the field `a` of `col`, as in PySpark: a Python
+/// function of that name, which calls the `__getattr__` of the Column. PyO3 makes `__getattr__`
+/// only the attribute hook of the type, and that hook, the wrapper `__getattribute__` of the class,
+/// is removed, so that an attribute is looked up as of PySpark's class: the class's attributes,
+/// and else its `__getattr__`.
+pub(crate) fn install_getattr(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+    let globals = PyDict::new(py);
+    globals.set_item("__name__", "pyspark.sql.connect.column")?;
+    globals.set_item("_getattr", wrap_pyfunction!(_column_getattr, m)?)?;
+    py.run(
+        c"def __getattr__(self, item):\n    return _getattr(self, item)\n",
+        Some(&globals),
+        None,
+    )?;
+    let getattr = globals
+        .get_item("__getattr__")?
+        .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("__getattr__ is not defined"))?;
+    getattr.setattr("__qualname__", "Column.__getattr__")?;
+    let column = py.get_type::<PyColumn>();
+    column.setattr("__getattr__", getattr)?;
+    column.delattr("__getattribute__")
+}
+
+/// The `spark.connect.Expression` of `column`, a message of `pyspark.sql.connect.proto`, as
+/// PySpark Connect's `to_plan` of its expression builds it. One too deep to be sent is the
+/// `RecursionError` that PySpark's `to_plan`, which recurses, raises.
+pub(crate) fn expression_message(py: Python<'_>, column: &Column) -> PyResult<Py<PyAny>> {
+    use prost::Message;
+    let expression = column.try_to_proto().to_pyerr()?;
+    let bytes = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
+    Ok(py
+        .import("pyspark.sql.connect.proto")?
+        .getattr("Expression")?
+        .call_method1("FromString", (bytes,))?
+        .unbind())
 }
 
 #[pymethods]

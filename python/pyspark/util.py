@@ -27,8 +27,41 @@ if TYPE_CHECKING:
     from py4j.java_collections import JavaArray
     from py4j.java_gateway import JavaObject
 
+    from pyspark._typing import NonUDFType
     from pyspark.serializers import Serializer
     from pyspark.sql import SparkSession
+    from pyspark.sql._typing import (
+        SQLArrowBatchedUDFType,
+        SQLArrowTableUDFType,
+        SQLArrowUDTFType,
+        SQLBatchedUDFType,
+        SQLTableUDFType,
+    )
+    from pyspark.sql.pandas._typing import (
+        ArrowCogroupedMapUDFType,
+        ArrowGroupedAggIterUDFType,
+        ArrowGroupedAggUDFType,
+        ArrowGroupedMapIterUDFType,
+        ArrowGroupedMapUDFType,
+        ArrowMapIterUDFType,
+        ArrowScalarIterUDFType,
+        ArrowScalarUDFType,
+        ArrowWindowAggUDFType,
+        GroupedMapUDFTransformWithStateInitStateType,
+        GroupedMapUDFTransformWithStateType,
+        PandasCogroupedMapUDFType,
+        PandasGroupedAggIterUDFType,
+        PandasGroupedAggUDFType,
+        PandasGroupedMapIterUDFType,
+        PandasGroupedMapUDFTransformWithStateInitStateType,
+        PandasGroupedMapUDFTransformWithStateType,
+        PandasGroupedMapUDFType,
+        PandasGroupedMapUDFWithStateType,
+        PandasMapIterUDFType,
+        PandasScalarIterUDFType,
+        PandasScalarUDFType,
+        PandasWindowAggUDFType,
+    )
 
 from pyspark.serializers import (
     write_int,
@@ -88,8 +121,6 @@ def _parse_memory(s: str) -> int:
     if s[-1].lower() not in units:
         raise ValueError("invalid format: " + s)
     return int(float(s[:-1]) * units[s[-1].lower()])
-
-# Evaluation-type constants (Rust-backed), mirroring pyspark.util.PythonEvalType.
 
 def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
     """
@@ -225,7 +256,51 @@ class InheritableThread(threading.Thread):
         self._tags = set(self._session.getTags())
         return super().start()
 
-from pyspark._pyspark import PythonEvalType  # noqa: E402,F401
+
+# PySpark's plain class, of the evaluation types of org.apache.spark.api.python.PythonEvalType.
+class PythonEvalType:
+    """
+    Evaluation type of python rdd.
+
+    These values are internal to PySpark.
+
+    These values should match values in org.apache.spark.api.python.PythonEvalType.
+    """
+
+    NON_UDF: "NonUDFType" = 0
+
+    SQL_BATCHED_UDF: "SQLBatchedUDFType" = 100
+    SQL_ARROW_BATCHED_UDF: "SQLArrowBatchedUDFType" = 101
+
+    SQL_SCALAR_PANDAS_UDF: "PandasScalarUDFType" = 200
+    SQL_GROUPED_MAP_PANDAS_UDF: "PandasGroupedMapUDFType" = 201
+    SQL_GROUPED_AGG_PANDAS_UDF: "PandasGroupedAggUDFType" = 202
+    SQL_WINDOW_AGG_PANDAS_UDF: "PandasWindowAggUDFType" = 203
+    SQL_SCALAR_PANDAS_ITER_UDF: "PandasScalarIterUDFType" = 204
+    SQL_MAP_PANDAS_ITER_UDF: "PandasMapIterUDFType" = 205
+    SQL_COGROUPED_MAP_PANDAS_UDF: "PandasCogroupedMapUDFType" = 206
+    SQL_MAP_ARROW_ITER_UDF: "ArrowMapIterUDFType" = 207
+    SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE: "PandasGroupedMapUDFWithStateType" = 208
+    SQL_GROUPED_MAP_ARROW_UDF: "ArrowGroupedMapUDFType" = 209
+    SQL_COGROUPED_MAP_ARROW_UDF: "ArrowCogroupedMapUDFType" = 210
+    SQL_TRANSFORM_WITH_STATE_PANDAS_UDF: "PandasGroupedMapUDFTransformWithStateType" = 211
+    SQL_TRANSFORM_WITH_STATE_PANDAS_INIT_STATE_UDF: "PandasGroupedMapUDFTransformWithStateInitStateType" = 212
+    SQL_TRANSFORM_WITH_STATE_PYTHON_ROW_UDF: "GroupedMapUDFTransformWithStateType" = 213
+    SQL_TRANSFORM_WITH_STATE_PYTHON_ROW_INIT_STATE_UDF: "GroupedMapUDFTransformWithStateInitStateType" = 214
+    SQL_GROUPED_MAP_ARROW_ITER_UDF: "ArrowGroupedMapIterUDFType" = 215
+    SQL_GROUPED_MAP_PANDAS_ITER_UDF: "PandasGroupedMapIterUDFType" = 216
+    SQL_GROUPED_AGG_PANDAS_ITER_UDF: "PandasGroupedAggIterUDFType" = 217
+
+    # Arrow UDFs
+    SQL_SCALAR_ARROW_UDF: "ArrowScalarUDFType" = 250
+    SQL_SCALAR_ARROW_ITER_UDF: "ArrowScalarIterUDFType" = 251
+    SQL_GROUPED_AGG_ARROW_UDF: "ArrowGroupedAggUDFType" = 252
+    SQL_WINDOW_AGG_ARROW_UDF: "ArrowWindowAggUDFType" = 253
+    SQL_GROUPED_AGG_ARROW_ITER_UDF: "ArrowGroupedAggIterUDFType" = 254
+
+    SQL_TABLE_UDF: "SQLTableUDFType" = 300
+    SQL_ARROW_TABLE_UDF: "SQLArrowTableUDFType" = 301
+    SQL_ARROW_UDTF: "SQLArrowUDTFType" = 302
 
 
 class VersionUtils:

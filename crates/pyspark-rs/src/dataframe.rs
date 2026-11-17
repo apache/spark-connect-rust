@@ -69,6 +69,20 @@ const EAGER_EVAL: [&str; 3] = [
 ];
 
 impl PyDataFrame {
+    /// The names of the columns of the schema of this DataFrame, as Rust callers need them. Not
+    /// a method of the Python class, as PySpark's DataFrame has none of this name: so
+    /// `df.column_names` is the column of that name, of `__getattr__`.
+    fn column_names(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        if self.schema_object.is_some() {
+            return self.columns(py)?.bind(py).extract();
+        }
+        // The schema is cached, so the names come from it without another request.
+        let session = self.dataframe.spark_session();
+        let schema = interruptible(py, &session, || self.dataframe.schema())?;
+        check_schema_conversion(py, Some(&schema))?;
+        interruptible(py, &session, || self.dataframe.columns())
+    }
+
     /// `other`, a DataFrame of the session of this one, as PySpark's `_check_same_session`
     /// takes the DataFrame of a method: else `SESSION_NOT_SAME`, as for what is not a
     /// DataFrame.
@@ -3274,18 +3288,6 @@ impl PyDataFrame {
         Ok(PyList::new(py, self.column_names(py)?)?.into_any().unbind())
     }
 
-    /// The names of the columns of the schema of this DataFrame, as Rust callers need them.
-    fn column_names(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        if self.schema_object.is_some() {
-            return self.columns(py)?.bind(py).extract();
-        }
-        // The schema is cached, so the names come from it without another request.
-        let session = self.dataframe.spark_session();
-        let schema = interruptible(py, &session, || self.dataframe.schema())?;
-        check_schema_conversion(py, Some(&schema))?;
-        interruptible(py, &session, || self.dataframe.columns())
-    }
-
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`), of `num` as the
     /// proto's int32 of the plan, converted as `limit` converts it.
     fn tail(&self, py: Python<'_>, num: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
@@ -4473,6 +4475,12 @@ pub struct PyWhenMatched {
 
 #[pymethods]
 impl PyWhenMatched {
+    /// The merge builder of the clause, as PySpark's `writer` attribute of the clause.
+    #[getter]
+    fn writer(&self, py: Python<'_>) -> Py<PyMergeIntoWriter> {
+        self.writer.clone_ref(py)
+    }
+
     /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
     /// and condition, with the instance attributes of this one.
     fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
@@ -4533,6 +4541,12 @@ pub struct PyWhenNotMatched {
 
 #[pymethods]
 impl PyWhenNotMatched {
+    /// The merge builder of the clause, as PySpark's `writer` attribute of the clause.
+    #[getter]
+    fn writer(&self, py: Python<'_>) -> Py<PyMergeIntoWriter> {
+        self.writer.clone_ref(py)
+    }
+
     /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
     /// and condition, with the instance attributes of this one.
     fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
@@ -4588,6 +4602,12 @@ pub struct PyWhenNotMatchedBySource {
 
 #[pymethods]
 impl PyWhenNotMatchedBySource {
+    /// The merge builder of the clause, as PySpark's `writer` attribute of the clause.
+    #[getter]
+    fn writer(&self, py: Python<'_>) -> Py<PyMergeIntoWriter> {
+        self.writer.clone_ref(py)
+    }
+
     /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
     /// and condition, with the instance attributes of this one.
     fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {

@@ -10,6 +10,55 @@ use spark_connect::plan::AggregateGroupType;
 
 use crate::column::PyColumn;
 
+/// The object of the native state `init` of the class `cls`, `T` itself or a Python subclass of
+/// it, as PyO3's `tp_new` of a `#[new]` makes one of a subclass: so a copy of an object of a
+/// subclass, and the object that `_of_state` gives back of its pickle, are of the subclass, as
+/// the copies and pickles of PySpark's plain objects are of their class.
+pub(crate) fn new_of_class<'py, T: pyo3::PyClass>(
+    cls: &Bound<'py, pyo3::types::PyType>,
+    init: impl Into<PyClassInitializer<T>>,
+) -> PyResult<Bound<'py, T>> {
+    let py = cls.py();
+    if cls.is(py.get_type::<T>()) {
+        return Bound::new(py, init);
+    }
+    if !cls.is_subclass_of::<T>()? {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{} is not a subtype of {}",
+            cls.name()?,
+            py.get_type::<T>().name()?
+        )));
+    }
+    // SAFETY: `cls` is a subclass of `T`, of which PyO3's `tp_new_impl`, the `tp_new` of a
+    // `#[new]`, makes an object of an initializer of `T`.
+    unsafe {
+        let ptr = pyo3::impl_::pymethods::tp_new_impl::<PyClassInitializer<T>, T>(
+            py,
+            init.into(),
+            cls.as_type_ptr(),
+        )?;
+        Ok(Bound::from_owned_ptr(py, ptr).cast_into_unchecked())
+    }
+}
+
+/// The arguments `args` of the reducer of [`state_reduce`] of `object`, an object of the native
+/// class `native`, with the class of `object` after them when it is a Python subclass of it,
+/// which the reducer names, so that the unpickled object is of that class (see `_of_state`). Of
+/// the native class itself, the arguments, and so the pickle, are as they are.
+pub(crate) fn with_subclass<'py>(
+    object: &Bound<'py, PyAny>,
+    native: Bound<'py, pyo3::types::PyType>,
+    args: Bound<'py, PyTuple>,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let cls = object.get_type();
+    if cls.is(&native) {
+        return Ok(args);
+    }
+    let mut items: Vec<Bound<'py, PyAny>> = args.iter().collect();
+    items.push(cls.into_any());
+    PyTuple::new(object.py(), items)
+}
+
 /// The reduce of an object that pickles as `getattr(holder, name)`, such as a catalog as the
 /// attribute of its session.
 pub(crate) fn getattr_reduce<'py>(

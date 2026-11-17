@@ -355,7 +355,7 @@ def main():
     )
 
     # ---- session extras ---------------------------------------------------------
-    ck("session.sessionId", lambda: spark.sessionId)
+    ck("session.session_id", lambda: spark.session_id)
     ck("session.newSession", lambda: spark.newSession())
     ck("session.cloneSession", lambda: spark.cloneSession())
     ck("session.emptyDataFrame", lambda: spark.emptyDataFrame().count())

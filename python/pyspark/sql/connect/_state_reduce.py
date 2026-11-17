@@ -45,12 +45,29 @@ _GROUP_TYPES = {
 
 
 def _state_reduce(
-    drop_in: str, worker: Callable[..., Any], args: tuple[Any, ...]
+    drop_in: str, worker: Callable[..., Any], args: tuple[Any, ...], cls: Any = None
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The reduce of an object of the drop-in class ``drop_in`` of ``args``, its state: the
     function, which cloudpickle pickles by value, gives back the drop-in's object of the state
     through its ``_of_state``, or, on a worker without ``pyspark._pyspark``, what ``worker``
-    builds of the state with PySpark's own objects."""
+    builds of the state with PySpark's own objects. An object of ``cls``, a Python subclass of
+    the drop-in class, is given back of ``cls``, which the reduce names, as a pickle of PySpark's
+    object of a subclass is of that subclass: on such a worker, ``cls`` is the subclass of
+    PySpark's class, whose object PySpark's pickle makes without its ``__init__``, as here."""
+    if cls is not None:
+
+        def creator(cls: Any, *state: Any) -> Any:
+            try:
+                from pyspark import _pyspark  # noqa: F401
+            except ImportError:
+                obj = worker(*state)
+                if isinstance(cls, type) and issubclass(cls, type(obj)):
+                    obj.__class__ = cls
+                return obj
+            return cls._of_state(*state)
+
+        creator.__qualname__ = "SparkSession.__reduce__.<locals>.creator"
+        return creator, (cls, *args)
 
     def creator(*state: Any) -> Any:
         try:
@@ -100,12 +117,15 @@ def reader_reduce(
     options: dict[str, str],
     unsent: Any,
     unencodable: Any,
+    cls: Any = None,
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of a DataFrameReader of ``session``, of the state that ``_of_state`` takes."""
+    """The reduce of a DataFrameReader of ``session``, of the state that ``_of_state`` takes, of
+    the subclass ``cls`` if it is one."""
     return _state_reduce(
         "DataFrameReader",
         _worker_reader,
         (session, format, schema, options, unsent, unencodable),
+        cls,
     )
 
 
@@ -371,12 +391,15 @@ def stream_reader_reduce(
     source_name: Optional[str],
     unsent: Any,
     unencodable: Any,
+    cls: Any = None,
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of a DataStreamReader of ``session``, of the state that ``_of_state`` takes."""
+    """The reduce of a DataStreamReader of ``session``, of the state that ``_of_state`` takes, of
+    the subclass ``cls`` if it is one."""
     return _state_reduce(
         "DataStreamReader",
         _worker_stream_reader,
         (session, format, schema, options, source_name, unsent, unencodable),
+        cls,
     )
 
 

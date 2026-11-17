@@ -53,6 +53,14 @@ impl PyTableArg {
         })
     }
 
+    /// The `spark.connect.Expression` of the table argument, as PySpark Connect's
+    /// `TableArg.to_plan`: that of its subquery expression, of `pyspark.sql.connect.proto`, of
+    /// its plan ID, its partitioning, its ordering and its single partition.
+    fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let _ = session;
+        crate::column::expression_message(py, &self.inner.to_column())
+    }
+
     /// Mark the table argument as requiring a single partition.
     #[allow(non_snake_case)]
     fn withSinglePartition(&self) -> PyResult<PyTableArg> {

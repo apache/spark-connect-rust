@@ -349,6 +349,32 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
   which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
   holds there (`vars(spark.streams)` is empty, where PySpark's has `_session` and `_sqlb`).
+- **Subclasses** (intentional; the state is native). PySpark's classes are plain classes that a
+  user subclasses. The drop-in's DataFrame, `Observation`, `DataFrameReader`, `DataStreamReader`,
+  `SparkSession.Hook`, `StorageLevel` and `PythonEvalType` are subclassed as PySpark's: a subclass
+  constructs of the arguments of its `__init__`, and its copies and pickles are of the subclass.
+  The `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window` is subclassed, of its
+  static methods, but neither it nor a subclass has instances (`Window()` raises
+  `cannot create '...' instances`), as it has no state. A reader is made of a session, one of
+  those arguments, so PySpark's pickle of a reader, which makes it of its class without arguments,
+  does not load in the drop-in (`TypeError`). The other native classes are not subclassable
+  (`TypeError: type '...' is not an acceptable base type`), and of them only `SparkSession`,
+  `Catalog`, `DataSourceRegistration` and the data types construct, as PySpark's do; the others
+  raise `cannot create '...' instances`, as their constructors take the Python objects of
+  PySpark's client, which the drop-in's native state replaces (see `docs/compatibility.md`):
+  - `Column`: an `Expression` of `pyspark.sql.connect.expressions`;
+  - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter`, `MergeIntoWriter`: the
+    `LogicalPlan` of a DataFrame;
+  - `GroupedData`, `PandasCogroupedOps`: a DataFrame and the expressions of its grouping;
+  - `DataFrameNaFunctions`, `DataFrameStatFunctions`: a DataFrame of a native plan;
+  - `WindowSpec`, `TableArg`: expressions and a `WindowFrame`, a `SubqueryExpression`;
+  - `RuntimeConf`: a `SparkConnectClient`;
+  - `StreamingQueryManager`, `StreamingQuery`: a session and the IDs of a query, of the
+    listener bus and the queries of the Rust core;
+  - `TableValuedFunction`: a session, of the native core.
+
+  The data types (`StringType`, `DecimalType`, `ArrayType`, `StructField`, `StructType` and
+  the others) construct but are not subclassable.
 - **Shallow copy of a session builder** (tracked). `copy.copy(SparkSession.builder)` has
   options of its own, where PySpark's shares its `_options` dict and its hook factories
   with the builder that it copies, so that a `config` of either one is seen by both.

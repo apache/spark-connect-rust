@@ -244,9 +244,13 @@ fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
 /// Like PySpark's reader, the setters change this object and return it, and the
 /// reader can be used again after a read: the core reader is a consuming builder, so
 /// the setters replace the wrapped value in place and the reads work on a clone.
+/// As PySpark's plain class, it constructs of a session, `DataStreamReader(spark)`, and is
+/// subclassed: the setters return the object, of its subclass, and its copies and pickles are
+/// of its class.
 #[pyclass(
     name = "DataStreamReader",
     module = "pyspark.sql.connect.streaming.readwriter",
+    subclass,
     weakref,
     dict
 )]
@@ -437,14 +441,40 @@ impl PyDataStreamReader {
 
 #[pymethods]
 impl PyDataStreamReader {
+    /// `DataStreamReader(client)`, as PySpark Connect's, of the session `client`: the reader that
+    /// `spark.readStream` gives. As the `object.__new__` of PySpark's plain class, it takes the
+    /// arguments of the `__init__` of a subclass too, of which the session is the first that is
+    /// a session (see `session::constructor_session`); `__init__` checks them.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(client)")]
+    fn py_new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let session = crate::session::constructor_session(cls, args, kwargs, "client")?;
+        Ok(PyDataStreamReader::new(
+            session.borrow().session.read_stream(),
+        ))
+    }
+
+    /// As PySpark's `__init__(client)`, which makes the reader of the session anew: of no
+    /// format, schema, options or source name.
+    fn __init__(slf: &Bound<'_, Self>, client: PyRef<'_, crate::session::PySparkSession>) {
+        let reader = PyDataStreamReader::new(client.session.read_stream());
+        *slf.borrow_mut() = reader;
+    }
+
     /// The shallow copy of a stream reader, as PySpark's `copy.copy`: the copy shares the
     /// options of this reader, as its `_options` dict is shared, so an option that either one
-    /// sets or unsets is seen by both, and has its own format, which is kept as it is.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+    /// sets or unsets is seen by both, and has its own format, which is kept as it is. It is of
+    /// the class of this reader, as the copy of PySpark's of a subclass is.
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
         let py = slf.py();
         let this = slf.borrow();
-        let copy = Py::new(
-            py,
+        let copy = crate::reduce::new_of_class(
+            &slf.get_type(),
             PyDataStreamReader {
                 inner: this.inner.clone(),
                 options: Arc::clone(&this.options),
@@ -457,12 +487,13 @@ impl PyDataStreamReader {
                 gc_ready: crate::gc::GcReady::new(),
             },
         )?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.as_any())?;
         Ok(copy)
     }
 
     /// The reduce of a stream reader, as PySpark's pickle of its session and its state, which
-    /// `_of_state` gives back, with the instance attributes of the reader.
+    /// `_of_state` gives back, of the class of the reader (named in the reduce when it is a
+    /// subclass), with the instance attributes of the reader.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::{optional_object, state_reduce, str_dict};
 
@@ -485,16 +516,18 @@ impl PyDataStreamReader {
                 )?,
             ],
         )?;
+        let args = crate::reduce::with_subclass(slf.as_any(), py.get_type::<Self>(), args)?;
         let reduced = state_reduce(py, "stream_reader_reduce", args)?;
         crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
     }
 
-    /// A stream reader of its state, as `__reduce__` gives it: of the session `session`, the
-    /// format, the schema, the options, the source name, the format that is kept (`unsent`), and
-    /// the schema and the options that UTF-8 cannot encode (`unencodable`).
-    #[staticmethod]
-    fn _of_state(
-        py: Python<'_>,
+    /// A stream reader of its state, as `__reduce__` gives it, of the class `cls`: of the session
+    /// `session`, the format, the schema, the options, the source name, the format that is kept
+    /// (`unsent`), and the schema and the options that UTF-8 cannot encode (`unencodable`).
+    #[classmethod]
+    #[allow(clippy::too_many_arguments)]
+    fn _of_state<'py>(
+        cls: &Bound<'py, pyo3::types::PyType>,
         session: Py<crate::session::PySparkSession>,
         format: Option<String>,
         schema: String,
@@ -502,7 +535,8 @@ impl PyDataStreamReader {
         source_name: Option<String>,
         unsent: Option<Py<PyAny>>,
         unencodable: Py<PyAny>,
-    ) -> PyResult<PyDataStreamReader> {
+    ) -> PyResult<Bound<'py, PyDataStreamReader>> {
+        let py = cls.py();
         let mut reader = session.borrow(py).session.read_stream();
         if let Some(format) = format {
             reader = reader.format(&format);
@@ -529,7 +563,7 @@ impl PyDataStreamReader {
             let state = result.put_option(result.state(), &key, value.as_ref());
             result.set_state(state);
         }
-        Ok(result)
+        crate::reduce::new_of_class(cls, result)
     }
 
     /// Set the schema, if any, and the options of `options` that are not None, through its own
@@ -2231,7 +2265,10 @@ impl PyStreamingQueryManager {
         Ok(())
     }
 
-    fn streamListenerEvents(&self, py: Python<'_>) -> PyResult<PyListenerEventStream> {
+    /// The events of the listener bus of the server, an iterator of `(event type, JSON)`, of the
+    /// Rust core's listener event stream. A private name, as PySpark's manager has no such
+    /// method: its listener bus reads the events itself.
+    fn _stream_listener_events(&self, py: Python<'_>) -> PyResult<PyListenerEventStream> {
         let session = self.inner.spark_session();
         let stream = interruptible(py, &session, || {
             self.inner.listener_event_stream().map_err(Box::new)
