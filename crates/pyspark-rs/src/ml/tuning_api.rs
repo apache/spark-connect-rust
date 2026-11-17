@@ -137,7 +137,7 @@ fn converted_to_py(py: Python<'_>, value: Converted) -> PyResult<Py<PyAny>> {
     Ok(match value {
         Converted::Null => py.None(),
         Converted::Int(value) => value.into_py_any(py)?,
-        // An int beyond a long, as the `repr` of the converted value.
+        // A value that PySpark cannot send, of the `repr` of the converted value.
         Converted::Unsendable(text) => py
             .import("ast")?
             .getattr("literal_eval")?
@@ -148,7 +148,10 @@ fn converted_to_py(py: Python<'_>, value: Converted) -> PyResult<Py<PyAny>> {
         Converted::Bool(value) => value.into_py_any(py)?,
         Converted::StrList(value) => value.into_py_any(py)?,
         Converted::FloatList(value) => value.into_py_any(py)?,
-        Converted::IntList(value) => value.into_py_any(py)?,
+        Converted::IntList(literal) => {
+            let value = spark_connect::ml::MlValue::from_literal(&literal).to_pyerr()?;
+            object::ml_value_to_py(py, &value)?
+        }
         Converted::FloatListList(value) => value.into_py_any(py)?,
         Converted::Raw(value) => value,
         Converted::Vector(_) | Converted::Matrix(_) => {

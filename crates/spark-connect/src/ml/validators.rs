@@ -197,9 +197,12 @@ fn parallel_fits(
                     let mut copy = estimator.clone_stage();
                     copy.apply_param_map(&maps[index])?;
                     let model = copy.fit(train)?;
-                    // As `model.transform(validation, epm[index])`: of a copy of the map.
+                    // As `model.transform(validation, epm[index])`: of a copy of the map, as
+                    // `Transformer.transform` copies the model of a map that is not empty.
                     let mut evaluated = model.clone_box();
-                    evaluated.apply_param_map(&maps[index])?;
+                    if !maps[index].is_empty() {
+                        evaluated.apply_param_map(&maps[index])?;
+                    }
                     let metric = evaluator.evaluate(&evaluated.transform(validation)?)?;
                     Ok((metric, model))
                 })();
@@ -739,9 +742,66 @@ impl Transformer for CrossValidatorModel {
         self.best_model.transform(df)
     }
 
+    /// Set the values of `map`, as `CrossValidatorModel.copy(extra)` of PySpark: a copy of the
+    /// best model of `map`, then PySpark's `assert self.subModels is not None`, which fails of a
+    /// model of no sub-models (see [`no_sub_models`]), copies of the sub-models (of no map: PySpark
+    /// copies no extra into them), and the model's own params of `map` (`numFolds`, `foldCol` and
+    /// `seed`), as `_copyValues` sets them.
     fn apply_param_map(&mut self, map: &ParamMap) -> Result<()> {
-        self.best_model.apply_param_map(map)
+        let mut best_model = self.best_model.clone_box();
+        best_model.apply_param_map(map)?;
+        let Some(folds) = &self.sub_models else {
+            return Err(no_sub_models("CrossValidatorModel"));
+        };
+        let sub_models = folds
+            .iter()
+            .map(|models| copied_models(models))
+            .collect::<Result<Vec<_>>>()?;
+        let class = self.operator.name.clone();
+        let uid = self.operator.uid.clone();
+        let num_folds = own_as(&class, &uid, map, "numFolds", MlValue::as_i64)?;
+        let fold_col = own_as(&class, &uid, map, "foldCol", |v| {
+            v.as_str().map(String::from)
+        })?;
+        let seed = own_as(&class, &uid, map, "seed", MlValue::as_i64)?;
+        self.best_model = best_model;
+        self.sub_models = Some(sub_models);
+        if let Some(num_folds) = num_folds {
+            self.num_folds = num_folds;
+        }
+        if let Some(fold_col) = fold_col {
+            self.fold_col = fold_col;
+        }
+        if seed.is_some() {
+            self.common.seed = seed;
+        }
+        Ok(())
     }
+}
+
+/// PySpark's `assert self.subModels is not None` of the `copy` of a model of the validator class
+/// `class`: a bare `AssertionError` of the model of a fit of no `collectSubModels`, which fails an
+/// outer validator's evaluation of a param map too, as its `model.transform(validation,
+/// epm[index])` copies the model of the map.
+fn no_sub_models(class: &str) -> SparkError {
+    assertion_error(format!(
+        "{class}.copy asserts that the model has sub-models (`assert self.subModels is not \
+         None`), and this model has none: fit it with collect_sub_models to copy it of a param map"
+    ))
+}
+
+/// Copies of `models`, as PySpark's `[sub_model.copy() for sub_model in models]` copies the
+/// sub-models of a validator's model: of no param map (whose copy of a validator's model of no
+/// sub-models fails as its own `copy` does).
+fn copied_models(models: &[Box<dyn Model>]) -> Result<Vec<Box<dyn Model>>> {
+    models
+        .iter()
+        .map(|model| {
+            let mut copy = model.clone_box();
+            copy.apply_param_map(&ParamMap::new())?;
+            Ok(copy)
+        })
+        .collect()
 }
 
 impl Model for CrossValidatorModel {
@@ -1114,8 +1174,29 @@ impl Transformer for TrainValidationSplitModel {
         self.best_model.transform(df)
     }
 
+    /// Set the values of `map`, as `TrainValidationSplitModel.copy(extra)` of PySpark (see
+    /// [`CrossValidatorModel`]'s): a copy of the best model of `map`, the `assert` of sub-models,
+    /// copies of the sub-models, and the model's own params of `map` (`trainRatio` and `seed`).
     fn apply_param_map(&mut self, map: &ParamMap) -> Result<()> {
-        self.best_model.apply_param_map(map)
+        let mut best_model = self.best_model.clone_box();
+        best_model.apply_param_map(map)?;
+        let Some(models) = &self.sub_models else {
+            return Err(no_sub_models("TrainValidationSplitModel"));
+        };
+        let sub_models = copied_models(models)?;
+        let class = self.operator.name.clone();
+        let uid = self.operator.uid.clone();
+        let train_ratio = own_as(&class, &uid, map, "trainRatio", MlValue::as_f64)?;
+        let seed = own_as(&class, &uid, map, "seed", MlValue::as_i64)?;
+        self.best_model = best_model;
+        self.sub_models = Some(sub_models);
+        if let Some(train_ratio) = train_ratio {
+            self.train_ratio = train_ratio;
+        }
+        if seed.is_some() {
+            self.common.seed = seed;
+        }
+        Ok(())
     }
 }
 
@@ -1893,6 +1974,104 @@ mod tests {
             ),
             (0.3, 2, true)
         );
+    }
+
+    #[test]
+    fn the_models_of_the_validators_apply_a_param_map_as_their_copy_in_pyspark() {
+        // As `CrossValidatorModel.copy(extra)` and `TrainValidationSplitModel.copy(extra)`: a copy
+        // of the best model of `extra`, PySpark's `assert self.subModels is not None` (a bare
+        // AssertionError of a model of no sub-models, also of no extra), copies of the sub-models of
+        // no extra (which fail as their own `copy` does), and the model's own params of `extra`, as
+        // `_copyValues` sets the params of the model's uid.
+        let assembler = VectorAssembler::new().set_output_col("v");
+        let assembler_uid = assembler.operator().uid.clone();
+        let best = || -> Box<dyn Model> {
+            Box::new(PipelineModel::of_stages(vec![PipelineStage::transformer(
+                assembler.clone(),
+            )]))
+        };
+        let output_col = |model: &dyn Model| {
+            let pipeline = model.downcast_ref::<PipelineModel>().expect("a pipeline");
+            let PipelineStage::Transformer(stage) = &pipeline.stages()[0] else {
+                panic!("a transformer stage");
+            };
+            stage.params().string_opt("outputCol").map(str::to_string)
+        };
+        let cv_model = |sub_models| CrossValidatorModel {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.tuning.CrossValidatorModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            best_model: best(),
+            avg_metrics: vec![0.5],
+            std_metrics: vec![0.0],
+            sub_models,
+            common: Common::new(0),
+            num_folds: 3,
+            fold_col: String::new(),
+        };
+        let tvs_model = |sub_models| TrainValidationSplitModel {
+            operator: MlOperator::new(
+                "org.apache.spark.ml.tuning.TrainValidationSplitModel",
+                OperatorType::Model,
+            ),
+            params: Params::new(),
+            best_model: best(),
+            validation_metrics: vec![0.5],
+            sub_models,
+            common: Common::new(0),
+            train_ratio: 0.75,
+        };
+        let of_best = ParamMap::new().put(&assembler_uid, "outputCol", MlValue::String("w".into()));
+        let assertion = |result: Result<()>| {
+            let error = result.expect_err("the assert of the sub-models");
+            assert_eq!(error.kind, SparkErrorKind::AssertionError);
+            assert!(
+                error
+                    .to_string()
+                    .contains("(`assert self.subModels is not None`)"),
+                "{error}"
+            );
+        };
+        for map in [of_best.clone(), ParamMap::new()] {
+            assertion(cv_model(None).apply_param_map(&map));
+            assertion(tvs_model(None).apply_param_map(&map));
+        }
+
+        let mut model = cv_model(Some(vec![vec![best()], vec![best()]]));
+        let uid = model.uid().to_string();
+        let map = of_best
+            .clone()
+            .put(&uid, "numFolds", MlValue::Int(5))
+            .put(&uid, "foldCol", MlValue::String("fold".into()))
+            .put(&uid, "seed", MlValue::Int(9));
+        model.apply_param_map(&map).unwrap();
+        assert_eq!(
+            (model.num_folds(), model.fold_col(), model.seed()),
+            (5, "fold", 9)
+        );
+        assert_eq!(output_col(model.best_model()).as_deref(), Some("w"));
+        let folds = model.sub_models().expect("sub-models");
+        assert_eq!(folds.len(), 2);
+        assert_eq!(output_col(folds[0][0].as_ref()).as_deref(), Some("v"));
+
+        let mut model = tvs_model(Some(vec![best()]));
+        let uid = model.uid().to_string();
+        let map = of_best
+            .clone()
+            .put(&uid, "trainRatio", MlValue::Double(0.5))
+            .put(&uid, "seed", MlValue::Int(9));
+        model.apply_param_map(&map).unwrap();
+        assert_eq!((model.train_ratio(), model.seed()), (0.5, 9));
+        assert_eq!(output_col(model.best_model()).as_deref(), Some("w"));
+        let sub_models = model.sub_models().expect("sub-models");
+        assert_eq!(output_col(sub_models[0].as_ref()).as_deref(), Some("v"));
+
+        // A sub-model of no sub-models of its own fails its copy, of PySpark's
+        // `[sub_model.copy() for ...]`.
+        assertion(cv_model(Some(vec![vec![Box::new(cv_model(None))]])).apply_param_map(&of_best));
+        assertion(tvs_model(Some(vec![Box::new(tvs_model(None))])).apply_param_map(&of_best));
     }
 
     #[test]

@@ -75,6 +75,8 @@ enum Kind {
     StrList,
     /// `toListFloat`: an array literal of doubles.
     FloatList,
+    /// `toListInt`: the array literal of `LiteralExpression._from_value` of the list, of the type
+    /// of its first element (see [`int_list`]).
     IntList,
     FloatListList,
     Identity,
@@ -111,15 +113,18 @@ enum Converted {
     /// NullPointerException), and reads a null bootstrap as false.
     Null,
     Int(i64),
-    /// An int beyond a long (or a list of ints with one), which PySpark's `LiteralExpression`
-    /// cannot send, of the `repr` of the converted value, which its getter returns.
+    /// A value that PySpark's `LiteralExpression` cannot send, of the `repr` of the converted
+    /// value, which its getter returns: an int beyond a long, or a list of ints whose literal
+    /// fails (see [`int_list`]). The next fit, transform or save raises the error of its literal
+    /// (see [`params_api::unsendable_error`]).
     Unsendable(String),
     Float(f64),
     Str(String),
     Bool(bool),
     StrList(Vec<String>),
     FloatList(Vec<f64>),
-    IntList(Vec<i64>),
+    /// The array literal of a list of ints (see [`int_list`]).
+    IntList(spark_connect_proto::expression::Literal),
     Vector(MlVector),
     FloatListList(Vec<Vec<f64>>),
     Raw(Py<PyAny>),
@@ -161,10 +166,7 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
         Kind::Bool => Converted::Bool(converted.extract()?),
         Kind::StrList => Converted::StrList(converted.extract()?),
         Kind::FloatList => Converted::FloatList(converted.extract()?),
-        Kind::IntList => match converted.extract::<Vec<i64>>() {
-            Ok(value) => Converted::IntList(value),
-            Err(_) => Converted::Unsendable(converted.repr()?.to_string()),
-        },
+        Kind::IntList => int_list(&converted)?,
         Kind::FloatListList => Converted::FloatListList(converted.extract()?),
         Kind::Identity => Converted::Raw(converted.unbind()),
         Kind::Vector => {
@@ -216,6 +218,30 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
                 })
             }
         }
+    })
+}
+
+/// The value of a `toListInt` param of the list `converted` that its converter returned, as
+/// PySpark's serialization of the params sends it (`serialize_param`): the literal of
+/// `LiteralExpression._from_value` of the list, as the values of the ML fetches are built
+/// (`functions::to_value_column`). Its type is the type of its first element (`_infer_type`), an
+/// integer, else a long, and each element is a `LiteralExpression` of that type. A list of which
+/// it fails is unsendable, of the error of the literal at the next fit, transform or save: an
+/// element out of the range of the first's type fails its `assert` (a bare `AssertionError`), a
+/// first element beyond a long is `VALUE_NOT_BETWEEN`, and an empty list
+/// `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
+fn int_list(converted: &Bound<'_, PyAny>) -> PyResult<Converted> {
+    let literal = crate::functions::to_value_column(converted)
+        .ok()
+        .and_then(|column| match column.expression().node() {
+            spark_connect::expression::ExpressionNode::Literal(literal) => {
+                Some(literal.to_literal_proto())
+            }
+            _ => None,
+        });
+    Ok(match literal {
+        Some(literal) => Converted::IntList(literal),
+        None => Converted::Unsendable(converted.repr()?.to_string()),
     })
 }
 
@@ -301,7 +327,7 @@ fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
         Converted::Bool(value) => params.set_param_bool(jvm, value),
         Converted::StrList(values) => params.set_param_string_array(jvm, values),
         Converted::FloatList(values) => params.set_param_double_array(jvm, values),
-        Converted::IntList(values) => params.set_param_int_array(jvm, values),
+        Converted::IntList(literal) => params.set_param_literal(jvm, literal),
         Converted::Vector(value) => params.set_param_vector(jvm, value),
         Converted::FloatListList(value) => params.set_param_double_arrays(jvm, value),
         Converted::Raw(value) => {
@@ -539,23 +565,22 @@ fn check_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 
 /// The core object of `slf`, cloned under a short borrow, so that a setter that another
 /// thread calls while a fit, transform or evaluate waits for the server does not fail. As
-/// PySpark's serialization of the params, it first raises `VALUE_NOT_BETWEEN` of an int
-/// that PySpark cannot send, and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list param without
-/// elements, whose element type PySpark cannot infer.
+/// PySpark's serialization of the params, it first raises the error of a value that PySpark
+/// cannot send (`VALUE_NOT_BETWEEN` of an int beyond a long, see
+/// [`params_api::unsendable_error`]), and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list param
+/// without elements, whose element type PySpark cannot infer.
 fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
+    let py = slf.py();
     let this = slf.try_borrow()?;
-    if !this.unsendable().is_empty() {
-        return Err(crate::functions::value_not_between(slf.py()));
+    let unsendable = this.unsendable().first().map(|name| T::jvm_name(name));
+    if unsendable.is_none() && !this.params().has_empty_array() {
+        return this.snapshot_core(py);
     }
-    if this.params().has_empty_array() {
-        return Err(crate::column::raise_pyspark(
-            slf.py(),
-            "PySparkTypeError",
-            "CANNOT_INFER_ARRAY_ELEMENT_TYPE",
-            &[],
-        ));
-    }
-    this.snapshot_core(slf.py())
+    // The error of a copy of the params, after the borrow (see `params_api::params_error`).
+    let params = this.params().clone();
+    drop(this);
+    Err(params_api::params_error(py, &params, unsendable)
+        .unwrap_or_else(|| crate::functions::value_not_between(py)))
 }
 
 /// The dataset of `method`, a Spark DataFrame. Another object raises the `AttributeError` of

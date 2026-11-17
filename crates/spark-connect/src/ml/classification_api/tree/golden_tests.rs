@@ -34,6 +34,7 @@ const CLASSIFICATION_SUMMARIES: &str =
     include_str!("../../../../../../tests/golden/classification_summaries.json");
 const CLASSIFICATION_PERSISTENCE: &str =
     include_str!("../../../../../../tests/golden/classification_persistence.json");
+const TREE_API_CASES: &str = include_str!("../../../../../../tests/golden/tree_api_cases.json");
 
 type Requests = Arc<Mutex<Vec<proto::ExecutePlanRequest>>>;
 
@@ -382,6 +383,26 @@ fn random_forest_model_accessors_send_the_golden_requests() {
         model.supported_feature_subset_strategies(),
         ["auto", "all", "onethird", "sqrt", "log2"]
     );
+}
+
+#[test]
+fn the_summary_of_a_random_forest_model_of_none_is_pysparks_error() {
+    // As PySpark's `HasTrainingSummary.summary` over Spark Connect of a model that has no
+    // `_summary` (a loaded model): the RuntimeError of the model's class name, before any request,
+    // as the golden of official PySpark 4.3.0 has it (`tree_api_cases.json`), and as the other
+    // models' `summary` say it.
+    let cases = golden(TREE_API_CASES);
+    let expected = &cases["RandomForest"]["live"]["loaded_summary"];
+    assert_eq!(expected[0], "RuntimeError");
+    let session = offline_session();
+    let requests = capture(&session);
+    let model = RandomForestClassificationModel::from_ml_ref(
+        MlRef::from_id(&session, "<id0>"),
+        Params::new(),
+    );
+    let error = model.summary().expect_err("a model of no training summary");
+    assert_eq!(error.to_string(), expected[1].as_str().unwrap());
+    assert!(requests.lock().unwrap().is_empty());
 }
 
 #[test]

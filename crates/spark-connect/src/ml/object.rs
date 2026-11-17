@@ -826,7 +826,7 @@ pub fn write_operator(
             r#type: Some(proto::ml_command::write::Type::Operator(
                 operator.to_proto(),
             )),
-            params: Some(params.to_proto()),
+            params: Some(params.sendable()?),
             path: path.to_string(),
             should_overwrite: Some(overwrite),
             options: options.clone(),
@@ -848,7 +848,7 @@ pub fn write_object(
         object.session(),
         proto::ml_command::Command::Write(proto::ml_command::Write {
             r#type: Some(proto::ml_command::write::Type::ObjRef(object.object_ref())),
-            params: Some(params.to_proto()),
+            params: Some(params.sendable()?),
             path: path.to_string(),
             should_overwrite: Some(overwrite),
             options: options.clone(),

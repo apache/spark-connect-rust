@@ -1578,6 +1578,96 @@ def test_ml_connect_binary_evaluator_uses_standard_raw_prediction_parameters(ml_
         cls(probabilityCol="p")
 
 
+def test_ml_connect_int_lists_are_literals_of_the_type_of_their_first_element_as_pyspark(ml_mock):
+    # As PySpark's serialization of a list of ints (`toListInt`): LiteralExpression._from_value
+    # types the list by its first element, an integer when it fits 32 bits, else a long, and each
+    # element is a LiteralExpression of that type, whose assert fails of an element out of its
+    # range. The constructor, the setters, setParams and a copy take any list of ints, which the
+    # getter returns, and the next fit, transform or save raises, before any request, the bare
+    # AssertionError of such an element, the VALUE_NOT_BETWEEN of a first element beyond a long,
+    # and the CANNOT_INFER_ARRAY_ELEMENT_TYPE of no element: of the first param of `_paramMap` that
+    # it cannot send, as official pyspark-client 4.3.0 does of each of these.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    models = []
+    mlp = connect.MultilayerPerceptronClassifier
+    slicer = connect.VectorSlicer
+    sendable = [
+        ([2, 3, 2], "integer"),
+        ([-(2**31), 2**31 - 1], "integer"),
+        ([2**33, 3, 2], "long"),
+        ([2**40, -(2**63), 2**63 - 1], "long"),
+    ]
+    for values, element in sendable:
+        made = [
+            ("layers", mlp(layers=values)),
+            ("layers", mlp().setLayers(values)),
+            ("layers", mlp().setParams(layers=values)),
+            ("indices", slicer(indices=values)),
+            ("indices", slicer().setIndices(values)),
+        ]
+        for name, obj in made:
+            _, params = _native_request(spark, service, obj, models)
+            literal = params.params[name]
+            assert literal.array.element_type.WhichOneof("kind") == element, (name, values)
+            elements = literal.array.elements
+            assert [e.WhichOneof("literal_type") for e in elements] == [element] * len(values)
+            assert [getattr(e, element) for e in elements] == values
+    unsendable = [
+        ([2, 2**32 + 3, 2], AssertionError, None),
+        ([2, 2**64, 2], AssertionError, None),
+        ([2**40, 2**64], AssertionError, None),
+        ([2, -(2**31) - 1], AssertionError, None),
+        ([2**64, 2, 2], PySparkValueError, "VALUE_NOT_BETWEEN"),
+        ([], PySparkTypeError, "CANNOT_INFER_ARRAY_ELEMENT_TYPE"),
+    ]
+    df = spark.range(1)
+    sent = _requests_but_deletes(service)
+    for values, error_class, condition in unsendable:
+        made = [
+            ("getLayers", mlp(layers=values), "fit"),
+            ("getLayers", mlp().setLayers(values), "fit"),
+            ("getLayers", mlp().setParams(layers=values).copy(), "fit"),
+            ("getIndices", slicer(indices=values), "transform"),
+            ("getNumBucketsArray", connect.QuantileDiscretizer(numBucketsArray=values), "fit"),
+        ]
+        for getter, obj, call in made:
+            assert getattr(obj, getter)() == values
+            for run in [lambda: getattr(obj, call)(df), lambda: obj.write().save("/unsent/path")]:
+                with pytest.raises(error_class) as error:
+                    run()
+                if condition is None:
+                    assert type(error.value) is AssertionError and str(error.value) == ""
+                else:
+                    assert error.value.getCondition() == condition, (getter, values)
+    assert _requests_but_deletes(service) == sent
+    # A list that PySpark sends, set again, is sent.
+    estimator = mlp(layers=[2, 2**33])
+    assert estimator.setLayers([2, 3]) is estimator
+    assert _native_sent(spark, service, estimator, models)["layers"] == ("array", [2, 3])
+    # The error is that of the first param of `_paramMap` that PySpark cannot send.
+    for estimator, expected in [
+        (mlp(maxIter=2**64, layers=[2, 2**33]), PySparkValueError),
+        (mlp(layers=[2, 2**33], maxIter=2**64), AssertionError),
+        (mlp().setMaxIter(2**64).setLayers([2, 2**33]), PySparkValueError),
+        (mlp().setLayers([2, 2**33]).setMaxIter(2**64), AssertionError),
+    ]:
+        with pytest.raises(expected) as error:
+            estimator.fit(df)
+        assert type(error.value) is expected
+    # A model's copy of such a list keeps it, and its transform raises.
+    _native_request(spark, service, mlp(layers=[2, 3]), models)
+    model = models[-1]
+    copied = model.copy({model.layers: [2, 2**32 + 3]})
+    assert copied.getLayers() == [2, 2**32 + 3]
+    sent = _requests_but_deletes(service)
+    with pytest.raises(AssertionError) as error:
+        copied.transform(df)
+    assert type(error.value) is AssertionError
+    assert _requests_but_deletes(service) == sent
+
+
 def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
     # As PySpark: an int beyond a long is taken by the constructor and the setter, and the
     # next fit raises the VALUE_NOT_BETWEEN of PySpark's serialization of the params, before

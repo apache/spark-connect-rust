@@ -350,13 +350,43 @@ impl MlMatrix {
 pub struct Params {
     /// User-supplied parameters as name -> Literal mappings
     params: HashMap<String, proto::Expression>,
+    /// The params of a value that PySpark cannot send, by name, of the error that PySpark's
+    /// serialization of the params raises of it (see [`Params::sendable`]). The value stays in
+    /// `params`, which its getter reads, as PySpark's `_paramMap` keeps it.
+    unsendable: std::collections::BTreeMap<String, SparkError>,
+}
+
+/// The error of an `assert` of PySpark that fails, a bare `AssertionError` in PySpark (such as the
+/// one of its `LiteralExpression` of a value that it does not take), of the message `message`,
+/// which says what failed.
+fn assertion_error(message: String) -> SparkError {
+    SparkError {
+        kind: SparkErrorKind::AssertionError,
+        ..SparkError::value_msg(message)
+    }
 }
 
 impl Params {
     /// Create a new empty Params collection.
     pub fn new() -> Self {
-        Params {
-            params: HashMap::new(),
+        Params::default()
+    }
+
+    /// Set the param `name` to `expr`, a value that PySpark sends, in place of any value that it
+    /// cannot send.
+    fn put(&mut self, name: &str, expr: proto::Expression) {
+        self.unsendable.remove(name);
+        self.params.insert(name.to_string(), expr);
+    }
+
+    /// The params as [`Params::to_proto`] serializes them, to be sent, as PySpark's
+    /// `serialize_ml_params` serializes a fit's, transform's, evaluate's or save's: the error that
+    /// it raises of a param of a value that it cannot send (such as a list of ints of a
+    /// [`Params::set_param_int_array`]), of the first of them by name, before any request.
+    pub fn sendable(&self) -> spark_connect_core::error::Result<proto::MlParams> {
+        match self.unsendable.values().next() {
+            Some(error) => Err(error.clone()),
+            None => Ok(self.to_proto()),
         }
     }
 
@@ -366,7 +396,7 @@ impl Params {
         let mut lit = proto::expression::Literal::default();
         lit.literal_type = Some(proto::expression::literal::LiteralType::Long(value));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -377,8 +407,8 @@ impl Params {
             literal_type: Some(proto::expression::literal::LiteralType::Integer(value)),
             ..Default::default()
         };
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -416,8 +446,8 @@ impl Params {
             elements,
         }
         .to_literal_proto();
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -426,7 +456,8 @@ impl Params {
         self
     }
 
-    /// Set a parameter to an array of 32-bit integers, as PySpark sends a list of ints.
+    /// Set a parameter to an array of 32-bit integers, as PySpark sends a list of ints that fit
+    /// 32 bits: an array literal of `integer` elements.
     pub fn set_param_int32_array(self, name: &str, values: impl IntoIterator<Item = i32>) -> Self {
         self.set_param_int_array(name, values.into_iter().map(i64::from))
     }
@@ -443,8 +474,8 @@ impl Params {
             elements: values.into_iter().map(LiteralExpression::Double).collect(),
         }
         .to_literal_proto();
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -453,55 +484,68 @@ impl Params {
         self
     }
 
-    /// Set a parameter to an integer array, preserving PySpark's literal width.
-    #[allow(deprecated)] // Matches the array representation of PySpark's ML parameters.
+    /// Set a parameter to an array of integers, as PySpark sends a list of ints: of the type of
+    /// its first element, as `LiteralExpression._infer_type` types a list, so of `integer`
+    /// elements when the first fits 32 bits, else of `long` ones (which the server reads as the 32
+    /// bits of each, into a JVM `Array[Int]`, as it reads PySpark's). Each element is a
+    /// `LiteralExpression` of that type, whose `assert` fails of an element out of its range: of
+    /// a first element that fits 32 bits and another that does not, PySpark sends nothing, and
+    /// neither does this. The list is kept, for its getter, and a fit, transform, evaluate or
+    /// save returns the `AssertionError` (see [`Params::sendable`]). A list of no element has no
+    /// type to infer, which PySpark refuses (`CANNOT_INFER_ARRAY_ELEMENT_TYPE`); it is sent as an
+    /// array of `integer` elements.
     pub fn set_param_int_array(
         mut self,
         name: &str,
         values: impl IntoIterator<Item = i64>,
     ) -> Self {
-        use proto::expression::literal::LiteralType as L;
         let values: Vec<i64> = values.into_iter().collect();
-        let narrow = values.iter().all(|v| i32::try_from(*v).is_ok());
-        let elements = values
-            .into_iter()
-            .map(|v| proto::expression::Literal {
-                literal_type: Some(if narrow {
-                    L::Integer(v as i32)
-                } else {
-                    L::Long(v)
-                }),
-                ..Default::default()
-            })
-            .collect();
-        let literal = proto::expression::Literal {
-            literal_type: Some(L::Array(proto::expression::literal::Array {
-                element_type: Some(
-                    if narrow {
-                        DataType::Integer
-                    } else {
-                        DataType::Long
-                    }
-                    .to_proto(),
-                ),
-                elements,
-            })),
-            ..Default::default()
+        // The type of the first element (`_infer_type`): an `integer` when it fits 32 bits.
+        let narrow = values.first().is_none_or(|v| i32::try_from(*v).is_ok());
+        let out_of_range = if narrow {
+            values.iter().copied().find(|v| i32::try_from(*v).is_err())
+        } else {
+            None
         };
-        self.params.insert(
-            name.into(),
+        let (element_type, elements) = match out_of_range {
+            None if narrow => (
+                DataType::Integer,
+                values
+                    .iter()
+                    .map(|v| LiteralExpression::Integer(*v as i32))
+                    .collect(),
+            ),
+            _ => (
+                DataType::Long,
+                values.iter().map(|v| LiteralExpression::Long(*v)).collect(),
+            ),
+        };
+        let literal = LiteralExpression::Array {
+            element_type: Box::new(element_type),
+            elements,
+        }
+        .to_literal_proto();
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
             },
         );
+        if let Some(value) = out_of_range {
+            let error = assertion_error(format!(
+                "{name}: the element {value} of the list of ints is out of the range of an \
+                 integer, the type of its first element, as PySpark's LiteralExpression asserts"
+            ));
+            self.unsendable.insert(name.to_string(), error);
+        }
         self
     }
 
     /// Set a vector parameter using Spark's VectorUDT representation.
     pub fn set_param_vector(mut self, name: &str, value: impl Into<MlVector>) -> Self {
-        self.params.insert(
-            name.into(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(
                     value.into().to_literal(),
@@ -515,8 +559,8 @@ impl Params {
     /// Set a matrix parameter using Spark's MatrixUDT representation, as PySpark sends a
     /// `DenseMatrix` or a `SparseMatrix` (see [`MlMatrix`]).
     pub fn set_param_matrix(mut self, name: &str, value: impl Into<MlMatrix>) -> Self {
-        self.params.insert(
-            name.into(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(
                     value.into().to_literal(),
@@ -533,7 +577,7 @@ impl Params {
         let mut lit = proto::expression::Literal::default();
         lit.literal_type = Some(proto::expression::literal::LiteralType::Double(value));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -545,7 +589,7 @@ impl Params {
             value.to_string(),
         ));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -555,7 +599,7 @@ impl Params {
         let mut lit = proto::expression::Literal::default();
         lit.literal_type = Some(proto::expression::literal::LiteralType::Boolean(value));
         literal.expr_type = Some(proto::expression::ExprType::Literal(lit));
-        self.params.insert(name.to_string(), literal);
+        self.put(name, literal);
         self
     }
 
@@ -569,6 +613,23 @@ impl Params {
                 .filter(|(name, _)| keep(name))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect(),
+            unsendable: self
+                .unsendable
+                .iter()
+                .filter(|(name, _)| keep(name))
+                .map(|(name, error)| (name.clone(), error.clone()))
+                .collect(),
+        }
+    }
+
+    /// The params of `self` with those of `other` set over them, as a copy of PySpark of a param
+    /// map sets its values.
+    pub fn extend_from(&mut self, other: &Params) {
+        for (name, value) in &other.params {
+            self.put(name, value.clone());
+        }
+        for (name, error) in &other.unsendable {
+            self.unsendable.insert(name.clone(), error.clone());
         }
     }
 
@@ -576,6 +637,7 @@ impl Params {
     /// PySpark's `Params.clear` does.
     pub fn clear_param(mut self, name: &str) -> Self {
         self.params.remove(name);
+        self.unsendable.remove(name);
         self
     }
 
@@ -587,8 +649,8 @@ impl Params {
             )),
             ..Default::default()
         };
-        self.params.insert(
-            name.to_string(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -616,8 +678,8 @@ impl Params {
 
     /// Set a parameter to a literal, preserving its wire type.
     pub fn set_param_literal(mut self, name: &str, literal: proto::expression::Literal) -> Self {
-        self.params.insert(
-            name.into(),
+        self.put(
+            name,
             proto::Expression {
                 expr_type: Some(proto::expression::ExprType::Literal(literal)),
                 ..Default::default()
@@ -871,7 +933,10 @@ impl Params {
             e.expr_type = Some(proto::expression::ExprType::Literal(lit.clone()));
             params.insert(name.clone(), e);
         }
-        Params { params }
+        Params {
+            params,
+            unsendable: Default::default(),
+        }
     }
 }
 
@@ -1068,7 +1133,7 @@ pub trait Transformer: Send + Sync {
             self.operator().to_proto(),
         ));
         transform.input = Some(Box::new(input.relation()?));
-        transform.params = Some(self.params().to_proto());
+        transform.params = Some(self.params().sendable()?);
 
         let mut ml_relation = proto::MlRelation::default();
         ml_relation.ml_type = Some(proto::ml_relation::MlType::Transform(Box::new(transform)));
@@ -1144,12 +1209,18 @@ impl dyn Model {
 /// the features, and the prediction of a single vector, of the model's server-side object.
 pub trait PredictionModel: Model {
     /// The number of features that the model was trained on (`numFeatures`), or -1 if unknown.
+    /// PySpark reads the server's int as a Python int of any size: one out of the range of an
+    /// `i32` is an error, rather than truncated.
     fn num_features(&self) -> spark_connect_core::error::Result<i32> {
         let value = fetch(&self.model_target()?, "numFeatures", vec![])?.into_value()?;
-        value
-            .as_i64()
-            .map(|v| v as i32)
-            .ok_or_else(|| SparkError::value_msg(format!("numFeatures is not an int: {value:?}")))
+        let num_features = value.as_i64().ok_or_else(|| {
+            SparkError::value_msg(format!("numFeatures is not an int: {value:?}"))
+        })?;
+        i32::try_from(num_features).map_err(|_| {
+            SparkError::value_msg(format!(
+                "numFeatures of the model is out of the range of an int: {num_features}"
+            ))
+        })
     }
 
     /// The prediction of a single vector of features (`predict`).
@@ -1283,7 +1354,7 @@ fn evaluate_via_command(
     let dataset = df.relation()?;
     let evaluate = proto::ml_command::Evaluate {
         evaluator: Some(operator.to_proto()),
-        params: Some(params.to_proto()),
+        params: Some(params.sendable()?),
         dataset: Some(dataset),
     };
     let mut ml_command = proto::MlCommand::default();
@@ -1812,7 +1883,7 @@ fn fit_via_command(
     let command = proto::MlCommand {
         command: Some(proto::ml_command::Command::Fit(proto::ml_command::Fit {
             estimator: Some(operator.to_proto()),
-            params: Some(params.to_proto()),
+            params: Some(params.sendable()?),
             dataset: Some(df.relation()?),
         })),
     };
@@ -1902,7 +1973,7 @@ impl CachedModel {
                         self.0.model_ref.clone(),
                     )),
                     input: Some(Box::new(df.relation()?)),
-                    params: Some(params.to_proto()),
+                    params: Some(params.sendable()?),
                 },
             ))),
             ..Default::default()
@@ -5774,6 +5845,90 @@ mod tests {
     }
 
     #[test]
+    fn int_arrays_are_of_the_type_of_their_first_element_or_unsendable_as_pyspark() {
+        // As PySpark's `LiteralExpression._from_value` of a list of ints: of the type of its first
+        // element, an `Integer` when it fits 32 bits, else a `Long`, of every element. Of a first
+        // element that fits 32 bits and another that does not, PySpark sends nothing: the `assert`
+        // of the element's `LiteralExpression` fails. The list is kept for its getter, and a fit, a
+        // transform and a save return the `AssertionError` (`sendable`), before any request.
+        let array = |element_type: DataType, elements: Vec<LiteralExpression>| {
+            LiteralExpression::Array {
+                element_type: Box::new(element_type),
+                elements,
+            }
+            .to_literal_proto()
+        };
+        let sent = |values: &[i64]| {
+            Params::new()
+                .set_param_int_array("indices", values.iter().copied())
+                .sendable()
+                .map(|params| params.params["indices"].clone())
+        };
+        let (min, max) = (i64::from(i32::MIN), i64::from(i32::MAX));
+        assert_eq!(
+            sent(&[min, max]).unwrap(),
+            array(
+                DataType::Integer,
+                vec![
+                    LiteralExpression::Integer(i32::MIN),
+                    LiteralExpression::Integer(i32::MAX)
+                ]
+            )
+        );
+        assert_eq!(
+            sent(&[1 << 33, 2]).unwrap(),
+            array(
+                DataType::Long,
+                vec![LiteralExpression::Long(1 << 33), LiteralExpression::Long(2)]
+            )
+        );
+        assert_eq!(sent(&[]).unwrap(), array(DataType::Integer, Vec::new()));
+        for values in [[2, max + 1], [2, min - 1], [0, i64::MAX]] {
+            let error = sent(&values).unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::AssertionError, "{values:?}");
+        }
+        // The getter reads the list. Set again or cleared, the param is sent; a copy of the params
+        // of the class keeps it unsendable.
+        let slicer = VectorSlicer::new().set_indices([0, 1 << 33]);
+        assert_eq!(slicer.indices(), Some(vec![0, 1 << 33]));
+        assert!(slicer.params().sendable().is_err());
+        assert!(slicer
+            .clone()
+            .set_indices([0, 2])
+            .params()
+            .sendable()
+            .is_ok());
+        let params = slicer.params().clone();
+        assert!(params.clone().clear_param("indices").sendable().is_ok());
+        assert!(params
+            .retain_names(|name| name != "indices")
+            .sendable()
+            .is_ok());
+        assert!(params.retain_names(|_| true).sendable().is_err());
+        let mut merged = Params::new();
+        merged.extend_from(&params);
+        assert!(merged.sendable().is_err());
+        merged.extend_from(&Params::new().set_param_int_array("indices", [0]));
+        assert!(merged.sendable().is_ok());
+        // A fit, a transform and a save of a session whose server is unreachable return it before
+        // any request.
+        let session = unreachable_session();
+        let df = session.range(1).unwrap();
+        let mut slicer = slicer;
+        let errors = [
+            Transformer::transform(&mut slicer, &df).map(|_| ()),
+            QuantileDiscretizer::new()
+                .set_num_buckets_array([2, 1 << 33])
+                .fit(&df)
+                .map(|_| ()),
+            slicer.write().session(&session).save("/unsent"),
+        ];
+        for error in errors {
+            assert_eq!(error.unwrap_err().kind, SparkErrorKind::AssertionError);
+        }
+    }
+
+    #[test]
     #[allow(deprecated)]
     fn test_string_array_param_has_the_default_collation() {
         // As PySpark infers the type of a list of strings: a string of the UTF8_BINARY collation.
@@ -6099,6 +6254,19 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("session")
+    }
+
+    /// A session of an unreachable server, without retries: a request fails at once, of the
+    /// error of its connection, so the error of a check before any request is the check's.
+    fn unreachable_session() -> SparkSession {
+        let builder = spark_connect_core::channel::ChannelBuilder::parse("sc://127.0.0.1:1")
+            .expect("a valid URL");
+        let mut client = spark_connect_core::runtime::block_on(
+            spark_connect_core::client::SparkConnectClient::connect(&builder),
+        )
+        .expect("a client");
+        client.set_retry_policy(spark_connect_core::retries::RetryPolicy::no_retries());
+        SparkSession::new(client)
     }
 
     /// The model that a fit of the server returns as the object `id`, cached for `s`.
