@@ -22658,6 +22658,22 @@ def test_windows_of_no_partitions_warn_once_a_request_of_udfs_as_pyspark(mock_co
         assert sum("No Partition Defined" in str(warning.message) for warning in record) == 2
 
 
+def test_chained_partition_by_and_order_by_replace_the_spec_as_pyspark():
+    # As PySpark's WindowSpec.partitionBy and orderBy (connect/window.py), which make a spec of the
+    # new partitioning or ordering in place of the old one and keep the other parts, as Spark's
+    # WindowSpec does: a chained call partitions or orders by the columns of the last one only.
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    assert repr(Window.partitionBy("a").partitionBy("b")) == "WindowSpec(PartitionBy(b))"
+    assert repr(Window.orderBy("a").orderBy(F.col("b").desc(), "a")) == (
+        "WindowSpec(OrderBy(b DESC NULLS LAST, a ASC NULLS FIRST))")
+    assert repr(
+        Window.partitionBy("a").orderBy("c").rowsBetween(-1, 0).partitionBy("b").orderBy("d")
+    ) == "WindowSpec(PartitionBy(b), OrderBy(d ASC NULLS FIRST), WindowFrame(ROW_FRAME, -1, 0))"
+    assert repr(Window.partitionBy("a").partitionBy()) == "WindowSpec()"
+
+
 def test_window_frames_and_columns_are_checked_as_pyspark():
     # As PySpark's: a start of -sys.maxsize or less is unbounded preceding and an end of
     # sys.maxsize or more unbounded following; a row frame raises VALUE_NOT_BETWEEN for a
