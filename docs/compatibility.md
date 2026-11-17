@@ -1153,10 +1153,12 @@ alias copies and pickles, and its copy raises the same errors, also on a Python 
 server. A name of lone surrogates shows escaped in the `__repr__`, where PySpark's shows it as it
 is.
 
-An `Observation` that PySpark pickled at protocol 0 or 1 raises a `TypeError` when the drop-in
-unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's `Observation`, a
-class with a native base; protocols 2 and up, pickle's default, load in both clients, and PySpark
-loads the drop-in's at every protocol.
+An `Observation` or a `SparkSession.Hook`, of the class or of a subclass, that PySpark pickled at
+protocol 0 or 1 raises a `TypeError` when the drop-in unpickles it, as CPython's
+`copyreg._reconstructor` cannot create the drop-in's, a class with a native base; protocols 2 and
+up, pickle's default, load in both clients, and PySpark loads the drop-in's at every protocol. A
+hook of a subclass with `__slots__` pickles at protocols 0 and 1 too, where PySpark's raises the
+`TypeError` of a class that defines `__slots__` without `__getstate__`.
 
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
@@ -1232,12 +1234,18 @@ needs a SparkContext. `udf` gives a function in both clients, which is of neithe
 
 So it is for the objects of a session: each is of PySpark Connect's class, of its module of
 `pyspark.sql.connect`, as `repr`, `type(x).__module__` and pickle show it. These are the
-SparkSession, its `catalog`, `read`, `readStream`, `streams`, `udf`, `udtf`, `tvf` and `client`,
-and a DataFrame's `write`, `writeTo`, `writeStream`, `mergeInto` and its clauses, `na`, `stat`,
-`groupBy`, `cogroup`, `asTable` and the WindowSpec of its windows. `spark.dataSource` still gives
-the classic class, `pyspark.sql.datasource.DataSourceRegistration`. The functions of
-`pyspark.sql.connect.functions` are of its modules (`builtin` and `partitioning`), and are not
-those of `pyspark.sql.functions`, as in PySpark.
+SparkSession, its `conf`, `catalog`, `read`, `readStream`, `streams`, `udf`, `udtf`,
+`dataSource`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
+`mergeInto` and its clauses, `na`, `stat`, `groupBy`, `cogroup`, `asTable` and the WindowSpec of
+its windows, and an `Observation`. So are `SparkSession.Hook`, nested in the session class, and
+the classes of `pyspark.sql.connect.client` (its channel builders, `PlanObservedMetrics` and
+`SparkConnectClient`), which are of `pyspark.sql.connect.client.core`.
+The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` and
+`partitioning`), and so are those of `pyspark.sql.connect.avro.functions` and
+`pyspark.sql.connect.protobuf.functions`: they are not those of `pyspark.sql.functions`,
+`pyspark.sql.avro.functions` and `pyspark.sql.protobuf.functions`, as in PySpark. An alias, such
+as `column`, `negate`, `power` or `random`, is the function `col`, `negative`, `pow` or `rand`, of
+that name, as PySpark binds it.
 
 `pyspark.sql.SparkSession` is PySpark's classic class, the module `pyspark.sql.session` of Apache
 Spark as it is, as in PySpark. Its builder reads `spark.remote` or `SPARK_REMOTE`, raises
@@ -1245,14 +1253,29 @@ Spark as it is, as in PySpark. Its builder reads `spark.remote` or `SPARK_REMOTE
 the builder of `pyspark.sql.connect.session.SparkSession`, of which the session is. So
 `isinstance(spark, pyspark.sql.SparkSession)` is False, as in PySpark, and `active()` and
 `getActiveSession()` of the classic class give the session of Spark Connect. The builder of
-`pyspark.sql.connect.session.SparkSession` is PySpark Connect's: it does not read `SPARK_REMOTE`,
-raises `SESSION_NEED_CONN_STR_OR_BUILDER` without a URL or a channel builder, and returns the
-active session from `getOrCreate`. For the other objects of a session, the classic name names the
-same class, so `isinstance` against it is True, where PySpark gives False for `GroupedData`, the
-readers and writers and `Catalog`. The concrete DataFrame and Column are not subclasses of the
-public `pyspark.sql.DataFrame` and `pyspark.sql.Column`: `isinstance` holds by registration, so
-the MRO of a DataFrame is its native class and `object`, and `pyspark.sql.Column` names the
-concrete class.
+`pyspark.sql.connect.session.SparkSession`, of a `classproperty` of `pyspark.sql.session`, is
+PySpark Connect's: it does not read `SPARK_REMOTE`, raises `SESSION_NEED_CONN_STR_OR_BUILDER`
+without a URL or a channel builder, returns the active session from `getOrCreate`, and its
+`enableHiveSupport` raises `NOT_IMPLEMENTED`, where that of the classic builder sets
+`spark.sql.catalogImplementation`.
+
+The classic classes of `pyspark.sql.conf`, `pyspark.sql.tvf`, `pyspark.sql.datasource`,
+`pyspark.sql.merge` and `pyspark.sql.observation` are PySpark's, of those modules of Apache Spark
+as they are, so `isinstance` of a session's `conf`, `tvf`, `dataSource` and `mergeInto` against
+them is False, as in PySpark. `Observation(...)` makes an Observation of
+`pyspark.sql.connect.observation`, which is not an instance of `pyspark.sql.Observation`, as
+PySpark's `__new__` makes one. `pyspark.sql.connect.window.Window` is a subclass of
+`pyspark.sql.window.Window`, as in PySpark. For the other objects of a session, the classic name
+names PySpark Connect's class, so `isinstance` against it is True, where PySpark gives False:
+`Catalog`, `DataFrameReader`, `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamReader`,
+`DataStreamWriter`, `StreamingQueryManager`, `StreamingQuery`, `UDFRegistration`,
+`UDTFRegistration`, `GroupedData` and `PandasCogroupedOps`, and the UDTFs above. The classic
+`DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg` name PySpark
+Connect's classes too, which in PySpark are their subclasses: `isinstance` is True in both, and
+the MRO of such an object is its native class and `object`. The concrete DataFrame and Column are
+not subclasses of the public `pyspark.sql.DataFrame` and `pyspark.sql.Column`: `isinstance` holds
+by registration, so the MRO of a DataFrame is its native class and `object`, and
+`pyspark.sql.Column` names the concrete class.
 
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped

@@ -4,7 +4,7 @@
 //! unpickles first, with the state of the object.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use spark_connect::column::Column;
 use spark_connect::plan::AggregateGroupType;
 
@@ -63,6 +63,36 @@ pub(crate) fn reduce_with_instance_dict<'py>(
     let reduced = reduced.cast::<PyTuple>()?;
     let state = [reduced.get_item(0)?, reduced.get_item(1)?, attributes];
     Ok(PyTuple::new(object.py(), state)?.into_any())
+}
+
+/// The state of `object` that a pickle of a plain Python object keeps, which
+/// `object.__getstate__` gives from the protocol 2: its `__dict__`, or None when that is empty,
+/// paired with the values of the `__slots__` of its class that are set, when there are some
+/// (`copyreg._slotnames`), and None when there is neither, as the reduce then has no state.
+/// `object` has a `__dict__`.
+pub(crate) fn plain_object_state<'py>(
+    object: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = object.py();
+    let attributes = object.getattr(pyo3::intern!(py, "__dict__"))?;
+    let attributes = (attributes.len()? > 0).then_some(attributes);
+    let slots = PyDict::new(py);
+    let names = py
+        .import("copyreg")?
+        .call_method1("_slotnames", (object.get_type(),))?;
+    for name in names.try_iter()? {
+        let name = name?.cast_into::<PyString>()?;
+        if let Some(value) = object.getattr_opt(&name)? {
+            slots.set_item(name, value)?;
+        }
+    }
+    if slots.is_empty() {
+        return Ok(attributes);
+    }
+    let attributes = attributes.unwrap_or_else(|| py.None().into_bound(py));
+    Ok(Some(
+        PyTuple::new(py, [attributes, slots.into_any()])?.into_any(),
+    ))
 }
 
 /// The Python list of the columns, each a Column of the wrapper of `Column`.

@@ -58,21 +58,17 @@ impl PySparkSessionBuilder {
     }
 }
 
-/// `SparkSession.builder`, as PySpark's `classproperty(lambda cls: cls.Builder())`: each access
-/// of the class, or of a session, is a new builder, so the options of one do not leak into
-/// another.
-#[pyclass(name = "classproperty", module = "pyspark.sql.session")]
-pub struct PyBuilderProperty;
-
-#[pymethods]
-impl PyBuilderProperty {
-    fn __get__(
-        &self,
-        _instance: Option<&Bound<'_, PyAny>>,
-        _owner: Option<&Bound<'_, PyAny>>,
-    ) -> PySparkSessionBuilder {
-        PySparkSessionBuilder::new()
-    }
+/// Install `builder` as the class attribute `builder` of the native SparkSession: PySpark
+/// Connect's `classproperty(lambda cls: cls.Builder())`, of PySpark's class
+/// `pyspark.sql.session.classproperty`, so that each access of the class, or of a session, is a
+/// new builder, and the options of one do not leak into another. That class is of PySpark's
+/// classic session module, whose imports import this extension, so it cannot be imported while
+/// the extension loads: `pyspark.sql.connect.session`, the module of the native class, makes the
+/// descriptor and installs it when it is imported, as the class body of PySpark Connect's makes
+/// it.
+#[pyfunction]
+pub fn _install_builder(py: Python<'_>, builder: &Bound<'_, PyAny>) -> PyResult<()> {
+    py.get_type::<PySparkSession>().setattr("builder", builder)
 }
 
 #[pymethods]
@@ -286,11 +282,18 @@ impl PySparkSessionBuilder {
         Ok(slf)
     }
 
-    /// `enableHiveSupport` - a no-op for a Connect client (the remote server's
-    /// catalog is fixed); accepted for API parity.
+    /// `enableHiveSupport` raises `PySparkNotImplementedError` `NOT_IMPLEMENTED`, as PySpark
+    /// Connect's builder does: the catalog is the server's. The classic builder,
+    /// `pyspark.sql.SparkSession.builder`, sets `spark.sql.catalogImplementation` instead, as
+    /// PySpark's does.
     #[pyo3(name = "enableHiveSupport")]
-    fn enable_hive_support(slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf
+    fn enable_hive_support(&self, py: Python<'_>) -> PyResult<()> {
+        Err(crate::column::raise_pyspark(
+            py,
+            "PySparkNotImplementedError",
+            "NOT_IMPLEMENTED",
+            &[("feature", "enableHiveSupport")],
+        ))
     }
 
     /// Get the active session of this thread, or else the default session, or create one
@@ -883,22 +886,21 @@ fn set_default_and_active(py: Python<'_>, session: &Py<PySparkSession>) {
 /// get filed against this project, not the reference `pyspark-client`. Logged the
 /// first time a session connects, via Python's `logging` (so it honors the
 /// application's logging configuration); best-effort and never fails the connect.
+/// It names the version of the package, `pyspark-client-rust`, which is that of this crate
+/// (the release workflow checks that `Cargo.toml` and `pyproject.toml` agree), not
+/// `pyspark.__version__`, the Spark version of the API that the client mirrors.
 fn log_client_banner(py: Python<'_>) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let _ = (|| -> PyResult<()> {
-            let version: String = py
-                .import("pyspark")
-                .and_then(|m| m.getattr("__version__"))
-                .and_then(|v| v.extract())
-                .unwrap_or_default();
             let logger = py
                 .import("logging")?
                 .call_method1("getLogger", ("pyspark",))?;
             let msg = format!(
-                "pyspark-client-rust {version} active: Spark Connect client backed by the native \
+                "pyspark-client-rust {} active: Spark Connect client backed by the native \
                  Rust engine (tonic), a drop-in for pyspark-client -- not the reference Python \
-                 client. https://apache.github.io/spark-connect-rust/which-client/"
+                 client. https://apache.github.io/spark-connect-rust/which-client/",
+                env!("CARGO_PKG_VERSION")
             );
             logger.call_method1("info", (msg,))?;
             Ok(())
@@ -940,26 +942,64 @@ impl PyActiveSession {
 /// `SparkSession.Hook`: a session calls the `on_execute_plan` of each hook of the factories of
 /// `_registerHook` with each `ExecutePlanRequest`, as a message of the generated
 /// `pyspark.sql.connect.proto`, before it sends it, and sends the request that it returns. The
-/// base hook returns the request as it is.
-#[pyclass(name = "Hook", module = "pyspark.sql.connect.session", subclass)]
+/// base hook returns the request as it is. PySpark's is a plain Python class nested in
+/// `SparkSession`, so a hook takes attributes and weak references, and pickles and copies as a
+/// plain object does, as a hook of a subclass does too.
+#[pyclass(
+    name = "Hook",
+    module = "pyspark.sql.connect.session",
+    subclass,
+    weakref,
+    dict
+)]
 pub struct PyHook;
 
 #[pymethods]
 impl PyHook {
     /// A hook, of the arguments of the `__init__` of a subclass, which `__new__` leaves to it,
-    /// as `object.__new__` does for PySpark's hooks.
+    /// as `object.__new__` does for PySpark's hooks. A class without an `__init__` of its own
+    /// takes no arguments: `TypeError: Hook() takes no arguments`, as `object.__new__` raises.
     #[new]
-    #[pyo3(signature = (*_args, **_kwargs))]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs))]
     fn new(
-        _args: &Bound<'_, pyo3::types::PyTuple>,
-        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> Self {
-        PyHook
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Self> {
+        let py = cls.py();
+        let given = !args.is_empty() || kwargs.is_some_and(|kwargs| !kwargs.is_empty());
+        let object_init = py
+            .get_type::<PyAny>()
+            .getattr(pyo3::intern!(py, "__init__"))?;
+        if given && cls.getattr(pyo3::intern!(py, "__init__"))?.is(&object_init) {
+            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{}() takes no arguments",
+                cls.name()?
+            )));
+        }
+        Ok(PyHook)
     }
 
     /// Called before sending an ExecutePlanRequest; returns the (unchanged) request.
     fn on_execute_plan<'py>(&self, request: Bound<'py, PyAny>) -> Bound<'py, PyAny> {
         request
+    }
+
+    /// The reduce of pickle and copy, as `object.__reduce_ex__` gives it for PySpark's hook, a
+    /// plain object, from the protocol 2: `copyreg.__newobj__` of its class, which a pickle names
+    /// by reference, with the state of a plain object (`plain_object_state`) when there is one.
+    /// So a hook of a subclass, with the attributes that its `__init__` sets, pickles, at every
+    /// protocol: below 2, the default reduce of a class of a native base fails, as copyreg's
+    /// does.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+        let args = PyTuple::new(py, [slf.get_type()])?.into_any();
+        match crate::reduce::plain_object_state(slf.as_any())? {
+            Some(state) => PyTuple::new(py, [newobj, args, state]),
+            None => PyTuple::new(py, [newobj, args]),
+        }
     }
 }
 
@@ -2227,13 +2267,6 @@ fn schema_spec(
 
 #[pymethods]
 impl PySparkSession {
-    /// The session builder, reached as `SparkSession.builder`: a new builder of each access, as
-    /// PySpark's `classproperty`.
-    #[classattr]
-    fn builder() -> PyBuilderProperty {
-        PyBuilderProperty
-    }
-
     /// Create a DataFrame representing a range of integers.
     ///
     /// Mirrors `pyspark.sql.SparkSession.range(start, end=None, step=1, numPartitions=None)`:

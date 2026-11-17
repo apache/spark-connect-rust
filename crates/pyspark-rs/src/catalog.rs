@@ -184,7 +184,8 @@ fn named_tuples<T: NamedTuple>(py: Python<'_>, results: Vec<T>) -> PyResult<Vec<
         .collect()
 }
 
-/// Python wrapper for Spark Catalog.
+/// Python wrapper for Spark Catalog. It has the default repr, as PySpark Connect's Catalog, which
+/// defines none: `<pyspark.sql.connect.catalog.Catalog object at 0x...>`.
 #[pyclass(
     name = "Catalog",
     module = "pyspark.sql.connect.catalog",
@@ -829,9 +830,5 @@ impl PyCatalog {
                     .map_err(Box::new)
             })?,
         )
-    }
-
-    fn __repr__(&self) -> String {
-        "Catalog()".to_string()
     }
 }
