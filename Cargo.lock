@@ -100,7 +100,6 @@ dependencies = [
  "sha2",
  "stacker",
  "tempfile",
- "thiserror",
  "tokio",
  "tokio-stream",
  "tonic",
