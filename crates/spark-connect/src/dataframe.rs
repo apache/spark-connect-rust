@@ -3306,6 +3306,7 @@ pub(crate) fn random_seed() -> i64 {
 }
 
 /// Decode an Arrow batch into rows.
+#[cfg(test)]
 pub(crate) fn decode_arrow_batch(
     batch: &proto::execute_plan_response::ArrowBatch,
 ) -> Result<Vec<Row>> {

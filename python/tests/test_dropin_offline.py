@@ -27181,9 +27181,10 @@ def test_reader_parses_a_dataframe_of_strings_as_pyspark(mock_connect, read, for
 
 
 def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
-    # As PySpark Connect's: a write of a mode other than append, overwrite, error (or
-    # errorifexists, which PySpark documents) and ignore raises UNSUPPORTED_OPERATION, of the
-    # last mode set; format(None) unsets the format; the reader raises JVM_ATTRIBUTE_NOT_SUPPORTED
+    # As PySpark Connect's: a write of a mode other than append, overwrite, error and ignore
+    # raises UNSUPPORTED_OPERATION, of the last mode set, before it sends anything, also of
+    # errorifexists, which its WriteOperation does not take, unlike classic PySpark's writer;
+    # format(None) unsets the format; the reader raises JVM_ATTRIBUTE_NOT_SUPPORTED
     # of _jreader, asserts the bounds of a JDBC column and refuses a schema in changes; and csv,
     # text and orc of None read without a path.
     from pyspark.errors import AnalysisException, PySparkAttributeError, PySparkValueError
@@ -27196,11 +27197,15 @@ def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
         (lambda: df.write.mode(" append").insertInto("t"), " append"),
         (lambda: df.write.parquet("p", mode=""), ""),
         (lambda: df.write.jdbc("jdbc:x", "t", mode="bad"), "bad"),
+        (lambda: df.write.mode("errorifexists").insertInto("t"), "errorifexists"),
+        (lambda: df.write.parquet("p", mode="ErrorIfExists"), "ErrorIfExists"),
     ]:
+        sent = len(service.execute_requests)
         with pytest.raises(PySparkValueError) as e:
             write()
         assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
         assert e.value.getMessageParameters() == {"operation": mode}
+        assert len(service.execute_requests) == sent
 
     def sent_write():
         # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2.
@@ -27210,7 +27215,7 @@ def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
     # WriteOperation.source=2 and mode=5, of SAVE_MODE_APPEND=1 and SAVE_MODE_ERROR_IF_EXISTS=3.
     df.write.mode("bad").mode("APPEND").format("json").format(None).save("p")
     assert 2 not in sent_write() and sent_write()[5] == [1]
-    df.write.mode("errorifexists").insertInto("t")
+    df.write.mode("error").insertInto("t")
     assert sent_write()[5] == [3]
     df.write.jdbc("jdbc:x", "t", properties={"user": 1, "flag": True, "skip": None})
     # WriteOperation.options=9, of entries of key=1 and value=2.

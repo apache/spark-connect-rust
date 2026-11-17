@@ -2638,6 +2638,77 @@ impl SparkConnectClient {
             Err(_) => drop(crate::runtime::get_runtime().spawn(release)),
         }
     }
+
+    /// Send `request`, the execution of a finalizer, as PySpark sends the removal of a cached
+    /// remote relation in `CachedRemoteRelation.__del__`: through the channel itself, as a
+    /// `unary_unary` call of ExecutePlan, so neither reattachable, with no ReleaseExecute after
+    /// it, nor passed to the hooks of the executions. Its request is that of
+    /// `_execute_plan_request_with_metadata`, whose only option allows result chunking, and the
+    /// call is retried under the retry policy of the client, as `_retrying()` retries it.
+    ///
+    /// The request is completed on the calling thread, whose user context extensions it takes,
+    /// as PySpark's is of the thread of its finalizer. It is sent on the shared runtime without
+    /// waiting for the server, so that a drop never blocks on it: a drop may run on a thread of a
+    /// runtime, or in a Python finalizer that holds the GIL, which another thread may need to
+    /// read the responses of the same connection, whose flow control would hold this response
+    /// back meanwhile. A failure is only logged, as PySpark's, and nothing is sent once the
+    /// client is closed. Not a stable API.
+    #[doc(hidden)]
+    pub fn spawn_unary_execute_plan(&self, mut request: ExecutePlanRequest) {
+        if self.is_closed() {
+            return;
+        }
+        allow_arrow_batch_chunking(&mut request);
+        self.extend_user_context(&mut request.user_context);
+        self.fill_user_context(&mut request.user_context);
+        self.fill_client_type(&mut request.client_type);
+        self.observe_on(&mut request.client_observed_server_side_session_id);
+        let operation_id = request
+            .operation_id
+            .get_or_insert_with(|| Uuid::new_v4().to_string())
+            .clone();
+        let stub = self.stub.clone();
+        let metadata = self.execution_metadata();
+        let policy = self.retry_policy.clone();
+        let closed = std::sync::Arc::clone(&self.closed);
+        let send = async move {
+            // A client closed meanwhile makes no more attempts, as the channel of a closed
+            // PySpark client refuses its calls.
+            let still_open = || {
+                if closed.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            };
+            let sent = retrying(&mut Retrying::new(&policy), still_open, || {
+                let mut req = Request::new(request.clone());
+                *req.metadata_mut() = metadata.clone();
+                let mut stub = stub.clone();
+                async move {
+                    let mut responses = stub
+                        .execute_plan(req)
+                        .await
+                        .map_err(RetryError::Status)?
+                        .into_inner();
+                    // The call ends with the responses of the execution, as the unary call
+                    // of the reference reads them.
+                    while responses
+                        .message()
+                        .await
+                        .map_err(RetryError::Status)?
+                        .is_some()
+                    {}
+                    Ok(())
+                }
+            })
+            .await;
+            if let Err(RetryError::Status(status)) = sent {
+                tracing::warn!("ExecutePlan of operation {operation_id} failed: {status}");
+            }
+        };
+        drop(crate::runtime::get_runtime().spawn(send));
+    }
 }
 
 impl ReattachableResponseStream {

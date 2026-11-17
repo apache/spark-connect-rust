@@ -81,15 +81,10 @@ fn lit_binary(b: Vec<u8>) -> Expression {
 /// Mirrors `pyspark.sql.functions.col`.
 ///
 /// `"*"` and any `"prefix.*"` become an `UnresolvedStar` (so `count("*")`,
-/// `select("*")`, `col("t.*")` resolve on the server), matching pyspark.
+/// `select("*")`, `col("t.*")` resolve on the server), matching pyspark: it is
+/// [`crate::column::col`].
 pub fn col(name: &str) -> Column {
-    if name == "*" {
-        Column::new(ExpressionNode::UnresolvedStar(None, None).into())
-    } else if let Some(prefix) = name.strip_suffix(".*") {
-        Column::new(ExpressionNode::UnresolvedStar(Some(format!("{prefix}.*")), None).into())
-    } else {
-        Column::new(Expression::column(name))
-    }
+    crate::column::col(name)
 }
 
 /// Mirrors `pyspark.sql.functions.column`.
