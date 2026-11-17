@@ -189,6 +189,13 @@ pub enum TreeFlag {
     ValueContainsNull,
 }
 
+/// The writers of the flags and of the type names of a tree string (see
+/// [`DataType::tree_string_with_names`]).
+struct TreeText<'a, F, N> {
+    flag: &'a mut F,
+    name: &'a mut N,
+}
+
 impl DataType {
     /// Parses a DDL-formatted string into a DataType, mirroring `DataType.fromDDL()`.
     ///
@@ -1045,9 +1052,28 @@ impl DataType {
     ///
     /// Not a stable API: it exists for the Python client, which keeps the flags as given.
     #[doc(hidden)]
-    pub fn tree_string_with_flags<F>(&self, max_depth: i32, mut flag: F) -> Result<String>
+    pub fn tree_string_with_flags<F>(&self, max_depth: i32, flag: F) -> Result<String>
     where
         F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
+    {
+        self.tree_string_with_names(max_depth, flag, |_| None)
+    }
+
+    /// Like [`DataType::tree_string_with_flags`], but a type that `name` gives a name of is
+    /// written with that name, rather than the core's: the Python client names here the types
+    /// of Python classes that it holds as [`DataType::Unparsed`], whose name is not the core's.
+    ///
+    /// Not a stable API: it exists for the Python client.
+    #[doc(hidden)]
+    pub fn tree_string_with_names<F, N>(
+        &self,
+        max_depth: i32,
+        mut flag: F,
+        mut name: N,
+    ) -> Result<String>
+    where
+        F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
+        N: FnMut(&DataType) -> Option<String>,
     {
         match self {
             DataType::Struct { .. } => {
@@ -1057,7 +1083,10 @@ impl DataType {
                     " |",
                     if max_depth > 0 { max_depth } else { i32::MAX },
                     &mut Vec::new(),
-                    &mut flag,
+                    &mut TreeText {
+                        flag: &mut flag,
+                        name: &mut name,
+                    },
                 );
                 Ok(out)
             }
@@ -1066,6 +1095,14 @@ impl DataType {
                 &[("detail", "treeString() can only be called on StructType")],
             )),
         }
+    }
+
+    /// The name of the type in a tree string, as `name` gives it, or else the core's.
+    fn tree_name_of<F, N>(&self, text: &mut TreeText<'_, F, N>) -> String
+    where
+        N: FnMut(&DataType) -> Option<String>,
+    {
+        (text.name)(self).unwrap_or_else(|| self.tree_type_name())
     }
 
     fn tree_type_name(&self) -> String {
@@ -1081,16 +1118,17 @@ impl DataType {
     }
 
     /// Appends the tree below `self`, whose path from the root is `path`; see
-    /// [`DataType::tree_string_with_flags`].
-    fn append_tree<F>(
+    /// [`DataType::tree_string_with_names`].
+    fn append_tree<F, N>(
         &self,
         out: &mut String,
         prefix: &str,
         remaining: i32,
         path: &mut Vec<TreeStep>,
-        flag: &mut F,
+        text: &mut TreeText<'_, F, N>,
     ) where
         F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
+        N: FnMut(&DataType) -> Option<String>,
     {
         if remaining <= 0 {
             return;
@@ -1102,17 +1140,17 @@ impl DataType {
                     out.push_str(prefix);
                     out.push_str("-- ");
                     push_escaped_name(out, &f.name);
-                    let nullable = flag(&path[..], TreeFlag::Nullable(i), f.nullable);
+                    let nullable = (text.flag)(&path[..], TreeFlag::Nullable(i), f.nullable);
                     writeln!(
                         out,
                         ": {} (nullable = {})",
-                        f.data_type.tree_type_name(),
+                        f.data_type.tree_name_of(text),
                         nullable
                     )
                     .expect("writing to a String cannot fail");
                     path.push(TreeStep::Field(i));
                     f.data_type
-                        .append_tree(out, &child_prefix, remaining - 1, path, flag);
+                        .append_tree(out, &child_prefix, remaining - 1, path, text);
                     path.pop();
                 }
             }
@@ -1121,17 +1159,17 @@ impl DataType {
                 contains_null,
             } => {
                 let child_prefix = format!("{prefix}    |");
-                let contains_null = flag(&path[..], TreeFlag::ContainsNull, *contains_null);
+                let contains_null = (text.flag)(&path[..], TreeFlag::ContainsNull, *contains_null);
                 writeln!(
                     out,
                     "{}-- element: {} (containsNull = {})",
                     prefix,
-                    element_type.tree_type_name(),
+                    element_type.tree_name_of(text),
                     contains_null
                 )
                 .expect("writing to a String cannot fail");
                 path.push(TreeStep::Element);
-                element_type.append_tree(out, &child_prefix, remaining - 1, path, flag);
+                element_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
             }
             DataType::Map {
@@ -1140,23 +1178,23 @@ impl DataType {
                 value_contains_null,
             } => {
                 let child_prefix = format!("{prefix}    |");
-                writeln!(out, "{}-- key: {}", prefix, key_type.tree_type_name())
+                writeln!(out, "{}-- key: {}", prefix, key_type.tree_name_of(text))
                     .expect("writing to a String cannot fail");
                 path.push(TreeStep::Key);
-                key_type.append_tree(out, &child_prefix, remaining - 1, path, flag);
+                key_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
                 let value_contains_null =
-                    flag(&path[..], TreeFlag::ValueContainsNull, *value_contains_null);
+                    (text.flag)(&path[..], TreeFlag::ValueContainsNull, *value_contains_null);
                 writeln!(
                     out,
                     "{}-- value: {} (valueContainsNull = {})",
                     prefix,
-                    value_type.tree_type_name(),
+                    value_type.tree_name_of(text),
                     value_contains_null
                 )
                 .expect("writing to a String cannot fail");
                 path.push(TreeStep::Value);
-                value_type.append_tree(out, &child_prefix, remaining - 1, path, flag);
+                value_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
             }
             _ => {}
@@ -4069,6 +4107,63 @@ mod tests {
             struct_type
                 .tree_string_with_flags(i32::MAX, |_, _, truth| truth.to_string())
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn tree_string_with_names_writes_the_names_it_gives_of_the_types() {
+        // The types that the name gives a name of, at every position of a type in a tree, and
+        // the core's names of the others.
+        let unparsed = |name: &str| DataType::Unparsed {
+            data_type_string: name.to_string(),
+        };
+        let struct_type = DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    data_type: unparsed("atomic"),
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "m".to_string(),
+                    data_type: DataType::Map {
+                        key_type: Box::new(unparsed("data")),
+                        value_type: Box::new(DataType::Array {
+                            element_type: Box::new(unparsed("numeric")),
+                            contains_null: false,
+                        }),
+                        value_contains_null: true,
+                    },
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "u".to_string(),
+                    data_type: unparsed("int"),
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let text = struct_type
+            .tree_string_with_names(
+                i32::MAX,
+                |_, _, truth| truth.to_string(),
+                |data_type| match data_type {
+                    DataType::Unparsed { data_type_string } if data_type_string != "int" => {
+                        Some(data_type_string.clone())
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            text,
+            "root\n |-- a: atomic (nullable = true)\n |-- m: map (nullable = false)\n \
+             |    |-- key: data\n |    |-- value: array (valueContainsNull = true)\n \
+             |    |    |-- element: numeric (containsNull = false)\n \
+             |-- u: unparsed (nullable = true)\n"
         );
     }
 

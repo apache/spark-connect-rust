@@ -1253,6 +1253,9 @@ package is marked typed as PySpark's is (`py.typed` and PySpark's stubs), and
 `pyspark.sql.SparkSession`, PySpark's own class, has PySpark's signatures and docstrings. The
 functions of `pyspark.sql.functions` and the methods of the native classes, such as
 `DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
+The `__init__` of a native type of parameters, such as `ArrayType`, is a slot of its class, whose
+`inspect.signature` is CPython's `(self, /, *args, **kwargs)`; that of the class shows the
+parameters, as PySpark's does.
 
 The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
 that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
@@ -1274,11 +1277,12 @@ functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy
 
 A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
 builds the Column or the window: the frame bounds of `Window.rowsBetween` and `rangeBetween`, and a
-`StructField` given as the return type of a UDF. Their errors are PySpark's, raised at the call
+`StructField` or an abstract type such as `AtomicType()`, also one nested in the type, given as the
+return type of a UDF that is not Arrow-optimized. Their errors are PySpark's, raised at the call
 rather than when the plan is built. The type of `cast` and `try_cast` is converted when the plan is
-built, as in PySpark: a `StructField`, also one nested in the type, the base `DataType()` and a
-Python subclass of it make a Column that renders as the `simpleString` of the type, and whose plans
-raise PySpark's `UNSUPPORTED_OPERATION`.
+built, as in PySpark: a `StructField`, the base `DataType()`, an abstract type such as `AtomicType()`
+and a Python subclass of them, also one nested in the type, make a Column that renders as the
+`simpleString` of the type, and whose plans raise PySpark's `UNSUPPORTED_OPERATION`.
 
 `Column.alias` and `Column.name` raise PySpark's errors when PySpark's `ColumnAlias` raises them.
 At the call, they raise the metadata of several names (`ONLY_ALLOWED_FOR_SINGLE_COLUMN`) and other
@@ -1324,6 +1328,29 @@ have, raises the constructor's error, where PySpark keeps any value, of which it
 fail later. A set `srid` of a spatial type is of its JSON too, where PySpark's JSON stays that of
 the CRS of its constructor. The parameters are not entries of the `__dict__` of a type, so
 `vars(t)` is empty, where PySpark's has them.
+
+The abstract classes of the types, `DataType`, `AtomicType`, `NumericType`, `IntegralType`,
+`FractionalType`, `DatetimeType`, `AnyTimeType`, `SpatialType` and `AnsiIntervalType`, make types
+of their own, as PySpark's plain classes do. `AtomicType()` has the `typeName`, `simpleString` and
+`jsonValue` of its class, `atomic`, converts no values, and is equal to a type of its class and
+`__dict__` only. It pickles as its class and its `__dict__`: at the protocols 2 and up its pickle
+is PySpark's own, byte for byte, and PySpark loads the drop-in's at every protocol. The struct,
+array or map that holds it names it in its `simpleString`, JSON and tree string, and pickles of
+the types it is made of. `IntegralType()` is one instance, as PySpark's `DataTypeSingleton` makes
+it, and a Python subclass of these classes, such as a `UserDefinedType` of parameters, takes the
+arguments of its `__init__`. A Python subclass of `IntegralType` cannot be instantiated, where
+PySpark's `DataTypeSingleton` makes one instance of each subclass: the constructor of a native
+class either returns an object that exists or makes one of the class it is called for. Neither
+client has a proto or an Arrow type of such a type: a plan of one raises `UNSUPPORTED_OPERATION`,
+and local rows of one `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION`.
+
+PySpark's singleton types, from `NullType` and `IntegerType` to `CalendarIntervalType` and
+`IntegralType`, are classes of the metaclass `DataTypeSingleton`, which `type(IntegerType)` shows.
+The drop-in's are native classes, whose metaclass is `type`, and `pyspark.sql.types` has no
+`DataTypeSingleton`: PyO3 has no option of a metaclass of a class, and CPython refuses to assign
+the `__class__` of a class of `type` after it is made. Their constructors return the one instance
+and raise the `TypeError` of `DataTypeSingleton.__call__` for an argument, as PySpark's, and
+`inspect.signature` of the class shows no parameters.
 
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
