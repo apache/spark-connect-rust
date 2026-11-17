@@ -2984,6 +2984,20 @@ impl DataFrame {
         DataFrame::new(self.session.clone(), plan)
     }
 
+    /// As [`DataFrame::unbuildable`], with the schema that this DataFrame cached. Mirrors a
+    /// `limit`, `coalesce`, `repartition`, `repartitionByRange`, `repartitionById`, `sample` or
+    /// `randomSplit` of a value that PySpark's client fails with when it builds the plan: these
+    /// copy the `_cached_schema` of their input, so the schema is known without a request, and
+    /// each request of the plan raises `error`. Not a stable API.
+    #[doc(hidden)]
+    pub fn unbuildable_with_cached_schema(&self, error: SparkError) -> DataFrame {
+        let plan = LogicalPlan::Unbuildable {
+            input: Arc::clone(&self.plan),
+            error,
+        };
+        self.with_cached_schema(plan)
+    }
+
     /// A subquery of `subquery_type` of this DataFrame's plan, which refers to the plan by
     /// its plan ID in the session.
     pub(crate) fn subquery(
@@ -5323,6 +5337,38 @@ mod cache_tests {
             df.sort_within_partitions(["id"]).cached_schema().as_deref(),
             Some(&schema)
         );
+    }
+
+    #[test]
+    fn an_unbuildable_plan_keeps_the_cached_schema_only_where_pyspark_copies_it() {
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let error = || SparkError::value_msg("Value out of range: 1099511627776");
+        // Of no cached schema, both have none.
+        assert!(df
+            .unbuildable_with_cached_schema(error())
+            .cached_schema()
+            .is_none());
+        let schema = DataType::Struct { fields: vec![] };
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(schema.clone()));
+
+        // As PySpark's `limit` of a count that it fails to send, whose DataFrame copies the
+        // `_cached_schema` of its input: the schema needs no request, and a request fails.
+        let kept = df.unbuildable_with_cached_schema(error());
+        assert_eq!(kept.cached_schema().as_deref(), Some(&schema));
+        assert_eq!(kept.schema().unwrap(), schema);
+        assert_eq!(
+            kept.limit(1).cached_schema().as_deref(),
+            Some(&schema),
+            "a later transformation that keeps the schema keeps it too"
+        );
+        let failed = kept.collect().unwrap_err();
+        assert_eq!(failed.message(), "Value out of range: 1099511627776");
+        // As PySpark's `offset`, which does not copy it.
+        assert!(df.unbuildable(error()).cached_schema().is_none());
     }
 
     #[test]

@@ -294,6 +294,11 @@ pub enum ExpressionNode {
     /// [`Expression::unbuildable`]).
     #[doc(hidden)]
     Unbuildable(Box<UnbuildableExpression>),
+    /// An expression that PySpark's client makes when it builds the plan, rather than when the
+    /// Column is made, so that its origin is that of its API function at that time. Not a stable
+    /// API (see [`Expression::with_plan_build_origin`]).
+    #[doc(hidden)]
+    PlanBuildOrigin(Box<PlanBuildOrigin>),
 }
 
 /// An expression of [`ExpressionNode::Unbuildable`]: `expression`, as this client builds it, and
@@ -349,6 +354,61 @@ impl UnbuildableExpression {
             record_unrenderable(error);
         }
         text
+    }
+}
+
+/// An expression of [`ExpressionNode::PlanBuildOrigin`]: `expression`, which PySpark's client
+/// makes by the API function `fragment` when it builds the plan, such as the `and` of the
+/// conditions of a join of a list of Columns, of `__and__`. Not a stable API.
+#[doc(hidden)]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlanBuildOrigin {
+    pub expression: Expression,
+    pub fragment: String,
+}
+
+impl PlanBuildOrigin {
+    /// The proto of `expression`, as a request builds it, of the origin that the listener of the
+    /// plans gives for `fragment` now ([`crate::plan_build::PlanBuildListener::origin`]), and of
+    /// none without one: PySpark's client takes it before it builds the expressions below.
+    fn to_proto(&self) -> proto::Expression {
+        let origin = tell_plan_build_listener(|listener| listener.origin(&self.fragment)).flatten();
+        let mut expr = self.expression.to_proto();
+        expr.common = origin.map(|origin| origin_proto(&origin));
+        expr
+    }
+}
+
+/// Tell the listener of the plans of the process ([`crate::plan_build`]) of what PySpark's
+/// client does as it builds the plan, by `tell`, unless the request that builds it has failed
+/// already, as PySpark's client stops at the first error. The error of `tell` is the request's,
+/// as the error of an expression that PySpark fails to build. None without a listener.
+fn tell_plan_build_listener<T>(
+    tell: impl FnOnce(&dyn crate::plan_build::PlanBuildListener) -> Result<T>,
+) -> Option<T> {
+    let listener = crate::plan_build::listener()?;
+    if UNBUILDABLE_EXPRESSION_ERROR.with(|slot| slot.borrow().is_some()) {
+        return None;
+    }
+    match tell(listener.as_ref()) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            record_unbuildable(&error);
+            None
+        }
+    }
+}
+
+/// The common fields of an expression of `origin`, as PySpark's `_create_proto_expression` sends
+/// them.
+fn origin_proto(origin: &crate::origin::Origin) -> proto::ExpressionCommon {
+    proto::ExpressionCommon {
+        origin: Some(proto::Origin {
+            function: Some(proto::origin::Function::PythonOrigin(proto::PythonOrigin {
+                fragment: origin.fragment.clone(),
+                call_site: origin.call_site.clone(),
+            })),
+        }),
     }
 }
 
@@ -668,6 +728,7 @@ impl Expression {
             ExpressionNode::Subquery(subquery) => subquery.render(),
             ExpressionNode::Sent(sent) => sent.rendered.clone(),
             ExpressionNode::Unbuildable(unbuildable) => unbuildable.render(),
+            ExpressionNode::PlanBuildOrigin(made) => made.expression.render(),
         }
     }
 
@@ -714,12 +775,29 @@ impl Expression {
         )))
     }
 
+    /// `expression`, which PySpark's client makes by the API function `fragment` when it builds
+    /// the plan, rather than when the Column is made: a request sends it of the origin that the
+    /// listener of the plans ([`crate::plan_build`]) gives for `fragment` as it builds the plan,
+    /// and of none without one. So the `and` of the conditions of a join of a list of Columns
+    /// is of `__and__` at its call site then, as PySpark's `functools.reduce(lambda c1, c2:
+    /// c1 & c2, on)` makes it at each plan build. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_plan_build_origin(expression: Expression, fragment: &str) -> Expression {
+        Expression::new(ExpressionNode::PlanBuildOrigin(Box::new(PlanBuildOrigin {
+            expression,
+            fragment: fragment.to_string(),
+        })))
+    }
+
     /// Converts the expression to a Spark Connect protobuf expression, with its origin, as
     /// PySpark's `Expression._create_proto_expression` sends it.
     pub fn to_proto(&self) -> proto::Expression {
-        // An unbuildable expression is the proto of its expression, of no level of its own.
-        if let ExpressionNode::Unbuildable(unbuildable) = self.node() {
-            return unbuildable.to_proto();
+        // An unbuildable expression is the proto of its expression, of no level of its own, and
+        // so is an expression of an origin of the plan build.
+        match self.node() {
+            ExpressionNode::Unbuildable(unbuildable) => return unbuildable.to_proto(),
+            ExpressionNode::PlanBuildOrigin(made) => return made.to_proto(),
+            _ => {}
         }
         // A level serializes the levels below it: grow the stack for an expression of many
         // levels, and count them for `with_expression_depth_bound`.
@@ -807,14 +885,7 @@ impl Expression {
             return expr;
         }
         if let Some(origin) = &self.origin {
-            expr.common = Some(proto::ExpressionCommon {
-                origin: Some(proto::Origin {
-                    function: Some(proto::origin::Function::PythonOrigin(proto::PythonOrigin {
-                        fragment: origin.fragment.clone(),
-                        call_site: origin.call_site.clone(),
-                    })),
-                }),
-            });
+            expr.common = Some(origin_proto(origin));
         }
         expr
     }
@@ -894,6 +965,7 @@ impl Expression {
                 stacker::maybe_grow(stack, stack, || sent.expression.clone())
             }
             ExpressionNode::Unbuildable(unbuildable) => unbuildable.to_proto(),
+            ExpressionNode::PlanBuildOrigin(made) => made.to_proto(),
         }
     }
 }
@@ -1660,7 +1732,10 @@ impl WindowExpressionWrapper {
         // Set the window function
         window.window_function = Some(Box::new(self.window_function.to_proto()));
 
-        // Set partition spec
+        // Set partition spec. PySpark's `to_plan` warns of a window of no partitions here.
+        if self.partition_spec.is_empty() {
+            tell_plan_build_listener(|listener| listener.window_without_partitions());
+        }
         window.partition_spec = self.partition_spec.iter().map(|e| e.to_proto()).collect();
 
         // Set order spec

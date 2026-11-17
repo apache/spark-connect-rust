@@ -25,7 +25,9 @@ use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 #[pyclass(
     name = "Builder",
     module = "pyspark.sql.connect.session",
-    from_py_object
+    from_py_object,
+    weakref,
+    dict
 )]
 #[derive(Clone)]
 pub struct PySparkSessionBuilder {
@@ -81,20 +83,25 @@ impl PySparkSessionBuilder {
     }
 
     /// The shallow copy of a builder, as PySpark's `copy.copy`, of its options, its channel
-    /// builder and its hook factories.
-    fn __copy__(&self) -> PySparkSessionBuilder {
-        self.clone()
+    /// builder, its hook factories and its instance attributes.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let copy = Py::new(py, slf.borrow().clone())?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of a builder, as PySpark's pickle of its state: its options, the URL first,
     /// its channel builder and its hook factories, which `builder_reduce` gives the builder back
-    /// from.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        let mut options = Vec::with_capacity(self.configs.len() + 1);
-        if let Some(url) = &self.remote_url {
+    /// from, and its instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let mut options = Vec::with_capacity(this.configs.len() + 1);
+        if let Some(url) = &this.remote_url {
             options.push(("spark.remote".to_string(), url.clone()));
         }
-        options.extend(self.configs.iter().cloned());
+        options.extend(this.configs.iter().cloned());
         let options = PyList::new(
             py,
             options
@@ -112,7 +119,7 @@ impl PySparkSessionBuilder {
         )?;
         let hook_factories = PyList::new(
             py,
-            self.hook_factories
+            this.hook_factories
                 .iter()
                 .map(|factory| factory.clone_ref(py).into_bound(py)),
         )?;
@@ -120,11 +127,12 @@ impl PySparkSessionBuilder {
             py,
             [
                 options.into_any(),
-                crate::reduce::optional_object(py, self.channel_builder.as_deref()),
+                crate::reduce::optional_object(py, this.channel_builder.as_deref()),
                 hook_factories.into_any(),
             ],
         )?;
-        crate::reduce::state_reduce(py, "builder_reduce", args)
+        let reduced = crate::reduce::state_reduce(py, "builder_reduce", args)?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).

@@ -28,18 +28,23 @@ impl PyStatFunctions {
 #[pymethods]
 impl PyStatFunctions {
     /// The shallow copy of the statistics functions, as PySpark's `copy.copy`: of the same
-    /// DataFrame.
-    fn __copy__(&self, py: Python<'_>) -> PyStatFunctions {
-        let frame = self.frame.clone_ref(py);
+    /// DataFrame, with the instance attributes of these.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let frame = slf.borrow().frame.clone_ref(py);
         let stat = frame.borrow(py).dataframe.stat();
-        PyStatFunctions::new(stat, frame)
+        let copy = Py::new(py, PyStatFunctions::new(stat, frame))?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of the statistics functions, as PySpark's: `stat` of their DataFrame, which
-    /// unpickles with it.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
-        let frame = self.frame.clone_ref(py).into_any().into_bound(py);
-        crate::reduce::getattr_reduce(py, frame, "stat")
+    /// unpickles with it, and their instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let frame = slf.borrow().frame.clone_ref(py).into_any().into_bound(py);
+        let reduced = crate::reduce::getattr_reduce(py, frame, "stat")?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
     }
 
     /// The DataFrame of these functions, as PySpark's `DataFrameStatFunctions.df`: `df.stat.df`

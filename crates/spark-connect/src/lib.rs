@@ -31,6 +31,8 @@ pub mod observation;
 pub mod origin;
 pub mod pipelines;
 pub mod plan;
+#[doc(hidden)]
+pub mod plan_build;
 pub mod profiler;
 pub mod progress;
 pub mod readwriter;

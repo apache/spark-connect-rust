@@ -65,6 +65,17 @@ pub(crate) fn reduce_with_instance_dict<'py>(
     Ok(PyTuple::new(object.py(), state)?.into_any())
 }
 
+/// The reduce of `object`, which no copy but the shallow one copies, as PySpark's object of a
+/// client, whose `__dict__` holds the thread-local state of the client: of the class of `object`
+/// and of a `threading.local`. So a pickle, cloudpickle and a deep copy fail at that object, with
+/// the error that PySpark's raise at each protocol, as pickle refuses a `_thread._local`.
+pub(crate) fn thread_local_reduce<'py>(object: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    let py = object.py();
+    let local = py.import("threading")?.call_method0("local")?;
+    let args = PyTuple::new(py, [local])?;
+    Ok(PyTuple::new(py, [object.get_type().into_any(), args.into_any()])?.into_any())
+}
+
 /// The state of `object` that a pickle of a plain Python object keeps, which
 /// `object.__getstate__` gives from the protocol 2: its `__dict__`, or None when that is empty,
 /// paired with the values of the `__slots__` of its class that are set, when there are some

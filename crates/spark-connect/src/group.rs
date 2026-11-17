@@ -531,6 +531,28 @@ impl GroupedData {
         function: &str,
         columns: impl IntoIterator<Item = S>,
     ) -> Result<DataFrame> {
+        let expressions: Vec<Expression> = self
+            .numeric_agg_columns(columns)?
+            .iter()
+            .map(|name| {
+                Expression::function(
+                    function,
+                    vec![crate::column::col(name).expression().clone()],
+                )
+            })
+            .collect();
+        Ok(self.agg(expressions))
+    }
+
+    /// The names of the columns that [`GroupedData::numeric_agg`] aggregates of `columns`: each
+    /// of them, which must be a numeric column of the schema of the DataFrame, else
+    /// `NOT_NUMERIC_COLUMNS`, or every numeric column without any. The schema is requested
+    /// unless it is cached. Not a stable API.
+    #[doc(hidden)]
+    pub fn numeric_agg_columns<S: Into<String>>(
+        &self,
+        columns: impl IntoIterator<Item = S>,
+    ) -> Result<Vec<String>> {
         let columns: Vec<String> = columns.into_iter().map(Into::into).collect();
         let schema = self.dataframe.schema()?;
         let names: Vec<String> = if columns.is_empty() {
@@ -558,16 +580,7 @@ impl GroupedData {
             }
             columns.iter().map(|column| column.to_string()).collect()
         };
-        let expressions: Vec<Expression> = names
-            .iter()
-            .map(|name| {
-                Expression::function(
-                    function,
-                    vec![crate::column::col(name).expression().clone()],
-                )
-            })
-            .collect();
-        Ok(self.agg(expressions))
+        Ok(names)
     }
 
     /// Sum values in each group, as `GroupedData.sum`: every numeric column without `columns`.

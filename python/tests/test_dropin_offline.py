@@ -5312,6 +5312,50 @@ def test_counts_that_the_proto_refuses_are_refused_as_pyspark():
         assert error.value.getMessageParameters() == parameters
 
 
+def test_counts_and_seeds_that_fail_the_plan_keep_the_cached_schema_as_pyspark(mock_connect):
+    # As PySpark's limit, coalesce, repartition, repartitionByRange, repartitionById, sample and
+    # randomSplit, which copy the _cached_schema of their input: of a count or a seed that the
+    # proto refuses, whose plan fails each request, the schema is that of the input once the
+    # input has one, with no request, while the actions still fail. offset and sampleBy do not
+    # copy it, so their schema is that of their plan, which fails before a request, as it does
+    # for all of them before the input has a schema.
+    spark, service = mock_connect
+    df = spark.range(3)
+    keeping = [
+        lambda d: d.limit(2.0),
+        lambda d: d.limit(2**40),
+        lambda d: d.coalesce(2**40),
+        lambda d: d.repartition(2**40),
+        lambda d: d.repartition(2**40, "id"),
+        lambda d: d.repartitionByRange(2**40, "id"),
+        lambda d: d.repartitionById(2**40, "id"),
+        lambda d: d.sample(fraction=0.5, seed=2**70),
+        lambda d: d.sample(True, 0.5, 2**70),
+        lambda d: d.randomSplit([0.5, 0.5], seed=2**70)[0],
+        lambda d: d.randomSplit([0.5, 0.5], seed=2**70)[1],
+    ]
+    dropping = [lambda d: d.offset(2**40), lambda d: d.sampleBy("id", {0: 0.5}, seed=2**70)]
+    for make in keeping + dropping:
+        with pytest.raises((TypeError, ValueError)):
+            make(df).schema
+    assert service.analyze_requests == []
+    schema = df.schema
+    assert len(service.analyze_requests) == 1
+    for make in keeping:
+        plan = make(df)
+        assert plan.schema == schema
+        assert plan.columns == ["id"]
+        # A transformation that keeps the schema keeps it again.
+        assert plan.limit(1).columns == ["id"]
+        with pytest.raises((TypeError, ValueError)):
+            plan.collect()
+    for make in dropping:
+        with pytest.raises(ValueError, match="Value out of range"):
+            make(df).columns
+    assert len(service.analyze_requests) == 1
+    assert service.execute_requests == []
+
+
 def test_counts_are_sent_by_their_index_as_pyspark(mock_connect):
     # As protobuf's default (upb) backend takes the count of these plans, by its __index__: a
     # NumPy int, an int of a subclass, or another object with __index__ is sent as its int, and so
@@ -14762,6 +14806,76 @@ if __name__ == "__main__":
     assert result.stdout.strip().splitlines()[-1] == str(["col"] * 6)
 
 
+def test_aggregates_range_partitions_and_join_conditions_carry_pysparks_origins():
+    # As PySpark's: count of grouped data is the `alias` of its count, whose count and literal
+    # have no origin; sum, avg, mean, min and max, and agg of a dict, give each column to
+    # `F.col`, and their functions have no origin; repartitionByRange sorts a column by its
+    # `asc`, whose sort order is of `asc_nulls_first`; and the plans of join and _joinAsOf of a
+    # list of Columns reduce them with `&` each time they are built, so their `and`s are of
+    # `__and__` at the call site of the request, not of the join. In a new interpreter, whose
+    # first column of a session reads spark.python.sql.dataFrameDebugging.enabled.
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    pytest.importorskip("grpc")
+    code = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from _mock_connect_server import mock_connect_session
+from pyspark.sql.connect import proto
+
+def origin(expression):
+    # The fragment of the python_origin of the expression, and the line of its call site.
+    if not expression.HasField("common"):
+        return None
+    python_origin = expression.common.origin.python_origin
+    return python_origin.fragment, int(python_origin.call_site.rsplit(":", 1)[1])
+
+def arguments(expression):
+    return [origin(argument) for argument in expression.unresolved_function.arguments]
+
+if __name__ == "__main__":
+    with mock_connect_session() as (spark, service):
+        df = spark.range(1)
+
+        def root(dataframe):
+            dataframe.collect()
+            return proto.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+
+        found = []
+        for grouped in (df.groupBy("id").count(), df.groupBy("id").pivot("id", [0]).count()):
+            found.append([origin(e) for e in root(grouped).aggregate.aggregate_expressions])
+        for function in ("sum", "avg", "mean", "min", "max"):
+            for columns in ((), ("id",)):
+                aggregate = root(getattr(df.groupBy("id"), function)(*columns)).aggregate
+                (expression,) = aggregate.aggregate_expressions
+                found.append((origin(expression), arguments(expression)))
+        (expression,) = root(df.groupBy("id").agg({"id": "max"})).aggregate.aggregate_expressions
+        found.append((origin(expression), arguments(expression)))
+        repartitioned = root(df.repartitionByRange(2, "id", df.id.desc()))
+        found.append([origin(e) for e in repartitioned.repartition_by_expression.partition_exprs])
+        joined = df.join(df, [df.id == df.id, df.id == df.id, df.id == df.id])
+        condition = root(joined).join.join_condition
+        found.append((origin(condition), arguments(condition)))
+        condition = root(df._joinAsOf(df, "id", "id", on=[df.id == df.id, df.id == df.id]))
+        condition = condition.as_of_join.join_expr
+        found.append((origin(condition), arguments(condition)))
+        print(found)
+"""
+    tests = str(Path(__file__).resolve().parent)
+    result = subprocess.run(
+        [sys.executable, "-c", code, tests], check=True, capture_output=True, text=True)
+    # The lines of the code above, as PySpark gives them for it: the requests are built at line
+    # 22, in `root`, so the `and`s of a join are of that line, and not of the line of the join.
+    assert result.stdout.strip().splitlines()[-1] == str([
+        [("alias", 26)], [("alias", 26)], *[(None, [("col", 30)])] * 10, (None, [("col", 33)]),
+        [("asc_nulls_first", 35), ("desc_nulls_last", 35)],
+        (("__and__", 22), [("__and__", 22), ("__eq__", 37)]),
+        (("__and__", 22), [("__eq__", 40), ("__eq__", 40)]),
+    ])
+
+
 def test_join_as_of_sends_the_as_of_join_as_pyspark(mock_connect):
     # As PySpark's plan.AsOfJoin: Relation.as_of_join=39, with left=1, right=2, left_as_of=3,
     # right_as_of=4, join_expr=5, using_columns=6, join_type=7, tolerance=8,
@@ -21629,6 +21743,52 @@ def test_window_and_lambda_reprs_as_pyspark():
         repr(F.transform("a", lambda x: x + 1)))
 
 
+def test_windows_of_no_partitions_warn_at_each_plan_build_as_pyspark(mock_connect):
+    # As PySpark's WindowExpression.to_plan, which warns with warnings.warn as it builds the plan
+    # of a window expression of no partitions: a UserWarning of pyspark.sql.connect.expressions
+    # at each request that builds such an expression, for each of them, and none when the
+    # Column or the DataFrame is made, for a window of partitions, or for a pickle, which keeps
+    # the plan objects without building them. A warning of one place, which the default filter
+    # shows once, and which the error filter raises from the request, before it is sent.
+    import warnings
+
+    import cloudpickle
+    import pyspark.sql.connect.expressions as expressions
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    message = (
+        "WARN WindowExpression: No Partition Defined for Window operation! Moving all data to a "
+        "single partition, this can cause serious performance degradation.")
+    ordered = Window.orderBy("id")
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        unpartitioned = F.row_number().over(ordered)
+        df = spark.range(3).select(
+            unpartitioned, F.rank().over(ordered), F.max("id").over(Window.partitionBy("id")))
+        cloudpickle.dumps(df)
+        cloudpickle.dumps(unpartitioned)
+        assert record == []
+        df.schema
+        df.columns
+        df.collect()
+    assert [str(warning.message) for warning in record] == [message] * 4
+    assert {(warning.category, warning.filename) for warning in record} == {
+        (UserWarning, expressions.__file__)}
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("default")
+        df.collect()
+        df.collect()
+    assert len(record) == 1
+    requests = len(service.execute_requests)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(UserWarning, match="^WARN WindowExpression: No Partition Defined"):
+            df.collect()
+    assert len(service.execute_requests) == requests
+
+
 def test_window_frames_and_columns_are_checked_as_pyspark():
     # As PySpark's: a start of -sys.maxsize or less is unbounded preceding and an end of
     # sys.maxsize or more unbounded following; a row frame raises VALUE_NOT_BETWEEN for a
@@ -27741,18 +27901,67 @@ def test_copies_of_the_objects_as_pyspark(mock_connect, name):
         assert type(copy.deepcopy(obj)) is type(obj)
 
 
+@pytest.mark.parametrize(
+    "name", tuple(name for name in _COPYABLE_OBJECTS if name != "df") + tuple(_UNCOPYABLE_MESSAGES))
+def test_copies_and_pickles_keep_the_instance_attributes_as_pyspark(mock_connect, name):
+    # As PySpark's plain objects, which copy and pickle their __dict__: a shallow copy shares the
+    # attributes that were set on the object, and a deep copy and cloudpickle copy them, where
+    # they copy at all. (A DataFrame copies the state of its __reduce__, without them, in both.)
+    import copy
+
+    import cloudpickle
+
+    spark, _ = mock_connect
+    obj = _copy_objects(spark)[name]()
+    obj.foo = [1, 2]
+    assert copy.copy(obj).foo is obj.foo
+    if name in _UNCOPYABLE_MESSAGES:
+        return
+    deep = copy.deepcopy(obj)
+    assert deep.foo == [1, 2]
+    assert deep.foo is not obj.foo or deep is obj
+    assert pickle.loads(cloudpickle.dumps(obj)).foo == [1, 2]
+
+
+@pytest.mark.parametrize("name", tuple(_UNCOPYABLE_MESSAGES))
+def test_plain_pickles_of_the_uncopyable_objects_fail_as_pyspark(mock_connect, name):
+    # As PySpark's pickle of their __dict__, which fails at the first value that it cannot
+    # pickle: the client of the conf and of a merge builder or action, and the session of the
+    # stream manager, before its listener bus, whose creator is a local function.
+    spark, _ = mock_connect
+    obj = _copy_objects(spark)[name]()
+    obj.foo = 1
+    if name == "streams":
+        error = AttributeError, "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'"
+    else:
+        error = TypeError, _UNCOPYABLE_MESSAGES[name]
+    with pytest.raises(error[0], match=f"^{re.escape(error[1])}$"):
+        pickle.dumps(obj)
+
+
 @pytest.mark.parametrize("protocol", range(6))
 @pytest.mark.parametrize("name", _COPYABLE_OBJECTS + tuple(_UNCOPYABLE_MESSAGES))
 def test_pickles_of_the_objects_at_every_protocol_as_pyspark(mock_connect, name, protocol):
     # As PySpark's cloudpickle of these objects at every protocol: each pickles and unpickles
     # with the active session, except the conf, merge builder and stream manager, which raise
-    # the TypeError that their deep copy raises.
+    # the TypeError that their deep copy raises, of the thread-local state of their client or the
+    # lock of their listener bus. Pickle's protocols 0 and 1 name the thread-local `_local`, and
+    # cloudpickle pickles the class of the lock there, which fails to unpickle.
     import cloudpickle
 
     spark, _ = mock_connect
     obj = _copy_objects(spark)[name]()
+    if name == "streams" and protocol < 2:
+        data = cloudpickle.dumps(obj, protocol)
+        message = "cannot set '__doc__' attribute of immutable type '_thread.lock'"
+        with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
+            pickle.loads(data)
+        return
     if name in _UNCOPYABLE_MESSAGES:
-        with pytest.raises(TypeError, match=re.escape(_UNCOPYABLE_MESSAGES[name])):
+        message = _UNCOPYABLE_MESSAGES[name]
+        if protocol < 2:
+            message = message.replace("_thread._local", "_local")
+        with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
             cloudpickle.dumps(obj, protocol)
         return
     data = cloudpickle.dumps(obj, protocol)
@@ -28361,6 +28570,43 @@ def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
     rebuilt = pickle.loads(pickle.dumps(builder))
     assert type(rebuilt) is type(builder)
     assert ("k", "v") in rebuilt.__reduce__()[1][0]
+
+
+def test_builders_merge_actions_and_queries_keep_their_instance_attributes_as_pyspark(
+        mock_connect):
+    # As PySpark's plain classes of the session builder, of the actions of a merge builder and
+    # of a streaming query: an attribute can be set on one, which can be weakly referenced, and a
+    # copy shares the attribute, while a deep copy, a pickle and cloudpickle copy it, where they
+    # copy the object at all, as PySpark's do.
+    import copy
+    import weakref
+
+    import cloudpickle
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r"))
+    )
+    query = spark.readStream.format("rate").load().writeStream.format("noop").start()
+    merge = df.mergeInto("t", df.id == df.id)
+    actions = [merge.whenMatched(), merge.whenNotMatched(), merge.whenNotMatchedBySource()]
+    builder = SparkSession.builder.config("k", "v")
+    for obj in [builder, query, *actions]:
+        obj.foo = [1, 2]
+        assert weakref.ref(obj)() is obj
+        assert copy.copy(obj).foo is obj.foo
+    for obj in [builder, query]:
+        deep = copy.deepcopy(obj)
+        assert deep.foo == [1, 2] and deep.foo is not obj.foo
+        assert pickle.loads(cloudpickle.dumps(obj)).foo == [1, 2]
+    assert copy.copy(query).id == query.id
+    assert pickle.loads(pickle.dumps(builder)).foo == [1, 2]
+    for obj in actions:
+        with pytest.raises(TypeError, match="^cannot pickle '_thread._local' object$"):
+            copy.deepcopy(obj)
 
 
 def test_pivot_values_are_the_literal_columns_as_pyspark(mock_connect):

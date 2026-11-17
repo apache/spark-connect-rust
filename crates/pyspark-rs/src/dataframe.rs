@@ -603,10 +603,23 @@ fn as_of_join_condition(
         };
         condition = Some(match condition {
             None => col.column.clone(),
-            Some(left) => left.and(col.column.clone()),
+            Some(left) => plan_conjunction(left, col.column.clone()),
         });
     }
     Ok((condition, Vec::new()))
+}
+
+/// The conjunction `left & right` of the conditions of a join of a list of Columns, as PySpark's
+/// `Join` and `AsOfJoin` plans make it when they are built, `functools.reduce(lambda c1, c2:
+/// c1 & c2, on)`: so the `and` is of the origin of `__and__` at the call site of each request.
+fn plan_conjunction(
+    left: spark_connect::column::Column,
+    right: spark_connect::column::Column,
+) -> spark_connect::column::Column {
+    let and = left.and(right).expression().clone();
+    spark_connect::column::Column::new(
+        spark_connect::expression::Expression::with_plan_build_origin(and, "__and__"),
+    )
 }
 
 /// The as-of column of `_joinAsOf` of `df`: a Column as it is, or the column of `df` that
@@ -735,7 +748,7 @@ impl PyDataFrame {
             .getattr("_reduce_dataframe")?
             .call1((
                 this.spark_session(py)?,
-                this._relation_bytes(py)?,
+                crate::origin::pickling(|| this._relation_bytes(py))?,
                 this.dataframe.plan_levels(),
                 this.support_repr_html
                     .load(std::sync::atomic::Ordering::SeqCst),
@@ -1043,7 +1056,7 @@ impl PyDataFrame {
 
     /// Limit the number of rows, as PySpark's `limit`, which does not check `num`: its plan sets
     /// `num` in the proto's int32, whose errors ([`proto_int`]) PySpark raises once it sends the
-    /// plan; this client builds the plan here, so it raises them here. The server checks the rest.
+    /// plan, so the DataFrame raises them at each request. The server checks the rest.
     fn limit(&self, num: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let py = num.py();
         let value = proto_int(num, "spark.connect.Limit.limit");
@@ -1051,11 +1064,14 @@ impl PyDataFrame {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Skip the first `num` rows, as PySpark's `offset`, which sends `num` as `limit` does.
+    /// Skip the first `num` rows, as PySpark's `offset`, which sends `num` as `limit` does, but
+    /// does not copy the `_cached_schema` of its input, also when the count fails the plan.
     fn offset(&self, num: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let py = num.py();
-        let value = proto_int(num, "spark.connect.Offset.offset");
-        let df = converted_plan(py, &self.dataframe, value, |num| self.dataframe.offset(num))?;
+        let df = match proto_int(num, "spark.connect.Offset.offset") {
+            Ok(num) => self.dataframe.offset(num),
+            Err(err) => self.dataframe.unbuildable(unbuildable_error(py, err)?),
+        };
         Ok(PyDataFrame::new(df))
     }
 
@@ -1168,7 +1184,7 @@ impl PyDataFrame {
                 };
                 condition = Some(match condition {
                     None => col.column.clone(),
-                    Some(left) => left.and(col.column.clone()),
+                    Some(left) => plan_conjunction(left, col.column.clone()),
                 });
             }
             return Ok(PyDataFrame::new(self.dataframe.join(
@@ -1394,11 +1410,20 @@ impl PyDataFrame {
                 "Column, int or str",
             ));
         };
-        // As PySpark's `_to_cols(cols, sort=True)`, which does not unpack a list among them.
-        let exprs: Vec<_> = to_columns_as_given(cols)?
-            .into_iter()
-            .map(|c| c.expression().clone())
-            .collect();
+        // As PySpark's `_to_cols(cols, sort=True)`, which does not unpack a list among them, and
+        // sorts a column that is not a sort order by its `asc`, which is `asc_nulls_first`, of
+        // the origin of that.
+        let mut exprs = Vec::with_capacity(cols.len());
+        for column in to_columns_as_given(cols)? {
+            let sorted = match column.expression().node() {
+                spark_connect::ExpressionNode::SortOrder(_) => column,
+                _ => {
+                    let _origin = crate::origin::with_origin("asc_nulls_first")?;
+                    column.asc_nulls_first()
+                }
+            };
+            exprs.push(sorted.expression().clone());
+        }
         // The count is the proto's int32 of the plan, which PySpark converts once it sends the
         // plan, after the columns: a count that protobuf refuses fails the plan, which is built
         // here with no count, so that the errors of the columns come first.
@@ -1413,8 +1438,9 @@ impl PyDataFrame {
             .dataframe
             .repartition_by_range_opt(num_partitions, exprs)
             .to_pyerr()?;
+        // Of the schema that the input cached, as PySpark copies it.
         Ok(PyDataFrame::new(match plan_error {
-            Some(error) => df.unbuildable(error),
+            Some(error) => df.unbuildable_with_cached_schema(error),
             None => df,
         }))
     }
@@ -2327,8 +2353,9 @@ impl PyDataFrame {
             .to_pyerr()?
             .into_iter()
             .map(|df| {
+                // Of the schema that the input cached, as PySpark copies it to each split.
                 PyDataFrame::new(match &plan_error {
-                    Some(error) => df.unbuildable(error.clone()),
+                    Some(error) => df.unbuildable_with_cached_schema(error.clone()),
                     None => df,
                 })
             })
@@ -3010,8 +3037,9 @@ impl PyDataFrame {
             None => (python_random_seed(py)?, None),
         };
         let df = self.dataframe.sample_opt(frac, replace, Some(seed));
+        // Of the schema that the input cached, as PySpark copies it.
         Ok(PyDataFrame::new(match plan_error {
-            Some(error) => df.unbuildable(error),
+            Some(error) => df.unbuildable_with_cached_schema(error),
             None => df,
         }))
     }
@@ -3470,19 +3498,29 @@ pub struct PyDataFrameNaFunctions {
 
 #[pymethods]
 impl PyDataFrameNaFunctions {
-    /// The shallow copy of the null functions, as PySpark's `copy.copy`: of the same DataFrame.
-    fn __copy__(&self, py: Python<'_>) -> PyDataFrameNaFunctions {
-        PyDataFrameNaFunctions {
-            df: self.df.clone(),
-            frame: self.frame.clone_ref(py),
-        }
+    /// The shallow copy of the null functions, as PySpark's `copy.copy`: of the same DataFrame,
+    /// with the instance attributes of these.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyDataFrameNaFunctions {
+                df: this.df.clone(),
+                frame: this.frame.clone_ref(py),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of the null functions, as PySpark's: `na` of their DataFrame, which unpickles
-    /// with it.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        let frame = self.frame.clone_ref(py).into_any().into_bound(py);
-        crate::reduce::getattr_reduce(py, frame, "na")
+    /// with it, and their instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let frame = slf.borrow().frame.clone_ref(py).into_any().into_bound(py);
+        let reduced = crate::reduce::getattr_reduce(py, frame, "na")?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
     }
 
     /// The DataFrame of these functions, as PySpark's `DataFrameNaFunctions.df`: `df.na.df` is
@@ -3823,25 +3861,30 @@ fn check_merge_clause(
 impl PyMergeIntoWriter {
     /// The shallow copy of a merge builder, as PySpark's `copy.copy`: the copy shares the state
     /// of this one, its table, its condition and its actions, as the copy of PySpark's shares
-    /// its attributes.
-    fn __copy__(&self, py: Python<'_>) -> PyMergeIntoWriter {
-        PyMergeIntoWriter {
-            inner: std::sync::Arc::clone(&self.inner),
-            schema_evolution: std::sync::atomic::AtomicBool::new(
-                self.schema_evolution
-                    .load(std::sync::atomic::Ordering::SeqCst),
-            ),
+    /// its attributes, and the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyMergeIntoWriter {
+                inner: std::sync::Arc::clone(&this.inner),
+                schema_evolution: std::sync::atomic::AtomicBool::new(
+                    this.schema_evolution
+                        .load(std::sync::atomic::Ordering::SeqCst),
+                ),
 
-            unsent_table: self.unsent_table.as_ref().map(|table| table.clone_ref(py)),
-        }
+                unsent_table: this.unsent_table.as_ref().map(|table| table.clone_ref(py)),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// A merge builder does not pickle, as PySpark's, whose client holds a thread-local state
     /// that pickle cannot copy.
-    fn __reduce__(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "cannot pickle '_thread._local' object",
-        ))
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::reduce::thread_local_reduce(slf.as_any())
     }
 
     /// Nested builder-class references, mirroring pyspark's `MergeIntoWriter.WhenMatched`
@@ -3937,7 +3980,12 @@ fn assignments_to_map(
 
 /// `whenMatched(...)` clause builder. Holds its parent writer, like PySpark's
 /// `MergeIntoWriter.WhenMatched`; each action may be called more than once.
-#[pyclass(name = "WhenMatched", module = "pyspark.sql.connect.merge")]
+#[pyclass(
+    name = "WhenMatched",
+    module = "pyspark.sql.connect.merge",
+    weakref,
+    dict
+)]
 pub struct PyWhenMatched {
     writer: Py<PyMergeIntoWriter>,
     condition: Option<spark_connect::column::Column>,
@@ -3946,20 +3994,25 @@ pub struct PyWhenMatched {
 #[pymethods]
 impl PyWhenMatched {
     /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
-    /// and condition.
-    fn __copy__(&self, py: Python<'_>) -> PyWhenMatched {
-        PyWhenMatched {
-            writer: self.writer.clone_ref(py),
-            condition: self.condition.clone(),
-        }
+    /// and condition, with the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyWhenMatched {
+                writer: this.writer.clone_ref(py),
+                condition: this.condition.clone(),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
     /// thread-local state that pickle cannot copy.
-    fn __reduce__(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "cannot pickle '_thread._local' object",
-        ))
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::reduce::thread_local_reduce(slf.as_any())
     }
 
     #[pyo3(name = "updateAll")]
@@ -3989,7 +4042,12 @@ impl PyWhenMatched {
 
 /// `whenNotMatched(...)` clause builder. Holds its parent writer, like PySpark's
 /// `MergeIntoWriter.WhenNotMatched`.
-#[pyclass(name = "WhenNotMatched", module = "pyspark.sql.connect.merge")]
+#[pyclass(
+    name = "WhenNotMatched",
+    module = "pyspark.sql.connect.merge",
+    weakref,
+    dict
+)]
 pub struct PyWhenNotMatched {
     writer: Py<PyMergeIntoWriter>,
     condition: Option<spark_connect::column::Column>,
@@ -3998,20 +4056,25 @@ pub struct PyWhenNotMatched {
 #[pymethods]
 impl PyWhenNotMatched {
     /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
-    /// and condition.
-    fn __copy__(&self, py: Python<'_>) -> PyWhenNotMatched {
-        PyWhenNotMatched {
-            writer: self.writer.clone_ref(py),
-            condition: self.condition.clone(),
-        }
+    /// and condition, with the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyWhenNotMatched {
+                writer: this.writer.clone_ref(py),
+                condition: this.condition.clone(),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
     /// thread-local state that pickle cannot copy.
-    fn __reduce__(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "cannot pickle '_thread._local' object",
-        ))
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::reduce::thread_local_reduce(slf.as_any())
     }
 
     #[pyo3(name = "insertAll")]
@@ -4035,7 +4098,12 @@ impl PyWhenNotMatched {
 
 /// `whenNotMatchedBySource(...)` clause builder. Holds its parent writer, like
 /// PySpark's `MergeIntoWriter.WhenNotMatchedBySource`.
-#[pyclass(name = "WhenNotMatchedBySource", module = "pyspark.sql.connect.merge")]
+#[pyclass(
+    name = "WhenNotMatchedBySource",
+    module = "pyspark.sql.connect.merge",
+    weakref,
+    dict
+)]
 pub struct PyWhenNotMatchedBySource {
     writer: Py<PyMergeIntoWriter>,
     condition: Option<spark_connect::column::Column>,
@@ -4044,20 +4112,25 @@ pub struct PyWhenNotMatchedBySource {
 #[pymethods]
 impl PyWhenNotMatchedBySource {
     /// The shallow copy of a merge action, as PySpark's `copy.copy`: of the same merge builder
-    /// and condition.
-    fn __copy__(&self, py: Python<'_>) -> PyWhenNotMatchedBySource {
-        PyWhenNotMatchedBySource {
-            writer: self.writer.clone_ref(py),
-            condition: self.condition.clone(),
-        }
+    /// and condition, with the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let copy = Py::new(
+            py,
+            PyWhenNotMatchedBySource {
+                writer: this.writer.clone_ref(py),
+                condition: this.condition.clone(),
+            },
+        )?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
     /// thread-local state that pickle cannot copy.
-    fn __reduce__(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "cannot pickle '_thread._local' object",
-        ))
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::reduce::thread_local_reduce(slf.as_any())
     }
 
     #[pyo3(name = "updateAll")]
@@ -6116,7 +6189,9 @@ pub(crate) fn unbuildable_error(
 
 /// The plan of `df` with `plan` of the value `value`, which PySpark converts as it sends the plan:
 /// a value that protobuf refuses makes `df` fail each request with its error, as
-/// [`unbuildable_error`] gives it. Another error is raised at the call.
+/// [`unbuildable_error`] gives it, with the schema that `df` cached, as PySpark's `limit`,
+/// `coalesce`, `repartition` and `repartitionById` copy the `_cached_schema` of their input.
+/// Another error is raised at the call.
 fn converted_plan<T>(
     py: Python<'_>,
     df: &DataFrame,
@@ -6125,7 +6200,7 @@ fn converted_plan<T>(
 ) -> PyResult<DataFrame> {
     match value {
         Ok(value) => Ok(plan(value)),
-        Err(err) => Ok(df.unbuildable(unbuildable_error(py, err)?)),
+        Err(err) => Ok(df.unbuildable_with_cached_schema(unbuildable_error(py, err)?)),
     }
 }
 

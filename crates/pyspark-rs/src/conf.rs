@@ -89,17 +89,18 @@ pub(crate) fn warn_all(py: Python<'_>, warnings: &[String]) -> PyResult<()> {
 #[pymethods]
 impl PyRuntimeConf {
     /// The shallow copy of the runtime configuration, as PySpark's `copy.copy`: of the same
-    /// session.
-    fn __copy__(&self) -> PyRuntimeConf {
-        PyRuntimeConf::new(self.session.clone())
+    /// session, with the instance attributes of this one.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let copy = Py::new(py, PyRuntimeConf::new(slf.borrow().session.clone()))?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The runtime configuration does not pickle, as PySpark's, whose client holds a
     /// thread-local state that pickle cannot copy.
-    fn __reduce__(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyTypeError::new_err(
-            "cannot pickle '_thread._local' object",
-        ))
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        crate::reduce::thread_local_reduce(slf.as_any())
     }
 
     /// Set a configuration value, as PySpark's: a bool as "true" or "false", an int as its
