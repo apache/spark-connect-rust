@@ -858,6 +858,10 @@ impl PyDataFrame {
     /// the session is that of its `__reduce__`, the active session of its ID, once in a call: so
     /// a deep copy raises `NO_ACTIVE_SESSION` where no session is active, as on another thread,
     /// and `PySparkAssertionError` where another one is, while `copy.copy` keeps the session.
+    /// PySpark's copy of the plan deep-copies the function of each UDF of it, with `memo`, before
+    /// the session: so do these (`deep_copied_picklers`), of which the plan of a copy in the
+    /// session of this DataFrame is made, which pickles them at each request, as PySpark's copy
+    /// does; a copy in another session is of the relation (`deep_copy_with_pickler_copies`).
     fn __deepcopy__(&self, py: Python<'_>, memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         // As PySpark's: `copy.deepcopy` looks up `__deepcopy__` through `__getattr__`, whose check
         // reads the columns, so the schema is requested unless it is cached. On a stopped session,
@@ -876,6 +880,7 @@ impl PyDataFrame {
                 ))
             })
             .collect::<PyResult<Vec<_>>>()?;
+        let copies = crate::udf_command::deep_copied_picklers(py, self.dataframe.picklers(), memo)?;
         let session = py
             .import("copy")?
             .call_method1(
@@ -885,8 +890,11 @@ impl PyDataFrame {
             .extract::<PyRef<'_, crate::session::PySparkSession>>()?
             .session
             .clone();
-        let copy = crate::on_grown_stack(|| self.dataframe.deep_copy_with(session, observations))
-            .to_pyerr()?;
+        let copy = crate::on_grown_stack(|| {
+            self.dataframe
+                .deep_copy_with_pickler_copies(session, observations, &copies)
+        })
+        .to_pyerr()?;
         // As PySpark's reconstruction of the copy, which requests its schema, as the copy has none.
         let copy = self.copy_of(copy);
         copy.fresh_schema_request(py)?;

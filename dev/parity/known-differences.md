@@ -138,9 +138,12 @@ difference is intentional or tracked for a fix.
   invalid string (the Rust API's `collect` returns `SparkErrorKind::UnicodeDecode`).
 
 - **What a plan build does for a pickle or a deep copy** (intentional; DESIGN). A pickled
-  DataFrame or Column, and a deep copy of a DataFrame, carry the relation that the drop-in
-  builds for them, where PySpark's keep their plan objects and build them at each request.
-  So the requests of an unpickled DataFrame or Column, or of a deep copy, do not warn of a
+  DataFrame or Column, and a deep copy of a DataFrame whose plan holds no function of a UDF or
+  that is copied into another session, carry the relation that the drop-in builds for them,
+  where PySpark's keep their plan objects and build them at each request. (A deep copy of a
+  DataFrame of such functions in its session is a copy of its plan, of copies of them, which
+  its requests build, as PySpark's; see "A deep copy of a DataFrame into another session".)
+  So the requests of an unpickled DataFrame or Column, or of such a deep copy, do not warn of a
   window of no partitions (`WARN WindowExpression: No Partition Defined ...`), which
   PySpark's do at each build, and the `and` of the conditions of a join of a list of
   Columns keeps the origin of its call site at the pickle or the copy, where PySpark's has
@@ -246,11 +249,15 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   a UDF of a lambda pickles, where PySpark's raises the `PicklingError` of the lambda, and that of
   a function that does not pickle by value raises its `PicklingError`, where PySpark's pickles a
   module-level function by reference.
-- **A deep copy of a DataFrame** (tracked). It is a DataFrame of the relation of the copied one, so
-  that its Observations are copies, as PySpark's, and so it carries the commands that the
-  functions pickled to when it was copied, where PySpark's deep copy holds the functions, which its
-  requests pickle again. `copy.copy` of a Column or a DataFrame, and `copy.deepcopy` of a Column,
-  share the functions, as PySpark's do.
+- **A deep copy of a DataFrame into another session** (tracked). A deep copy whose session copies
+  to another one, of a `memo` that maps it or of another active session of its ID, is a DataFrame
+  of the relation of the copied one, so that its Observations are copies, as PySpark's, and so it
+  carries the commands that the functions pickled to when it was copied, where PySpark's holds the
+  copies of the functions, which its requests pickle again. In the session of the DataFrame, the
+  copies of a DataFrame, a Column, grouped data and a table argument hold the functions as
+  PySpark's do: `copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo` of
+  the call, which gives a function itself, and a copy of a callable object, a bound method or a
+  `functools.partial`.
 - **The UDFs of a `mergeInto` clause** (tracked). Its condition and assignments are pickled when
   the clause is added, as PySpark's `_build_merge_action` builds them, and again when `merge` runs,
   whose command carries the second pickle; PySpark's carries the first.

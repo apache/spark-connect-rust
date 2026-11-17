@@ -784,16 +784,26 @@ impl PyColumn {
         Ok(copy)
     }
 
-    /// The deep copy of a Column, as PySpark's `copy.deepcopy`: of the same expression, which
-    /// cannot change, as the functions of the UDFs of PySpark's deep copy are those of the Column,
-    /// and of deep copies of its attributes, with `memo`, which has the copy before them, as
-    /// `copy` reconstructs an object.
+    /// The deep copy of a Column, as PySpark's `copy.deepcopy`, which deep-copies its expression,
+    /// of the function of each UDF with `memo` (`deep_copied_picklers`): a function is the same
+    /// object, so the copy pickles it as it is at its requests, and a callable object, a bound
+    /// method or a partial is a copy; the expression is shared up to the UDFs of the copies. Then
+    /// of deep copies of its attributes, with `memo`, which has the copy before them, as `copy`
+    /// reconstructs an object of its arguments.
     fn __deepcopy__<'py>(
         slf: &Bound<'py, Self>,
         memo: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         let py = slf.py();
-        let copy = Bound::new(py, PyColumn::new(slf.get().column.clone()))?;
+        let column = &slf.get().column;
+        let copies =
+            crate::udf_command::deep_copied_picklers(py, column.expression().picklers(), memo)?;
+        let column = if copies.is_empty() {
+            column.clone()
+        } else {
+            Column::new(column.expression().with_pickler_copies(&copies))
+        };
+        let copy = Bound::new(py, PyColumn::new(column))?;
         let state = crate::group::instance_state(slf.as_any())?;
         if !state.is_none() {
             memo.set_item(slf.as_ptr() as usize, &copy)?;

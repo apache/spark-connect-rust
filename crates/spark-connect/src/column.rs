@@ -33,6 +33,11 @@ impl Column {
         &self.expr
     }
 
+    /// The underlying Expression, to replace.
+    pub(crate) fn expression_mut(&mut self) -> &mut Expression {
+        &mut self.expr
+    }
+
     /// Mirrors `pyspark.sql.column.Column.alias`.
     pub fn alias(self, name: &str) -> Column {
         Column {

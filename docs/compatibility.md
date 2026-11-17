@@ -1268,8 +1268,9 @@ sends the plan, where the drop-in sends it and the server fails it at its own li
 A Column of 745 levels or more raises a `RecursionError` when it is pickled, of the drop-in's own
 message. PySpark's pickler raises one from about 600 levels, under Python's default recursion limit,
 so a Column of 600 to 744 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a
-Column share its expression, so they copy a Column of any depth, as PySpark's `copy.copy` does;
-PySpark's `copy.deepcopy` raises a `RecursionError` from about 165 levels.
+Column share its expression, of which a deep copy makes again only the levels above the UDFs whose
+functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy` does; PySpark's
+`copy.deepcopy` raises a `RecursionError` from about 165 levels.
 
 A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
 builds the Column or the window: the frame bounds of `Window.rowsBetween` and `rangeBetween`, and a
@@ -1364,7 +1365,8 @@ operation! ...`, is PySpark's: a `UserWarning` of `pyspark.sql.connect.expressio
 that module, which the default filter shows once, at each request that builds the plan of such a
 window, as PySpark warns as it builds the plan. Its line is that of the drop-in's module. A pickle
 of a DataFrame or a Column does not warn, as PySpark's builds no plan; but a DataFrame or a Column
-that is unpickled, and a deep copy of a DataFrame, send the plan that was built for the pickle or
+that is unpickled, and a deep copy of a DataFrame whose plan holds no function of a UDF or that is
+copied into another session (see the UDFs below), send the plan that was built for the pickle or
 the copy, so their requests do not warn again, where PySpark's warn at each. Such a plan keeps the
 origin of the `and` of the conditions of a join of a list of Columns of that time too, where
 PySpark gives it the call site of each request that builds it, as it does in the drop-in otherwise.
@@ -1464,24 +1466,28 @@ the call that applies it does not fail. The functions are pickled in the order i
 builds the plan, the initial state of `transformWithState` before its function and the arguments of
 a UDTF before its handler, and the first error of the build, of a pickling or of a value that the
 plan does not take, such as a str above, is raised. `spark.udf.register` and `spark.udtf.register`
-are commands, which pickle the function when they are called, as PySpark's do. A copy of a Column
-(`copy.copy` and `copy.deepcopy`), and `copy.copy` of a DataFrame, share the function, which the
-requests of the copy pickle. A request warns once of a window of no partitions, as PySpark's, though
-the drop-in builds the plan of a request twice when it has such functions, as it pickles them
-between the two builds: so where a function that does not pickle comes before such a window in the
-build, the drop-in warns of the window before it raises the error of the pickling, where PySpark
-raises it without the warning.
+are commands, which pickle the function when they are called, as PySpark's do. A copy of a Column, a
+DataFrame, grouped data or a table argument holds the functions, which the requests of the copy
+pickle, as PySpark's: `copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo`
+of the call, so a function, a lambda or a closure is the function itself, and a callable object, a
+bound method or a `functools.partial` is a copy, which the copies of one call share, as the two
+Columns of a UDF of `copy.deepcopy([c1, c2])` do. A request warns once of a window of no partitions,
+as PySpark's, though the drop-in builds the plan of a request twice when it has such functions, as
+it pickles them between the two builds: so where a function that does not pickle comes before such a
+window in the build, the drop-in warns of the window before it raises the error of the pickling,
+where PySpark raises it without the warning.
 
-A pickled Column or DataFrame, and a deep copy of a DataFrame, carry the commands that their
-functions pickled to when they were pickled or copied, as protobufs that the server's Python worker
-unpickles too, where PySpark's carry the functions, which their requests pickle again. So a value
-that a function reads, changed after that, is seen by PySpark's deep copy, and by its unpickled
-Column of a function that `pickle` pickles by reference, such as a function of `__main__`, but not
-by the drop-in's. `pickle.dumps` of a Column of a UDF of a function that does not pickle by value
-raises the `PicklingError` of its command, where PySpark's pickles a module-level function by
-reference, and `pickle.dumps` of the Column of a UDF of a lambda pickles, where PySpark's raises
-the `PicklingError` of the lambda. `CloudPickleSerializer.dumps` of such a Column raises the same
-error in both.
+A pickled Column or DataFrame, and a deep copy of a DataFrame into another session, whose session
+copies to another one (of a `memo` that maps it, or another active session of its ID), carry the
+commands that their functions pickled to when they were pickled or copied, as protobufs that the
+server's Python worker unpickles too, where PySpark's carry the functions, which their requests
+pickle again. So a value that a function reads, changed after that, is seen by PySpark's such deep
+copy, and by its unpickled Column of a function that `pickle` pickles by reference, such as a
+function of `__main__`, but not by the drop-in's. `pickle.dumps` of a Column of a UDF of a function
+that does not pickle by value raises the `PicklingError` of its command, where PySpark's pickles a
+module-level function by reference, and `pickle.dumps` of the Column of a UDF of a lambda pickles,
+where PySpark's raises the `PicklingError` of the lambda. `CloudPickleSerializer.dumps` of such a
+Column raises the same error in both.
 
 A DataFrame or a Column reports the functions of its UDFs to Python's garbage collector, as
 PySpark's plan of Python objects is seen by it, so a reference cycle through a function and the

@@ -510,6 +510,17 @@ pub enum LogicalPlan {
     },
 }
 
+/// A part of a plan node, of [`LogicalPlan::parts_mut`]: an input, an expression, a UDF, the
+/// pickler of a UDTF, the Observation of an `Observe` of its name, or the Observations of a `Raw`.
+pub(crate) enum PlanPart<'a> {
+    Input(&'a mut Arc<LogicalPlan>),
+    Expression(&'a mut Expression),
+    Udf(&'a mut CommonInlineUserDefinedFunctionExpression),
+    Pickler(&'a mut Option<crate::udf::CommandPickler>),
+    Observation(&'a str, &'a mut Option<crate::observation::Observation>),
+    Observations(&'a mut Vec<(String, crate::observation::Observation)>),
+}
+
 /// Aggregation group type (GROUP BY, ROLLUP, CUBE, PIVOT).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregateGroupType {
@@ -1352,6 +1363,245 @@ impl LogicalPlan {
     /// The plans that this one reads directly.
     pub(crate) fn inputs(&self) -> Vec<&Arc<LogicalPlan>> {
         inputs_of!(self)
+    }
+
+    /// The inputs of this node, then its expressions, UDFs, the pickler of its UDTF and its
+    /// Observations, which a deep copy of the functions of its UDFs replaces (see
+    /// [`crate::udf::PicklerRebuild`]).
+    pub(crate) fn parts_mut(&mut self) -> Vec<PlanPart<'_>> {
+        use PlanPart::{Expression as Of, Input, Observation, Observations, Pickler, Udf};
+        fn columns(columns: &mut [Column]) -> impl Iterator<Item = PlanPart<'_>> {
+            columns.iter_mut().map(|column| Of(column.expression_mut()))
+        }
+        let mut parts = Vec::new();
+        match self {
+            LogicalPlan::Sql {
+                pos_args,
+                named_args,
+                ..
+            } => {
+                parts.extend(pos_args.iter_mut().map(Of));
+                parts.extend(named_args.values_mut().map(Of));
+            }
+            LogicalPlan::Project { input, columns: c }
+            | LogicalPlan::WithColumns {
+                input, columns: c, ..
+            } => {
+                parts.push(Input(input));
+                parts.extend(columns(c));
+            }
+            LogicalPlan::Filter { input, condition } => {
+                parts.push(Input(input));
+                parts.push(Of(condition.expression_mut()));
+            }
+            LogicalPlan::Aggregate {
+                input,
+                grouping_expressions,
+                aggregate_expressions,
+                pivot_col,
+                pivot_values,
+                grouping_sets,
+                ..
+            } => {
+                parts.push(Input(input));
+                parts.extend(grouping_expressions.iter_mut().map(Of));
+                parts.extend(aggregate_expressions.iter_mut().map(Of));
+                parts.extend(pivot_col.iter_mut().map(Of));
+                parts.extend(pivot_values.iter_mut().map(Of));
+                parts.extend(grouping_sets.iter_mut().flatten().map(Of));
+            }
+            LogicalPlan::Join {
+                left, right, on, ..
+            }
+            | LogicalPlan::LateralJoin {
+                left, right, on, ..
+            } => {
+                parts.extend([Input(left), Input(right)]);
+                parts.extend(on.iter_mut().map(|on| Of(on.expression_mut())));
+            }
+            LogicalPlan::SetOperation { left, right, .. } | LogicalPlan::Zip { left, right } => {
+                parts.extend([Input(left), Input(right)])
+            }
+            LogicalPlan::Sort {
+                input,
+                order: expressions,
+                ..
+            }
+            | LogicalPlan::RepartitionByExpression {
+                input, expressions, ..
+            }
+            | LogicalPlan::Drop {
+                input, expressions, ..
+            }
+            | LogicalPlan::Hint {
+                input,
+                parameters: expressions,
+                ..
+            }
+            | LogicalPlan::RepartitionByRange {
+                input,
+                partition_exprs: expressions,
+                ..
+            }
+            | LogicalPlan::Transpose {
+                input,
+                index_columns: expressions,
+            } => {
+                parts.push(Input(input));
+                parts.extend(expressions.iter_mut().map(Of));
+            }
+            LogicalPlan::Observe {
+                input,
+                name,
+                exprs,
+                observation,
+            } => {
+                parts.push(Input(input));
+                parts.extend(exprs.iter_mut().map(Of));
+                parts.push(Observation(name.as_str(), observation));
+            }
+            LogicalPlan::Raw { observations, .. } => parts.push(Observations(observations)),
+            LogicalPlan::UnresolvedTableValuedFunction { arguments, .. } => {
+                parts.extend(arguments.iter_mut().map(Of));
+            }
+            LogicalPlan::WithColumnMetadata { input, column, .. } => {
+                parts.push(Input(input));
+                parts.push(Of(column));
+            }
+            LogicalPlan::Unpivot {
+                input, ids, values, ..
+            } => {
+                parts.push(Input(input));
+                parts.extend(columns(ids));
+                if let Some(values) = values {
+                    parts.extend(columns(values));
+                }
+            }
+            LogicalPlan::StatSampleBy {
+                input,
+                col,
+                fractions,
+                ..
+            } => {
+                parts.push(Input(input));
+                parts.push(Of(col));
+                parts.extend(fractions.iter_mut().map(|(stratum, _)| Of(stratum)));
+            }
+            LogicalPlan::MapPartitions { input, func, .. } => {
+                parts.push(Input(input));
+                parts.push(Udf(func));
+            }
+            LogicalPlan::GroupMap {
+                input,
+                grouping_expressions,
+                func,
+                sorting_expressions,
+                initial_input,
+                initial_grouping_expressions,
+                ..
+            } => {
+                parts.push(Input(input));
+                parts.extend(grouping_expressions.iter_mut().map(Of));
+                parts.extend(initial_input.iter_mut().map(Input));
+                parts.extend(initial_grouping_expressions.iter_mut().map(Of));
+                parts.push(Udf(func));
+                parts.extend(sorting_expressions.iter_mut().map(Of));
+            }
+            LogicalPlan::ApplyInPandasWithState {
+                input,
+                grouping_expressions,
+                func,
+                ..
+            } => {
+                parts.push(Input(input));
+                parts.extend(grouping_expressions.iter_mut().map(Of));
+                parts.push(Udf(func));
+            }
+            LogicalPlan::CoGroupMap {
+                input,
+                input_grouping_expressions,
+                other,
+                other_grouping_expressions,
+                func,
+            } => {
+                parts.push(Input(input));
+                parts.extend(input_grouping_expressions.iter_mut().map(Of));
+                parts.push(Input(other));
+                parts.extend(other_grouping_expressions.iter_mut().map(Of));
+                parts.push(Udf(func));
+            }
+            LogicalPlan::AsOfJoin {
+                left,
+                right,
+                left_as_of,
+                right_as_of,
+                on,
+                tolerance,
+                ..
+            } => {
+                parts.extend([Input(left), Input(right)]);
+                parts.push(Of(left_as_of.expression_mut()));
+                parts.push(Of(right_as_of.expression_mut()));
+                parts.extend(on.iter_mut().map(|on| Of(on.expression_mut())));
+                parts.extend(tolerance.iter_mut().map(|t| Of(t.expression_mut())));
+            }
+            LogicalPlan::NearestByJoin {
+                left,
+                right,
+                ranking_expression,
+                ..
+            } => {
+                parts.extend([Input(left), Input(right)]);
+                parts.push(Of(ranking_expression));
+            }
+            LogicalPlan::CommonInlineUdtf {
+                arguments, pickler, ..
+            } => {
+                parts.extend(arguments.iter_mut().map(Of));
+                parts.push(Pickler(pickler));
+            }
+            LogicalPlan::WithRelations { root, references } => {
+                parts.push(Input(root));
+                parts.extend(references.iter_mut().map(Input));
+            }
+            LogicalPlan::Limit { input, .. }
+            | LogicalPlan::Offset { input, .. }
+            | LogicalPlan::Tail { input, .. }
+            | LogicalPlan::ShowString { input, .. }
+            | LogicalPlan::HtmlString { input, .. }
+            | LogicalPlan::Deduplicate { input, .. }
+            | LogicalPlan::Sample { input, .. }
+            | LogicalPlan::Repartition { input, .. }
+            | LogicalPlan::WithColumnsRenamed { input, .. }
+            | LogicalPlan::ToDF { input, .. }
+            | LogicalPlan::ToSchema { input, .. }
+            | LogicalPlan::Unbuildable { input, .. }
+            | LogicalPlan::Parse { input, .. }
+            | LogicalPlan::NAFill { input, .. }
+            | LogicalPlan::NAFillColumns { input, .. }
+            | LogicalPlan::NADrop { input, .. }
+            | LogicalPlan::NAReplace { input, .. }
+            | LogicalPlan::Describe { input, .. }
+            | LogicalPlan::Summary { input, .. }
+            | LogicalPlan::ColRegex { input, .. }
+            | LogicalPlan::SubqueryAlias { input, .. }
+            | LogicalPlan::WithWatermark { input, .. }
+            | LogicalPlan::StatCrosstab { input, .. }
+            | LogicalPlan::StatFreqItems { input, .. }
+            | LogicalPlan::StatApproxQuantile { input, .. }
+            | LogicalPlan::StatCorr { input, .. }
+            | LogicalPlan::StatCov { input, .. }
+            | LogicalPlan::MlTransform { input, .. } => parts.push(Input(input)),
+            LogicalPlan::Range { .. }
+            | LogicalPlan::LocalRelation { .. }
+            | LogicalPlan::ChunkedCachedLocalRelation { .. }
+            | LogicalPlan::CachedRemoteRelation { .. }
+            | LogicalPlan::CachedRelation { .. }
+            | LogicalPlan::Read { .. }
+            | LogicalPlan::RelationChanges { .. }
+            | LogicalPlan::Catalog { .. } => {}
+        }
+        parts
     }
 
     /// The expressions, the UDFs and the pickler of the UDTF of this node, without those of its

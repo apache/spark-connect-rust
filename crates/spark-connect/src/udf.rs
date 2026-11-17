@@ -128,6 +128,18 @@ impl CommandPickler {
         self.0.pickle()
     }
 
+    /// The object of this pickler, which a deep copy of the UDF copies, as PySpark's deep copy of
+    /// a UDF copies its function (see [`PicklerCopies`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn object(&self) -> &(dyn std::any::Any + Send + Sync) {
+        self.0.object()
+    }
+
+    /// The address of the pickling of this pickler, which its copies share.
+    fn address(&self) -> usize {
+        Arc::as_ptr(&self.0) as *const () as usize
+    }
+
     /// The object of this pickler, if no copy of it shares it: so the plan or the expression that
     /// holds this pickler alone holds the object, which the garbage collector of a Python client
     /// is told of (see [`exclusive_pickler_objects`]).
@@ -149,11 +161,12 @@ impl PartialEq for CommandPickler {
     }
 }
 
-/// A plan, an expression, a UDF or the pickler of a UDTF, of which [`exclusive_pickler_objects`]
-/// visits the picklers.
+/// A plan, an expression, a subquery, a UDF or the pickler of a UDTF, of which
+/// [`exclusive_pickler_objects`] and [`all_picklers`] visit the picklers.
 pub(crate) enum PicklerHolder<'a> {
     Plan(&'a crate::plan::LogicalPlan),
     Expression(&'a Expression),
+    Subquery(&'a crate::expression::SubqueryExpression),
     Udf(&'a CommonInlineUserDefinedFunctionExpression),
     Pickler(&'a CommandPickler),
 }
@@ -186,6 +199,7 @@ pub(crate) fn exclusive_pickler_objects<'a>(
                     expression.node().push_pickler_holders(&mut pending);
                 }
             }
+            PicklerHolder::Subquery(subquery) => subquery.push_pickler_holders(&mut pending, true),
             PicklerHolder::Udf(udf) => {
                 pending.extend(udf.arguments.iter().map(PicklerHolder::Expression));
                 pending.extend(udf.python_udf.pickler.as_ref().map(PicklerHolder::Pickler));
@@ -194,6 +208,263 @@ pub(crate) fn exclusive_pickler_objects<'a>(
         }
     }
     objects
+}
+
+/// The picklers of `holders`, of their UDFs and UDTFs, below them and in the plans of their
+/// subqueries, each once, in the order of the build of a request: a plan that several plans share,
+/// and an expression that several expressions share, are visited once. Computed without
+/// recursing.
+pub(crate) fn all_picklers(holders: Vec<PicklerHolder<'_>>) -> Vec<CommandPickler> {
+    let mut picklers = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut pending: Vec<PicklerHolder<'_>> = holders.into_iter().rev().collect();
+    while let Some(holder) = pending.pop() {
+        let mut below = Vec::new();
+        match holder {
+            PicklerHolder::Plan(plan) => {
+                if !seen.insert(plan as *const crate::plan::LogicalPlan as usize) {
+                    continue;
+                }
+                below.extend(
+                    plan.inputs()
+                        .into_iter()
+                        .map(|input| PicklerHolder::Plan(input)),
+                );
+                plan.push_own_pickler_holders(&mut below);
+            }
+            PicklerHolder::Expression(expression) => {
+                if !seen.insert(expression.node_address()) {
+                    continue;
+                }
+                expression.node().push_pickler_holders(&mut below);
+            }
+            PicklerHolder::Subquery(subquery) => subquery.push_pickler_holders(&mut below, false),
+            PicklerHolder::Udf(udf) => {
+                below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
+                below.extend(udf.python_udf.pickler.as_ref().map(PicklerHolder::Pickler));
+            }
+            PicklerHolder::Pickler(pickler) => {
+                if seen.insert(pickler.address()) {
+                    picklers.push(pickler.clone());
+                }
+            }
+        }
+        // The first below is visited first.
+        pending.extend(below.into_iter().rev());
+    }
+    picklers
+}
+
+/// The copies of the picklers of a deep copy, by the pickler that each is a copy of: of the copy
+/// of the object of the pickler, as PySpark's deep copy of a plan or an expression copies the
+/// function of each UDF of it with the memo of the call, so a function, of which a deep copy is
+/// the function itself, gives a pickler of the same function, and a callable object a pickler of
+/// its copy. Not a stable API.
+#[doc(hidden)]
+#[derive(Default)]
+pub struct PicklerCopies {
+    copies: std::collections::HashMap<usize, CommandPickler>,
+}
+
+impl PicklerCopies {
+    pub fn new() -> Self {
+        PicklerCopies::default()
+    }
+
+    /// Make `copy` the copy of `original`.
+    pub fn insert(&mut self, original: &CommandPickler, copy: CommandPickler) {
+        self.copies.insert(original.address(), copy);
+    }
+
+    /// Whether no pickler has a copy.
+    pub fn is_empty(&self) -> bool {
+        self.copies.is_empty()
+    }
+
+    /// The copy of `pickler`, if it has one.
+    fn copy_of(&self, pickler: &CommandPickler) -> Option<&CommandPickler> {
+        self.copies.get(&pickler.address())
+    }
+}
+
+/// The rebuild of a plan, an expression or a subquery with the copies of its picklers, and, of a
+/// deep copy of a DataFrame, with the copies of its Observations: a node above a pickler or an
+/// Observation that has a copy is rebuilt, of the copies below it, and the others are shared. A
+/// node that several nodes share is rebuilt once, so the copy shares its copy as they shared it,
+/// as the memo of PySpark's deep copy shares the copy of an object. A rebuilt plan has the plan ID
+/// of the plan that it is a copy of, as PySpark's copy of a plan keeps its plan ID.
+pub(crate) struct PicklerRebuild<'c> {
+    copies: &'c PicklerCopies,
+    observations: &'c [(String, crate::observation::Observation)],
+    plans: std::collections::HashMap<usize, Option<Arc<crate::plan::LogicalPlan>>>,
+    expressions: std::collections::HashMap<usize, Option<Expression>>,
+}
+
+impl<'c> PicklerRebuild<'c> {
+    /// The rebuild of the copies `copies` of picklers and `observations` of Observations, by
+    /// their names.
+    pub(crate) fn new(
+        copies: &'c PicklerCopies,
+        observations: &'c [(String, crate::observation::Observation)],
+    ) -> Self {
+        PicklerRebuild {
+            copies,
+            observations,
+            plans: Default::default(),
+            expressions: Default::default(),
+        }
+    }
+
+    /// The rebuilt `plan`, or None if nothing below it has a copy. A rebuilt node has the plan ID
+    /// in `ids` of the node that it is a copy of.
+    pub(crate) fn plan(
+        &mut self,
+        plan: &Arc<crate::plan::LogicalPlan>,
+        ids: Option<&crate::plan::PlanIds>,
+    ) -> Option<Arc<crate::plan::LogicalPlan>> {
+        use crate::plan::PlanPart;
+        let key = Arc::as_ptr(plan) as usize;
+        if let Some(rebuilt) = self.plans.get(&key) {
+            return rebuilt.clone();
+        }
+        let rebuilt = crate::expression::with_stack_for_a_level(|| {
+            let mut node = plan.as_ref().clone();
+            let mut rebuilt = false;
+            for part in node.parts_mut() {
+                rebuilt |= match part {
+                    PlanPart::Input(input) => self.replace_plan(input, ids),
+                    PlanPart::Expression(expression) => self.replace_expression(expression),
+                    PlanPart::Udf(udf) => self.udf(udf),
+                    PlanPart::Pickler(pickler) => self.pickler(pickler),
+                    PlanPart::Observation(name, observation) => self.observation(name, observation),
+                    PlanPart::Observations(observations) => {
+                        let mut copied = false;
+                        for (name, observation) in observations.iter_mut() {
+                            if let Some(copy) = self.copy_of_observation(name) {
+                                *observation = copy;
+                                copied = true;
+                            }
+                        }
+                        copied
+                    }
+                };
+            }
+            rebuilt.then(|| Arc::new(node))
+        });
+        if let (Some(rebuilt), Some(ids)) = (&rebuilt, ids) {
+            ids.assign(rebuilt, ids.id_of(plan));
+        }
+        self.plans.insert(key, rebuilt.clone());
+        rebuilt
+    }
+
+    /// The rebuilt `expression`, or None if nothing below it has a copy.
+    pub(crate) fn expression(&mut self, expression: &Expression) -> Option<Expression> {
+        use crate::expression::ExpressionPart;
+        let key = expression.node_address();
+        if let Some(rebuilt) = self.expressions.get(&key) {
+            return rebuilt.clone();
+        }
+        let rebuilt = crate::expression::with_stack_for_a_level(|| {
+            let mut node = expression.node().clone();
+            let mut rebuilt = false;
+            for part in node.parts_mut() {
+                rebuilt |= match part {
+                    ExpressionPart::Expression(child) => self.replace_expression(child),
+                    ExpressionPart::Udf(udf) => self.udf(udf),
+                    ExpressionPart::Subquery(subquery) => self.subquery(subquery),
+                };
+            }
+            rebuilt.then(|| expression.of_node(node))
+        });
+        self.expressions.insert(key, rebuilt.clone());
+        rebuilt
+    }
+
+    /// Rebuild `subquery` in place: its plan, of the plan IDs of its session, and its
+    /// expressions. Whether anything below it has a copy.
+    pub(crate) fn subquery(
+        &mut self,
+        subquery: &mut crate::expression::SubqueryExpression,
+    ) -> bool {
+        let ids = subquery.plan_ids.clone();
+        let mut rebuilt = self.replace_plan(&mut subquery.plan, ids.as_deref());
+        for expression in subquery
+            .partition_spec
+            .iter_mut()
+            .chain(subquery.order_spec.iter_mut())
+            .chain(subquery.in_subquery_values.iter_mut())
+        {
+            rebuilt |= self.replace_expression(expression);
+        }
+        rebuilt
+    }
+
+    fn replace_plan(
+        &mut self,
+        plan: &mut Arc<crate::plan::LogicalPlan>,
+        ids: Option<&crate::plan::PlanIds>,
+    ) -> bool {
+        match self.plan(plan, ids) {
+            Some(rebuilt) => {
+                *plan = rebuilt;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn replace_expression(&mut self, expression: &mut Expression) -> bool {
+        match self.expression(expression) {
+            Some(rebuilt) => {
+                *expression = rebuilt;
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn udf(&mut self, udf: &mut CommonInlineUserDefinedFunctionExpression) -> bool {
+        let mut rebuilt = false;
+        for argument in udf.arguments.iter_mut() {
+            rebuilt |= self.replace_expression(argument);
+        }
+        rebuilt | self.pickler(&mut udf.python_udf.pickler)
+    }
+
+    fn pickler(&self, pickler: &mut Option<CommandPickler>) -> bool {
+        match pickler
+            .as_ref()
+            .and_then(|pickler| self.copies.copy_of(pickler))
+        {
+            Some(copy) => {
+                *pickler = Some(copy.clone());
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn observation(
+        &self,
+        name: &str,
+        observation: &mut Option<crate::observation::Observation>,
+    ) -> bool {
+        match (observation.is_some(), self.copy_of_observation(name)) {
+            (true, Some(copy)) => {
+                *observation = Some(copy);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn copy_of_observation(&self, name: &str) -> Option<crate::observation::Observation> {
+        self.observations
+            .iter()
+            .find(|(copied, _)| copied == name)
+            .map(|(_, copy)| copy.clone())
+    }
 }
 
 /// The command of a UDF or UDTF as a request builds it: that of `pickler`, which pickles it
@@ -446,6 +717,109 @@ mod tests {
             tags(exclusive_pickler_objects(holders)),
             ["argument", "handler"]
         );
+    }
+
+    /// The tag of the object of the pickler of the UDF `expression`.
+    fn tag_of(expression: &Expression) -> &str {
+        let crate::expression::ExpressionNode::CommonInlineUserDefinedFunction(udf) =
+            expression.node()
+        else {
+            panic!("a UDF");
+        };
+        let pickler = udf.python_udf.pickler.as_ref().unwrap();
+        pickler.object().downcast_ref::<&'static str>().unwrap()
+    }
+
+    /// The arguments of the function `expression`.
+    fn arguments(expression: &Expression) -> &[Expression] {
+        let crate::expression::ExpressionNode::UnresolvedFunction(function) = expression.node()
+        else {
+            panic!("a function");
+        };
+        &function.args
+    }
+
+    #[test]
+    fn test_a_deep_copy_rebuilds_what_holds_the_copies_of_picklers_and_shares_the_rest() {
+        use crate::plan::{LogicalPlan, PlanIds};
+        // The picklers of an expression, each once, in the order of the build: a node that the
+        // expression holds twice is visited once.
+        let a = udf_expression("a");
+        let plain = Expression::function("upper", vec![Expression::column("y")]);
+        let expression = Expression::function(
+            "struct",
+            vec![a.clone(), udf_expression("b"), a.clone(), plain.clone()],
+        );
+        let picklers = expression.picklers();
+        let names: Vec<&str> = picklers
+            .iter()
+            .map(|p| *p.object().downcast_ref::<&'static str>().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        // Of a copy of `a` only: the node of `a` is rebuilt once, and shared by its two places, as
+        // the memo of PySpark's deep copy shares the copy of an object; `b` and the plain
+        // subtree are the nodes of the original.
+        let mut copies = PicklerCopies::new();
+        copies.insert(&picklers[0], CommandPickler::new("a'", |_| Ok(Vec::new())));
+        let copied = expression.with_pickler_copies(&copies);
+        let [first, b, second, copied_plain] = arguments(&copied) else {
+            panic!("four arguments");
+        };
+        assert_eq!(
+            (tag_of(first), tag_of(b), tag_of(second)),
+            ("a'", "b", "a'")
+        );
+        assert_eq!(first.node_address(), second.node_address());
+        assert_eq!(b.node_address(), arguments(&expression)[1].node_address());
+        assert_eq!(copied_plain.node_address(), plain.node_address());
+        assert_eq!(tag_of(&arguments(&expression)[0]), "a");
+        // Without copies, the expression is shared as it is.
+        let none = expression.with_pickler_copies(&PicklerCopies::new());
+        assert_eq!(none.node_address(), expression.node_address());
+        // A plan: the nodes above a copy are rebuilt, of the plan IDs of the nodes that they are
+        // copies of, and the others shared.
+        let ids = PlanIds::new();
+        let input = Arc::new(LogicalPlan::Project {
+            input: Arc::new(crate::plan::range(0, 1, 1)),
+            columns: vec![crate::column::Column::new(udf_expression("c"))],
+        });
+        let plan = Arc::new(LogicalPlan::Filter {
+            input: Arc::clone(&input),
+            condition: crate::column::Column::new(Expression::column("x")),
+        });
+        let (input_id, plan_id) = (ids.id_of(&input), ids.id_of(&plan));
+        let picklers = all_picklers(vec![PicklerHolder::Plan(&plan)]);
+        let mut copies = PicklerCopies::new();
+        copies.insert(&picklers[0], CommandPickler::new("c'", |_| Ok(Vec::new())));
+        let rebuilt = PicklerRebuild::new(&copies, &[])
+            .plan(&plan, Some(&ids))
+            .expect("a copy below");
+        assert!(!Arc::ptr_eq(&rebuilt, &plan));
+        assert_eq!(ids.id_of(&rebuilt), plan_id);
+        let LogicalPlan::Filter {
+            input: copied_input,
+            ..
+        } = rebuilt.as_ref()
+        else {
+            panic!("a filter");
+        };
+        assert_eq!(ids.id_of(copied_input), input_id);
+        let LogicalPlan::Project {
+            input: range,
+            columns,
+        } = copied_input.as_ref()
+        else {
+            panic!("a project");
+        };
+        assert_eq!(tag_of(columns[0].expression()), "c'");
+        let LogicalPlan::Project {
+            input: original_range,
+            ..
+        } = input.as_ref()
+        else {
+            panic!("a project");
+        };
+        assert!(Arc::ptr_eq(range, original_range));
     }
 
     #[test]

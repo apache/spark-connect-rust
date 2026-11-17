@@ -10825,6 +10825,96 @@ def test_udf_functions_are_pickled_in_the_order_of_the_build_of_each_request_as_
         CloudPickleSerializer().dumps(unpicklable)
 
 
+class _Marked:
+    # A callable object whose pickle holds its mark.
+    def __init__(self, mark):
+        self.mark = mark
+
+    def __call__(self, x):
+        return self.mark
+
+    def method(self, x):
+        return self.mark
+
+
+def test_deep_copies_copy_the_functions_of_udfs_as_pyspark(mock_connect):
+    # As PySpark's copy.deepcopy of a Column, a DataFrame, grouped data and a table argument,
+    # which deep-copies the PythonUDF of each UDF, of its function with the memo of the call: a
+    # function, lambda or closure, is the function itself, so the copy pickles it as it is at each
+    # request, as the original does; a callable object, a bound method and a partial are copies,
+    # which the later changes of the original do not reach, and which the memo of one deep copy
+    # shares with the other objects that it copies.
+    import copy
+    import functools
+
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    base = spark.range(1)
+
+    def sent(frame, mark, other):
+        # The marks are in the pickled commands of the request only.
+        frame.explain()
+        request = service.analyze_requests[-1]
+        return mark.encode() in request and other.encode() not in request
+
+    def callables():
+        box, partial_box, marked, bound = ["<old>"], ["<old>"], _Marked("<old>"), _Marked("<old>")
+
+        def closure(x):
+            return box[0]
+
+        def change():
+            box[0] = partial_box[0] = marked.mark = bound.mark = "<new>"
+
+        return {
+            "lambda": lambda x: box[0],
+            "closure": closure,
+            "callable object": marked,
+            "bound method": bound.method,
+            "partial": functools.partial(lambda x, box: box[0], box=partial_box),
+        }, change
+
+    @F.udtf(returnType="v: long")
+    class Echo:
+        def eval(self, row):
+            yield (1,)
+
+    holders = {
+        "column": (lambda udf: udf("id"), lambda held: base.select(held)),
+        "dataframe": (lambda udf: base.select(udf("id")), lambda held: held),
+        "grouped data": (lambda udf: base.groupBy(udf("id")), lambda held: held.count()),
+        "table argument": (lambda udf: base.select(udf("id")).asTable(), Echo),
+    }
+    shared_kinds = ("lambda", "closure")
+    for kind in ("lambda", "closure", "callable object", "bound method", "partial"):
+        for holder, (hold, plan_of) in holders.items():
+            made, change = callables()
+            original = hold(F.udf(made[kind], "long"))
+            copied = copy.deepcopy(original)
+            change()
+            assert sent(plan_of(original), "<new>", "<old>"), (kind, holder)
+            if kind in shared_kinds:
+                assert sent(plan_of(copied), "<new>", "<old>"), (kind, holder)
+            else:
+                assert sent(plan_of(copied), "<old>", "<new>"), (kind, holder)
+
+    # The memo of one deep copy: the copies of two Columns, a DataFrame and a callable object
+    # share the copy of the object, as they share the object.
+    shared = _Marked("<old>")
+    udf = F.udf(shared, "long")
+    first, second = udf("id"), udf("id") + 1
+    copies = copy.deepcopy([first, second, base.select(udf("id")), shared])
+    copies[-1].mark = "<copied>"
+    shared.mark = "<new>"
+    assert sent(base.select(copies[0], copies[1]), "<copied>", "<new>")
+    assert sent(copies[2], "<copied>", "<new>")
+    assert sent(base.select(first, second), "<new>", "<copied>")
+    # A Column that the call copies twice is copied once.
+    twice = copy.deepcopy([first, first])
+    assert twice[0] is twice[1]
+
+
 def test_unpicklable_functions_raise_picklingerror_as_pyspark(mock_connect):
     # As PySpark's CloudPickleSerializer().dumps: a function of applyInPandas, applyInArrow,
     # mapInPandas, mapInArrow, cogroup, transformWithState(InPandas) or a data source class

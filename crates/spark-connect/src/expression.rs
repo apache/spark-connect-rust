@@ -144,7 +144,7 @@ impl ExpressionNode {
         &'a self,
         pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
     ) {
-        use crate::udf::PicklerHolder::{Expression as Of, Plan, Udf};
+        use crate::udf::PicklerHolder::{Expression as Of, Subquery, Udf};
         match self {
             ExpressionNode::Literal(_)
             | ExpressionNode::ColumnReference(_)
@@ -182,18 +182,73 @@ impl ExpressionNode {
             ExpressionNode::LambdaFunction(lambda) => pending.push(Of(&lambda.function)),
             ExpressionNode::CommonInlineUserDefinedFunction(udf) => pending.push(Udf(udf)),
             ExpressionNode::NamedArgument(argument) => pending.push(Of(&argument.value)),
-            ExpressionNode::Subquery(subquery) => {
-                if Arc::strong_count(&subquery.plan) == 1 {
-                    pending.push(Plan(&subquery.plan));
-                }
-                pending.extend(subquery.partition_spec.iter().map(Of));
-                pending.extend(subquery.order_spec.iter().map(Of));
-                pending.extend(subquery.in_subquery_values.iter().map(Of));
-            }
+            ExpressionNode::Subquery(subquery) => pending.push(Subquery(subquery)),
             ExpressionNode::Unbuildable(unbuildable) => pending.push(Of(&unbuildable.expression)),
             ExpressionNode::PlanBuildOrigin(made) => pending.push(Of(&made.expression)),
         }
     }
+
+    /// The expressions, the UDFs and the subqueries right below this node, which a deep copy of
+    /// the functions of its UDFs replaces (see [`crate::udf::PicklerRebuild`]).
+    pub(crate) fn parts_mut(&mut self) -> Vec<ExpressionPart<'_>> {
+        use ExpressionPart::{Expression as Of, Subquery, Udf};
+        match self {
+            ExpressionNode::Literal(_)
+            | ExpressionNode::ColumnReference(_)
+            | ExpressionNode::UnresolvedStar(..)
+            | ExpressionNode::UnresolvedRegex(..)
+            | ExpressionNode::SQLExpression(_)
+            | ExpressionNode::UnresolvedNamedLambdaVariable(_)
+            | ExpressionNode::Sent(_) => Vec::new(),
+            ExpressionNode::UnresolvedFunction(function) => {
+                function.args.iter_mut().map(Of).collect()
+            }
+            ExpressionNode::Alias(alias) => vec![Of(&mut alias.child)],
+            ExpressionNode::Cast(cast) => vec![Of(&mut cast.child)],
+            ExpressionNode::DirectShufflePartitionId(child) => vec![Of(child)],
+            ExpressionNode::SortOrder(sort) => vec![Of(&mut sort.child)],
+            ExpressionNode::CaseWhen(case_when) => {
+                let case_when = &mut **case_when;
+                let mut parts = Vec::new();
+                for (condition, value) in case_when.branches.iter_mut() {
+                    parts.extend([Of(condition), Of(value)]);
+                }
+                parts.extend(case_when.else_expr.iter_mut().map(Of));
+                parts
+            }
+            ExpressionNode::UnresolvedExtractValue(extract) => {
+                let extract = &mut **extract;
+                vec![Of(&mut extract.child), Of(&mut extract.extraction)]
+            }
+            ExpressionNode::UpdateFields(update) => {
+                let update = &mut **update;
+                let mut parts = vec![Of(&mut update.struct_expression)];
+                parts.extend(update.value_expression.iter_mut().map(Of));
+                parts
+            }
+            ExpressionNode::CallFunction(call) => call.arguments.iter_mut().map(Of).collect(),
+            ExpressionNode::WindowExpression(window) => {
+                let window = &mut **window;
+                let mut parts = vec![Of(&mut window.window_function)];
+                parts.extend(window.partition_spec.iter_mut().map(Of));
+                parts.extend(window.order_spec.iter_mut().map(|sort| Of(&mut sort.child)));
+                parts
+            }
+            ExpressionNode::LambdaFunction(lambda) => vec![Of(&mut lambda.function)],
+            ExpressionNode::CommonInlineUserDefinedFunction(udf) => vec![Udf(udf)],
+            ExpressionNode::NamedArgument(argument) => vec![Of(&mut argument.value)],
+            ExpressionNode::Subquery(subquery) => vec![Subquery(subquery)],
+            ExpressionNode::Unbuildable(unbuildable) => vec![Of(&mut unbuildable.expression)],
+            ExpressionNode::PlanBuildOrigin(made) => vec![Of(&mut made.expression)],
+        }
+    }
+}
+
+/// A part of an expression node, of [`ExpressionNode::parts_mut`].
+pub(crate) enum ExpressionPart<'a> {
+    Expression(&'a mut Expression),
+    Udf(&'a mut CommonInlineUserDefinedFunctionExpression),
+    Subquery(&'a mut SubqueryExpression),
 }
 
 /// Record `error`, of an expression or a plan (`LogicalPlan::Unbuildable`) that the serialization
@@ -639,6 +694,9 @@ pub struct SubqueryExpression {
     pub with_single_partition: Option<bool>,
     /// The values of an IN subquery.
     pub in_subquery_values: Vec<Expression>,
+    /// The plan IDs of the session of the DataFrame of `plan`, in which a deep copy of the
+    /// subquery gives the plan that it rebuilds the plan ID of `plan`.
+    pub(crate) plan_ids: Option<Arc<crate::plan::PlanIds>>,
 }
 
 impl PartialEq for SubqueryExpression {
@@ -665,7 +723,24 @@ impl SubqueryExpression {
             order_spec: Vec::new(),
             with_single_partition: None,
             in_subquery_values: Vec::new(),
+            plan_ids: None,
         }
+    }
+
+    /// The holders of the picklers of this subquery: its plan, which a walk that visits only
+    /// what it alone holds visits when nothing else shares it, and its expressions.
+    pub(crate) fn push_pickler_holders<'a>(
+        &'a self,
+        pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
+        exclusive: bool,
+    ) {
+        use crate::udf::PicklerHolder::{Expression as Of, Plan};
+        if !exclusive || Arc::strong_count(&self.plan) == 1 {
+            pending.push(Plan(&self.plan));
+        }
+        pending.extend(self.partition_spec.iter().map(Of));
+        pending.extend(self.order_spec.iter().map(Of));
+        pending.extend(self.in_subquery_values.iter().map(Of));
     }
 
     /// As `SubqueryExpression.__repr__`, but with the plan ID of the plan, which PySpark
@@ -819,6 +894,36 @@ impl Expression {
     /// Whether no other expression shares the node of this one.
     pub(crate) fn is_exclusive(&self) -> bool {
         Arc::strong_count(&self.node) == 1
+    }
+
+    /// The address of the node of this expression, which the expressions that share it have too.
+    pub(crate) fn node_address(&self) -> usize {
+        Arc::as_ptr(&self.node) as usize
+    }
+
+    /// The expression of `node`, of the origin of this one.
+    pub(crate) fn of_node(&self, node: ExpressionNode) -> Expression {
+        Expression {
+            node: Arc::new(node),
+            origin: self.origin.clone(),
+        }
+    }
+
+    /// The picklers of the UDFs of this expression, below it and in the plans of its subqueries,
+    /// each once. Not a stable API.
+    #[doc(hidden)]
+    pub fn picklers(&self) -> Vec<crate::udf::CommandPickler> {
+        crate::udf::all_picklers(vec![crate::udf::PicklerHolder::Expression(self)])
+    }
+
+    /// This expression with the copies `copies` of its picklers, of the copies of their objects,
+    /// as a deep copy of PySpark's expression copies the functions of its UDFs: the nodes above a
+    /// pickler of a copy are new, and the others shared. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_pickler_copies(&self, copies: &crate::udf::PicklerCopies) -> Expression {
+        crate::udf::PicklerRebuild::new(copies, &[])
+            .expression(self)
+            .unwrap_or_else(|| self.clone())
     }
 
     /// The objects of the picklers of the UDFs of this expression that it alone holds, which a
