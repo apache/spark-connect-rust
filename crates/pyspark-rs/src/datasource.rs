@@ -11,10 +11,12 @@ use crate::session::PySparkSession;
 
 /// Python accessor for data source registration.
 ///
-/// Exposed as `SparkSession.dataSource` to register custom data sources.
+/// Exposed as `SparkSession.dataSource` to register custom data sources. It is PySpark Connect's
+/// class, `pyspark.sql.connect.datasource.DataSourceRegistration`, which that module re-exports:
+/// `pyspark.sql.datasource.DataSourceRegistration` is PySpark's classic class, of which it is not.
 #[pyclass(
     name = "DataSourceRegistration",
-    module = "pyspark.sql.datasource",
+    module = "pyspark.sql.connect.datasource",
     weakref,
     dict
 )]
@@ -30,6 +32,14 @@ impl PyDataSourceRegistration {
 
 #[pymethods]
 impl PyDataSourceRegistration {
+    /// `DataSourceRegistration(sparkSession)`, as PySpark Connect's: the registration of the data
+    /// sources of the session.
+    #[new]
+    #[allow(non_snake_case)]
+    fn py_new(sparkSession: Py<PySparkSession>) -> Self {
+        PyDataSourceRegistration::new(sparkSession)
+    }
+
     /// The shallow copy of the data source registration, as PySpark's `copy.copy`: of the same
     /// session.
     fn __copy__(&self, py: Python<'_>) -> PyDataSourceRegistration {
@@ -51,15 +61,16 @@ impl PyDataSourceRegistration {
 
     /// Register a custom data source class.
     ///
-    /// Mirrors `pyspark.sql.SparkSession.dataSource.register`.
+    /// Mirrors `pyspark.sql.SparkSession.dataSource.register(dataSource)`, of PySpark's parameter.
     /// The data source class is cloudpickled and sent to the server.
-    fn register(&self, py: Python<'_>, data_source_class: &Bound<'_, PyAny>) -> PyResult<()> {
+    #[allow(non_snake_case)]
+    fn register(&self, py: Python<'_>, dataSource: &Bound<'_, PyAny>) -> PyResult<()> {
         // The name of the classmethod `name()`, as PySpark Connect's: the AttributeError of a
         // class without one.
-        let name: String = data_source_class.call_method0("name")?.extract()?;
+        let name: String = dataSource.call_method0("name")?.extract()?;
 
         // Cloudpickle the class
-        let command = py_cloudpickle(py, data_source_class)?;
+        let command = py_cloudpickle(py, dataSource)?;
         let py_ver = py_version(py);
 
         // Create the payload and expression

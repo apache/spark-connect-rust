@@ -351,8 +351,9 @@ impl PyWindowSpec {
     }
 }
 
-/// Python wrapper for the Window static builder.
-#[pyclass(name = "Window", module = "pyspark.sql.window")]
+/// Python wrapper for the Window static builder, `pyspark.sql.window.Window`. As PySpark's, it is
+/// subclassed by PySpark Connect's `pyspark.sql.connect.window.Window`, a class of its own.
+#[pyclass(name = "Window", module = "pyspark.sql.window", subclass)]
 pub struct PyWindow;
 
 #[pymethods]

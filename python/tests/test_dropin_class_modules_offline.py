@@ -21,6 +21,7 @@ EXPECTED = {
     "udf": "pyspark.sql.connect.udf.UDFRegistration",
     "udtf": "pyspark.sql.connect.udtf.UDTFRegistration",
     "tvf": "pyspark.sql.connect.tvf.TableValuedFunction",
+    "dataSource": "pyspark.sql.connect.datasource.DataSourceRegistration",
     "client": "pyspark.sql.connect.client.core.SparkConnectClient",
     "df": "pyspark.sql.connect.dataframe.DataFrame",
     "write": "pyspark.sql.connect.readwriter.DataFrameWriter",
@@ -52,6 +53,7 @@ def _objects(spark):
         "udf": spark.udf,
         "udtf": spark.udtf,
         "tvf": spark.tvf,
+        "dataSource": spark.dataSource,
         "client": spark.client,
         "df": df,
         "write": df.write,
@@ -88,6 +90,69 @@ def test_the_repr_of_a_session_names_its_connect_class(objects):
     assert repr(objects["spark"]).startswith("<pyspark.sql.connect.session.SparkSession object at ")
 
 
+def test_the_data_source_registration_is_pyspark_connects(objects):
+    # As PySpark's: spark.dataSource is of PySpark Connect's class, which its module names and
+    # which takes the session, and not of pyspark.sql.datasource's, PySpark's classic class.
+    from pyspark.sql import datasource as classic
+    from pyspark.sql.connect import datasource
+
+    registration = objects["dataSource"]
+    assert type(registration) is datasource.DataSourceRegistration
+    assert not isinstance(registration, classic.DataSourceRegistration)
+    assert classic.DataSourceRegistration.__module__ == "pyspark.sql.datasource"
+    made = datasource.DataSourceRegistration(sparkSession=objects["spark"])
+    assert type(made) is datasource.DataSourceRegistration
+    assert made.sparkSession is objects["spark"]
+
+
+def test_the_classic_conf_tvf_merge_and_observation_classes_are_pysparks(objects):
+    # As PySpark's pyspark.sql.conf, tvf, merge and observation: their classes are PySpark's
+    # classic ones, of which the objects of a session are not instances, and Observation(...)
+    # makes an Observation of PySpark Connect's class, which is not an instance of the classic one.
+    import pyspark.sql.conf
+    import pyspark.sql.connect.observation
+    import pyspark.sql.merge
+    import pyspark.sql.tvf
+    from pyspark.sql import MergeIntoWriter, Observation
+
+    for name, classic, expected in [
+        ("conf", pyspark.sql.conf.RuntimeConfig, "pyspark.sql.conf.RuntimeConfig"),
+        ("tvf", pyspark.sql.tvf.TableValuedFunction, "pyspark.sql.tvf.TableValuedFunction"),
+        ("mergeInto", pyspark.sql.merge.MergeIntoWriter, "pyspark.sql.merge.MergeIntoWriter"),
+        (
+            "whenMatched",
+            pyspark.sql.merge.MergeIntoWriter.WhenMatched,
+            "pyspark.sql.merge.MergeIntoWriter.WhenMatched",
+        ),
+    ]:
+        assert f"{classic.__module__}.{classic.__qualname__}" == expected
+        assert not isinstance(objects[name], classic), name
+        assert pickle.loads(pickle.dumps(classic)) is classic
+    assert MergeIntoWriter is pyspark.sql.merge.MergeIntoWriter
+    observation = Observation("o")
+    assert type(observation) is pyspark.sql.connect.observation.Observation
+    assert not isinstance(observation, Observation)
+    assert Observation.__module__ == "pyspark.sql.observation"
+
+
+def test_the_connect_window_is_a_class_of_its_own_as_pysparks():
+    # As PySpark Connect's Window, a subclass of pyspark.sql.window.Window, whose static methods
+    # make the WindowSpecs of PySpark Connect.
+    from pyspark.sql.connect import window
+
+    assert window.Window is not Window
+    assert window.Window.__mro__ == (window.Window, Window, object)
+    assert (window.Window.__module__, window.Window.__qualname__) == (
+        "pyspark.sql.connect.window",
+        "Window",
+    )
+    assert pickle.loads(pickle.dumps(window.Window)) is window.Window
+    spec = window.Window.partitionBy("id").orderBy("id")
+    assert type(spec) is window.WindowSpec
+    assert repr(spec) == repr(Window.partitionBy("id").orderBy("id"))
+    assert window.Window.unboundedPreceding == Window.unboundedPreceding
+
+
 def test_the_streaming_query_class_is_pysparks():
     from pyspark.sql.connect.streaming.query import StreamingQuery
     from pyspark.sql.streaming import StreamingQuery as ClassicName
@@ -98,6 +163,11 @@ def test_the_streaming_query_class_is_pysparks():
     )
     assert ClassicName is StreamingQuery
     assert pickle.loads(pickle.dumps(StreamingQuery)) is StreamingQuery
+
+
+def test_the_repr_of_a_catalog_is_pysparks(objects):
+    # Of no `__repr__` of its own, as PySpark Connect's Catalog.
+    assert repr(objects["catalog"]).startswith("<pyspark.sql.connect.catalog.Catalog object at 0x")
 
 
 def test_the_repr_of_a_table_argument_is_pysparks(objects):
@@ -124,18 +194,43 @@ def test_cpythons_messages_name_a_class_by_its_bare_name_as_pysparks():
     assert pickle.loads(pickle.dumps(cls)) is cls
 
 
-def test_every_native_class_has_its_bare_name_as_its_c_name():
-    # `object.__new__(cls)` refuses a native class, in a message of its C name. It makes an
-    # object of a Python class of the module, such as VariantVal, whose C name is its name.
-    import pyspark._pyspark as native
+def test_every_native_class_has_its_bare_name_as_its_c_name(objects):
+    # `object.__new__(cls)` refuses a native class, in a message of its C name. The native
+    # classes, whose `__new__` is a builtin of their own, are those of the module and those of
+    # objects that it makes outside it, such as the expression of a Column, the active session of
+    # the class and the exit hook of a session, which the garbage collector finds.
+    import gc
+    import inspect
+    import types
 
-    checked = 0
-    for cls in vars(native).values():
-        if not isinstance(cls, type) or issubclass(cls, BaseException):
+    import pyspark._pyspark as native
+    from pyspark.sql.connect.session import SparkSession
+
+    made = [
+        F.col("a")._expr,
+        SparkSession._active_session,
+        objects["spark"]._copy_thread_tags(),
+        objects["spark"]._copy_thread_user_context_extensions(),
+        objects["streams"]._sqlb,
+        inspect.getattr_static(native.LogisticRegression, "maxIter"),
+    ]
+    module_classes = {cls for cls in vars(native).values() if isinstance(cls, type)}
+    outside = {type(obj) for obj in made}
+    assert not outside & module_classes and len(outside) == len(made)
+    classes = [
+        cls
+        for cls in gc.get_objects()
+        if isinstance(cls, type)
+        and isinstance(vars(cls).get("__new__"), types.BuiltinFunctionType)
+        and str(getattr(cls, "__module__", "")).startswith("pyspark.")
+    ]
+    assert outside <= set(classes) and len(module_classes & set(classes)) > 50
+    checked = set()
+    for cls in classes:
+        if issubclass(cls, BaseException):
             continue
-        try:
+        with pytest.raises(TypeError) as error:
             object.__new__(cls)
-        except TypeError as error:
-            assert f"{cls.__module__}.{cls.__name__}" not in str(error), str(error)
-            checked += 1
-    assert checked > 50
+        assert f"{cls.__module__}.{cls.__name__}" not in str(error.value), str(error.value)
+        checked.add(cls.__name__)
+    assert len(checked) > 50 and "_ExitHook" in checked

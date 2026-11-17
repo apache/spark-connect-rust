@@ -2379,8 +2379,9 @@ def test_functions_exports_fresh_process():
             # As in PySpark, distinct from those of pyspark.sql.functions, which are deprecated
             # and call them.
             assert all(getattr(part, name) is not getattr(F, name) for name in part.__all__)
-            assert F.random is F.rand
-            assert F.column is not F.col
+            # The aliases are their functions, as PySpark binds them.
+            assert F.random is F.rand and F.column is F.col
+            assert F.negate is F.negative and F.power is F.pow
             assert list(inspect.signature(F.first).parameters) == ["col", "ignorenulls"]
             assert list(inspect.signature(F.split).parameters) == ["str", "pattern", "limit"]
             return F.__all__.copy()
@@ -3739,6 +3740,24 @@ def test_channel_builder_parses_the_connection_string_and_the_session_honors_it_
     finally:
         session.release_session_on_close = False
         session.stop()
+
+
+def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
+    # As PySpark Connect's ChannelBuilder, DefaultChannelBuilder, PlanObservedMetrics and
+    # SparkConnectClient, of pyspark.sql.connect.client.core, which names them: their repr and a
+    # pickle by reference name them there.
+    from pyspark.sql.connect import client
+    from pyspark.sql.connect.client import core
+
+    for name in ["ChannelBuilder", "DefaultChannelBuilder", "PlanObservedMetrics",
+                 "SparkConnectClient"]:
+        cls = getattr(client, name)
+        assert (cls.__module__, cls.__qualname__) == ("pyspark.sql.connect.client.core", name)
+        assert getattr(core, name) is cls
+        assert pickle.loads(pickle.dumps(cls)) is cls
+    assert repr(client.DefaultChannelBuilder("sc://localhost")).startswith(
+        "<pyspark.sql.connect.client.core.DefaultChannelBuilder object at 0x")
+    assert core.__all__ == ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
 
 
 def test_session_constructor_and_its_flags_as_pyspark_connect():
@@ -11987,11 +12006,22 @@ def test_connect_import_path_modules_as_pyspark(mock_connect):
         function = getattr(connect_partitioning, name)
         assert function is not getattr(partitioning, name)
         assert function.__module__ == "pyspark.sql.connect.functions.partitioning"
+    # So are the Avro and the Protobuf functions, as PySpark Connect's own, which run as the
+    # classic ones do and pickle by reference to the modules of PySpark Connect.
     connect_avro = importlib.import_module("pyspark.sql.connect.avro.functions")
-    assert connect_avro.from_avro is avro.from_avro and connect_avro.to_avro is avro.to_avro
     connect_protobuf = importlib.import_module("pyspark.sql.connect.protobuf.functions")
-    assert connect_protobuf.from_protobuf is protobuf.from_protobuf
-    assert connect_protobuf.to_protobuf is protobuf.to_protobuf
+    for connect_module, module, names in [
+        (connect_avro, avro, ["from_avro", "to_avro"]),
+        (connect_protobuf, protobuf, ["from_protobuf", "to_protobuf"]),
+    ]:
+        for name in names:
+            function = getattr(connect_module, name)
+            assert function is not getattr(module, name)
+            assert function.__module__ == connect_module.__name__
+            assert function.__doc__ == getattr(module, name).__doc__
+            assert pickle.loads(pickle.dumps(function)) is function
+    assert str(connect_avro.to_avro("a")) == str(avro.to_avro("a"))
+    assert str(connect_protobuf.from_protobuf("a", "M")) == str(protobuf.from_protobuf("a", "M"))
     assert importlib.import_module("pyspark.sql.connect.table_arg").TableArg is TableArg
     typing_module = importlib.import_module("pyspark.sql.connect._typing")
     assert {"ColumnOrName", "DataTypeOrString", "LiteralType"} <= set(dir(typing_module))
@@ -12031,6 +12061,9 @@ def test_connect_import_path_modules_as_pyspark(mock_connect):
 
     DataSourceRegistration(spark).register(TestSource)
     assert service.execute_calls == 1
+    # Of the session's registration, which takes PySpark's keyword.
+    spark.dataSource.register(dataSource=TestSource)
+    assert service.execute_calls == 2
 
 
 def test_connect_utils_check_the_dependencies_of_the_client(tmp_path):
@@ -12267,6 +12300,44 @@ from pyspark.sql.connect.session import SparkSession as _SS  # noqa: E402
 
 def test_dropin_version_is_spark_version():
     assert pyspark.__version__ == "4.3.0"
+
+
+def test_the_client_banner_names_the_version_of_the_package(mock_connect):
+    # The INFO log of the first session of a process names pyspark-client-rust's version, that of
+    # pyproject.toml, which the release checks against Cargo.toml's, and not pyspark.__version__,
+    # the version of Spark whose API the client mirrors.
+    import subprocess
+    import sys
+    import textwrap
+    from pathlib import Path
+
+    _, service = mock_connect
+    pyproject = (Path(__file__).resolve().parents[2] / "pyproject.toml").read_text()
+    version = re.search(r'^version = "([^"]+)"$', pyproject, re.MULTILINE).group(1)
+    script = textwrap.dedent('''
+        import logging
+        import sys
+
+        class Collect(logging.Handler):
+            def emit(self, record):
+                print(record.getMessage())
+
+        logger = logging.getLogger("pyspark")
+        logger.setLevel(logging.INFO)
+        logger.addHandler(Collect())
+        from pyspark.sql import SparkSession
+
+        SparkSession.builder.remote(sys.argv[1]).getOrCreate().stop()
+    ''')
+    result = subprocess.run([sys.executable, "-c", script, service.remote], capture_output=True,
+                            text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    banners = [line for line in result.stdout.splitlines() if "active: Spark Connect" in line]
+    assert banners == [
+        f"pyspark-client-rust {version} active: Spark Connect client backed by the native Rust "
+        "engine (tonic), a drop-in for pyspark-client -- not the reference Python client. "
+        "https://apache.github.io/spark-connect-rust/which-client/"
+    ]
 
 
 def test_lit_takes_an_int_or_a_float_by_its_type_as_pyspark(mock_connect):
@@ -12847,6 +12918,7 @@ def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
     from pyspark.errors import PySparkAssertionError
     from pyspark.sql import Observation
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation as ConnectObservation
 
     class Worker(pickle.Unpickler):
         # The classes that a worker's PySpark finds: a plain class for the Observation.
@@ -12865,15 +12937,20 @@ def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
         assert same[0] == same[1]
         return pickled[1]
 
-    # cloudpickle finds the module of a class only in sys.modules, which pyspark.sql fills with it,
-    # in a new process too.
-    script = "import sys, pyspark.sql\nprint('pyspark.sql.connect.observation' in sys.modules)\n"
+    # cloudpickle finds the module of a class only in sys.modules, where the Observation of
+    # pyspark.sql, PySpark's classic class, puts it as it makes an Observation of the class of
+    # that module, in a new process too.
+    script = (
+        "import sys\nfrom pyspark.sql import Observation\n"
+        "m = 'pyspark.sql.connect.observation'\n"
+        "print(m in sys.modules, type(Observation('o')).__module__ == m, m in sys.modules)\n"
+    )
     imported = subprocess.run([sys.executable], input=script, capture_output=True, text=True,
                               check=True)
-    assert imported.stdout.strip() == "True"
+    assert imported.stdout.strip() == "False True True"
     spark, service = mock_connect
     unused = pickle.loads(pickle.dumps(Observation("u")))
-    assert type(unused) is Observation and unused._name == "u"
+    assert type(unused) is ConnectObservation and unused._name == "u"
     assert on_worker(Observation("u")) == {"_name": "u", "_result": None, "_error": None}
     spark.range(1).observe(unused, F.count(F.lit(1)).alias("c"))
     assert pickle.loads(pickle.dumps(unused)).get == {}
@@ -12890,7 +12967,7 @@ def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
     assert on_worker(observation) == {"_name": "o", "_result": {"c": 3}, "_error": None,
                                       "tag": "t"}
     assert pickle.loads(pickle.dumps(observation, protocol=2)).get == {"c": 3}
-    assert observation.__reduce_ex__(4)[:2] == (copyreg.__newobj__, (Observation,))
+    assert observation.__reduce_ex__(4)[:2] == (copyreg.__newobj__, (ConnectObservation,))
     with pytest.raises(PySparkAssertionError, match="REUSE_OBSERVATION"):
         spark.range(1).observe(restored, F.count(F.lit(1)).alias("c"))
     service.execute_payload = batch + observed("o", varint_field(7, 4), "c")
@@ -12929,15 +13006,16 @@ def test_an_observation_pickles_at_every_protocol_as_pyspark(mock_connect):
     from pyspark.errors import PySparkAssertionError
     from pyspark.sql import Observation
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation as ConnectObservation
 
     spark, service = mock_connect
     protocols = range(pickle.HIGHEST_PROTOCOL + 1)
     observation = Observation("o")
     for protocol in protocols:
         unused = pickle.loads(pickle.dumps(observation, protocol=protocol))
-        assert type(unused) is Observation and unused._name == "o"
+        assert type(unused) is ConnectObservation and unused._name == "o"
         again = pickle.loads(pickle.dumps(unused, protocol=protocol))
-        assert type(again) is Observation and again._name == "o"
+        assert type(again) is ConnectObservation and again._name == "o"
         spark.range(1).observe(again, F.count(F.lit(1)).alias("c"))
 
     df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
@@ -12946,7 +13024,7 @@ def test_an_observation_pickles_at_every_protocol_as_pyspark(mock_connect):
     assert df.count() == 3
     for protocol in protocols:
         restored = pickle.loads(pickle.dumps(observation, protocol=protocol))
-        assert type(restored) is Observation and restored._name == "o"
+        assert type(restored) is ConnectObservation and restored._name == "o"
         assert restored.get == {"c": 3}
         twice = pickle.loads(pickle.dumps(restored, protocol=protocol))
         assert twice._name == "o" and twice.get == {"c": 3}
@@ -13443,7 +13521,7 @@ def test_no_pyclass_reports_builtins_module():
         ("pyspark.sql.connect.merge", ["MergeIntoWriter"]),
         ("pyspark.sql.connect.streaming.readwriter", ["DataStreamReader", "DataStreamWriter"]),
         ("pyspark.sql.connect.streaming.query", ["StreamingQuery", "StreamingQueryManager"]),
-        ("pyspark.sql.conf", ["RuntimeConfig", "RuntimeConf"]),
+        ("pyspark.sql.conf", ["RuntimeConfig"]),
         ("pyspark.sql.tvf", ["TableValuedFunction"]),
     ],
 )
@@ -13698,6 +13776,52 @@ def test_session_hook_is_present_and_passthrough():
     hook = _SS.Hook()
     sentinel = object()
     assert hook.on_execute_plan(sentinel) is sentinel
+
+
+class _SessionHook(_SS.Hook):
+    def __init__(self, session):
+        self.session = session
+
+
+class _SlottedHook(_SS.Hook):
+    __slots__ = ("a", "b")
+
+
+def test_session_hook_is_nested_in_the_session_and_pickles_as_pyspark():
+    # As PySpark Connect's SparkSession.Hook, a plain class nested in SparkSession: it is named
+    # there, a hook takes attributes and weak references, and a hook of the class or of a
+    # subclass pickles and copies with its attributes at every protocol, and with the slots of a
+    # subclass at pickle's default one, as a plain object. A class without an __init__ of its own
+    # takes no arguments, as object.__new__ raises.
+    import copy
+    import weakref
+
+    hook_class = _SS.Hook
+    assert (hook_class.__module__, hook_class.__qualname__, hook_class.__name__) == (
+        "pyspark.sql.connect.session", "SparkSession.Hook", "Hook")
+    assert repr(hook_class) == "<class 'pyspark.sql.connect.session.SparkSession.Hook'>"
+    assert pickle.loads(pickle.dumps(hook_class)) is hook_class
+    hook = hook_class()
+    hook.tag = "t"
+    assert weakref.ref(hook)() is hook
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        restored = pickle.loads(pickle.dumps(hook, protocol=protocol))
+        assert type(restored) is hook_class and vars(restored) == {"tag": "t"}
+        restored = pickle.loads(pickle.dumps(_SessionHook(None), protocol=protocol))
+        assert type(restored) is _SessionHook and vars(restored) == {"session": None}
+    assert type(pickle.loads(pickle.dumps(hook_class()))) is hook_class
+    for copier in (copy.copy, copy.deepcopy):
+        copied = copier(_SessionHook([1]))
+        assert type(copied) is _SessionHook and copied.session == [1]
+    slotted = _SlottedHook()
+    slotted.a = 1
+    restored = pickle.loads(pickle.dumps(slotted))
+    assert type(restored) is _SlottedHook and restored.a == 1 and not hasattr(restored, "b")
+    with pytest.raises(TypeError, match=r"^Hook\(\) takes no arguments$"):
+        hook_class(1)
+    with pytest.raises(TypeError, match=r"^_SlottedHook\(\) takes no arguments$"):
+        _SlottedHook(a=1)
+    assert _SessionHook(session=2).session == 2
 
 
 def test_ml_vector_functions_build_their_columns_as_pyspark():

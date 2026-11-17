@@ -15,9 +15,15 @@
 # limitations under the License.
 
 """Thin re-export of the client classes of ``pyspark.sql.connect.client.core``, which official
-PySpark code and tests import from there. The gRPC client itself is the Rust transport: the
-drop-in does not provide the rest of ``core`` (``RpcDeadlines``, the gRPC stub)."""
+PySpark code and tests import from there, and of which these classes are, as PySpark's: so a
+pickle names them here. The gRPC client itself is the Rust transport: the drop-in does not
+provide the rest of ``core`` (``RpcDeadlines``, the gRPC stub)."""
 
 __all__ = ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
 
-from pyspark.sql.connect.client import ChannelBuilder, DefaultChannelBuilder, SparkConnectClient
+from pyspark.sql.connect.client import (  # noqa: F401
+    ChannelBuilder,
+    DefaultChannelBuilder,
+    PlanObservedMetrics,
+    SparkConnectClient,
+)

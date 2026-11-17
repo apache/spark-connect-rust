@@ -15,7 +15,11 @@
 # limitations under the License.
 #
 """The Protobuf functions under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.protobuf.functions``: those of ``pyspark.sql.protobuf.functions``, which the
-Rust core builds."""
+``pyspark.sql.connect.protobuf.functions``: copies of those of ``pyspark.sql.protobuf.functions``,
+which the Rust core builds, of this module (see ``pyspark.sql.connect.functions._copies``), as
+PySpark Connect's are its own functions."""
 
-from pyspark.sql.protobuf.functions import from_protobuf, to_protobuf  # noqa: F401
+from pyspark.sql.connect.functions._copies import connect_functions as _connect_functions
+from pyspark.sql.protobuf import functions as _protobuf
+
+_connect_functions(globals(), _protobuf, __name__)
