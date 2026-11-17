@@ -11964,6 +11964,193 @@ def test_module_level_names_as_pyspark(monkeypatch):
         assert [name for name in namespace if name != "__builtins__"] == expected, module
 
 
+def test_vendored_modules_of_pyspark_client_import():
+    # As in pyspark-client 4.3.0, which ships them, the modules that this client vendors from
+    # Apache Spark v4.3.0 as they are import. PySpark's RDD helpers and tools, and the modules
+    # that the Spark Connect server runs in Python, need no gRPC, protobuf or py4j.
+    # StateMessage_pb2, which protoc generates, needs protobuf, and adds its file, which imports
+    # no other, to protobuf's default pool beside the files of the protos of Spark Connect that
+    # pyspark.sql.connect.proto adds. The modules of PySpark's gRPC client need grpcio,
+    # grpcio-status and googleapis-common-protos, which pyspark-client requires and this client
+    # does not: base_pb2_grpc builds its stub and servicer on the messages of
+    # pyspark.sql.connect.proto, and importing them leaves the names that
+    # pyspark.sql.connect.client exports as they are. foreach_batch_worker and listener_worker
+    # import pyspark.worker, PySpark's Python worker. Each check runs in a subprocess, which sends
+    # no RPC, so that the protobuf pool and gRPC of this process stay as they are.
+    import importlib.util
+    import subprocess
+    import sys
+    import textwrap
+
+    def importable(names):
+        try:
+            return all(importlib.util.find_spec(name) is not None for name in names)
+        except ImportError:
+            return False
+
+    plain = [
+        "pyspark.errors_doc_gen",
+        "pyspark.install",
+        "pyspark.join",
+        "pyspark.rddsampler",
+        "pyspark.resultiterable",
+        "pyspark.shuffle",
+        "pyspark.statcounter",
+        "pyspark.threaddump",
+        "pyspark.daemon",
+        "pyspark.sql.connect.local_server",
+        "pyspark.sql.connect.streaming.worker",
+        "pyspark.sql.streaming.proto",
+        "pyspark.sql.streaming.python_streaming_source_runner",
+    ]
+    # PySpark 4.3.0 requires Python 3.11: worker_message imports typing.TypeAlias, and transpile
+    # has match statements, both of Python 3.10. PySpark's worker, and the streaming workers of
+    # Spark Connect that import it, import worker_message.
+    if sys.version_info >= (3, 10):
+        plain += [
+            "pyspark.worker_message",
+            "pyspark.sql.transpile",
+            "pyspark.worker",
+            "pyspark.sql.connect.streaming.worker.foreach_batch_worker",
+            "pyspark.sql.connect.streaming.worker.listener_worker",
+        ]
+    needs_grpc = [
+        "pyspark.sql.connect.client.retries",
+        "pyspark.sql.connect.client.artifact",
+        "pyspark.sql.connect.client.reattach",
+        "pyspark.sql.connect.proto.base_pb2_grpc",
+    ]
+    state = "pyspark.sql.streaming.proto.StateMessage_pb2"
+    packages = {"protobuf": ["google.protobuf"], "grpc": ["grpc", "grpc_status", "google.rpc"]}
+    arguments = json.dumps([plain, needs_grpc, state, packages])
+
+    def run(script):
+        result = subprocess.run(
+            [sys.executable, "-c", textwrap.dedent(script), arguments],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert result.returncode == 0, result.stderr
+        return json.loads(result.stdout)
+
+    # Where none of grpcio, grpcio-status, googleapis-common-protos, protobuf, py4j and
+    # zstandard can be imported.
+    blocked = run(
+        """
+        import importlib, importlib.abc, json, sys
+
+        BLOCKED = ("grpc", "grpc_status", "google.rpc", "google.protobuf", "py4j", "zstandard")
+
+        def is_blocked(name):
+            return any(name == b or name.startswith(b + ".") for b in BLOCKED)
+
+        class Block(importlib.abc.MetaPathFinder):
+            # As the import of a package that is not installed fails.
+            def find_spec(self, name, path, target=None):
+                if is_blocked(name):
+                    raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+
+        sys.meta_path.insert(0, Block())
+        plain, needs_grpc, state, _ = json.loads(sys.argv[1])
+        for name in plain:
+            importlib.import_module(name)
+        failed = {}
+        for name in needs_grpc + [state]:
+            try:
+                importlib.import_module(name)
+            except ImportError as error:
+                failed[name] = [error.name, str(error)]
+        print(json.dumps({"failed": failed, "loaded": sorted(filter(is_blocked, sys.modules))}))
+        """
+    )
+    assert blocked["loaded"] == []
+    assert sorted(blocked["failed"]) == sorted(needs_grpc + [state])
+    # Each of the modules of the gRPC client imports grpc first; StateMessage_pb2 fails at
+    # google.protobuf, or at its namespace package where nothing of google is installed.
+    for name in needs_grpc:
+        assert blocked["failed"][name][0] == "grpc", blocked["failed"][name]
+    assert blocked["failed"][state][0] in ("google.protobuf", "google"), blocked["failed"][state]
+
+    # With the packages that are installed here. StateMessage_pb2 is imported before
+    # pyspark.sql.connect.proto, whose files then join the pool.
+    ran = run(
+        """
+        import importlib, importlib.util, json, sys
+
+        plain, needs_grpc, state, packages = json.loads(sys.argv[1])
+
+        def importable(names):
+            try:
+                return all(importlib.util.find_spec(name) is not None for name in names)
+            except ImportError:
+                return False
+
+        ran = []
+        if importable(packages["protobuf"]):
+            messages = importlib.import_module(state)
+            from google.protobuf import descriptor_pool, message
+
+            import pyspark.sql.connect.proto as proto
+            from pyspark import _pyspark
+
+            pool = descriptor_pool.Default()
+            state_file = "org/apache/spark/sql/execution/streaming/StateMessage.proto"
+            assert pool.FindFileByName(state_file) is messages.DESCRIPTOR
+            assert not messages.DESCRIPTOR.dependencies
+            assert issubclass(messages.StateRequest, message.Message)
+            request = messages.StateRequest(
+                version=1,
+                statefulProcessorCall=messages.StatefulProcessorCall(
+                    setHandleState=messages.SetHandleState(state=messages.INITIALIZED)
+                ),
+            )
+            assert messages.StateRequest.FromString(request.SerializeToString()) == request
+            assert issubclass(proto.Relation, _pyspark.ProtoMessage)
+            for name, package, _, _ in _pyspark._proto_files():
+                if package == "spark.connect":
+                    serialized = _pyspark._proto_file_descriptor(name).serialized_pb
+                    assert pool.FindFileByName(name).serialized_pb == serialized, name
+            ran.append("protobuf")
+        for name in plain:
+            importlib.import_module(name)
+        if importable(packages["grpc"]):
+            from concurrent.futures import ThreadPoolExecutor
+
+            import grpc
+
+            import pyspark.sql.connect.client as client
+
+            names, exported = set(vars(client)), getattr(client, "__all__", None)
+            for name in needs_grpc:
+                importlib.import_module(name)
+            # As any import of a submodule, each binds the module to its package, and only that.
+            assert getattr(client, "__all__", None) == exported
+            assert names <= set(vars(client)) <= names | {"artifact", "reattach", "retries"}
+            for name in ("artifact", "reattach", "retries"):
+                module = sys.modules["pyspark.sql.connect.client." + name]
+                assert getattr(client, name) is module
+            from pyspark.sql.connect.proto import base_pb2, base_pb2_grpc
+
+            assert base_pb2_grpc.spark_dot_connect_dot_base__pb2 is base_pb2
+            channel = grpc.insecure_channel("localhost:1")
+            stub = base_pb2_grpc.SparkConnectServiceStub(channel)
+            assert isinstance(stub.ExecutePlan, grpc.UnaryStreamMultiCallable)
+            assert isinstance(stub.AddArtifacts, grpc.StreamUnaryMultiCallable)
+            assert isinstance(stub.Config, grpc.UnaryUnaryMultiCallable)
+            channel.close()
+            server = grpc.server(ThreadPoolExecutor(max_workers=1))
+            base_pb2_grpc.add_SparkConnectServiceServicer_to_server(
+                base_pb2_grpc.SparkConnectServiceServicer(), server
+            )
+            server.stop(None)
+            ran.append("grpc")
+        print(json.dumps(ran))
+        """
+    )
+    assert ran == [check for check, names in packages.items() if importable(names)]
+
+
 def test_connect_import_path_modules_as_pyspark(mock_connect):
     # As official PySpark 4.3.0: the modules of the connect import path, of the functions and
     # the classes of this client, and the deprecated functions of the builtin modules.

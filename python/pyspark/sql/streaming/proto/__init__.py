@@ -14,5 +14,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-"""Placeholder package for pyspark.sql.streaming.proto. Real protobuf bindings are a follow-up."""

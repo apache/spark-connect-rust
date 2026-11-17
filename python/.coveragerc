@@ -74,6 +74,27 @@ omit =
     */pyspark/sql/sql_formatter.py
     */pyspark/sql/connect/profiler.py
     */pyspark/sql/connect/shell/progress.py
+    # PySpark's RDD helpers, tools and server-side workers, and the modules of its gRPC client,
+    # which import grpcio (the runner of a streaming data source and the state messages are
+    # under sql/streaming, omitted above).
+    */pyspark/join.py
+    */pyspark/rddsampler.py
+    */pyspark/worker.py
+    */pyspark/daemon.py
+    */pyspark/resultiterable.py
+    */pyspark/shuffle.py
+    */pyspark/statcounter.py
+    */pyspark/worker_message.py
+    */pyspark/errors_doc_gen.py
+    */pyspark/install.py
+    */pyspark/threaddump.py
+    */pyspark/sql/transpile.py
+    */pyspark/sql/connect/local_server.py
+    */pyspark/sql/connect/streaming/worker/*
+    */pyspark/sql/connect/client/retries.py
+    */pyspark/sql/connect/client/artifact.py
+    */pyspark/sql/connect/client/reattach.py
+    */pyspark/sql/connect/proto/base_pb2_grpc.py
     # The native extension and its embedded Row and value sources, which have synthetic
     # filenames.
     */pyspark/_pyspark*

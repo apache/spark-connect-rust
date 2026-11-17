@@ -470,9 +470,9 @@ def render_license(components, apache_text):
     out.append(
         "The Python and data components of the wheels are not Rust dependencies. They are\n"
         "listed in LICENSE: python/pyspark/loose_version.py (Python Software Foundation\n"
-        "License), python/pyspark/cloudpickle/*.py, python/pyspark/_globals.py (BSD\n"
-        "3-Clause), python/pyspark/errors/exceptions/tblib.py (BSD 2-Clause), and\n"
-        "crates/spark-connect/src/srs_registry.csv (MIT, PROJ).\n"
+        "License), python/pyspark/cloudpickle/*.py, python/pyspark/_globals.py,\n"
+        "python/pyspark/join.py (BSD 3-Clause), python/pyspark/errors/exceptions/tblib.py\n"
+        "(BSD 2-Clause), and crates/spark-connect/src/srs_registry.csv (MIT, PROJ).\n"
     )
     for c in others:
         for name, text in c.license_files:

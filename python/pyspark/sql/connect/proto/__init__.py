@@ -22,7 +22,9 @@ the same classes of the drop-in's protobuf runtime in Rust (``pyspark.sql.connec
 with the API, bytes, text and errors of protobuf's messages, and makes each of those modules
 (``pyspark.sql.connect.proto.base_pb2``, ...) the one of the runtime, so that ``protobuf`` is not
 needed. The modules of PySpark that build their own messages, such as ``pyspark.ml``, use them.
-The gRPC stubs of ``base_pb2_grpc`` are not exported: the Rust transport speaks gRPC.
+PySpark's package also exports the gRPC stubs of ``base_pb2_grpc``, which imports grpcio; this one
+does not, as the Rust transport speaks gRPC. ``pyspark.sql.connect.proto.base_pb2_grpc`` is
+PySpark's module, which builds its stubs on the messages of ``base_pb2`` of this package.
 
 Where ``protobuf`` is installed, the files of the protos are added to its default descriptor
 pool too, as the generated modules add them, so that the modules that protoc generates of other

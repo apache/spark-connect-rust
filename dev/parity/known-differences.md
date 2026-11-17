@@ -214,10 +214,13 @@ difference is intentional or tracked for a fix.
   The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.
-- **Retry and reattach** (intentional; DESIGN). `RpcDeadlines`, `client.retries`
-  (`RetryPolicy`, `Retrying`, `DefaultPolicy`, `RetryException`) and `client.reattach`
-  are not provided. Retries and reattachment live in the Rust transport, which has no
-  policy to configure from Python.
+- **Retry and reattach** (intentional; DESIGN). `RpcDeadlines` is not provided.
+  `client.retries` (`RetryPolicy`, `Retrying`, `DefaultPolicy`, `RetryException`) and
+  `client.reattach` are PySpark's own, vendored, as `client.artifact` and
+  `proto.base_pb2_grpc` are. They import grpcio (`retries` and `reattach` also grpcio-status
+  and googleapis-common-protos), which `pyspark-client` requires and this client does not, so
+  they import only where those are installed. Retries and reattachment live in the Rust
+  transport, which does not use these modules and has no policy to configure from Python.
 - **Default port** (intentional). `DefaultChannelBuilder.default_port()` is 15002. PySpark
   takes the port of a local JVM server in its testing mode; the drop-in has no JVM.
 - **Missing URL error** (intentional). The one builder of the drop-in serves
