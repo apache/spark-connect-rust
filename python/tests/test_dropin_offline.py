@@ -9652,6 +9652,69 @@ def test_to_keeps_a_schema_that_is_not_a_datatype_as_pyspark_reads_it(mock_conne
     assert text.schema == "int"
 
 
+def test_the_schema_of_to_is_cached_and_copied_as_pyspark(mock_connect):
+    # As PySpark's `to`, which sets the `_cached_schema` of its DataFrame to the schema whatever it
+    # is, a DataType that is not a struct too, and the methods that copy the `_cached_schema` of
+    # their input, which give that schema without a request: alias, filter and where, limit, the
+    # sorts, hint, the repartitions and coalesce, distinct and dropDuplicates, sample, randomSplit
+    # and observe. select, which does not copy it, asks the plan, which does not build of a schema
+    # that is not a DataType; the plan of a DataType that is not a struct is sent, and so the
+    # server rejects it.
+    import pyspark.sql.types as T
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    keeping = [
+        lambda d: d.alias("x"),
+        lambda d: d.filter("a > 0"),
+        lambda d: d.where("a > 0"),
+        lambda d: d.limit(1),
+        lambda d: d.limit(2.0),
+        lambda d: d.sort("a"),
+        lambda d: d.orderBy("a"),
+        lambda d: d.sortWithinPartitions("a"),
+        lambda d: d.hint("broadcast"),
+        lambda d: d.repartition(2),
+        lambda d: d.repartition(2, "a"),
+        lambda d: d.repartition("a"),
+        lambda d: d.repartitionByRange(2, "a"),
+        lambda d: d.repartitionById(2, "a"),
+        lambda d: d.coalesce(1),
+        lambda d: d.distinct(),
+        lambda d: d.dropDuplicates(),
+        lambda d: d.drop_duplicates(["a"]),
+        lambda d: d.sample(0.5, seed=1),
+        lambda d: d.randomSplit([1.0, 1.0], seed=1)[1],
+        lambda d: d.observe("o", F.count(F.lit(1))),
+    ]
+    for schema in ("a long", T.LongType(), T.ArrayType(T.StringType())):
+        df = spark.range(3).to(schema)
+        assert df.schema == schema
+        for make in keeping:
+            assert make(df).schema == schema
+            assert make(df).limit(1).schema == schema
+    assert service.analyze_requests == []
+    with pytest.raises(PySparkValueError) as error:
+        spark.range(3).to("a long").select("a").schema
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+    # observe of an Observation asks whether the DataFrame is streaming first, as PySpark's
+    # `Observation._on`, whose plan does not build of a schema that is not a DataType.
+    with pytest.raises(PySparkValueError) as error:
+        spark.range(3).to("a long").observe(Observation(), F.count(F.lit(1)))
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+    observed = spark.range(3).to(T.LongType()).observe(Observation(), F.count(F.lit(1)))
+    assert len(service.analyze_requests) == 1
+    assert observed.schema == T.LongType()
+    assert len(service.analyze_requests) == 1
+    with pytest.raises(AttributeError, match="'LongType' object has no attribute 'treeString'"):
+        spark.range(3).to(T.LongType()).printSchema()
+    spark.range(3).to(T.LongType()).collect()
+    assert len(service.execute_requests) == 1
+    assert len(service.analyze_requests) == 1
+
+
 def test_sequence_arguments_are_unpacked_as_pyspark_does(mock_connect):
     # As PySpark's `_to_cols`: a single argument that is a collections.abc.Sequence, and not an
     # int, a str or a Column, stands for its items, so a range, bytes, a UserList and a Sequence of
@@ -12370,6 +12433,21 @@ def test_struct_field_equality():
     assert f1 != f3
 
 
+def test_struct_fields_compare_their_metadata_as_python_compares_the_dicts_as_pyspark():
+    # As PySpark's `DataType.__eq__` of the `__dict__` of a StructField, whose metadata is a dict
+    # that Python compares: `1 == 1.0 == True`, in nested lists and dicts too, and so the structs,
+    # arrays and maps of such fields.
+    a = T.StructField("a", T.LongType(), False, {"x": 1, "y": [1, {"z": 2}]})
+    b = T.StructField("a", T.LongType(), False, {"x": 1.0, "y": [True, {"z": 2.0}]})
+    assert a == b and T.StructType([a]) == T.StructType([b])
+    assert T.ArrayType(T.StructType([a])) == T.ArrayType(T.StructType([b]))
+    assert T.MapType(T.LongType(), T.StructType([a])) == T.MapType(T.LongType(), T.StructType([b]))
+    assert hash(a) == hash(b)
+    for other in ({"x": 2, "y": [1, {"z": 2}]}, {"x": 1, "y": [1, {"z": 2}], "w": None}):
+        c = T.StructField("a", T.LongType(), False, other)
+        assert a != c and T.StructType([a]) != T.StructType([c])
+
+
 def test_is_streaming_asks_the_server_as_pyspark(mock_connect):
     # As PySpark's: isStreaming is the server's answer to an IsStreaming request of the plan,
     # which a DataFrame asks once.
@@ -12383,6 +12461,31 @@ def test_is_streaming_asks_the_server_as_pyspark(mock_connect):
         service.streaming = False
     # base.proto: AnalyzePlanRequest.is_streaming=8.
     assert sum(8 in parse_message(request) for request in service.analyze_requests) == 2
+
+
+def test_observe_of_an_observation_reads_the_kept_is_streaming_as_pyspark(mock_connect):
+    # As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, a
+    # `functools.cached_property`: a DataFrame asks once, whether `isStreaming` is read first or
+    # an observe asks it, and another DataFrame asks of its own.
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+
+    def streaming_requests():
+        # base.proto: AnalyzePlanRequest.is_streaming=8.
+        return sum(8 in parse_message(request) for request in service.analyze_requests)
+
+    df = spark.range(3)
+    assert df.isStreaming is False
+    for name in ("a", None, "b"):
+        df.observe(Observation(name), F.count(F.lit(1)))
+    assert streaming_requests() == 1
+    other = spark.range(4)
+    other.observe(Observation("c"), F.count(F.lit(1)))
+    Observation("d")._on(other, F.count(F.lit(1)))
+    assert other.isStreaming is False
+    assert streaming_requests() == 2
 
 
 def _is_local_requests(service):
@@ -12741,6 +12844,53 @@ def test_sessions_and_dataframes_pickle_of_the_active_session_as_pyspark(mock_co
     assert errors == ["NO_ACTIVE_SESSION", "NO_ACTIVE_SESSION"]
     with pytest.raises(PySparkAssertionError, match="Expected session ID does not match"):
         SparkSession._getActiveSessionIfMatches("another")
+
+
+def test_unpickled_dataframes_request_their_schema_and_keep_the_cached_one_as_pyspark(
+        mock_connect):
+    # As PySpark's unpickle of a DataFrame, which builds the plan of the new DataFrame and requests
+    # its schema, as pickle looks its `__setstate__` up through `__getattr__`, which reads its
+    # columns, and then sets the `_cached_schema` of the state of the pickle: one request at each
+    # unpickle, whose error the unpickle raises, and then the schema of a DataFrame that had one
+    # is known, while one that had none is requested again. A plan that does not build pickles,
+    # and its unpickle raises the error of its build, with no request.
+    import pickle
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.serializers import CloudPickleSerializer
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+    cached = spark.range(3)
+    schema = cached.schema
+    for df, later in ((cached, 0), (spark.range(4), 1)):
+        data = serializer.dumps(df)
+        before = len(service.analyze_requests)
+        unpickled = serializer.loads(data)
+        assert len(service.analyze_requests) == before + 1
+        assert unpickled.schema == schema and unpickled.columns == ["id"]
+        assert len(service.analyze_requests) == before + 1 + later
+    failing = [
+        (cached.limit(2.0), TypeError, "'float' object cannot be interpreted as an integer"),
+        (cached.alias("a\ud800"), UnicodeEncodeError,
+         "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"),
+        (cached.to("a long"), PySparkValueError,
+         "[UNSUPPORTED_OPERATION] data type a long is not supported."),
+    ]
+    requests = (len(service.analyze_requests), len(service.execute_requests))
+    for df, error_type, message in failing:
+        data = serializer.dumps(df)
+        with pytest.raises(error_type) as error:
+            serializer.loads(data)
+        assert type(error.value) is error_type and str(error.value) == message
+        with pytest.raises(AttributeError, match="Can't pickle local object"):
+            pickle.dumps(df)
+    assert (len(service.analyze_requests), len(service.execute_requests)) == requests
+    data = serializer.dumps(spark.range(5))
+    service.failure = "rpc"
+    with pytest.raises(SparkConnectGrpcException, match="schema unavailable"):
+        serializer.loads(data)
 
 
 
@@ -20019,6 +20169,27 @@ def test_schema_cache_set_operations_require_equal_warm_schemas(mock_connect, op
     assert mismatched.columns == ["coerced"]
     assert service.calls == 5
     assert left.columns == ["id"]
+
+
+def test_schema_cache_set_operations_compare_the_metadata_as_python_as_pyspark(mock_connect):
+    # As PySpark's `_merge_cached_schema`, which compares the cached schemas with `==`, of the
+    # metadata dicts of their fields as Python compares them: `1 == 1.0 == True`, so the schema
+    # of the left side is known without a request.
+    spark, service = mock_connect
+
+    def of(metadata):
+        field = T.StructField("id", T.LongType(), True, metadata)
+        return spark.range(3).to(T.StructType([field]))
+
+    left = of({"x": 1})
+    for operation in ("union", "unionByName", "subtract", "exceptAll", "intersect"):
+        for metadata in ({"x": 1.0}, {"x": True}):
+            merged = getattr(left, operation)(of(metadata))
+            assert merged.schema.fields[0].metadata == {"x": 1}
+    assert service.calls == 0
+    service.data_type = struct_schema("resolved")
+    assert left.union(of({"x": 1.5})).columns == ["resolved"]
+    assert service.calls == 1
 
 
 def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect, monkeypatch):
@@ -29596,7 +29767,9 @@ def test_pickled_writers_keep_the_entries_that_fail_their_write_as_pyspark(mock_
     # As PySpark's pickle of a writer, which keeps each option, partitioning, bucketing, sorting,
     # clustering and table property that UTF-8 cannot encode, or that is not a str, and fails its
     # write with the error of the first of them. A pickled writer of each kind, with each entry,
-    # raises at its write, as the writer it was pickled from, with no request sent.
+    # raises at its write, as the writer it was pickled from, with no request sent. Its unpickle
+    # requests the schema of its DataFrame, which PySpark's writer holds in its callback, as the
+    # unpickle of a DataFrame does.
     import cloudpickle
     from pyspark.errors import PySparkValueError
 
@@ -29641,7 +29814,10 @@ def test_pickled_writers_keep_the_entries_that_fail_their_write_as_pyspark(mock_
         for writer in (original, copied):
             with pytest.raises(error_type, match=error_message):
                 action(writer)
-    assert service.analyze_requests == [] and service.execute_requests == []
+    # AnalyzePlanRequest.schema=4.
+    assert [4 in parse_message(request) for request in service.analyze_requests] == [True] * len(
+        cases)
+    assert service.execute_requests == []
     # A bucketing with a count that is not positive sends no bucketing column, so none fails.
     copied = cloudpickle.loads(cloudpickle.dumps(df.write.bucketBy(0, bad).format("noop")))
     copied.save("/p")

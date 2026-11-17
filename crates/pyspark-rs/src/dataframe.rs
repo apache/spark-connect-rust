@@ -210,6 +210,28 @@ impl PyDataFrame {
         }
     }
 
+    /// Whether this DataFrame is streaming, of the answer that `isStreaming` keeps, asked once,
+    /// as PySpark's `functools.cached_property` of it, which its `Observation._on` reads too. It
+    /// waits for the server without the GIL.
+    pub(crate) fn streaming_once(&self) -> spark_connect::Result<bool> {
+        if let Some(streaming) = self.is_streaming.get() {
+            return Ok(*streaming);
+        }
+        let streaming = self.dataframe.is_streaming()?;
+        Ok(*self.is_streaming.get_or_init(|| streaming))
+    }
+
+    /// `result`, of a plan over this DataFrame of the same schema, with the schema of `to` that
+    /// this one keeps apart from the core, as PySpark's `alias`, `filter`, `limit`, `sort`, the
+    /// repartitions and the other methods that copy the `_cached_schema` of their input copy it
+    /// whatever it is. The core keeps a cached struct itself.
+    fn of_same_schema(&self, mut result: PyDataFrame) -> PyDataFrame {
+        if let Some(schema) = &self.schema_object {
+            result.schema_object = Some(Python::attach(|py| schema.clone_ref(py)));
+        }
+        result
+    }
+
     /// The DataFrame of `dataframe`, a copy of this one, with the `_support_repr_html` of this
     /// one, as the state of PySpark's DataFrame carries it to its copies. Its other answers are
     /// its own, as PySpark keeps them for each DataFrame.
@@ -821,21 +843,49 @@ impl PyDataFrame {
 
     /// A DataFrame pickles, as PySpark Connect's, of its session, which gives back the active
     /// session of its ID, of its plan, here the bytes of its relation, and of the
-    /// `_support_repr_html` of its state. The session unpickles first: so on a Python worker of
-    /// the server, which has no active session, a pickled DataFrame raises `NO_ACTIVE_SESSION`,
-    /// as PySpark's does. The unpickled DataFrame has copies of the Observations of this one
-    /// (see `DataFrame::from_sent_relation`).
+    /// `_support_repr_html` and the `_cached_schema` of its state. The session unpickles first: so
+    /// on a Python worker of the server, which has no active session, a pickled DataFrame raises
+    /// `NO_ACTIVE_SESSION`, as PySpark's does. The unpickled DataFrame has copies of the
+    /// Observations of this one (see `DataFrame::from_sent_relation`).
+    ///
+    /// PySpark's pickle keeps the objects of the plan, which it does not build, and its unpickle
+    /// builds the plan, as pickle looks the `__setstate__` of the new DataFrame up through its
+    /// `__getattr__`, which reads its columns. So a plan that does not build, of a value that
+    /// PySpark converts when it builds the plan, pickles of its error instead of its relation,
+    /// which the unpickle raises ([`crate::column::described_error`]).
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::types::PyBytes;
         let py = slf.py();
         let this = slf.borrow();
+        let session = this.spark_session(py)?;
+        let (relation, build_error) = match crate::origin::pickling(|| this.dataframe.to_relation())
+        {
+            Ok(relation) => (
+                PyBytes::new(py, &crate::encode_on_grown_stack(relation)),
+                None,
+            ),
+            Err(error) => match crate::column::described_error(py, &error)? {
+                Some(description) => (PyBytes::new(py, b""), Some(description)),
+                None => return Err(crate::errors::spark_error_to_py_exception(error)),
+            },
+        };
+        // The schema that this DataFrame cached, of the types of PySpark, when they hold it.
+        let cached_schema = this
+            .dataframe
+            .known_schema()
+            .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
+            .map(|schema| crate::types::data_type_to_py(py, &schema))
+            .transpose()?;
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
             .call1((
-                this.spark_session(py)?,
-                crate::origin::pickling(|| this._relation_bytes(py))?,
+                session,
+                relation,
                 this.dataframe.plan_levels(),
                 this.support_repr_html
                     .load(std::sync::atomic::Ordering::SeqCst),
+                cached_schema,
+                build_error,
             ))
     }
 
@@ -902,16 +952,30 @@ impl PyDataFrame {
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
-    /// pickled DataFrame unpickles, with the `_support_repr_html` of its state.
+    /// pickled DataFrame unpickles, with the `_support_repr_html` and the `_cached_schema` of its
+    /// state. As PySpark's unpickle, whose lookup of the `__setstate__` of the new DataFrame reads
+    /// its columns, it requests the schema of the relation, whose error it raises, and then the
+    /// DataFrame has the cached schema of the pickled one, none when it had none, so that its
+    /// `schema` requests it again then. Without `request_schema`, of an object that PySpark
+    /// pickles of the plan of the DataFrame, as a DataStreamWriter, the schema is not requested.
     #[staticmethod]
-    #[pyo3(signature = (session, relation, levels=1, support_repr_html=false))]
+    #[pyo3(signature = (
+        session, relation, levels=1, support_repr_html=false, cached_schema=None, request_schema=true
+    ))]
     fn _of_relation(
+        py: Python<'_>,
         session: &Bound<'_, crate::session::PySparkSession>,
         relation: &[u8],
         levels: usize,
         support_repr_html: bool,
+        cached_schema: Option<&Bound<'_, PyAny>>,
+        request_schema: bool,
     ) -> PyResult<PyDataFrame> {
         let session = session.borrow().session.clone();
+        let known_schema = cached_schema
+            .filter(|schema| !schema.is_none())
+            .map(crate::types::py_to_data_type)
+            .transpose()?;
         use prost::Message;
         // Decoded, and then built or dropped, on a stack that holds its levels.
         // The errors become Python exceptions on the caller's stack, which runs no Python code
@@ -922,7 +986,11 @@ impl PyDataFrame {
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
-        let dataframe = PyDataFrame::new(dataframe);
+        if request_schema {
+            let schema = interruptible(py, &dataframe.spark_session(), || dataframe.schema())?;
+            check_schema_conversion(py, Some(&schema))?;
+        }
+        let dataframe = PyDataFrame::new(dataframe.with_known_schema(known_schema));
         dataframe
             .support_repr_html
             .store(support_repr_html, std::sync::atomic::Ordering::SeqCst);
@@ -975,9 +1043,9 @@ impl PyDataFrame {
 
     /// Filter rows by a Column condition or a SQL-string condition.
     fn filter(&self, condition: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
-        Ok(PyDataFrame::new(
+        Ok(self.of_same_schema(PyDataFrame::new(
             self.dataframe.filter(cond_column(condition)?),
-        ))
+        )))
     }
 
     /// Alias for filter (reference pyspark name is `where`).
@@ -989,9 +1057,9 @@ impl PyDataFrame {
         {
             return Err(not_expected_type(condition, "condition", "Column or str"));
         }
-        Ok(PyDataFrame::new(
+        Ok(self.of_same_schema(PyDataFrame::new(
             self.dataframe.filter(cond_column(condition)?),
-        ))
+        )))
     }
 
     /// Add or replace a column, of a Column, as PySpark's `DataFrame.withColumn`, which checks
@@ -1126,9 +1194,9 @@ impl PyDataFrame {
         let mut args = crate::plan_args::PlanArgs::new();
         let name = args.str(name)?;
         let args = args.before(&mut expressions);
-        Ok(PyDataFrame::new(
+        Ok(self.of_same_schema(PyDataFrame::new(
             args.plan(self.dataframe.hint_expressions(&name, expressions)),
-        ))
+        )))
     }
 
     /// Drop columns, of Columns or column names, as PySpark's `DataFrame.drop`.
@@ -1167,7 +1235,7 @@ impl PyDataFrame {
         let py = num.py();
         let value = proto_int(num, "spark.connect.Limit.limit");
         let df = converted_plan(py, &self.dataframe, value, |num| self.dataframe.limit(num))?;
-        Ok(PyDataFrame::new(df))
+        Ok(self.of_same_schema(PyDataFrame::new(df)))
     }
 
     /// Skip the first `num` rows, as PySpark's `offset`, which sends `num` as `limit` does, but
@@ -1183,7 +1251,7 @@ impl PyDataFrame {
 
     /// Remove duplicate rows.
     fn distinct(&self) -> PyDataFrame {
-        PyDataFrame::new(self.dataframe.distinct())
+        self.of_same_schema(PyDataFrame::new(self.dataframe.distinct()))
     }
 
     /// Remove duplicate rows, optionally on specific columns.
@@ -1194,9 +1262,9 @@ impl PyDataFrame {
         let col_refs: Option<Vec<&str>> = subset
             .as_ref()
             .map(|names| names.iter().map(|s| s.as_str()).collect());
-        Ok(PyDataFrame::new(
+        Ok(self.of_same_schema(PyDataFrame::new(
             args.plan(self.dataframe.drop_duplicates(col_refs)),
-        ))
+        )))
     }
 
     /// Sort rows. `ascending` (a bool or list of bools, via kwargs) mirrors reference
@@ -1209,7 +1277,7 @@ impl PyDataFrame {
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         let exprs = self.sort_columns(_py, cols, kwargs.as_ref())?;
-        Ok(PyDataFrame::new(self.dataframe.sort(exprs)))
+        Ok(self.of_same_schema(PyDataFrame::new(self.dataframe.sort(exprs))))
     }
 
     /// Alias for sort.
@@ -1221,7 +1289,7 @@ impl PyDataFrame {
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         let exprs = self.sort_columns(_py, cols, kwargs.as_ref())?;
-        Ok(PyDataFrame::new(self.dataframe.order_by(exprs)))
+        Ok(self.of_same_schema(PyDataFrame::new(self.dataframe.order_by(exprs))))
     }
 
     /// Join with another DataFrame.
@@ -1541,10 +1609,10 @@ impl PyDataFrame {
             .repartition_by_range_opt(num_partitions, exprs)
             .to_pyerr()?;
         // Of the schema that the input cached, as PySpark copies it.
-        Ok(PyDataFrame::new(match plan_error {
+        Ok(self.of_same_schema(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable_with_cached_schema(error),
             None => df,
-        }))
+        })))
     }
 
     /// Repartition into `numPartitions` using a column's value directly as the shuffle
@@ -1587,7 +1655,7 @@ impl PyDataFrame {
             value,
             |num_partitions| self.dataframe.repartition_by_id(num_partitions, col),
         )?;
-        Ok(PyDataFrame::new(df))
+        Ok(self.of_same_schema(PyDataFrame::new(df)))
     }
 
     /// Append a distributed monotonically-increasing index column, as PySpark's
@@ -1699,7 +1767,7 @@ impl PyDataFrame {
             if cols.is_empty() {
                 let n = proto_int(&numPartitions, "spark.connect.Repartition.num_partitions");
                 let df = converted_plan(py, &self.dataframe, n, |n| self.dataframe.repartition(n))?;
-                return Ok(PyDataFrame::new(df));
+                return Ok(self.of_same_schema(PyDataFrame::new(df)));
             }
             // As PySpark's `_to_cols(cols)`, which does not unpack a list among them.
             let exprs: Vec<_> = to_columns_as_given(cols)?
@@ -1713,7 +1781,7 @@ impl PyDataFrame {
             let df = converted_plan(py, &self.dataframe, n, |n| {
                 self.dataframe.repartition_by_expressions(n, exprs)
             })?;
-            return Ok(PyDataFrame::new(df));
+            return Ok(self.of_same_schema(PyDataFrame::new(df)));
         }
         if !(numPartitions.is_instance_of::<pyo3::types::PyString>()
             || numPartitions.extract::<PyRef<'_, PyColumn>>().is_ok())
@@ -1730,9 +1798,9 @@ impl PyDataFrame {
             .iter()
             .map(|c| c.expression().clone())
             .collect();
-        Ok(PyDataFrame::new(
+        Ok(self.of_same_schema(PyDataFrame::new(
             self.dataframe.repartition_by_expressions(0, exprs),
-        ))
+        )))
     }
 
     /// Coalesce into `numPartitions` partitions, as PySpark's `coalesce`: any value that is
@@ -1746,7 +1814,7 @@ impl PyDataFrame {
             value,
             |num_partitions| self.dataframe.coalesce(num_partitions),
         )?;
-        Ok(PyDataFrame::new(df))
+        Ok(self.of_same_schema(PyDataFrame::new(df)))
     }
 
     /// Convert to DataFrame with new column names.
@@ -1770,7 +1838,7 @@ impl PyDataFrame {
     fn alias(&self, alias: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let mut args = crate::plan_args::PlanArgs::new();
         let alias = args.str(alias)?;
-        Ok(PyDataFrame::new(args.plan(self.dataframe.alias(&alias))))
+        Ok(self.of_same_schema(PyDataFrame::new(args.plan(self.dataframe.alias(&alias)))))
     }
 
     /// Group by columns for aggregation.
@@ -1925,9 +1993,9 @@ impl PyDataFrame {
         kwargs: Option<Bound<'_, PyDict>>,
     ) -> PyResult<PyDataFrame> {
         let exprs = self.sort_columns(_py, cols, kwargs.as_ref())?;
-        Ok(PyDataFrame::new(
+        Ok(self.of_same_schema(PyDataFrame::new(
             self.dataframe.sort_within_partitions(exprs),
-        ))
+        )))
     }
 
     /// Except all (keeps duplicates).
@@ -2204,16 +2272,17 @@ impl PyDataFrame {
             }
         }
         if let Ok(observation) = observation.cast::<crate::observation::PyObservation>() {
-            return crate::observation::observe(py, &self.dataframe, observation, columns);
+            let observed = crate::observation::observe(py, self, observation, columns)?;
+            return Ok(self.of_same_schema(observed));
         }
         if observation.is_instance_of::<pyo3::types::PyString>() {
             // Its `CollectMetrics` plan sets the name when it builds the plan, before the metrics.
             let mut args = crate::plan_args::PlanArgs::new();
             let name = args.str(observation)?;
             let args = args.before(&mut columns);
-            return Ok(PyDataFrame::new(
+            return Ok(self.of_same_schema(PyDataFrame::new(
                 args.plan(self.dataframe.observe(&name, columns)),
-            ));
+            )));
         }
         let type_name = observation.get_type().name()?.to_string();
         Err(crate::column::raise_pyspark(
@@ -2380,7 +2449,9 @@ impl PyDataFrame {
 
     /// Reconcile to a target schema (StructType or DDL string). As PySpark's, a schema that is
     /// not a DataType is kept as it is, and the DataFrame fails at each action, which PySpark's
-    /// client raises when it builds the plan; a DDL string is not parsed.
+    /// client raises when it builds the plan; a DDL string is not parsed. As PySpark's, the
+    /// schema is the cached schema of the DataFrame whatever it is, so a DataType that is not a
+    /// struct, which the core does not cache, is kept as it is too, while its plan is sent.
     fn to(&self, schema: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if schema.is_none() {
             // As PySpark's `assert schema is not None`.
@@ -2393,7 +2464,14 @@ impl PyDataFrame {
         if !schema.is_instance_of::<pyo3::types::PyString>() {
             if let Ok(dt) = crate::types::py_to_data_type(schema) {
                 match crate::types::unsendable_field_repr(schema, &dt)? {
-                    None => return Ok(PyDataFrame::new(self.dataframe.to(dt))),
+                    None => {
+                        let is_struct = matches!(dt, spark_connect::types::DataType::Struct { .. });
+                        let mut result = PyDataFrame::new(self.dataframe.to(dt));
+                        if !is_struct {
+                            result.schema_object = Some(schema.clone().unbind());
+                        }
+                        return Ok(result);
+                    }
                     Some(field) => unsendable = Some(field),
                 }
             }
@@ -2519,10 +2597,10 @@ impl PyDataFrame {
             .into_iter()
             .map(|df| {
                 // Of the schema that the input cached, as PySpark copies it to each split.
-                PyDataFrame::new(match &plan_error {
+                self.of_same_schema(PyDataFrame::new(match &plan_error {
                     Some(error) => df.unbuildable_with_cached_schema(error.clone()),
                     None => df,
-                })
+                }))
             })
             .collect())
     }
@@ -3234,10 +3312,10 @@ impl PyDataFrame {
         };
         let df = self.dataframe.sample_opt(frac, replace, Some(seed));
         // Of the schema that the input cached, as PySpark copies it.
-        Ok(PyDataFrame::new(match plan_error {
+        Ok(self.of_same_schema(PyDataFrame::new(match plan_error {
             Some(error) => df.unbuildable_with_cached_schema(error),
             None => df,
-        }))
+        })))
     }
 
     /// Check if the DataFrame is empty, asked once, as PySpark's.

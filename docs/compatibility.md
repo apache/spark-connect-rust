@@ -1435,6 +1435,8 @@ copied into another session (see the UDFs below), send the plan that was built f
 the copy, so their requests do not warn again, where PySpark's warn at each. Such a plan keeps the
 origin of the `and` of the conditions of a join of a list of Columns of that time too, where
 PySpark gives it the call site of each request that builds it, as it does in the drop-in otherwise.
+A request that PySpark builds in `functools`, as of `isStreaming`, a `functools.cached_property`,
+gives that `and` the call site of `functools.py`, where the drop-in gives the user's.
 
 The `FutureWarning` of `BisectingKMeansModel.computeCost` is attributed as PySpark's is, to the
 line of its `warnings.warn` in `pyspark/ml/clustering.py` and to the module
@@ -1533,11 +1535,12 @@ and the call raises none. Of a join on a tuple, or on a list of conditions whose
 calls the `__getattr__` of the DataFrame. It is the Column of `schema`, where PySpark's is of
 `_schema`, and `columns` gives the Column of `columns`, where PySpark's raises `NOT_ITERABLE`.
 
-A DataFrame whose plan fails to build raises that error when it is pickled, also by cloudpickle,
-where PySpark's cloudpickle pickles it, of a copy that raises the error at its requests. `alias`, a
-hint, `dropDuplicates`, `observe`, `filter`, `sort`, `sortWithinPartitions` and the repartitions of
-such a value keep the cached schema of the DataFrame that they are of, as PySpark copies it, so
-their `schema` is known without a request, and their other requests raise the error.
+A DataFrame whose plan fails to build pickles, also by cloudpickle, and its unpickle raises the
+error, as PySpark's: its pickle keeps the objects of the plan, and its unpickle builds the plan to
+read the columns of the new DataFrame. `alias`, a hint, `dropDuplicates`, `observe`, `filter`,
+`sort`, `sortWithinPartitions` and the repartitions of such a value keep the cached schema of the
+DataFrame that they are of, as PySpark copies it, so their `schema` is known without a request,
+and their other requests raise the error.
 
 The `barrier` of `mapInPandas` and `mapInArrow` is a protobuf bool, which their plan sets once it
 pickled the function, when it is built: an int is taken, as `barrier=1`, and another value, such
@@ -1665,7 +1668,20 @@ A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped
 session fails the copy with `SparkConnectException`, as PySpark's does. One difference remains:
 PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` by reading the columns, which
-the drop-in does not, since it defines `__deepcopy__` itself.
+the drop-in does not, since it defines `__deepcopy__` itself. An unpickled DataFrame requests its
+schema once, at the unpickle, which raises the error of the request, as PySpark's pickle looks the
+`__setstate__` of the new DataFrame up through its `__getattr__`. Its cached schema is then that of
+the pickled DataFrame, as the state of PySpark's pickle sets it: of none, its `schema` requests it
+again. So does the unpickle of an object that PySpark pickles with its DataFrame: a writer, of its
+callback, grouped data, `na` and `stat`; a stream writer, which PySpark's pickles of the plan of
+the DataFrame, requests nothing.
+
+`to` caches its schema whatever it is, as PySpark's, so of a DataType that is not a struct, such as
+`LongType()`, `schema` gives a copy of it without a request, while its plan is sent, which the
+server rejects. The methods that copy the cached schema of their input in PySpark copy that of
+`to` too: `alias`, `filter` and `where`, `limit`, `sort`, `orderBy` and `sortWithinPartitions`,
+`hint`, `repartition`, `repartitionByRange`, `repartitionById` and `coalesce`, `distinct` and
+`dropDuplicates`, `sample`, `randomSplit` and `observe`, as do the set operations of equal ones.
 
 The other objects of a session above, a streaming query and `SparkSession.builder` keep the
 attributes that are set on them through copies and pickles, as PySpark's copy and pickle their

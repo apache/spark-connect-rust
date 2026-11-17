@@ -1277,6 +1277,21 @@ fn error_description<'py>(
     py: Python<'py>,
     error: &spark_connect_core::error::SparkError,
 ) -> PyResult<Bound<'py, PyTuple>> {
+    described_error(py, error)?.ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "cannot pickle a Column whose plan fails with {}",
+            error.message
+        ))
+    })
+}
+
+/// The description of `error`, of a plan or an expression that PySpark's client fails to build,
+/// as [`error_description`] gives it, of which `pyspark.sql.connect._column_reduce.raise_error`
+/// raises the error again: None for the error of another kind, which no pickle keeps.
+pub(crate) fn described_error<'py>(
+    py: Python<'py>,
+    error: &spark_connect_core::error::SparkError,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
     use pyo3::types::PyBytes;
     use pyo3::IntoPyObjectExt;
     use spark_connect_core::error::SparkErrorKind as K;
@@ -1305,12 +1320,7 @@ fn error_description<'py>(
             error.error_class.clone(),
             error.params.clone().into_bound_py_any(py)?,
         ),
-        _ => {
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "cannot pickle a Column whose plan fails with {}",
-                error.message
-            )))
-        }
+        _ => return Ok(None),
     };
     PyTuple::new(
         py,
@@ -1320,6 +1330,7 @@ fn error_description<'py>(
             payload,
         ],
     )
+    .map(Some)
 }
 
 /// The error of `description`, of [`error_description`].
