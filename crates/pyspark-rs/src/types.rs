@@ -83,6 +83,8 @@ fn lowered_field<'py>(py: Python<'py>, json: &str) -> PyResult<Option<Bound<'py,
     dict
 )]
 pub struct PyDataType {
+    /// The core type. A concrete class reads its type of its own fields (`py_to_data_type`), and
+    /// the setters of its parameters keep this one the same (`sync_base`).
     pub(crate) inner: DataType,
 }
 
@@ -119,20 +121,7 @@ fn interval_fields(
     default: (i32, i32),
     last: i32,
 ) -> PyResult<(i32, i32)> {
-    let field = |value: Option<&Bound<'_, PyAny>>| -> Option<i32> {
-        let value = value?;
-        if value.is_instance_of::<pyo3::types::PyFloat>() {
-            // `1.0 in {0, 1}` of PySpark, of a float that equals a field.
-            let float: f64 = value.extract().ok()?;
-            return (float.fract() == 0.0 && (0.0..=f64::from(last)).contains(&float))
-                .then_some(float as i32);
-        }
-        value
-            .extract::<i64>()
-            .ok()
-            .filter(|field| (0..=i64::from(last)).contains(field))
-            .map(|field| field as i32)
-    };
+    let field = |value: Option<&Bound<'_, PyAny>>| interval_field(value?, last);
     let (start, end) = match (start, end) {
         (None, None) => return Ok(default),
         (Some(start), None) => (Some(start), Some(start)),
@@ -147,17 +136,97 @@ fn interval_fields(
                     None => "None".to_string(),
                 })
             };
-            Err(crate::column::raise_pyspark(
-                py,
-                "PySparkRuntimeError",
-                "INVALID_INTERVAL_CASTING",
-                &[
-                    ("start_field", text(start)?.as_str()),
-                    ("end_field", text(end)?.as_str()),
-                ],
-            ))
+            Err(invalid_interval_casting(py, &text(start)?, &text(end)?))
         }
     }
+}
+
+/// The field of an interval type of the fields `0..=last` that `value` is, as PySpark's
+/// `value in fields.keys()` takes it: an int of a field, or a float that equals one (`1.0`).
+fn interval_field(value: &Bound<'_, PyAny>, last: i32) -> Option<i32> {
+    if value.is_instance_of::<pyo3::types::PyFloat>() {
+        // `1.0 in {0, 1}` of PySpark, of a float that equals a field.
+        let float: f64 = value.extract().ok()?;
+        return (float.fract() == 0.0 && (0.0..=f64::from(last)).contains(&float))
+            .then_some(float as i32);
+    }
+    value
+        .extract::<i64>()
+        .ok()
+        .filter(|field| (0..=i64::from(last)).contains(field))
+        .map(|field| field as i32)
+}
+
+/// PySpark's `PySparkRuntimeError` of `INVALID_INTERVAL_CASTING`, of the `str` of each field.
+fn invalid_interval_casting(py: Python<'_>, start_field: &str, end_field: &str) -> PyErr {
+    crate::column::raise_pyspark(
+        py,
+        "PySparkRuntimeError",
+        "INVALID_INTERVAL_CASTING",
+        &[("start_field", start_field), ("end_field", end_field)],
+    )
+}
+
+/// The field `value` that is set as the `startField` (`start`) or the `endField` of an interval
+/// type of the fields `0..=last`, whose other field is `other`. PySpark's attribute is a plain
+/// one, of any value, which the type then shows, as `t.startField = 1` gives
+/// `DayTimeIntervalType(1, 3)`; the core type holds a field of the type only, so another value
+/// raises the `INVALID_INTERVAL_CASTING` of PySpark's constructor, of the fields it would make.
+fn set_interval_field(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    other: i32,
+    last: i32,
+    start: bool,
+) -> PyResult<i32> {
+    if let Some(field) = interval_field(value, last) {
+        return Ok(field);
+    }
+    let (value, other) = (value.str()?.to_string(), other.to_string());
+    let (start_field, end_field) = if start {
+        (value, other)
+    } else {
+        (other, value)
+    };
+    Err(invalid_interval_casting(py, &start_field, &end_field))
+}
+
+/// Keep the base `DataType` of the type object `obj` (`PyDataType::inner`) the core type of its
+/// parameters, after one of them was set.
+fn sync_base(obj: &Bound<'_, PyAny>) -> PyResult<()> {
+    let data_type = py_to_data_type(obj)?;
+    obj.cast::<PyDataType>()?.borrow_mut().inner = data_type;
+    Ok(())
+}
+
+/// Set the state `state` that PySpark pickled of a type, its `__dict__`, on the type object
+/// `obj`. PySpark's types are plain classes, which pickle at the protocols 2 and up as
+/// `copyreg.__newobj__(cls)` and this state, whose entries pickle sets in the `__dict__` of the
+/// new object. The drop-in's class makes the object of `cls.__new__(cls)`, without arguments,
+/// and sets each entry as `setattr` does: a parameter through its setter, so that the core type
+/// is that of the parameters, and any other attribute in the `__dict__` of `obj`, as PySpark's
+/// has it. `computed` takes the entries that PySpark keeps of the parameters, which the drop-in
+/// computes of them, and returns whether it took the entry.
+fn set_pickled_state<'py>(
+    obj: &Bound<'py, PyAny>,
+    state: &Bound<'py, pyo3::types::PyDict>,
+    mut computed: impl FnMut(&str, &Bound<'py, PyAny>) -> PyResult<bool>,
+) -> PyResult<()> {
+    let py = obj.py();
+    for (key, value) in state.iter() {
+        match key.cast::<pyo3::types::PyString>() {
+            Ok(name) => {
+                if !computed(&name.to_cow()?, &value)? {
+                    obj.setattr(name, &value)?;
+                }
+            }
+            // A key that is not a str is only an entry of the `__dict__`, as pickle sets it.
+            Err(_) => obj
+                .getattr(pyo3::intern!(py, "__dict__"))?
+                .set_item(&key, &value)?,
+        }
+    }
+    Ok(())
 }
 
 /// The abstract intermediate base classes of the type hierarchy (mirror pyspark's
@@ -1192,6 +1261,15 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
     if py_to_data_type(a)? != py_to_data_type(b)? {
         return Ok(false);
     }
+    // The `hasPrecisionInfo` of a decimal is an attribute of PySpark's `__dict__` too.
+    if let (Ok(da), Ok(db)) = (a.cast::<PyDecimalType>(), b.cast::<PyDecimalType>()) {
+        let py = a.py();
+        let ia = da.borrow().has_precision_info.clone_ref(py);
+        let ib = db.borrow().has_precision_info.clone_ref(py);
+        if !ia.bind(py).eq(ib.bind(py))? {
+            return Ok(false);
+        }
+    }
     // The flags as they were given are compared as PySpark's `__dict__` does: `1` equals `True`.
     if has_other_flag(a.py(), a)? || has_other_flag(b.py(), b)? {
         let (a, _) = type_json_value(a.py(), a)?;
@@ -1777,14 +1855,38 @@ impl PyDoubleType {
 pub struct PyDecimalType {
     pub precision: i32,
     pub scale: i32,
+    /// `hasPrecisionInfo` as it was set: PySpark's `__init__` sets it true, and it is a plain
+    /// attribute, of any value, which `==` compares as PySpark's `__dict__` does.
+    has_precision_info: Py<PyAny>,
+}
+
+impl PyDecimalType {
+    /// The parts of a `DecimalType(precision, scale)`, as PySpark's `__init__` sets them.
+    fn of(py: Python<'_>, precision: i32, scale: i32) -> Self {
+        PyDecimalType {
+            precision,
+            scale,
+            has_precision_info: flag_of_bool(py, true),
+        }
+    }
 }
 
 #[pymethods]
 impl PyDecimalType {
-    /// As PySpark's `DecimalType.hasPrecisionInfo`, a public attribute that is always true.
+    /// As PySpark's `DecimalType.hasPrecisionInfo`, a public attribute that `__init__` sets true,
+    /// and that may be set, as a plain attribute is. It is not of the core type, nor its JSON.
     #[getter(hasPrecisionInfo)]
-    fn has_precision_info(&self) -> bool {
-        true
+    fn has_precision_info(&self, py: Python<'_>) -> Py<PyAny> {
+        self.has_precision_info.clone_ref(py)
+    }
+    #[setter(hasPrecisionInfo)]
+    fn set_has_precision_info(&mut self, value: Py<PyAny>) {
+        self.has_precision_info = value;
+    }
+    /// The type of the state that PySpark pickled, of `precision`, `scale` and
+    /// `hasPrecisionInfo`, which pickle sets as attributes (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
@@ -1827,21 +1929,33 @@ impl PyDecimalType {
     /// `DecimalType(precision=10, scale=0)` - defaults match pyspark.
     #[new]
     #[pyo3(signature = (precision=10, scale=0))]
-    fn new(precision: i32, scale: i32) -> pyo3::PyClassInitializer<Self> {
+    fn new(py: Python<'_>, precision: i32, scale: i32) -> pyo3::PyClassInitializer<Self> {
         init_chain!(
             DataType::Decimal { precision, scale },
-            PyDecimalType { precision, scale },
+            PyDecimalType::of(py, precision, scale),
             [PyAtomicType, PyNumericType, PyFractionalType],
             value
         )
     }
+    // The parameters are plain attributes, as PySpark's: an assignment of one makes the type of
+    // it, as its repr, JSON, `==` and hash show.
     #[getter]
     fn precision(&self) -> i32 {
         self.precision
     }
+    #[setter]
+    fn set_precision(slf: &Bound<'_, Self>, precision: i32) -> PyResult<()> {
+        slf.borrow_mut().precision = precision;
+        sync_base(slf.as_any())
+    }
     #[getter]
     fn scale(&self) -> i32 {
         self.scale
+    }
+    #[setter]
+    fn set_scale(slf: &Bound<'_, Self>, scale: i32) -> PyResult<()> {
+        slf.borrow_mut().scale = scale;
+        sync_base(slf.as_any())
     }
     fn __repr__(&self) -> String {
         format!("DecimalType({},{})", self.precision, self.scale)
@@ -1859,10 +1973,20 @@ pub struct PyStringType {
 
 #[pymethods]
 impl PyStringType {
-    /// The collation of the strings, as PySpark's `StringType.collation`.
+    /// The collation of the strings, as PySpark's `StringType.collation`: a plain attribute, of
+    /// which an assignment makes the type of the collation.
     #[getter]
     fn collation(&self) -> String {
         self.collation.clone()
+    }
+    #[setter]
+    fn set_collation(slf: &Bound<'_, Self>, collation: String) -> PyResult<()> {
+        slf.borrow_mut().collation = collation;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `collation` (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // Collation providers, mirroring `StringType.providerSpark/providerICU/providers`.
     #[classattr]
@@ -2326,31 +2450,61 @@ impl PyArrayType {
             (element_type, this.contains_null_object.clone_ref(py)).into_pyobject(py)
         })
     }
-    // Kwargs mirror the reference: ArrayType(elementType, containsNull=True).
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `ArrayType.__new__(ArrayType)`, of which pickle's `copyreg.__newobj__` makes the type that
+    /// PySpark pickled, is an array of `NullType()` until `__setstate__` sets its attributes. The
+    /// class shows the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    #[pyo3(signature = (elementType, containsNull=default_flag()))]
-    #[allow(non_snake_case)]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(elementType, containsNull=True)"
+    )]
     fn new(
         py: Python<'_>,
-        elementType: &Bound<'_, PyAny>,
-        containsNull: Py<PyAny>,
-    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let et = nested_data_type(elementType, "elementType")?;
-        let contains_null = containsNull.bind(py).is_truthy()?;
-        Ok(init_chain!(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
             DataType::Array {
-                element_type: Box::new(et.clone()),
-                contains_null,
+                element_type: Box::new(DataType::Null),
+                contains_null: true,
             },
             PyArrayType {
-                element_type: et,
-                contains_null,
-                element_object: KeptType::of(elementType),
-                contains_null_object: containsNull,
+                element_type: DataType::Null,
+                contains_null: true,
+                element_object: KeptType::default(),
+                contains_null_object: flag_of_bool(py, true),
             },
             [],
             value
-        ))
+        )
+    }
+    /// As PySpark's `__init__(self, elementType, containsNull=True)`, which asserts that the
+    /// element type is a `DataType`.
+    #[pyo3(signature = (elementType, containsNull=default_flag()))]
+    #[allow(non_snake_case)]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        elementType: &Bound<'_, PyAny>,
+        containsNull: Py<PyAny>,
+    ) -> PyResult<()> {
+        let et = nested_data_type(elementType, "elementType")?;
+        let contains_null = containsNull.bind(slf.py()).is_truthy()?;
+        let mut this = slf.borrow_mut();
+        this.as_super().inner = DataType::Array {
+            element_type: Box::new(et.clone()),
+            contains_null,
+        };
+        this.element_type = et;
+        this.contains_null = contains_null;
+        this.element_object = KeptType::of(elementType);
+        this.contains_null_object = containsNull;
+        Ok(())
+    }
+    /// The type of the state that PySpark pickled, of `elementType` and `containsNull`, which
+    /// pickle sets as attributes (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: ArrayType(<elementType repr>, <containsNull>).
@@ -2496,36 +2650,70 @@ impl PyMapType {
                 .into_pyobject(py)
         })
     }
-    // Kwargs mirror the reference: MapType(keyType, valueType, valueContainsNull=True).
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `MapType.__new__(MapType)`, of which pickle's `copyreg.__newobj__` makes the type that
+    /// PySpark pickled, is a map of `NullType()` keys and values until `__setstate__` sets its
+    /// attributes. The class shows the signature of `__init__`, as `inspect.signature` of
+    /// PySpark's class does.
     #[new]
-    #[pyo3(signature = (keyType, valueType, valueContainsNull=default_flag()))]
-    #[allow(non_snake_case)]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(keyType, valueType, valueContainsNull=True)"
+    )]
     fn new(
         py: Python<'_>,
-        keyType: &Bound<'_, PyAny>,
-        valueType: &Bound<'_, PyAny>,
-        valueContainsNull: Py<PyAny>,
-    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let kt = nested_data_type(keyType, "keyType")?;
-        let vt = nested_data_type(valueType, "valueType")?;
-        let value_contains_null = valueContainsNull.bind(py).is_truthy()?;
-        Ok(init_chain!(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> pyo3::PyClassInitializer<Self> {
+        init_chain!(
             DataType::Map {
-                key_type: Box::new(kt.clone()),
-                value_type: Box::new(vt.clone()),
-                value_contains_null,
+                key_type: Box::new(DataType::Null),
+                value_type: Box::new(DataType::Null),
+                value_contains_null: true,
             },
             PyMapType {
-                key_type: kt,
-                value_type: vt,
-                value_contains_null,
-                key_object: KeptType::of(keyType),
-                value_object: KeptType::of(valueType),
-                value_contains_null_object: valueContainsNull,
+                key_type: DataType::Null,
+                value_type: DataType::Null,
+                value_contains_null: true,
+                key_object: KeptType::default(),
+                value_object: KeptType::default(),
+                value_contains_null_object: flag_of_bool(py, true),
             },
             [],
             value
-        ))
+        )
+    }
+    /// As PySpark's `__init__(self, keyType, valueType, valueContainsNull=True)`, which asserts
+    /// that the key and the value types are `DataType`s.
+    #[pyo3(signature = (keyType, valueType, valueContainsNull=default_flag()))]
+    #[allow(non_snake_case)]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        keyType: &Bound<'_, PyAny>,
+        valueType: &Bound<'_, PyAny>,
+        valueContainsNull: Py<PyAny>,
+    ) -> PyResult<()> {
+        let kt = nested_data_type(keyType, "keyType")?;
+        let vt = nested_data_type(valueType, "valueType")?;
+        let value_contains_null = valueContainsNull.bind(slf.py()).is_truthy()?;
+        let mut this = slf.borrow_mut();
+        this.as_super().inner = DataType::Map {
+            key_type: Box::new(kt.clone()),
+            value_type: Box::new(vt.clone()),
+            value_contains_null,
+        };
+        this.key_type = kt;
+        this.value_type = vt;
+        this.value_contains_null = value_contains_null;
+        this.key_object = KeptType::of(keyType);
+        this.value_object = KeptType::of(valueType);
+        this.value_contains_null_object = valueContainsNull;
+        Ok(())
+    }
+    /// The type of the state that PySpark pickled, of `keyType`, `valueType` and
+    /// `valueContainsNull`, which pickle sets as attributes (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: MapType(<keyType repr>, <valueType repr>, <valueContainsNull>).
@@ -2598,9 +2786,9 @@ pub struct PyStructField {
     /// is the metadata of the field. `field.metadata` is only its snapshot at the time it was
     /// made, so the metadata is read through `current_field`.
     metadata: Py<pyo3::types::PyDict>,
-    /// The `needConversion` of the type, kept while the type cannot change: an atomic type
-    /// object is not changed in place, so `add` need not read it again for each field. Reset by
-    /// a set `dataType`.
+    /// The `needConversion` of the type, kept while it cannot change: that of an atomic type does
+    /// not change with its parameters, which may be set, so `add` need not read it again for each
+    /// field. Reset by a set `dataType`.
     need_conversion_of_type: std::sync::OnceLock<bool>,
 }
 
@@ -2648,9 +2836,9 @@ impl PyStructField {
             return Ok(need);
         }
         // The type is read from its object when the field has one, without reading the fields
-        // of a nested struct, or else from the snapshot. The value is kept only for a type that
-        // does not change: not a container, which can be edited in place, nor a year-month
-        // interval, whose value follows `PYSPARK_YM_INTERVAL_LEGACY`.
+        // of a nested struct, or else from the snapshot. The value is kept only for a type whose
+        // value does not change: not a container, whose element types can be edited in place,
+        // nor a year-month interval, whose value follows `PYSPARK_YM_INTERVAL_LEGACY`.
         let (need, fixed) = match self.data_type_object.kept(py) {
             Some(object) => {
                 let object = object.bind(py);
@@ -2827,17 +3015,41 @@ impl PyStructField {
             .call1((json,))?
             .unbind())
     }
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `StructField.__new__(StructField)`, of which pickle's `copyreg.__newobj__` makes the field
+    /// that PySpark pickled, is a field of an empty name and of `NullType()` until `__setstate__`
+    /// sets its attributes. The class shows the signature of `__init__`, as `inspect.signature`
+    /// of PySpark's class does.
     #[new]
-    #[pyo3(signature = (name, dataType, nullable=default_flag(), metadata=None))]
-    #[allow(non_snake_case)]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(name, dataType, nullable=True, metadata=None)"
+    )]
     fn new(
         py: Python<'_>,
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        let field = StructField {
+            name: String::new(),
+            data_type: DataType::Null,
+            nullable: true,
+            metadata: BTreeMap::new(),
+        };
+        Ok(field_base(Self::from_field(py, field)?))
+    }
+    /// As PySpark's `__init__(self, name, dataType, nullable=True, metadata=None)`, which asserts
+    /// the data type first, then the name.
+    #[pyo3(signature = (name, dataType, nullable=default_flag(), metadata=None))]
+    #[allow(non_snake_case)]
+    fn __init__(
+        slf: &Bound<'_, Self>,
         name: &Bound<'_, PyAny>,
         dataType: &Bound<'_, PyAny>,
         nullable: Py<PyAny>,
         metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        // As PySpark's: the data type is asserted first, then the name.
+    ) -> PyResult<()> {
+        let py = slf.py();
         let data_type = nested_data_type(dataType, "dataType")?;
         let name = field_name(name)?;
         let md = match metadata {
@@ -2851,7 +3063,15 @@ impl PyStructField {
             metadata: md,
         };
         let this = Self::build(py, field, metadata, nullable, KeptType::of(dataType))?;
-        Ok(field_base(this))
+        // The parts that this replaces are freed after the borrow ends.
+        let replaced = std::mem::replace(&mut *slf.borrow_mut(), this);
+        drop(replaced);
+        Ok(())
+    }
+    /// The field of the state that PySpark pickled, of `name`, `dataType`, `nullable` and
+    /// `metadata`, which pickle sets as attributes (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // The attributes are plain ones, as PySpark's `StructField`: an assignment of them is the
     // field's, and of the `StructType` the field is in.
@@ -3085,6 +3305,37 @@ impl PyStructType {
         };
         let (base, parts) = struct_parts(py, list)?;
         Ok(init_chain!(base, parts, [], value))
+    }
+
+    /// The struct of the state that PySpark pickled, of `fields`, `names`, `_needConversion` and
+    /// `_needSerializeAnyField`, which pickle sets as attributes (see `set_pickled_state`): the
+    /// fields and the names as they were, also when an edit of the fields made them differ, and
+    /// `_needConversion` as PySpark kept it, of which `_needSerializeAnyField` is. A state without
+    /// it has the `needConversion` of its fields.
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        let py = slf.py();
+        let mut kept: Option<Vec<bool>> = None;
+        set_pickled_state(slf.as_any(), state, |key, value| match key {
+            "_needConversion" => {
+                let need = value
+                    .try_iter()?
+                    .map(|need| need?.is_truthy())
+                    .collect::<PyResult<Vec<bool>>>()?;
+                kept = Some(need);
+                Ok(true)
+            }
+            "_needSerializeAnyField" => Ok(true),
+            _ => Ok(false),
+        })?;
+        let need_conversion = match kept {
+            Some(need) => need,
+            None => {
+                let fields = slf.borrow().fields.clone_ref(py);
+                need_conversion_of_fields(py, fields.bind(py))?
+            }
+        };
+        slf.borrow_mut().need_conversion = need_conversion;
+        Ok(())
     }
 
     /// Append a field and return `self` (chainable, mirroring `StructType.add`):
@@ -3377,10 +3628,20 @@ pub struct PyCharType {
 
 #[pymethods]
 impl PyCharType {
-    /// The length of the strings, as PySpark's `CharType.length`.
+    /// The length of the strings, as PySpark's `CharType.length`: a plain attribute, of which an
+    /// assignment makes the type of the length.
     #[getter]
     fn length(&self) -> i32 {
         self.length
+    }
+    #[setter]
+    fn set_length(slf: &Bound<'_, Self>, length: i32) -> PyResult<()> {
+        slf.borrow_mut().length = length;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `length` (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
@@ -3419,14 +3680,26 @@ impl PyCharType {
         };
         type_reduce(py, &dt.json())
     }
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `CharType.__new__(CharType)`, of which pickle's `copyreg.__newobj__` makes the type that
+    /// PySpark pickled, is a type of length 0 until `__setstate__` sets it. The class shows the
+    /// signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    fn new(length: i32) -> pyo3::PyClassInitializer<Self> {
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(length)")]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> pyo3::PyClassInitializer<Self> {
         init_chain!(
-            DataType::Char { length },
-            PyCharType { length },
+            DataType::Char { length: 0 },
+            PyCharType { length: 0 },
             [PyAtomicType],
             value
         )
+    }
+    /// As PySpark's `__init__(self, length)`.
+    fn __init__(slf: &Bound<'_, Self>, length: i32) -> PyResult<()> {
+        Self::set_length(slf, length)
     }
     fn __repr__(&self) -> String {
         format!("CharType({})", self.length)
@@ -3444,10 +3717,20 @@ pub struct PyVarcharType {
 
 #[pymethods]
 impl PyVarcharType {
-    /// The maximum length of the strings, as PySpark's `VarcharType.length`.
+    /// The maximum length of the strings, as PySpark's `VarcharType.length`: a plain attribute,
+    /// of which an assignment makes the type of the length.
     #[getter]
     fn length(&self) -> i32 {
         self.length
+    }
+    #[setter]
+    fn set_length(slf: &Bound<'_, Self>, length: i32) -> PyResult<()> {
+        slf.borrow_mut().length = length;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `length` (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
@@ -3486,14 +3769,26 @@ impl PyVarcharType {
         };
         type_reduce(py, &dt.json())
     }
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `VarcharType.__new__(VarcharType)`, of which pickle's `copyreg.__newobj__` makes the type
+    /// that PySpark pickled, is a type of length 0 until `__setstate__` sets it. The class shows
+    /// the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    fn new(length: i32) -> pyo3::PyClassInitializer<Self> {
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(length)")]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> pyo3::PyClassInitializer<Self> {
         init_chain!(
-            DataType::Varchar { length },
-            PyVarcharType { length },
+            DataType::Varchar { length: 0 },
+            PyVarcharType { length: 0 },
             [PyAtomicType],
             value
         )
+    }
+    /// As PySpark's `__init__(self, length)`.
+    fn __init__(slf: &Bound<'_, Self>, length: i32) -> PyResult<()> {
+        Self::set_length(slf, length)
     }
     fn __repr__(&self) -> String {
         format!("VarcharType({})", self.length)
@@ -3511,10 +3806,20 @@ pub struct PyTimeType {
 
 #[pymethods]
 impl PyTimeType {
-    /// The precision of the times, as PySpark's `TimeType.precision`.
+    /// The precision of the times, as PySpark's `TimeType.precision`: a plain attribute, of which
+    /// an assignment makes the type of the precision.
     #[getter]
     fn precision(&self) -> i32 {
         self.precision
+    }
+    #[setter]
+    fn set_precision(slf: &Bound<'_, Self>, precision: i32) -> PyResult<()> {
+        slf.borrow_mut().precision = precision;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `precision` (see `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
     #[pyo3(name = "json")]
@@ -3815,15 +4120,35 @@ pub struct PyYearMonthIntervalType {
 
 #[pymethods]
 impl PyYearMonthIntervalType {
-    /// The first field, as PySpark's `YearMonthIntervalType.startField`.
+    /// The first field, as PySpark's `YearMonthIntervalType.startField`: a plain attribute, of
+    /// which an assignment of a field makes the type of it (see `set_interval_field`).
     #[getter(startField)]
     fn start_field(&self) -> i32 {
         self.start_field
     }
-    /// The last field, as PySpark's `YearMonthIntervalType.endField`.
+    #[setter(startField)]
+    fn set_start_field(slf: &Bound<'_, Self>, field: &Bound<'_, PyAny>) -> PyResult<()> {
+        let end = slf.borrow().end_field;
+        let start = set_interval_field(slf.py(), field, end, 1, true)?;
+        slf.borrow_mut().start_field = start;
+        sync_base(slf.as_any())
+    }
+    /// The last field, as PySpark's `YearMonthIntervalType.endField`, a plain attribute too.
     #[getter(endField)]
     fn end_field(&self) -> i32 {
         self.end_field
+    }
+    #[setter(endField)]
+    fn set_end_field(slf: &Bound<'_, Self>, field: &Bound<'_, PyAny>) -> PyResult<()> {
+        let start = slf.borrow().start_field;
+        let end = set_interval_field(slf.py(), field, start, 1, false)?;
+        slf.borrow_mut().end_field = end;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `startField` and `endField` (see
+    /// `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     #[classattr]
     const YEAR: i32 = 0;
@@ -3908,15 +4233,35 @@ pub struct PyDayTimeIntervalType {
 
 #[pymethods]
 impl PyDayTimeIntervalType {
-    /// The first field, as PySpark's `DayTimeIntervalType.startField`.
+    /// The first field, as PySpark's `DayTimeIntervalType.startField`: a plain attribute, of
+    /// which an assignment of a field makes the type of it (see `set_interval_field`).
     #[getter(startField)]
     fn start_field(&self) -> i32 {
         self.start_field
     }
-    /// The last field, as PySpark's `DayTimeIntervalType.endField`.
+    #[setter(startField)]
+    fn set_start_field(slf: &Bound<'_, Self>, field: &Bound<'_, PyAny>) -> PyResult<()> {
+        let end = slf.borrow().end_field;
+        let start = set_interval_field(slf.py(), field, end, 3, true)?;
+        slf.borrow_mut().start_field = start;
+        sync_base(slf.as_any())
+    }
+    /// The last field, as PySpark's `DayTimeIntervalType.endField`, a plain attribute too.
     #[getter(endField)]
     fn end_field(&self) -> i32 {
         self.end_field
+    }
+    #[setter(endField)]
+    fn set_end_field(slf: &Bound<'_, Self>, field: &Bound<'_, PyAny>) -> PyResult<()> {
+        let start = slf.borrow().start_field;
+        let end = set_interval_field(slf.py(), field, start, 3, false)?;
+        slf.borrow_mut().end_field = end;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `startField` and `endField` (see
+    /// `set_pickled_state`).
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     #[classattr]
     const DAY: i32 = 0;
@@ -4074,21 +4419,49 @@ impl PyGeometryType {
     const MIXED_CRS: &'static str = "SRID:ANY";
     #[classattr]
     const MIXED_SRID: i32 = -1;
-    /// As PySpark's `GeometryType(srid)`: `"ANY"` for a mixed SRID, or an SRID of a
-    /// coordinate reference system that PySpark knows.
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `GeometryType.__new__(GeometryType)`, of which pickle's `copyreg.__newobj__` makes the type
+    /// that PySpark pickled, is a type of the default SRID until `__setstate__` sets it. The class
+    /// shows the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    fn new(srid: &Bound<'_, PyAny>) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let srid = spatial_type_srid(srid, false)?;
-        Ok(init_chain!(
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(srid)")]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> pyo3::PyClassInitializer<Self> {
+        let srid = Self::DEFAULT_SRID;
+        init_chain!(
             DataType::Geometry { srid },
             PyGeometryType { srid },
             [PyAtomicType, PySpatialType],
             value
-        ))
+        )
     }
+    /// As PySpark's `__init__(self, srid)`: `"ANY"` for a mixed SRID, or an SRID of a
+    /// coordinate reference system that PySpark knows.
+    fn __init__(slf: &Bound<'_, Self>, srid: &Bound<'_, PyAny>) -> PyResult<()> {
+        let srid = spatial_type_srid(srid, false)?;
+        slf.borrow_mut().srid = srid;
+        sync_base(slf.as_any())
+    }
+    /// The SRID, as PySpark's `GeometryType.srid`: a plain attribute, of which an assignment
+    /// makes the type of the SRID (see `attribute_srid`), also its JSON, which PySpark's writes
+    /// of the private `_crs` that its constructor sets.
     #[getter]
     fn srid(&self) -> i32 {
         self.srid
+    }
+    #[setter]
+    fn set_srid(slf: &Bound<'_, Self>, srid: &Bound<'_, PyAny>) -> PyResult<()> {
+        let srid = attribute_srid(srid, false)?;
+        slf.borrow_mut().srid = srid;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `srid` and `_crs`, which pickle sets as
+    /// attributes (see `set_pickled_state`): the type is of the `srid`, whose CRS the JSON
+    /// names, as PySpark's constructor sets `_crs` of it.
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |key, _| Ok(key == "_crs"))
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, &DataType::Geometry { srid: self.srid }.json())
@@ -4135,21 +4508,51 @@ impl PyGeographyType {
     const MIXED_CRS: &'static str = "SRID:ANY";
     #[classattr]
     const MIXED_SRID: i32 = -1;
-    /// As PySpark's `GeographyType(srid)`: `"ANY"` for a mixed SRID, or an SRID of a
-    /// geographic coordinate reference system that PySpark knows.
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `GeographyType.__new__(GeographyType)`, of which pickle's `copyreg.__newobj__` makes the
+    /// type that PySpark pickled, is a type of the default SRID until `__setstate__` sets it. The
+    /// class shows the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    fn new(srid: &Bound<'_, PyAny>) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let srid = spatial_type_srid(srid, true)?;
-        Ok(init_chain!(
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(srid)")]
+    fn new(
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> pyo3::PyClassInitializer<Self> {
+        let srid = Self::DEFAULT_SRID;
+        init_chain!(
             DataType::Geography { srid },
             PyGeographyType { srid },
             [PyAtomicType, PySpatialType],
             value
-        ))
+        )
     }
+    /// As PySpark's `__init__(self, srid)`: `"ANY"` for a mixed SRID, or an SRID of a
+    /// geographic coordinate reference system that PySpark knows.
+    fn __init__(slf: &Bound<'_, Self>, srid: &Bound<'_, PyAny>) -> PyResult<()> {
+        let srid = spatial_type_srid(srid, true)?;
+        slf.borrow_mut().srid = srid;
+        sync_base(slf.as_any())
+    }
+    /// The SRID, as PySpark's `GeographyType.srid`: a plain attribute, of which an assignment
+    /// makes the type of the SRID (see `attribute_srid`), also its JSON, which PySpark's writes
+    /// of the private `_crs` and `_alg` that its constructor sets.
     #[getter]
     fn srid(&self) -> i32 {
         self.srid
+    }
+    #[setter]
+    fn set_srid(slf: &Bound<'_, Self>, srid: &Bound<'_, PyAny>) -> PyResult<()> {
+        let srid = attribute_srid(srid, true)?;
+        slf.borrow_mut().srid = srid;
+        sync_base(slf.as_any())
+    }
+    /// The type of the state that PySpark pickled, of `srid`, `_crs` and `_alg`, which pickle
+    /// sets as attributes (see `set_pickled_state`): the type is of the `srid`, whose CRS and
+    /// algorithm the JSON names, as PySpark's constructor sets `_crs` and `_alg` of it.
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        set_pickled_state(slf.as_any(), state, |key, _| {
+            Ok(matches!(key, "_crs" | "_alg"))
+        })
     }
     fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
         type_reduce(py, &DataType::Geography { srid: self.srid }.json())
@@ -4206,6 +4609,20 @@ pub(crate) fn spatial_type_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> Py
         "ST_INVALID_SRID_VALUE",
         &[("srid", &srid_str)],
     ))
+}
+
+/// The SRID `srid` that is set as the `srid` of a spatial type of the given kind, a plain
+/// attribute in PySpark, of any value. The core type holds an SRID that PySpark's types hold: the
+/// mixed SRID -1, of which PySpark's `GeometryType("ANY")` is, or a value that the constructor
+/// takes, of which another raises its `ST_INVALID_SRID_VALUE` (see [`spatial_type_srid`]).
+fn attribute_srid(srid: &Bound<'_, PyAny>, geographic: bool) -> PyResult<i32> {
+    use spark_connect::types::SpatialType;
+    if srid.is_instance_of::<pyo3::types::PyInt>()
+        && srid.extract::<i64>().ok() == Some(i64::from(SpatialType::MIXED_SRID))
+    {
+        return Ok(SpatialType::MIXED_SRID);
+    }
+    spatial_type_srid(srid, geographic)
 }
 
 /// Whether PySpark 4.3.0 takes the SRID `srid` in a spatial type of the given kind: its
@@ -4380,7 +4797,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             let (precision, scale) = (*precision, *scale);
             obj!(init_chain!(
                 DataType::Decimal { precision, scale },
-                PyDecimalType { precision, scale },
+                PyDecimalType::of(py, precision, scale),
                 [PyAtomicType, PyNumericType, PyFractionalType],
                 value
             ))
