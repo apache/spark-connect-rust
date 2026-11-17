@@ -255,6 +255,26 @@ pub(super) fn unsendable_key(jvm: &str) -> String {
     format!("\u{0}unsendable:{jvm}")
 }
 
+/// The error that PySpark's serialization of the params raises of the value that `params` keeps
+/// of the param `jvm`, which it cannot send (see [`unsendable_key`]): the error of
+/// `LiteralExpression._from_value` of the value, as the values of the ML fetches raise it
+/// (`functions::to_value_column`). Of an int beyond a long, it is `VALUE_NOT_BETWEEN`; of a list of
+/// ints, the bare `AssertionError` of an element out of the range of the type of the first, the
+/// `VALUE_NOT_BETWEEN` of a first element beyond a long, or the `CANNOT_INFER_ARRAY_ELEMENT_TYPE`
+/// of no element.
+pub(super) fn unsendable_error(py: Python<'_>, params: &Params, jvm: &str) -> PyErr {
+    let error = || -> PyResult<PyErr> {
+        let Some(value) = literal_value(py, params, jvm)? else {
+            return Ok(crate::functions::value_not_between(py));
+        };
+        Ok(match crate::functions::to_value_column(value.bind(py)) {
+            Err(error) => error,
+            Ok(_) => crate::functions::value_not_between(py),
+        })
+    };
+    error().unwrap_or_else(|error| error)
+}
+
 /// The Python value of the literal of a set param of `params`, by its JVM name `jvm`.
 pub(super) fn literal_value(
     py: Python<'_>,
@@ -1017,20 +1037,29 @@ pub(super) fn native_params<'py, T: ParamsHolder>(
 
 /// Make the params of `slf` those of PySpark's `_paramMap` and `_defaultParamMap` of it, of the
 /// values `set` and `defaults` by name, before a request that sends them: the values of `set`, the
-/// others unset, and the defaults of `defaults` that the object holds of its own.
+/// others unset, and the defaults of `defaults` that the object holds of its own. The values of
+/// `set` are set in its order, of `_paramMap`, in which PySpark's serialization of the params reads
+/// them: the error of the first that it cannot send is the first of `_paramMap`'s (see
+/// `snapshot`).
 pub(super) fn sync_params<T: ParamsHolder>(
     slf: &Bound<'_, T>,
     set: &Bound<'_, PyDict>,
     defaults: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
-    for meta in params_of(slf.as_any())? {
-        match set.get_item(&meta.name)? {
-            Some(value) => set_by_name(slf, &meta.name, &value)?,
-            None => slf.try_borrow_mut()?.unset(meta.name.as_str())?,
+    let params = params_of(slf.as_any())?;
+    for meta in params {
+        if !set.contains(&meta.name)? {
+            slf.try_borrow_mut()?.unset(meta.name.as_str())?;
         }
         if let Some(value) = defaults.get_item(&meta.name)? {
             slf.try_borrow_mut()?
                 .put_own_default(meta.name.as_str(), value.unbind());
+        }
+    }
+    for (name, value) in set.iter() {
+        let name = name.extract::<String>()?;
+        if params.iter().any(|meta| meta.name == name) {
+            set_by_name(slf, &name, &value)?;
         }
     }
     Ok(())
@@ -1116,14 +1145,20 @@ pub(super) fn copy<'py, T: ParamsHolder + NativeInstance>(
     Ok(that)
 }
 
-/// The error that PySpark's serialization of the params of `slf` raises, if any, as `snapshot`
-/// raises it: `VALUE_NOT_BETWEEN` of an int that PySpark cannot send, and
-/// `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list without elements.
-fn serialization_error<T: Native>(py: Python<'_>, this: &T) -> Option<PyErr> {
-    if !this.unsendable().is_empty() {
-        return Some(crate::functions::value_not_between(py));
+/// The error that PySpark's serialization of the params `params` raises, if any, as `snapshot`
+/// raises it: of the first param of a value that PySpark cannot send, of the JVM name
+/// `unsendable` ([`unsendable_error`]), and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list without
+/// elements. It runs Python code: give it a copy of the params of an object that is not borrowed,
+/// so that a setter that another thread calls meanwhile does not fail.
+pub(super) fn params_error(
+    py: Python<'_>,
+    params: &Params,
+    unsendable: Option<&str>,
+) -> Option<PyErr> {
+    if let Some(jvm) = unsendable {
+        return Some(unsendable_error(py, params, jvm));
     }
-    if this.params().has_empty_array() {
+    if params.has_empty_array() {
         return Some(crate::column::raise_pyspark(
             py,
             "PySparkTypeError",
@@ -1144,14 +1179,16 @@ pub(super) fn operator_writer<T: Native + PyClass<Frozen = False>>(
 ) -> PyResult<super::object::PyMLWriter> {
     let py = slf.py();
     let uid: String = slf.as_any().getattr("uid")?.extract()?;
-    let this = slf.try_borrow()?;
+    let (params, unsendable) = {
+        let this = slf.try_borrow()?;
+        let unsendable = this.unsendable().first().map(|name| T::jvm_name(name));
+        (this.params().clone(), unsendable)
+    };
+    let error = params_error(py, &params, unsendable);
     let operator = spark_connect::ml::MlOperator::with_uid(jvm, &uid, op_type);
     Ok(
-        super::object::PyMLWriter::new(super::object::WriteTarget::Operator(
-            operator,
-            this.params().clone(),
-        ))
-        .with_error(serialization_error(py, &*this)),
+        super::object::PyMLWriter::new(super::object::WriteTarget::Operator(operator, params))
+            .with_error(error),
     )
 }
 

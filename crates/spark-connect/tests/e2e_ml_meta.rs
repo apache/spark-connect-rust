@@ -147,6 +147,91 @@ fn validators_nested_in_a_grid_set_their_own_params_as_pyspark_does() {
     );
 }
 
+/// Validators nested in a pipeline of an outer cross validator, of no sub-models: the evaluation of
+/// a param map that is not empty transforms by a copy of the model of the map
+/// (`model.transform(validation, epm[index])`), whose inner validator model's `copy` fails
+/// PySpark's `assert self.subModels is not None`; of an empty map, it transforms by the model
+/// itself, and the fit is PySpark's.
+#[test]
+fn validators_of_no_sub_models_nested_in_a_grid_fail_their_copy_as_pyspark_does() {
+    use spark_connect::ml::ParamMap;
+    use spark_connect_core::error::SparkErrorKind;
+    let Some(s) = live_session() else {
+        return;
+    };
+    let df = training(&s);
+    let svc = LinearSVC::new().set_max_iter(3);
+    let svc_uid = svc.operator().uid.clone();
+    let svc_grid = ParamGridBuilder::new()
+        .add_grid(
+            &svc_uid,
+            "regParam",
+            [MlValue::Double(0.1), MlValue::Double(1.0)],
+        )
+        .build();
+    let evaluator = BinaryClassificationEvaluator::new();
+    let cv = CrossValidator::new()
+        .set_estimator(svc.clone())
+        .set_estimator_param_maps(svc_grid.clone())
+        .set_evaluator(evaluator.clone())
+        .set_num_folds(2)
+        .set_seed(7);
+    let tvs = TrainValidationSplit::new()
+        .set_estimator(svc)
+        .set_estimator_param_maps(svc_grid)
+        .set_evaluator(evaluator.clone())
+        .set_seed(7);
+    let (cv_uid, tvs_uid) = (cv.uid().to_string(), tvs.uid().to_string());
+    let cases = [
+        (
+            PipelineStage::estimator(cv),
+            ParamGridBuilder::new().add_grid(
+                &cv_uid,
+                "numFolds",
+                [MlValue::Int(2), MlValue::Int(4)],
+            ),
+            0.4245580808080808,
+        ),
+        (
+            PipelineStage::estimator(tvs),
+            ParamGridBuilder::new().add_grid(
+                &tvs_uid,
+                "trainRatio",
+                [MlValue::Double(0.3), MlValue::Double(0.9)],
+            ),
+            0.42077020202020204,
+        ),
+    ];
+    for (inner, grid, metric) in cases {
+        let outer = CrossValidator::new()
+            .set_estimator(Pipeline::new().set_stages(vec![inner]))
+            .set_evaluator(evaluator.clone())
+            .set_num_folds(2)
+            .set_seed(3);
+        let error = outer
+            .clone()
+            .set_estimator_param_maps(grid.build())
+            .fit_validator(&df)
+            .expect_err("the assert of the sub-models");
+        assert_eq!(error.kind, SparkErrorKind::AssertionError, "{error}");
+        let model = outer
+            .set_estimator_param_maps(ParamGridBuilder::new().build())
+            .fit_validator(&df)
+            .unwrap();
+        assert_all_close(model.avg_metrics(), &[metric], 1e-12);
+        // The best model's validator model has no sub-models, so its copy fails too.
+        let best = model.best_model().downcast_ref::<PipelineModel>().unwrap();
+        let PipelineStage::Model(inner) = &best.stages()[0] else {
+            panic!("the model of the inner validator");
+        };
+        let mut copy = inner.clone();
+        let error = copy
+            .apply_param_map(&ParamMap::new())
+            .expect_err("the assert of the sub-models");
+        assert_eq!(error.kind, SparkErrorKind::AssertionError, "{error}");
+    }
+}
+
 /// A pipeline of ALS that PySpark saved: the fitted model keeps the ALS params that its model has,
 /// and its transform sends them (PySpark's `Param rank does not exist.` otherwise).
 #[test]

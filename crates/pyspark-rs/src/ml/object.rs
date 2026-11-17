@@ -1089,16 +1089,17 @@ impl ModelCore {
         self.model.operator().uid.clone()
     }
 
-    /// The error of PySpark's serialization of the model's params (an int that it cannot send).
+    /// The error of PySpark's serialization of the model's params: of a value that it cannot send
+    /// (see [`params_api::unsendable_error`]), the first of them by name.
     pub(super) fn serialization_error(&self, py: Python<'_>) -> Option<PyErr> {
-        let unsendable = self
-            .model
-            .params()
+        let params = self.model.params();
+        let jvm = params
             .to_proto()
             .params
-            .keys()
-            .any(|name| name.starts_with("\u{0}unsendable:"));
-        unsendable.then(|| crate::functions::value_not_between(py))
+            .into_keys()
+            .filter_map(|key| key.strip_prefix("\u{0}unsendable:").map(str::to_string))
+            .min()?;
+        Some(params_api::unsendable_error(py, params, &jvm))
     }
 
     /// The transform of `df` by the model, of `df` as it is, as `try_remote_transform_relation` of
@@ -1152,9 +1153,9 @@ impl ModelCore {
 }
 
 /// Set the param `jvm` of the model params `params` to `value`, as the setters of a model set it:
-/// a value of the converter `identity` as the literal of `LiteralExpression._from_value`, and an
-/// int that PySpark cannot send under the reserved key that keeps it (see
-/// [`params_api::unsendable_key`]).
+/// a value of the converter `identity` as the literal of `LiteralExpression._from_value`, and a
+/// value that PySpark cannot send (an int beyond a long, or a list of ints whose literal fails)
+/// under the reserved key that keeps it (see [`params_api::unsendable_key`]).
 pub(super) fn put_model_param(
     py: Python<'_>,
     params: Params,
@@ -1173,7 +1174,7 @@ pub(super) fn put_model_param(
         Converted::Bool(value) => params.set_param_bool(jvm, value),
         Converted::StrList(values) => params.set_param_string_array(jvm, values),
         Converted::FloatList(values) => params.set_param_double_array(jvm, values),
-        Converted::IntList(values) => params.set_param_int_array(jvm, values),
+        Converted::IntList(literal) => params.set_param_literal(jvm, literal),
         Converted::Vector(value) => params.set_param_vector(jvm, value),
         Converted::FloatListList(value) => params.set_param_double_arrays(jvm, value),
         Converted::Matrix(value) => params.set_param_matrix(jvm, value),

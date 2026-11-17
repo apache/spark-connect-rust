@@ -262,7 +262,17 @@ classes to build on:
 - The fit of the `Estimator` trait returns a `Box<dyn Model>`; `model.downcast_ref::<M>()` gives
   its concrete model type. `Model::describe()` is the server's description of a model (PySpark's
   `__repr__` of a model, its `toString`). `PredictionModel` gives `num_features()` and
-  `predict(&vector)`, the members of every prediction model of `pyspark.ml`.
+  `predict(&vector)`, the members of every prediction model of `pyspark.ml`. PySpark reads a
+  fetched int as a Python int of any size: `num_features()` (and the other `i32` members) of one
+  out of the range of an `i32` is an error, not the truncated int.
+- A fit, transform, evaluate and save sends the params as `Params::sendable` serializes them, as
+  PySpark's `serialize_ml_params` does: of the error of a value that PySpark cannot send, before
+  any request. `Params::set_param_int_array` (of `VectorSlicer::set_indices` and
+  `QuantileDiscretizer::set_num_buckets_array`) sends a list of ints as PySpark's literal of it,
+  of the type of its first element (`Integer` when it fits 32 bits, else `Long`) of every element.
+  Of a first element that fits 32 bits and another that does not, PySpark's `LiteralExpression`
+  fails its `assert` of the element's range: the list is kept, for its getter, and is that
+  `AssertionError`.
 - `ObjectModel` is a model of a server-side object, of its operator and params, which transforms
   as every cached model does: the model of an object that `read_model` loads, or of one that a
   fetch returns. `training_summary(&model_ref, &dataset)` is the target of the training summary of
@@ -451,7 +461,9 @@ Each clustering estimator of `spark_connect::ml` fits its typed model, as the re
 
 - `KMeansModel` and `BisectingKMeansModel`: `cluster_centers()` (the rows of the server's
   `clusterCenterMatrix`, as PySpark reads them), `num_features`, `predict` of a cluster index,
-  `compute_cost(&dataset)` of a bisecting model, and the training summary of a fit.
+  `compute_cost(&dataset)` of a bisecting model (which PySpark deprecates since 3.0.0, in favor
+  of `ClusteringEvaluator` and of the training summary's cost), and the training summary of a
+  fit.
 - `GaussianMixtureModel`: `weights`, `gaussians_df()`, `gaussians()` (a `MultivariateGaussian` of
   each collected row of `gaussiansDF`, as PySpark builds them client-side), `predict`,
   `predict_probability` and the training summary of a fit.
@@ -531,7 +543,12 @@ PySpark (an integral float for an int param, for example), and a value that the
 converter rejects raises its `TypeError`. A fit, transform or evaluate sends only the
 params that the constructor or a setter set, so the server applies its defaults to
 the others, as with PySpark. An int beyond a long raises PySpark's
-`VALUE_NOT_BETWEEN` at the next fit. `None` is sent as a null literal, as PySpark sends
+`VALUE_NOT_BETWEEN` at the next fit, transform or save. A list of ints (`layers`, `indices`,
+`numBucketsArray`) is sent as PySpark's literal of it, of the type of its first element (an
+integer, else a long) of every element: a list of an element out of the range of that type raises
+PySpark's bare `AssertionError` at the next fit, transform or save, and one whose first element is
+beyond a long `VALUE_NOT_BETWEEN`. Of several such params, the error is of the first of PySpark's
+`_paramMap`. `None` is sent as a null literal, as PySpark sends
 it: the server reads a null `bootstrap` as false and rejects the other nulls. A param that is
 not given is not sent, so the server's default applies. A list param without elements is
 accepted by its constructor and setters, and a fit, transform or evaluate raises PySpark's
@@ -633,7 +650,10 @@ and `set_feature_col`, the names of v4.2.0, stay as deprecated aliases of `featu
 `set_threshold` and `set_thresholds` follow `_LogisticRegressionParams`: the getters check that
 the two agree to 1e-5 and `threshold()` requires two thresholds. The setters leave the other
 param set, as over Spark Connect, where the `clear` of `pyspark.ml` does nothing, so a
-disagreement raises the getters' error.
+disagreement raises the getters' error. Their arithmetic is PySpark's, in Python: a zero divisor
+of the equivalent threshold of two thresholds, `1 / (1 + t0 / t1)` (a zero `t1`, or a ratio of
+-1), is the error "float division by zero" of its `ZeroDivisionError`, of `threshold()` and,
+with a threshold set too, of `thresholds()`.
 The model has the typed members of `LinearSVCModel` above, plus `coefficient_matrix()` and
 `intercept_vector()`; `coefficients()` and `intercept()` raise the server's error of a multinomial
 model, as PySpark does. The model's `summary()` is binary for at most two classes, of the
@@ -984,7 +1004,11 @@ client:
   param that the stage's class does not have is not set. A pipeline applies them to its stages.
   The grid keeps the values as they were given, and a validator converts them when it applies or
   saves them, not when the grid is built as PySpark does, so a value that PySpark refuses at build
-  (a `TypeError`) is refused at the fit or the save of the validator.
+  (a `TypeError`) is refused at the fit or the save of the validator. So is a value that PySpark
+  takes but cannot send, which its fit refuses: an int beyond a long (a whole float such as
+  `1e20` of an int param), PySpark's `VALUE_NOT_BETWEEN`, and a list of ints of an element out of
+  the range of the type of its first element, the `AssertionError` of its `LiteralExpression`. A
+  list of ints is sent as PySpark sends it, of the type of its first element.
 - **`Pipeline` and `PipelineModel`**: `fit` (or `fit_pipeline`, of the typed model) is
   `Pipeline._fit`; `PipelineModel` transforms by each stage in order. `copy` keeps the pipeline's
   uid, and a pipeline model's copy has a new one.
@@ -995,7 +1019,14 @@ client:
   are numpy's (the mean and the standard deviation of the population over the folds), and the
   best is numpy's `argmax` or `argmin`, of the first NaN of any. The best param map is fitted on
   the whole dataset. Their models have `best_model`, the metrics and `sub_models`
-  (`collect_sub_models`), and transform by the best model. A validator's `apply_param_map` sets
+  (`collect_sub_models`), and transform by the best model. The evaluation of a param map that is
+  not empty transforms by a copy of its model of the map (`model.transform(validation,
+  epm[index])`), and of an empty one by the model itself. A model's `apply_param_map` is
+  PySpark's `copy(extra)` of it: it applies the map to the best model, fails as PySpark's
+  `assert self.subModels is not None` of a model of no sub-models (so the evaluation of a param
+  map of a validator of no sub-models nested in a pipeline fails, as PySpark's does), copies the
+  sub-models of no map, and sets the model's own params of the map (`numFolds`, `foldCol`,
+  `trainRatio` and `seed`). A validator's `apply_param_map` sets
   its own params (`numFolds`, `foldCol`, `trainRatio`, `seed`, `parallelism` and
   `collectSubModels`) first, then its estimator's and evaluator's, as PySpark's `copy(extra)`
   does, so a validator nested in a grid takes the values of its own params from it. A fit of no
