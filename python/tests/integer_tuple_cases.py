@@ -125,6 +125,14 @@ class IntegerTupleTests(unittest.TestCase):
                              for key in keys)
             return _bytes(1, request[1][0]) + _bytes(4, b"input-name-fixture") + pairs
 
+        def analyze(raw, context):
+            # The schema of the result of `execute`, which has no rows and no columns: toArrow
+            # asks for it before it executes the plan, as PySpark's does.
+            # AnalyzePlanResponse.session_id(1), server_side_session_id(15), schema(2) ->
+            # Schema.schema(1) -> DataType.struct(21), of no fields.
+            return (_bytes(1, _fields(raw)[1][0]) + _bytes(15, b"input-name-fixture")
+                    + _bytes(2, _bytes(1, _bytes(21, b""))))
+
         def release(raw, context):
             return _bytes(1, _fields(raw)[1][0])
 
@@ -134,6 +142,7 @@ class IntegerTupleTests(unittest.TestCase):
         server.add_generic_rpc_handlers([grpc.method_handlers_generic_handler(
             "spark.connect.SparkConnectService", {
                 "ExecutePlan": grpc.unary_stream_rpc_method_handler(execute),
+                "AnalyzePlan": grpc.unary_unary_rpc_method_handler(analyze),
                 "Config": grpc.unary_unary_rpc_method_handler(config),
                 "ReleaseExecute": grpc.unary_unary_rpc_method_handler(release),
                 "ReleaseSession": grpc.unary_unary_rpc_method_handler(release),

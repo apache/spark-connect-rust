@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyInt, PyList, PyTuple};
-use spark_connect::dataframe::{AsOfJoinOptions, DataFrame, LocalRowIterator};
+use spark_connect::dataframe::{AsOfJoinOptions, DataFrame, LocalRowIterator, PreparedExecution};
 use spark_connect::plan::{AsOfJoinDirection, AsOfJoinType, JoinType};
 use spark_connect::udf::{eval_type, CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 
@@ -91,24 +91,31 @@ impl PyDataFrame {
         }
     }
 
-    /// The pandas DataFrame of the result, as `SparkConnectClient.to_pandas` makes it: the
-    /// settings of the conversion first, in one request; then the Arrow result with the schema
-    /// that the server sends, which `pyspark.sql.connect.client._to_pandas` converts.
+    /// The pandas DataFrame of the result, as PySpark's `_to_pandas` makes it: the plan is built
+    /// first (`to_proto`), so a plan that does not build raises before any request, and the
+    /// first plan of the session reads the plan compression settings then; then
+    /// `SparkConnectClient.to_pandas` reads the settings of the conversion, in one request,
+    /// and sends the plan; the Arrow result with the schema that the server sends is converted
+    /// by `pyspark.sql.connect.client._to_pandas`.
     pub(crate) fn to_pandas(
         &self,
         py: Python<'_>,
         struct_handling_mode: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let settings = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.spark_session().conf().get_many(&[
+        let session = self.dataframe.spark_session();
+        let execution = interruptible(py, &session, || {
+            self.dataframe.prepare_execution().map_err(Box::new)
+        })?;
+        let settings = interruptible(py, &session, || {
+            session.conf().get_many(&[
                 "spark.sql.session.timeZone",
                 "spark.sql.execution.pandas.structHandlingMode",
                 "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
             ])
         })?;
-        let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
-                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
+        let (batches, schema) = interruptible(py, &session, || {
+            execution
+                .collect_record_batches_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
         check_schema_conversion(py, schema.as_ref())?;
@@ -2644,41 +2651,54 @@ impl PyDataFrame {
             .call1((rows,))
     }
 
+    /// The `pyarrow.Table` of the result as the server sends it, uncast, and the schema that the
+    /// server sends with it, a `StructType`, or None: PySpark Connect's private `_to_table`, of
+    /// which its `toArrow` is made. A result without batches raises the `AssertionError` of its
+    /// `assert table is not None`; a Spark server sends at least one batch.
+    fn _to_table(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+        let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
+                .map_err(Box::new)
+        })?;
+        if batches.is_empty() {
+            return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+        }
+        let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
+        let schema = match &schema {
+            Some(schema) => crate::types::data_type_to_py(py, schema)?,
+            None => py.None(),
+        };
+        Ok((table, schema))
+    }
+
     /// Collect the DataFrame into a `pyarrow.Table`.
     ///
-    /// Mirrors PySpark Connect's `toArrow()`: the table of the result, cast to the Arrow schema of
-    /// its schema, `to_arrow_schema(schema, error_on_duplicated_field_names_in_struct=True,
-    /// timezone="UTC")`, which raises for a type that PySpark does not convert to Arrow: so of
-    /// the Arrow types of the Spark types, and of the names of the schema for the fields of
-    /// nested structs. The schema is the one that the server sends with the result, of the
-    /// analysis of the query, which PySpark asks for before it runs the query; the data of a
-    /// server that sends none is as it is.
+    /// Mirrors PySpark Connect's `toArrow()`: the Arrow schema of the `schema` of the DataFrame
+    /// first, `to_arrow_schema(self.schema, error_on_duplicated_field_names_in_struct=True,
+    /// timezone="UTC")`, then the table of the result, cast to it. The schema is that of the
+    /// analysis of the plan, which the DataFrame keeps, so `columns` asks nothing afterwards; a
+    /// type that PySpark does not convert to Arrow, and duplicate names of the fields of a
+    /// nested struct, raise before the query runs, so before any error of its execution.
     ///
     /// The result is decoded from the server's Arrow IPC stream and handed to `pyarrow` through
     /// arrow-rs's reader conversion, sharing compatible decoded Arrow value buffers. Bitmap
     /// alignment and schemas requiring the IPC compatibility fallback can still copy.
     #[pyo3(name = "toArrow")]
     fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
-                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
-                .map_err(Box::new)
-        })?;
-        check_schema_conversion(py, schema.as_ref())?;
-        let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
-        let Some(schema) = schema else {
-            return Ok(table);
-        };
         let kwargs = PyDict::new(py);
         kwargs.set_item("error_on_duplicated_field_names_in_struct", true)?;
         kwargs.set_item("timezone", "UTC")?;
         let arrow_schema = py
             .import("pyspark.sql.pandas.types")?
             .getattr("to_arrow_schema")?
-            .call(
-                (crate::types::data_type_to_py(py, &schema)?,),
-                Some(&kwargs),
-            )?;
+            .call((self.schema(py)?,), Some(&kwargs))?;
+        let (batches, _) = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe
+                .collect_record_batches_with_schema_checked(check_schema_at_receipt)
+                .map_err(Box::new)
+        })?;
+        let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let table = table.bind(py);
         // A result without batches has no columns: the empty table of the schema.
         if table.getattr("num_columns")?.extract::<usize>()? == 0 && arrow_schema.len()? > 0 {
@@ -3270,14 +3290,16 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_PANDAS_ITER_UDF)?;
-        let cols = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.columns()
-        })?;
-        let udf = build_map_udf(
+        // As PySpark's `_map_partitions`: a DDL string is parsed before the columns of the
+        // input are read.
+        let session = self.dataframe.spark_session();
+        let return_type = resolve_datatype(py, &session, &schema)?;
+        let cols = interruptible(py, &session, || self.dataframe.columns())?;
+        let udf = map_udf_of(
             py,
-            &self.dataframe.spark_session(),
             &func,
             &schema,
+            return_type,
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
             &cols,
         )?;
@@ -3300,14 +3322,16 @@ impl PyDataFrame {
         profile: Option<Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_MAP_ARROW_ITER_UDF)?;
-        let cols = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.columns()
-        })?;
-        let udf = build_map_udf(
+        // As PySpark's `_map_partitions`: a DDL string is parsed before the columns of the
+        // input are read.
+        let session = self.dataframe.spark_session();
+        let return_type = resolve_datatype(py, &session, &schema)?;
+        let cols = interruptible(py, &session, || self.dataframe.columns())?;
+        let udf = map_udf_of(
             py,
-            &self.dataframe.spark_session(),
             &func,
             &schema,
+            return_type,
             eval_type::SQL_MAP_ARROW_ITER_UDF,
             &cols,
         )?;
@@ -5672,8 +5696,9 @@ fn bind_arguments<'py, const N: usize>(
     }))
 }
 
-/// Resolve a Python schema argument (a `DataType` wrapper or a DDL string) into a Rust
-/// DataType: a DDL string as the server of `session` parses it, as PySpark's `_parse_ddl`.
+/// Resolve the return type of a map or group function (a `DataType` wrapper or a DDL string)
+/// into a Rust DataType: a DDL string as the server of `session` parses it, as PySpark's
+/// `_parse_ddl`. Another object raises as [`check_return_type_argument`].
 pub(crate) fn resolve_datatype(
     py: Python<'_>,
     session: &spark_connect::session::SparkSession,
@@ -5687,9 +5712,18 @@ pub(crate) fn resolve_datatype(
     if schema.is_instance_of::<pyo3::types::PyString>() {
         return crate::types::schema_data_type(py, session, schema);
     }
-    Err(pyo3::exceptions::PyTypeError::new_err(
-        "schema must be a DataType or a DDL string",
-    ))
+    Err(not_expected_type(schema, "returnType", "DataType or str"))
+}
+
+/// Raises as the constructor of PySpark's `UserDefinedFunction` does for a return type that is
+/// neither a `DataType` nor a str, `NOT_EXPECTED_TYPE` of `returnType`, before any request.
+pub(crate) fn check_return_type_argument(schema: &Bound<'_, PyAny>) -> PyResult<()> {
+    if schema.extract::<PyRef<PyDataType>>().is_ok()
+        || schema.is_instance_of::<pyo3::types::PyString>()
+    {
+        return Ok(());
+    }
+    Err(not_expected_type(schema, "returnType", "DataType or str"))
 }
 
 /// The id of the resource profile `profile` of `mapInPandas` and `mapInArrow`, as PySpark's
@@ -5753,6 +5787,9 @@ fn udf_name(func: &Bound<'_, PyAny>) -> PyResult<String> {
 
 /// Build a map/group UDF expression: cloudpickle `(func, schema)` as the command and
 /// carry the resolved schema as the output type (mirrors the scalar UDF command layout).
+/// The return type is resolved here, after the caller read the columns of the input, as the
+/// `returnType` of PySpark's `UserDefinedFunction` parses a DDL string when the map node builds
+/// the function, which `applyInPandasWithState` and `transformWithState` do.
 pub(crate) fn build_map_udf(
     py: Python<'_>,
     session: &spark_connect::session::SparkSession,
@@ -5761,8 +5798,23 @@ pub(crate) fn build_map_udf(
     eval_type_id: i32,
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
-    let name = udf_name(func)?;
     let return_type = resolve_datatype(py, session, schema)?;
+    map_udf_of(py, func, schema, return_type, eval_type_id, input_cols)
+}
+
+/// The map/group UDF expression of [`build_map_udf`], of `return_type`, the type of `schema`
+/// that [`resolve_datatype`] gives: for a function whose DDL string PySpark parses before it
+/// reads the columns of the input, as `mapInPandas`, `applyInPandas` and their Arrow forms do,
+/// and cogroups, which bind no columns.
+pub(crate) fn map_udf_of(
+    py: Python<'_>,
+    func: &Bound<'_, PyAny>,
+    schema: &Bound<'_, PyAny>,
+    return_type: spark_connect::types::DataType,
+    eval_type_id: i32,
+    input_cols: &[String],
+) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
+    let name = udf_name(func)?;
     // As PySpark's `MapPartitions`, `GroupMap` and the other map nodes do when they build the
     // UDF, the return type is checked for the eval type: a map or group function returns a
     // struct, so another type raises `INVALID_RETURN_TYPE_FOR_PANDAS_UDF` here, not at the action.
@@ -5785,10 +5837,10 @@ pub(crate) fn build_map_udf(
     let tup = PyTuple::new(py, [func.clone(), pickled_type])?;
     let command = py_cloudpickle(py, tup.as_any())?;
     let payload = PythonUDFPayload::new(return_type, eval_type_id, command, py_version(py));
-    // The worker reconstructs the input pandas/Arrow DataFrame from the UDF's argument
-    // columns; without them the input columns are unnamed (KeyError in the user fn).
-    // Mirror the reference Connect client, which passes the child's columns as the
-    // function arguments.
+    // The worker reconstructs the input pandas/Arrow DataFrame of a map or group function from
+    // the UDF's argument columns; without them the input columns are unnamed (KeyError in the
+    // user fn). Mirror the reference Connect client, which passes the child's columns as the
+    // function arguments, and none for a cogroup function, which takes the whole cogroups.
     let arguments = input_cols
         .iter()
         .map(|c| spark_connect::functions::col(c).expression().clone())
@@ -6175,7 +6227,8 @@ fn check_collectable(
 
 /// The binary result setting, as PySpark's `DataFrame._get_binary_as_bytes` reads it,
 /// including when the server sends only an Arrow schema or the result has no binary fields.
-/// Collect reads it after execution; a local iterator snapshots it before its first fetch.
+/// Collect reads it after execution; a local iterator reads it once its plan is built, before
+/// the execution starts.
 fn read_binary_as_bytes(py: Python<'_>, dataframe: &DataFrame) -> PyResult<bool> {
     let session = dataframe.spark_session();
     let value = interruptible(py, &session, || {
@@ -6215,7 +6268,7 @@ fn rows_to_py(
     let fields = PyList::new(py, first.fields())?;
     let mut nested_fields = NestedFieldNames::default();
     if let Some(schema) = schema {
-        nested_fields.note_udt_key_maps(schema);
+        nested_fields.note_schema(schema);
     }
     // Drop each native payload after conversion instead of retaining two full results.
     rows.into_iter()
@@ -6237,6 +6290,8 @@ fn rows_to_py(
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
     dataframe: DataFrame,
+    /// The execution of the rows once its plan is built, which the first row sends.
+    prepared: Option<PreparedExecution>,
     /// The rows of the execution, which the first row starts, as PySpark's generator does.
     iterator: Option<LocalRowIterator>,
     /// Whether the iteration ended, with its last row or an error, as a generator ends.
@@ -6244,7 +6299,11 @@ pub struct PyLocalRowIterator {
     /// The converters of the fields of user-defined types of the rows, once the schema of the
     /// result is known: with the first row.
     converters: Option<Option<FieldConverters>>,
-    /// Snapshotted before the first fetch, as the body of PySpark's generator does.
+    /// Whether the conversion of the first record batch of the result was checked, once it
+    /// arrived.
+    batch_checked: bool,
+    /// Read before the execution starts, after the plan is built, as the body of PySpark's
+    /// generator reads it.
     binary_as_bytes: Option<bool>,
     /// Top-level names shared only by rows of the current Arrow record batch.
     fields: Option<(std::sync::Arc<[String]>, Py<PyList>)>,
@@ -6256,19 +6315,22 @@ impl PyLocalRowIterator {
     pub fn new(dataframe: DataFrame) -> Self {
         PyLocalRowIterator {
             dataframe,
+            prepared: None,
             iterator: None,
             finished: false,
             converters: None,
+            batch_checked: false,
             binary_as_bytes: None,
             fields: None,
             nested_fields: NestedFieldNames::default(),
         }
     }
 
-    /// The next row, starting the execution for the first.
+    /// The next row, sending the prepared execution for the first; it fetches the next batch of
+    /// the result when the batch that the iterator holds is used up.
     fn next_row(&mut self) -> Option<spark_connect_core::error::Result<spark_connect::row::Row>> {
-        if self.iterator.is_none() {
-            match self.dataframe.to_local_iterator(false) {
+        if let Some(prepared) = self.prepared.take() {
+            match prepared.into_local_iterator(false) {
                 Ok(iterator) => self.iterator = Some(iterator),
                 Err(error) => return Some(Err(error)),
             }
@@ -6278,24 +6340,51 @@ impl PyLocalRowIterator {
 
     /// Prepare and fetch one Python row; the public wrapper closes on exhaustion or error.
     fn next_python_row(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let session = self.dataframe.spark_session();
         let binary_as_bytes = match self.binary_as_bytes {
             Some(value) => value,
             None => {
+                // As the body of PySpark's generator: the plan is built first (`to_proto`), so a
+                // plan that does not build raises before any request, then the binary setting is
+                // read, and then the execution starts.
+                let prepared = interruptible(py, &session, || {
+                    self.dataframe.prepare_execution().map_err(Box::new)
+                })?;
                 let value = read_binary_as_bytes(py, &self.dataframe)?;
+                self.prepared = Some(prepared);
                 self.binary_as_bytes = Some(value);
                 value
             }
         };
-        let next = interruptible(py, &self.dataframe.spark_session(), || {
-            Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
-        })?;
-        if self.converters.is_none() {
-            if let Some(schema) = self.iterator.as_ref().and_then(LocalRowIterator::schema) {
-                // The result is known once its first message arrives, possibly with no rows.
-                check_schema_conversion(py, Some(&schema))?;
-                check_collectable(py, Some(&schema))?;
-                self.converters = Some(udt_field_converters(py, Some(&schema))?);
-                self.nested_fields.note_udt_key_maps(&schema);
+        // A row of the batch that the iterator holds is taken with the GIL held: only the fetch
+        // of a batch waits for the server, which releases it.
+        let next = match self
+            .iterator
+            .as_mut()
+            .and_then(LocalRowIterator::next_decoded)
+        {
+            Some(row) => Some(Ok(row)),
+            None => interruptible(py, &session, || {
+                Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
+            })?,
+        };
+        if let Some(iterator) = self.iterator.as_ref() {
+            if self.converters.is_none() {
+                if let Some(schema) = iterator.schema() {
+                    // As PySpark's conversion of the schema of the response that carries it,
+                    // before the rows and a later failure of the execution.
+                    check_schema_conversion(py, Some(&schema))?;
+                    self.converters = Some(udt_field_converters(py, Some(&schema))?);
+                    self.nested_fields.note_schema(&schema);
+                }
+            }
+            if !self.batch_checked && iterator.has_received_batch() {
+                // As PySpark's `ArrowTableToRowsConversion.convert` of each record batch as it
+                // arrives, also of one without rows, as the server sends for an empty result: its
+                // year-month error is raised with the first record batch, before the error of a
+                // later response, and not for an execution that fails before any.
+                self.batch_checked = true;
+                check_collectable(py, iterator.schema().as_ref())?;
             }
         }
         match next {
@@ -6337,7 +6426,7 @@ impl PyLocalRowIterator {
 }
 
 impl PyLocalRowIterator {
-    /// The iterator, for a call that runs or closes it. The fetch of a row releases the GIL
+    /// The iterator, for a call that runs or closes it. The fetch of a batch releases the GIL
     /// with the iterator borrowed, so that a second thread can call it meanwhile: its state is
     /// never shared, as the borrow is exclusive, and the second call raises the `ValueError` of
     /// a generator that is already executing, as PySpark's generator does, rather than the
@@ -6350,6 +6439,7 @@ impl PyLocalRowIterator {
     /// End the iteration, releasing its execution without the GIL.
     fn finish(&mut self, py: Python<'_>) {
         let iterator = self.iterator.take();
+        self.prepared = None;
         self.finished = true;
         self.fields = None;
         self.nested_fields.clear();
@@ -6373,8 +6463,9 @@ impl PyLocalRowIterator {
 
     /// Fetch the next row from the iterator.
     ///
-    /// The first call snapshots the binary result setting before starting execution.
-    /// Both the Config RPC and blocking row fetch release the GIL.
+    /// The first call builds the plan, then reads the binary result setting, then starts the
+    /// execution, as PySpark's generator does. The Config RPC and the fetch of each batch release
+    /// the GIL; the rows of a fetched batch are converted with it held.
     fn __next__(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
         let py = slf.py();
         let mut this = Self::not_executing(slf)?;

@@ -13363,6 +13363,9 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(
     from pyspark.sql import functions as F
 
     service.data_type = struct
+    # A DataFrame of its own, as toArrow keeps the schema of the analysis that it asks for, as
+    # PySpark's does.
+    df = spark.range(1)
     # repr reads the settings of the eager evaluation of the session, which the server has.
     service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
                      "spark.sql.repl.eagerEval.maxNumRows": "20",
@@ -18612,6 +18615,64 @@ def test_map_and_group_functions_reject_a_non_struct_return_type_as_pyspark(mock
     assert service.execute_requests == []
 
 
+def test_map_and_group_functions_parse_their_ddl_before_they_read_the_columns_as_pyspark(
+        mock_connect):
+    # As PySpark's mapInPandas, mapInArrow, applyInPandas and applyInArrow, which parse a DDL
+    # string (`_parse_ddl`) before they read the columns of the input, of an AnalyzePlan of its
+    # schema, so a parse that fails sends nothing more; and the functions of cogroups, which
+    # parse it and bind no columns, as they take the whole cogroups, so their inputs are not
+    # analyzed. The result keeps the parsed schema. A return type that is neither a DataType nor
+    # a str raises NOT_EXPECTED_TYPE, of the constructor of PySpark's UserDefinedFunction, before
+    # any request.
+    from pyspark.errors import PySparkException, PySparkTypeError
+
+    spark, service = mock_connect
+
+    def cogrouped():
+        return spark.range(2).groupBy("id").cogroup(spark.range(2).groupBy("id"))
+
+    calls = [
+        (lambda schema: spark.range(2).mapInPandas(lambda it: it, schema),
+         ["ddl_parse", "schema"]),
+        (lambda schema: spark.range(2).mapInArrow(lambda it: it, schema), ["ddl_parse", "schema"]),
+        (lambda schema: spark.range(2).groupBy("id").applyInPandas(lambda pdf: pdf, schema),
+         ["ddl_parse", "schema"]),
+        (lambda schema: spark.range(2).groupBy("id").applyInArrow(lambda table: table, schema),
+         ["ddl_parse", "schema"]),
+        (lambda schema: cogrouped().applyInPandas(lambda left, right: left, schema),
+         ["ddl_parse"]),
+        (lambda schema: cogrouped().applyInArrow(lambda left, right: left, schema), ["ddl_parse"]),
+    ]
+    for make, kinds in calls:
+        start = len(service.recorded_order)
+        result = make("id long")
+        assert _sent_kinds(service, start) == kinds
+        assert result.columns == ["id"]
+        assert _sent_kinds(service, start) == kinds
+        start = len(service.recorded_order)
+        with pytest.raises(PySparkTypeError) as e:
+            make(1)
+        assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert e.value.getMessageParameters() == {
+            "arg_name": "returnType", "expected_type": "DataType or str", "arg_type": "int"}
+        assert _sent_kinds(service, start) == []
+    # The parse is the first request, of which a failure is raised before the columns are read.
+    service.failure = "rpc"
+    for make, _ in calls:
+        start = len(service.recorded_order)
+        with pytest.raises(PySparkException, match="schema unavailable"):
+            make("id long")
+        assert _sent_kinds(service, start) == ["ddl_parse"]
+    service.failure = None
+    # Relation.co_group_map=32, CoGroupMap.func=5; Relation.map_partitions=28, MapPartitions.func
+    # =2; CommonInlineUserDefinedFunction.arguments=3.
+    for make, relation, function in [(calls[4][0], 32, 5), (calls[0][0], 28, 2)]:
+        make("id long").collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        arguments = parse_message(parse_message(parse_message(plan)[relation][0])[function][0])
+        assert len(arguments.get(3, [])) == (0 if relation == 32 else 1)
+
+
 @pytest.mark.parametrize("transform", [
     pytest.param(lambda df: df.selectExpr("id AS renamed"), id="select"),
     pytest.param(lambda df: df.zipWithIndex(), id="zipWithIndex"),
@@ -19148,12 +19209,27 @@ def test_arrow_input_roundtrip_live_server():
         spark.stop()
 
 
+def _sent_kinds(service, start=0):
+    """The kinds of the requests that the server recorded from `start`, in order, but of the
+    ReleaseExecute requests, which the client sends without waiting for them: of an AnalyzePlan,
+    its analysis, such as "schema" or "ddl_parse"."""
+    import pyspark.sql.connect.proto as pb2
+
+    return [
+        pb2.AnalyzePlanRequest.FromString(data).WhichOneof("analyze") if kind == "analyze" else kind
+        for kind, data in service.recorded_order[start:]
+        if kind != "release_execute"
+    ]
+
+
 def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(mock_connect):
-    # As PySpark Connect's: toArrow casts the table of the result to the Arrow schema of its
-    # schema, of string and binary even of large var types, which raises for a type that
-    # PySpark does not convert to Arrow. The data of a server that sends no schema is as it is.
+    # As PySpark Connect's toArrow: the Arrow schema of `self.schema` first, of the AnalyzePlan
+    # that the DataFrame keeps, so `columns` asks nothing afterwards; then the table of the
+    # execution, cast to it, of string and binary even of large var types. A type that PySpark
+    # does not convert to Arrow, and duplicate names of the fields of a nested struct, raise
+    # before the query runs. `_to_table` gives the table of the execution as it is.
     import pyarrow as pa
-    from pyspark.errors import PySparkTypeError
+    from pyspark.errors import PySparkTypeError, UnsupportedOperationException
 
     spark, service = mock_connect
     table = pa.table({"s": pa.array(["x"], pa.large_string()),
@@ -19162,20 +19238,36 @@ def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(mock_connec
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
     # ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2.
-    batch = message_field(2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
-
-    service.execute_payload = batch
-    assert spark.range(1).toArrow().schema == table.schema
-    # ExecutePlanResponse.schema=7.
-    service.execute_payload = message_field(7, ddl_data_type("s string, b binary")) + batch
-    result = spark.range(1).toArrow()
+    service.execute_payload = message_field(
+        2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+    service.data_type = ddl_data_type("s string, b binary")
+    df = spark.range(1)
+    result = df.toArrow()
     assert result.schema == pa.schema([("s", pa.string()), ("b", pa.binary())])
     assert result.to_pylist() == [{"s": "x", "b": b"y"}]
-    service.execute_payload = message_field(7, ddl_data_type("v interval year to month")) + batch
-    with pytest.raises(PySparkTypeError) as e:
-        spark.range(1).toArrow()
-    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
-    assert e.value.getMessageParameters() == {"data_type": "YearMonthIntervalType(0, 1)"}
+    assert _sent_kinds(service) == ["schema", "execute"]
+    assert df.columns == ["s", "b"]
+    assert _sent_kinds(service) == ["schema", "execute"]
+    raw, sent_schema = spark.range(1)._to_table()
+    assert raw.schema == table.schema and sent_schema is None
+    # DataType.calendar_interval=17; Struct.fields=1, StructField: name=1, data_type=2.
+    calendar = message_field(21, message_field(
+        1, message_field(1, "v") + message_field(2, message_field(17, b"")) + varint_field(3, 1)))
+    executions = len(service.execute_requests)
+    for data_type, error, condition, parameters in [
+        (ddl_data_type("v interval year to month"), PySparkTypeError,
+         "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION", {"data_type": "YearMonthIntervalType(0, 1)"}),
+        (calendar, PySparkTypeError, "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+         {"data_type": "CalendarIntervalType()"}),
+        (ddl_data_type("v struct<a: int, a: int>"), UnsupportedOperationException,
+         "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT", {"field_names": "['a', 'a']"}),
+    ]:
+        service.data_type = data_type
+        with pytest.raises(error) as e:
+            spark.range(1).toArrow()
+        assert e.value.getCondition() == condition
+        assert e.value.getMessageParameters() == parameters
+    assert len(service.execute_requests) == executions
 
 
 @pytest.mark.parametrize("kind", ["slice", "dictionary", "decimal", "null", "struct", "nul"])
@@ -20369,6 +20461,29 @@ def test_udf_register_takes_user_defined_functions_as_pyspark(mock_connect):
     # A UDF registers under the name and is returned as it was given.
     assert spark.udf.register("f3", plain) is plain
     assert b"f3" in service.execute_requests[-1]
+
+
+def test_udf_register_parses_a_ddl_return_type_for_its_wrapper_and_its_command_as_pyspark(
+        mock_connect):
+    # As PySpark's register of a function with a DDL string: the wrapper that it returns parses
+    # the type, and the registration takes the str as it was given, which its PythonUDF parses
+    # again for the command, whose pickle has the parsed type; a DataType is not parsed.
+    from pyspark import cloudpickle
+
+    spark, service = mock_connect
+    start = len(service.recorded_order)
+    wrapper = spark.udf.register("f", lambda x: x, "long")
+    assert _sent_kinds(service, start) == ["ddl_parse", "ddl_parse", "execute"]
+    assert wrapper.returnType == T.LongType()
+    # ExecutePlanRequest.plan=3, Plan.command=2, Command.register_function=1;
+    # CommonInlineUserDefinedFunction.python_udf=4, PythonUDF.command=3.
+    command = parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0])
+    udf = parse_message(parse_message(command[1][0])[4][0])
+    _, return_type = cloudpickle.loads(udf[3][0])
+    assert return_type == T.LongType()
+    start = len(service.recorded_order)
+    spark.udf.register("g", lambda x: x, T.LongType())
+    assert _sent_kinds(service, start) == ["execute"]
 
 
 @pytest.mark.parametrize("func, condition", [
@@ -22255,7 +22370,11 @@ def _collect_mock_result(mock_connect, table, schema_ddl):
     spark, service = mock_connect
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, table.schema) as writer:
-        writer.write_table(table)
+        # As the server, which sends a record batch of no rows for an empty result, of which
+        # write_table writes none.
+        for record_batch in table.to_batches() or [
+                pa.RecordBatch.from_pylist([], schema=table.schema)]:
+            writer.write_batch(record_batch)
     batch = varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes())
     service.execute_payload = message_field(7, ddl_data_type(schema_ddl)) + message_field(2, batch)
     return spark.range(1)
@@ -22735,6 +22854,187 @@ def test_pandas_conversion_and_its_imports_are_pyspark_modules():
 
     assert callable(_convert_arrow_table_to_pandas) and callable(captured.convert_exception)
     assert inspect.isgeneratorfunction(pyspark.util._load_from_socket.__wrapped__)
+
+
+@pytest.mark.parametrize("convert", [
+    pytest.param(lambda df: df.toPandas(), id="toPandas"),
+    pytest.param(lambda df: list(df.toLocalIterator()), id="toLocalIterator"),
+])
+def test_conversions_build_their_plan_before_they_read_their_settings_as_pyspark(
+        mock_connect, convert):
+    # As PySpark's toPandas and toLocalIterator, which build the plan (`to_proto`) before they
+    # read the settings of the conversion: a plan that does not build raises its error before
+    # any request, and the first plan of a session reads the plan compression settings of the
+    # server before those settings, which are read before the execution.
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    # The settings that toPandas reads.
+    service.confs = {"spark.sql.session.timeZone": "UTC",
+                     "spark.sql.execution.pandas.structHandlingMode": "legacy",
+                     "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false"}
+    _two_row_range_results(service)
+    start = len(service.recorded_order)
+    with pytest.raises(UnicodeEncodeError):
+        convert(spark.range(1).withColumns({"\ud800": F.lit(1)}))
+    assert _sent_kinds(service, start) == []
+    fresh = SparkSession.builder.remote(service.remote).create()
+    try:
+        start = len(service.recorded_order)
+        lookups = len(service.plan_compression_lookup_positions)
+        convert(fresh.range(2))
+        assert _sent_kinds(service, start) == ["config", "execute"]
+        assert service.plan_compression_lookup_positions[lookups:] == [start]
+    finally:
+        fresh.stop()
+
+
+def _year_month_responses():
+    # The responses of a result of a year-month interval: ExecutePlanResponse.schema=7, and
+    # arrow_batch=2 (ArrowBatch.row_count=1, data=2) of an IPC stream of a record batch of no
+    # rows, as the server sends for an empty result, or of none.
+    import pyarrow as pa
+
+    def arrow_batch(write):
+        sink = pa.BufferOutputStream()
+        schema = pa.schema([("ym", pa.int32())])
+        with pa.ipc.new_stream(sink, schema) as writer:
+            write(writer, schema)
+        return message_field(2, varint_field(1, 0) + message_field(2, sink.getvalue().to_pybytes()))
+
+    no_rows = arrow_batch(lambda writer, schema: writer.write_batch(
+        pa.record_batch([pa.array([], pa.int32())], schema=schema)))
+    return message_field(7, ddl_data_type("ym interval year")), no_rows, arrow_batch(
+        lambda writer, schema: None)
+
+
+def test_local_iterator_raises_the_year_month_error_with_the_first_record_batch_as_pyspark(
+        mock_connect):
+    # As PySpark's toLocalIterator, which converts each record batch of the result as it
+    # arrives: a year-month interval raises NOT_IMPLEMENTED with the first one, also of no rows,
+    # as the server sends for an empty result, before the error of a later response. An
+    # execution that fails before any record batch raises its own error, and one that sends
+    # none, or an Arrow batch without one, yields no rows. The cases agree with PySpark 4.3.0.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    spark, service = mock_connect
+    schema, no_rows, no_record_batch = _year_month_responses()
+    service.stream_failure = "INTERNAL"
+    for payloads in ([schema], [schema, no_record_batch]):
+        service.execute_payloads = payloads
+        with pytest.raises(SparkConnectGrpcException, match="stream dropped"):
+            list(spark.range(1).toLocalIterator())
+    for failure in ("INTERNAL", None):
+        service.stream_failure = failure
+        service.execute_payloads = [schema, no_rows]
+        with pytest.raises(PySparkNotImplementedError) as e:
+            list(spark.range(1).toLocalIterator())
+        assert e.value.getCondition() == "NOT_IMPLEMENTED"
+        assert e.value.getMessageParameters() == {
+            "feature": "Collecting a year-month interval value in Spark Connect"}
+    for payloads in ([schema], [schema, no_record_batch]):
+        service.execute_payloads = payloads
+        assert list(spark.range(1).toLocalIterator()) == []
+
+
+def test_local_iterator_gives_calendar_intervals_as_pyarrow_month_day_nano_as_pyspark(
+        mock_connect):
+    # As PySpark's toLocalIterator, whose conversion of the rows has no converter of a calendar
+    # interval, so its values are those of pyarrow's `to_pylist()`: a pyarrow.MonthDayNano, also
+    # in arrays, maps and structs. A string that reads as one stays a str. Its collect raises,
+    # as `from_arrow_schema` has no type of the Arrow interval.
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+    interval = pa.month_day_nano_interval()
+    nanos = pa.MonthDayNano
+    table = pa.table({
+        "c": pa.array([nanos([14, 25, 18367500000000]), None], interval),
+        "a": pa.array([[nanos([1, 0, 0])], None], pa.list_(interval)),
+        "s": pa.array([{"x": nanos([0, 0, 1])}, None], pa.struct([("x", interval)])),
+        "m": pa.array([[("k", nanos([-1, -2, -3]))], None], pa.map_(pa.string(), interval)),
+        "t": ["14 months 25 days 18367500000000 ns", None],
+    })
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # DataType.calendar_interval=17, string=11, array=20 (Array.element_type=1, contains_null=2),
+    # struct=21 (Struct.fields=1; StructField: name=1, data_type=2, nullable=3), map=22
+    # (Map.key_type=1, value_type=2, value_contains_null=3).
+    calendar, string = message_field(17, b""), message_field(11, b"")
+
+    def field(name, data_type):
+        return message_field(1, message_field(1, name) + message_field(2, data_type)
+                             + varint_field(3, 1))
+
+    schema = message_field(21, field("c", calendar)
+                           + field("a", message_field(20, message_field(1, calendar)
+                                                      + varint_field(2, 1)))
+                           + field("s", message_field(21, field("x", calendar)))
+                           + field("m", message_field(22, message_field(1, string)
+                                                      + message_field(2, calendar)
+                                                      + varint_field(3, 1)))
+                           + field("t", string))
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, schema) + message_field(
+        2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+    first, second = spark.range(1).toLocalIterator()
+    assert type(first.c) is nanos and first.c == nanos([14, 25, 18367500000000])
+    assert type(first.a[0]) is nanos and first.a == [nanos([1, 0, 0])]
+    assert type(first.s.x) is nanos and first.s.x == nanos([0, 0, 1])
+    assert first.m == {"k": nanos([-1, -2, -3])} and type(first.m["k"]) is nanos
+    assert first.t == "14 months 25 days 18367500000000 ns"
+    assert tuple(second) == (None,) * 5
+    with pytest.raises(PySparkTypeError) as e:
+        spark.range(1).collect()
+    assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+
+
+def test_local_iterator_converts_the_rows_of_a_fetched_batch_with_the_gil_held(mock_connect):
+    # As PySpark's toLocalIterator, which converts a batch in Python: the rows of a batch that
+    # the iterator holds are converted with the GIL held, and only the fetch of a batch waits for
+    # the server without it. With a switch interval longer than the test, a thread that waits for
+    # the GIL runs only when the iterator releases it, which no row after the first does here.
+    import sys
+    import threading
+
+    import pyarrow as pa
+
+    spark, service = mock_connect
+    table = pa.table({"id": pa.array(range(3000), pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, struct_schema("id")) + message_field(
+        2, varint_field(1, table.num_rows) + message_field(2, sink.getvalue().to_pybytes()))
+    rows = spark.range(3000).toLocalIterator()
+    ticks = []
+    stop = threading.Event()
+
+    def tick():
+        while not stop.is_set():
+            ticks.append(None)
+            time.sleep(0)
+
+    interval = sys.getswitchinterval()
+    thread = threading.Thread(target=tick, daemon=True)
+    sys.setswitchinterval(100)
+    try:
+        thread.start()
+        assert next(rows).id == 0
+        before = len(ticks)
+        assert [next(rows).id for _ in range(2998)] == list(range(1, 2999))
+        held = len(ticks) - before
+    finally:
+        stop.set()
+        sys.setswitchinterval(interval)
+        thread.join()
+    assert held == 0
+    assert [row.id for row in rows] == [2999]
 
 
 def test_to_local_iterator_executes_with_its_first_row_as_pyspark(mock_connect):
@@ -24132,7 +24432,14 @@ def test_tests_restore_the_sigint_handler_that_a_background_start_ignores():
     assert result.stdout.strip() == "interrupted"
 
 
-def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(mock_connect):
+@pytest.mark.parametrize("action", [
+    pytest.param(lambda df: df.collect(), id="collect"),
+    # Of the plans that are built, and so look the plan compression up, before their settings.
+    pytest.param(lambda df: df.toPandas(), id="toPandas"),
+    pytest.param(lambda df: list(df.toLocalIterator()), id="toLocalIterator"),
+])
+def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_once(
+        mock_connect, action):
     # As PySpark's: the Config lookup of the plan compression of the first plan is a blocked call
     # with no execution in flight, which a signal ends at once, so no execution is started.
     import signal
@@ -24146,7 +24453,7 @@ def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_
     timer.start()
     try:
         with pytest.raises(KeyboardInterrupt):
-            spark.range(3).collect()
+            action(spark.range(3))
     finally:
         timer.cancel()
         service.release_response()
@@ -25679,6 +25986,47 @@ def test_apply_in_pandas_with_state_sends_its_relation_as_pyspark(mock_connect):
     assert (apply[6][0], apply[7][0]) == (b"update", b"NoTimeout")
     # CommonInlineUserDefinedFunction.python_udf=4 -> PythonUDF.eval_type=2.
     assert parse_message(parse_message(apply[3][0])[4][0])[2][0] == 208
+
+
+def test_apply_in_pandas_with_state_sends_its_schemas_as_given_as_pyspark(mock_connect):
+    # As PySpark's: the output schema is the return type of the function, whose DDL string is
+    # parsed once the columns of the input are read, and both schemas are sent as they are given,
+    # for the server to parse, so the state schema is not parsed. A state schema that protobuf
+    # does not take as a str fails each request of the DataFrame with its TypeError, as PySpark's
+    # plan fails to build, and bytes are sent as their UTF-8. An output schema that is neither a
+    # DataType nor a str raises NOT_EXPECTED_TYPE before any request.
+    from pyspark.errors import PySparkTypeError
+
+    spark, service = mock_connect
+
+    def stateful(output, state):
+        return spark.range(3).groupBy("id").applyInPandasWithState(
+            lambda key, frames, s: frames, output, state, "append", "NoTimeout")
+
+    def sent_schemas():
+        # plan=3 -> root=1 -> apply_in_pandas_with_state=34: output_schema=4, state_schema=5.
+        root = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        apply = parse_message(parse_message(root)[34][0])
+        return apply[4][0].decode(), apply[5][0].decode()
+
+    start = len(service.recorded_order)
+    df = stateful("id long", "c long")
+    assert _sent_kinds(service, start) == ["schema", "ddl_parse"]
+    df.collect()
+    assert sent_schemas() == ("id long", "c long")
+    stateful("id long", b"c long").collect()
+    assert sent_schemas() == ("id long", "c long")
+    for state in (1, None):
+        df = stateful("id long", state)
+        start = len(service.recorded_order)
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            df.schema
+        assert _sent_kinds(service, start) == []
+    start = len(service.recorded_order)
+    with pytest.raises(PySparkTypeError) as e:
+        stateful(1, "c long")
+    assert e.value.getCondition() == "NOT_EXPECTED_TYPE"
+    assert _sent_kinds(service, start) == []
 
 
 @pytest.mark.parametrize("read", [

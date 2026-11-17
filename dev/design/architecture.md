@@ -68,10 +68,12 @@ Server-streaming RPCs (`ExecutePlan`) are consumed into Arrow record batches.
 ## Data path
 
 Results arrive as Arrow IPC streams. `arrow-rs` decodes them; `toArrow()` collects
-all batches into a Rust vector. `pyspark-rs` uses arrow-rs's `IntoPyArrow` for
+all batches into a Rust vector, after it reads the Arrow schema of the analyzed schema,
+as PySpark's does. `pyspark-rs` uses arrow-rs's `IntoPyArrow` for
 one boxed `RecordBatchReader`, importing it as a PyArrow
-`RecordBatchReader`, and calls `read_all()`. PyArrow pulls batches through native
-callbacks that do not call Python, avoiding a per-batch Python import loop.
+`RecordBatchReader`, calls `read_all()`, and casts the table to that schema. PyArrow
+pulls batches through native callbacks that do not call Python, avoiding a per-batch
+Python import loop.
 This is an in-process buffer handoff, not network streaming or bounded-memory
 result collection.
 

@@ -215,6 +215,19 @@ CRS is of the form `<authority>:<code>`, and an algorithm other than `SPHERICAL`
 number or `any` as an SRID, as the DDL parser of Spark does, and no longer takes such forms as
 `geometry(+5)`, `geometry(SRID:ANY)` or `geography(4326, SPHERICAL)`.
 
+`CoGroupedData::input_columns` is removed. It gave the columns of both sides for the arguments
+of the function of a cogroup, but that function binds no columns, as PySpark's `CoGroupMap`
+builds it: it takes the whole cogroups, so the inputs need no analysis.
+`GroupedData::apply_in_pandas_with_state_with_schemas` sends the output and the state schemas
+as the strings that it is given, DDL or JSON, which the server parses, as PySpark sends a
+schema given as a string; `apply_in_pandas_with_state` sends the JSON of its types, as before.
+`Value::calendar_interval_parts` reads the months, days and nanoseconds of a collected calendar
+interval back from its text. `LocalRowIterator::next_decoded` takes the next row of the batch
+that the iterator holds without fetching another, and `LocalRowIterator::has_received_batch`
+tells whether a record batch of the result has arrived, also one without rows.
+`SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
+before a plan is sent, as PySpark's client reads them when it builds its first plan.
+
 ## Native ML objects: fetch, summaries, save and load (Rust API)
 
 `spark_connect::ml` reads and writes the server-side objects of Spark Connect ML as PySpark 4.3.0

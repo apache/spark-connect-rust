@@ -356,12 +356,34 @@ impl GroupedData {
         output_mode: &str,
         timeout_conf: &str,
     ) -> DataFrame {
+        let output_schema = func.python_udf.output_type.json();
+        self.apply_in_pandas_with_state_with_schemas(
+            func,
+            &output_schema,
+            &state_schema.json(),
+            output_mode,
+            timeout_conf,
+        )
+    }
+
+    /// As [`GroupedData::apply_in_pandas_with_state`], with the output and the state schemas
+    /// sent as they are given, DDL strings or the JSON of the types, which the server parses:
+    /// PySpark sends a schema that it is given as a string as it is, and a `StructType` as its
+    /// JSON.
+    pub fn apply_in_pandas_with_state_with_schemas(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        output_schema: &str,
+        state_schema: &str,
+        output_mode: &str,
+        timeout_conf: &str,
+    ) -> DataFrame {
         let plan = LogicalPlan::ApplyInPandasWithState {
             input: Arc::clone(&self.dataframe.plan),
             grouping_expressions: self.grouping_expressions(),
-            output_schema: func.python_udf.output_type.clone(),
             func,
-            state_schema,
+            output_schema: output_schema.to_string(),
+            state_schema: state_schema.to_string(),
             output_mode: output_mode.to_string(),
             timeout_conf: timeout_conf.to_string(),
         };
@@ -881,14 +903,6 @@ pub struct CoGroupedData {
 }
 
 impl CoGroupedData {
-    /// Column names of both sides (left then right), passed as the cogroup UDF's
-    /// argument columns so the worker's two pandas/Arrow inputs are named.
-    pub fn input_columns(&self) -> Result<Vec<String>> {
-        let mut cols = self.left.input_columns()?;
-        cols.extend(self.right.input_columns()?);
-        Ok(cols)
-    }
-
     /// The session of the cogrouped DataFrames.
     pub fn spark_session(&self) -> crate::session::SparkSession {
         self.left.spark_session()
@@ -897,7 +911,8 @@ impl CoGroupedData {
     /// Apply a pandas UDF to each cogroup (`cogroup(...).applyInPandas`).
     ///
     /// `func` is built on the Python side (cloudpickled, eval type
-    /// `SQL_COGROUPED_MAP_PANDAS_UDF`).
+    /// `SQL_COGROUPED_MAP_PANDAS_UDF`), with no arguments: the function takes the whole
+    /// cogroups, of all the columns of each side, so PySpark binds no columns to it.
     pub fn apply_in_pandas(&self, func: CommonInlineUserDefinedFunctionExpression) -> DataFrame {
         self.cogroup_map(func)
     }
@@ -1082,7 +1097,8 @@ mod tests {
                 "3.12".to_string(),
             ),
         );
-        let result = grouped.apply_in_pandas_with_state(udf, state.clone(), "update", "NoTimeout");
+        let result =
+            grouped.apply_in_pandas_with_state(udf.clone(), state.clone(), "update", "NoTimeout");
         // The relation of the reference client, which the server takes for this function,
         // not a GroupMap, which it rejects.
         let Some(RelType::ApplyInPandasWithState(apply)) = result.plan.to_proto().rel_type else {
@@ -1095,6 +1111,22 @@ mod tests {
         assert_eq!(apply.grouping_expressions.len(), 1);
         assert!(apply.input.is_some());
         assert_eq!(apply.func.unwrap().function_name, "count");
+        // Schemas given as strings are sent as they are, as PySpark sends a DDL string.
+        let result = grouped.apply_in_pandas_with_state_with_schemas(
+            udf,
+            "id long, c long",
+            "c long",
+            "append",
+            "NoTimeout",
+        );
+        let Some(RelType::ApplyInPandasWithState(apply)) = result.plan.to_proto().rel_type else {
+            panic!("expected an ApplyInPandasWithState relation");
+        };
+        assert_eq!(
+            (apply.output_schema.as_str(), apply.state_schema.as_str()),
+            ("id long, c long", "c long")
+        );
+        assert_eq!(apply.output_mode, "append");
     }
 
     #[test]

@@ -379,6 +379,7 @@ def serve(connection):
             self.read_confs = []
             self.config_requests = []
             self.plan_compression_lookups = 0
+            self.plan_compression_lookup_positions = []
             self.config_failure = None
             self.block_config = False
             self.plan_compression_lookup_delay = 0
@@ -561,6 +562,9 @@ def serve(connection):
         read_confs = []
         config_requests = []
         plan_compression_lookups = 0
+        # The position in `recorded_order` of each plan compression lookup: the number of the
+        # requests recorded before it, so that a test sees when it came.
+        plan_compression_lookup_positions = []
         config_failure = None
         block_config = False
         # The seconds that the plan compression lookup of the first plan of a session takes.
@@ -908,6 +912,8 @@ def serve(connection):
             # The lookup of the first plan of a forgotten session is answered, but not counted.
             if lookup and not self.is_forgotten(request):
                 self.plan_compression_lookups += 1
+                with self.listener_condition:
+                    self.plan_compression_lookup_positions.append(len(self.recorded_order))
             # The requests of a forgotten session are answered, but not recorded below.
             recorded = not lookup and self.is_recorded(request, "config")
             if recorded:
