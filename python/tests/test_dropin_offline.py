@@ -20174,6 +20174,46 @@ def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_conne
         DataFrame(Gone(None), spark)
 
 
+def test_plans_of_plugins_send_the_relations_of_their_dataframes_in_their_extensions(
+    mock_connect,
+):
+    # As PySpark's plugins send them, such as Delta Lake's merge, whose plan is the extension of
+    # a relation of a message that holds the plan of its source DataFrame
+    # (relation.merge_into_table.source.CopyFrom(source._plan.plan(session))): the core replaces
+    # the placeholder of the DataFrame in the message, of a type that it does not know, so the
+    # server receives the relation of the DataFrame there. So does a plugin's command.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+    from pyspark.sql.connect.proto import example_plugins_pb2 as plugins
+
+    class PluginPlan(LogicalPlan):
+        # The plan of a plugin's relation over its input, as Spark's example plugin defines it.
+        def plan(self, session):
+            plan = self._create_proto_relation()
+            plugin = plugins.ExamplePluginRelation(custom_field="c")
+            plugin.input.subquery_alias.input.CopyFrom(self._child.plan(session))
+            plugin.input.subquery_alias.alias = "s"
+            plan.extension.Pack(plugin)
+            return plan
+
+    spark, service = mock_connect
+    source = spark.range(3).withColumnRenamed("id", "k")
+    relation = pb2.Relation.FromString(source._relation_bytes())
+    DataFrame(PluginPlan(source._plan), spark).collect()
+    sent = plugins.ExamplePluginRelation()
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert request.plan.root.extension.Unpack(sent)
+    assert sent.custom_field == "c" and sent.input.subquery_alias.alias == "s"
+    assert sent.input.subquery_alias.input == relation
+
+    command = pb2.Command()
+    command.extension.Pack(plugins.ExamplePluginRelation(input=source._plan.plan(spark.client)))
+    spark.client.execute_command(command)
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert request.plan.command.extension.Unpack(sent) and sent.input == relation
+
+
 def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):
     # As PySpark's DataFrame, a Python object: a cycle through a DataFrame of a Python plan, whose
     # plan keeps an object that keeps the DataFrame (as a pyspark.ml model keeps its summary's

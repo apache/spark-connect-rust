@@ -25,15 +25,19 @@ that protoc generates give them; the classes of the well-known types ``google.pr
 (``pyspark.sql.connect.proto.base_pb2``, ...) has the names of the generated module of the proto.
 
 Where the ``protobuf`` package is installed, the files of the protos are also added to its default
-descriptor pool, as the generated modules add them (see ``_add_files_to_protobuf``).
+descriptor pool, as the generated modules add them (see ``_add_files_to_protobuf``), and the
+modules that protoc generates of other protos that import them get the classes of this runtime
+(see ``_hook_protobuf_builder``).
 """
 import calendar
 import collections.abc
 import datetime
+import functools
 import importlib
 import importlib.abc
 import importlib.machinery
 import sys
+import threading
 import types
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
@@ -377,11 +381,16 @@ def _module_name(file_name: str, package: str) -> str:
     return f"{__name__}.{stem}_pb2"
 
 
+def _protoc_module_name(file_name: str) -> str:
+    """The name of the module that protoc generates of the file ``file_name``, of its path:
+    ``spark.connect.relations_pb2`` of ``spark/connect/relations.proto``."""
+    return file_name[: -len(".proto")].replace("/", ".") + "_pb2"
+
+
 def _module_alias(file_name: str) -> str:
     """The name that the generated module of a proto that imports the file ``file_name`` binds
     the module of the file to, as protoc names it: ``spark_dot_connect_dot_relations__pb2``."""
-    module = file_name[: -len(".proto")].replace("/", ".") + "_pb2"
-    return module.replace("_", "__").replace(".", "_dot_")
+    return _protoc_module_name(file_name).replace("_", "__").replace(".", "_dot_")
 
 
 def _add_descriptors(module: types.ModuleType, file_descriptor: _Any) -> None:
@@ -491,8 +500,7 @@ def _add_files_to_protobuf() -> None:
     installed, as its generated modules of the protos add them: the modules that protoc generates
     of other protos that import them (those of a plugin, such as Delta Lake's) then build, and
     protobuf's ``json_format``, ``text_format`` and ``symbol_database`` find their types, of an
-    ``Any`` too. The messages of those modules are protobuf's, whose message fields take a message
-    of this runtime through its bytes or a dict.
+    ``Any`` too. Those modules get the classes of this runtime (see ``_hook_protobuf_builder``).
 
     protobuf's own modules of the well-known types add their files, of protobuf's copies of them.
     A file that the pool has is left as it is. The files are those that protoc writes, the bytes
@@ -523,12 +531,142 @@ def _add_files_to_protobuf() -> None:
             pass
 
 
+# The files of the descriptor set of the runtime, and those of them of the protos of Spark Connect.
+_EMBEDDED_FILES = frozenset(name for name, _, _, _ in _pyspark._proto_files())
+_SPARK_CONNECT_FILES = frozenset(
+    name for name, package, _, _ in _pyspark._proto_files() if package == "spark.connect"
+)
+
+# The name of the generated module of each file of protobuf's default pool that protobuf's
+# builder built since the hook was installed: the module of the classes of the runtime of the
+# messages of a file that the runtime holds for a plugin's file that imports it.
+_GENERATED_MODULES: dict[str, str] = {}
+
+# The lock of the files that the hook adds to the runtime and of their classes: the generated
+# modules of two threads may build at once.
+_HOOK_LOCK = threading.RLock()
+
+
+def _files_for_runtime(file_des: _Any) -> Optional[list[_Any]]:
+    """The files of protobuf's pool that the runtime needs to hold the messages of the file
+    ``file_des``: the file and the files that it imports, directly or through others, but those of
+    the descriptor set of the runtime, each after those that it imports. None when it imports no
+    proto of Spark Connect, so that it keeps protobuf's classes, as the modules of protobuf and of
+    other libraries do, or when one of them is a file of protobuf's own package other than those
+    of the set, the well-known types ``Any`` and ``Timestamp``, whose classes of the runtime have
+    the methods of protobuf's: the runtime would have classes of the others (``Duration``,
+    ``Struct``, ...) without them."""
+    found: list[_Any] = []
+    seen: set[str] = set()
+    imports_spark_connect = False
+    stack: list[tuple[_Any, bool]] = [(file_des, False)]
+    while stack:
+        file, imports_found = stack.pop()
+        if imports_found:
+            found.append(file)
+            continue
+        if file.name in seen:
+            continue
+        seen.add(file.name)
+        if file.name in _EMBEDDED_FILES:
+            imports_spark_connect = imports_spark_connect or file.name in _SPARK_CONNECT_FILES
+            continue
+        if file.package == "google.protobuf":
+            return None
+        stack.append((file, True))
+        stack.extend((dependency, False) for dependency in reversed(file.dependencies))
+    return found if imports_spark_connect else None
+
+
+def _use_runtime_classes(file_des: _Any, module_name: str, module: dict[str, _Any]) -> None:
+    """Give ``module``, the globals of the generated module ``module_name`` of the file
+    ``file_des`` of protobuf's default pool, the classes of this runtime of the messages of the
+    file, and its wrappers of the enums, when the file imports a proto of Spark Connect, directly
+    or through the files that it imports, as a plugin's does (Delta Lake's
+    ``delta/connect/relations.proto``): their message fields then take the messages of this
+    package as they are, as protobuf's take PySpark's. The module of the same file built again
+    gets the same classes, as protobuf's builder gives a file the classes that it made of it.
+
+    The files are added to the pool of the runtime first, with those that the file imports that
+    it does not have, whose messages the runtime makes classes of too: a file that imports no
+    proto of Spark Connect (Delta Lake's ``delta/connect/base.proto``) keeps protobuf's classes in
+    its own module, and a message field of the runtime of one of its types takes protobuf's
+    messages of the type, of their full name and bytes, as it takes any. A file that the runtime
+    does not hold as protobuf does (of proto2 or of editions, or that imports one) keeps
+    protobuf's classes.
+
+    The other names of the module stay protobuf's: its ``DESCRIPTOR``, the descriptors that the
+    builder's ``BuildMessageAndEnumDescriptors`` binds (``_DELETEFROMTABLE``), whose serialized
+    ranges and options the generated code sets with protobuf's pure-Python implementation, and
+    its extensions and services."""
+    _GENERATED_MODULES.setdefault(file_des.name, module_name)
+    files = _files_for_runtime(file_des)
+    if files is None:
+        return
+    with _HOOK_LOCK:
+        if files:
+            try:
+                held = _pyspark._proto_register_files([file.serialized_pb for file in files])
+            except ValueError:
+                return
+            made = set(_CLASSES)
+            for name, _, messages, _ in held:
+                of_module = (
+                    module_name
+                    if name == file_des.name
+                    else _GENERATED_MODULES.get(name, _protoc_module_name(name))
+                )
+                for full_name in messages:
+                    if full_name not in _CLASSES:
+                        _make_class(full_name, full_name.rpartition(".")[2], of_module)
+            _pyspark._proto_register_classes(
+                {name: cls for name, cls in _CLASSES.items() if name not in made}
+            )
+        for name, descriptor in file_des.message_types_by_name.items():
+            module[name] = _CLASSES[descriptor.full_name]
+        for name, enum in file_des.enum_types_by_name.items():
+            module[name] = EnumTypeWrapper(_pyspark._proto_enum_descriptor(enum.full_name))
+
+
+def _hook_protobuf_builder() -> None:
+    """Wrap ``BuildTopDescriptorsAndMessages`` of protobuf's builder (``google.protobuf.internal
+    .builder``), when protobuf is installed, with ``_use_runtime_classes``. A module that protoc
+    generates calls it to make the classes of the messages of its file, of protobuf's default pool,
+    after it imports the modules of the files that its file imports, which import this package and
+    so install the hook first, for a file that imports the protos of Spark Connect. The builder
+    makes protobuf's classes of the file first, as it does without the hook, so protobuf's own
+    lookups of the file (``message_factory.GetMessageClass``, ``symbol_database``) still give them.
+    A file of another pool, such as one that a test builds, keeps protobuf's classes. One hook
+    wraps the builder's own function, of the runtime of the last install."""
+    try:
+        from google.protobuf import descriptor_pool
+        from google.protobuf.internal import builder
+
+        default_pool = descriptor_pool.Default()
+    except Exception:  # pragma: no cover  # noqa: BLE001 - no protobuf, or one that fails
+        return
+    build = builder.BuildTopDescriptorsAndMessages
+    build = getattr(build, "_protobuf_build", build)
+
+    @functools.wraps(build)
+    def BuildTopDescriptorsAndMessages(
+        file_des: _Any, module_name: str, module: dict[str, _Any]
+    ) -> None:
+        build(file_des, module_name, module)
+        if file_des.pool is default_pool:
+            _use_runtime_classes(file_des, module_name, module)
+
+    BuildTopDescriptorsAndMessages._protobuf_build = build  # type: ignore[attr-defined]
+    builder.BuildTopDescriptorsAndMessages = BuildTopDescriptorsAndMessages
+
+
 def install(package: dict[str, _Any]) -> None:
     """Export the messages of Spark Connect into ``package``, the globals of
     ``pyspark.sql.connect.proto``, as its ``from ..._pb2 import *`` of the generated modules does
     (so its ``DESCRIPTOR`` is that of the last, ``pipelines_pb2``), make each generated module
-    (``pyspark.sql.connect.proto.base_pb2``, ...) the one of this runtime, and add the files of
-    the protos to protobuf's pool when protobuf is installed."""
+    (``pyspark.sql.connect.proto.base_pb2``, ...) the one of this runtime, and, when protobuf is
+    installed, add the files of the protos to its pool and give the modules that protoc generates
+    of other protos that import them the classes of the runtime."""
     prefix = "pyspark.sql.connect.proto."
     for module_name, module in _MODULES.items():
         if _is_exported(module_name):
@@ -546,6 +684,7 @@ def install(package: dict[str, _Any]) -> None:
     ]
     sys.meta_path.insert(0, _Finder())
     _add_files_to_protobuf()
+    _hook_protobuf_builder()
 
 
 @contextmanager

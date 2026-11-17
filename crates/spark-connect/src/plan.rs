@@ -881,7 +881,8 @@ pub(crate) fn child_observations(
 
 /// Replace the placeholders of `relation` by the relations of their DataFrames, and of the
 /// relations that the plans of `pyspark.ml` take as input (their `ml_relation`, `with_relations`
-/// and fetched arguments). Each replacement is the relation of a DataFrame of the core, which has
+/// and fetched arguments), and of the messages of the extensions of a plugin (see
+/// [`resolve_extension`]). Each replacement is the relation of a DataFrame of the core, which has
 /// no placeholder.
 pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
     resolve_relation_at(relation, 1).map(|_| ())
@@ -945,13 +946,123 @@ fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<u
                 below(reference)?;
             }
         }
+        Some(proto::relation::RelType::Extension(extension)) => resolve_extension(extension)?,
         _ => {}
     }
     Ok(deepest)
 }
 
-/// Replace the placeholders of the relations of the ML command `command`, as `resolve_relation`.
+/// Replace the placeholders that `extension`, the `Any` of the extension of a relation or of a
+/// command, holds. Its message is a plugin's relation or command, which the plugin's Python client
+/// builds over the plans of the DataFrames that it takes, as Delta Lake's `merge` builds its
+/// `MergeIntoTable` over the plan of its source DataFrame. The core does not know the type of the
+/// message, so it reads its encoding as that of any message (see [`resolve_encoded`]). The message
+/// adds no level to the plan that holds it, as PySpark's serializer counts them: the client
+/// serializes it on its own, into the bytes of the `Any` (`Any.Pack`).
+fn resolve_extension(extension: &mut prost_types::Any) -> Result<()> {
+    if let Some(value) = resolve_encoded(&extension.value)? {
+        extension.value = value;
+    }
+    Ok(())
+}
+
+/// Whether `relation` is a placeholder.
+fn is_placeholder(relation: &proto::Relation) -> bool {
+    matches!(
+        &relation.rel_type,
+        Some(proto::relation::RelType::Extension(any)) if any.type_url == PLACEHOLDER_TYPE_URL
+    )
+}
+
+/// The length of the encoding of a placeholder, whose marker is of 8 bytes.
+static PLACEHOLDER_LEN: LazyLock<usize> = LazyLock::new(|| {
+    use prost::Message;
+    proto::Relation {
+        common: None,
+        rel_type: Some(proto::relation::RelType::Extension(prost_types::Any {
+            type_url: PLACEHOLDER_TYPE_URL.to_string(),
+            value: vec![0; 8],
+        })),
+    }
+    .encoded_len()
+});
+
+/// `encoded`, the encoding of a message of a type that the core need not know, with the
+/// placeholders that it holds replaced by the relations of their DataFrames; None when it holds
+/// none, as an encoding that does not hold the type URL of a placeholder does not. An encoding of
+/// a placeholder is replaced by that of the relation of its DataFrame; an encoding of fields is
+/// read as a message: the value of each field of it that may be a message (of the wire type of
+/// length-delimited values) is resolved in turn, and the other fields stay as they are. An
+/// encoding that does not read as a message, such as that of a string that holds the type URL,
+/// holds no placeholder.
+fn resolve_encoded(encoded: &[u8]) -> Result<Option<Vec<u8>>> {
+    use prost::encoding::{decode_varint, encode_varint};
+    use prost::Message;
+
+    let url = PLACEHOLDER_TYPE_URL.as_bytes();
+    if !encoded.windows(url.len()).any(|window| window == url) {
+        return Ok(None);
+    }
+    if encoded.len() == *PLACEHOLDER_LEN {
+        if let Ok(mut relation) = proto::Relation::decode(encoded) {
+            if is_placeholder(&relation) && relation.encode_to_vec() == encoded {
+                let stack = raw_relation_stack(resolve_relation_levels(&mut relation)?);
+                return Ok(Some(stacker::maybe_grow(stack, stack, || {
+                    relation.encode_to_vec()
+                })));
+            }
+        }
+    }
+    let mut resolved = Vec::with_capacity(encoded.len());
+    let mut replaced = false;
+    let mut rest = encoded;
+    while !rest.is_empty() {
+        let field = rest;
+        let Ok(key) = decode_varint(&mut rest) else {
+            return Ok(None);
+        };
+        let tag = &field[..field.len() - rest.len()];
+        let wire_type = key & 7;
+        let len = match wire_type {
+            0 => match decode_varint(&mut rest) {
+                Ok(_) => 0,
+                Err(_) => return Ok(None),
+            },
+            1 => 8,
+            2 => match decode_varint(&mut rest).map(usize::try_from) {
+                Ok(Ok(len)) => len,
+                _ => return Ok(None),
+            },
+            5 => 4,
+            // A group, which a proto3 file has none of, is not read.
+            _ => return Ok(None),
+        };
+        if key >> 3 == 0 || len > rest.len() {
+            return Ok(None);
+        }
+        let (value, after) = rest.split_at(len);
+        rest = after;
+        if wire_type == 2 {
+            let below = crate::expression::with_stack_for_a_level(|| resolve_encoded(value))?;
+            if let Some(bytes) = below {
+                resolved.extend_from_slice(tag);
+                encode_varint(bytes.len() as u64, &mut resolved);
+                resolved.extend_from_slice(&bytes);
+                replaced = true;
+                continue;
+            }
+        }
+        resolved.extend_from_slice(&field[..field.len() - rest.len()]);
+    }
+    Ok(replaced.then_some(resolved))
+}
+
+/// Replace the placeholders of the relations of the ML command `command`, and of the message
+/// of the extension of a plugin's command, as `resolve_relation`.
 pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
+    if let Some(proto::command::CommandType::Extension(extension)) = command.command_type.as_mut() {
+        return resolve_extension(extension);
+    }
     let Some(proto::command::CommandType::MlCommand(ml)) = command.command_type.as_mut() else {
         return Ok(());
     };
@@ -4184,6 +4295,92 @@ mod placeholder_tests {
             root.plan.unwrap().op_type,
             Some(proto::plan::OpType::Root(transform_of(relation)))
         );
+    }
+
+    /// A relation of the extension `message`, of a plugin's type.
+    fn extension_of(message: &impl Message) -> proto::Relation {
+        proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Extension(prost_types::Any {
+                type_url: "type.googleapis.com/tests.PluginRelation".to_string(),
+                value: message.encode_to_vec(),
+            })),
+        }
+    }
+
+    #[test]
+    fn placeholders_resolve_in_the_messages_of_the_extensions_of_plugins() {
+        // As the relation of Delta Lake's merge, the extension of a relation whose message, of a
+        // type that the core does not know, holds the plan of a DataFrame in a field, and below
+        // in a message of a field: Spark's Join stands for a plugin's message here. Its string
+        // fields that hold the type URL of a placeholder, which do not read as messages, stay.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids).unwrap();
+        let shallow = placeholder(&node, &ids);
+        let join = |input: &proto::Relation| proto::Join {
+            left: Some(Box::new(input.clone())),
+            right: Some(Box::new(proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::SubqueryAlias(Box::new(
+                    proto::SubqueryAlias {
+                        input: Some(Box::new(input.clone())),
+                        alias: PLACEHOLDER_TYPE_URL.to_string(),
+                        qualifier: Vec::new(),
+                    },
+                ))),
+            })),
+            join_condition: None,
+            join_type: 2,
+            using_columns: vec![PLACEHOLDER_TYPE_URL.to_string()],
+            join_data_type: None,
+        };
+        let mut plan = extension_of(&join(&shallow));
+        // The message of the extension, which the client serializes on its own, adds no level to
+        // the plan, as PySpark's serializer counts them.
+        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 1);
+        assert_eq!(plan, extension_of(&join(&relation)));
+
+        // Of the extension of a command, as a plugin's Python client sends it.
+        let alias = proto::SubqueryAlias {
+            input: Some(Box::new(shallow.clone())),
+            alias: "s".to_string(),
+            qualifier: Vec::new(),
+        };
+        let command = |message: &proto::SubqueryAlias| proto::Command {
+            command_type: Some(proto::command::CommandType::Extension(prost_types::Any {
+                type_url: "type.googleapis.com/tests.PluginCommand".to_string(),
+                value: message.encode_to_vec(),
+            })),
+        };
+        let mut sent = command(&alias);
+        resolve_command(&mut sent).unwrap();
+        let resolved = proto::SubqueryAlias {
+            input: Some(Box::new(relation)),
+            ..alias.clone()
+        };
+        assert_eq!(sent, command(&resolved));
+
+        // An extension of no placeholder is left as it is, of its levels.
+        let mut plain = extension_of(&resolved);
+        assert_eq!(resolve_relation_levels(&mut plain).unwrap(), 1);
+        assert_eq!(plain, extension_of(&resolved));
+        // So is one whose message holds the type URL in a string, which does not read as a
+        // message, and in an Any of no marker.
+        let mut text = extension_of(&prost_types::Any {
+            type_url: PLACEHOLDER_TYPE_URL.to_string(),
+            value: b"\x04\x05".to_vec(),
+        });
+        let before = text.clone();
+        resolve_relation(&mut text).unwrap();
+        assert_eq!(text, before);
+
+        // A placeholder of a dropped DataFrame in an extension is the error of one elsewhere.
+        let gone = Arc::new(range(0, 4, 1));
+        let mut plan = extension_of(&join(&placeholder(&gone, &ids)));
+        std::mem::drop(gone);
+        let error = resolve_relation(&mut plan).unwrap_err();
+        assert!(error.to_string().contains("no longer exists"), "{error}");
     }
 
     #[test]
