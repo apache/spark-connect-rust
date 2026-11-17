@@ -421,15 +421,16 @@ pub fn assert_matches(actual: &Json, expected: &Json, at: &str) {
 }
 
 /// The error of official PySpark is in the message of the Rust one. A JVM exception that the server
-/// does not classify reaches PySpark as an `UnknownException` of "(<class>) <message>".
+/// does not classify reaches PySpark as an `UnknownException` of "(<class>) <message>". The golden
+/// tests of every area check their errors with it.
 pub fn assert_error(actual: &str, expected: &Json, at: &str) {
     let message = expected["message"].as_str().unwrap();
-    // An empty message would be in any error.
-    assert!(!message.is_empty(), "{at}: the golden error has no message");
     let message = match message.split_once(") ") {
         Some((class, rest)) if class.starts_with("(java.") => rest,
         _ => message,
     };
+    // An empty message, or the class of one, would be in any error.
+    assert!(!message.is_empty(), "{at}: the golden error has no message");
     assert!(
         actual.contains(message),
         "{at}: the error {actual:?} does not carry {message:?}"

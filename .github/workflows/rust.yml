@@ -89,6 +89,49 @@ jobs:
         # Enforce the "100% coverage, no followups" rule
         run: bash scripts/audit_no_stubs.sh
 
+  pyspark-rs-unit:
+    name: pyspark-rs unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo & target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-pyspark-rs-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-pyspark-rs-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cargo test (pyspark-rs unit tests)
+        # pyspark-rs is not a default member, so the job above does not test it. Its pyo3 has the
+        # `extension-module` feature, which leaves libpython unlinked, as an extension that an
+        # interpreter loads needs; the test binary is an executable, so it links the libpython of
+        # the interpreter that pyo3 builds for, which it finds at run time by its rpath.
+        run: |
+          LIBDIR=$(python -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          LIBRARY=$(python -c "import sysconfig; print(sysconfig.get_config_var('LDLIBRARY'))")
+          export PYO3_PYTHON="$(command -v python)"
+          export RUSTFLAGS="${RUSTFLAGS} -C link-arg=-L${LIBDIR} -C link-arg=-l:${LIBRARY} -C link-arg=-Wl,-rpath,${LIBDIR}"
+          cargo test -p pyspark-rs --lib
+
   aarch64-core:
     name: Core transport tests (aarch64 Linux)
     runs-on: ubuntu-24.04-arm
@@ -171,8 +214,9 @@ jobs:
         # reference `pyspark` (installed above) for `pyspark.cloudpickle` and
         # `pyspark.sql.types._parse_datatype_json_value`, and produces a reference
         # `DataType` the executors unpickle. No separate `pyspark_wasm_udf` package
-        # is needed on any path now, so just run the ignored end-to-end test.
-        run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces
+        # is needed on any path now, so just run the ignored tests that pack a UDF: the
+        # end-to-end one, and the one of `to_expression`'s arguments.
+        run: cargo test -p apache-spark-connect --features wasm-udf -- --ignored packer_produces to_expression_takes_any_columns
 
       - name: WASM UDF runners (pyarrow batches, no server)
         run: |

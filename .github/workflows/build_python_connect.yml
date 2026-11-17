@@ -119,7 +119,8 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           # Match the supported pandas 2.x environment used by pandas-parity.yml.
-          # Spark 4.2's tests and Python workers are not compatible with pandas 3.x.
+          # Spark 4.3's tests and Python workers do not fully support pandas 3.x yet, as PySpark
+          # 4.3.0 warns.
           # plotly and graphviz are the optional packages Apache's connect job installs (pins as
           # in Apache's build_python_connect.yml). Without them the DataFrame.plot tests
           # (sql/tests/connect/test_parity_frame_plot_plotly.py) and test_df_debug.py skip.
@@ -144,12 +145,12 @@ jobs:
         id: spark-download
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
-          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+          if [ ! -d "${HOME}/spark-dist/spark-${SPARK_VERSION}-bin-hadoop3"* ]; then
             scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
-          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name "spark-${SPARK_VERSION}-bin-hadoop3*" | head -1)
           echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
@@ -233,9 +234,10 @@ jobs:
       - name: Drop-in live-server tests (native Arrow handoff and API behaviors), without protobuf
         # The parity gate above runs the reference pyspark over our transport, so the
         # drop-in's own Rust-backed classes are only exercised against a server here. They run
-        # in an environment of only the drop-in's dependencies (pandas, pyarrow, numpy, pyyaml)
-        # and pytest, without protobuf, where pyspark.sql.connect.proto is the Rust protobuf
-        # runtime.
+        # in an environment of only the drop-in's dependencies (pandas, pyarrow, numpy, pyyaml),
+        # pytest, and plotly (of DataFrame.plot, as the parity job installs it), without
+        # protobuf, where pyspark.sql.connect.proto is the Rust protobuf runtime. -rs lists each
+        # skipped test with its reason, as the offline suite of coverage.yml does.
         # The server's Python workers keep the job's environment, as those of foreachBatch and
         # the listeners run PySpark's own client.
         working-directory: python
@@ -244,13 +246,13 @@ jobs:
           PYTHONPATH: ${{ github.workspace }}/python
         run: |
           python -m venv /tmp/client
-          /tmp/client/bin/python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy pyyaml
+          /tmp/client/bin/python -m pip install pytest 'pandas>=2.2,<3.0' pyarrow numpy pyyaml 'plotly<6.0.0'
           if /tmp/client/bin/python -c "import google.protobuf" 2>/dev/null; then
             echo "protobuf is installed in the client environment"; exit 1
           fi
           /tmp/client/bin/python -c \
             "import pyspark._pyspark as r, pyspark.sql.connect.proto as p; assert issubclass(p.Relation, r.ProtoMessage)"
-          /tmp/client/bin/python -m pytest -q \
+          /tmp/client/bin/python -m pytest -q -rs \
             tests/test_proto_rust_offline.py \
             tests/test_arrow_e2e.py \
             tests/test_dropin_e2e.py \
@@ -421,12 +423,12 @@ jobs:
         id: spark-download
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
-          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+          if [ ! -d "${HOME}/spark-dist/spark-${SPARK_VERSION}-bin-hadoop3"* ]; then
             scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
-          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name "spark-${SPARK_VERSION}-bin-hadoop3*" | head -1)
           echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} source (official test files)
@@ -516,13 +518,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check that a workflow runs every Rust e2e test
+      - name: Check that a workflow runs every Rust live test
         # A live test returns early without SPARK_REMOTE, so one that no workflow names in a
-        # `cargo test --test` list passes without running.
+        # `cargo test --test` list passes without running: an e2e_* file, and any other test
+        # file that reads SPARK_REMOTE, itself or by its common module's `should_run` or
+        # `live_session` (raw_relation, types_roundtrip, the core's integration_test, ...).
         run: |
           missing=0
-          for f in crates/spark-connect/tests/e2e_*.rs; do
+          for f in crates/*/tests/*.rs tests/*/tests/*.rs; do
             name=$(basename "$f" .rs)
+            case "$name" in
+              e2e_*) ;;
+              *) grep -qE 'env::var\("SPARK_REMOTE"\)|should_run\(\)|live_session\(\)' "$f" || continue ;;
+            esac
             if ! grep -qE -- "--test ${name}([^A-Za-z0-9_]|$)" .github/workflows/*.yml; then
               echo "::error file=$f::$name is in no workflow's cargo test --test list"
               missing=1
@@ -578,12 +586,12 @@ jobs:
         id: spark-download
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
-          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+          if [ ! -d "${HOME}/spark-dist/spark-${SPARK_VERSION}-bin-hadoop3"* ]; then
             scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           else
             echo "Using cached Spark distribution."
           fi
-          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name "spark-${SPARK_VERSION}-bin-hadoop3*" | head -1)
           echo "SPARK_HOME=${SPARK_HOME}" >> "$GITHUB_OUTPUT"
 
       - name: Start Spark Connect server
@@ -695,13 +703,13 @@ jobs:
       - name: Download & start Spark ${{ env.SPARK_VERSION }} server
         run: |
           PKG="spark-${SPARK_VERSION}-bin-hadoop3-connect"
-          if [ ! -d "${HOME}/spark-dist/spark-4.3.0-bin-hadoop3"* ]; then
+          if [ ! -d "${HOME}/spark-dist/spark-${SPARK_VERSION}-bin-hadoop3"* ]; then
             scripts/download_spark_dist.sh "${SPARK_VERSION}" "${PKG}" "${HOME}/spark-dist"
           fi
           if [ ! -d "${HOME}/spark-source/python" ]; then
             git clone --depth 1 --branch "v${SPARK_VERSION}" https://github.com/apache/spark.git "${HOME}/spark-source"
           fi
-          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name 'spark-4.3.0-bin-hadoop3*' | head -1)
+          SPARK_HOME=$(find "${HOME}/spark-dist" -maxdepth 1 -type d -name "spark-${SPARK_VERSION}-bin-hadoop3*" | head -1)
           "${SPARK_HOME}/sbin/start-connect-server.sh" > /tmp/server.log 2>&1 &
           for i in $(seq 1 90); do (echo > /dev/tcp/localhost/15002) 2>/dev/null && break; sleep 1; done
       - name: Benchmark reference client

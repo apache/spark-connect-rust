@@ -9,9 +9,11 @@ on PyPI - and how to tell which one you have installed - see
 
 ## Supported Spark
 
-Apache Spark **4.3.0 and later**. The crate and wheel version tracks the Spark
-release it targets (starting at `4.3.0`), so the version number tells you which
-Spark it speaks.
+Apache Spark **4.3.0 and later**. A release of the crates and the wheel has the version
+of the Spark release it targets (starting at `4.3.0`), so the version number of a release
+tells you which Spark it speaks. The `master` branch carries the next development version
+(`4.4.0` now), and speaks the Spark release that it pins (4.3.0) until it moves to the next
+one.
 
 ## Rust migration for the 4.3 line
 
