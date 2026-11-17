@@ -1277,6 +1277,13 @@ with two differences: a loopback host is never proxied, where grpcio proxies `lo
 `no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
 cannot connect (and takes a port past 65535 modulo 65536).
 
+As in grpcio, a connection has 20 s, its connect deadline, to complete: the TCP connection and the
+TLS handshake, and the tunnel of a proxy. One that does not fails with `UNAVAILABLE`, which the
+retry policy retries. One difference remains: grpcio also waits at most 20 s for the server's
+HTTP/2 settings, while here a plaintext connection to a server that accepts it and never answers
+ends at the keepalive of the connection, 80 s by default (`grpc_keepalive_time_ms` and
+`grpc_keepalive_timeout_ms`), or at the deadline of the call without a keepalive.
+
 For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
 [TLS Root Certificates](configuration.md#tls-root-certificates).
 

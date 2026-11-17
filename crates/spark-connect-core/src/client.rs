@@ -2,6 +2,7 @@
 //!
 //! Mirrors `pyspark.sql.connect.client.core.SparkConnectClient`.
 
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioIo;
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -78,22 +79,44 @@ fn ssl_roots_pem(path: Option<std::ffi::OsString>) -> Option<Vec<u8>> {
     None
 }
 
-/// How long a connection through a proxy may take as a whole: the TCP connection to the
-/// proxy, the tunnel, and the TLS handshake inside it, as grpcio's 20 s connect deadline. It is
-/// longer than [`READY_TIMEOUT`], which bounds the tunnel alone, so that a proxy that does not
-/// answer is reported as that.
-const PROXY_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+/// How long a connection may take as a whole, as grpcio's 20 s connect deadline: the TCP
+/// connection and the TLS handshake of a direct connection, or the TCP connection to the proxy,
+/// the tunnel, and the TLS handshake inside it. It is longer than [`READY_TIMEOUT`], which bounds
+/// the TCP connection of a direct connection and the tunnel alone, so that a server or a proxy
+/// that does not answer is reported as that.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// A lazy channel to `endpoint`, connected directly.
+///
+/// Two bounds apply, and either is `UNAVAILABLE` and retried, as in grpcio. The TCP connection
+/// is bounded by [`READY_TIMEOUT`]. tonic bounds the whole connection, the TLS handshake
+/// included, by [`CONNECT_TIMEOUT`] from outside the connector, which
+/// [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`. tonic's `connect_lazy` would
+/// bound only the TCP connection, so that a server that accepts it and never answers the TLS
+/// handshake would hold the call until its own deadline.
+fn connect_directly(endpoint: tonic::transport::Endpoint) -> Channel {
+    // As tonic's own connector of an endpoint (`Endpoint::http_connector`), of the endpoint's
+    // defaults: an `https` URI goes through it too (tonic negotiates TLS on its stream), and
+    // TCP_NODELAY is set.
+    let mut connector = HttpConnector::new();
+    connector.enforce_http(false);
+    connector.set_nodelay(true);
+    connector.set_connect_timeout(Some(READY_TIMEOUT));
+    endpoint
+        .connect_timeout(CONNECT_TIMEOUT)
+        .connect_with_connector_lazy(connector)
+}
 
 /// A lazy channel to `endpoint` through an HTTP CONNECT tunnel of `proxy`. tonic negotiates
 /// TLS (for an `https` endpoint) inside the tunnel, with the endpoint's own server name.
 ///
 /// Two bounds apply, and either is `UNAVAILABLE` and retried, as in grpcio. The connector
 /// bounds the TCP connection to the proxy and the tunnel by [`READY_TIMEOUT`]. tonic bounds
-/// the whole connection, the TLS handshake included, by [`PROXY_CONNECT_TIMEOUT`] from outside
-/// the connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
+/// the whole connection, the TLS handshake included, by [`CONNECT_TIMEOUT`] from outside the
+/// connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
 fn connect_through_proxy(endpoint: tonic::transport::Endpoint, proxy: HttpProxy) -> Channel {
     endpoint
-        .connect_timeout(PROXY_CONNECT_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
         .connect_with_connector_lazy(ProxyConnector(std::sync::Arc::new(proxy)))
 }
 
@@ -750,7 +773,7 @@ impl SparkConnectClient {
             .proxy_for(builder.host())
             .map_err(SparkError::connect_msg)?;
         let channel = match proxy {
-            None => tonic_endpoint.connect_timeout(READY_TIMEOUT).connect_lazy(),
+            None => connect_directly(tonic_endpoint),
             Some(proxy) => connect_through_proxy(tonic_endpoint, proxy),
         };
 
