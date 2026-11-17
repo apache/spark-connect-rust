@@ -1610,12 +1610,30 @@ with two differences: a loopback host is never proxied, where grpcio proxies `lo
 `no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
 cannot connect (and takes a port past 65535 modulo 65536).
 
-As in grpcio, a connection has 20 s, its connect deadline, to complete: the TCP connection and the
-TLS handshake, and the tunnel of a proxy. One that does not fails with `UNAVAILABLE`, which the
-retry policy retries. One difference remains: grpcio also waits at most 20 s for the server's
-HTTP/2 settings, while here a plaintext connection to a server that accepts it and never answers
-ends at the keepalive of the connection, 80 s by default (`grpc_keepalive_time_ms` and
-`grpc_keepalive_timeout_ms`), or at the deadline of the call without a keepalive.
+As in grpcio, a connection has 20 s, its connect deadline, to complete: one deadline from its
+start, which the TCP connection, the tunnel of a proxy and the TLS handshake share. One that does
+not complete fails with `UNAVAILABLE`, which the retry policy retries. Two differences remain.
+grpcio also waits at most 20 s for the server's HTTP/2 settings, while here a plaintext connection
+to a server that accepts it and never answers ends at the keepalive of the connection, 80 s by
+default (`grpc_keepalive_time_ms` and `grpc_keepalive_timeout_ms`), or at the deadline of the call
+without a keepalive. And for a host of several addresses, grpcio starts a connection to the next
+address 250 ms after the previous one while that one is not done, each with a deadline of its own,
+while here the TCP connections to the addresses of a family are tried in turn, each for an equal
+share of the 20 s, those to the other family from 300 ms on, and the TLS handshake is made on the
+first that connects.
+
+The user agent, `<user_agent> spark/4.3.0 os/<os> python/rust`, is sent as PySpark sends it: as
+the client type of the requests that PySpark builds with it, and not as a header. The `user-agent`
+header is the client library's own, `tonic/<version>` here and grpcio's in PySpark, such as
+`grpc-python/1.85.1 grpc-c/58.0.0 (linux; chttp2)`. A `user-agent` parameter of the connection
+string is checked as metadata and not sent, as grpcio replaces it with its own. So a user agent
+may hold any character, a control character included. As PySpark's `userAgent`, which its requests
+read when they are built, a user agent longer than 2048 characters after URL escaping, or a
+`SPARK_CONNECT_USER_AGENT` that is not UTF-8, is the error of each request that carries it, which
+is not sent: `SparkConnectException`, or the `UnicodeEncodeError` of `urllib.parse.quote`. The
+session is made all the same, its `stop()` logs the error as that of its release, and the requests
+that PySpark builds without the user agent, of the artifacts and of `CloneSession`, are sent. As
+`urllib.parse.urlsplit` does, a tab, CR or LF anywhere in the connection string is removed.
 
 For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
 [TLS Root Certificates](configuration.md#tls-root-certificates).

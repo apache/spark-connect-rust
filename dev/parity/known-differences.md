@@ -283,7 +283,10 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   and `metadata()`. The transport reads them as a `sc://` URL, so they apply. The gRPC
   channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
   properties and `userAgent` read the parameters as PySpark does, but `userAgent` reports
-  PySpark's `python/<version>` where the transport sends `python/rust` as the client type.
+  PySpark's `python/<version>` where the transport sends `python/rust` as the client type. The
+  transport reads `SPARK_CONNECT_USER_AGENT` once, when the session is made, where PySpark's
+  requests read it each time: it does not read the environment of the process while Python
+  threads may change it.
   The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.

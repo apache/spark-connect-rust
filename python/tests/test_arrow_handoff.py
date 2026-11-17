@@ -850,11 +850,13 @@ def _arrow_input_service(
 
 def _assert_artifact_contexts(contexts, *, session_id, user_id, user_agent):
     assert contexts
-    # As PySpark's ArtifactManager, the requests carry the user agent in the gRPC header only,
-    # and no client type.
+    # As PySpark's ArtifactManager, the requests carry no client type, and so not the user agent:
+    # their gRPC header is the client library's own, grpcio's in PySpark and tonic's here.
     grpc_user_agents = {context["grpc_user_agent"] for context in contexts}
     assert len(grpc_user_agents) == 1
-    assert grpc_user_agents.pop().startswith(user_agent + " spark/")
+    grpc_user_agent = grpc_user_agents.pop()
+    assert grpc_user_agent.startswith("tonic/"), grpc_user_agent
+    assert user_agent not in grpc_user_agent
     for context in contexts:
         assert context["session_id"] == session_id
         # PySpark's ArtifactManager sends a present context even without a user ID.

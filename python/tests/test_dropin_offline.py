@@ -5254,21 +5254,41 @@ def test_create_raises_for_an_authority_that_urllib_rejects_as_pyspark():
     session.stop()
 
 
-def test_create_raises_for_a_too_long_user_agent_as_pyspark(monkeypatch):
-    # As PySpark's channel builder: a user agent of more than 2048 characters after the URL
-    # escaping raises a SparkConnectException of the message of the reference client.
+def test_a_too_long_user_agent_raises_at_each_request_as_pyspark(mock_connect, monkeypatch, caplog):
+    # As PySpark's `userAgent`, which its requests read when they are built: the session of a
+    # user agent of more than 2048 characters after the URL escaping is made, and each request
+    # that carries the user agent raises a SparkConnectException of the message of the reference
+    # client and is not sent. stop() logs that error, of the release of the session.
     from pyspark.errors.exceptions.connect import SparkConnectException
     from pyspark.sql import SparkSession
 
+    _, service = mock_connect
     monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
-    with pytest.raises(SparkConnectException) as error:
-        SparkSession.builder.remote("sc://localhost/;user_agent=" + "a" * 2049).create()
-    assert type(error.value) is SparkConnectException
-    assert str(error.value) == (
+    spark = SparkSession.builder.remote(service.remote + "/;user_agent=" + "a" * 2049).create()
+    message = (
         "'user_agent' parameter should not exceed 2048 characters after URL escaping, "
         "found 2049 characters."
     )
-    assert error.value.getCondition() is None
+    for request in [
+        lambda: spark.range(1).count(),
+        lambda: spark.conf.get("spark.sql.session.timeZone"),
+        lambda: spark.version,
+        spark.interruptAll,
+    ]:
+        with pytest.raises(SparkConnectException) as error:
+            request()
+        assert type(error.value) is SparkConnectException
+        assert str(error.value) == message
+        assert error.value.getCondition() is None
+    with caplog.at_level("WARNING", logger="pyspark"):
+        assert spark.stop() is None
+    assert spark.is_stopped
+    messages = [record.message for record in caplog.records if record.name == "pyspark"]
+    assert len(messages) == 1
+    assert messages[0].startswith("session.stop(): Session could not be released. Error: ")
+    assert message in messages[0]
+    session_id = spark.session_id.encode()
+    assert not any(session_id in request for _, request in service.recorded_order)
 
 
 def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mock_connect):
