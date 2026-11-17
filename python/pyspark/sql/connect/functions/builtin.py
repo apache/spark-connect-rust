@@ -17,7 +17,10 @@
 """The functions of ``pyspark.sql.functions`` under the Connect import path, of this module, as
 PySpark Connect's ``pyspark.sql.connect.functions.builtin``: copies of them, which run as they do
 (see ``_copies``)."""
+# sys: of PySpark Connect's module, whose namespace the official doctests of the functions take as
+# their globals, and whose examples use it (try_add, try_multiply, try_subtract).
 import random as py_random  # noqa: F401
+import sys  # noqa: F401
 from typing import TYPE_CHECKING
 
 from pyspark.sql import functions as _functions

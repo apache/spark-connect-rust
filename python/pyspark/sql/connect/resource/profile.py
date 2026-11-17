@@ -15,13 +15,55 @@
 # limitations under the License.
 #
 
-"""Compatibility shim for pyspark.sql.connect.resource.profile.
+from typing import Optional, Dict
 
-PySpark Connect's ResourceProfile registers the profile on the server and keeps the server's
-profile id. Here ``pyspark.resource.ResourceProfile`` does that on its ``id`` property, through the
-Rust transport (``SparkSession.buildResourceProfile``), so this module re-exports it.
-"""
+from pyspark.resource import ExecutorResourceRequest, TaskResourceRequest
 
-from pyspark.resource.profile import ResourceProfile
+import pyspark.sql.connect.proto as pb2
 
-__all__ = ["ResourceProfile"]
+
+class ResourceProfile:
+    """The internal ResourceProfile is used to create the Spark ResourceProfile
+    on the server side and store the generated profile id."""
+
+    def __init__(
+        self,
+        exec_req: Optional[Dict[str, ExecutorResourceRequest]] = None,
+        task_req: Optional[Dict[str, TaskResourceRequest]] = None,
+    ):
+        from pyspark.sql.connect.session import SparkSession
+
+        session = SparkSession.getActiveSession()
+        if session is None:
+            raise RuntimeError(
+                "SparkSession should be initialized before ResourceProfile creation."
+            )
+
+        exec_req = exec_req or {}
+        task_req = task_req or {}
+
+        self._exec_req = {}
+        self._task_req = {}
+
+        for key, value in exec_req.items():
+            self._exec_req[key] = pb2.ExecutorResourceRequest(
+                resource_name=value.resourceName,
+                amount=value.amount,
+                discovery_script=value.discoveryScript,
+                vendor=value.vendor,
+            )
+
+        for k, v in task_req.items():
+            self._task_req[k] = pb2.TaskResourceRequest(
+                resource_name=v.resourceName, amount=v.amount
+            )
+
+        self._remote_profile = pb2.ResourceProfile(
+            executor_resources=self._exec_req, task_resources=self._task_req
+        )
+
+        self._id = session.client._create_profile(self._remote_profile)
+
+    @property
+    def id(self) -> int:
+        return self._id

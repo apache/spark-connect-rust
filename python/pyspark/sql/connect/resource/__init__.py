@@ -14,28 +14,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-"""Compatibility shim for pyspark.sql.connect.resource: re-exports resource classes from pyspark.resource."""
-
-try:
-    from pyspark.resource import (
-        ResourceProfile,
-        ResourceProfileBuilder,
-        ExecutorResourceRequest,
-        ExecutorResourceRequests,
-        TaskResourceRequest,
-        TaskResourceRequests,
-        ResourceInformation,
-    )
-    __all__ = [
-        "ResourceProfile",
-        "ResourceProfileBuilder",
-        "ExecutorResourceRequest",
-        "ExecutorResourceRequests",
-        "TaskResourceRequest",
-        "TaskResourceRequests",
-        "ResourceInformation",
-    ]
-except ImportError:
-    # Guard if dependencies not available
-    __all__ = []

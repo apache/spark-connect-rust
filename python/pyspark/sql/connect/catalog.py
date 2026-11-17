@@ -25,4 +25,8 @@ from pyspark.sql.catalog import (
     TablePartition,
 )
 
+# Of PySpark Connect's pyspark.sql.connect.catalog, whose namespace the official doctests of the
+# Catalog take as their globals, and whose examples use it (Catalog.cacheTable).
+from pyspark.storagelevel import StorageLevel  # noqa: F401
+
 __all__ = ["Catalog", "CatalogMetadata", "Column", "Database", "Function", "Table", "TablePartition"]

@@ -90,6 +90,13 @@ extend-exclude = [
     "python/pyspark/traceback_utils.py",
     "python/pyspark/conf.py",
     "python/pyspark/taskcontext.py",
+    "python/pyspark/serializers.py",
+    "python/pyspark/resource/__init__.py",
+    "python/pyspark/resource/information.py",
+    "python/pyspark/resource/profile.py",
+    "python/pyspark/resource/requests.py",
+    "python/pyspark/sql/connect/resource/__init__.py",
+    "python/pyspark/sql/connect/resource/profile.py",
     "python/pyspark/sql/interchange.py",
     "python/pyspark/logger/__init__.py",
     "python/pyspark/logger/logger.py",
@@ -237,9 +244,6 @@ extend-exclude = [
     "python/pyspark/loose_version.py",
     "python/pyspark/ml/linalg/__init__.py",
     "python/pyspark/mllib/_typing.pyi",
-    "python/pyspark/resource/__init__.py",
-    "python/pyspark/resource/information.py",
-    "python/pyspark/resource/requests.py",
     "python/pyspark/sql/avro/__init__.py",
     "python/pyspark/sql/datasource.py",
     "python/pyspark/sql/pandas/_typing/__init__.pyi",
@@ -292,11 +296,10 @@ ignore = ["E501"]  # line length handled by the formatter, not enforced hard
 # swapped in). Only the correctness rules (F, E, W) apply; the import order, the typing and
 # string-formatting idioms and the bugbear style stay as upstream writes them, so a diff
 # against the pinned tag shows the adaptation and nothing else.
-"python/pyspark/{__init__,find_spark_home,serializers,util}.py" = ["I", "UP", "B", "E402", "F401"]
+"python/pyspark/{__init__,find_spark_home,util}.py" = ["I", "UP", "B", "E402", "F401"]
 "python/pyspark/errors/exceptions/connect.py" = ["I", "UP", "B"]
 "python/pyspark/mllib/stat/__init__.py" = ["I", "UP", "B"]
 "python/pyspark/pipelines/{api,spark_connect_graph_element_registry,spark_connect_pipeline}.py" = ["I", "UP", "B", "F401"]
-"python/pyspark/resource/profile.py" = ["I", "UP", "B"]
 "python/pyspark/sql/{__init__,tvf_argument,types,udf,udtf}.py" = ["I", "UP", "B"]
 "python/pyspark/sql/connect/{context,datasource,expressions,sql_formatter,types,utils}.py" = ["I", "UP", "B"]
 "python/pyspark/sql/streaming/{stateful_processor_api_client,transform_with_state_driver_worker}.py" = ["I", "UP", "B"]

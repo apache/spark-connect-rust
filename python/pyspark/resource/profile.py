@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 from threading import RLock
-from typing import Dict, Union, Optional
+from typing import overload, Dict, Union, Optional, TYPE_CHECKING
 
 from pyspark.resource.requests import (
     TaskResourceRequest,
@@ -23,6 +23,9 @@ from pyspark.resource.requests import (
     ExecutorResourceRequests,
     ExecutorResourceRequest,
 )
+
+if TYPE_CHECKING:
+    from py4j.java_gateway import JavaObject
 
 
 class ResourceProfile:
@@ -80,8 +83,20 @@ class ResourceProfile:
      'memory': <...ExecutorResourceRequest...>}
     """
 
+    @overload
+    def __init__(self, _java_resource_profile: "JavaObject"): ...
+
+    @overload
     def __init__(
         self,
+        _java_resource_profile: None = ...,
+        _exec_req: Optional[Dict[str, ExecutorResourceRequest]] = ...,
+        _task_req: Optional[Dict[str, TaskResourceRequest]] = ...,
+    ): ...
+
+    def __init__(
+        self,
+        _java_resource_profile: Optional["JavaObject"] = None,
         _exec_req: Optional[Dict[str, ExecutorResourceRequest]] = None,
         _task_req: Optional[Dict[str, TaskResourceRequest]] = None,
     ):
@@ -89,8 +104,13 @@ class ResourceProfile:
         self._id: Optional[int] = None
         # lock to protect _id
         self._lock = RLock()
-        self._executor_resource_requests = _exec_req or {}
-        self._task_resource_requests = _task_req or {}
+
+        if _java_resource_profile is not None:
+            self._java_resource_profile = _java_resource_profile
+        else:
+            self._java_resource_profile = None
+            self._executor_resource_requests = _exec_req or {}
+            self._task_resource_requests = _task_req or {}
 
     @property
     def id(self) -> int:
@@ -102,35 +122,22 @@ class ResourceProfile:
         """
         with self._lock:
             if self._id is None:
-                from pyspark._pyspark import (
-                    ExecutorResourceRequests as _ER,
-                    TaskResourceRequests as _TR,
-                    ResourceProfileBuilder as _RPB,
-                )
-                from pyspark.sql import SparkSession
+                if self._java_resource_profile is not None:
+                    self._id = self._java_resource_profile.id()
+                else:
+                    from pyspark.sql import is_remote
 
-                session = SparkSession.getActiveSession()
-                if session is None:
-                    raise RuntimeError(
-                        "An active SparkSession is required to get the profile id."
-                    )
+                    if is_remote():
+                        from pyspark.sql.connect.resource.profile import ResourceProfile
 
-                er = _ER()
-                for name, req in self._executor_resource_requests.items():
-                    er = er.resource(
-                        name,
-                        int(req.amount),
-                        req.discoveryScript or None,
-                        req.vendor or None,
-                    )
-
-                tr = _TR()
-                for name, req in self._task_resource_requests.items():
-                    tr = tr.resource(name, float(req.amount))
-
-                profile = _RPB().executor_resources(er).task_resources(tr).build()
-                self._id = session.buildResourceProfile(profile)
-
+                        # Utilize the connect ResourceProfile to create Spark ResourceProfile
+                        # on the server and get the profile ID.
+                        rp = ResourceProfile(
+                            self._executor_resource_requests, self._task_resource_requests
+                        )
+                        self._id = rp.id
+                    else:
+                        raise RuntimeError("SparkContext must be created to get the profile id.")
             return self._id
 
     @property
@@ -141,7 +148,15 @@ class ResourceProfile:
         dict
             a dictionary of resources to :class:`TaskResourceRequest`
         """
-        return self._task_resource_requests
+
+        if self._java_resource_profile is not None:
+            taskRes = self._java_resource_profile.taskResourcesJMap()
+            result = {}
+            for k, v in taskRes.items():
+                result[k] = TaskResourceRequest(v.resourceName(), v.amount())
+            return result
+        else:
+            return self._task_resource_requests
 
     @property
     def executorResources(self) -> Dict[str, ExecutorResourceRequest]:
@@ -151,7 +166,16 @@ class ResourceProfile:
         dict
             a dictionary of resources to :class:`ExecutorResourceRequest`
         """
-        return self._executor_resource_requests
+        if self._java_resource_profile is not None:
+            execRes = self._java_resource_profile.executorResourcesJMap()
+            result = {}
+            for k, v in execRes.items():
+                result[k] = ExecutorResourceRequest(
+                    v.resourceName(), v.amount(), v.discoveryScript(), v.vendor()
+                )
+            return result
+        else:
+            return self._executor_resource_requests
 
 
 class ResourceProfileBuilder:
@@ -173,8 +197,24 @@ class ResourceProfileBuilder:
     """
 
     def __init__(self) -> None:
-        self._executor_resource_requests: Dict[str, ExecutorResourceRequest] = {}
-        self._task_resource_requests: Dict[str, TaskResourceRequest] = {}
+        from pyspark.sql import is_remote
+
+        _jvm = None
+        if not is_remote():
+            from pyspark.core.context import SparkContext
+
+            _jvm = SparkContext._jvm
+
+        if _jvm is not None:
+            self._jvm = _jvm
+            self._java_resource_profile_builder = getattr(
+                _jvm, "org.apache.spark.resource.ResourceProfileBuilder"
+            )()
+        else:
+            self._jvm = None
+            self._java_resource_profile_builder = None
+            self._executor_resource_requests: Dict[str, ExecutorResourceRequest] = {}
+            self._task_resource_requests: Dict[str, TaskResourceRequest] = {}
 
     def require(
         self, resourceRequest: Union[ExecutorResourceRequests, TaskResourceRequests]
@@ -194,16 +234,43 @@ class ResourceProfileBuilder:
         """
 
         if isinstance(resourceRequest, TaskResourceRequests):
-            self._task_resource_requests.update(resourceRequest.requests)
+            if self._java_resource_profile_builder is not None:
+                if resourceRequest._java_task_resource_requests is not None:
+                    self._java_resource_profile_builder.require(
+                        resourceRequest._java_task_resource_requests
+                    )
+                else:
+                    taskReqs = TaskResourceRequests(self._jvm, resourceRequest.requests)
+                    self._java_resource_profile_builder.require(
+                        taskReqs._java_task_resource_requests
+                    )
+            else:
+                self._task_resource_requests.update(resourceRequest.requests)
         else:
-            self._executor_resource_requests.update(resourceRequest.requests)
+            if self._java_resource_profile_builder is not None:
+                r = resourceRequest._java_executor_resource_requests
+                if r is not None:
+                    self._java_resource_profile_builder.require(r)
+                else:
+                    execReqs = ExecutorResourceRequests(self._jvm, resourceRequest.requests)
+                    self._java_resource_profile_builder.require(
+                        execReqs._java_executor_resource_requests
+                    )
+            else:
+                self._executor_resource_requests.update(resourceRequest.requests)
         return self
 
     def clearExecutorResourceRequests(self) -> None:
-        self._executor_resource_requests = {}
+        if self._java_resource_profile_builder is not None:
+            self._java_resource_profile_builder.clearExecutorResourceRequests()
+        else:
+            self._executor_resource_requests = {}
 
     def clearTaskResourceRequests(self) -> None:
-        self._task_resource_requests = {}
+        if self._java_resource_profile_builder is not None:
+            self._java_resource_profile_builder.clearTaskResourceRequests()
+        else:
+            self._task_resource_requests = {}
 
     @property
     def taskResources(self) -> Dict[str, TaskResourceRequest]:
@@ -213,7 +280,14 @@ class ResourceProfileBuilder:
         dict
             a dictionary of resources to :class:`TaskResourceRequest`
         """
-        return self._task_resource_requests
+        if self._java_resource_profile_builder is not None:
+            taskRes = self._java_resource_profile_builder.taskResourcesJMap()
+            result = {}
+            for k, v in taskRes.items():
+                result[k] = TaskResourceRequest(v.resourceName(), v.amount())
+            return result
+        else:
+            return self._task_resource_requests
 
     @property
     def executorResources(self) -> Dict[str, ExecutorResourceRequest]:
@@ -223,10 +297,42 @@ class ResourceProfileBuilder:
         dict
             a dictionary of resources to :class:`ExecutorResourceRequest`
         """
-        return self._executor_resource_requests
+        if self._java_resource_profile_builder is not None:
+            result = {}
+            execRes = self._java_resource_profile_builder.executorResourcesJMap()
+            for k, v in execRes.items():
+                result[k] = ExecutorResourceRequest(
+                    v.resourceName(), v.amount(), v.discoveryScript(), v.vendor()
+                )
+            return result
+        else:
+            return self._executor_resource_requests
 
     @property
     def build(self) -> ResourceProfile:
-        return ResourceProfile(
-            _exec_req=self._executor_resource_requests, _task_req=self._task_resource_requests
-        )
+        if self._java_resource_profile_builder is not None:
+            jresourceProfile = self._java_resource_profile_builder.build()
+            return ResourceProfile(_java_resource_profile=jresourceProfile)
+        else:
+            return ResourceProfile(
+                _exec_req=self._executor_resource_requests, _task_req=self._task_resource_requests
+            )
+
+
+def _test() -> None:
+    import doctest
+    import sys
+    from pyspark import SparkContext
+
+    globs = globals().copy()
+    globs["sc"] = SparkContext("local[4]", "profile tests")
+    failure_count, test_count = doctest.testmod(
+        globs=globs, optionflags=doctest.ELLIPSIS | doctest.NORMALIZE_WHITESPACE
+    )
+    globs["sc"].stop()
+    if failure_count:
+        sys.exit(-1)
+
+
+if __name__ == "__main__":
+    _test()
