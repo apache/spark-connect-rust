@@ -3681,6 +3681,20 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
         assert [(r.o, r.rn) for r in rows] == expected
 
 
+def test_chained_window_specs_partition_and_order_by_their_last_columns_as_pyspark(session):
+    # As PySpark's WindowSpec.partitionBy and orderBy, of the columns of the last call only: a
+    # count over the rows of the last partitioning, and a row number of the last ordering.
+    from pyspark.sql import Window
+
+    df = session.createDataFrame([(1, 10), (2, 10), (3, 20)], ["a", "b"])
+    partitioned = Window.partitionBy("a").partitionBy("b")
+    rows = df.select("a", F.count("*").over(partitioned).alias("n")).orderBy("a").collect()
+    assert [r.n for r in rows] == [2, 2, 1]
+    ordered = Window.orderBy("a").orderBy(F.col("b").desc(), "a")
+    rows = df.select("a", F.row_number().over(ordered).alias("rn")).orderBy("a").collect()
+    assert [r.rn for r in rows] == [2, 3, 1]
+
+
 def test_create_dataframe_of_a_numpy_array_as_pyspark(session):
     # As PySpark Connect's: a column of each column of a 1- or 2-dimensional array, named by the
     # names, else `value` for one column, else `_1`, `_2`, ..., of the types of the array, or
