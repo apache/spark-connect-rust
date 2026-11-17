@@ -32,8 +32,12 @@ class RowConversionProbe:
         return type(value) is self.row_type and self.field_name in getattr(value, "__fields__", ())
 
     def snapshot(self):
-        captured_at = time.monotonic()
-        objects = gc.get_objects()
+        return self.count(*self.capture())
+
+    def capture(self):
+        return time.monotonic(), gc.get_objects()
+
+    def count(self, captured_at, objects):
         return {
             "captured_at": captured_at,
             "rows": sum(self.matches(value) for value in objects),
@@ -67,10 +71,14 @@ class RowConversionProbe:
                 time.sleep(0)
             if self.finished.is_set():
                 return
-            snapshot = self.snapshot()
-            self.observed["progress_snapshot"] = snapshot
-            if self.cancel and 0 < snapshot["rows"] < self.expected_rows:
+            captured = self.capture()
+            if self.cancel:
+                # Request the interrupt before counting: under a tracer such as coverage, the
+                # count can outlast the rest of the native materialization, and the request
+                # then arrives after collect returned. The handler counts again and raises
+                # only while the conversion is still partial.
                 _thread.interrupt_main()
+            self.observed["progress_snapshot"] = self.count(*captured)
         except BaseException as error:
             self.failures.append(error)
 
