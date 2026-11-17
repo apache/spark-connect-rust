@@ -1157,6 +1157,21 @@ pub trait Model: Transformer + AsAny {
         None
     }
 
+    /// The warning that the server sent with the model of its fit (`warning_message`): of a tree
+    /// model whose training stopped early because it grew beyond the threshold of the memory
+    /// control of the server's ML cache (of the session's
+    /// `spark.connect.session.connectML.mlCache.memoryControl.maxModelSize`), such as "The random
+    /// forest training stops early because the model size (35016 bytes) exceeds threshold (24000
+    /// bytes).", the warnings of the fit a line each (of a boosting tree, the forest's of its tree
+    /// before its own). PySpark's `try_remote_fit` logs it to the `pyspark.ml.util` logger, at
+    /// WARNING; the Rust client keeps it on the model, and hands it to the handler of
+    /// [`SparkSession::set_ml_fit_warning_handler`] as the fit's result arrives. None of a model
+    /// of a fit without a warning, of a load or a fetch, and of a model of no single server-side
+    /// object, such as a pipeline model, whose stages have their own.
+    fn fit_warning(&self) -> Option<&str> {
+        self.ml_ref().and_then(MlRef::fit_warning)
+    }
+
     /// The target of the methods of the model's server-side object, or an error of a model that
     /// the server does not hold.
     fn model_target(&self) -> spark_connect_core::error::Result<MlTarget> {
@@ -1877,7 +1892,11 @@ ml_params! {
     }
 }
 
-/// Submit training data and parameters and read the fitted operator metadata.
+/// Submit training data and parameters and read the fitted operator metadata. The warning of the
+/// fit that the server sends with it (`warning_message`, of a tree training that the memory
+/// control of the server's ML cache stopped early) goes to the handler of the session, before the
+/// model is made of the metadata: as PySpark's `try_remote_fit` logs it of a non-empty
+/// `warning_message`, before it makes the model (see [`SparkSession::set_ml_fit_warning_handler`]).
 fn fit_via_command(
     operator: &MlOperator,
     params: &Params,
@@ -1901,6 +1920,9 @@ fn fit_via_command(
             if let Some(proto::ml_command_result::ResultType::OperatorInfo(info)) =
                 result.result_type
             {
+                if let Some(warning) = fit_warning_of(&info) {
+                    df.session.report_ml_fit_warning(warning)?;
+                }
                 return Ok(info);
             }
         }
@@ -1909,6 +1931,14 @@ fn fit_via_command(
         "{}.fit: server returned no fitted model",
         operator.name
     )))
+}
+
+/// The warning of the fit of `info`, the server's `warning_message`, when it is not empty: as
+/// PySpark's `if warning_msg := getattr(model_info, "warning_message", None)` takes it.
+fn fit_warning_of(info: &proto::ml_command_result::MlOperatorInfo) -> Option<&str> {
+    info.warning_message
+        .as_deref()
+        .filter(|warning| !warning.is_empty())
 }
 
 /// A server-side ML object: a fitted model, or another object that a fetch returns (a submodel, a
@@ -1924,6 +1954,8 @@ type CachedModel = MlRef;
 struct CachedModelRef {
     model_ref: proto::ObjectRef,
     session: SparkSession,
+    /// The warning that the server sent with the model of a fit (see [`MlRef::fit_warning`]).
+    fit_warning: Option<String>,
 }
 
 impl std::fmt::Debug for CachedModelRef {
@@ -1956,6 +1988,7 @@ impl CachedModel {
                 Ok(Self(Arc::new(CachedModelRef {
                     model_ref: reference.clone(),
                     session: session.clone(),
+                    fit_warning: fit_warning_of(info).map(str::to_string),
                 })))
             }
             _ => Err(spark_connect_core::error::SparkError::connect_msg(format!(

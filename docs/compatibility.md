@@ -271,6 +271,19 @@ classes to build on:
   `predict(&vector)`, the members of every prediction model of `pyspark.ml`. PySpark reads a
   fetched int as a Python int of any size: `num_features()` (and the other `i32` members) of one
   out of the range of an `i32` is an error, not the truncated int.
+- The server sends a warning with the model of a fit when the memory control of its ML cache
+  stopped the training of a tree model early, as the model outgrew 2/5 of the session's
+  `spark.connect.session.connectML.mlCache.memoryControl.maxModelSize` (`The random forest training
+  stops early because the model size (35016 bytes) exceeds threshold (24000 bytes).`; the warnings
+  of a fit a line each, of a boosting tree also the forest's of its tree). PySpark's
+  `try_remote_fit` logs it, to the logger `pyspark.ml.util` at WARNING. The Rust API, which has no
+  Python logging, keeps it on the model: `Model::fit_warning()` (and `MlRef::fit_warning()`), None
+  of a fit without one, a load and a fetch, and of a pipeline model, a OneVsRest model and a
+  validator's model, whose stages, class models and best model have theirs.
+  `SparkSession::set_ml_fit_warning_handler` sets the handler that each fit of the session calls
+  with its warning, on the thread of the fit (of the pool of a OneVsRest), once the result of the
+  fit has arrived and before the model is made of it, as PySpark logs it; an error of the handler
+  is the error of the fit. The Python client logs the warnings by it.
 - A fit, transform, evaluate and save sends the params as `Params::sendable` serializes them, as
   PySpark's `serialize_ml_params` does: of the error of a value that PySpark cannot send, before
   any request. `Params::set_param_int_array` (of `VectorSlicer::set_indices` and
@@ -402,6 +415,16 @@ PySpark class has them:
 - **Fits of param maps**: `fit(dataset, paramMap)` fits a copy of the estimator with the map, a
   list or tuple of maps fits once per map, and `fitMultiple(dataset, paramMaps)` returns PySpark's
   `_FitMultipleIterator`. `transform(dataset, paramMap)` transforms of a copy of the model.
+- **The warning of a fit**: the warning that the server sends with the model of a fit, of a tree
+  training that the memory control of its ML cache stopped early (see "Native ML objects: fetch,
+  summaries, save and load (Rust API)"), is logged as PySpark's `try_remote_fit` logs it:
+  `_logger.warning(warning_msg)` of `pyspark.ml.util`, to the logger `pyspark.ml.util` at WARNING,
+  of the server's message as it is, of a record of that line of `pyspark/ml/util.py` (its
+  `pathname`, `lineno` and `funcName` `wrapped`), once the result of the Fit has arrived and before
+  the model is made of it (before the trees of a forest are read). So each fit logs its own: of a
+  param map, of each stage of a Pipeline, of each class of a OneVsRest, on the thread that fits it,
+  and of each fit of a validator. An exception of the logging (of a filter that raises) is the
+  exception of the fit, as PySpark's.
 - **Persistence**: `write()` (an `MLWriter` of `pyspark.ml.util`, with `overwrite()`, `option`,
   `optionMap`, `session` and `save`), `save(path)`, `read()` (an `MLReader`) and `load(path)`, as
   `RemoteMLWriter` and `RemoteMLReader` save and load them, so that this client and PySpark load

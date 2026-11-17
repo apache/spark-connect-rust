@@ -589,6 +589,28 @@ fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     )))
 }
 
+/// Have the ML fits of `session` log the warning that the server sends with the model of a fit,
+/// of a tree training that the memory control of its ML cache stopped early, as PySpark's
+/// `try_remote_fit` logs it: `_logger.warning(warning_msg)` of `pyspark.ml.util`, to the logger
+/// `pyspark.ml.util` at WARNING, of the server's message as it is, from the line of that call (see
+/// `_native_classes._log_as`). The core calls it of every fit (see
+/// `SparkSession::set_ml_fit_warning_handler`): of an estimator, the stages of a Pipeline, the
+/// classes of a OneVsRest and the fits of a validator. It logs once the result of the fit has
+/// arrived, before the model is made of it (before the fetch of a forest's trees), on the thread
+/// of the fit, as PySpark's logs on the thread of the pool of a OneVsRest or a validator. An
+/// exception of the logging (of a filter that raises) is the exception of the fit, as PySpark's.
+pub(crate) fn log_fit_warnings(session: &spark_connect::SparkSession) {
+    session.set_ml_fit_warning_handler(|warning| {
+        Python::attach(|py| -> PyResult<()> {
+            let pysparks = py.import("pyspark.ml.util")?.getattr("try_remote_fit")?;
+            py.import("pyspark.ml._native_classes")?
+                .call_method1("_log_as", (pysparks, "_logger", warning))?;
+            Ok(())
+        })
+        .map_err(crate::errors::callback_error)
+    });
+}
+
 /// Fit a native estimator on `dataset`, as `try_remote_fit` does, and make its typed model of the core
 /// model and the training DataFrame with `model` (`PyLinearSVCModel::fitted`), which has the
 /// defaults of the estimator, as `_copyValues` copies them to the model of a fit.

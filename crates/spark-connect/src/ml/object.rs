@@ -30,12 +30,20 @@ impl MlRef {
         &self.0.session
     }
 
+    /// The warning that the server sent with the object, the model of a fit, of a tree training
+    /// that the memory control of its ML cache stopped early (see [`Model::fit_warning`]). None of
+    /// a fit without a warning, and of an object that a fetch or a read returns.
+    pub fn fit_warning(&self) -> Option<&str> {
+        self.0.fit_warning.as_deref()
+    }
+
     /// An object that the server returned by its id (an `operator_info` of a fetch or a read), of
     /// which this client is the first owner.
     pub(crate) fn from_id(session: &SparkSession, id: &str) -> Self {
         Self(Arc::new(CachedModelRef {
             model_ref: proto::ObjectRef { id: id.to_string() },
             session: session.clone(),
+            fit_warning: None,
         }))
     }
 
