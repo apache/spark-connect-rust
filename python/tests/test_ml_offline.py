@@ -25,6 +25,7 @@ import datetime
 import decimal
 import enum
 import gc
+import logging
 import subprocess
 import sys
 import textwrap
@@ -2777,6 +2778,218 @@ def test_ml_fit_and_transform_send_the_messages_of_pyspark(ml_mock):
     reference = predictions["counts"]._expr.to_plan(None).unresolved_attribute
     assert reference.plan_id == relation.common.plan_id
     assert len(service.execute_requests) == 1
+
+
+def _fit_warning_result(ref, warning):
+    # The ExecutePlanResponse of a Fit whose model `ref` the server sends with the warning
+    # `warning` (MlOperatorInfo.warning_message), as of a tree training that the memory control of
+    # its ML cache stopped early.
+    return _ml_result(
+        operator_info=pb2.MlCommandResult.MlOperatorInfo(
+            obj_ref=pb2.ObjectRef(id=ref), warning_message=warning
+        )
+    )
+
+
+@pytest.fixture
+def fit_warning_mock(_ml_mock_server):
+    # A session of its own of the shared server, as of `ml_mock`, whose hook records the request of
+    # each execution, but the Delete of a released model (which is sent without waiting, at any
+    # time), with the records of the logger pyspark.ml.util, in their order, of any thread:
+    # ("request", <a fit or fetch of its class or method, or the plan's kind>) and ("log", record).
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    _, service = _ml_mock_server
+    service.reset()
+    events = []
+
+    class Recording(ConnectSession.Hook):
+        def on_execute_plan(self, request):
+            command = request.plan.command.ml_command
+            if command.HasField("fit"):
+                events.append(("request", "fit " + command.fit.estimator.name.split(".")[-1]))
+            elif command.HasField("fetch"):
+                methods = ".".join(method.method for method in command.fetch.methods)
+                events.append(("request", "fetch " + methods))
+            elif not command.HasField("delete"):
+                events.append(("request", request.plan.WhichOneof("op_type")))
+            return request
+
+    class Logged(logging.Handler):
+        def emit(self, record):
+            events.append(("log", record))
+
+    logger = logging.getLogger("pyspark.ml.util")
+    handler = Logged()
+    logger.addHandler(handler)
+    builder = ConnectSession.builder.remote(service.remote)
+    spark = builder._registerHook(lambda session: Recording()).create()
+    try:
+        yield spark, service, events
+    finally:
+        logger.removeHandler(handler)
+        service.forget_session(spark.session_id)
+        spark.stop()
+
+
+def test_ml_connect_fits_log_the_warning_of_the_server_as_pyspark(fit_warning_mock):
+    # As official PySpark 4.3.0's try_remote_fit: the warning that the server sends with the model
+    # of a fit (MlOperatorInfo.warning_message, of a tree training that the memory control of its
+    # ML cache stopped early) is logged by its `_logger.warning(warning_msg)`, to the logger
+    # pyspark.ml.util at WARNING, of the server's message as it is (of no arguments), from that
+    # line of pyspark/ml/util.py, once the result of the Fit has arrived and before the model is
+    # made of it (before the fetch of a forest's trees or of a discretizer's splits). So each fit
+    # logs its own: of a param map, of each map of a list and of fitMultiple, and of each stage of
+    # a Pipeline. A fit whose result has no warning, or an empty one, logs nothing, and so does a
+    # fetch whose result has one.
+    import inspect
+    import threading
+
+    import pyspark.ml.util as util
+    from pyspark.ml.connect.feature import QuantileDiscretizer, StringIndexer
+    from pyspark.ml.connect.pipeline import Pipeline
+    from pyspark.ml.connect.regression import RandomForestRegressor
+
+    spark, service, events = fit_warning_mock
+    df = spark.range(1)
+    lines, start = inspect.getsourcelines(util.try_remote_fit)
+    line = start + next(i for i, text in enumerate(lines) if "_logger.warning(" in text)
+    where = (util.try_remote_fit.__code__.co_filename, line, "wrapped")
+    forest = (
+        "The random forest training stops early because the model size (35016 bytes) exceeds "
+        "threshold (24000 bytes)."
+    )
+
+    def logged(fit, *payloads):
+        # The requests and the logged messages of `fit`, whose executions are answered by
+        # `payloads` in turn, in their order; each record is PySpark's.
+        service.execute_payload_queue = list(payloads)
+        del events[:]
+        fit()
+        seen = []
+        for kind, value in events:
+            if kind == "log":
+                assert (value.name, value.levelname) == ("pyspark.ml.util", "WARNING")
+                assert value.args == () and value.exc_info is None
+                assert value.thread == threading.get_ident()
+                assert (value.pathname, value.lineno, value.funcName) == where
+                value = value.msg
+            seen.append((kind, value))
+        return seen
+
+    # A forest's fit, whose model reads its trees, of a result of a warning that is no fit's.
+    trees = _fit_warning_result("tree-1", "not of a fit")
+    fit, read = ("request", "fit RandomForestRegressor"), ("request", "fetch trees")
+    first, second = _fit_warning_result("f", forest), _fit_warning_result("s", "second")
+    assert logged(lambda: RandomForestRegressor().fit(df), first, trees) == [
+        fit, ("log", forest), read
+    ]
+    estimator = RandomForestRegressor()
+    assert logged(lambda: estimator.fit(df, {estimator.maxDepth: 3}), first, trees) == [
+        fit, ("log", forest), read
+    ]
+    expected = [fit, ("log", forest), read, fit, ("log", "second"), read]
+    maps = [{}, {estimator.maxDepth: 3}]
+    assert logged(lambda: estimator.fit(df, maps), first, trees, second, trees) == expected
+    fits = lambda: list(estimator.fitMultiple(df, maps))  # noqa: E731
+    assert logged(fits, first, trees, second, trees) == expected
+
+    # A discretizer's fit, whose Bucketizer is made of the splits that it reads of its model.
+    doubles = [pb2.Expression.Literal(double=v) for v in [0.0, 0.5, 1.0]]
+    splits = pb2.Expression.Literal(array=pb2.Expression.Literal.Array(elements=doubles))
+    service.payload_for_request = {b"getSplits": _ml_result(param=splits)}
+    discretizer = QuantileDiscretizer(inputCol="id")
+    assert logged(lambda: discretizer.fit(df), _fit_warning_result("q", "of splits")) == [
+        ("request", "fit QuantileDiscretizer"),
+        ("log", "of splits"),
+        ("request", "fetch getSplits"),
+    ]
+    service.payload_for_request = {}
+
+    # The stages of a Pipeline, each of its own warning.
+    indexer = StringIndexer(inputCol="x", outputCol="y")
+    pipeline = Pipeline(stages=[RandomForestRegressor(predictionCol="p"), indexer])
+    of_indexer = _fit_warning_result("i", "of an indexer")
+    assert logged(lambda: pipeline.fit(df), first, trees, of_indexer) == [
+        fit, ("log", forest), read, ("request", "fit StringIndexer"), ("log", "of an indexer")
+    ]
+
+    # No warning, and an empty one.
+    for result in [_operator_info("plain"), _fit_warning_result("empty", "")]:
+        assert logged(lambda: indexer.fit(df), result) == [("request", "fit StringIndexer")]
+
+
+def test_ml_connect_one_vs_rest_logs_the_warning_of_each_class_fit_as_pyspark(fit_warning_mock):
+    # As official PySpark 4.3.0's OneVsRest._fit, whose `classifier.fit` of each class runs in a
+    # thread of its pool, of try_remote_fit: the warning of the Fit of each class is logged, of
+    # the logger pyspark.ml.util, on the thread that fits the class (not the caller's), once that
+    # Fit has returned and before the next class is fitted.
+    import threading
+
+    from pyspark.ml.connect.classification import DecisionTreeClassifier, OneVsRest
+
+    spark, service, events = fit_warning_mock
+    estimator = OneVsRest(classifier=DecisionTreeClassifier(), parallelism=1)
+    # The labels' maximum is 1.0: two classes, whose Fits are told apart by their binary labels.
+    service.query_payload = _label_query_result(estimator)
+    service.payload_for_request = {
+        b"mc2b$0": _fit_warning_result("class-0", "the warning of class 0"),
+        b"mc2b$1": _fit_warning_result("class-1", "the warning of class 1"),
+    }
+    try:
+        estimator.fit(spark.range(1))
+    finally:
+        service.query_payload = None
+    fit = ("request", "fit DecisionTreeClassifier")
+    assert [(kind, value if kind == "request" else value.msg) for kind, value in events] == [
+        ("request", "root"),
+        fit,
+        ("log", "the warning of class 0"),
+        fit,
+        ("log", "the warning of class 1"),
+    ]
+    for record in [value for kind, value in events if kind == "log"]:
+        assert (record.name, record.levelname) == ("pyspark.ml.util", "WARNING")
+        assert record.thread != threading.get_ident()
+
+
+def test_ml_connect_fit_raises_the_exception_of_logging_its_warning_as_pyspark(fit_warning_mock):
+    # As official PySpark 4.3.0: the exception of the logging of the warning of a fit, of a filter
+    # of the logger that raises, is the exception of the fit, as it is, which makes no model (it
+    # reads no trees).
+    from pyspark.ml.connect.regression import RandomForestRegressor
+
+    spark, service, events = fit_warning_mock
+
+    class Failing(logging.Filter):
+        def filter(self, record):
+            raise ValueError("the filter failed")
+
+    logger = logging.getLogger("pyspark.ml.util")
+    failing = Failing()
+    logger.addFilter(failing)
+    service.execute_payload_queue = [
+        _fit_warning_result("forest", "stopped early"),
+        _operator_info("tree-1"),
+    ]
+    try:
+        with pytest.raises(ValueError, match="the filter failed"):
+            RandomForestRegressor().fit(spark.range(1))
+    finally:
+        logger.removeFilter(failing)
+    assert events == [("request", "fit RandomForestRegressor")]
+
+
+def test_the_logging_of_a_fit_warning_needs_the_logging_call_of_pysparks_function():
+    # The warning of a fit is logged from the line of the `_logger.warning(...)` call of PySpark's
+    # try_remote_fit (`_native_classes._log_as`), of its nested `wrapped`: a function that makes no
+    # such call is a ValueError, rather than a record of another location.
+    import pyspark.ml.util as util
+    from pyspark.ml import _native_classes
+
+    with pytest.raises(ValueError) as error:
+        _native_classes._log_as(util.try_remote_transform_relation, "_logger", "a warning")
+    assert str(error.value) == "try_remote_transform_relation calls no _logger.warning"
 
 
 def test_ml_transformers_send_the_relation_of_pyspark(ml_mock):

@@ -1183,6 +1183,8 @@ impl PySparkSession {
         });
         // The metrics of the Observations of its executions, which PySpark's client converts.
         crate::observation::check_observed_metrics(&session);
+        // The warnings of its ML fits, which PySpark's `try_remote_fit` logs.
+        crate::ml::log_fit_warnings(&session);
         PySparkSession {
             session,
             streams: std::sync::OnceLock::new(),

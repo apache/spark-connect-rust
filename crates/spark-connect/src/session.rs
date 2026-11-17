@@ -36,6 +36,10 @@ pub(crate) type ProgressHandlers = Arc<Mutex<Vec<(u64, FallibleProgressHandler)>
 pub type ObservationMetricsCheck =
     Arc<dyn Fn(&proto::execute_plan_response::ObservedMetrics) -> Result<()> + Send + Sync>;
 
+/// A handler of the warning of an ML fit, as [`SparkSession::set_ml_fit_warning_handler`] sets
+/// it.
+type MlFitWarningHandler = Arc<dyn Fn(&str) -> Result<()> + Send + Sync>;
+
 /// Metrics captured from the last executed query. Mirrors the data behind
 /// `pyspark.sql.DataFrame.executionInfo` / `client.core.ExecutionInfo`.
 #[derive(Debug, Clone, Default)]
@@ -260,6 +264,8 @@ pub struct SparkSession {
     python_accumulators: PythonAccumulators,
     /// The check of the metrics of the Observations of its executions (shared across clones).
     observation_metrics_check: Arc<Mutex<Option<ObservationMetricsCheck>>>,
+    /// The handler of the warnings of its ML fits (shared across clones).
+    ml_fit_warning_handler: Arc<Mutex<Option<MlFitWarningHandler>>>,
     /// Whether this session was stopped, by `stop()` once its release ended, or by `close()`
     /// (shared across clones). Backs `is_stopped`.
     stopped: Arc<AtomicBool>,
@@ -283,6 +289,7 @@ impl SparkSession {
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             python_accumulators: PythonAccumulators::default(),
             observation_metrics_check: Arc::default(),
+            ml_fit_warning_handler: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
@@ -550,6 +557,7 @@ impl SparkSession {
             progress_handler_id: Arc::new(AtomicU64::new(0)),
             python_accumulators: PythonAccumulators::default(),
             observation_metrics_check: Arc::default(),
+            ml_fit_warning_handler: Arc::default(),
             stopped: Arc::new(AtomicBool::new(false)),
             server_version: Arc::new(Mutex::new(None)),
             listener_bus: Arc::default(),
@@ -1555,6 +1563,39 @@ impl SparkSession {
             .clone()
     }
 
+    /// Set the handler of the warnings of the ML fits of this session, and of its clones. The
+    /// server sends a warning with the model of a fit (`warning_message`) when the training of a
+    /// tree model stopped early because the model grew beyond the threshold of the memory control
+    /// of its ML cache (of the session's
+    /// `spark.connect.session.connectML.mlCache.memoryControl.maxModelSize`). The handler is
+    /// called with it on the thread of the fit, once the result of the fit has arrived and before
+    /// the model is made of it or any other request is sent, as PySpark's `try_remote_fit` logs
+    /// it then: of each fit, also of those of the stages of a pipeline, of the classes of a
+    /// OneVsRest and of a validator. An error that it returns is the error of the fit. Used by
+    /// the Python client to log the warnings as PySpark does; the fitted model keeps its warning
+    /// too, as [`Model::fit_warning`](crate::ml::Model::fit_warning) gives it.
+    pub fn set_ml_fit_warning_handler(
+        &self,
+        handler: impl Fn(&str) -> Result<()> + Send + Sync + 'static,
+    ) {
+        *self
+            .ml_fit_warning_handler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(handler));
+    }
+
+    /// Hand the warning of an ML fit to the handler of the session (see
+    /// [`SparkSession::set_ml_fit_warning_handler`]), if one is set: its error is the fit's.
+    pub(crate) fn report_ml_fit_warning(&self, warning: &str) -> Result<()> {
+        // Called out of the lock, so that the handler may set another one.
+        let handler = self
+            .ml_fit_warning_handler
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        handler.map_or(Ok(()), |handler| handler(warning))
+    }
+
     /// Stop this Spark session.
     ///
     /// Idempotent, mirroring pyspark: the session is marked stopped even if releasing it
@@ -1668,6 +1709,7 @@ impl Clone for SparkSession {
             progress_handler_id: Arc::clone(&self.progress_handler_id),
             python_accumulators: self.python_accumulators.clone(),
             observation_metrics_check: Arc::clone(&self.observation_metrics_check),
+            ml_fit_warning_handler: Arc::clone(&self.ml_fit_warning_handler),
             stopped: Arc::clone(&self.stopped),
             server_version: Arc::clone(&self.server_version),
             listener_bus: Arc::clone(&self.listener_bus),

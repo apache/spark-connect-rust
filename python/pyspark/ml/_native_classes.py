@@ -211,6 +211,50 @@ def _warn_as(function, message, category):
     warnings.warn_explicit(message, category, code.co_filename, line, module.__name__, registry)
 
 
+def _log_as(function, logger_name, message):
+    """Log `message` at WARNING as PySpark's `function` logs it of its `<logger_name>.warning(...)`
+    call, made by `function` or by a function nested in it (the `wrapped` of a decorator): by the
+    `warning` of the logger that the global `logger_name` of the module of `function` is when it is
+    called, as PySpark's call looks it up, from a frame at the location of that call, the line of
+    the call in the file of the function, in the function that makes it. So the `pathname`,
+    `lineno` and `funcName` of the record are those of PySpark's, and so is a traceback of an
+    exception of the logging (of a filter that raises)."""
+    _logging_call(function, logger_name)(function.__globals__[logger_name], message)
+
+
+@functools.cache
+def _logging_call(function, logger_name):
+    """The function that calls `logger.warning(message)` from the line of the
+    `<logger_name>.warning(...)` call of `function`, or of a function nested in it, in its file (see
+    `_log_as`)."""
+    codes = [function.__code__]
+    while codes:
+        code = codes.pop(0)
+        starts = dict(dis.findlinestarts(code))
+        line = code.co_firstlineno
+        for instruction in dis.get_instructions(code):
+            line = starts.get(instruction.offset) or line
+            if instruction.opname == "LOAD_GLOBAL" and instruction.argval == logger_name:
+                break
+        else:
+            codes.extend(const for const in code.co_consts if isinstance(const, types.CodeType))
+            continue
+
+        def call(logger, message):
+            logger.warning(message)
+
+        # The call is on the line after the `def` of `call`, so its frame is at `line`.
+        names = {
+            "co_filename": code.co_filename,
+            "co_firstlineno": line - 1,
+            "co_name": code.co_name,
+        }
+        if sys.version_info >= (3, 11):
+            names["co_qualname"] = code.co_qualname
+        return types.FunctionType(call.__code__.replace(**names), {})
+    raise ValueError(f"{function.__qualname__} calls no {logger_name}.warning")
+
+
 def _binding_of(function):
     """The signature that Python binds a call of `function` of: of the function itself, which is
     the wrapper of a decorator (`try_remote_attribute_relation` takes any arguments, and
