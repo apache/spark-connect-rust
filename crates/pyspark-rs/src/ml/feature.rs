@@ -130,11 +130,16 @@ macro_rules! feature_transformer {
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
             // As PySpark's constructor: Python's binding of its keyword-only signature (a positional
-            // argument, an unexpected keyword), then the defaults that the active session fetches
-            // (`server_defaults`), then the keyword arguments, which their converters convert.
-            fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+            // argument, an unexpected keyword), then the keyword arguments, which their converters
+            // convert. The defaults that PySpark's constructor fetches of the active session (the
+            // locale and the stop words of StopWordsRemover) are those that its `__init__`, which
+            // the public class runs, sets (`_setDefault`), which the native object takes of the
+            // param maps (`_sync`): so a construction or a load sends PySpark's requests, once
+            // each. The object of no `__init__` of PySpark's fetches them where it reads them (see
+            // `params_api::class_default`).
+            fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
                 bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
-                let own_defaults = params_api::server_defaults(py, $name)?;
+                let own_defaults = Vec::new();
                 let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)
@@ -271,11 +276,16 @@ macro_rules! feature_estimator {
             #[new]
             #[pyo3(signature = (*args, **kwargs))]
             // As PySpark's constructor: Python's binding of its keyword-only signature (a positional
-            // argument, an unexpected keyword), then the defaults that the active session fetches
-            // (`server_defaults`), then the keyword arguments, which their converters convert.
-            fn new(py: Python<'_>, args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+            // argument, an unexpected keyword), then the keyword arguments, which their converters
+            // convert. The defaults that PySpark's constructor fetches of the active session (the
+            // locale and the stop words of StopWordsRemover) are those that its `__init__`, which
+            // the public class runs, sets (`_setDefault`), which the native object takes of the
+            // param maps (`_sync`): so a construction or a load sends PySpark's requests, once
+            // each. The object of no `__init__` of PySpark's fetches them where it reads them (see
+            // `params_api::class_default`).
+            fn new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
                 bind_params("__init__", $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
-                let own_defaults = params_api::server_defaults(py, $name)?;
+                let own_defaults = Vec::new();
                 let mut this = Self { inner: core::$core::new(), unsendable: Vec::new(), raw: Vec::new(), own_defaults };
                 init_params(&mut this, $name, &[], &[$(($param, Kind::$kind)),*], args, kwargs)?;
                 Ok(this)

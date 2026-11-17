@@ -649,7 +649,7 @@ native_summary! {
     /// PySpark's `__repr__` (its `toString`).
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let target = Self::summary_target(slf)?;
+        let target = Self::fetch_target(slf)?;
         let out = crate::ml::object::fetch_py(py, &target, "toString", &[])?;
         crate::ml::object::fetch_output_to_py(py, out)
     }

@@ -860,8 +860,10 @@ macro_rules! native_model {
 /// `LogisticRegressionSummary`): it has the members of `$base`, and its own of the lists, and its
 /// server-side object is `$base`'s.
 ///
-/// Each class constructs as PySpark's `JavaWrapper.__init__(java_obj=None)`: of no server-side
-/// object, whose members raise PySpark's errors (see `SummaryObject::target`).
+/// Each class constructs as PySpark's `JavaWrapper.__init__(java_obj=None)`, of no server-side
+/// object: the `__init__` of the public class keeps the `java_obj` in the object's attributes
+/// (`_java_obj`), which the members read at each call, of PySpark's errors of a value that names no
+/// object (see `SummaryObject::target`).
 macro_rules! native_summary {
     (
         $ty:ident = $name:literal in $module:literal extends $base:ty;
@@ -876,12 +878,22 @@ macro_rules! native_summary {
                 pyo3::PyClassInitializer::<$base>::from(<$base>::from(target)).add_subclass(Self)
             }
 
-            /// The summary of PySpark's constructor of `java_obj`.
-            pub(crate) fn given(java_obj: Py<PyAny>) -> pyo3::PyClassInitializer<Self> {
-                pyo3::PyClassInitializer::<$base>::from(<$base>::given(java_obj)).add_subclass(Self)
+            /// The summary of PySpark's constructor.
+            pub(crate) fn given() -> pyo3::PyClassInitializer<Self> {
+                pyo3::PyClassInitializer::<$base>::from(<$base>::given()).add_subclass(Self)
             }
 
-            /// The server-side object of the summary `slf`, as its members read it.
+            /// The server-side object of the summary `slf`, as its members that fetch read it
+            /// (see `SummaryObject::target`).
+            pub(crate) fn fetch_target(
+                slf: &Bound<'_, Self>,
+            ) -> PyResult<spark_connect::ml::MlTarget> {
+                <$base>::fetch_target(slf.as_super())
+            }
+
+            /// The server-side object of the summary `slf`, as its DataFrame members read it (see
+            /// `SummaryObject::relation_target`).
+            #[allow(dead_code)] // Read by a subclass of DataFrame members of its own only.
             pub(crate) fn summary_target(
                 slf: &Bound<'_, Self>,
             ) -> PyResult<spark_connect::ml::MlTarget> {
@@ -890,11 +902,13 @@ macro_rules! native_summary {
         }
 
         native_summary!(@members $ty; {
-            /// PySpark's `JavaWrapper.__init__(java_obj=None)`.
+            /// PySpark's `JavaWrapper.__init__(java_obj=None)`, whose `java_obj` the `__init__` of
+            /// the public class keeps in the object's attributes.
             #[new]
             #[pyo3(signature = (java_obj=None))]
-            fn new(py: Python<'_>, java_obj: Option<Py<PyAny>>) -> pyo3::PyClassInitializer<Self> {
-                Self::given(java_obj.unwrap_or_else(|| py.None()))
+            fn new(java_obj: Option<&Bound<'_, PyAny>>) -> pyo3::PyClassInitializer<Self> {
+                let _ = java_obj;
+                Self::given()
             }
         }; $($rest)*);
     };
@@ -917,37 +931,53 @@ macro_rules! native_summary {
         }
 
         impl $ty {
-            /// The summary of PySpark's constructor of `java_obj`.
-            pub(crate) fn given(java_obj: Py<PyAny>) -> Self {
+            /// The summary of PySpark's constructor.
+            pub(crate) fn given() -> Self {
                 Self {
-                    object: $crate::ml::object::SummaryObject::Given(java_obj),
+                    object: $crate::ml::object::SummaryObject::Given,
                 }
             }
 
-            /// The server-side object of the summary `slf`, as its members read it.
+            /// The server-side object of the summary `slf`, as its members that fetch read it
+            /// (see `SummaryObject::target`).
+            pub(crate) fn fetch_target(
+                slf: &Bound<'_, Self>,
+            ) -> PyResult<spark_connect::ml::MlTarget> {
+                let object = slf.try_borrow()?.object.clone_ref();
+                object.target(slf.as_any())
+            }
+
+            /// The server-side object of the summary `slf`, as its DataFrame members read it (see
+            /// `SummaryObject::relation_target`).
             pub(crate) fn summary_target(
                 slf: &Bound<'_, Self>,
             ) -> PyResult<spark_connect::ml::MlTarget> {
-                slf.try_borrow()?.object.target(slf.py())
+                let object = slf.try_borrow()?.object.clone_ref();
+                object.relation_target(slf.as_any())
             }
         }
 
         native_summary!(@members $ty; {
-            /// PySpark's `JavaWrapper.__init__(java_obj=None)`.
+            /// PySpark's `JavaWrapper.__init__(java_obj=None)`, whose `java_obj` the `__init__` of
+            /// the public class keeps in the object's attributes.
             #[new]
             #[pyo3(signature = (java_obj=None))]
-            fn new(py: Python<'_>, java_obj: Option<Py<PyAny>>) -> Self {
-                Self::given(java_obj.unwrap_or_else(|| py.None()))
+            fn new(java_obj: Option<&Bound<'_, PyAny>>) -> Self {
+                let _ = java_obj;
+                Self::given()
             }
 
             /// The AttributeError of an attribute that the summary does not have, as CPython's of
-            /// PySpark's class (see `params_api::no_attribute`). Of a member of the class, whose
-            /// getter raised an AttributeError (of a summary of no server-side object), the error
-            /// of the getter, as PySpark's class has no `__getattr__` to raise another.
+            /// PySpark's class (see `params_api::no_attribute`). CPython calls `__getattr__` also
+            /// when the getter of a member raised an AttributeError (of a summary of no server-side
+            /// object, or of no `_summary_dataset`): of a member of the class, the error of its
+            /// getter, which runs again (it raises before any request), as PySpark's class has no
+            /// `__getattr__` to raise another.
             fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-                if let Ok(attribute) = name.cast::<pyo3::types::PyString>() {
-                    if slf.get_type().as_any().getattr(attribute).is_ok() {
-                        Self::summary_target(slf)?;
+                let get = pyo3::intern!(slf.py(), "__get__");
+                if let Some(member) = $crate::ml::object::class_member(slf.as_any(), name)? {
+                    if member.hasattr(get)? {
+                        return Ok(member.call_method1(get, (slf, slf.get_type()))?.unbind());
                     }
                 }
                 Err($crate::ml::params_api::no_attribute(slf.as_any(), name))
@@ -958,7 +988,7 @@ macro_rules! native_summary {
             /// `java_obj`), as the native class of a subclass of this one (a training summary) is
             /// of another deallocator than this one's, of which CPython assigns no `__class__`.
             fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-                let object = slf.try_borrow()?.object.clone_ref(slf.py());
+                let object = slf.try_borrow()?.object.clone_ref();
                 let class = slf.get_type();
                 let that = class.call_method1("__new__", (&class,))?;
                 that.cast::<Self>()?.try_borrow_mut()?.object = object;
@@ -966,20 +996,40 @@ macro_rules! native_summary {
                 Ok(that)
             }
 
-            /// `copy.deepcopy` of PySpark's summary raises the TypeError of the lock of its
-            /// model's `RemoteModelRef`.
-            fn __deepcopy__(&self, memo: &Bound<'_, PyAny>) -> PyResult<()> {
-                let _ = memo;
-                Err($crate::ml::params_api::lock_error())
+            /// `copy.deepcopy`, as of PySpark's summary: of a summary of a server-side object, the
+            /// TypeError of the lock of the `RemoteModelRef` of its model, which PySpark's copies
+            /// (the `_remote_model_obj` of a fit's summary, the `__source_transformer__` of an
+            /// evaluation's); of a summary of PySpark's constructor, a summary of the class and of
+            /// copies of the attributes, as of the reduce of a plain object (`__reduce_ex__`).
+            fn __deepcopy__<'py>(
+                slf: &Bound<'py, Self>,
+                memo: &Bound<'py, PyAny>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                if let $crate::ml::object::SummaryObject::Target(_) = &slf.try_borrow()?.object {
+                    return Err($crate::ml::params_api::lock_error());
+                }
+                let py = slf.py();
+                let reduced = $crate::reduce::plain_reduce(slf.as_any())?;
+                let mut args = vec![slf.clone().into_any(), memo.clone()];
+                args.extend(reduced.iter());
+                py.import("copy")?
+                    .call_method1("_reconstruct", pyo3::types::PyTuple::new(py, args)?)
             }
 
-            /// `pickle` of PySpark's summary raises the error of the local function of the
-            /// `SparkSession.__reduce__` of its DataFrames' session.
-            fn __reduce_ex__(&self, protocol: &Bound<'_, PyAny>) -> PyResult<()> {
-                let _ = protocol;
-                Err(pyo3::exceptions::PyAttributeError::new_err(
-                    "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'",
-                ))
+            /// `pickle`, as of PySpark's summary: of a summary of a server-side object, the error
+            /// of the first of its attributes that PySpark's does not pickle (see
+            /// `object::summary_pickle_error`); of a summary of PySpark's constructor, the reduce
+            /// of a plain object, of the class and its attributes (see `reduce::plain_reduce`).
+            fn __reduce_ex__<'py>(
+                slf: &Bound<'py, Self>,
+                protocol: &Bound<'py, PyAny>,
+            ) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
+                if let $crate::ml::object::SummaryObject::Target(target) = &slf.try_borrow()?.object
+                {
+                    let py = slf.py();
+                    return Err($crate::ml::object::summary_pickle_error(py, target, protocol));
+                }
+                $crate::reduce::plain_reduce(slf.as_any())
             }
         }; $($rest)*);
     };
@@ -1017,7 +1067,7 @@ macro_rules! native_summary {
                 #[pyo3(name = $prop_py)]
                 fn $prop(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
                     let py = slf.py();
-                    let target = Self::summary_target(slf)?;
+                    let target = Self::fetch_target(slf)?;
                     let out = $crate::ml::object::fetch_py(py, &target, $prop_method, &[])?;
                     $crate::ml::object::fetch_output_to_py(py, out)
                 }
@@ -1033,7 +1083,7 @@ macro_rules! native_summary {
                 )]
                 fn $m(slf: &Bound<'_, Self>, $( $arg: Py<PyAny> ),*) -> PyResult<Py<PyAny>> {
                     let py = slf.py();
-                    let target = Self::summary_target(slf)?;
+                    let target = Self::fetch_target(slf)?;
                     let args = vec![$( $arg.into_bound(py) ),*];
                     let out = $crate::ml::object::fetch_py(py, &target, $m_method, &args)?;
                     $crate::ml::object::fetch_output_to_py(py, out)

@@ -326,10 +326,16 @@ PySpark class has them:
   `LogisticRegressionTrainingSummary` of `BinaryLogisticRegressionTrainingSummary`), of PySpark's
   metaclass (`type` of the summaries). So `isinstance(LinearSVCModel(), MLWritable)` holds, and a
   Pipeline of `pyspark.ml` fits and saves native stages. A summary constructs as PySpark's
-  `JavaWrapper.__init__(java_obj=None)`, with its errors of a call that does not bind, and its
-  members read the `java_obj` as PySpark's `_extract_id_methods`: the id of an object of the ML
-  cache and its methods (`"<id>.summary"`) of a string, over the active session, and PySpark's
-  `AttributeError: 'NoneType' object has no attribute 'split'` of a summary of no object. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
+  `JavaWrapper.__init__(java_obj=None)`, PySpark's own function, with its errors of a call that
+  does not bind: it keeps the `java_obj` in the summary's attributes (`_java_obj`, also of the
+  `super().__init__` of a subclass), which its members read at each call as PySpark's
+  `_extract_id_methods`: the id of an object of the ML cache and its methods (`"<id>.summary"`) of
+  a string, over the active session, and PySpark's
+  `AttributeError: 'NoneType' object has no attribute 'split'` of a summary of no object. A
+  DataFrame member (`predictions`, `residuals()`) of a summary of the `summary` method first, as
+  PySpark names the training summary of a fit, reads the plan of its `_summary_dataset`, which
+  PySpark's fit sets, as the summary dataset of the relation, and raises the AttributeError of the
+  attribute of a summary of none, as PySpark's `invoke_remote_attribute_relation` does. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
   `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
   the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
@@ -358,7 +364,9 @@ PySpark class has them:
   call as PySpark's `_summary`, and the summary of `evaluate`; a loaded model has none, and raises
   PySpark's `RuntimeError`. Their DataFrames (`predictions`, `roc`, `cluster`, ...) are of the
   summary dataset of the fit. The `__repr__` of a GeneralizedLinearRegressionTrainingSummary is the
-  server's description of it (its table of coefficients and its deviances), as PySpark's is.
+  server's description of it (its table of coefficients and its deviances), as PySpark's is. Their
+  members have PySpark's docstrings, and their methods PySpark's signatures: a member is a property
+  of a property of PySpark's (`r2`), and a method of a method (`fMeasureByLabel(beta=1.0)`).
 - **Fits of param maps**: `fit(dataset, paramMap)` fits a copy of the estimator with the map, a
   list or tuple of maps fits once per map, and `fitMultiple(dataset, paramMaps)` returns PySpark's
   `_FitMultipleIterator`. `transform(dataset, paramMap)` transforms of a copy of the model.
@@ -391,8 +399,23 @@ PySpark class has them:
   - A PipelineModel, a OneVsRestModel and a validator's model are made again of their
     constructor's objects (`stages`, `models`, `bestModel`, ...).
   - A model of a server-side object, and its summary, copy, sharing the object, and are not
-    copied deep nor pickled: PySpark's raise the TypeError of the lock of its `RemoteModelRef`, and
-    the pickle of a summary the AttributeError of its DataFrames' session.
+    copied deep nor pickled: PySpark's raise the TypeError of the lock of the model's
+    `RemoteModelRef`. A pickle of a summary raises the error of the first of its attributes that
+    does not pickle, as PySpark's: of the summary of an `evaluate`, the lock of its model
+    (`__source_transformer__`); of a training summary, the lock of the model in the plan of its
+    summary dataset when that reads a transform of a model (the transform of the training dataset
+    by the model, of the KMeans, BisectingKMeans and GaussianMixture summaries, and a training
+    dataset of a stage after a model of a Pipeline), else the AttributeError of the session of the
+    training DataFrame, which PySpark pickles after its plan. The error of a lock is that of its
+    pickle at the protocol (a `PicklingError` below 2). Of cloudpickle, which pickles the local
+    function of the session by value, PySpark's training summary of a training DataFrame raises
+    the TypeError of the lock of its model, which comes next, where the drop-in's raises the
+    AttributeError of the session, as of `pickle`. PySpark's `copy.deepcopy` of a training summary
+    requests the schema of its summary dataset before its error (its DataFrame's `__getattr__`
+    reads the columns), where the drop-in's raises at once.
+  - A summary of PySpark's constructor (`LinearRegressionSummary("<id>.summary")`), of no
+    server-side object, copies, copies deep and pickles, at every protocol, as PySpark's plain
+    object: of its class and of its attributes (`_java_obj`).
   - A shallow copy of a model keeps the server-side object while either object lives. PySpark's
     shares its `RemoteModelRef` without a reference of its own, so the garbage collection of the
     copy releases the object of the original (`CONNECT_ML.CACHE_INVALID` at its next use).
@@ -1834,8 +1857,11 @@ vectors. Mean centering is opt-in through `withMean=True`. Convert pandas data w
 This covers constructor parameters, named setters, fit and DataFrame transform, and
 `StopWordsRemover.loadDefaultStopWords`, which reads the server's default stop words through
 Spark Connect's ML helper, as PySpark does (Rust `StopWordsRemover::load_default_stop_words`).
-As PySpark's constructor does, `StopWordsRemover()` fetches its default locale and English stop
-words of the active session first, so without one it raises PySpark's bare `AssertionError`.
+As PySpark's constructor does, `StopWordsRemover()` fetches its default locale and then its English
+stop words of the active session, once each, so without one it raises PySpark's bare
+`AssertionError`. They are the defaults of PySpark's own `__init__` (`_setDefault`), which the
+native stage takes, so a load sends its `Read` and then these two requests, and a copy sends none,
+as PySpark's.
 The Rust `StopWordsRemover::load` sends its `Read` alone, where PySpark's load also fetches these
 two defaults, in the constructor of the loaded stage: only the requests differ, since a Rust stage,
 new or loaded, reads an unset `locale` or `stop_words` as `None` or empty and the server applies
@@ -2001,6 +2027,18 @@ The Python module is a Rust-backed shim, replacing its vendored implementation,
 except `MultivariateGaussian`, which stays PySpark's plain Python class.
 `pyspark.ml.connect` adds no statistics module; its `summarizer` is the one of PySpark's
 deprecated package, unchanged.
+
+The module has PySpark's names and no `__all__`, as PySpark's, so `from pyspark.ml.stat import *`
+imports the same names (the names of its imports too, such as `Column` and `JavaWrapper`).
+`ChiSquareTest`, `Correlation`, `KolmogorovSmirnovTest` and `Summarizer` construct as PySpark's
+plain classes: of no arguments (`ChiSquareTest() takes no arguments`) unless a subclass has an
+`__init__` of its own, of attributes and weak references, and pickled and copied as plain objects.
+`SummaryBuilder` is a `JavaWrapper` of PySpark's `__init__(self, jSummaryBuilder)`, which keeps no
+Java object over Spark Connect: its `summary` reads the `_metrics` of its attributes, which
+`Summarizer.metrics` sets with a `_java_obj` of None, so `SummaryBuilder(None).summary(col)` raises
+PySpark's AttributeError, and a subclass that sets `_metrics` summarizes of them. The methods have
+PySpark's parameters, without its annotations and docstrings, and only `SummaryBuilder` has
+PySpark's class docstring.
 
 The statistical tests return lazy Spark DataFrames. Chi-square supports both the
 vector result and one row per feature (`flatten=True`); correlation supports

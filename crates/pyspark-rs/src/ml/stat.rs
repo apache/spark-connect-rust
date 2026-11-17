@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Native bindings for standard pyspark.ml.stat over Spark Connect.
+//! Native bindings for standard pyspark.ml.stat over Spark Connect. The classes and methods of
+//! Python are commented, not documented: PyO3 makes a doc comment their docstring.
 use super::object::fetch_arg_of;
 use super::*;
 use crate::column::PyColumn;
@@ -42,10 +43,37 @@ fn helper_relation(
     ))
 }
 
-#[pyclass(subclass, name = "ChiSquareTest", module = "pyspark.ml.stat")]
+// PySpark's `ChiSquareTest`, a plain class of a static `test`: its objects, and those of a
+// subclass, construct as `object.__new__` makes PySpark's (see `reduce::check_plain_new`), take
+// attributes and weak references, and pickle and copy as plain objects.
+#[pyclass(
+    subclass,
+    weakref,
+    dict,
+    name = "ChiSquareTest",
+    module = "pyspark.ml.stat"
+)]
 pub struct PyChiSquareTest;
 #[pymethods]
 impl PyChiSquareTest {
+    // As `object.__new__` of PySpark's class, of its signature `()`.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::reduce::check_plain_new(cls, args, kwargs)?;
+        Ok(Self)
+    }
+
+    // The reduce of a plain object (see `reduce::plain_reduce`).
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        crate::reduce::plain_reduce(slf.as_any())
+    }
+
     #[staticmethod]
     #[pyo3(
         signature = (dataset, featuresCol, labelCol, flatten=DefaultedOption::Omitted),
@@ -68,10 +96,35 @@ impl PyChiSquareTest {
     }
 }
 
-#[pyclass(subclass, name = "Correlation", module = "pyspark.ml.stat")]
+// PySpark's `Correlation`, a plain class of a static `corr` (see `PyChiSquareTest`).
+#[pyclass(
+    subclass,
+    weakref,
+    dict,
+    name = "Correlation",
+    module = "pyspark.ml.stat"
+)]
 pub struct PyCorrelation;
 #[pymethods]
 impl PyCorrelation {
+    // As `object.__new__` of PySpark's class, of its signature `()`.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::reduce::check_plain_new(cls, args, kwargs)?;
+        Ok(Self)
+    }
+
+    // The reduce of a plain object (see `reduce::plain_reduce`).
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        crate::reduce::plain_reduce(slf.as_any())
+    }
+
     #[staticmethod]
     #[pyo3(
         signature = (dataset, column, method=DefaultedOption::Omitted),
@@ -91,10 +144,35 @@ impl PyCorrelation {
     }
 }
 
-#[pyclass(subclass, name = "KolmogorovSmirnovTest", module = "pyspark.ml.stat")]
+// PySpark's `KolmogorovSmirnovTest`, a plain class of a static `test` (see `PyChiSquareTest`).
+#[pyclass(
+    subclass,
+    weakref,
+    dict,
+    name = "KolmogorovSmirnovTest",
+    module = "pyspark.ml.stat"
+)]
 pub struct PyKolmogorovSmirnovTest;
 #[pymethods]
 impl PyKolmogorovSmirnovTest {
+    // As `object.__new__` of PySpark's class, of its signature `()`.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::reduce::check_plain_new(cls, args, kwargs)?;
+        Ok(Self)
+    }
+
+    // The reduce of a plain object (see `reduce::plain_reduce`).
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        crate::reduce::plain_reduce(slf.as_any())
+    }
+
     #[staticmethod]
     #[pyo3(signature = (dataset, sampleCol, distName, *params))]
     #[allow(non_snake_case)]
@@ -137,27 +215,56 @@ impl PyKolmogorovSmirnovTest {
     }
 }
 
-#[pyclass(subclass, name = "SummaryBuilder", module = "pyspark.ml.stat")]
-pub struct PySummaryBuilder {
-    metrics: Vec<Py<PyAny>>,
-}
+// PySpark's `SummaryBuilder` over Spark Connect, whose metrics are the `_metrics` of its
+// attributes, which `Summarizer.metrics` sets: it holds no state of its own, so that its objects
+// (of the public class of `pyspark.ml.stat`, whose `__init__(jSummaryBuilder)` is PySpark's), and
+// those of a subclass, take their attributes, and pickle and copy as PySpark's plain objects.
+#[pyclass(
+    subclass,
+    weakref,
+    dict,
+    name = "SummaryBuilder",
+    module = "pyspark.ml.stat"
+)]
+pub struct PySummaryBuilder;
 #[pymethods]
 impl PySummaryBuilder {
+    // As `object.__new__` of PySpark's class: the `__init__` of the public class takes the
+    // arguments, as PySpark's `__init__(self, jSummaryBuilder)`.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs))]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::reduce::check_plain_new(cls, args, kwargs)?;
+        Ok(Self)
+    }
+
+    // The reduce of a plain object (see `reduce::plain_reduce`), of the `_metrics` and the
+    // `_java_obj` of its attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        crate::reduce::plain_reduce(slf.as_any())
+    }
+
     #[pyo3(signature = (featuresCol, weightCol=None))]
     #[allow(non_snake_case)]
     fn summary(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         featuresCol: &Bound<'_, PyAny>,
         weightCol: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyColumn> {
-        // As in the remote SummaryBuilder, the metrics are converted at summary(), each with
-        // `lit` (`F.array([F.lit(m) for m in self._metrics])`), so that a list is the array of
-        // `lit`, and non-Column arguments fail the _invoke_function assertion.
-        let metrics = self
-            .metrics
-            .iter()
-            .map(|v| crate::functions::to_column(v.bind(py)))
+        // As in the remote SummaryBuilder, the metrics are those of the `_metrics` of the builder
+        // (the AttributeError of a builder of none, `SummaryBuilder(None)`), converted at
+        // summary(), each with `lit` (`F.array([F.lit(m) for m in self._metrics])`), so that a list
+        // is the array of `lit`, and non-Column arguments fail the _invoke_function assertion.
+        let py = slf.py();
+        let metrics = slf
+            .getattr(pyo3::intern!(py, "_metrics"))?
+            .try_iter()?
+            .map(|v| crate::functions::to_column(&v?))
             .collect::<PyResult<Vec<_>>>()?;
         let features = featuresCol
             .extract::<PyRef<'_, PyColumn>>()
@@ -177,7 +284,14 @@ impl PySummaryBuilder {
     }
 }
 
-#[pyclass(subclass, name = "Summarizer", module = "pyspark.ml.stat")]
+// PySpark's `Summarizer`, a plain class of static methods (see `PyChiSquareTest`).
+#[pyclass(
+    subclass,
+    weakref,
+    dict,
+    name = "Summarizer",
+    module = "pyspark.ml.stat"
+)]
 pub struct PySummarizer;
 fn columns(
     col: &Bound<'_, PyAny>,
@@ -200,11 +314,35 @@ fn columns(
 }
 macro_rules! metrics {
     ($(($name:ident, $python:literal)),* $(,)?) => { #[pymethods] impl PySummarizer {
+        // As `object.__new__` of PySpark's class, of its signature `()`.
+        #[new]
+        #[classmethod]
+        #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
+        fn new(
+            cls: &Bound<'_, pyo3::types::PyType>,
+            args: &Bound<'_, PyTuple>,
+            kwargs: Option<&Bound<'_, PyDict>>,
+        ) -> PyResult<Self> {
+            crate::reduce::check_plain_new(cls, args, kwargs)?;
+            Ok(Self)
+        }
+
+        // The reduce of a plain object (see `reduce::plain_reduce`).
+        fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+            crate::reduce::plain_reduce(slf.as_any())
+        }
+
+        // As PySpark's over Spark Connect: a builder of no Java object (`SummaryBuilder(None)`),
+        // of the public class, whose `_metrics` is the list of the metrics, and `_java_obj` None,
+        // in its attributes, in that order.
         #[staticmethod]
         #[pyo3(signature = (*metrics))]
         fn metrics(metrics: &Bound<'_, PyTuple>) -> PyResult<Py<PySummaryBuilder>> {
-            let builder = PySummaryBuilder { metrics: metrics.iter().map(Bound::unbind).collect() };
-            crate::ml::object::new_py(metrics.py(), builder)
+            let py = metrics.py();
+            let builder = crate::ml::object::new_object(py, PySummaryBuilder)?;
+            builder.setattr(pyo3::intern!(py, "_metrics"), PyList::new(py, metrics.iter())?)?;
+            builder.setattr(pyo3::intern!(py, "_java_obj"), py.None())?;
+            Ok(builder.unbind())
         }
         $(
         #[staticmethod]

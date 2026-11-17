@@ -106,6 +106,44 @@ pub(crate) fn plain_object_state<'py>(
     ))
 }
 
+/// The reduce of `object`, of a native class of no state of its own, as `object.__reduce_ex__`
+/// gives it of PySpark's plain object from the protocol 2: `copyreg.__newobj__` of its class,
+/// which a pickle names by reference, with the state of a plain object (`plain_object_state`) when
+/// there is one. So it pickles and copies at every protocol: below 2, the default reduce of a class
+/// of a native base fails, as copyreg's does.
+pub(crate) fn plain_reduce<'py>(object: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
+    let py = object.py();
+    let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+    let args = PyTuple::new(py, [object.get_type()])?.into_any();
+    match plain_object_state(object)? {
+        Some(state) => PyTuple::new(py, [newobj, args, state]),
+        None => PyTuple::new(py, [newobj, args]),
+    }
+}
+
+/// The check of `object.__new__` of the arguments of `cls`, a class of PySpark's plain classes of
+/// no `__new__` of their own (or a subclass): the arguments of the `__init__` of a subclass are
+/// left to it, and a class without an `__init__` of its own takes none
+/// (`TypeError: ChiSquareTest() takes no arguments`).
+pub(crate) fn check_plain_new(
+    cls: &Bound<'_, pyo3::types::PyType>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    let py = cls.py();
+    let given = !args.is_empty() || kwargs.is_some_and(|kwargs| !kwargs.is_empty());
+    let object_init = py
+        .get_type::<PyAny>()
+        .getattr(pyo3::intern!(py, "__init__"))?;
+    if given && cls.getattr(pyo3::intern!(py, "__init__"))?.is(&object_init) {
+        return Err(pyo3::exceptions::PyTypeError::new_err(format!(
+            "{}() takes no arguments",
+            cls.name()?
+        )));
+    }
+    Ok(())
+}
+
 /// The Python list of the columns, each a Column of the wrapper of `Column`.
 pub(crate) fn column_list<'py>(
     py: Python<'py>,

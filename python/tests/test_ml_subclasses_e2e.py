@@ -136,6 +136,13 @@ def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
         copy.deepcopy(summary)
     with pytest.raises(AttributeError, match="Can't pickle local object"):
         pickle.dumps(summary)
+    # The pickle of a summary of an evaluation, which keeps its model, or of a training summary of
+    # the transform of the model (a KMeans's), raises the TypeError of the model's lock first.
+    KMeans = _cls("clustering", "KMeans")
+    for other in (model.evaluate(frame), KMeans(k=2, maxIter=2, seed=1).fit(frame).summary):
+        for call in (lambda: copy.deepcopy(other), lambda: pickle.dumps(other)):
+            with pytest.raises(TypeError, match=r"^cannot pickle '_thread.lock' object$"):
+                call()
     # A PipelineModel of transformers copies, copies deep and pickles, of its stages.
     fitted = Pipeline(stages=[Binarizer(threshold=4.5, inputCol="x", outputCol="b")]).fit(frame)
     for copied in (copy.copy(fitted), copy.deepcopy(fitted), pickle.loads(pickle.dumps(fitted))):
@@ -157,3 +164,16 @@ def test_a_summary_of_no_server_side_object_raises_pysparks_errors(session):
     KMeansSummary = _cls("clustering", "KMeansSummary")
     with pytest.raises(AttributeError, match="^'NoneType' object has no attribute 'split'$"):
         KMeansSummary().k
+    # As PySpark's `invoke_remote_attribute_relation`: a DataFrame member of a summary of the
+    # `summary` method first (`"<id>.summary"`) reads its `_summary_dataset`, which PySpark's fit
+    # sets, and a summary of another id builds a DataFrame that the server refuses.
+    for summary in (Summary("abc.summary"), KMeansSummary("abc.summary")):
+        message = f"^'{type(summary).__name__}' object has no attribute '_summary_dataset'$"
+        with pytest.raises(AttributeError, match=message):
+            summary.predictions
+    with pytest.raises(Exception, match="The MLCache key abc is invalid"):
+        KMeansSummary("abc").predictions.collect()
+    with_dataset = KMeansSummary("abc.summary")
+    with_dataset._summary_dataset = session.range(1)
+    with pytest.raises(Exception, match="The MLCache key abc is invalid"):
+        with_dataset.cluster.collect()

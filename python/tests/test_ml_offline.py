@@ -1822,6 +1822,97 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
         }
 
 
+def test_the_dataframe_members_of_a_summary_of_its_constructor_read_its_summary_dataset(ml_mock):
+    # As PySpark's invoke_remote_attribute_relation: of a summary whose `java_obj` starts with the
+    # `summary` method (`"<id>.summary"`, as PySpark names the training summary of a fit), a
+    # DataFrame member reads the plan of the summary's `_summary_dataset`, which PySpark's fit sets,
+    # as the summary dataset of the relation: without one, the AttributeError of the attribute,
+    # before any request. The members of a value, of no DataFrame, read none.
+    import pyspark.ml.connect as connect
+
+    spark, service = ml_mock
+    sent = _requests_but_deletes(service)
+    for summary, member in [
+        (connect.regression.LinearRegressionSummary("abc.summary"), lambda s: s.predictions),
+        (connect.clustering.KMeansSummary("abc.summary.x"), lambda s: s.cluster),
+        (
+            connect.classification.BinaryLogisticRegressionTrainingSummary("abc.summary"),
+            lambda s: s.roc,
+        ),
+        (
+            connect.regression.GeneralizedLinearRegressionSummary("abc.summary"),
+            lambda s: s.residuals(),
+        ),
+    ]:
+        with pytest.raises(AttributeError) as error:
+            member(summary)
+        assert str(error.value) == (
+            f"'{type(summary).__name__}' object has no attribute '_summary_dataset'"
+        )
+    assert _requests_but_deletes(service) == sent
+    dataset = spark.range(3)
+    summary = connect.regression.LinearRegressionSummary("abc.summary")
+    summary._summary_dataset = dataset
+    relation = _relation(summary.predictions).ml_relation
+    assert relation.fetch.obj_ref.id == "abc"
+    assert [method.method for method in relation.fetch.methods] == ["summary", "predictions"]
+    assert relation.model_summary_dataset == _relation(dataset)
+    for given in ("abc", "abc.x.summary"):
+        relation = _relation(connect.regression.LinearRegressionSummary(given).predictions)
+        assert not relation.ml_relation.HasField("model_summary_dataset"), given
+    summary._summary_dataset = 5
+    with pytest.raises(AttributeError, match="^'int' object has no attribute '_plan'$"):
+        summary.predictions
+    # The member of a value reads the `_java_obj` of the summary as it is at the call.
+    summary._java_obj = "def"
+    service.execute_payload = _ml_result(param=pb2.Expression.Literal(double=0.5))
+    sent = len(service.execute_requests)
+    assert summary.r2 == 0.5
+    (command,) = _commands_but_deletes(service, sent)
+    assert command.ml_command.fetch.obj_ref.id == "def"
+    assert [method.method for method in command.ml_command.fetch.methods] == ["r2"]
+
+
+def test_a_summary_of_a_fit_or_an_evaluation_is_not_pickled_as_pysparks(ml_mock):
+    # As PySpark's pickle of a summary of a server-side object, of the error of the first of its
+    # attributes that does not pickle: the TypeError of the lock of the RemoteModelRef of the
+    # model that the summary of an evaluation keeps (`__source_transformer__`), and that the
+    # summary dataset of a fit keeps when it reads a transform of a model (`_summary_dataset` of
+    # the clustering models, the transform of the training dataset by the model); else the
+    # AttributeError of the session of the training DataFrame, which it pickles after its plan.
+    # `copy.deepcopy` raises the TypeError of each, which copies the RemoteModelRef of the model.
+    import copy
+    import pickle
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    lock = "^cannot pickle '_thread.lock' object$"
+    session = "^Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'$"
+    service.execute_payload = _operator_info("model-of-a-summary")
+    kmeans = connect.clustering.KMeans(k=2).fit(frame)
+    regression = connect.regression.LinearRegression().fit(frame)
+    # The training dataset of a stage after a model of a Pipeline is a transform of the model.
+    after_model = connect.regression.LinearRegression().fit(kmeans.transform(frame).select("*"))
+    service.payload_for_request = {b"evaluate": _ml_result(summary="evaluated-summary")}
+    evaluated = regression.evaluate(frame)
+    assert type(evaluated).__name__ == "LinearRegressionSummary"
+    sent = _requests_but_deletes(service)
+    for summary, error, message in [
+        (kmeans.summary, TypeError, lock),
+        (regression.summary, AttributeError, session),
+        (after_model.summary, TypeError, lock),
+        (evaluated, TypeError, lock),
+    ]:
+        with pytest.raises(error, match=message):
+            pickle.dumps(summary)
+        with pytest.raises(TypeError, match=lock):
+            copy.deepcopy(summary)
+    assert _requests_but_deletes(service) == sent
+
+
 def test_native_models_released_while_their_session_stops_send_their_delete_as_pyspark(ml_mock):
     # As PySpark's del_remote_cache, which deletes through the active session, whose client is
     # closed only once its ReleaseSession ends: a native model that goes while that release waits
