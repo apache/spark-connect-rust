@@ -132,12 +132,15 @@ turns the cache off, on the server or for a session with `spark.conf.set`.
 
 ### Python Arrow table handoff
 
-`toArrow()` collects decoded batches and uses arrow-rs's `IntoPyArrow` for one
-boxed `RecordBatchReader`. Compatible value and offset buffers are shared;
-network decoding, sliced validity bitmaps, and pandas conversion may still copy.
-Batch schema consistency is validated before export. Field names or timezones
-containing NUL use IPC over the collected batches, without another RPC. Empty
-batch vectors retain the empty-schema behavior.
+`toArrow()` reads the Arrow schema of the analyzed `schema` of the DataFrame first, as
+PySpark's does, so that a type which PySpark does not convert to Arrow raises before the
+query runs. It then collects decoded batches, uses arrow-rs's `IntoPyArrow` for one
+boxed `RecordBatchReader`, and casts the table to that schema. Compatible value and offset
+buffers are shared; network decoding, sliced validity bitmaps, the cast and pandas
+conversion may still copy. Batch schema consistency is validated before export. Field
+names or timezones containing NUL use IPC over the collected batches, without another RPC.
+Empty batch vectors retain the empty-schema behavior. `_to_table()`, PySpark's private
+method, gives the table of this handoff as it is, with the schema that the server sent.
 
 `createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
 timestamp conversion helpers normalize the table, then arrow-rs imports its

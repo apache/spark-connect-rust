@@ -723,6 +723,60 @@ fn year_month_interval_values_roundtrip() {
     assert_eq!(back, vec![Value::YearMonthInterval(-13), Value::Null]);
 }
 
+/// A calendar interval has no `Value` variant: it is collected as the text of its months, days
+/// and nanoseconds, which `Value::calendar_interval_parts` reads back.
+#[test]
+fn calendar_intervals_are_collected_as_the_text_of_their_parts() {
+    if !should_run() {
+        return;
+    }
+    let rows = session()
+        .sql("SELECT make_interval(1, 2, 3, 4, 5, 6, 7.5) AS c")
+        .unwrap()
+        .collect()
+        .unwrap();
+    let value = rows[0].get(0).unwrap();
+    assert_eq!(value.as_str(), Some("14 months 25 days 18367500000000 ns"));
+    assert_eq!(
+        value.calendar_interval_parts(),
+        Some((14, 25, 18_367_500_000_000))
+    );
+}
+
+/// A local iterator gives the rows of the batch that it holds without fetching another, and
+/// notes when a record batch of the result arrives, also one of no rows, which the server
+/// sends for an empty result.
+#[test]
+fn local_iterators_give_the_rows_of_their_batch_and_note_its_arrival() {
+    use spark_connect::row::Value;
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    // One partition, of one batch.
+    let mut rows = s
+        .sql("SELECT id FROM range(0, 3, 1, 1)")
+        .unwrap()
+        .to_local_iterator(false)
+        .unwrap();
+    assert!(!rows.has_received_batch());
+    assert!(rows.next_decoded().is_none());
+    assert_eq!(rows.next().unwrap().unwrap().get(0), Some(&Value::Long(0)));
+    assert!(rows.has_received_batch());
+    let rest: Vec<_> = std::iter::from_fn(|| rows.next_decoded())
+        .map(|row| row.get(0).cloned())
+        .collect();
+    assert_eq!(rest, vec![Some(Value::Long(1)), Some(Value::Long(2))]);
+    assert!(rows.next().is_none());
+    let mut empty = s
+        .sql("SELECT id FROM range(0)")
+        .unwrap()
+        .to_local_iterator(false)
+        .unwrap();
+    assert!(empty.next().is_none());
+    assert!(empty.has_received_batch());
+}
+
 /// Collect a slow query and iterate it on demand, on this thread, which `caller` notes: the rows
 /// of each.
 fn run_slow_queries(

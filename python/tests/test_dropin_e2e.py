@@ -647,6 +647,47 @@ def test_year_month_intervals_are_not_collected_as_pyspark(session):
         datetime.timedelta(days=1, seconds=7384))
 
 
+def test_local_iterator_raises_the_error_of_an_execution_before_its_year_month_error(session):
+    # As PySpark's toLocalIterator, which converts each record batch as it arrives: an execution
+    # that fails before its first batch raises its own error, not the NOT_IMPLEMENTED of its
+    # year-month interval, which an empty result raises, of the batch of no rows that the
+    # server sends for it.
+    from pyspark.errors import PySparkNotImplementedError
+
+    query = session.sql("SELECT INTERVAL '1' YEAR AS ym, raise_error('boom') AS e")
+    with pytest.raises(Exception) as error:
+        list(query.toLocalIterator())
+    assert error.value.getCondition() == "USER_RAISED_EXCEPTION"
+    for empty in ("SELECT INTERVAL '1' YEAR AS ym LIMIT 0",
+                  "SELECT INTERVAL '1' YEAR AS ym WHERE false"):
+        with pytest.raises(PySparkNotImplementedError):
+            list(session.sql(empty).toLocalIterator())
+
+
+def test_local_iterator_gives_calendar_intervals_as_pyarrow_month_day_nano_as_pyspark(session):
+    # As PySpark's toLocalIterator, whose conversion of the rows has no converter of a calendar
+    # interval, so its values are pyarrow's MonthDayNano, also in arrays, maps and structs; its
+    # collect and toArrow raise, and toPandas gives a DateOffset.
+    import pandas as pd
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    df = session.sql("SELECT make_interval(1, 2, 3, 4, 5, 6, 7.5) AS c, "
+                     "array(make_interval(0, 1)) AS a, named_struct('x', make_interval(0, 0, 0, 1)) "
+                     "AS s, map('k', make_interval(-1)) AS m")
+    nanos = pa.MonthDayNano
+    [row] = df.toLocalIterator()
+    assert type(row.c) is nanos and row.c == nanos([14, 25, 18367500000000])
+    assert type(row.a[0]) is nanos and row.a == [nanos([1, 0, 0])]
+    assert type(row.s.x) is nanos and row.s.x == nanos([0, 1, 0])
+    assert type(row.m["k"]) is nanos and row.m == {"k": nanos([-12, 0, 0])}
+    for convert in (df.collect, df.toArrow):
+        with pytest.raises(PySparkTypeError) as e:
+            convert()
+        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    assert df.toPandas()["c"][0] == pd.DateOffset(months=14, days=25, nanoseconds=18367500000000)
+
+
 def test_repartition_by_range_without_a_count_lets_the_server_pick_it(session):
     # As PySpark's: the str/Column forms send no partition count, so the server picks it
     # and returns the rows.
@@ -892,6 +933,37 @@ def test_map_functions_take_a_ddl_schema(session):
         grouped.cogroup(grouped).applyInArrow(lambda left, right: left, schema),
     ):
         assert sorted(tuple(r) for r in result.collect()) == [(1, 1.0), (1, 2.0), (2, 3.0)]
+
+
+def test_cogroup_functions_take_the_whole_cogroups_as_pyspark(session):
+    # As PySpark's, whose function of a cogroup binds no columns: it takes the cogroups of all the
+    # columns of each side, whatever their names.
+    import pandas as pd
+    import pyarrow as pa
+
+    left = session.range(3).withColumn("a", F.lit(1))
+    right = session.range(3).withColumn("b", F.lit(2))
+    cogrouped = left.groupBy("id").cogroup(right.groupBy("id"))
+
+    def pandas_names(first, second):
+        names = ",".join(first.columns) + "|" + ",".join(second.columns)
+        return pd.DataFrame({"id": first["id"], "names": [names] * len(first)})
+
+    def arrow_names(first, second):
+        names = ",".join(first.column_names) + "|" + ",".join(second.column_names)
+        return pa.table({"id": first.column("id"), "names": [names] * first.num_rows})
+
+    for result in (cogrouped.applyInPandas(pandas_names, "id long, names string"),
+                   cogrouped.applyInArrow(arrow_names, "id long, names string")):
+        assert sorted(tuple(r) for r in result.collect()) == [(i, "id,a|id,b") for i in range(3)]
+
+
+def test_python_functions_registered_of_a_ddl_return_type_run_from_sql_as_pyspark(session):
+    # As PySpark's register of a function with a DDL string, whose wrapper and command parse it.
+    registered = session.udf.register("ddl_return_type_plus_one", lambda x: x + 1, "long")
+    assert registered.returnType == LongType()
+    rows = session.sql("SELECT ddl_return_type_plus_one(id) AS r FROM range(2)").collect()
+    assert rows == [Row(r=1), Row(r=2)]
 
 
 def test_inheritable_threads_run_with_the_tags_of_their_parents_as_pyspark(session):
@@ -2689,7 +2761,8 @@ def test_progress_handlers_receive_the_progress_of_executions_as_pyspark(session
 
 
 
-def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
+@pytest.mark.parametrize("ddl", [False, True])
+def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path, ddl):
     import pandas as pd
 
     def count(key, frames, state):
@@ -2699,6 +2772,9 @@ def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
 
     output = StructType([StructField("k", LongType()), StructField("c", LongType())])
     state = StructType([StructField("c", LongType())])
+    if ddl:
+        # As PySpark's, which sends the schemas as they are given, for the server to parse.
+        output, state = "k long, c long", "c long"
     df = session.createDataFrame([(1,), (1,), (2,)], "k long")
     # The server takes the function in a streaming query only, as with PySpark.
     with pytest.raises(Exception, match="applyInPandasWithState is unsupported in batch query"):
@@ -2712,14 +2788,14 @@ def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
         query = (
             session.readStream.schema("k long").parquet(source).groupBy("k")
             .applyInPandasWithState(count, output, state, "update", "NoTimeout")
-            .writeStream.format("memory").queryName("apply_in_pandas_with_state")
+            .writeStream.format("memory").queryName(f"apply_in_pandas_with_state_{ddl}")
             .outputMode("update").option("checkpointLocation", str(tmp_path / "checkpoint"))
             .trigger(availableNow=True).start()
         )
         try:
             query.awaitTermination(120)
             assert query.exception() is None
-            rows = session.table("apply_in_pandas_with_state").collect()
+            rows = session.table(f"apply_in_pandas_with_state_{ddl}").collect()
             assert sorted(tuple(r) for r in rows) == [(1, 2), (2, 1)]
         finally:
             query.stop()
@@ -3421,7 +3497,8 @@ def test_column_alias_names_every_column_and_keeps_its_metadata(session):
 def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
     # As PySpark Connect's: the Arrow types of the Spark types, of UTC timestamps and of strings
     # even of large var types, and the errors of the types that PySpark does not convert to
-    # Arrow and of duplicate names of nested fields.
+    # Arrow and of duplicate names of nested fields, which the Arrow schema of the analyzed schema
+    # raises before the query runs, so also of a query that fails.
     import pyarrow as pa
     from pyspark.errors import PySparkTypeError, UnsupportedOperationException
 
@@ -3437,15 +3514,16 @@ def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
             session.conf.set(key, value)
     assert table.schema.field("s").type == pa.string()
     assert table.schema.field("t").type == pa.timestamp("us", tz="UTC")
-    for expr, data_type in [("INTERVAL '1-2' YEAR TO MONTH", "YearMonthIntervalType(0, 1)"),
-                            ("make_interval(1)", "CalendarIntervalType()")]:
-        with pytest.raises(PySparkTypeError) as e:
-            session.sql(f"SELECT {expr} AS v").toArrow()
-        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
-        assert e.value.getMessageParameters() == {"data_type": data_type}
-    with pytest.raises(UnsupportedOperationException) as e:
-        session.sql("SELECT named_struct('a', 1, 'a', 2) AS v").toArrow()
-    assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
+    for failing in ("", ", raise_error('boom') AS e"):
+        for expr, data_type in [("INTERVAL '1-2' YEAR TO MONTH", "YearMonthIntervalType(0, 1)"),
+                                ("make_interval(1)", "CalendarIntervalType()")]:
+            with pytest.raises(PySparkTypeError) as e:
+                session.sql(f"SELECT {expr} AS v{failing}").toArrow()
+            assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+            assert e.value.getMessageParameters() == {"data_type": data_type}
+        with pytest.raises(UnsupportedOperationException) as e:
+            session.sql(f"SELECT named_struct('a', 1, 'a', 2) AS v{failing}").toArrow()
+        assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
 
 def test_a_derived_dataframe_of_a_local_checkpoint_outlives_the_checkpoint_as_pyspark(session):
     # The checkpoint is released when its last DataFrame goes: a DataFrame derived from it keeps

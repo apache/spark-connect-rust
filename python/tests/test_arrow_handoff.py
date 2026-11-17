@@ -357,9 +357,12 @@ def test_handoff_preserves_values_metadata_and_chunks(protocol):
     batches = [batch.slice(1, 2), batch.slice(0, 1), batch.slice(3, 1)]
     expected = pa.Table.from_batches(batches)
     calls = {}
+    # The table of the execution as it is, of `_to_table`, which toArrow casts to the Arrow schema
+    # of the schema of its analysis.
     with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
-        actual = frame.toArrow()
+        actual, schema = frame._to_table()
     assert actual.equals(expected, check_metadata=True)
+    assert schema is None
     for column in actual.columns:
         assert [len(chunk) for chunk in column.chunks] == [2, 1, 1]
     assert calls == {"execute": 1}
@@ -372,7 +375,7 @@ def test_normal_handoff_does_not_reopen_ipc(protocol, monkeypatch):
     monkeypatch.setattr(pa.ipc, "open_file", unexpected_ipc)
     batch = _mixed_batch()
     with _dataframe(protocol=protocol, batches=[batch]) as (frame, _):
-        assert frame.toArrow().equals(pa.Table.from_batches([batch]), check_metadata=True)
+        assert frame._to_table()[0].equals(pa.Table.from_batches([batch]), check_metadata=True)
 
 
 def test_handoff_buffers_outlive_dataframe_session_and_table(protocol):
@@ -382,7 +385,7 @@ def test_handoff_buffers_outlive_dataframe_session_and_table(protocol):
 
     def collect():
         with _dataframe(protocol=protocol, batches=[batch], calls=calls) as (frame, session):
-            table = frame.toArrow()
+            table, _ = frame._to_table()
             session.stop()
             return table
 
@@ -401,9 +404,15 @@ def test_handoff_buffers_outlive_dataframe_session_and_table(protocol):
 @pytest.mark.parametrize("kind", ["no-batches", "empty-typed", "zero-columns"])
 def test_handoff_empty_and_zero_column_results(protocol, kind):
     if kind == "no-batches":
-        batches = []
-        expected = pa.table({})
-    elif kind == "empty-typed":
+        # As PySpark's `_to_table`, which asserts that the result has a batch: a Spark server
+        # sends one for an empty result.
+        calls = {}
+        with _dataframe(protocol=protocol, batches=[], calls=calls) as (frame, _):
+            with pytest.raises(AssertionError):
+                frame._to_table()
+        assert calls == {"execute": 1}
+        return
+    if kind == "empty-typed":
         batches = [_mixed_batch().slice(0, 0)]
         expected = pa.Table.from_batches(batches)
     else:
@@ -415,7 +424,7 @@ def test_handoff_empty_and_zero_column_results(protocol, kind):
         assert expected.num_rows == 5
     calls = {}
     with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
-        actual = frame.toArrow()
+        actual, _ = frame._to_table()
     assert actual.num_rows == expected.num_rows
     assert actual.num_columns == expected.num_columns
     assert actual.equals(expected, check_metadata=True)
@@ -496,7 +505,7 @@ def test_nul_schema_strings_fall_back_without_executing_again(protocol, kind, mo
     expected = pa.Table.from_batches(batches)
     calls = {}
     with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
-        actual = frame.toArrow()
+        actual, _ = frame._to_table()
     # Compare raw Arrow data, not Python datetimes: the deliberately unusual
     # timezone string is preserved but is not a Python timezone identifier.
     assert actual.equals(expected, check_metadata=True)
@@ -511,7 +520,7 @@ def test_nul_schema_and_field_metadata_are_preserved(protocol):
     batch = pa.RecordBatch.from_arrays([pa.array([1, None, 3])], schema=schema)
     calls = {}
     with _dataframe(protocol=protocol, batches=[batch], calls=calls) as (frame, _):
-        actual = frame.toArrow()
+        actual, _ = frame._to_table()
     assert actual.equals(pa.Table.from_batches([batch]), check_metadata=True)
     assert calls == {"execute": 1}
 
@@ -542,7 +551,7 @@ def test_mismatched_batch_schemas_are_rejected_before_fallback(protocol, differe
     calls = {}
     with _dataframe(protocol=protocol, batches=batches, calls=calls) as (frame, _):
         with pytest.raises(ValueError, match="inconsistent schemas"):
-            frame.toArrow()
+            frame._to_table()
     assert calls == {"execute": 1}
 
 
@@ -552,7 +561,7 @@ def test_malformed_ipc_is_reported(protocol):
         protocol=protocol, batches=[], payloads=[(1, b"not arrow ipc")], calls=calls
     ) as (frame, _):
         with pytest.raises(RuntimeError, match="Arrow"):
-            frame.toArrow()
+            frame._to_table()
     assert calls == {"execute": 1}
 
 
@@ -671,8 +680,13 @@ def _arrow_input_service(
 
     def analyze(raw, context):
         # As the server, which parses the DDL schemas that the client sends (`_parse_ddl`) and
-        # answers whether a plan is local: a local relation, cached or chunked, is local.
+        # answers whether a plan is local: a local relation, cached or chunked, is local. The
+        # schema of a plan is that of the result of `execute`, which toArrow asks for first.
         request = protocol("AnalyzePlanRequest").FromString(raw)
+        if request.WhichOneof("analyze") == "schema":
+            return protocol("AnalyzePlanResponse", session_id=request.session_id,
+                            server_side_session_id=server_id,
+                            schema=dict(schema=ddl_type("rows long"))).SerializeToString()
         if request.WhichOneof("analyze") == "is_local":
             local = request.is_local.plan.root.WhichOneof("rel_type") in (
                 "local_relation", "cached_local_relation", "chunked_cached_local_relation")
@@ -2180,7 +2194,9 @@ class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
 with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
-    spark.createDataFrame(frame, schema).toArrow()
+    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
+    # with the classes that this script patches.
+    spark.createDataFrame(frame, schema)._to_table()
     assert state["config_requests"] == [
         ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
     table = state["input_tables"][0]
@@ -2784,7 +2800,9 @@ class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
 with capture._arrow_input_service(capture.protocol.__wrapped__(Factory()), capture_tables=True) as (spark, state):
-    spark.createDataFrame(frame, schema).toArrow()
+    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
+    # with the classes that this script patches.
+    spark.createDataFrame(frame, schema)._to_table()
     assert state["config_requests"] == [
         ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
     table = capture.pa.concat_tables(state["tables"])
@@ -3449,7 +3467,9 @@ class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
 with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
-    spark.createDataFrame(frame, schema).toArrow()
+    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
+    # with the classes that this script patches.
+    spark.createDataFrame(frame, schema)._to_table()
     assert len(state["config_requests"]) == 1, state["config_requests"]
     table = state["input_tables"][0]
     assert table.schema.names == ["x"], table.schema
@@ -3513,7 +3533,9 @@ class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
 with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
-    spark.createDataFrame(frame, schema).toArrow()
+    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
+    # with the classes that this script patches.
+    spark.createDataFrame(frame, schema)._to_table()
     assert len(state["config_requests"]) == 1, state["config_requests"]
     table = state["input_tables"][0]
     assert table.schema.names == ["x"], table.schema
@@ -5844,7 +5866,9 @@ class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
 with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
-    spark.createDataFrame(frame, schema).toArrow()
+    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
+    # with the classes that this script patches.
+    spark.createDataFrame(frame, schema)._to_table()
     if attribute == "isUTF8BinaryCollation":
         # Official converts this explicit schema with Arrow, after reading the configuration;
         # it never reads this attribute, so the result is the same as the row path's.
@@ -6586,7 +6610,9 @@ class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
 with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
-    spark.createDataFrame(frame, schema).toArrow()
+    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
+    # with the classes that this script patches.
+    spark.createDataFrame(frame, schema)._to_table()
     assert state["config_requests"] == [
         ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
     table = state["input_tables"][0]
@@ -6788,7 +6814,9 @@ class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
 with capture._arrow_input_service(capture.protocol.__wrapped__(Factory())) as (spark, state):
-    spark.createDataFrame(frame, schema).toArrow()
+    # Sends the plan as `_to_table` does: toArrow converts the schema to Arrow first,
+    # with the classes that this script patches.
+    spark.createDataFrame(frame, schema)._to_table()
     assert state["config_requests"] == [
         ("get", capture._CREATE_DATAFRAME_KEYS)], state["config_requests"]
     table = state["input_tables"][0]

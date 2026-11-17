@@ -44,6 +44,9 @@ impl std::fmt::Debug for RelationOwner {
 }
 
 #[derive(Debug, Clone)]
+// `GroupMap` is the largest variant; boxing its fields would change the public fields of the
+// variant, and each plan node is shared in an `Arc`, so its size is paid once per node.
+#[allow(clippy::large_enum_variant)]
 pub enum LogicalPlan {
     /// A range of integers: `range(start, end, step)`.
     Range {
@@ -445,14 +448,14 @@ pub enum LogicalPlan {
         state_schema: Option<DataType>,
         transform_with_state_info: Option<TransformWithStateInfo>,
     },
-    /// ApplyInPandasWithState: `GroupedData.applyInPandasWithState`. The schemas are sent
-    /// as JSON.
+    /// ApplyInPandasWithState: `GroupedData.applyInPandasWithState`. The schemas are the
+    /// strings that it sends, a DDL string or the JSON of a type, which the server parses.
     ApplyInPandasWithState {
         input: Arc<LogicalPlan>,
         grouping_expressions: Vec<Expression>,
         func: CommonInlineUserDefinedFunctionExpression,
-        output_schema: DataType,
-        state_schema: DataType,
+        output_schema: String,
+        state_schema: String,
         output_mode: String,
         timeout_conf: String,
     },
@@ -2460,8 +2463,8 @@ impl LogicalPlan {
                         .map(|e| e.to_proto())
                         .collect(),
                     func: Some(func.to_proto()),
-                    output_schema: output_schema.json(),
-                    state_schema: state_schema.json(),
+                    output_schema: output_schema.clone(),
+                    state_schema: state_schema.clone(),
                     output_mode: output_mode.clone(),
                     timeout_conf: timeout_conf.clone(),
                 };

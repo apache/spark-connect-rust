@@ -8,11 +8,32 @@ use spark_connect::udf::eval_type;
 
 use crate::column::PyColumn;
 use crate::dataframe::{
-    build_map_udf, infer_group_map_eval_type, validate_map_function, PyDataFrame,
+    build_map_udf, check_return_type_argument, infer_group_map_eval_type, map_udf_of,
+    resolve_datatype, validate_map_function, PyDataFrame,
 };
 use crate::errors::ResultExt;
 
 use crate::interrupt::interruptible;
+
+/// A schema of `applyInPandasWithState` as PySpark sends it: a `StructType` as its JSON, and
+/// anything else as it is, which protobuf converts as a str when the plan is built. The `Err` is
+/// the error of a value that it does not take, which the plan raises then (see
+/// [`crate::dataframe::unbuildable_str_error`]).
+fn sent_schema(
+    py: Python<'_>,
+    schema: &Bound<'_, PyAny>,
+) -> PyResult<Result<String, spark_connect_core::error::SparkError>> {
+    if let Ok(st) = schema.extract::<PyRef<'_, crate::types::PyStructType>>() {
+        return Ok(Ok(spark_connect::types::DataType::Struct {
+            fields: st.current_fields(py)?,
+        }
+        .json()));
+    }
+    if let Some(error) = crate::dataframe::unbuildable_str_error(schema)? {
+        return Ok(Err(error));
+    }
+    Ok(Ok(crate::options::str_argument(schema)?))
+}
 
 /// As PySpark's `_check_same_session` of the DataFrames of grouped data: `SESSION_NOT_SAME`
 /// unless `other` is of the session of `this`.
@@ -426,11 +447,11 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;
-        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
-            self.grouped_data.input_columns()
-        })?;
+        // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let session = self.grouped_data.spark_session();
-        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
+        let return_type = resolve_datatype(py, &session, &schema)?;
+        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
+        let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
     }
 
@@ -485,11 +506,11 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_ARROW_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;
-        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
-            self.grouped_data.input_columns()
-        })?;
+        // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let session = self.grouped_data.spark_session();
-        let udf = build_map_udf(py, &session, &func, &schema, eval_type_id, &cols)?;
+        let return_type = resolve_datatype(py, &session, &schema)?;
+        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
+        let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
         Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
     }
 
@@ -510,7 +531,11 @@ impl PyGroupedData {
         })
     }
 
-    /// `GroupedData.applyInPandasWithState` (stateful streaming).
+    /// `GroupedData.applyInPandasWithState` (stateful streaming), as PySpark's: the output
+    /// schema is the return type of the function, whose DDL string is parsed once the columns of
+    /// the input are read, and both schemas are sent as they are given, a `StructType` as its
+    /// JSON, which the server parses. A state schema that protobuf does not take as a str fails
+    /// each request of the DataFrame, as PySpark's plan fails to build.
     #[pyo3(name = "applyInPandasWithState")]
     #[pyo3(signature = (func, outputStructType, stateStructType, outputMode, timeoutConf))]
     fn apply_in_pandas_with_state(
@@ -523,10 +548,11 @@ impl PyGroupedData {
         timeoutConf: &str,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE)?;
-        let cols = interruptible(py, &self.grouped_data.spark_session(), || {
-            self.grouped_data.input_columns()
-        })?;
+        check_return_type_argument(&outputStructType)?;
+        let output_schema = sent_schema(py, &outputStructType)?;
+        let state_schema = sent_schema(py, &stateStructType)?;
         let session = self.grouped_data.spark_session();
+        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
         let udf = build_map_udf(
             py,
             &session,
@@ -535,15 +561,22 @@ impl PyGroupedData {
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF_WITH_STATE,
             &cols,
         )?;
-        let state_schema = crate::dataframe::resolve_datatype(py, &session, &stateStructType)?;
-        Ok(PyDataFrame::new(
-            self.grouped_data.apply_in_pandas_with_state(
-                udf,
-                state_schema,
-                outputMode,
-                timeoutConf,
-            ),
-        ))
+        // The plan sets the output schema, then the state schema.
+        let (output_schema, state_schema, plan_error) = match (output_schema, state_schema) {
+            (Ok(output), Ok(state)) => (output, state, None),
+            (Err(error), _) | (_, Err(error)) => (String::new(), String::new(), Some(error)),
+        };
+        let df = self.grouped_data.apply_in_pandas_with_state_with_schemas(
+            udf,
+            &output_schema,
+            &state_schema,
+            outputMode,
+            timeoutConf,
+        );
+        Ok(PyDataFrame::new(match plan_error {
+            Some(error) => df.unbuildable(error),
+            None => df,
+        }))
     }
 
     /// `GroupedData.transformWithStateInPandas` — arbitrary stateful processing with a
@@ -739,16 +772,16 @@ impl PyCoGroupedData {
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_PANDAS_UDF)?;
-        let cols = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.input_columns()
-        })?;
-        let udf = build_map_udf(
+        // As PySpark's: a DDL string is parsed, and the function binds no columns, as it takes
+        // the whole cogroups, so the inputs are not analyzed.
+        let return_type = resolve_datatype(py, &self.inner.spark_session(), &schema)?;
+        let udf = map_udf_of(
             py,
-            &self.inner.spark_session(),
             &func,
             &schema,
+            return_type,
             eval_type::SQL_COGROUPED_MAP_PANDAS_UDF,
-            &cols,
+            &[],
         )?;
         Ok(PyDataFrame::new(self.inner.apply_in_pandas(udf)))
     }
@@ -762,16 +795,16 @@ impl PyCoGroupedData {
         schema: Bound<'_, PyAny>,
     ) -> PyResult<PyDataFrame> {
         validate_map_function(py, &func, eval_type::SQL_COGROUPED_MAP_ARROW_UDF)?;
-        let cols = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.input_columns()
-        })?;
-        let udf = build_map_udf(
+        // As PySpark's: a DDL string is parsed, and the function binds no columns, as it takes
+        // the whole cogroups, so the inputs are not analyzed.
+        let return_type = resolve_datatype(py, &self.inner.spark_session(), &schema)?;
+        let udf = map_udf_of(
             py,
-            &self.inner.spark_session(),
             &func,
             &schema,
+            return_type,
             eval_type::SQL_COGROUPED_MAP_ARROW_UDF,
-            &cols,
+            &[],
         )?;
         Ok(PyDataFrame::new(self.inner.apply_in_arrow(udf)))
     }

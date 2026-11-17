@@ -1241,6 +1241,16 @@ impl SparkConnectClient {
         looked_up
     }
 
+    /// Read the server's plan compression settings, unless this client has them, as PySpark's
+    /// client reads them when it builds its first plan (`to_proto`), before it sends the plan.
+    /// The plans that this client sends afterwards are compressed with them without another
+    /// read. A caller that reads settings of its own between building a plan and sending it, as
+    /// PySpark's `toPandas` does, reads these first; any other execution reads them as it sends
+    /// its plan.
+    pub async fn read_plan_compression(&self) {
+        self.plan_compression().await;
+    }
+
     /// Compress `plan` as the plan compression of this client asks.
     async fn compress_plan(&self, plan: &mut Plan) {
         if let PlanCompression::Zstd { threshold } = self.plan_compression().await {
