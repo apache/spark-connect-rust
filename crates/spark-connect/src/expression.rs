@@ -23,7 +23,7 @@ pub fn next_lambda_var_index() -> u32 {
 
 /// The most levels of an expression that a plan of a request may carry. It protects this client,
 /// as [`crate::plan::MAX_PLAN_DEPTH`] does for plans: a deeper expression is a `RecursionError`
-/// here, before any request is built (see [`with_expression_depth_bound`]). PySpark's own point is
+/// here, before any request is built (see `with_expression_depth_bound`). PySpark's own point is
 /// not this number, and depends on its protobuf backend: it builds the proto of an expression by
 /// recursing in Python, so with the pure-Python backend its serializer raises `RecursionError` from
 /// about 244 additions, as in `select((col("id") + 1 + ... + 1).alias("x"))`, and with upb it

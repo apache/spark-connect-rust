@@ -744,7 +744,7 @@ impl Transformer for CrossValidatorModel {
 
     /// Set the values of `map`, as `CrossValidatorModel.copy(extra)` of PySpark: a copy of the
     /// best model of `map`, then PySpark's `assert self.subModels is not None`, which fails of a
-    /// model of no sub-models (see [`no_sub_models`]), copies of the sub-models (of no map: PySpark
+    /// model of no sub-models (see `no_sub_models`), copies of the sub-models (of no map: PySpark
     /// copies no extra into them), and the model's own params of `map` (`numFolds`, `foldCol` and
     /// `seed`), as `_copyValues` sets them.
     fn apply_param_map(&mut self, map: &ParamMap) -> Result<()> {

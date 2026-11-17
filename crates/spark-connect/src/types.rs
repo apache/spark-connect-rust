@@ -310,7 +310,7 @@ impl DataType {
     /// For example:
     /// - "int", "string", "boolean"
     /// - "decimal(10,0)", "char(50)", "varchar(100)"
-    /// - "array<int>", "map<string,int>", "struct<name:string,age:int>"
+    /// - `"array<int>"`, `"map<string,int>"`, `"struct<name:string,age:int>"`
     /// - "interval day to second"
     pub fn simple_string(&self) -> String {
         match self {
@@ -537,7 +537,7 @@ impl DataType {
         parse_json_value(value, "", &CollationsMap::new())
     }
 
-    /// Parses a JSON string into a DataType (convenience over [`from_json`]).
+    /// Parses a JSON string into a DataType (convenience over [`DataType::from_json`]).
     pub fn from_json_str(s: &str) -> Result<DataType> {
         let value: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;

@@ -961,7 +961,7 @@ pub(super) fn python_class_of(class: &str) -> String {
 
 /// The stage saved at `path`, as `DefaultParamsReader.loadParamsInstance` reads it of the class of
 /// its metadata: a meta-algorithm of PySpark's Python format (of the JVM writer's class names too,
-/// see [`python_class_of`]), or an estimator, a transformer or a model of the server's class (an
+/// see `python_class_of`), or an estimator, a transformer or a model of the server's class (an
 /// [`OperatorEstimator`], an [`OperatorTransformer`] or an [`ObjectModel`]).
 pub fn load_stage(session: &SparkSession, path: &str) -> Result<PipelineStage> {
     let metadata = load_python_metadata(session, path)?;

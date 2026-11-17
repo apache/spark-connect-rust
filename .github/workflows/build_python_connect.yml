@@ -646,8 +646,10 @@ jobs:
           SPARK_REMOTE: sc://localhost:15002
         run: |
           cargo test --manifest-path tests/wasm-udf/Cargo.toml --test e2e_wasm_udf
-          # Skips itself on a server older than 4.4.0, which has no spark.pythonWorkerEnv.
-          cargo test --manifest-path tests/wasm-udf-wasi/Cargo.toml --test e2e_python_worker_env
+          # Skips itself on a server older than 4.4.0, which has no spark.pythonWorkerEnv; the
+          # captured output shows the skip.
+          cargo test --manifest-path tests/wasm-udf-wasi/Cargo.toml --test e2e_python_worker_env \
+            -- --show-output
 
   # ---------------------------------------------------------------------------
   # E2E performance benchmark: our client vs reference, same 4.3.0 server.

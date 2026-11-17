@@ -138,7 +138,7 @@ pub enum LogicalPlan {
     /// number of levels of the relation as a plan, with those of the plans of DataFrames that it
     /// holds (1 for a relation without them), which count for [`MAX_PLAN_DEPTH`]. `observations`
     /// are those of the DataFrames that the relation holds as its child, as PySpark's plans of
-    /// `pyspark.ml` collect them (see [`LogicalPlan::observations`]).
+    /// `pyspark.ml` collect them (see `LogicalPlan::observations`).
     Raw {
         relation: Box<proto::Relation>,
         owner: Option<RelationOwner>,

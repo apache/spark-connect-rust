@@ -2855,7 +2855,7 @@ impl Estimator for OneVsRest {
         Ok(())
     }
 
-    /// The writer of PySpark's Python format, as `OneVsRestWriter` (see [`OneVsRest::writer`]).
+    /// The writer of PySpark's Python format, as `OneVsRestWriter` (see `OneVsRest::writer`).
     fn write(&self) -> MlWriter {
         self.writer()
     }
@@ -3171,7 +3171,7 @@ impl Model for OneVsRestModel {
     }
 
     /// The writer of PySpark's Python format, as `OneVsRestModelWriter` (see
-    /// [`OneVsRestModel::writer`]).
+    /// `OneVsRestModel::writer`).
     fn write(&self) -> spark_connect_core::error::Result<MlWriter> {
         Ok(self.writer())
     }
