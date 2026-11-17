@@ -98,16 +98,13 @@ impl DataFrameReader {
     }
 
     /// Load data from `paths`, any iterable of them, mirroring `DataFrameReader.load` of a list
-    /// of paths, with the configured format, schema, and options.
+    /// of paths, with the configured format, schema, and options. The schema is sent also when it
+    /// is empty, as PySpark's reader sends its `""` of no schema, which the server reads as none.
     pub fn load_paths<S: Into<String>>(self, paths: impl IntoIterator<Item = S>) -> DataFrame {
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format,
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema)
-                },
+                schema: Some(self.schema),
                 options: self.options,
                 paths: paths.into_iter().map(Into::into).collect(),
                 predicates: vec![],
@@ -181,9 +178,12 @@ impl DataFrameReader {
         self.format("orc").load(Some(path))
     }
 
-    /// Read text data.
+    /// Read text data, as PySpark's `text(paths)`: of its `wholetext=False`, which sets the
+    /// option `wholetext` to `false`, also over an earlier one.
     pub fn text(self, path: &str) -> DataFrame {
-        self.format("text").load(Some(path))
+        self.option("wholetext", "false")
+            .format("text")
+            .load(Some(path))
     }
 
     /// Read XML file(s). Mirrors `DataFrameReader.xml`.
@@ -201,11 +201,7 @@ impl DataFrameReader {
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format,
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema)
-                },
+                schema: Some(self.schema),
                 options: self.options,
                 paths: vec![],
                 predicates: predicates.unwrap_or_default(),

@@ -111,17 +111,14 @@ impl DataStreamReader {
         &self.options
     }
 
-    /// Load streaming data from the specified path(s).
+    /// Load streaming data from the specified path(s). The schema is sent also when it is empty,
+    /// as PySpark's reader sends its `""` of no schema, which the server reads as none.
     pub fn load(self, path: Option<&str>) -> DataFrame {
         let paths = path.map(|p| vec![p.to_string()]);
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
+                schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths: paths.unwrap_or_default(),
                 predicates: vec![],
@@ -162,11 +159,7 @@ impl DataStreamReader {
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
+                schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths,
                 predicates: vec![],
@@ -184,11 +177,7 @@ impl DataStreamReader {
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
+                schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths,
                 predicates: vec![],
@@ -206,11 +195,7 @@ impl DataStreamReader {
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
+                schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths,
                 predicates: vec![],
@@ -228,11 +213,7 @@ impl DataStreamReader {
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
+                schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths,
                 predicates: vec![],
@@ -243,18 +224,18 @@ impl DataStreamReader {
         DataFrame::new(self.session, plan)
     }
 
-    /// Read streaming text data from a path.
+    /// Read streaming text data from a path, as PySpark's `text(path)`: of its `wholetext=False`,
+    /// which sets the option `wholetext` to `False`, also over an earlier one. The stream reader
+    /// of PySpark writes an option as Python's `str` of it, where the batch reader writes `false`.
     pub fn text(mut self, path: &str) -> DataFrame {
         self.format = Some("text".to_string());
+        self.options
+            .insert("wholetext".to_string(), "False".to_string());
         let paths = vec![path.to_string()];
         let plan = LogicalPlan::Read {
             read_type: ReadType::DataSource {
                 format: self.format.clone(),
-                schema: if self.schema.is_empty() {
-                    None
-                } else {
-                    Some(self.schema.clone())
-                },
+                schema: Some(self.schema.clone()),
                 options: self.options.clone(),
                 paths,
                 predicates: vec![],
