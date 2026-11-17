@@ -990,6 +990,20 @@ impl DataFrame {
         self.map_partitions(func, is_barrier, profile_id)
     }
 
+    /// As [`DataFrame::map_in_pandas_with_profile`] and [`DataFrame::map_in_arrow_with_profile`],
+    /// of a resource profile whose id a request reads with `profile_id_reader` when it builds the
+    /// plan, as PySpark's plan reads `profile.id`, which creates the profile on the server the
+    /// first time (see `LogicalPlan::MapPartitions`). Not a stable API.
+    #[doc(hidden)]
+    pub fn map_in_python_with_profile_reader(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id_reader: Option<crate::udf::CommandPickler>,
+    ) -> DataFrame {
+        self.map_partitions_of(func, is_barrier, None, profile_id_reader)
+    }
+
     /// Build a `MapPartitions` relation from an already-constructed UDF.
     fn map_partitions(
         &self,
@@ -997,12 +1011,23 @@ impl DataFrame {
         is_barrier: bool,
         profile_id: Option<i32>,
     ) -> DataFrame {
+        self.map_partitions_of(func, is_barrier, profile_id, None)
+    }
+
+    fn map_partitions_of(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id: Option<i32>,
+        profile_id_reader: Option<crate::udf::CommandPickler>,
+    ) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::MapPartitions {
             input: Arc::clone(&self.plan),
             func,
             is_barrier,
             profile_id,
+            profile_id_reader,
         };
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }

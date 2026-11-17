@@ -116,6 +116,14 @@ difference is intentional or tracked for a fix.
   of the core hold UTF-8). Such a str, of a name, a SQL string or a literal, fails the plans of the
   Column when they are built, as in PySpark, and its lone surrogates show escaped in the `__repr__`
   (`\ud800`), where PySpark's shows the str as it is (see `docs/compatibility.md`).
+- **A `StructField` of a name or a metadata str that UTF-8 cannot encode** (intentional; the types
+  of the core hold their names and metadata as UTF-8 and JSON). Its constructor raises the
+  `UnicodeEncodeError` of the str, of a lone surrogate, where PySpark's builds the field, whose
+  `json()`, `simpleString()`, `==` and pickle work, and whose uses fail later: the DataFrames of
+  `to`, `createDataFrame`, `from_json`, a cast or a UDF of such a type are made, and fail at the
+  first request that sends the type, with protobuf's `UnicodeEncodeError` of a name, or with the
+  server's error of the string of a lone surrogate (`Unpaired surrogate`) of the JSON in which
+  `json.dumps` escapes it.
 - **The pickle of a DataFrame whose plan fails to build** (tracked). `pickle` and cloudpickle of a
   DataFrame of a value that its plan does not take, such as `df.alias("a\ud800")` or
   `df.limit(2.0)`, raise the error of the plan, as the pickle holds the relation; PySpark's

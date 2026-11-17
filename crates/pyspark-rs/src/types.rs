@@ -1152,8 +1152,34 @@ fn py_metadata_to_map(
         .getattr("dumps")?
         .call1((d,))?
         .extract()?;
-    serde_json::from_str(&s)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+    serde_json::from_str(&s).or_else(|e| {
+        // The metadata of the core is JSON of UTF-8, which `json.dumps` escapes a lone surrogate
+        // of: the error is that of the first str that UTF-8 cannot encode, as of a name.
+        check_metadata_strs(d.as_any())?;
+        Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            e.to_string(),
+        ))
+    })
+}
+
+/// The `UnicodeEncodeError` of the first str of `value`, of metadata, that UTF-8 cannot encode:
+/// of the keys and the values of its dicts and the items of its lists and tuples, in their order.
+fn check_metadata_strs(value: &Bound<'_, PyAny>) -> PyResult<()> {
+    if let Ok(text) = value.cast::<pyo3::types::PyString>() {
+        text.to_cow()?;
+    } else if let Ok(dict) = value.cast::<pyo3::types::PyDict>() {
+        for (key, item) in dict.iter() {
+            check_metadata_strs(&key)?;
+            check_metadata_strs(&item)?;
+        }
+    } else if value.is_instance_of::<pyo3::types::PyList>()
+        || value.is_instance_of::<pyo3::types::PyTuple>()
+    {
+        for item in value.try_iter()? {
+            check_metadata_strs(&item?)?;
+        }
+    }
+    Ok(())
 }
 
 /// The keys of the JSON objects of the nested data types, in the order of PySpark's

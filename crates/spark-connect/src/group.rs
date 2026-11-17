@@ -391,17 +391,19 @@ impl GroupedData {
     }
 
     /// `GroupedData.transformWithState` (row output). `func` is the cloudpickled
-    /// stateful processor (eval type in the 211-214 range). Its return type is sent as the
-    /// output schema, which the server reads, as PySpark sends `outputStructType`.
+    /// stateful processor (eval type in the 211-214 range). `output_schema` is the output schema of
+    /// the `TransformWithStateInfo`, as PySpark sends `outputStructType`: a DDL string as a
+    /// [`DataType::Unparsed`], which the server parses, or the type, as
+    /// [`GroupedData::transform_with_state_in_pandas`] sends it.
     pub fn transform_with_state(
         &self,
         func: CommonInlineUserDefinedFunctionExpression,
+        output_schema: DataType,
         output_mode: &str,
         time_mode: &str,
         event_time_column_name: Option<&str>,
         initial_state: Option<&GroupedData>,
     ) -> DataFrame {
-        let output_schema = func.python_udf.output_type.clone();
         self.transform_with_state_impl(
             func,
             output_mode,
@@ -1174,14 +1176,20 @@ mod tests {
                 "3.12".to_string(),
             ),
         );
-        let result = grouped.transform_with_state(udf, "Update", "None", None, None);
-        // As PySpark's, the TransformWithStateInfo carries the output schema, which the
-        // server reads as the schema of the rows of the processor.
+        let unparsed = DataType::Unparsed {
+            data_type_string: "id long, c long".to_string(),
+        };
+        let result =
+            grouped.transform_with_state(udf, unparsed.clone(), "Update", "None", Some(""), None);
+        // As PySpark's, the TransformWithStateInfo carries the output schema as it is given, a
+        // DDL string unparsed, which the server parses as the schema of the rows of the
+        // processor, and the event-time column, which PySpark always sets.
         let Some(RelType::GroupMap(group_map)) = result.plan.to_proto().rel_type else {
             panic!("expected a GroupMap relation");
         };
         let info = group_map.transform_with_state_info.unwrap();
-        assert_eq!(info.output_schema, Some(output.to_proto()));
+        assert_eq!(info.output_schema, Some(unparsed.to_proto()));
+        assert_eq!(info.event_time_column_name, Some(String::new()));
         assert_eq!(info.time_mode, "None");
         assert_eq!(group_map.output_mode, Some("Update".to_string()));
     }

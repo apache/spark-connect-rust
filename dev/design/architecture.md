@@ -153,7 +153,9 @@ Python/pandas UDFs are **serialized, not executed** on the client:
    the `CommandPickler` of the binding, which the core calls after a first build of the plan, in
    the order of the build, outside its recursion, and then builds the plan again with the commands
    (`UdfCommands` of `spark_connect::expression`); the Rust API's payload holds the bytes of its
-   command.
+   command. The id of the resource profile of `mapInPandas` and `mapInArrow` is read the same
+   way, of a `CommandPickler` of `profile.id` in the `MapPartitions` plan, as PySpark's plan
+   reads it when it is built.
 2. Wrap into `CommonInlineUserDefinedFunction` with `PythonUDF { command,
    output_type, eval_type, python_ver }`. `eval_type` distinguishes SQL_BATCHED,
    SQL_ARROW_BATCHED, pandas scalar/grouped-map/cogrouped-map, mapInPandas,
