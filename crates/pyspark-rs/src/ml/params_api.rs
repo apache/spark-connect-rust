@@ -206,6 +206,51 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
         let _ = py;
         Ok(())
     }
+
+    /// The names of the defaults and of the set params of the object, in the order of PySpark's
+    /// `_defaultParamMap` and `_paramMap` of it, where it is not the order of the names of the
+    /// params (see [`native_params`]): of a validator or a OneVsRest, whose constructor sets its
+    /// defaults in the order of PySpark's, and whose set params are in the order of their setting
+    /// (of the metadata of a load). None of the others, whose maps of a fit, a load or a copy are of
+    /// the names, as `_resetUid` and `Params.copy` rebuild them of `params`.
+    fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+        None
+    }
+}
+
+/// The names of the set params of an object in the order of their first setting, as PySpark's
+/// `_paramMap` (a dict, which keeps the place of a key that is set again) keeps them, of an object
+/// whose set params are not in the order of their names: a OneVsRest of a load, of the classifier
+/// and then of the order of the metadata (see `ParamsHolder::map_order`).
+#[derive(Clone, Default)]
+pub(super) struct SetOrder(Vec<&'static str>);
+
+impl SetOrder {
+    /// The order of the names `names`, set in their order.
+    pub(super) fn of(names: &[&'static str]) -> Self {
+        let mut order = Self::default();
+        for name in names {
+            order.put(name);
+        }
+        order
+    }
+
+    /// Set `name`: in its place, if it is set.
+    pub(super) fn put(&mut self, name: &'static str) {
+        if !self.0.contains(&name) {
+            self.0.push(name);
+        }
+    }
+
+    /// Unset `name`, as `del self._paramMap[param]`.
+    pub(super) fn unset(&mut self, name: &str) {
+        self.0.retain(|n| *n != name);
+    }
+
+    /// The names, in their order.
+    pub(super) fn names(&self) -> Vec<&'static str> {
+        self.0.clone()
+    }
 }
 
 /// The defaults that an object holds itself, by param, where PySpark's `_defaultParamMap` has one
@@ -980,18 +1025,37 @@ pub(super) fn shallow_copy<'py, T: NativeInstance>(
     Ok(that)
 }
 
-/// The values of the params of `slf` by name, in the order of the class's params: its set values,
-/// and its defaults (its own, else the class's), of which the public class makes PySpark's
-/// `_paramMap` and `_defaultParamMap` of an object that this client makes (a fit, a load).
+/// The values of the params of `slf` by name: its set values, and its defaults (its own, else the
+/// class's), of which the public class makes PySpark's `_paramMap` and `_defaultParamMap` of an
+/// object that this client makes (a fit, a load). They are in the order of the object's maps
+/// (`ParamsHolder::map_order`), else of the class's params, which is of their names.
 pub(super) fn native_params<'py, T: ParamsHolder>(
     slf: &Bound<'py, T>,
 ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
     let py = slf.py();
+    let params = params_of(slf.as_any())?;
+    let order = slf.try_borrow()?.map_order();
+    // The params of the names `first`, in their order, and then the others, in the class's.
+    let ordered = |first: Option<&Vec<&'static str>>| -> Vec<&ParamMeta> {
+        let mut metas: Vec<&ParamMeta> = first
+            .into_iter()
+            .flatten()
+            .filter_map(|name| params.iter().find(|meta| meta.name == *name))
+            .collect();
+        for meta in params {
+            if !metas.iter().any(|m| m.name == meta.name) {
+                metas.push(meta);
+            }
+        }
+        metas
+    };
     let (set, defaults) = (PyDict::new(py), PyDict::new(py));
-    for meta in params_of(slf.as_any())? {
+    for meta in ordered(order.as_ref().map(|(_, set)| set)) {
         if let Some(value) = set_value_of(slf, &meta.name)? {
             set.set_item(&meta.name, value)?;
         }
+    }
+    for meta in ordered(order.as_ref().map(|(defaults, _)| defaults)) {
         if let Some(value) = default_value(slf, meta)? {
             defaults.set_item(&meta.name, value)?;
         }

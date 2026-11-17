@@ -985,32 +985,17 @@ impl ModelCore {
         Ok(core)
     }
 
-    /// The model of the server-side object `object` that a fetch returns, of the model's JVM class
-    /// `jvm_class`: of a new uid of the class `class` (`Identifiable._randomUID`), without set
-    /// params, a training summary, own defaults or cached members, as PySpark makes a model of a
-    /// bare object (the trees of an ensemble, the models of a OneVsRestModel).
-    pub(super) fn of_object(
-        py: Python<'_>,
-        jvm_class: &str,
-        class: &str,
-        object: spark_connect::ml::MlRef,
-    ) -> PyResult<Self> {
-        let session_id = object.session().session_id().to_string();
-        let uid = params_api::random_uid(py, class)?;
-        let operator = MlOperator::with_uid(jvm_class, &uid, OperatorType::Model);
-        Ok(Self {
-            model: Box::new(spark_connect::ml::ObjectModel::new(
-                object,
-                operator,
-                Params::new(),
-            )),
-            session_id,
-            summary: None,
-            summary_object: std::sync::OnceLock::new(),
-            own_defaults: Vec::new(),
-            cache: Default::default(),
-            method_cache: Default::default(),
-        })
+    /// Make the model of no server-side object (see [`ModelCore::unbound`]) the model of the
+    /// server-side object `object`, of its uid and params, as PySpark gives a model that its
+    /// constructor made the `_java_obj` of a `RemoteModelRef` (see `native_model!`'s
+    /// `of_constructor`).
+    pub(super) fn bind(&mut self, object: spark_connect::ml::MlRef) {
+        let operator = self.model.operator().clone();
+        let params = self.model.params().clone();
+        self.session_id = object.session().session_id().to_string();
+        self.model = Box::new(spark_connect::ml::ObjectModel::new(
+            object, operator, params,
+        ));
     }
 
     /// The model that a `Read` loads: of its object, the model's JVM class `jvm_class`, its uid and

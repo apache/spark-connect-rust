@@ -4,7 +4,8 @@
 use super::*;
 
 /// The trees of an ensemble, as PySpark's `trees` (a cached property of the model): each tree
-/// is a `DecisionTreeRegressionModel` of the object that the server returns of its id.
+/// is a `DecisionTreeRegressionModel` of the constructor of the class and of the object that the
+/// server returns of its id (`DecisionTreeRegressionModel(RemoteModelRef(m))`).
 fn make_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> {
     let target = model.target()?;
     let objects = object::fetch_py(py, &target, "trees", &[])?
@@ -13,8 +14,7 @@ fn make_trees(py: Python<'_>, model: &object::ModelCore) -> PyResult<Py<PyAny>> 
     let trees = objects
         .into_iter()
         .map(|tree| {
-            PyDecisionTreeRegressionModel::of_object(py, tree)
-                .and_then(|m| crate::ml::object::new_py(py, m))
+            PyDecisionTreeRegressionModel::of_constructor(py, |_| Ok(tree)).map(Bound::unbind)
         })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(PyList::new(py, trees)?.into_any().unbind())
@@ -622,12 +622,9 @@ native_summary! {
     relations: [
         "predictions" => (predictions, "predictions"),
     ];
-    relation_methods: ["residuals" => (
-            residuals,
-            "residuals",
-            (residualsType = "deviance"),
-            "($self, residualsType='deviance')"
-        )];
+    relation_methods: [
+        "residuals" => (residuals, "residuals", "($self, residualsType='deviance')"),
+    ];
 }
 
 native_summary! {

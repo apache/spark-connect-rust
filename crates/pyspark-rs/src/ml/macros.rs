@@ -8,10 +8,12 @@
 //! they are, and the generated ones.
 //!
 //! The arguments of the methods and DataFrames of a model or a summary are the Python objects as
-//! given, which a fetch sends as PySpark's `_call_java` does. Each is written with its default of
-//! PySpark, in Python (`(value)`, `(beta = 1.0)`, `(residualsType = "deviance")`), and a method of
-//! a default gives its text signature too (`"($self, beta=1.0)"`), which PyO3 cannot render of a
-//! default that it evaluates.
+//! given, which a fetch sends as PySpark's `_call_java` does. Each argument of a method is written
+//! with its default of PySpark, in Python (`(value)`, `(beta = 1.0)`), and a method of a default
+//! gives its text signature too (`"($self, beta=1.0)"`), which PyO3 cannot render of a default
+//! that it evaluates. A DataFrame method takes any arguments, as PySpark's
+//! `try_remote_attribute_relation` does, and is written with the text signature of PySpark's
+//! (`"($self, residualsType='deviance')"`).
 
 /// The `#[pymethods]` block of the class `$ty`: the methods `$methods`, the Params API of PySpark's
 /// `Params` (`params`, `getParam`, `hasParam`, `isSet`, `isDefined`, `hasDefault`, `getOrDefault`,
@@ -232,11 +234,11 @@ macro_rules! native_pymethods {
                     slf.getattr("uid")?.extract()
                 }
 
-                /// As `JavaParams.clear` over Spark Connect, which does nothing
-                /// (`try_remote_intercept`).
-                #[pyo3(name = "clear")]
-                fn __params_clear(&self, param: &Bound<'_, PyAny>) {
-                    let _ = param;
+                /// As `JavaParams.clear` over Spark Connect, which does nothing: its
+                /// `try_remote_intercept` takes any positional arguments and returns None.
+                #[pyo3(name = "clear", signature = (*args), text_signature = "($self, param)")]
+                fn __params_clear(&self, args: &Bound<'_, pyo3::types::PyTuple>) {
+                    let _ = args;
                 }
 
                 /// A copy of the same uid and params, with `extra`, as `Params.copy`.
@@ -396,8 +398,9 @@ macro_rules! native_pymethods {
 ///   `functools.cache` of the optional `cached_methods` (`"toLocal" => (to_local, make)`, a section
 ///   before `cached`), which a copy does not share;
 /// - `transform`, `copy`, `__repr__` (the server's `toString`, as `JavaModel.__repr__`), `write`,
-///   `save`, `read` and `load`, `fitted` (of a fit), `of_object` (of an object that a fetch
-///   returns), and the class's own methods `$body`.
+///   `save`, `read` and `load`, `fitted` (of a fit), `of_constructor` (of an object that a fetch
+///   returns, as PySpark's constructor makes the model of one), and the class's own methods
+///   `$body`.
 ///
 /// A model class constructs as PySpark's of no `java_model`: a model of no server-side object (see
 /// `ModelCore::unbound`).
@@ -406,9 +409,9 @@ macro_rules! native_pymethods {
 /// class `$name` (`LDAModel`, of `LocalLDAModel` and `DistributedLDAModel`): a
 /// `#[pyclass(subclass)]` of all these members but the persistence, which PySpark's base class
 /// does not have. A subclass (`#[pyclass(extends = $ty)]`, of no fields) has the persistence and
-/// its own members, and makes its objects of the base's `__fitted_with`, `__of_object_with` and
-/// `__loaded_with`, of a `make` that makes an object of the subclass of a core, of which a copy is
-/// of the same class (see `NativeInstance::duplicate`).
+/// its own members, and makes its objects of the base's `__fitted_with` and `__loaded_with`, of a
+/// `make` that makes an object of the subclass of a core, of which a copy is of the same class
+/// (see `NativeInstance::duplicate`).
 macro_rules! native_model {
     (
         $ty:ident = $name:literal in $module:literal, jvm: $jvm:literal;
@@ -466,15 +469,26 @@ macro_rules! native_model {
                 Self::__fitted_with(py, model, df, summary, Self::__make)
             }
 
-            /// The model of the server-side object `object` that a fetch returns (a tree of an
-            /// ensemble, a model of a OneVsRestModel), as PySpark makes one of a bare object: of a
-            /// new uid, without set params, a training summary or cached members.
+            /// The model of the server-side object that `object` gives of the uid of the model, as
+            /// PySpark makes the model of a bare object (a tree of an ensemble,
+            /// `DecisionTreeClassificationModel(RemoteModelRef(id))`) or of a class method
+            /// (`StringIndexerModel.from_labels`, which gives the model of `StringIndexerModel()`
+            /// the `_java_obj` of the object of its uid): of the constructor of its class, whose
+            /// `JavaModel.__init__` makes its uid and its param maps (the defaults in the order in
+            /// which it sets them), without a training summary or cached members, and then of the
+            /// object (see `ModelCore::bind`).
             #[allow(dead_code)]
-            pub(crate) fn of_object(
-                py: Python<'_>,
-                object: spark_connect::ml::MlRef,
-            ) -> PyResult<Self> {
-                Self::__of_object_with(py, $jvm, $name, object, Self::__make)
+            pub(crate) fn of_constructor<'py>(
+                py: Python<'py>,
+                object: impl FnOnce(&str) -> PyResult<spark_connect::ml::MlRef>,
+            ) -> PyResult<Bound<'py, Self>> {
+                let class = $crate::ml::object::public_class::<Self>(py)
+                    .unwrap_or_else(|| py.get_type::<Self>());
+                let model = class.call0()?.cast_into::<Self>()?;
+                let uid = model.try_borrow()?.core.uid();
+                let object = object(&uid)?;
+                model.try_borrow_mut()?.core.bind(object);
+                Ok(model)
             }
 
             fn __from_read<'py>(
@@ -517,12 +531,7 @@ macro_rules! native_model {
         ];
         relations: [ $( $r_py:literal => ($r:ident, $r_method:literal) ),* $(,)? ];
         relation_methods: [
-            $(
-                $rm_py:literal => (
-                    $rm:ident, $rm_method:literal, ( $( $rarg:ident $(= $rdefault:tt)? ),* )
-                    $(, $rm_sig:literal)?
-                )
-            ),* $(,)?
+            $( $rm_py:literal => ($rm:ident, $rm_method:literal, $rm_sig:literal) ),* $(,)?
         ];
         summary: $summary:expr;
         // Before `cached`: an optional section before the body of any tokens is ambiguous.
@@ -618,20 +627,6 @@ macro_rules! native_model {
                 let this = Self { core, make };
                 this.__prime(py)?;
                 Ok(this)
-            }
-
-            /// The model of a server-side object of the JVM class `jvm` and of PySpark's class
-            /// `name` (see `of_object`), whose copies `make` makes.
-            #[allow(dead_code)]
-            fn __of_object_with(
-                py: Python<'_>,
-                jvm: &str,
-                name: &str,
-                object: spark_connect::ml::MlRef,
-                make: fn(Python<'_>, $crate::ml::object::ModelCore) -> PyResult<Py<$ty>>,
-            ) -> PyResult<Self> {
-                let core = $crate::ml::object::ModelCore::of_object(py, jvm, name, object)?;
-                Ok(Self { core, make })
             }
 
             /// The model of what a `Read` of the JVM class `jvm` returns, of PySpark's class
@@ -731,11 +726,11 @@ macro_rules! native_model {
                     Ok(Py::new(slf.py(), PyDataFrame::new(df))?.into_any())
                 }
 
-                /// As `JavaParams.clear` over Spark Connect, which does nothing
-                /// (`try_remote_intercept`).
-                #[pyo3(name = "clear")]
-                fn __params_clear(&self, param: &Bound<'_, PyAny>) {
-                    let _ = param;
+                /// As `JavaParams.clear` over Spark Connect, which does nothing: its
+                /// `try_remote_intercept` takes any positional arguments and returns None.
+                #[pyo3(name = "clear", signature = (*args), text_signature = "($self, param)")]
+                fn __params_clear(&self, args: &Bound<'_, pyo3::types::PyTuple>) {
+                    let _ = args;
                 }
 
                 #[pyo3(name = "copy", signature = (extra=None))]
@@ -804,20 +799,19 @@ macro_rules! native_model {
                 )*
 
                 $(
-                    #[pyo3(
-                        name = $rm_py,
-                        signature = (
-                            $( $rarg $(= $crate::ml::object::py_default(stringify!($rdefault)))? ),*
-                        )
-                        $(, text_signature = $rm_sig)?
-                    )]
+                    /// A DataFrame method, as PySpark's `try_remote_attribute_relation` sends it
+                    /// over Spark Connect: the server's method of the positional arguments only.
+                    /// So keyword arguments are dropped, and no arity is checked (a call of other
+                    /// arguments than the server's method takes fails on the server when the
+                    /// result is analyzed).
+                    #[pyo3(name = $rm_py, signature = (*args, **_kwargs), text_signature = $rm_sig)]
                     fn $rm(
                         slf: &Bound<'_, Self>,
-                        $( $rarg: Py<PyAny> ),*
+                        args: &Bound<'_, pyo3::types::PyTuple>,
+                        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
                     ) -> PyResult<PyDataFrame> {
-                        let py = slf.py();
                         let target = slf.try_borrow()?.core.target()?;
-                        let args = vec![$( $rarg.into_bound(py) ),*];
+                        let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
                         $crate::ml::object::attribute_relation_py(&target, $rm_method, &args)
                     }
                 )*
@@ -1047,12 +1041,7 @@ macro_rules! native_summary {
         ];
         relations: [ $( $r_py:literal => ($r:ident, $r_method:literal) ),* $(,)? ];
         relation_methods: [
-            $(
-                $rm_py:literal => (
-                    $rm:ident, $rm_method:literal, ( $( $rarg:ident $(= $rdefault:tt)? ),* )
-                    $(, $rm_sig:literal)?
-                )
-            ),* $(,)?
+            $( $rm_py:literal => ($rm:ident, $rm_method:literal, $rm_sig:literal) ),* $(,)?
         ];
         $($body:tt)*
     ) => {
@@ -1100,17 +1089,19 @@ macro_rules! native_summary {
             )*
 
             $(
-                #[pyo3(
-                    name = $rm_py,
-                    signature = (
-                        $( $rarg $(= $crate::ml::object::py_default(stringify!($rdefault)))? ),*
-                    )
-                    $(, text_signature = $rm_sig)?
-                )]
-                fn $rm(slf: &Bound<'_, Self>, $( $rarg: Py<PyAny> ),*) -> PyResult<PyDataFrame> {
-                    let py = slf.py();
+                /// A DataFrame method, as PySpark's `try_remote_attribute_relation` sends it over
+                /// Spark Connect: the server's method of the positional arguments only. So
+                /// keyword arguments are dropped, and no arity is checked (a call of other
+                /// arguments than the server's method takes fails on the server when the result
+                /// is analyzed).
+                #[pyo3(name = $rm_py, signature = (*args, **_kwargs), text_signature = $rm_sig)]
+                fn $rm(
+                    slf: &Bound<'_, Self>,
+                    args: &Bound<'_, pyo3::types::PyTuple>,
+                    _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+                ) -> PyResult<PyDataFrame> {
                     let target = Self::summary_target(slf)?;
-                    let args = vec![$( $rarg.into_bound(py) ),*];
+                    let args: Vec<Bound<'_, PyAny>> = args.iter().collect();
                     $crate::ml::object::attribute_relation_py(&target, $rm_method, &args)
                 }
             )*

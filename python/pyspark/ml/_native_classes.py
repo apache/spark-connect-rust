@@ -41,11 +41,13 @@ PySpark's constructor did not make (a fit's model, a load, a native copy) are ma
 object's values at their first read.
 """
 
+import dis
 import functools
 import importlib
 import inspect
 import sys
 import types
+import warnings
 
 from pyspark import _pyspark as _native
 from pyspark import keyword_only
@@ -187,31 +189,80 @@ def _native_writer(obj):
     raise TypeError(f"{type(obj).__name__} has no native writer")
 
 
-def _of_pysparks(function, member, name, official):
-    """`function`, the member `name` of the public class of PySpark's class `official` over the
-    native member `member`, of PySpark's qualified name, and of the docstring and signature of
-    PySpark's member of the name (the native member's, if PySpark's class has none)."""
-    function.__name__ = name
-    function.__qualname__ = f"{official.__name__}.{name}"
+def _warn_as(function, message, category):
+    """Warn `message` of `category` as PySpark's `function` warns it of its `warnings.warn(...)`
+    call: of the location that `warnings.warn` gives it, the line of the call in the file of the
+    function, and of the module of the function and its registry of the warnings that it showed.
+    So the filters of the module (`filterwarnings(..., module="pyspark.ml.clustering")`) and the
+    actions of a location (`"default"`, `"module"`) take it as they take PySpark's."""
+    code = function.__code__
+    starts = dict(dis.findlinestarts(code))
+    line = code.co_firstlineno
+    for instruction in dis.get_instructions(code):
+        # The call of `warnings.warn` starts of the load of `warnings`, of the line that Python
+        # attributes the call to.
+        line = starts.get(instruction.offset) or line
+        if instruction.opname == "LOAD_GLOBAL" and instruction.argval == "warnings":
+            break
+    else:
+        raise ValueError(f"{function.__qualname__} calls no warnings.warn")
+    module = sys.modules[function.__module__]
+    registry = vars(module).setdefault("__warningregistry__", {})
+    warnings.warn_explicit(message, category, code.co_filename, line, module.__name__, registry)
+
+
+def _binding_of(function):
+    """The signature that Python binds a call of `function` of: of the function itself, which is
+    the wrapper of a decorator (`try_remote_attribute_relation` takes any arguments, and
+    `try_remote_intercept` any positional ones), rather than the function that it wraps, whose
+    signature `inspect.signature` gives; else of the function that a wrapper of no signature of its
+    own wraps (`functools.cache`'s, which passes it its arguments); else of any arguments."""
+    for follow_wrapped in (False, True):
+        try:
+            return inspect.signature(function, follow_wrapped=follow_wrapped)
+        except (TypeError, ValueError):
+            continue
+    Parameter = inspect.Parameter
+    return inspect.Signature(
+        [
+            Parameter("self", Parameter.POSITIONAL_ONLY),
+            Parameter("args", Parameter.VAR_POSITIONAL),
+            Parameter("kwargs", Parameter.VAR_KEYWORD),
+        ]
+    )
+
+
+def _synced(member, name, official, sync=True):
+    """The member `name` of the public class of PySpark's class `official`, which runs the native
+    method `member` of the native object's params synced first: a function of the parameters of
+    PySpark's member of the name, as Python binds a call of it (`_binding_of`), which passes them
+    to `member` as they are given, of the qualified name, module, docstring and signature of
+    PySpark's member (of the class of PySpark's that has it, `JavaMLWritable.write`). So a call that
+    does not bind raises PySpark's message (`JavaMLWritable.write() takes 1 positional argument but
+    2 were given`). Of a name that PySpark's class does not have, it is the native member's.
+    Without `sync`, it syncs no params, as of an object of none (a summary)."""
     _, pysparks = _member_of(official, name)
     if not callable(pysparks):
         pysparks = member
-    function.__doc__ = pysparks.__doc__
-    try:
-        function.__signature__ = inspect.signature(pysparks)
-    except (TypeError, ValueError):
-        pass
-    return function
-
-
-def _synced(member, name, official):
-    """The native method `member` (`name`), of the native object's params synced first."""
-
-    def synced(self, *args, **kwargs):
-        _sync(self)
-        return member(self, *args, **kwargs)
-
-    return _of_pysparks(synced, member, name, official)
+    binding = _binding_of(pysparks)
+    parameters = list(binding.parameters.values())
+    arguments = []
+    for parameter in parameters:
+        if parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            arguments.append("*" + parameter.name)
+        elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            arguments.append("**" + parameter.name)
+        elif parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+            arguments.append(f"{parameter.name}={parameter.name}")
+        else:
+            arguments.append(parameter.name)
+    # The object, of the first parameter, as every member of PySpark's has it (`self`).
+    body = f"return __member({', '.join(arguments)})"
+    if sync:
+        body = f"_sync({parameters[0].name})\n    {body}"
+    qualname = getattr(pysparks, "__qualname__", None) or f"{official.__name__}.{name}"
+    scope = {"_sync": _sync, "__member": member}
+    return _function(pysparks, name, qualname, body, scope, binding=binding)
 
 
 def _synced_property(descriptor, doc):
@@ -226,14 +277,21 @@ def _synced_property(descriptor, doc):
     return property(fget, doc=doc)
 
 
-def _function(official, name, qualname, body, scope):
+def _function(official, name, qualname, body, scope, binding=None):
     """A function `name` of the parameters of the function `official` (their names, kinds and
-    defaults), of the qualified name `qualname`, whose body is `body` of the names of `scope`:
-    Python binds a call of it as it binds `official`, and raises PySpark's messages of a call that
-    does not bind (`LinearSVC.__init__() got an unexpected keyword argument 'foo'`)."""
-    signature = inspect.signature(official)
+    defaults), or of the signature `binding` if given, of the qualified name `qualname`, whose body
+    is `body` of the names of `scope`: Python binds a call of it as it binds `official`, and raises
+    PySpark's messages of a call that does not bind (`LinearSVC.__init__() got an unexpected
+    keyword argument 'foo'`). Its module, docstring and signature are those of `official` (of
+    this module and of `binding`, of a native `official` of none)."""
+    try:
+        signature = inspect.signature(official)
+    except (TypeError, ValueError):
+        if binding is None:
+            raise
+        signature = binding
     parts, defaults, star, positional_only = [], {}, False, False
-    for index, parameter in enumerate(signature.parameters.values()):
+    for index, parameter in enumerate((binding or signature).parameters.values()):
         kind = parameter.kind
         if positional_only and kind is not inspect.Parameter.POSITIONAL_ONLY:
             parts.append("/")
@@ -254,7 +312,7 @@ def _function(official, name, qualname, body, scope):
         parts.append(text)
     if positional_only:
         parts.append("/")
-    namespace = {**scope, **defaults}
+    namespace = {"__name__": __name__, **scope, **defaults}
     exec(f"def {name}({', '.join(parts)}):\n    {body}\n", namespace)  # noqa: S102
     function = namespace[name]
     if sys.version_info >= (3, 11):
@@ -290,19 +348,9 @@ def _dispatchers():
 
 
 # The member of the object that each dispatcher runs, of which the native class's own member (of
-# no param map) is the public class's.
+# no param map) is the public class's: PySpark's `_fit` (`_transform`, `_evaluate`) of the native
+# `fit` (`transform`, `evaluate`), of the native object's params synced first (see `_synced`).
 _PRIMITIVES = {"fit": "_fit", "transform": "_transform", "evaluate": "_evaluate"}
-
-
-def _primitive(member, name, official):
-    """PySpark's `_fit` (`_transform`, `_evaluate`) of the native member `member` (`fit`, ...), of
-    no param map, of the native object's params synced first."""
-
-    def primitive(self, dataset):
-        _sync(self)
-        return member(self, dataset)
-
-    return _of_pysparks(primitive, member, name, official)
 
 
 # The native members that a public class keeps of the native class whatever PySpark's are: the
@@ -340,21 +388,25 @@ def _constructors(native, official, holder):
                 raise TypeError("Method __init__ forces keyword arguments.")
             checker(None, **kwargs)
 
-    elif _is_summary(official):
+    elif _is_summary(official) or "java_model" in signature.parameters:
         # PySpark's own `JavaWrapper.__init__` of a summary, which keeps its `java_obj` in the
         # object's attributes (`_java_obj`), which the native members read, as PySpark's do: so a
         # summary of a subclass reads the `java_obj` of its `super().__init__`, and a copy or a
-        # pickle keeps it with the other attributes.
+        # pickle keeps it with the other attributes. And PySpark's own `JavaModel.__init__`, of no
+        # server-side object (the native constructor raises the AssertionError of PySpark's of
+        # another `java_model`, which asserts a `RemoteModelRef`): its `Params.__init__` makes the
+        # param maps and the Params of the object, `Identifiable.__init__` its uid (of the class's
+        # name), and the `_setDefault` of its classes the defaults in their order.
         __init__ = init
 
         def check(*args, **kwargs):
             checker(None, *args, **kwargs)
 
     else:
-        # The native constructor takes the object of the arguments (a model's `java_model`, a
-        # PipelineModel's `stages`); PySpark's `JavaModel.__init__` asserts a server-side object.
-        body = "assert java_model is None" if "java_model" in signature.parameters else "pass"
-        __init__ = _function(inner, "__init__", qualname, body, {})
+        # The native constructor takes the objects of the arguments (a PipelineModel's `stages`, a
+        # OneVsRestModel's `models`, a validator model's `bestModel`), which PySpark's `__init__`
+        # sets as attributes of the instance that are the native class's own.
+        __init__ = _function(inner, "__init__", qualname, "pass", {})
 
         def check(*args, **kwargs):
             checker(None, *args, **kwargs)
@@ -459,7 +511,7 @@ def _params_api(native, official, namespace):
             namespace[name] = _synced(getattr(native, name), name, official)
     for name, primitive in _PRIMITIVES.items():
         if hasattr(native, name) and (_member_of(official, name)[0], name) in dispatchers:
-            namespace[primitive] = _primitive(getattr(native, name), primitive, official)
+            namespace[primitive] = _synced(getattr(native, name), primitive, official)
     if hasattr(native, "__getstate__"):
         namespace["__getstate__"] = _synced(native.__getstate__, "__getstate__", official)
     if hasattr(native, "write"):
@@ -498,13 +550,9 @@ def _property_of(descriptor, doc):
 
 
 def _method_of(member, name, official):
-    """The native method `member` (`name`) of PySpark's class `official`, as PySpark names it and
-    documents it (see `_of_pysparks`)."""
-
-    def method(self, *args, **kwargs):
-        return member(self, *args, **kwargs)
-
-    return _of_pysparks(method, member, name, official)
+    """The native method `member` (`name`) of PySpark's class `official`, as PySpark names it,
+    documents it and binds a call of it (see `_synced`), of no params to sync."""
+    return _synced(member, name, official, sync=False)
 
 
 def _newargs_of(official):
