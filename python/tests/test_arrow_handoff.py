@@ -3665,17 +3665,29 @@ def test_float64_instance_conversion_hooks_keep_row_fallback(protocol, method):
 
 
 
+def _forget_pandas_input(monkeypatch):
+    """Make the client import pyspark.sql._pandas_input again, as on its first use. The import
+    also binds the new module to the package's attribute, which removing the entry of sys.modules
+    does not restore: both are restored at the end of the test, so that a later test patches the
+    module that the client imports."""
+    import sys
+
+    import pyspark.sql
+
+    monkeypatch.delitem(sys.modules, "pyspark.sql._pandas_input", raising=False)
+    monkeypatch.delattr(pyspark.sql, "_pandas_input", raising=False)
+
+
 @pytest.mark.parametrize("method", ["astype", "notna", "where"])
 @pytest.mark.parametrize("before_import", [False, True])
 def test_float64_class_conversion_hooks_keep_row_fallback(
     protocol, monkeypatch, method, before_import
 ):
     import importlib
-    import sys
 
     helper_name = "pyspark.sql._pandas_input"
     if before_import:
-        monkeypatch.delitem(sys.modules, helper_name, raising=False)
+        _forget_pandas_input(monkeypatch)
     else:
         importlib.import_module(helper_name)
     values = np.arange(100000, dtype=np.float64)
@@ -6021,11 +6033,10 @@ def test_string_class_conversion_hooks_keep_row_fallback(
     protocol, monkeypatch, method, before_import
 ):
     import importlib
-    import sys
 
     name = "pyspark.sql._pandas_input"
     if before_import:
-        monkeypatch.delitem(sys.modules, name, raising=False)
+        _forget_pandas_input(monkeypatch)
     else:
         importlib.import_module(name)
     frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
