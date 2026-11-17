@@ -1060,23 +1060,40 @@ def test_arrow_input_zero_column_table(protocol, kind):
         assert state["relations"][0].local_relation.HasField("schema") == explicit
 
 
-@pytest.mark.parametrize("schema,expected_width", [
-    ("x long", "1"),
-    ("x long, y long, z long", "3"),
-    ("long", "1"),
+@pytest.mark.parametrize("schema,names", [
+    ("x long", "['x']"),
+    ("x long, y long, z long", "['x', 'y', 'z']"),
 ])
-def test_arrow_input_ddl_width_errors(protocol, schema, expected_width):
-    from pyspark.errors import PySparkValueError
-
+def test_arrow_input_ddl_struct_of_another_width_fails_the_cast(protocol, schema, names):
+    # As PySpark Connect's, which casts the table to the struct, whose names PyArrow's cast
+    # checks against the table's, before any width check.
     with _arrow_input_service(protocol) as (spark, state):
-        with pytest.raises(PySparkValueError) as error:
+        with pytest.raises(ValueError) as error:
             spark.createDataFrame(pa.table({"x": [1], "y": [2]}), schema)
-        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
-        assert error.value.getMessageParameters() == {
-            "expected_length": expected_width, "actual_length": "2",
-        }
+        assert type(error.value) is ValueError
+        assert str(error.value) == (
+            "Target schema's field names are not matching the table's field names: "
+            f"['x', 'y'], {names}"
+        )
         # As PySpark Connect's, the server parses the DDL schema.
         assert state["ddl_strings"] == [schema]
+        assert not state["relations"]
+        assert state["uploads"] == 0
+
+
+def test_arrow_input_ddl_width_errors(protocol):
+    from pyspark.errors import PySparkValueError
+
+    # An atomic type types one column: as PySpark Connect's, the table is cast to the schema of
+    # its own types, and then has another number of columns.
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pa.table({"x": [1], "y": [2]}), "long")
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": "1", "actual_length": "2",
+        }
+        assert state["ddl_strings"] == ["long"]
         assert not state["relations"]
         assert state["uploads"] == 0
 
@@ -6224,6 +6241,53 @@ def test_pandas_explicit_nonnullable_null_raises_as_pyspark(protocol):
     assert type(error.value) is ValueError
     assert str(error.value) == "Casting field 'a' with null values to non-nullable"
     assert state["input_tables"] == []
+
+
+class _PandasSubclass(pd.DataFrame):
+    """A frame of a class of its own, which the row path converts."""
+
+
+@pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
+@pytest.mark.parametrize("data,schema,expected,actual", [
+    ({"a": [1], "b": [2]}, "a long", "1", "2"),
+    ({"a": [1]}, "x long, y long", "2", "1"),
+    ({"a": [1, 2]}, T.StructType([]), "0", "1"),
+    (None, "a long", "1", "0"),
+], ids=["more-columns", "fewer-columns", "no-fields", "no-columns"])
+def test_pandas_explicit_struct_of_another_width_raises_axis_length_mismatch(
+        protocol, frame_class, data, schema, expected, actual):
+    from pyspark.errors import PySparkValueError
+
+    # PySpark's conversion zips the columns with the fields: it drops the columns past the
+    # fields, fails the rename of fewer with PyArrow's ArrowInvalid, and takes the index of a
+    # frame of no columns as its columns. This client raises AXIS_LENGTH_MISMATCH for each
+    # rather than drop data (dev/parity/known-differences.md).
+    frame = frame_class(index=[5, 6]) if data is None else frame_class(data)
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(frame, schema)
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": expected, "actual_length": actual}
+        assert state["relations"] == []
+
+
+@pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
+def test_pandas_frame_of_no_columns_under_a_struct_of_no_fields_as_pyspark(protocol, frame_class):
+    from pyspark.errors import PySparkValueError
+
+    # As PySpark Connect's, which takes a frame of no columns as `pa.RecordBatch.from_pandas`
+    # does, of any class: a column of each level of its index unless it is a RangeIndex, one
+    # more than the fields of a struct of none. Official: AXIS_LENGTH_MISMATCH for the index
+    # [0, 1], and two rows of no columns for a RangeIndex, which the live suite collects.
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(frame_class(index=[0, 1]), T.StructType([]))
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": "0", "actual_length": "1"}
+        assert state["relations"] == []
+        spark.createDataFrame(frame_class(index=range(2)), T.StructType([]))
 
 
 @pytest.mark.parametrize("schema", [None, ["p", "q"], ["p"]], ids=["inferred", "names", "fewer"])

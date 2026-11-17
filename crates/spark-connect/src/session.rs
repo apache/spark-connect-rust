@@ -733,7 +733,12 @@ impl SparkSession {
 
     /// Create a DataFrame from a collection of Rows and a schema.
     ///
-    /// Mirrors `pyspark.sql.SparkSession.createDataFrame(rows, schema)`.
+    /// Mirrors `pyspark.sql.SparkSession.createDataFrame(rows, schema)`. As PySpark's, rows that
+    /// are not empty read the settings of `createDataFrame` of the server in one request, and a
+    /// relation of `spark.sql.session.localRelationCacheThreshold` bytes or more, of any size, is
+    /// uploaded as cached artifacts; a smaller one is inline. The rows are converted before that
+    /// request, so that rows that do not fit the schema fail without one. No rows send the
+    /// schema alone, with no request.
     pub fn create_dataframe(&self, rows: Vec<Row>, schema: DataType) -> Result<DataFrame> {
         self.create_dataframe_of(rows, schema, None)
     }
@@ -774,28 +779,32 @@ impl SparkSession {
         ))
     }
 
-    /// The local relation of `batch`: inline, without reading the server's configuration, when
-    /// it is smaller than [`LOCAL_RELATION_SETTINGS_BYTES`]; otherwise as the Arrow importer
-    /// sends one, which reads the server's local-relation settings and applies the cache
-    /// threshold and the size limit, as PySpark does. A single gRPC message cannot carry a
-    /// relation beyond the server's message size limit. With the settings given, which the
-    /// caller read already, no request reads them, and a relation of the cache threshold or
-    /// more is uploaded at any size, as PySpark's is.
+    /// The local relation of `batch`, as PySpark's `createDataFrame` sends one: of the server's
+    /// local-relation settings, which are read unless the caller read them already, a relation
+    /// of the cache threshold or more is uploaded as cached artifacts at any size, which fails
+    /// past the size limit; a smaller one is inline. Inline below [`INLINE_IPC_BYTES`], it is
+    /// the IPC stream of the batch; from it, as the Arrow importer writes one.
     fn local_relation(
         &self,
         batch: arrow::record_batch::RecordBatch,
         schema: DataType,
         options: Option<&crate::ArrowInputOptions>,
     ) -> Result<LogicalPlan> {
+        let fetched;
+        let options = match options {
+            Some(options) => options,
+            None => {
+                fetched = crate::ArrowInputOptions::from_client(&self.client)?;
+                &fetched
+            }
+        };
         let bytes = crate::arrow_input::batch_data_size(&batch);
-        let inline = bytes < LOCAL_RELATION_SETTINGS_BYTES
-            && options.is_none_or(|options| bytes < options.cache_threshold());
-        if !inline {
+        if bytes >= INLINE_IPC_BYTES || bytes >= options.cache_threshold() {
             return crate::arrow_input::create_relation(
                 &self.client,
                 vec![batch],
                 Some(schema),
-                options,
+                Some(options),
             );
         }
         Ok(LogicalPlan::LocalRelation {
@@ -804,10 +813,10 @@ impl SparkSession {
         })
     }
 
-    /// Create an inline local relation from columns with the same encoding as local rows.
-    ///
-    /// Unlike imported Arrow input, this path does not read server configuration or
-    /// upload artifacts. Callers must supply one column per struct field.
+    /// Create a DataFrame from columns, with the same encoding as local rows, and sent as
+    /// [`Self::create_dataframe`] sends rows: of the server's local-relation settings, read once,
+    /// inline, or uploaded at the cache threshold. Callers must supply one column per struct
+    /// field.
     pub fn create_dataframe_from_columns(
         &self,
         columns: Vec<arrow::array::ArrayRef>,
@@ -844,10 +853,10 @@ impl SparkSession {
     }
 
     /// Internal binding bridge for Arrow IPC already validated and encoded from
-    /// local rows or columns. Retains the row path's transport policy: inline, unless the
-    /// IPC is large enough to consult the server's local-relation settings.
-    /// Large IPC is decoded and its map field names normalized before re-encoding;
-    /// smaller IPC is passed through unchanged.
+    /// local rows or columns. Retains the row path's transport policy: of the server's
+    /// local-relation settings, read once, inline, or uploaded at the cache threshold.
+    /// IPC of [`INLINE_IPC_BYTES`] or more, or uploaded, is decoded and its map field names
+    /// normalized before re-encoding; smaller inline IPC is passed through unchanged.
     #[doc(hidden)]
     pub fn create_dataframe_from_inline_arrow_ipc(
         &self,
@@ -858,8 +867,8 @@ impl SparkSession {
     }
 
     /// Internal binding bridge: [`Self::create_dataframe_from_inline_arrow_ipc`] with the
-    /// settings that the caller read already (see [`Self::create_dataframe_with_options`]), so
-    /// that IPC of the cache threshold or more is uploaded at any size; not a stable API.
+    /// settings that the caller read already (see [`Self::create_dataframe_with_options`]); not
+    /// a stable API.
     #[doc(hidden)]
     pub fn create_dataframe_from_inline_arrow_ipc_with_options(
         &self,
@@ -876,8 +885,15 @@ impl SparkSession {
         schema: DataType,
         options: Option<&crate::ArrowInputOptions>,
     ) -> Result<DataFrame> {
-        let inline = data.len() < LOCAL_RELATION_SETTINGS_BYTES
-            && options.is_none_or(|options| data.len() < options.cache_threshold());
+        let fetched;
+        let options = match options {
+            Some(options) => options,
+            None => {
+                fetched = crate::ArrowInputOptions::from_client(&self.client)?;
+                &fetched
+            }
+        };
+        let inline = data.len() < INLINE_IPC_BYTES && data.len() < options.cache_threshold();
         let plan = if !inline {
             let reader =
                 arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
@@ -887,7 +903,7 @@ impl SparkSession {
             let batches = reader
                 .collect::<std::result::Result<Vec<_>, _>>()
                 .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?;
-            crate::arrow_input::create_relation(&self.client, batches, Some(schema), options)?
+            crate::arrow_input::create_relation(&self.client, batches, Some(schema), Some(options))?
         } else {
             LogicalPlan::LocalRelation {
                 schema: Some(schema),
@@ -1643,16 +1659,11 @@ fn row_width_mismatch(row_index: usize, actual: usize, expected: usize) -> Spark
     ))
 }
 
-/// Convert Arrow RecordBatch data to IPC bytes.
-/// Used by createDataFrame to package local data.
-/// The size of a local relation, in Arrow data, from which `createDataFrame` reads the
-/// server's local-relation settings and sends the relation as the Arrow importer does: inline
-/// below `spark.sql.session.localRelationCacheThreshold`, uploaded at it, and failing past
-/// `spark.sql.session.localRelationSizeLimit`, as PySpark does. Smaller relations are sent
-/// inline without that RPC: 64 KiB is far below the server's gRPC message size limit (128 MiB
-/// by default), so a relation this small cannot be too large to send, and the RPC would cost
-/// more than the transfer.
-const LOCAL_RELATION_SETTINGS_BYTES: usize = 64 << 10;
+/// The size of a local relation of `createDataFrame`, in Arrow data, below which a relation under
+/// `spark.sql.session.localRelationCacheThreshold` is sent inline in the IPC that encoded it: the
+/// stream of the batch of its rows or columns, or the IPC that the binding gave. From it, the
+/// relation is sent as the Arrow importer sends one, which writes the IPC of its batches again.
+const INLINE_IPC_BYTES: usize = 64 << 10;
 
 /// Internal binding bridge for encoding already converted local rows. The Python
 /// binding also uses it for native columns beside imported pandas Arrow columns.

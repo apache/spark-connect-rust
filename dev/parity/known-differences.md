@@ -66,15 +66,12 @@ difference is intentional or tracked for a fix.
   Replacing a nested dict value containing a Row hashes its original key and may compare
   keys during lookup. Custom key hooks can therefore run during discovery; callback
   counts follow normal Python dict behavior, including collisions.
-  Adapted frames use the Arrow importer's session settings and transport policy:
-  `spark.sql.session.localRelationCacheThreshold` selects inline data or cached-artifact
-  upload, with the importer's size and chunk limits. Frames whose discovery finds neither
-  Rows nor an error retain native conversion and its upstream transport policy. For native
-  rows, Arrow data below 64 KiB stays inline without that settings RPC; at 64 KiB or more,
-  the upstream path reads the local-relation settings. For adapted frames, a failure
-  reading the shared settings is reported at the first selected column's position, so an
-  earlier invalid native column is reported first. Official PySpark reads configuration
-  before converting any column.
+  Adapted frames are sent through the Arrow importer, with its size and chunk limits; frames
+  whose discovery finds neither Rows nor an error retain native conversion. Both take the
+  settings that `createDataFrame` reads in one request before it converts any column, as
+  official PySpark does, so that `spark.sql.session.localRelationCacheThreshold` selects
+  inline data or cached-artifact upload at any size, and a failure of that read is raised
+  before any column.
 
   Other columns run native scalar conversion (`py_to_value`) at most once per cell.
   Decimal typing can read original objects again: column typing calls `as_tuple()` on

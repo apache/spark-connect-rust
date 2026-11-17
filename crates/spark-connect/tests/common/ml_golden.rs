@@ -79,7 +79,8 @@ pub fn dataset(session: &SparkSession, spec: &Json) -> DataFrame {
 
 /// The golden dataset `name` (`label`, `weight` and `features`) as a DataFrame of its rows, as
 /// PySpark's createDataFrame builds it: a LocalRelation of the rows, whose features are a vector
-/// column, in one partition. It is built offline: no request is sent.
+/// column, in one partition. Its only request is the read of the settings of createDataFrame,
+/// as PySpark's, which the replay answers too.
 pub fn golden_dataset(session: &SparkSession, datasets: &Json, name: &str) -> DataFrame {
     let rows: Vec<Row> = datasets[name]["rows"]
         .as_array()
@@ -1035,7 +1036,7 @@ fn answer(
 }
 
 /// The replay's service: ExecutePlan answers ML commands from the golden, and Config and
-/// ReleaseExecute answer as a session needs. Any other RPC is refused.
+/// ReleaseExecute answer as a session and the golden datasets need. Any other RPC is refused.
 #[derive(Clone)]
 struct ReplayService(Shared);
 
@@ -1133,7 +1134,37 @@ fn response(
     }
 }
 
-/// Config: answers with no pairs, which leaves plan compression off.
+/// The settings that createDataFrame reads, and the defaults of a Spark 4.3.0 server for them.
+const CREATE_DATAFRAME_SETTINGS: [(&str, &str); 13] = [
+    ("spark.sql.timestampType", "TIMESTAMP_LTZ"),
+    ("spark.sql.session.timeZone", "UTC"),
+    ("spark.sql.session.localRelationCacheThreshold", "1048576"),
+    ("spark.sql.session.localRelationSizeLimit", "3221225472"),
+    ("spark.sql.session.localRelationChunkSizeRows", "10000"),
+    ("spark.sql.session.localRelationChunkSizeBytes", "16777216"),
+    (
+        "spark.sql.session.localRelationBatchOfChunksSizeBytes",
+        "1073741824",
+    ),
+    (
+        "spark.sql.execution.pandas.convertToArrowArraySafely",
+        "true",
+    ),
+    ("spark.sql.execution.pandas.inferPandasDictAsMap", "false"),
+    ("spark.sql.pyspark.inferNestedDictAsStruct.enabled", "false"),
+    (
+        "spark.sql.pyspark.legacy.inferArrayTypeFromFirstElement.enabled",
+        "false",
+    ),
+    (
+        "spark.sql.pyspark.legacy.inferMapTypeFromFirstPair.enabled",
+        "false",
+    ),
+    ("spark.sql.execution.arrow.useLargeVarTypes", "false"),
+];
+
+/// Config: answers a get of the settings of createDataFrame with a 4.3.0 server's defaults, and
+/// with no other pair, which leaves plan compression off.
 struct Config;
 
 impl UnaryService<Vec<u8>> for Config {
@@ -1141,11 +1172,26 @@ impl UnaryService<Vec<u8>> for Config {
     type Future = BoxFuture<Response<Vec<u8>>, Status>;
 
     fn call(&mut self, request: Request<Vec<u8>>) -> Self::Future {
-        let session_id = proto::ConfigRequest::decode(request.into_inner().as_slice())
-            .unwrap()
-            .session_id;
+        let request = proto::ConfigRequest::decode(request.into_inner().as_slice()).unwrap();
+        let keys = match request.operation.and_then(|operation| operation.op_type) {
+            Some(proto::config_request::operation::OpType::Get(get)) => get.keys,
+            _ => Vec::new(),
+        };
+        let pairs = keys
+            .into_iter()
+            .filter_map(|key| {
+                let (_, value) = CREATE_DATAFRAME_SETTINGS
+                    .iter()
+                    .find(|(setting, _)| *setting == key)?;
+                Some(proto::KeyValue {
+                    key,
+                    value: Some((*value).to_string()),
+                })
+            })
+            .collect();
         let body = proto::ConfigResponse {
-            session_id,
+            session_id: request.session_id,
+            pairs,
             ..Default::default()
         }
         .encode_to_vec();
