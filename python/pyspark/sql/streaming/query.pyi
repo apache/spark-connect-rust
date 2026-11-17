@@ -25,7 +25,8 @@ from py4j.java_gateway import JavaObject
 __all__ = ['StreamingQuery', 'StreamingQueryManager']
 
 class StreamingQuery:
-    def __init__(self, jsq: 'JavaObject') -> None: ...
+    def __init__(self, jsq: 'JavaObject') -> None:
+        self._jsq = jsq
     @property
     def id(self) -> str: ...
     @property
@@ -47,7 +48,8 @@ class StreamingQuery:
     def exception(self) -> Optional[StreamingQueryException]: ...
 
 class StreamingQueryManager:
-    def __init__(self, jsqm: 'JavaObject') -> None: ...
+    def __init__(self, jsqm: 'JavaObject') -> None:
+        self._jsqm = jsqm
     @property
     def active(self) -> List[StreamingQuery]: ...
     def get(self, id: str) -> Optional['StreamingQuery']: ...
@@ -57,7 +59,8 @@ class StreamingQueryManager:
     def removeListener(self, listener: StreamingQueryListener) -> None: ...
 
 class StreamingCheckpointManager:
-    def __init__(self, jmanager: 'JavaObject') -> None: ...
+    def __init__(self, jmanager: 'JavaObject') -> None:
+        self._jmanager = jmanager
     def repartition(self, checkpoint_location: str, num_partitions: int, enforce_exactly_once_sink: bool=True) -> None: ...
 
 # Names of the drop-in's module that PySpark's does not have.

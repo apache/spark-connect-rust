@@ -20,7 +20,7 @@
 from pyspark.errors.exceptions.base import SessionNotSameException as SessionNotSameException, PySparkIndexError as PySparkIndexError
 from pyspark.resource import ResourceProfile as ResourceProfile
 from pyspark.sql.connect.logging import logger as logger
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, Sequence, overload, Callable
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union, Sequence, overload, Callable, cast
 import pyarrow as pa
 import functools
 from pyspark import _NoValue
@@ -52,13 +52,60 @@ from pyspark.sql.plot import PySparkPlotAccessor
 
 class DataFrame(ParentDataFrame):
     def __new__(cls, *args: Any, **kwargs: Any) -> 'DataFrame': ...
-    def __init__(self, plan: plan.LogicalPlan, session: 'SparkSession'): ...
+    def __init__(self, plan: plan.LogicalPlan, session: 'SparkSession'):
+        self._plan = plan
+        if self._plan is None:
+            raise PySparkRuntimeError(
+                errorClass="MISSING_VALID_PLAN",
+                messageParameters={"operator": "__init__"},
+            )
+
+        self._session: "SparkSession" = session  # type: ignore[assignment]
+        if self._session is None:
+            raise PySparkRuntimeError(
+                errorClass="NO_ACTIVE_SESSION",
+                messageParameters={},
+            )
+
+        # Check whether _repr_html is supported or not, we use it to avoid calling RPC twice
+        # by __repr__ and _repr_html_ while eager evaluation opens.
+        self._support_repr_html = False
+        self._cached_schema: Optional[StructType] = None
+        self._cached_schema_serialized: Optional[bytes] = None
+        self._execution_info: Optional["ExecutionInfo"] = None
     def __reduce__(self) -> Tuple: ...
     def __repr__(self) -> str: ...
-    def _repr_html_(self) -> Optional[str]: ...
+    def _repr_html_(self) -> Optional[str]:
+        if not self._support_repr_html:
+            self._support_repr_html = True
+        (
+            repl_eager_eval_enabled,
+            repl_eager_eval_max_num_rows,
+            repl_eager_eval_truncate,
+        ) = self._session._client.get_configs(
+            "spark.sql.repl.eagerEval.enabled",
+            "spark.sql.repl.eagerEval.maxNumRows",
+            "spark.sql.repl.eagerEval.truncate",
+        )
+        if repl_eager_eval_enabled == "true":
+            table, _ = DataFrame(
+                plan.HtmlString(
+                    child=self._plan,
+                    num_rows=int(cast(str, repl_eager_eval_max_num_rows)),
+                    truncate=int(cast(str, repl_eager_eval_truncate)),
+                ),
+                session=self._session,
+            )._to_table()
+            return table[0][0].as_py()
+        else:
+            return None
     def _to_cols(self, *cols: Union[Sequence['ColumnOrNameOrOrdinal'], 'ColumnOrNameOrOrdinal'], arg_name: str="cols", allow_ordinal: bool=False, allow_sequence: bool=True, sort: bool=False) -> List[Column]: ...
     @property
-    def write(self) -> 'DataFrameWriter': ...
+    def write(self) -> 'DataFrameWriter':
+        def cb(qe: "ExecutionInfo") -> None:
+            self._execution_info = qe
+
+        return DataFrameWriter(self._plan, self._session, cb)
     @functools.cache
     def isEmpty(self) -> bool: ...
     @overload
@@ -168,16 +215,35 @@ class DataFrame(ParentDataFrame):
     def __dir__(self) -> List[str]: ...
     def collect(self) -> List[Row]: ...
     def _get_binary_as_bytes(self) -> bool: ...
-    def _to_table(self) -> Tuple['pa.Table', Optional[StructType]]: ...
+    def _to_table(self) -> Tuple['pa.Table', Optional[StructType]]:
+        query = self._plan.to_proto(self._session.client)
+        table, schema, self._execution_info = self._session.client.to_table(
+            query, self._plan.observations
+        )
+        assert table is not None
+        return (table, schema)
     def toArrow(self) -> 'pa.Table': ...
     def toPandas(self) -> 'PandasDataFrameLike': ...
-    def _to_pandas(self, **kwargs: Any) -> 'PandasDataFrameLike': ...
+    def _to_pandas(self, **kwargs: Any) -> 'PandasDataFrameLike':
+        query = self._plan.to_proto(self._session.client)
+        pdf, ei = self._session.client.to_pandas(query, self._plan.observations, **kwargs)
+        self._execution_info = ei
+        return pdf
     def transpose(self, indexColumn: Optional['ColumnOrName']=None) -> ParentDataFrame: ...
     def asTable(self) -> TableArg: ...
     def scalar(self) -> Column: ...
     def exists(self) -> Column: ...
     @property
-    def _schema(self) -> StructType: ...
+    def _schema(self) -> StructType:
+        if self._cached_schema is None:
+            query = self._plan.to_proto(self._session.client)
+            self._cached_schema = self._session.client.schema(query)
+            try:
+                self._cached_schema_serialized = CPickleSerializer().dumps(self._schema)
+            except Exception as e:
+                logger.warning(f"DataFrame schema pickle dumps failed with exception: {e}.")
+                self._cached_schema_serialized = None
+        return self._cached_schema
     @property
     def schema(self) -> StructType: ...
     @functools.cache
@@ -192,10 +258,30 @@ class DataFrame(ParentDataFrame):
     def transform(self, func: Callable[..., ParentDataFrame], *args: Any, **kwargs: Any) -> ParentDataFrame: ...
     def _explain_string(self, extended: Optional[Union[bool, str]]=None, mode: Optional[str]=None) -> str: ...
     def explain(self, extended: Optional[Union[bool, str]]=None, mode: Optional[str]=None) -> None: ...
-    def createTempView(self, name: str) -> None: ...
-    def createOrReplaceTempView(self, name: str) -> None: ...
-    def createGlobalTempView(self, name: str) -> None: ...
-    def createOrReplaceGlobalTempView(self, name: str) -> None: ...
+    def createTempView(self, name: str) -> None:
+        command = plan.CreateView(
+            child=self._plan, name=name, is_global=False, replace=False
+        ).command(session=self._session.client)
+        _, _, ei = self._session.client.execute_command(command, self._plan.observations)
+        self._execution_info = ei
+    def createOrReplaceTempView(self, name: str) -> None:
+        command = plan.CreateView(
+            child=self._plan, name=name, is_global=False, replace=True
+        ).command(session=self._session.client)
+        _, _, ei = self._session.client.execute_command(command, self._plan.observations)
+        self._execution_info = ei
+    def createGlobalTempView(self, name: str) -> None:
+        command = plan.CreateView(
+            child=self._plan, name=name, is_global=True, replace=False
+        ).command(session=self._session.client)
+        _, _, ei = self._session.client.execute_command(command, self._plan.observations)
+        self._execution_info = ei
+    def createOrReplaceGlobalTempView(self, name: str) -> None:
+        command = plan.CreateView(
+            child=self._plan, name=name, is_global=True, replace=True
+        ).command(session=self._session.client)
+        _, _, ei = self._session.client.execute_command(command, self._plan.observations)
+        self._execution_info = ei
     def cache(self) -> ParentDataFrame: ...
     def persist(self, storageLevel: StorageLevel=StorageLevel.MEMORY_AND_DISK_DESER) -> ParentDataFrame: ...
     @property
@@ -216,11 +302,41 @@ class DataFrame(ParentDataFrame):
     def sameSemantics(self, other: ParentDataFrame) -> bool: ...
     @functools.cache
     def semanticHash(self) -> int: ...
-    def writeTo(self, table: str) -> 'DataFrameWriterV2': ...
-    def mergeInto(self, table: str, condition: Column) -> 'MergeIntoWriter': ...
+    def writeTo(self, table: str) -> 'DataFrameWriterV2':
+        def cb(ei: "ExecutionInfo") -> None:
+            self._execution_info = ei
+
+        return DataFrameWriterV2(self._plan, self._session, table, cb)
+    def mergeInto(self, table: str, condition: Column) -> 'MergeIntoWriter':
+        def cb(ei: "ExecutionInfo") -> None:
+            self._execution_info = ei
+
+        return MergeIntoWriter(
+            self._plan,
+            self._session,
+            table,
+            condition,  # type: ignore[arg-type]
+            cb,
+        )
     def offset(self, num: int) -> ParentDataFrame: ...
-    def checkpoint(self, eager: bool=True) -> ParentDataFrame: ...
-    def localCheckpoint(self, eager: bool=True, storageLevel: Optional[StorageLevel]=None) -> ParentDataFrame: ...
+    def checkpoint(self, eager: bool=True) -> ParentDataFrame:
+        cmd = plan.Checkpoint(child=self._plan, local=False, eager=eager)
+        _, properties, self._execution_info = self._session.client.execute_command(
+            cmd.command(self._session.client)
+        )
+        assert "checkpoint_command_result" in properties
+        checkpointed = properties["checkpoint_command_result"]
+        assert isinstance(checkpointed._plan, plan.CachedRemoteRelation)
+        return checkpointed
+    def localCheckpoint(self, eager: bool=True, storageLevel: Optional[StorageLevel]=None) -> ParentDataFrame:
+        cmd = plan.Checkpoint(child=self._plan, local=True, eager=eager, storage_level=storageLevel)
+        _, properties, self._execution_info = self._session.client.execute_command(
+            cmd.command(self._session.client)
+        )
+        assert "checkpoint_command_result" in properties
+        checkpointed = properties["checkpoint_command_result"]
+        assert isinstance(checkpointed._plan, plan.CachedRemoteRelation)
+        return checkpointed
     def toJSON(self) -> ParentDataFrame: ...
     @property
     def rdd(self) -> 'RDD[Row]': ...
@@ -230,13 +346,15 @@ class DataFrame(ParentDataFrame):
     def plot(self) -> 'PySparkPlotAccessor': ...
 
 class DataFrameNaFunctions(ParentDataFrameNaFunctions):
-    def __init__(self, df: ParentDataFrame): ...
+    def __init__(self, df: ParentDataFrame):
+        self.df = df
     def fill(self, value: Union['LiteralType', Dict[str, 'LiteralType']], subset: Optional[Union[str, Tuple[str, ...], List[str]]]=None) -> ParentDataFrame: ...
     def drop(self, how: str="any", thresh: Optional[int]=None, subset: Optional[Union[str, Tuple[str, ...], List[str]]]=None) -> ParentDataFrame: ...
     def replace(self, to_replace: Union[List['LiteralType'], Dict['LiteralType', 'OptionalPrimitiveType']], value: Optional[Union['OptionalPrimitiveType', List['OptionalPrimitiveType'], _NoValueType]]=_NoValue, subset: Optional[List[str]]=None) -> ParentDataFrame: ...
 
 class DataFrameStatFunctions(ParentDataFrameStatFunctions):
-    def __init__(self, df: ParentDataFrame): ...
+    def __init__(self, df: ParentDataFrame):
+        self.df = df
     def cov(self, col1: str, col2: str) -> float: ...
     def corr(self, col1: str, col2: str, method: Optional[str]=None) -> float: ...
     def approxQuantile(self, col: Union[str, List[str], Tuple[str]], probabilities: Union[List[float], Tuple[float]], relativeError: float) -> Union[List[float], List[List[float]]]: ...

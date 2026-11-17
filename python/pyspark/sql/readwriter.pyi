@@ -38,12 +38,42 @@ class OptionUtils:
     def _set_opts(self, schema: Optional[Union[StructType, str]]=None, **options: 'OptionalPrimitiveType') -> None: ...
 
 class DataFrameReader(OptionUtils):
-    def __init__(self, spark: 'SparkSession'): ...
+    def __init__(self, spark: 'SparkSession'):
+        self._jreader = spark._jsparkSession.read()
+        self._spark = spark
     def _df(self, jdf: 'JavaObject') -> 'DataFrame': ...
-    def format(self, source: str) -> 'DataFrameReader': ...
-    def schema(self, schema: Union[StructType, str]) -> 'DataFrameReader': ...
-    def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameReader': ...
-    def options(self, **options: 'OptionalPrimitiveType') -> 'DataFrameReader': ...
+    def format(self, source: str) -> 'DataFrameReader':
+        self._jreader = self._jreader.format(source)
+        return self
+    def schema(self, schema: Union[StructType, str]) -> 'DataFrameReader':
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession._getActiveSessionOrCreate()
+        if isinstance(schema, StructType):
+            jschema = spark._jsparkSession.parseDataType(schema.json())
+            self._jreader = self._jreader.schema(jschema)
+        elif isinstance(schema, str):
+            self._jreader = self._jreader.schema(schema)
+        else:
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "arg_name": "schema",
+                    "expected_type": "str or struct type",
+                    "arg_type": type(schema).__name__,
+                },
+            )
+        return self
+    def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameReader':
+        if value is None:
+            return self
+        self._jreader = self._jreader.option(key, to_str(value))
+        return self
+    def options(self, **options: 'OptionalPrimitiveType') -> 'DataFrameReader':
+        for k, v in options.items():
+            if v is not None:
+                self._jreader = self._jreader.option(k, to_str(v))
+        return self
     def load(self, path: Optional[PathOrPaths]=None, format: Optional[str]=None, schema: Optional[Union[StructType, str]]=None, **options: 'OptionalPrimitiveType') -> 'DataFrame': ...
     def json(self, path: Union[str, List[str], 'RDD[str]', 'DataFrame'], schema: Optional[Union[StructType, str]]=None, primitivesAsString: Optional[Union[bool, str]]=None, prefersDecimal: Optional[Union[bool, str]]=None, allowComments: Optional[Union[bool, str]]=None, allowUnquotedFieldNames: Optional[Union[bool, str]]=None, allowSingleQuotes: Optional[Union[bool, str]]=None, allowNumericLeadingZero: Optional[Union[bool, str]]=None, allowBackslashEscapingAnyCharacter: Optional[Union[bool, str]]=None, mode: Optional[str]=None, columnNameOfCorruptRecord: Optional[str]=None, dateFormat: Optional[str]=None, timestampFormat: Optional[str]=None, multiLine: Optional[Union[bool, str]]=None, allowUnquotedControlChars: Optional[Union[bool, str]]=None, lineSep: Optional[str]=None, samplingRatio: Optional[Union[float, str]]=None, dropFieldIfAllNull: Optional[Union[bool, str]]=None, encoding: Optional[str]=None, locale: Optional[str]=None, pathGlobFilter: Optional[Union[bool, str]]=None, recursiveFileLookup: Optional[Union[bool, str]]=None, modifiedBefore: Optional[Union[bool, str]]=None, modifiedAfter: Optional[Union[bool, str]]=None, allowNonNumericNumbers: Optional[Union[bool, str]]=None, useUnsafeRow: Optional[Union[bool, str]]=None) -> 'DataFrame': ...
     def table(self, tableName: str) -> 'DataFrame': ...
@@ -61,12 +91,28 @@ class DataFrameReader(OptionUtils):
     def jdbc(self, url: str, table: str, *, predicates: List[str], properties: Optional[Dict[str, str]]=None) -> 'DataFrame': ...
 
 class DataFrameWriter(OptionUtils):
-    def __init__(self, df: 'DataFrame'): ...
+    def __init__(self, df: 'DataFrame'):
+        self._df = df
+        self._spark = df.sparkSession
+        self._jwrite = df._jdf.write()
     def _sq(self, jsq: 'JavaObject') -> 'StreamingQuery': ...
-    def mode(self, saveMode: Optional[str]) -> 'DataFrameWriter': ...
-    def format(self, source: str) -> 'DataFrameWriter': ...
-    def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameWriter': ...
-    def options(self, **options: 'OptionalPrimitiveType') -> 'DataFrameWriter': ...
+    def mode(self, saveMode: Optional[str]) -> 'DataFrameWriter':
+        if saveMode is not None:
+            self._jwrite = self._jwrite.mode(saveMode)
+        return self
+    def format(self, source: str) -> 'DataFrameWriter':
+        self._jwrite = self._jwrite.format(source)
+        return self
+    def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameWriter':
+        if value is None:
+            return self
+        self._jwrite = self._jwrite.option(key, to_str(value))
+        return self
+    def options(self, **options: 'OptionalPrimitiveType') -> 'DataFrameWriter':
+        for k, v in options.items():
+            if v is not None:
+                self._jwrite = self._jwrite.option(k, to_str(v))
+        return self
     @overload
     def partitionBy(self, *cols: str) -> 'DataFrameWriter': ...
     @overload
@@ -95,7 +141,10 @@ class DataFrameWriter(OptionUtils):
     def jdbc(self, url: str, table: str, mode: Optional[str]=None, properties: Optional[Dict[str, str]]=None) -> None: ...
 
 class DataFrameWriterV2:
-    def __init__(self, df: 'DataFrame', table: str): ...
+    def __init__(self, df: 'DataFrame', table: str):
+        self._df = df
+        self._spark = df.sparkSession
+        self._jwriter = df._jdf.writeTo(table)
     def using(self, provider: str) -> 'DataFrameWriterV2': ...
     def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameWriterV2': ...
     def options(self, **options: 'OptionalPrimitiveType') -> 'DataFrameWriterV2': ...

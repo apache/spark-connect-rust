@@ -26,13 +26,29 @@ from pyspark.sql.connect._typing import ColumnOrName
 __all__ = ['Window', 'WindowSpec']
 
 class WindowFrame:
-    def __init__(self, isRowFrame: bool, start: int, end: int) -> None: ...
+    def __init__(self, isRowFrame: bool, start: int, end: int) -> None:
+        super().__init__()
+
+        assert isinstance(isRowFrame, bool)
+        assert isinstance(start, int)
+        assert isinstance(end, int)
+        self._isRowFrame = isRowFrame
+        self._start = start
+        self._end = end
     def __repr__(self) -> str: ...
 
 class WindowSpec(ParentWindowSpec):
     def __new__(cls, partitionSpec: Sequence[Expression], orderSpec: Sequence[SortOrder], frame: Optional[WindowFrame]) -> 'WindowSpec': ...
     def __getnewargs__(self) -> Tuple[Any, ...]: ...
-    def __init__(self, partitionSpec: Sequence[Expression], orderSpec: Sequence[SortOrder], frame: Optional[WindowFrame]) -> None: ...
+    def __init__(self, partitionSpec: Sequence[Expression], orderSpec: Sequence[SortOrder], frame: Optional[WindowFrame]) -> None:
+        assert isinstance(partitionSpec, list) and all(
+            isinstance(p, Expression) for p in partitionSpec
+        )
+        assert isinstance(orderSpec, list) and all(isinstance(s, SortOrder) for s in orderSpec)
+        assert frame is None or isinstance(frame, WindowFrame)
+        self._partitionSpec = partitionSpec
+        self._orderSpec = orderSpec
+        self._frame = frame
     def partitionBy(self, *cols: Union['ColumnOrName', Sequence['ColumnOrName']]) -> 'WindowSpec': ...
     def orderBy(self, *cols: Union['ColumnOrName', Sequence['ColumnOrName']]) -> 'WindowSpec': ...
     def rowsBetween(self, start: int, end: int) -> 'WindowSpec': ...

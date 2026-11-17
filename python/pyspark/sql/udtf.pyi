@@ -22,7 +22,7 @@ from typing import Any, Type, Optional, Sequence, Union
 from pyspark.errors import PySparkAttributeError as PySparkAttributeError, PySparkPicklingError as PySparkPicklingError, PySparkTypeError as PySparkTypeError, PySparkImportError as PySparkImportError
 from pyspark.util import PythonEvalType as PythonEvalType
 from pyspark.sql.pandas.utils import require_minimum_pandas_version as require_minimum_pandas_version, require_minimum_pyarrow_version as require_minimum_pyarrow_version
-from pyspark.sql.types import DataType as DataType, StructType as StructType
+from pyspark.sql.types import DataType as DataType, StructType as StructType, _parse_datatype_string
 from py4j.java_gateway import JavaObject
 from pyspark.sql._typing import TVFArgumentOrName
 from pyspark.sql.dataframe import DataFrame
@@ -62,18 +62,56 @@ class AnalyzeResult:
 
 class SkipRestOfInputTableException(Exception): ...
 
+def _validate_udtf_handler(cls: Any, returnType: Optional[Union[StructType, str]]) -> None: ...
+
 class UserDefinedTableFunction:
-    def __init__(self, func: Type, returnType: Optional[Union[StructType, str]], name: Optional[str]=None, evalType: int=PythonEvalType.SQL_TABLE_UDF, deterministic: bool=False): ...
+    def __init__(self, func: Type, returnType: Optional[Union[StructType, str]], name: Optional[str]=None, evalType: int=PythonEvalType.SQL_TABLE_UDF, deterministic: bool=False):
+        _validate_udtf_handler(func, returnType)
+
+        self.func = func
+        self._returnType = returnType
+        self._returnType_placeholder: Optional[StructType] = None
+        self._inputTypes_placeholder = None
+        self._judtf_placeholder = None
+        self._name = name or func.__name__
+        self.evalType = evalType
+        self.deterministic = deterministic
     @property
-    def returnType(self) -> Optional[StructType]: ...
+    def returnType(self) -> Optional[StructType]:
+        if self._returnType is None:
+            return None
+        # `_parse_datatype_string` accesses to JVM for parsing a DDL formatted string.
+        # This makes sure this is called after SparkContext is initialized.
+        if self._returnType_placeholder is None:
+            if isinstance(self._returnType, str):
+                parsed = _parse_datatype_string(self._returnType)
+            else:
+                parsed = self._returnType
+            if not isinstance(parsed, StructType):
+                raise PySparkTypeError(
+                    errorClass="UDTF_RETURN_TYPE_MISMATCH",
+                    messageParameters={
+                        "name": self._name,
+                        "return_type": f"{parsed}",
+                    },
+                )
+            self._returnType_placeholder = parsed
+        return self._returnType_placeholder
     @property
-    def _judtf(self) -> 'JavaObject': ...
+    def _judtf(self) -> 'JavaObject':
+        if self._judtf_placeholder is None:
+            self._judtf_placeholder = self._create_judtf(self.func)
+        return self._judtf_placeholder
     def _create_judtf(self, func: Type) -> 'JavaObject': ...
     def __call__(self, *args: 'TVFArgumentOrName', **kwargs: 'TVFArgumentOrName') -> 'DataFrame': ...
-    def asDeterministic(self) -> 'UserDefinedTableFunction': ...
+    def asDeterministic(self) -> 'UserDefinedTableFunction':
+        self._judtf_placeholder = None
+        self.deterministic = True
+        return self
 
 class UDTFRegistration:
-    def __init__(self, sparkSession: 'SparkSession'): ...
+    def __init__(self, sparkSession: 'SparkSession'):
+        self.sparkSession = sparkSession
     def register(self, name: str, f: 'UserDefinedTableFunction') -> 'UserDefinedTableFunction': ...
 
 # Names of the drop-in's module that PySpark's does not have.

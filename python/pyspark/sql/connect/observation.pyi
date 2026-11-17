@@ -18,15 +18,50 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Any, Dict, Optional
+import uuid
 from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError, IllegalArgumentException as IllegalArgumentException, PySparkAssertionError as PySparkAssertionError
 from pyspark.sql.column import Column as Column
 from pyspark.sql.connect.dataframe import DataFrame as DataFrame
+import pyspark.sql.connect.plan as plan
 
 __all__ = ['Observation']
 
 class Observation:
-    def __init__(self, name: Optional[str]=None) -> None: ...
-    def _set_error(self, exc: BaseException) -> None: ...
-    def _on(self, df: DataFrame, *exprs: Column) -> DataFrame: ...
+    def __init__(self, name: Optional[str]=None) -> None:
+        if name is not None:
+            if not isinstance(name, str):
+                raise PySparkTypeError(
+                    errorClass="NOT_EXPECTED_TYPE",
+                    messageParameters={
+                        "arg_name": "name",
+                        "expected_type": "str",
+                        "arg_type": type(name).__name__,
+                    },
+                )
+            if name == "":
+                raise PySparkValueError(
+                    errorClass="VALUE_NOT_NON_EMPTY_STR",
+                    messageParameters={"arg_name": "name", "arg_value": name},
+                )
+        self._name = name
+        self._result: Optional[Dict[str, Any]] = None
+        self._error: Optional[BaseException] = None
+    def _set_error(self, exc: BaseException) -> None:
+        self._error = exc
+    def _on(self, df: DataFrame, *exprs: Column) -> DataFrame:
+        if self._result is not None:
+            raise PySparkAssertionError(errorClass="REUSE_OBSERVATION", messageParameters={})
+
+        if self._name is None:
+            self._name = str(uuid.uuid4())
+
+        if df.isStreaming:
+            raise IllegalArgumentException(
+                errorClass="UNSUPPORTED_OPERATION",
+                messageParameters={"operation": "Streaming DataFrame with Observation"},
+            )
+
+        self._result = {}
+        return DataFrame(plan.CollectMetrics(df._plan, self, list(exprs)), df._session)
     @property
     def get(self) -> Dict[str, Any]: ...

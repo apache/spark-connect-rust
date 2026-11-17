@@ -27,6 +27,7 @@ from pyspark.sql.connect.types import UnparsedDataType as UnparsedDataType
 from pyspark.sql.connect.utils import get_python_ver as get_python_ver
 from pyspark.sql.pandas.utils import require_minimum_pyarrow_version as require_minimum_pyarrow_version, require_minimum_pandas_version as require_minimum_pandas_version
 from pyspark.sql.udtf import AnalyzeArgument as AnalyzeArgument, AnalyzeResult as AnalyzeResult
+from pyspark.sql.udtf import _validate_udtf_handler
 from pyspark.sql.types import DataType as DataType, StructType as StructType
 from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError, PySparkTypeError as PySparkTypeError, PySparkAttributeError as PySparkAttributeError
 from pyspark.sql.connect._typing import ColumnOrName
@@ -34,11 +35,27 @@ from pyspark.sql.connect.dataframe import DataFrame
 from pyspark.sql.connect.session import SparkSession
 
 class UserDefinedTableFunction:
-    def __init__(self, func: Type, returnType: Optional[Union[StructType, str]], name: Optional[str]=None, evalType: int=PythonEvalType.SQL_TABLE_UDF, deterministic: bool=False) -> None: ...
+    def __init__(self, func: Type, returnType: Optional[Union[StructType, str]], name: Optional[str]=None, evalType: int=PythonEvalType.SQL_TABLE_UDF, deterministic: bool=False) -> None:
+        _validate_udtf_handler(func, returnType)
+
+        self.func = func
+        self.returnType: Optional[DataType] = (
+            None
+            if returnType is None
+            else UnparsedDataType(returnType)
+            if isinstance(returnType, str)
+            else returnType
+        )
+        self._name = name or func.__name__
+        self.evalType = evalType
+        self.deterministic = deterministic
     def _build_common_inline_user_defined_table_function(self, *args: 'ColumnOrName', **kwargs: 'ColumnOrName') -> CommonInlineUserDefinedTableFunction: ...
     def __call__(self, *args: 'ColumnOrName', **kwargs: 'ColumnOrName') -> 'DataFrame': ...
-    def asDeterministic(self) -> 'UserDefinedTableFunction': ...
+    def asDeterministic(self) -> 'UserDefinedTableFunction':
+        self.deterministic = True
+        return self
 
 class UDTFRegistration:
-    def __init__(self, sparkSession: 'SparkSession'): ...
+    def __init__(self, sparkSession: 'SparkSession'):
+        self.sparkSession = sparkSession
     def register(self, name: str, f: 'UserDefinedTableFunction') -> 'UserDefinedTableFunction': ...

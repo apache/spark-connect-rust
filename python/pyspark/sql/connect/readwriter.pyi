@@ -19,7 +19,7 @@
 
 from typing import Dict
 from typing import Optional, Union, List, overload, Tuple, Callable
-from pyspark.sql.connect.plan import Read as Read, LogicalPlan as LogicalPlan
+from pyspark.sql.connect.plan import Read as Read, LogicalPlan as LogicalPlan, WriteOperation, WriteOperationV2
 from pyspark.sql.types import StructType as StructType
 from pyspark.sql.utils import to_str as to_str
 from pyspark.errors import AnalysisException as AnalysisException, PySparkAttributeError as PySparkAttributeError, PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError
@@ -36,9 +36,29 @@ class OptionUtils:
     def _set_opts(self, schema: Optional[Union[StructType, str]]=None, **options: 'OptionalPrimitiveType') -> None: ...
 
 class DataFrameReader(OptionUtils):
-    def __init__(self, client: 'SparkSession'): ...
-    def format(self, source: str) -> 'DataFrameReader': ...
-    def schema(self, schema: Union[StructType, str]) -> 'DataFrameReader': ...
+    def __init__(self, client: 'SparkSession'):
+        self._client = client
+        self._format: Optional[str] = None
+        self._schema = ""
+        self._options: Dict[str, str] = {}
+    def format(self, source: str) -> 'DataFrameReader':
+        self._format = source
+        return self
+    def schema(self, schema: Union[StructType, str]) -> 'DataFrameReader':
+        if isinstance(schema, StructType):
+            self._schema = schema.json()
+        elif isinstance(schema, str):
+            self._schema = schema
+        else:
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "arg_name": "schema",
+                    "expected_type": "str or struct type",
+                    "arg_type": type(schema).__name__,
+                },
+            )
+        return self
     def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameReader': ...
     def options(self, **options: 'OptionalPrimitiveType') -> 'DataFrameReader': ...
     def load(self, path: Optional[PathOrPaths]=None, format: Optional[str]=None, schema: Optional[Union[StructType, str]]=None, **options: 'OptionalPrimitiveType') -> 'DataFrame': ...
@@ -61,7 +81,12 @@ class DataFrameReader(OptionUtils):
     def _jreader(self) -> None: ...
 
 class DataFrameWriter(OptionUtils):
-    def __init__(self, plan: 'LogicalPlan', session: 'SparkSession', callback: Optional[Callable[['ExecutionInfo'], None]]=None): ...
+    def __init__(self, plan: 'LogicalPlan', session: 'SparkSession', callback: Optional[Callable[['ExecutionInfo'], None]]=None):
+        self._df: "LogicalPlan" = plan
+        self._spark: "SparkSession" = session
+        self._write: "WriteOperation" = WriteOperation(self._df)
+
+        self._callback = callback if callback is not None else lambda _: None
     def mode(self, saveMode: Optional[str]) -> 'DataFrameWriter': ...
     def format(self, source: str) -> 'DataFrameWriter': ...
     def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameWriter': ...
@@ -94,7 +119,12 @@ class DataFrameWriter(OptionUtils):
     def jdbc(self, url: str, table: str, mode: Optional[str]=None, properties: Optional[Dict[str, str]]=None) -> None: ...
 
 class DataFrameWriterV2(OptionUtils):
-    def __init__(self, plan: 'LogicalPlan', session: 'SparkSession', table: str, callback: Optional[Callable[['ExecutionInfo'], None]]=None): ...
+    def __init__(self, plan: 'LogicalPlan', session: 'SparkSession', table: str, callback: Optional[Callable[['ExecutionInfo'], None]]=None):
+        self._df: "LogicalPlan" = plan
+        self._spark: "SparkSession" = session
+        self._table_name: str = table
+        self._write: "WriteOperationV2" = WriteOperationV2(self._df, self._table_name)
+        self._callback = callback if callback is not None else lambda _: None
     def using(self, provider: str) -> 'DataFrameWriterV2': ...
     def option(self, key: str, value: 'OptionalPrimitiveType') -> 'DataFrameWriterV2': ...
     def options(self, **options: 'OptionalPrimitiveType') -> 'DataFrameWriterV2': ...

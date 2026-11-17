@@ -22,13 +22,45 @@ from pyspark.util import PythonEvalType as PythonEvalType
 from pyspark.sql.pandas.typehints import infer_group_arrow_eval_type_from_func as infer_group_arrow_eval_type_from_func
 from pyspark.sql.types import NumericType as NumericType, StructType as StructType
 from pyspark.sql.column import Column as Column
+from pyspark.sql.connect.functions import builtin as F
 from pyspark.errors import PySparkNotImplementedError as PySparkNotImplementedError, PySparkTypeError as PySparkTypeError
 from pyspark.sql.streaming.stateful_processor import StatefulProcessor as StatefulProcessor
 from pyspark.sql.connect._typing import LiteralType, PandasGroupedMapFunction, GroupedMapPandasUserDefinedFunction, PandasCogroupedMapFunction, ArrowCogroupedMapFunction, ArrowGroupedMapFunction, PandasGroupedMapFunctionWithState
 from pyspark.sql.connect.dataframe import DataFrame
 
 class GroupedData:
-    def __init__(self, df: 'DataFrame', group_type: str, grouping_cols: Sequence[Column], pivot_col: Optional[Column]=None, pivot_values: Optional[Sequence['LiteralType']]=None, grouping_sets: Optional[Sequence[Sequence[Column]]]=None) -> None: ...
+    def __init__(self, df: 'DataFrame', group_type: str, grouping_cols: Sequence[Column], pivot_col: Optional[Column]=None, pivot_values: Optional[Sequence['LiteralType']]=None, grouping_sets: Optional[Sequence[Sequence[Column]]]=None) -> None:
+        from pyspark.sql.connect.dataframe import DataFrame
+
+        assert isinstance(df, DataFrame)
+        self._df = df
+
+        assert isinstance(group_type, str) and group_type in [
+            "groupby",
+            "rollup",
+            "cube",
+            "pivot",
+            "grouping_sets",
+        ]
+        self._group_type = group_type
+
+        assert isinstance(grouping_cols, list) and all(isinstance(g, Column) for g in grouping_cols)
+        self._grouping_cols: List[Column] = grouping_cols
+
+        self._pivot_col: Optional["Column"] = None
+        self._pivot_values: Optional[List["Column"]] = None
+        if group_type == "pivot":
+            assert pivot_col is not None and isinstance(pivot_col, Column)
+            self._pivot_col = pivot_col
+
+            if pivot_values is not None:
+                assert isinstance(pivot_values, list)
+                self._pivot_values = [F.lit(v) for v in pivot_values]
+
+        self._grouping_sets: Optional[Sequence[Sequence["Column"]]] = None
+        if group_type == "grouping_sets":
+            assert grouping_sets is None or isinstance(grouping_sets, list)
+            self._grouping_sets = grouping_sets
     def __repr__(self) -> str: ...
     @overload
     def agg(self, *exprs: Column) -> 'DataFrame': ...
@@ -51,6 +83,9 @@ class GroupedData:
     def cogroup(self, other: 'GroupedData') -> 'PandasCogroupedOps': ...
 
 class PandasCogroupedOps:
-    def __init__(self, gd1: 'GroupedData', gd2: 'GroupedData'): ...
+    def __init__(self, gd1: 'GroupedData', gd2: 'GroupedData'):
+        gd1._df._check_same_session(gd2._df)
+        self._gd1 = gd1
+        self._gd2 = gd2
     def applyInPandas(self, func: 'PandasCogroupedMapFunction', schema: Union['StructType', str]) -> 'DataFrame': ...
     def applyInArrow(self, func: 'ArrowCogroupedMapFunction', schema: Union[StructType, str]) -> 'DataFrame': ...

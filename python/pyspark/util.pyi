@@ -18,6 +18,8 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 import contextlib
+import faulthandler
+import os
 import threading
 from contextlib import contextmanager
 from types import TracebackType
@@ -58,8 +60,75 @@ def handle_worker_exception(e: BaseException, outfile: IO, hide_traceback: Optio
 
 class InheritableThread(threading.Thread):
     _props: 'JavaObject'
-    def __init__(self, target: Callable, *args: Any, session: Optional['SparkSession']=None, **kwargs: Any): ...
-    def start(self) -> None: ...
+    def __init__(self, target: Callable, *args: Any, session: Optional['SparkSession']=None, **kwargs: Any):
+        from pyspark.sql import is_remote
+
+        # Spark Connect
+        if is_remote():
+            assert session is not None, "Spark Connect must be provided."
+            self._session = session
+
+            def copy_local_properties(*a: Any, **k: Any) -> Any:
+                # Set tags in child thread.
+                assert hasattr(self, "_tags")
+                assert session is not None
+                thread_local = session.client.thread_local
+                thread_local.tags = self._tags
+                return target(*a, **k)
+
+            super().__init__(target=copy_local_properties, *args, **kwargs)  # type: ignore[misc]
+        else:
+            # Non Spark Connect
+            from pyspark import SparkContext
+            from py4j.clientserver import ClientServer
+
+            self._session = session  # type: ignore[assignment]
+            if isinstance(SparkContext._gateway, ClientServer):
+                # Here's when the pinned-thread mode (PYSPARK_PIN_THREAD) is on.
+                def copy_local_properties(*a: Any, **k: Any) -> Any:
+                    # self._props is set before starting the thread to match the behavior with JVM.
+                    assert hasattr(self, "_props")
+                    if hasattr(self, "_tags"):
+                        for tag in self._tags:
+                            self._session.addTag(tag)
+                    assert SparkContext._active_spark_context is not None
+                    SparkContext._active_spark_context._jsc.sc().setLocalProperties(self._props)
+                    return target(*a, **k)
+
+                super().__init__(
+                    target=copy_local_properties,
+                    *args,
+                    **kwargs,  # type: ignore[misc]
+                )
+            else:
+                super().__init__(target=target, *args, **kwargs)  # type: ignore[misc]
+    def start(self) -> None:
+        from pyspark.sql import is_remote
+
+        if is_remote():
+            # Spark Connect
+            assert hasattr(self, "_session")
+            thread_local = self._session.client.thread_local
+            if not hasattr(thread_local, "tags"):
+                thread_local.tags = set()
+            self._tags = set(thread_local.tags)
+        else:
+            # Non Spark Connect
+            from pyspark import SparkContext
+            from py4j.clientserver import ClientServer
+
+            if isinstance(SparkContext._gateway, ClientServer):
+                # Here's when the pinned-thread mode (PYSPARK_PIN_THREAD) is on.
+
+                # Local property copy should happen in Thread.start to mimic JVM's behavior.
+                assert SparkContext._active_spark_context is not None
+                self._props = (
+                    SparkContext._active_spark_context._jsc.sc().getLocalProperties().clone()
+                )
+                if self._session is not None:
+                    self._tags = self._session.getTags()
+
+        return super().start()
 
 class PythonEvalType:
     NON_UDF: 'NonUDFType' = ...
@@ -100,10 +169,48 @@ def spark_connect_mode() -> str: ...
 def default_api_mode() -> str: ...
 
 class _FaulthandlerHelper:
-    def __init__(self) -> None: ...
-    def start(self) -> None: ...
-    def stop(self) -> None: ...
-    def start_periodic_traceback(self) -> None: ...
+    def __init__(self) -> None:
+        self._log_path: Optional[str] = None
+        self._log_file: Optional[TextIO] = None
+        self._periodic_traceback = False
+        self._reentry_depth = 0
+    def start(self) -> None:
+        self._reentry_depth += 1
+        if self._log_path:
+            # faulthandler is already enabled
+            return
+        self._log_path = os.environ.get("PYTHON_FAULTHANDLER_DIR", None)
+        if self._log_path:
+            self._log_path = os.path.join(self._log_path, str(os.getpid()))
+            self._log_file = open(self._log_path, "w", encoding="utf-8")
+
+            faulthandler.enable(file=self._log_file)
+    def stop(self) -> None:
+        self._reentry_depth -= 1
+        if self._reentry_depth > 0:
+            return
+        if self._log_path:
+            faulthandler.disable()
+            if self._log_file:
+                self._log_file.close()
+                self._log_file = None
+            try:
+                os.remove(self._log_path)
+            finally:
+                self._log_path = None
+        if self._periodic_traceback:
+            faulthandler.cancel_dump_traceback_later()
+            self._periodic_traceback = False
+    def start_periodic_traceback(self) -> None:
+        if self._periodic_traceback:
+            return
+
+        traceback_dump_interval_seconds = os.environ.get(
+            "PYTHON_TRACEBACK_DUMP_INTERVAL_SECONDS", None
+        )
+        if traceback_dump_interval_seconds is not None and int(traceback_dump_interval_seconds) > 0:
+            self._periodic_traceback = True
+            faulthandler.dump_traceback_later(int(traceback_dump_interval_seconds), repeat=True)
     def with_faulthandler(self, func: Callable) -> Callable: ...
     @contextmanager
     def enable_faulthandler(self, start_periodic_traceback: bool=True) -> Iterator[None]: ...

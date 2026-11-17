@@ -21,23 +21,73 @@ from typing import Callable, Any, Optional, Union
 from pyspark.util import PythonEvalType as PythonEvalType
 from pyspark.sql.connect.expressions import CommonInlineUserDefinedFunction, Expression as Expression
 from pyspark.sql.connect.column import Column as Column
-from pyspark.sql.types import DataType as DataType, StringType as StringType
+from pyspark.sql.types import DataType as DataType, StringType as StringType, _parse_datatype_string
+from pyspark.sql.udf import UserDefinedFunction as PySparkUserDefinedFunction
 from pyspark.sql.pandas.utils import require_minimum_pyarrow_version as require_minimum_pyarrow_version, require_minimum_pandas_version as require_minimum_pandas_version
 from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkRuntimeError as PySparkRuntimeError
 from pyspark.sql.connect._typing import ColumnOrName, DataTypeOrString, UserDefinedFunctionLike
 from pyspark.sql.connect.session import SparkSession
 
 class UserDefinedFunction:
-    def __init__(self, func: Callable[..., Any], returnType: 'DataTypeOrString'=StringType(), name: Optional[str]=None, evalType: int=PythonEvalType.SQL_BATCHED_UDF, deterministic: bool=True): ...
+    def __init__(self, func: Callable[..., Any], returnType: 'DataTypeOrString'=StringType(), name: Optional[str]=None, evalType: int=PythonEvalType.SQL_BATCHED_UDF, deterministic: bool=True):
+        if not callable(func):
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "callable",
+                    "arg_name": "func",
+                    "arg_type": type(func).__name__,
+                },
+            )
+
+        if not isinstance(returnType, (DataType, str)):
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "DataType or str",
+                    "arg_name": "returnType",
+                    "arg_type": type(returnType).__name__,
+                },
+            )
+
+        if not isinstance(evalType, int):
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "int",
+                    "arg_name": "evalType",
+                    "arg_type": type(evalType).__name__,
+                },
+            )
+
+        self.func = func
+        self._returnType = returnType
+        self._returnType_placeholder: Optional[DataType] = None
+        self._name = name or (
+            func.__name__ if hasattr(func, "__name__") else func.__class__.__name__
+        )
+        self.evalType = evalType
+        self.deterministic = deterministic
     @property
-    def returnType(self) -> DataType: ...
+    def returnType(self) -> DataType:
+        if self._returnType_placeholder is None:
+            if isinstance(self._returnType, DataType):
+                self._returnType_placeholder = self._returnType
+            else:
+                self._returnType_placeholder = _parse_datatype_string(self._returnType)
+
+        PySparkUserDefinedFunction._check_return_type(self._returnType_placeholder, self.evalType)
+        return self._returnType_placeholder
     def _build_common_inline_user_defined_function(self, *args: 'ColumnOrName', **kwargs: 'ColumnOrName') -> CommonInlineUserDefinedFunction: ...
     def __call__(self, *args: 'ColumnOrName', **kwargs: 'ColumnOrName') -> Column: ...
     def _wrapped(self) -> 'UserDefinedFunctionLike': ...
-    def asNondeterministic(self) -> 'UserDefinedFunction': ...
+    def asNondeterministic(self) -> 'UserDefinedFunction':
+        self.deterministic = False
+        return self
 
 class UDFRegistration:
-    def __init__(self, sparkSession: 'SparkSession'): ...
+    def __init__(self, sparkSession: 'SparkSession'):
+        self.sparkSession = sparkSession
     def register(self, name: str, f: Union[Callable[..., Any], 'UserDefinedFunctionLike'], returnType: Optional['DataTypeOrString']=None) -> 'UserDefinedFunctionLike': ...
     def registerJavaFunction(self, name: str, javaClassName: str, returnType: Optional['DataTypeOrString']=None) -> None: ...
     def registerJavaUDAF(self, name: str, javaClassName: str) -> None: ...

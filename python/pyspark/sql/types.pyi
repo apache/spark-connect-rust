@@ -24,6 +24,7 @@ from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer
 from pyspark.sql.utils import IllegalArgumentException as IllegalArgumentException, StringConcat
 from pyspark.sql.variant_utils import VariantUtils as VariantUtils
 from pyspark.errors import PySparkNotImplementedError as PySparkNotImplementedError, PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError, PySparkIndexError as PySparkIndexError, PySparkRuntimeError as PySparkRuntimeError, PySparkAttributeError as PySparkAttributeError, PySparkKeyError as PySparkKeyError
+from pyspark.sql.geo_utils import GeographicSpatialReferenceSystemMapper as _GeographicSRSMapper, CartesianSpatialReferenceSystemMapper as _CartesianSRSMapper
 import numpy as np
 from py4j.java_gateway import GatewayClient, JavaGateway, JavaClass
 
@@ -72,7 +73,8 @@ class StringType(AtomicType):
     providerSpark = 'spark'
     providerICU = 'icu'
     providers = [providerSpark, providerICU]
-    def __init__(self, collation: str="UTF8_BINARY"): ...
+    def __init__(self, collation: str="UTF8_BINARY"):
+        self.collation = collation
     @classmethod
     def collationProvider(cls, collationName: str) -> str: ...
     def simpleString(self) -> str: ...
@@ -81,13 +83,15 @@ class StringType(AtomicType):
     def isUTF8BinaryCollation(self) -> bool: ...
 
 class CharType(AtomicType):
-    def __init__(self, length: int): ...
+    def __init__(self, length: int):
+        self.length = length
     def simpleString(self) -> str: ...
     def jsonValue(self) -> str: ...
     def __repr__(self) -> str: ...
 
 class VarcharType(AtomicType):
-    def __init__(self, length: int): ...
+    def __init__(self, length: int):
+        self.length = length
     def simpleString(self) -> str: ...
     def jsonValue(self) -> str: ...
     def __repr__(self) -> str: ...
@@ -107,7 +111,8 @@ class DateType(DatetimeType, metaclass=DataTypeSingleton):
 class AnyTimeType(DatetimeType): ...
 
 class TimeType(AnyTimeType):
-    def __init__(self, precision: int=6): ...
+    def __init__(self, precision: int=6):
+        self.precision = precision
     def needConversion(self) -> bool: ...
     def toInternal(self, t: datetime.time) -> int: ...
     def fromInternal(self, nano: int) -> datetime.time: ...
@@ -128,7 +133,10 @@ class TimestampNTZType(DatetimeType, metaclass=DataTypeSingleton):
     def fromInternal(self, ts: int) -> datetime.datetime: ...
 
 class DecimalType(FractionalType):
-    def __init__(self, precision: int=10, scale: int=0): ...
+    def __init__(self, precision: int=10, scale: int=0):
+        self.precision = precision
+        self.scale = scale
+        self.hasPrecisionInfo = True  # this is a public API
     def simpleString(self) -> str: ...
     def jsonValue(self) -> str: ...
     def __repr__(self) -> str: ...
@@ -142,10 +150,26 @@ class SpatialType(AtomicType):
     MIXED_CRS = 'SRID:ANY'
 
 class GeographyType(SpatialType):
+    srid: int
     DEFAULT_CRS = 'OGC:CRS84'
     DEFAULT_ALG = 'SPHERICAL'
     DEFAULT_SRID = 4326
-    def __init__(self, srid: int | str): ...
+    def __init__(self, srid: int | str):
+        if srid == "ANY":
+            self.srid = GeographyType.MIXED_SRID
+            self._crs = GeographyType.MIXED_CRS
+        # Otherwise, the parameterized GEOGRAPHY type requires a valid integer SRID value.
+        elif not isinstance(srid, int) or (crs := _GeographicSRSMapper.get_string_id(srid)) is None:
+            raise IllegalArgumentException(
+                errorClass="ST_INVALID_SRID_VALUE",
+                messageParameters={
+                    "srid": str(srid),
+                },
+            )
+        else:
+            self.srid = srid
+            self._crs = crs
+        self._alg = GeographyType.DEFAULT_ALG
     @classmethod
     def _from_crs(cls, crs: str, alg: str) -> 'GeographyType': ...
     def simpleString(self) -> str: ...
@@ -156,9 +180,25 @@ class GeographyType(SpatialType):
     def toInternal(self, geography: Any) -> Any: ...
 
 class GeometryType(SpatialType):
+    srid: int
     DEFAULT_CRS = 'OGC:CRS84'
     DEFAULT_SRID = 4326
-    def __init__(self, srid: int | str): ...
+    def __init__(self, srid: int | str):
+        if srid == "ANY":
+            self.srid = GeometryType.MIXED_SRID
+            self._crs = GeometryType.MIXED_CRS
+        # Otherwise, the parameterized GEOMETRY type requires a valid integer SRID value.
+        elif not isinstance(srid, int) or (crs := _CartesianSRSMapper.get_string_id(srid)) is None:
+            raise IllegalArgumentException(
+                errorClass="ST_INVALID_SRID_VALUE",
+                messageParameters={
+                    "srid": str(srid),
+                },
+            )
+        # If the SRID is valid, initialize the GEOMETRY type with the corresponding CRS value.
+        else:
+            self.srid = srid
+            self._crs = crs
     @classmethod
     def _from_crs(cls, crs: str) -> 'GeometryType': ...
     def simpleString(self) -> str: ...
@@ -189,7 +229,22 @@ class DayTimeIntervalType(AnsiIntervalType):
     SECOND = 3
     _fields = {DAY: 'day', HOUR: 'hour', MINUTE: 'minute', SECOND: 'second'}
     _inverted_fields = dict(zip(_fields.values(), _fields.keys()))
-    def __init__(self, startField: Optional[int]=None, endField: Optional[int]=None): ...
+    def __init__(self, startField: Optional[int]=None, endField: Optional[int]=None):
+        if startField is None and endField is None:
+            # Default matched to scala side.
+            startField = DayTimeIntervalType.DAY
+            endField = DayTimeIntervalType.SECOND
+        elif startField is not None and endField is None:
+            endField = startField
+
+        fields = DayTimeIntervalType._fields
+        if startField not in fields.keys() or endField not in fields.keys():
+            raise PySparkRuntimeError(
+                errorClass="INVALID_INTERVAL_CASTING",
+                messageParameters={"start_field": str(startField), "end_field": str(endField)},
+            )
+        self.startField = startField
+        self.endField = endField
     def _str_repr(self) -> str: ...
     simpleString = _str_repr
     jsonValue = _str_repr
@@ -203,7 +258,22 @@ class YearMonthIntervalType(AnsiIntervalType):
     MONTH = 1
     _fields = {YEAR: 'year', MONTH: 'month'}
     _inverted_fields = dict(zip(_fields.values(), _fields.keys()))
-    def __init__(self, startField: Optional[int]=None, endField: Optional[int]=None): ...
+    def __init__(self, startField: Optional[int]=None, endField: Optional[int]=None):
+        if startField is None and endField is None:
+            # Default matched to scala side.
+            startField = YearMonthIntervalType.YEAR
+            endField = YearMonthIntervalType.MONTH
+        elif startField is not None and endField is None:
+            endField = startField
+
+        fields = YearMonthIntervalType._fields
+        if startField not in fields.keys() or endField not in fields.keys():
+            raise PySparkRuntimeError(
+                errorClass="INVALID_INTERVAL_CASTING",
+                messageParameters={"start_field": str(startField), "end_field": str(endField)},
+            )
+        self.startField = startField
+        self.endField = endField
     def _str_repr(self) -> str: ...
     simpleString = _str_repr
     jsonValue = _str_repr
@@ -220,7 +290,13 @@ class CalendarIntervalType(DataType, metaclass=DataTypeSingleton):
     def fromInternal(self, obj: Any) -> Any: ...
 
 class ArrayType(DataType):
-    def __init__(self, elementType: DataType, containsNull: bool=True): ...
+    def __init__(self, elementType: DataType, containsNull: bool=True):
+        assert isinstance(elementType, DataType), "elementType %s should be an instance of %s" % (
+            elementType,
+            DataType,
+        )
+        self.elementType = elementType
+        self.containsNull = containsNull
     def simpleString(self) -> str: ...
     def _as_nullable(self) -> 'ArrayType': ...
     def toNullable(self) -> 'ArrayType': ...
@@ -234,7 +310,18 @@ class ArrayType(DataType):
     def _build_formatted_string(self, prefix: str, stringConcat: StringConcat, maxDepth: int=JVM_INT_MAX) -> None: ...
 
 class MapType(DataType):
-    def __init__(self, keyType: DataType, valueType: DataType, valueContainsNull: bool=True): ...
+    def __init__(self, keyType: DataType, valueType: DataType, valueContainsNull: bool=True):
+        assert isinstance(keyType, DataType), "keyType %s should be an instance of %s" % (
+            keyType,
+            DataType,
+        )
+        assert isinstance(valueType, DataType), "valueType %s should be an instance of %s" % (
+            valueType,
+            DataType,
+        )
+        self.keyType = keyType
+        self.valueType = valueType
+        self.valueContainsNull = valueContainsNull
     def simpleString(self) -> str: ...
     def _as_nullable(self) -> 'MapType': ...
     def toNullable(self) -> 'MapType': ...
@@ -248,7 +335,16 @@ class MapType(DataType):
     def _build_formatted_string(self, prefix: str, stringConcat: StringConcat, maxDepth: int=JVM_INT_MAX) -> None: ...
 
 class StructField(DataType):
-    def __init__(self, name: str, dataType: DataType, nullable: bool=True, metadata: Optional[Dict[str, Any]]=None): ...
+    def __init__(self, name: str, dataType: DataType, nullable: bool=True, metadata: Optional[Dict[str, Any]]=None):
+        assert isinstance(dataType, DataType), "dataType %s should be an instance of %s" % (
+            dataType,
+            DataType,
+        )
+        assert isinstance(name, str), "field name %s should be a string" % (name)
+        self.name = name
+        self.dataType = dataType
+        self.nullable = nullable
+        self.metadata = metadata or {}
     def simpleString(self) -> str: ...
     def __repr__(self) -> str: ...
     def jsonValue(self) -> Dict[str, Any]: ...
@@ -266,7 +362,20 @@ class StructField(DataType):
     def _build_formatted_string(self, prefix: str, stringConcat: StringConcat, maxDepth: int=JVM_INT_MAX) -> None: ...
 
 class StructType(DataType):
-    def __init__(self, fields: Optional[List[StructField]]=None): ...
+    fields: List[StructField]
+    def __init__(self, fields: Optional[List[StructField]]=None):
+        if not fields:
+            self.fields = []
+            self.names = []
+        else:
+            self.fields = fields
+            self.names = [f.name for f in fields]
+            assert all(isinstance(f, StructField) for f in fields), (
+                "fields should be a list of StructField"
+            )
+        # Precalculated list of fields that need conversion with fromInternal/toInternal functions
+        self._needConversion = [f.needConversion() for f in self]
+        self._needSerializeAnyField = any(self._needConversion)
     @overload
     def add(self, field: str, data_type: Union[str, DataType], nullable: bool=True, metadata: Optional[Dict[str, Any]]=None) -> 'StructType': ...
     @overload
@@ -317,7 +426,9 @@ class UserDefinedType(DataType):
     def fromJson(cls, json: Dict[str, Any]) -> 'UserDefinedType': ...
 
 class VariantVal:
-    def __init__(self, value: bytes, metadata: bytes): ...
+    def __init__(self, value: bytes, metadata: bytes):
+        self.value = value
+        self.metadata = metadata
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
     def toPython(self) -> Any: ...
@@ -326,7 +437,9 @@ class VariantVal:
     def parseJson(cls, json_str: str) -> 'VariantVal': ...
 
 class Geography:
-    def __init__(self, wkb: bytes, srid: int): ...
+    def __init__(self, wkb: bytes, srid: int):
+        self.wkb = wkb
+        self.srid = srid
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
     def getSrid(self) -> int: ...
@@ -336,7 +449,9 @@ class Geography:
     def fromWKB(cls, wkb: bytes, srid: int) -> 'Geography': ...
 
 class Geometry:
-    def __init__(self, wkb: bytes, srid: int): ...
+    def __init__(self, wkb: bytes, srid: int):
+        self.wkb = wkb
+        self.srid = srid
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
     def getSrid(self) -> int: ...

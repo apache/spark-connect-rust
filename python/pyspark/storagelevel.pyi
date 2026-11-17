@@ -32,7 +32,12 @@ class StorageLevel:
     MEMORY_AND_DISK_2: ClassVar['StorageLevel']
     OFF_HEAP: ClassVar['StorageLevel']
     MEMORY_AND_DISK_DESER: ClassVar['StorageLevel']
-    def __init__(self, useDisk: bool, useMemory: bool, useOffHeap: bool, deserialized: bool, replication: int=1): ...
+    def __init__(self, useDisk: bool, useMemory: bool, useOffHeap: bool, deserialized: bool, replication: int=1):
+        self.useDisk = useDisk
+        self.useMemory = useMemory
+        self.useOffHeap = useOffHeap
+        self.deserialized = deserialized
+        self.replication = replication
     def __repr__(self) -> str: ...
     def __str__(self) -> str: ...
     def __eq__(self, other: Any) -> bool: ...
