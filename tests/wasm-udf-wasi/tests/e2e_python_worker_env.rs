@@ -123,7 +123,13 @@ fn python_worker_env_reaches_python_and_wasi_udfs() {
         .remote(&url)
         .get_or_create()
         .expect("session");
-    if !has_python_worker_env(&spark.version().unwrap()) {
+    let version = spark.version().unwrap();
+    if !has_python_worker_env(&version) {
+        // `spark.pythonWorkerEnv.*` is of Spark 4.4.0: say so in the log, as a skip, rather than
+        // pass silently.
+        eprintln!(
+            "skipping: the server is Spark {version}, and spark.pythonWorkerEnv.* is of 4.4.0"
+        );
         return;
     }
     let conf = spark.conf();

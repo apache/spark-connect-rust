@@ -46,7 +46,10 @@ crates/
   spark-connect         pure-Rust API mirroring pyspark: types, expressions,
                         column, plan, dataframe, functions, session, readwriter,
                         catalog, group, window, udf/udtf, streaming, observation
-  pyspark-rs            PyO3 bindings -> native module `_pyspark`
+  spark-connect-macros  procedural macros of the Rust WASM UDFs (#[spark_wasm_udf])
+  spark-connect-build   build.rs helper that compiles Rust WASM UDFs (embed_wasm_udf)
+  pyspark-rs            PyO3 bindings -> native module `_pyspark`, with the Rust
+                        protobuf runtime of `pyspark.sql.connect.proto` (src/pbmsg)
 python/
   pyspark/…             thin drop-in package; public modules re-export from
                         `_pyspark` so `from pyspark.sql import SparkSession` works
