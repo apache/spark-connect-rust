@@ -31,6 +31,10 @@ A public class of a native summary constructs of PySpark's own `JavaWrapper.__in
 the `java_obj` in the object's attributes (`_java_obj`), which the native members read, and has
 properties and methods of PySpark's docstrings and signatures over the native members.
 
+A public class of a native writer or reader (`RemoteMLWriter`, `RemoteMLReader`) is a plain class
+of the attributes of PySpark's `__init__`, which PySpark's own members set and read, and of the
+native `save` (`load`), which reads them at the save (load), as PySpark's does.
+
 A public class of a native class of params keeps them in PySpark's param maps (`_paramMap`,
 `_defaultParamMap`), in the object's attributes, and takes PySpark's own Python code over them (the
 Params API, the getters and setters, `setParams`, a `keyword_only` constructor) as it is. Before a
@@ -179,14 +183,28 @@ def _sync_values(value, synced):
 
 def _native_writer(obj):
     """The writer of the native class of `obj`, of the params of its maps (and of the objects that
-    it holds) as of now: a native writer's `save` reads them of it at the save, as PySpark's
-    `RemoteMLWriter.save` reads those of its instance."""
-    _sync(obj)
+    it holds) as of now: a writer's `save` saves its `_instance` of it at the save, as PySpark's
+    `RemoteMLWriter.save` reads the params of its instance then. None of an object of no native
+    class, which PySpark's own `RemoteMLWriter.saveInstance` saves."""
     for cls in type(obj).__mro__:
         member = vars(cls).get("write")
         if type(member).__name__ == "method_descriptor":
+            _sync(obj)
             return member(obj)
-    raise TypeError(f"{type(obj).__name__} has no native writer")
+    return None
+
+
+def _native_reader(clazz):
+    """The reader of the native class of the class `clazz` (a native class, its public class, or a
+    Python subclass of them), as its native `read()` of `clazz` gives it: a reader's `load` loads
+    of it at the load, as PySpark's `RemoteMLReader.load` reads its `_clazz` then. None of another
+    class or object, which PySpark's own `RemoteMLReader.loadInstance` loads."""
+    if isinstance(clazz, type):
+        for cls in clazz.__mro__:
+            member = vars(cls).get("read")
+            if type(member).__name__ == "classmethod_descriptor":
+                return member.__get__(None, clazz)()
+    return None
 
 
 def _warn_as(function, message, category):
@@ -574,6 +592,10 @@ def _public_class(native, official, parents):
     bases = (native,) + parents + (official,)
     # PySpark's metaclass (`ABCMeta` of the Params, `type` of the summaries).
     meta = type(official)
+    if _is_readwrite(official):
+        public = meta(native.__name__, bases, _readwrite_api(native, official))
+        _native._register_public_class(native, public)
+        return public
     holder = [None]
     __new__, __init__ = _constructors(native, official, holder)
     namespace = {
@@ -666,6 +688,38 @@ def _params_api(native, official, namespace):
     if hasattr(native, "read") and isinstance(_member_of(official, "read")[1], classmethod):
         # The native reader, of PySpark's class method (`JavaMLReadable.read`, `Pipeline.read`).
         namespace["read"] = _class_member(inspect.getattr_static(native, "read"), "read", official)
+
+
+def _is_readwrite(official):
+    """Whether PySpark's class `official` is a writer or a reader (`RemoteMLWriter`,
+    `RemoteMLReader`): a plain Python class of `BaseReadWrite`, whose `__init__` sets its state in
+    the object's attributes."""
+    from pyspark.ml.util import BaseReadWrite
+
+    return issubclass(official, BaseReadWrite)
+
+
+def _readwrite_api(native, official):
+    """The namespace of the public class of the native writer or reader `native` and PySpark's
+    class `official` (see `_is_readwrite`), a plain Python class as PySpark's: of PySpark's
+    docstring (None), and of the native `save` (`load`) as PySpark's `RemoteMLWriter.save`
+    (`RemoteMLReader.load`) names it, documents it and binds a call of it (see `_synced`), of no
+    params to sync, which reads the object's attributes at the save (load). The rest is PySpark's
+    own code, which the class takes of PySpark's class: its `__init__`, which sets the attributes
+    (`RemoteMLWriter.__init__(instance)`) after the native `__new__`, which leaves the arguments to
+    it as `object.__new__` does, so that a copy and a pickle make an object of none, as of
+    PySpark's class; `session`, `sparkSession` and `sc` (of `BaseReadWrite`, and of
+    `RemoteMLWriter`); `overwrite` and `option` (of `MLWriter`). It has no `__del__` and no
+    `_java_obj`, as PySpark's has none."""
+    namespace = {
+        "__module__": native.__module__,
+        "__qualname__": native.__qualname__,
+        "__doc__": official.__doc__,
+    }
+    for name in ("save", "load"):
+        if hasattr(native, name):
+            namespace[name] = _synced(getattr(native, name), name, official, sync=False)
+    return namespace
 
 
 def _summary_api(native, official, namespace):

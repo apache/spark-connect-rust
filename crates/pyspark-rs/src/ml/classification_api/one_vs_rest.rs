@@ -453,11 +453,8 @@ native_pymethods! {
     /// The writer of the model, as `OneVsRestModel.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `OneVsRestModelWriter` does).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            save_one_vs_rest_model,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(save_one_vs_rest_model))
+            .object_of(slf.as_any())
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -471,7 +468,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(load_one_vs_rest_model);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -636,7 +633,7 @@ pub(crate) fn save_one_vs_rest(
     spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    _options: &std::collections::HashMap<String, String>,
+    _options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     validate_one_vs_rest(instance, false)?;
     let (param_map, default_map) = param_maps(instance)?;
@@ -669,7 +666,7 @@ fn save_one_vs_rest_model(
     spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    _options: &std::collections::HashMap<String, String>,
+    _options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     validate_one_vs_rest(instance, true)?;
     let (param_map, default_map) = param_maps(instance)?;

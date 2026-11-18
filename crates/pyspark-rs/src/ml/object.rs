@@ -296,18 +296,24 @@ pub(super) fn attribute_relation_py(
 }
 
 /// The path of a `Write` or a `Read`, as PySpark's protobuf string field of
-/// `MlCommand.Write(path=...)` takes the Python value: a str as it is (of the UnicodeEncodeError of
-/// a lone surrogate), bytes of their UTF-8 (of the UnicodeDecodeError of other bytes), None as the
-/// empty path (which the server refuses), and anything else upb's TypeError.
+/// `MlCommand.Write(path=...)` takes the Python value: None as the empty path (which the server
+/// refuses), and anything else as `proto_string` takes it.
 fn proto_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
     if path.is_none() {
         return Ok(String::new());
     }
-    if path.is_instance_of::<PyString>() {
-        return path.extract();
+    proto_string(path)
+}
+
+/// The Python value `value` of a protobuf string field (of a message or of the entries of a map),
+/// as upb takes it: a str as it is (of the UnicodeEncodeError of a lone surrogate), bytes of their
+/// UTF-8 (of the UnicodeDecodeError of other bytes), and anything else upb's TypeError.
+fn proto_string(value: &Bound<'_, PyAny>) -> PyResult<String> {
+    if value.is_instance_of::<PyString>() {
+        return value.extract();
     }
-    if path.is_instance_of::<pyo3::types::PyBytes>() {
-        return path.call_method1("decode", ("utf-8",))?.extract();
+    if value.is_instance_of::<pyo3::types::PyBytes>() {
+        return value.call_method1("decode", ("utf-8",))?.extract();
     }
     Err(PyTypeError::new_err(
         "bad argument type for built-in operation",
@@ -328,11 +334,10 @@ fn python_path(path: &Bound<'_, PyAny>) -> PyResult<String> {
         .extract()
 }
 
-/// The session of the active Spark session of Python, which PySpark's `RemoteMLWriter.save` and
-/// `RemoteMLReader.load` use (`SparkSession.getActiveSession()`), or of `session` if given.
 /// The active session, as the Python object that `SparkSession.getActiveSession()` returns: of
 /// the saves and loads of PySpark's Python format, which `RemoteMLWriter` and `RemoteMLReader`
-/// make of it.
+/// make of it, and of the objects that PySpark's own `saveInstance` and `loadInstance` save and
+/// load.
 fn active_spark(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     let spark = py
         .import("pyspark.sql")?
@@ -345,6 +350,8 @@ fn active_spark(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
     Ok(spark)
 }
 
+/// The session of the active Spark session of Python, which PySpark's `RemoteMLWriter.save` and
+/// `RemoteMLReader.load` use (`SparkSession.getActiveSession()`), or of `session` if given.
 pub(super) fn session_of(py: Python<'_>, session: Option<&Py<PyAny>>) -> PyResult<SparkSession> {
     if let Some(session) = session {
         return Ok(session
@@ -534,23 +541,24 @@ fn training_summary_object(
 
 /// What a writer saves: an operator that is not fitted (an estimator, a transformer or an
 /// evaluator), of its params, a fitted model's object, of its params, or an object of PySpark's
-/// Python format.
+/// Python format, the `_instance` of the writer.
 pub(super) enum WriteTarget {
     Operator(MlOperator, Params),
     Object(MlRef, Params),
     /// An object of PySpark's Python format (a Pipeline, a validator), which its `PythonSave`
     /// saves.
-    Python(Py<PyAny>, PythonSave),
+    Python(PythonSave),
 }
 
 /// The save of an object `instance` of PySpark's Python format to `path`, of the Python session
-/// `spark` and its client `session`, and of the writer's options, as its `MLWriter.saveImpl`.
+/// `spark` and its client `session`, and of the writer's `optionMap`, as its `MLWriter.saveImpl`
+/// (the writer of a validator's model reads its `persistSubModels` of it).
 pub(super) type PythonSave = for<'py> fn(
     &Bound<'py, PyAny>,
     &Bound<'py, PyAny>,
     &SparkSession,
     &str,
-    &HashMap<String, String>,
+    &Bound<'py, PyAny>,
 ) -> PyResult<()>;
 
 /// The load of an object of PySpark's Python format from `path`, of the Python session `spark` and
@@ -558,47 +566,36 @@ pub(super) type PythonSave = for<'py> fn(
 pub(super) type PythonLoad =
     for<'py> fn(Python<'py>, &Bound<'py, PyAny>, &SparkSession, &str) -> PyResult<Py<PyAny>>;
 
-/// PySpark's `MLWriter` of a native class (`RemoteMLWriter` over Spark Connect): `overwrite()`,
-/// `option(key, value)` (of its lowercase key and string value), `session(spark)` and
-/// `save(path)`, which sends the `Write`.
+// PySpark's `RemoteMLWriter` over Spark Connect, a plain Python class, whose state is the
+// attributes of its `__init__(instance)`, in the object's attributes: `_sparkSession` (of
+// `BaseReadWrite.__init__`), `shouldOverwrite` and `optionMap` (of `MLWriter.__init__`), and
+// `_instance`. PySpark's own `session`, `sparkSession`, `overwrite` and `option`, which its public
+// class takes, read and set them, and `save` reads them at the save, as PySpark's does; so a writer
+// constructs, copies and pickles as PySpark's plain object. A writer that `write()` makes holds the
+// save of its object too, of the object's params as of then, of which the `save` of a writer saves
+// its `_instance` (see `save`). Commented, not documented: PyO3 makes a doc comment the class's
+// docstring, where PySpark's class has none.
 #[pyclass(
     subclass,
+    weakref,
+    dict,
     name = "RemoteMLWriter",
     module = "pyspark.ml.connect.readwrite"
 )]
 pub struct PyMLWriter {
-    target: WriteTarget,
-    /// Whether `save` overwrites, as the attribute of `MLWriter`.
-    #[pyo3(get, set)]
-    #[allow(non_snake_case)]
-    shouldOverwrite: bool,
-    /// The options, as the dict attribute of `MLWriter` that `option` sets.
-    #[pyo3(get, set)]
-    #[allow(non_snake_case)]
-    optionMap: Py<PyDict>,
-    session: Option<Py<PyAny>>,
-    /// The error of PySpark's serialization of the params, which `save` raises.
+    // What the save of the writer's object saves, of its params as of the writer's making; None of
+    // a writer of the constructor, a copy or a pickle.
+    target: Option<WriteTarget>,
+    // The error of PySpark's serialization of the params, which the save raises.
     error: Option<PyErr>,
-    /// The object of the writer, as PySpark's `RemoteMLWriter._instance`, whose params `save`
-    /// reads at the save.
-    instance: Option<Py<PyAny>>,
 }
 
 impl PyMLWriter {
     pub(super) fn new(target: WriteTarget) -> Self {
         Self {
-            target,
-            shouldOverwrite: false,
-            optionMap: Python::attach(|py| PyDict::new(py).unbind()),
-            session: None,
+            target: Some(target),
             error: None,
-            instance: None,
         }
-    }
-
-    /// The options of `optionMap`, as the `Write` sends them (a map of strings).
-    fn options(&self, py: Python<'_>) -> PyResult<HashMap<String, String>> {
-        self.optionMap.bind(py).extract()
     }
 
     pub(super) fn with_error(mut self, error: Option<PyErr>) -> Self {
@@ -606,84 +603,134 @@ impl PyMLWriter {
         self
     }
 
-    /// The writer of the object `instance`, whose params `save` reads at the save.
-    pub(super) fn with_instance(mut self, instance: &Bound<'_, PyAny>) -> Self {
-        self.instance = Some(instance.clone().unbind());
-        self
+    /// The writer of the object `instance`, as PySpark's `try_remote_write` makes it
+    /// (`RemoteMLWriter(instance)`): of the public class, of the attributes of PySpark's
+    /// `__init__`, in its order.
+    pub(super) fn object_of(self, instance: &Bound<'_, PyAny>) -> PyResult<Py<Self>> {
+        let py = instance.py();
+        let writer = new_object(py, self)?;
+        writer.setattr(pyo3::intern!(py, "_sparkSession"), py.None())?;
+        writer.setattr(pyo3::intern!(py, "shouldOverwrite"), false)?;
+        writer.setattr(pyo3::intern!(py, "optionMap"), PyDict::new(py))?;
+        writer.setattr(pyo3::intern!(py, "_instance"), instance)?;
+        Ok(writer.unbind())
     }
 }
 
 #[pymethods]
 impl PyMLWriter {
-    /// The AttributeError of an attribute that it does not have, as CPython's of PySpark's class.
-    fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        Err(params_api::no_attribute(slf.as_any(), name))
+    // As `object.__new__` of PySpark's class: the `__init__` of the public class, PySpark's
+    // `RemoteMLWriter.__init__(instance)`, takes the arguments (see `reduce::check_plain_new`).
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = None)]
+    fn new_plain(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::reduce::check_plain_new(cls, args, kwargs)?;
+        Ok(Self {
+            target: None,
+            error: None,
+        })
     }
 
-    /// Save to `path`, as `RemoteMLWriter.save`: of the active session (not the one that `session`
-    /// sets, which `RemoteMLWriter.save` does not read) of an operator, and of the session that
-    /// holds a model's object.
-    fn save(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<()> {
-        // PySpark's `RemoteMLWriter.save` reads the params of its instance at the save: the target
-        // of the object's params as of now, of its native class's writer.
-        let fresh = match &self.instance {
-            Some(instance) => Some(
-                py.import("pyspark.ml._native_classes")?
-                    .call_method1("_native_writer", (instance,))?
-                    .cast_into::<Self>()?,
-            ),
-            None => None,
-        };
-        let fresh = fresh.as_ref().map(|f| f.try_borrow()).transpose()?;
-        let (target, error) = match &fresh {
-            Some(f) => (&f.target, &f.error),
-            None => (&self.target, &self.error),
+    // The reduce of a plain object, of its attributes (see `readwrite_reduce`).
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        readwrite_reduce::<Self>(slf.as_any(), "_new_remote_ml_writer")
+    }
+
+    // Save to `path`, as `RemoteMLWriter.save` over Spark Connect: of the active session, of its
+    // `assert session is not None` first (not the one that `session` sets, which it does not
+    // read), and of the writer's `_instance`, `shouldOverwrite` and `optionMap` as of the save, in
+    // that order, as it reads them. A native object is saved of its params as of now, of the
+    // writer that `write()` of its native class gives (`_native_writer`), as `saveInstance` reads
+    // those of the object; another object as PySpark's own `RemoteMLWriter.saveInstance` saves it
+    // (`NotImplementedError: Unsupported write for <class 'NoneType'>`). The `Write` of an
+    // estimator, a transformer, an evaluator or a model (of the session that holds the model) takes
+    // the overwrite and the options as the protobuf fields of PySpark's `Write` take them
+    // (`proto_bool`, `proto_options`); a save of PySpark's Python format overwrites of the truth of
+    // `shouldOverwrite`, of the ML helper's `handleOverwrite` of the value as it is, as
+    // `RemoteMLWriter.handleOverwrite` does, and its writer reads the options as PySpark's does.
+    fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
+        let py = slf.py();
+        let session = session_of(py, None)?;
+        let instance = slf.getattr(pyo3::intern!(py, "_instance"))?;
+        let should_overwrite = slf.getattr(pyo3::intern!(py, "shouldOverwrite"))?;
+        let option_map = slf.getattr(pyo3::intern!(py, "optionMap"))?;
+        let fresh = py
+            .import("pyspark.ml._native_classes")?
+            .call_method1("_native_writer", (&instance,))?;
+        if fresh.is_none() {
+            let spark = active_spark(py)?;
+            py.import("pyspark.ml.connect.readwrite")?
+                .getattr("RemoteMLWriter")?
+                .call_method1(
+                    "saveInstance",
+                    (&instance, path, spark, &should_overwrite, &option_map),
+                )?;
+            return Ok(());
+        }
+        let fresh = fresh.cast_into::<Self>()?;
+        let (target, error) = {
+            let mut fresh = fresh.try_borrow_mut()?;
+            (fresh.target.take(), fresh.error.take())
         };
         if let Some(error) = error {
-            return Err(error.clone_ref(py));
+            return Err(error);
         }
-        let options = self.options(py)?;
+        let target = target.ok_or_else(|| {
+            PyTypeError::new_err(format!(
+                "{} has no native writer",
+                instance
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default()
+            ))
+        })?;
         match target {
             WriteTarget::Object(object, params) => {
-                let session = object.session().clone();
                 let path = proto_path(path)?;
+                let should_overwrite = proto_bool(&should_overwrite)?;
+                let options = proto_options(&option_map)?;
+                let session = object.session().clone();
                 interruptible(py, &session, || {
-                    spark_connect::ml::write_object(
-                        object,
-                        params,
+                    spark_connect::ml::write_object_opt(
+                        &object,
+                        &params,
                         &path,
-                        self.shouldOverwrite,
+                        should_overwrite,
                         &options,
                     )
                     .map_err(Box::new)
                 })
             }
             WriteTarget::Operator(operator, params) => {
-                let session = session_of(py, None)?;
                 let path = proto_path(path)?;
+                let should_overwrite = proto_bool(&should_overwrite)?;
+                let options = proto_options(&option_map)?;
                 interruptible(py, &session, || {
-                    spark_connect::ml::write_operator(
+                    spark_connect::ml::write_operator_opt(
                         &session,
-                        operator,
-                        params,
+                        &operator,
+                        &params,
                         &path,
-                        self.shouldOverwrite,
+                        should_overwrite,
                         &options,
                     )
                     .map_err(Box::new)
                 })
             }
-            WriteTarget::Python(instance, save) => {
+            WriteTarget::Python(save) => {
                 // As `RemoteMLWriter.saveInstance` of a meta-algorithm: the ML helper deletes the
-                // path of an overwrite (sent as PySpark's `serialize` sends the Python value),
-                // then the Python writer saves of the active session.
+                // path of a true `shouldOverwrite` (`handleOverwrite`, of the path and the value as
+                // PySpark's `serialize` sends them), then the Python writer saves of the active
+                // session, of the params that `_native_writer` synced.
                 let spark = active_spark(py)?;
-                let session = session_of(py, None)?;
-                if self.shouldOverwrite {
-                    let args = vec![
-                        fetch_arg_of(path)?,
-                        spark_connect::ml::FetchArg::Value(spark_connect::ml::MlValue::Bool(true)),
-                    ];
+                if should_overwrite.is_truthy()? {
+                    let args = vec![fetch_arg_of(path)?, fetch_arg_of(&should_overwrite)?];
                     interruptible(py, &session, || {
                         spark_connect::ml::fetch(
                             &spark_connect::ml::MlTarget::helper(&session),
@@ -694,71 +741,98 @@ impl PyMLWriter {
                         .map_err(Box::new)
                     })?;
                 }
-                // Of the params of the object (and of the objects that it holds) as of the save.
-                py.import("pyspark.ml._native_classes")?
-                    .call_method1("_sync", (instance,))?;
                 let path = python_path(path)?;
-                save(instance.bind(py), &spark, &session, &path, &options)
+                save(&instance, &spark, &session, &path, &option_map)
             }
         }
     }
+}
 
-    /// The object of the writer, as PySpark's `RemoteMLWriter._instance`.
-    #[getter(_instance)]
-    fn instance_of(&self, py: Python<'_>) -> Py<PyAny> {
-        match (&self.instance, &self.target) {
-            (Some(instance), _) | (None, WriteTarget::Python(instance, _)) => {
-                instance.clone_ref(py)
-            }
-            _ => py.None(),
-        }
+/// The `should_overwrite` of a `Write` of the Python value `value` (a writer's `shouldOverwrite`),
+/// as PySpark's `pb2.MlCommand.Write(should_overwrite=...)` takes it: None as unset (which the
+/// server reads as false), and anything else as protobuf's bool field takes it (a bool, or an int,
+/// true but of 0), with upb's TypeError of another value (`'str' object cannot be interpreted as
+/// an integer`).
+fn proto_bool(value: &Bound<'_, PyAny>) -> PyResult<Option<bool>> {
+    if value.is_none() {
+        return Ok(None);
     }
+    crate::pbmsg::bool_value(value).map(Some)
+}
 
-    /// Overwrite a saved one of the path, as `MLWriter.overwrite`.
-    fn overwrite(mut slf: PyRefMut<'_, Self>) -> PyRefMut<'_, Self> {
-        slf.shouldOverwrite = true;
-        slf
+/// The `options` of a `Write` of the Python value `options` (a writer's `optionMap`), as PySpark's
+/// `pb2.MlCommand.Write(options=...)` takes it: None as none, and else the entries that upb's map
+/// takes of its `update` (`MutableMapping.update`, of a mapping, an object of `keys` or pairs; of
+/// the items of a tuple as the arguments, as `PyObject_CallMethod` passes a tuple), of keys and
+/// values of str or UTF-8 bytes (`proto_string`).
+fn proto_options(options: &Bound<'_, PyAny>) -> PyResult<HashMap<String, String>> {
+    let py = options.py();
+    let mut entries = HashMap::new();
+    if options.is_none() {
+        return Ok(entries);
     }
+    let map = PyDict::new(py);
+    let mut args = vec![map.clone().into_any()];
+    match options.cast::<PyTuple>() {
+        Ok(tuple) => args.extend(tuple.iter()),
+        Err(_) => args.push(options.clone()),
+    }
+    py.import("collections.abc")?
+        .getattr("MutableMapping")?
+        .getattr("update")?
+        .call1(PyTuple::new(py, args)?)?;
+    for (key, value) in map.iter() {
+        entries.insert(proto_string(&key)?, proto_string(&value)?);
+    }
+    Ok(entries)
+}
 
-    /// An option of the writer, as `MLWriter.option`: `optionMap[key.lower()] = str(value)`.
-    fn option<'py>(
-        slf: PyRefMut<'py, Self>,
-        key: &Bound<'py, PyAny>,
-        value: &Bound<'py, PyAny>,
-    ) -> PyResult<PyRefMut<'py, Self>> {
-        let key = key.call_method0("lower")?;
-        slf.optionMap.bind(slf.py()).set_item(key, value.str()?)?;
-        Ok(slf)
+/// The reduce of `object`, a writer or a reader of the native class `T`, as `object.__reduce_ex__`
+/// gives it of PySpark's plain object, of the state of its attributes (see
+/// `reduce::plain_object_state`): `copyreg.__newobj__` of the class of an object of a subclass,
+/// which a pickle names by reference; and of an object of the public class of `T` (or of `T`),
+/// which no module has by its name (`pyspark.ml.connect.readwrite.RemoteMLWriter` is PySpark's
+/// class), the function `new` of the native module, which makes an object of it. So a copy and a
+/// pickle of a writer or a reader are of its class and its attributes, at every protocol.
+fn readwrite_reduce<'py, T: pyo3::PyTypeInfo>(
+    object: &Bound<'py, PyAny>,
+    new: &str,
+) -> PyResult<Bound<'py, PyTuple>> {
+    let py = object.py();
+    let cls = object.get_type();
+    let own = cls.is(py.get_type::<T>()) || public_class::<T>(py).is_some_and(|p| cls.is(&p));
+    if !own {
+        return crate::reduce::plain_reduce(object);
     }
+    let new = py.import("pyspark._pyspark")?.getattr(new)?;
+    let args = PyTuple::empty(py).into_any();
+    match crate::reduce::plain_object_state(object)? {
+        Some(state) => PyTuple::new(py, [new, args, state]),
+        None => PyTuple::new(py, [new, args]),
+    }
+}
 
-    /// The session to save with, as `BaseReadWrite.session`.
-    fn session<'py>(mut slf: PyRefMut<'py, Self>, spark: Bound<'py, PyAny>) -> PyRefMut<'py, Self> {
-        slf.session = Some(spark.unbind());
-        slf
-    }
+/// A writer of no attributes, of the public class (see [`new_object`]), which `copy` and `pickle`
+/// make of the reduce of a writer (see `readwrite_reduce`), as `copyreg.__newobj__` makes one of
+/// PySpark's class.
+#[pyfunction]
+#[pyo3(name = "_new_remote_ml_writer")]
+pub(crate) fn new_remote_ml_writer(py: Python<'_>) -> PyResult<Py<PyMLWriter>> {
+    new_py(
+        py,
+        PyMLWriter {
+            target: None,
+            error: None,
+        },
+    )
+}
 
-    /// The session to save with, as `BaseReadWrite.sparkSession`: the one that `session` set, else
-    /// the active one.
-    #[getter]
-    #[allow(non_snake_case)]
-    fn sparkSession(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.session {
-            Some(session) => Ok(session.clone_ref(py)),
-            None => Ok(py
-                .import("pyspark.sql")?
-                .getattr("SparkSession")?
-                .call_method0("getActiveSession")?
-                .unbind()),
-        }
-    }
-
-    /// As `RemoteMLWriter.sc`.
-    #[getter]
-    fn sc(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "Accessing SparkContext is not supported on Connect",
-        ))
-    }
+/// A reader of no attributes, of the public class, which `copy` and `pickle` make of the reduce of
+/// a reader (see [`new_remote_ml_writer`]).
+#[pyfunction]
+#[pyo3(name = "_new_remote_ml_reader")]
+pub(crate) fn new_remote_ml_reader(py: Python<'_>) -> PyResult<Py<PyMLReader>> {
+    new_py(py, PyMLReader { kind: None })
 }
 
 /// The constructor of a native class of what a `Read` returns: its object (of a model), uid and
@@ -766,19 +840,28 @@ impl PyMLWriter {
 pub(super) type FromRead =
     for<'py> fn(Python<'py>, spark_connect::ml::ReadResult) -> PyResult<Py<PyAny>>;
 
-/// PySpark's `MLReader` of a native class (`RemoteMLReader` over Spark Connect): `load(path)`
-/// sends the `Read` of the JVM class, and `session(spark)` sets the session to load with.
+// PySpark's `RemoteMLReader` over Spark Connect, a plain Python class, whose state is the
+// attributes of its `__init__(clazz)`, in the object's attributes: `_sparkSession` (of
+// `BaseReadWrite.__init__`) and `_clazz`. PySpark's own `session` and `sparkSession`, which its
+// public class takes, read and set them, and `load` reads `_clazz` at the load, as PySpark's
+// does; so a reader constructs, copies and pickles as PySpark's plain object. A reader that
+// `read()` makes holds the load of its class too, of which the `load` of a reader loads (see
+// `load`). Commented, not documented (see `PyMLWriter`).
 #[pyclass(
     subclass,
+    weakref,
+    dict,
     name = "RemoteMLReader",
     module = "pyspark.ml.connect.readwrite"
 )]
 pub struct PyMLReader {
-    kind: ReaderKind,
-    session: Option<Py<PyAny>>,
+    // What the load of the reader's class loads; None of a reader of the constructor, a copy or a
+    // pickle.
+    kind: Option<ReaderKind>,
 }
 
 /// What a reader loads: a `Read` of a JVM class, or an object of PySpark's Python format.
+#[derive(Clone)]
 enum ReaderKind {
     Jvm(std::borrow::Cow<'static, str>, OperatorType, FromRead),
     Python(PythonLoad),
@@ -806,74 +889,91 @@ impl PyMLReader {
             format!("{}.{name}", module.replace("pyspark", "org.apache.spark")).into()
         };
         Ok(Self {
-            kind: ReaderKind::Jvm(name, op_type, from_read),
-            session: None,
+            kind: Some(ReaderKind::Jvm(name, op_type, from_read)),
         })
     }
 
     /// The reader of an object of PySpark's Python format, which `load` loads.
     pub(super) fn python(load: PythonLoad) -> Self {
         Self {
-            kind: ReaderKind::Python(load),
-            session: None,
+            kind: Some(ReaderKind::Python(load)),
         }
+    }
+
+    /// The reader of the class `clazz`, as PySpark's `try_remote_read` makes it
+    /// (`RemoteMLReader(clazz)`): of the public class, of the attributes of PySpark's `__init__`,
+    /// in its order.
+    pub(super) fn object_of(self, clazz: &Bound<'_, PyAny>) -> PyResult<Py<Self>> {
+        let py = clazz.py();
+        let reader = new_object(py, self)?;
+        reader.setattr(pyo3::intern!(py, "_sparkSession"), py.None())?;
+        reader.setattr(pyo3::intern!(py, "_clazz"), clazz)?;
+        Ok(reader.unbind())
     }
 }
 
 #[pymethods]
 impl PyMLReader {
-    /// The AttributeError of an attribute that it does not have, as CPython's of PySpark's class.
-    fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        Err(params_api::no_attribute(slf.as_any(), name))
+    // As `object.__new__` of PySpark's class: the `__init__` of the public class, PySpark's
+    // `RemoteMLReader.__init__(clazz)`, takes the arguments (see `reduce::check_plain_new`).
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = None)]
+    fn new_plain(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        crate::reduce::check_plain_new(cls, args, kwargs)?;
+        Ok(Self { kind: None })
     }
 
-    /// Load from `path`, as `RemoteMLReader.load`, of the active session (not the one that
-    /// `session` sets, which `RemoteMLReader.load` does not read).
-    fn load(&self, py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    // The reduce of a plain object, of its attributes (see `readwrite_reduce`).
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        readwrite_reduce::<Self>(slf.as_any(), "_new_remote_ml_reader")
+    }
+
+    // Load from `path`, as `RemoteMLReader.load` over Spark Connect: of the active session, of its
+    // `assert session is not None` first (not the one that `session` sets, which it does not
+    // read), and of the reader's `_clazz` as of the load. A native class (its public class, or a
+    // Python subclass of them) loads of the reader that `read()` of it gives (`_native_reader`),
+    // and another class or object as PySpark's own `RemoteMLReader.loadInstance` loads it
+    // (`RuntimeError: Unsupported read for <class 'int'>`).
+    fn load(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         let session = session_of(py, None)?;
-        match &self.kind {
-            ReaderKind::Jvm(jvm_class, op_type, from_read) => {
+        let clazz = slf.getattr(pyo3::intern!(py, "_clazz"))?;
+        let fresh = py
+            .import("pyspark.ml._native_classes")?
+            .call_method1("_native_reader", (&clazz,))?;
+        if fresh.is_none() {
+            let spark = active_spark(py)?;
+            return Ok(py
+                .import("pyspark.ml.connect.readwrite")?
+                .getattr("RemoteMLReader")?
+                .call_method1("loadInstance", (&clazz, path, spark))?
+                .unbind());
+        }
+        let kind = fresh.cast_into::<Self>()?.try_borrow()?.kind.clone();
+        match kind {
+            Some(ReaderKind::Jvm(jvm_class, op_type, from_read)) => {
                 let path = proto_path(path)?;
                 let read = interruptible(py, &session, || {
-                    spark_connect::ml::read(&session, jvm_class.as_ref(), *op_type, &path)
+                    spark_connect::ml::read(&session, jvm_class.as_ref(), op_type, &path)
                         .map_err(Box::new)
                 })?;
                 from_read(py, read)
             }
-            ReaderKind::Python(load) => {
+            Some(ReaderKind::Python(load)) => {
                 let spark = active_spark(py)?;
                 let path = python_path(path)?;
                 load(py, &spark, &session, &path)
             }
+            None => Err(PyTypeError::new_err(format!(
+                "{} has no native reader",
+                clazz.str()?
+            ))),
         }
-    }
-
-    /// The session to load with, as `BaseReadWrite.session`.
-    fn session<'py>(mut slf: PyRefMut<'py, Self>, spark: Bound<'py, PyAny>) -> PyRefMut<'py, Self> {
-        slf.session = Some(spark.unbind());
-        slf
-    }
-
-    /// As `BaseReadWrite.sparkSession`.
-    #[getter]
-    #[allow(non_snake_case)]
-    fn sparkSession(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        match &self.session {
-            Some(session) => Ok(session.clone_ref(py)),
-            None => Ok(py
-                .import("pyspark.sql")?
-                .getattr("SparkSession")?
-                .call_method0("getActiveSession")?
-                .unbind()),
-        }
-    }
-
-    /// As `RemoteMLReader.sc` over Spark Connect.
-    #[getter]
-    fn sc(&self) -> PyResult<()> {
-        Err(pyo3::exceptions::PyRuntimeError::new_err(
-            "Accessing SparkContext is not supported on Connect",
-        ))
     }
 }
 

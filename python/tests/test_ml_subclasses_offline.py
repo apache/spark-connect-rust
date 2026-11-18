@@ -289,6 +289,42 @@ def test_copy_deepcopy_and_pickle_of_a_model_of_no_server_side_object():
         assert type(copied) is LRModel and copied.uid == model.uid
 
 
+def test_a_writer_and_a_reader_copy_and_pickle_as_pysparks_plain_objects():
+    # PySpark's writers and readers copy, copy deep and pickle at every protocol as plain objects,
+    # of their class and attributes: `copy.copy` shares the attributes (a writer's `_instance` and
+    # `optionMap`), and `copy.deepcopy` and `pickle` copy them; a reader's `_clazz` is the class.
+    import copy
+    import pickle
+
+    LR = _cls("classification", "LogisticRegression")
+    Evaluator = _cls("evaluation", "RegressionEvaluator")
+    Pipeline = _cls("pipeline", "Pipeline")
+    protocols = range(pickle.HIGHEST_PROTOCOL + 1)
+    for obj in (LR(maxIter=4), Evaluator(metricName="mae"), Pipeline(stages=[LR(maxIter=4)])):
+        writer = obj.write().overwrite().option("A", 1)
+        shallow, deep = copy.copy(writer), copy.deepcopy(writer)
+        for copied in [shallow, deep, *(pickle.loads(pickle.dumps(writer, p)) for p in protocols)]:
+            assert type(copied) is type(writer) and list(vars(copied)) == list(vars(writer))
+            assert copied.shouldOverwrite is True and copied.optionMap == {"a": "1"}
+            assert type(copied._instance) is type(obj) and copied._instance.uid == obj.uid
+        assert shallow._instance is obj and shallow.optionMap is writer.optionMap
+        assert deep._instance is not obj and deep.optionMap is not writer.optionMap
+        reader = type(obj).read()
+        for copied in [
+            copy.copy(reader),
+            copy.deepcopy(reader),
+            *(pickle.loads(pickle.dumps(reader, p)) for p in protocols),
+        ]:
+            assert type(copied) is type(reader)
+            assert vars(copied) == {"_sparkSession": None, "_clazz": type(obj)}
+    # A copy of a writer of a subclass is of the subclass, of its attributes.
+    Sub = type("Sub", (type(LR().write()),), {})
+    writer = Sub(LR())
+    writer.extra = 1
+    for copied in (copy.copy(writer), copy.deepcopy(writer)):
+        assert type(copied) is Sub and list(vars(copied)) == list(vars(writer))
+
+
 def test_a_model_of_no_server_side_object_has_no_summary_of_pysparks_params_walk():
     # PySpark's `_summary`, which its fit sets: a model of no server-side object has none, of the
     # `_java_obj` of its `__init__`, None, and the params walk (`Params.params`), which reads the
@@ -558,6 +594,76 @@ def test_the_class_and_static_methods_are_pysparks_functions():
             lambda: Remover.loadDefaultStopWords(),
             "StopWordsRemover.loadDefaultStopWords() missing 1 required positional argument: 'language'",
         ),
+    ]
+    if sys.version_info < (3, 10):
+        return
+    for call, message in cases:
+        with pytest.raises(TypeError) as error:
+            call()
+        assert str(error.value) == message
+
+
+def test_a_writer_and_a_reader_are_pysparks_plain_objects_of_their_attributes():
+    # PySpark's RemoteMLWriter and RemoteMLReader (ml/connect/readwrite.py:31-39, 202-206) are
+    # plain classes of the attributes of their `__init__`, which PySpark's own `session`,
+    # `overwrite` and `option` of `BaseReadWrite` and `MLWriter` (ml/util.py:534, 570-603) set, of
+    # any value. Their `save` and `load` are functions of PySpark's names, docstrings and
+    # signatures, which bind a call as PySpark's do, before the save or the load runs.
+    import inspect
+
+    import pyspark.ml.connect.readwrite as reference
+
+    LR = _cls("classification", "LogisticRegression")
+    Pipeline = _cls("pipeline", "Pipeline")
+    lr = LR(maxIter=2)
+    for obj in (lr, _cls("classification", "LogisticRegressionModel")(), Pipeline(stages=[])):
+        assert list(vars(obj.write()).items()) == [
+            ("_sparkSession", None),
+            ("shouldOverwrite", False),
+            ("optionMap", {}),
+            ("_instance", obj),
+        ]
+    for cls in (LR, Pipeline):
+        assert list(vars(cls.read()).items()) == [("_sparkSession", None), ("_clazz", cls)]
+    Writer, Reader = type(lr.write()), type(LR.read())
+    assert issubclass(Writer, reference.RemoteMLWriter) and issubclass(Reader, reference.RemoteMLReader)
+    for cls, pysparks, name, qualname in [
+        (Writer, reference.RemoteMLWriter, "save", "RemoteMLWriter.save"),
+        (Writer, reference.RemoteMLWriter, "overwrite", "MLWriter.overwrite"),
+        (Writer, reference.RemoteMLWriter, "option", "MLWriter.option"),
+        (Writer, reference.RemoteMLWriter, "session", "BaseReadWrite.session"),
+        (Reader, reference.RemoteMLReader, "load", "RemoteMLReader.load"),
+        (Reader, reference.RemoteMLReader, "session", "BaseReadWrite.session"),
+    ]:
+        member, theirs = getattr(cls, name), getattr(pysparks, name)
+        assert inspect.isfunction(member) and member.__qualname__ == qualname, name
+        assert member.__module__ == theirs.__module__ and member.__doc__ == theirs.__doc__, name
+        assert inspect.signature(member) == inspect.signature(theirs), name
+    for cls, pysparks in [(Writer, reference.RemoteMLWriter), (Reader, reference.RemoteMLReader)]:
+        assert cls.__doc__ is None and inspect.getdoc(cls) == inspect.getdoc(pysparks)
+        assert inspect.signature(cls) == inspect.signature(pysparks)
+        assert type(inspect.getattr_static(cls, "sparkSession")) is property
+        assert not hasattr(cls, "__del__") and not hasattr(cls, "_java_obj")
+    writer, reader = lr.write(), LR.read()
+    assert writer.overwrite() is writer and writer.option(key="Key", value=1) is writer
+    assert writer.session(sparkSession=None) is writer
+    assert (writer.shouldOverwrite, writer.optionMap) == (True, {"key": "1"})
+    writer.shouldOverwrite, writer.optionMap, writer._instance = 0, None, None
+    assert (writer.shouldOverwrite, writer.optionMap, writer._instance) == (0, None, None)
+    reader._clazz = int
+    assert reader._clazz is int and reader.session(sparkSession=1)._sparkSession == 1
+    assert list(vars(Writer(instance=lr)).items()) == list(vars(lr.write()).items())
+    assert vars(Reader(LR)) == vars(LR.read())
+    cases = [
+        (lambda: Writer(), "RemoteMLWriter.__init__() missing 1 required positional argument: 'instance'"),
+        (lambda: Reader(LR, 1), "RemoteMLReader.__init__() takes 2 positional arguments but 3 were given"),
+        (lambda: writer.save(), "RemoteMLWriter.save() missing 1 required positional argument: 'path'"),
+        (lambda: writer.save("p", 1), "RemoteMLWriter.save() takes 2 positional arguments but 3 were given"),
+        (lambda: writer.overwrite(1), "MLWriter.overwrite() takes 1 positional argument but 2 were given"),
+        (lambda: writer.option("k"), "MLWriter.option() missing 1 required positional argument: 'value'"),
+        (lambda: writer.session(spark=1), _unexpected("BaseReadWrite.session", "spark")),
+        (lambda: reader.load("p", 1), "RemoteMLReader.load() takes 2 positional arguments but 3 were given"),
+        (lambda: Reader.load(), "RemoteMLReader.load() missing 2 required positional arguments: 'self' and 'path'"),
     ]
     if sys.version_info < (3, 10):
         return

@@ -115,21 +115,20 @@ NumPy of `pyspark-client` 4.3.0 (`pandas>=2.2.0`, `pyarrow>=18.0.0`,
 `numpy>=1.23.2`), the versions that the runtime utilities check; the Arrow-string
 checks do not establish support for older pandas versions.
 
-Arrow-string input eligibility checks both array instances and canonical
-classes' row/Arrow conversion methods and label casting, including inherited
-methods, on the specialized, generic explicit-schema and inferred-schema routes.
-Other pandas array classes on the generic routes retain the existing
-module-origin policy, which does not authenticate mutations of their canonical
-classes' conversion hooks. The generic routes identify Arrow-string classes
-through their loaded defining module in `sys.modules`. Removing or replacing
-`pandas.core.arrays.string_arrow` there while retaining instances from the old
-module is outside these checks.
+The generic explicit-schema and inferred-schema routes are PySpark's conversion of each column
+to Arrow, which takes every pandas DataFrame, of any class, labels and arrays, as PySpark's
+`createDataFrame` does; they check only the schema and the type names that the conversion
+resolves (`accepts_pandas_schema`). The specialized Arrow-string route's eligibility checks both
+array instances and canonical classes' conversion methods and label casting, including
+inherited methods, and declines a frame whose hooks it does not authenticate, which then takes
+PySpark's conversion. It identifies Arrow-string classes through their loaded defining module
+in `sys.modules`. Removing or replacing `pandas.core.arrays.string_arrow` there while
+retaining instances from the old module is outside these checks.
 
 Authentication occurs when the concrete array is inspected. With NumPy-backed
-column labels, a specialized guard may first read `frame.dtypes`, matching the
-native row path's dtype read before cell normalization. A customized dtype
-property can therefore raise before the later array-class check, with the same
-local error and no configuration or upload request. The bounded Arrow-string
+column labels, a specialized guard may first read `frame.dtypes`, which PySpark's conversion
+reads of a frame without a schema. A customized dtype property can therefore raise before the
+later array-class check, with a local error and no upload request. The bounded Arrow-string
 class checks for data and labels inspect raw MRO dictionaries for conversion and
 label-iteration methods, dtype/missing-value properties and the null-subarray
 constructor (including its immediate super-constructor), optional factory and

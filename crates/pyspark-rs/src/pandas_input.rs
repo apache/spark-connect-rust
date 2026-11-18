@@ -26,11 +26,16 @@ use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 
+use crate::interrupt::ConversionBudget;
 use crate::types::PyStructType;
 
 /// The Python eligibility helper authenticates pandas storage and native schema.
 /// Validate each object before accepting it: extraction must never call a custom
 /// numeric/string conversion hook or turn a pandas missing sentinel into null.
+///
+/// Each value of either pass is a step of the budget of the conversion, whose checkpoints let
+/// other threads run and signals interrupt it, as PySpark's conversion, which is Python code,
+/// lets them (see `create_from_local`).
 #[pyfunction]
 pub(crate) fn _pandas_string_ipc<'py>(
     py: Python<'py>,
@@ -41,8 +46,9 @@ pub(crate) fn _pandas_string_ipc<'py>(
     if columns.len() != schema_fields.len() {
         return Ok(None);
     }
+    let budget = ConversionBudget::default();
     // Reject unsupported objects before copying any string data. Otherwise a
-    // late subclass would pay for most of an Arrow build before the row path.
+    // late subclass would pay for most of an Arrow build before the general conversion.
     // Keep this pass to exact type/null checks; UTF-8 extraction stays below.
     for (column, field) in columns.iter().zip(&schema_fields) {
         if !matches!(&field.data_type, spark_connect::types::DataType::String { collation }
@@ -52,20 +58,23 @@ pub(crate) fn _pandas_string_ipc<'py>(
         }
         for value in column.try_iter()? {
             let value = value?;
+            budget.step(py)?;
             if !(value.is_none() && field.nullable || value.is_exact_instance_of::<PyString>()) {
                 return Ok(None);
             }
         }
     }
     // Encode each string once, while building. A lone surrogate cannot be encoded: it
-    // falls back to the row path, which drops the partial Arrow buffers. The type pass
-    // above keeps a late subclass from paying for the build.
+    // falls back to the general conversion, which drops the partial Arrow buffers. The type
+    // pass above keeps a late subclass from paying for the build. A value that a checkpoint
+    // let another thread change is checked again here.
     let mut arrays: Vec<ArrayRef> = Vec::with_capacity(columns.len());
     let mut fields = Vec::with_capacity(columns.len());
     for (column, field) in columns.iter().zip(&schema_fields) {
         let mut builder = StringBuilder::with_capacity(column.len()?, column.len()? * 8);
         for value in column.try_iter()? {
             let value = value?;
+            budget.step(py)?;
             if value.is_none() && field.nullable {
                 builder.append_null();
             } else if let Ok(value) = value.cast_exact::<PyString>() {

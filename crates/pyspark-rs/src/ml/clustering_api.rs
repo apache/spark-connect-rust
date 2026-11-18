@@ -460,8 +460,8 @@ macro_rules! lda_model {
             }
 
             fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-                let writer = slf.as_super().try_borrow()?.core.writer(slf.py())?.with_instance(slf.as_any());
-                object::new_py(slf.py(), writer)
+                let writer = slf.as_super().try_borrow()?.core.writer(slf.py())?;
+                writer.object_of(slf.as_any())
             }
 
             fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -477,7 +477,7 @@ macro_rules! lda_model {
                     spark_connect::ml::OperatorType::Model,
                     <$ty>::__from_read,
                 )?;
-                object::new_py(cls.py(), reader)
+                reader.object_of(cls.as_any())
             }
 
             #[classmethod]

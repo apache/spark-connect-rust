@@ -117,6 +117,18 @@ jobs:
           python -m pip install maturin pytest coverage "mypy==2.4.1"
           python -m pip install pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
 
+      - name: Set up Node.js 20
+        # For pyright, which test_type_stubs_offline.py runs as it runs mypy, on a user's
+        # application and on the stubs.
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install pyright
+        # Pinned, as mypy is, so that a new release cannot change what it reports without a
+        # change here.
+        run: npm install --global pyright@1.1.414
+
       - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
         uses: actions/cache@v4
         with:

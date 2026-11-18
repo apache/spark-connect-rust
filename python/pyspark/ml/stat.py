@@ -49,6 +49,31 @@ class SummaryBuilder(_SummaryBuilder, JavaWrapper):
         # raises the AttributeError of its `summary`.
         pass
 
+    # PySpark's function, of its signature and docstring, over the native method: so a call binds
+    # as PySpark's does (`SummaryBuilder.summary() takes from 2 to 3 positional arguments but 4
+    # were given`).
+    def summary(self, featuresCol: Column, weightCol: Optional[Column] = None) -> Column:
+        """
+        Returns an aggregate object that contains the summary of the column with the requested
+        metrics.
+
+        .. versionadded:: 2.4.0
+
+        Parameters
+        ----------
+        featuresCol : str
+            a column that contains features Vector object.
+        weightCol : str, optional
+            a column that contains weight value. Default weight is 1.0.
+
+        Returns
+        -------
+        :py:class:`pyspark.sql.Column`
+            an aggregate column that contains the statistics. The exact content of this
+            structure is determined during the creation of the builder.
+        """
+        return _SummaryBuilder.summary(self, featuresCol, weightCol)
+
     __del__ = _del
 
 

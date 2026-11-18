@@ -1402,7 +1402,18 @@ def test_add_artifacts_names_each_artifact_as_pyspark(protocol, tmp_path, monkey
 _LOCAL_RELATION_PATHS = ["local_rows", "columns", "pandas_rows", "float64", "string", "int64"]
 
 
-def _local_relation_input(path, form):
+def _without_pyarrow(monkeypatch):
+    """Make createDataFrame convert pandas frames with its row path, as it does where PyArrow,
+    which PySpark's conversion and the fast paths of plain frames need, cannot be imported."""
+    import importlib
+
+    # The module that the native binding imports, rather than an attribute of the package,
+    # which earlier import-hook tests can leave pointing at another module object.
+    helper = importlib.import_module("pyspark.sql._pandas_input")
+    monkeypatch.setattr(helper, "pyarrow_available", lambda: False)
+
+
+def _local_relation_input(monkeypatch, path, form):
     """Data of `path` of at least 64 KiB of Arrow data, its row count, and its schema as a
     StructType or as the DDL of the same fields."""
     if path == "local_rows":
@@ -1413,11 +1424,9 @@ def _local_relation_input(path, form):
         data = [(i, i) for i in range(10000)]
         fields, ddl = [("a", T.LongType()), ("b", T.LongType())], "a long, b long"
     elif path == "pandas_rows":
-        # A DataFrame subclass keeps the frame off the Arrow paths, so its rows are converted.
-        class Frame(pd.DataFrame):
-            pass
-
-        data = Frame({"v": ["y" * 100] * 1000, "i": np.arange(1000, dtype=np.int64)})
+        # Without PyArrow, the rows of a pandas frame are converted.
+        _without_pyarrow(monkeypatch)
+        data = pd.DataFrame({"v": ["y" * 100] * 1000, "i": np.arange(1000, dtype=np.int64)})
         fields, ddl = [("v", T.StringType()), ("i", T.LongType())], "v string, i long"
     elif path == "float64":
         data = pd.DataFrame({"c": np.ones(100000)})
@@ -1435,8 +1444,10 @@ def _local_relation_input(path, form):
 @pytest.mark.parametrize("form", ["struct", "ddl"])
 @pytest.mark.parametrize("threshold", ["1", "1048576"])
 @pytest.mark.parametrize("path", _LOCAL_RELATION_PATHS)
-def test_local_relations_of_64_kib_read_the_settings_at_the_threshold(protocol, path, threshold, form):
-    data, schema, rows = _local_relation_input(path, form)
+def test_local_relations_of_64_kib_read_the_settings_at_the_threshold(
+    protocol, monkeypatch, path, threshold, form
+):
+    data, schema, rows = _local_relation_input(monkeypatch, path, form)
     with _arrow_input_service(
         protocol, **{"spark.sql.session.localRelationCacheThreshold": threshold}
     ) as (spark, state):
@@ -1454,10 +1465,10 @@ def test_local_relations_of_64_kib_read_the_settings_at_the_threshold(protocol, 
 
 @pytest.mark.parametrize("form", ["struct", "ddl"])
 @pytest.mark.parametrize("path", _LOCAL_RELATION_PATHS)
-def test_local_relations_of_64_kib_past_the_size_limit_raise(protocol, path, form):
+def test_local_relations_of_64_kib_past_the_size_limit_raise(protocol, monkeypatch, path, form):
     from pyspark.errors import AnalysisException
 
-    data, schema, _ = _local_relation_input(path, form)
+    data, schema, _ = _local_relation_input(monkeypatch, path, form)
     with _arrow_input_service(protocol, **{
         "spark.sql.session.localRelationCacheThreshold": "1",
         "spark.sql.session.localRelationSizeLimit": "10000",
@@ -1470,12 +1481,12 @@ def test_local_relations_of_64_kib_past_the_size_limit_raise(protocol, path, for
 
 
 @pytest.mark.parametrize("path", _LOCAL_RELATION_PATHS)
-def test_local_relations_of_64_kib_the_same_for_struct_and_ddl(protocol, path):
+def test_local_relations_of_64_kib_the_same_for_struct_and_ddl(protocol, monkeypatch, path):
     from pyspark.errors import AnalysisException
 
     outcomes = {}
     for form in ["struct", "ddl"]:
-        data, schema, rows = _local_relation_input(path, form)
+        data, schema, rows = _local_relation_input(monkeypatch, path, form)
         with _arrow_input_service(protocol, **{
             "spark.sql.session.localRelationCacheThreshold": "1",
         }) as (spark, state):
@@ -1501,7 +1512,7 @@ def test_local_relations_of_64_kib_the_same_for_struct_and_ddl(protocol, path):
 # as cache artifacts at the threshold, whichever path encoded them.
 
 @pytest.mark.parametrize("path", ["local_rows", "pandas_rows", "float64", "strings"])
-def test_large_local_relations_follow_the_cache_threshold(protocol, path):
+def test_large_local_relations_follow_the_cache_threshold(protocol, monkeypatch, path):
     # (The mock service keeps gRPC's default 4 MiB message limit, so the inline variant of
     # these inputs, below a higher threshold, can only be checked against a real server.)
     import numpy as np
@@ -1511,7 +1522,8 @@ def test_large_local_relations_follow_the_cache_threshold(protocol, path):
         schema = T.StructType([T.StructField("v", T.StringType()), T.StructField("i", T.LongType())])
         expected_rows = 20_000
     elif path == "pandas_rows":
-        # float32 columns into DoubleType keep the row path.
+        # Without PyArrow, the rows of a pandas frame are converted.
+        _without_pyarrow(monkeypatch)
         data = pd.DataFrame(np.ones((100_000, 45), dtype=np.float32),
                             columns=[f"c{i}" for i in range(45)])
         schema = T.StructType([T.StructField(c, T.DoubleType()) for c in data.columns])
@@ -1598,9 +1610,16 @@ def test_integer_canonical_columns_storage_stays_columnar(protocol, monkeypatch,
     "backing_class_getitem", "backing_instance_box",
 ])
 @pytest.mark.parametrize("behavior", ["raise", "mutate"])
-def test_integer_columns_iterator_hooks_keep_native_order(
+def test_integer_columns_iterator_hooks_run_in_pyspark_conversion(
     protocol, monkeypatch, dtype, schema_kind, location, behavior
 ):
+    # The fast path declines labels whose iteration is customized, without iterating them, and
+    # the frame converts as PySpark's conversion does: it iterates the labels, for the names
+    # without a struct schema and for the columns of `items()`, before it reads any value, so
+    # the hook's error is raised, or its change of the values is converted. It never calls the
+    # frame's notna or astype.
+    import json
+
     from pandas.core.base import IndexOpsMixin
 
     values = [2**53 + 1, -(2**63), 2**63 - 1, 0] * 250
@@ -1641,9 +1660,10 @@ def test_integer_columns_iterator_hooks_keep_native_order(
         invoked = True
         calls.append("columns iterator")
         if behavior == "raise":
-            raise ColumnsError("columns hook precedes pandas normalization")
-        # Install spies only when native iteration reaches the columns hook.
-        # Before eligibility, normalization methods are the canonical methods.
+            raise ColumnsError("columns hook precedes the conversion of the values")
+        # The spies of the frame's normalization methods are installed once the conversion
+        # iterates the labels, as the values that it reads next are changed: before, the fast
+        # path's guards see the canonical methods.
         monkeypatch.setitem(vars(frame), "notna", notna)
         monkeypatch.setitem(vars(frame), "astype", astype)
         frame.iat[0, 0] = 2**53 + 7
@@ -1707,7 +1727,7 @@ def test_integer_columns_iterator_hooks_keep_native_order(
     with _arrow_input_service(protocol) as (spark, state):
         if behavior == "raise":
             with pytest.raises(ColumnsError,
-                               match="columns hook precedes pandas normalization"):
+                               match="columns hook precedes the conversion of the values"):
                 spark.createDataFrame(frame, schema)
             assert calls == ["columns iterator"]
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -1718,23 +1738,35 @@ def test_integer_columns_iterator_hooks_keep_native_order(
             expected[0], expected[-1] = 2**53 + 7, (None if dtype == "Int64" else -(2**63) + 1)
             table = state["input_tables"][0]
             assert table.num_rows == 1000
-            assert table.column_names == [expected_name]
             assert table.column(0).type == pa.int64()
             assert table.column(0).to_pylist() == expected
             assert table.column(0).null_count == sum(value is None for value in expected)
-            assert table.schema.field(0).nullable is nullable
             assert table.schema.field(0).metadata is None
-            import json
-            logical = json.loads(state["relations"][0].local_relation.schema)
-            assert logical == {"type": "struct", "fields": [{
-                "name": expected_name, "type": "long", "nullable": nullable,
-                "metadata": metadata,
-            }]}
+            assert state["column_names"] == [expected_name]
+            if schema_kind == "explicit":
+                # PySpark's table takes the names and the nullability of the struct, which is
+                # the schema of the relation.
+                assert table.column_names == [expected_name]
+                assert table.schema.field(0).nullable is nullable
+                logical = json.loads(state["relations"][0].local_relation.schema)
+                assert logical == {"type": "struct", "fields": [{
+                    "name": expected_name, "type": "long", "nullable": nullable,
+                    "metadata": metadata,
+                }]}
+            else:
+                # Without a struct, PySpark's table is of the columns _0, _1, ..., sent without a
+                # schema, which toDF names.
+                assert table.column_names == ["_0"]
+                assert table.schema.field(0).nullable
+                assert state["spark_schema"] is None
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-            assert calls == ["columns iterator", "notna", "astype"]
+            assert calls == ["columns iterator"]
 
 
-def test_integer_rebound_index_values_keeps_native_error(protocol, monkeypatch):
+def test_integer_rebound_index_values_raise_in_pyspark_conversion(protocol, monkeypatch):
+    # The fast path declines labels whose storage is rebound without reading it. PySpark's
+    # conversion reads it to iterate the labels, for the columns of `items()`, so the hook's
+    # error is raised before any value is read.
     frame = pd.DataFrame({"original": np.arange(1000, dtype=np.int64)})
     schema = T.StructType([T.StructField("renamed", T.LongType())])
     columns = frame.columns
@@ -1744,13 +1776,13 @@ def test_integer_rebound_index_values_keeps_native_error(protocol, monkeypatch):
     def values(index):
         if index is columns:
             calls.append("_values")
-            raise RuntimeError("columns backing hook precedes normalization")
+            raise RuntimeError("columns backing hook precedes the conversion of the values")
         return original(index)
 
     monkeypatch.setattr(pd.Index, "_values", property(values))
     with _arrow_input_service(protocol) as (spark, state):
         with pytest.raises(RuntimeError,
-                           match="columns backing hook precedes normalization"):
+                           match="columns backing hook precedes the conversion of the values"):
             spark.createDataFrame(frame, schema)
         assert calls == ["_values"]
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -1788,7 +1820,7 @@ def test_integer_columns_preserve_values_without_python_rows(protocol, monkeypat
     with _arrow_input_service(protocol) as (spark, state):
         df = spark.createDataFrame(frame, schema=schema, verifySchema=verify)
         # Every nonempty pandas input applies its names through toDF, including
-        # explicit struct schemas, just as the current row fallback does.
+        # explicit struct schemas, as PySpark's createDataFrame does.
         assert not df.isLocal()
         assert df.toArrow().column(0).to_pylist() == [3]
         assert state["column_names"] == names
@@ -2011,7 +2043,11 @@ assert prepare_int64_table(nullable, None) is None
 
 
 @pytest.mark.parametrize("class_spoof", [False, True])
-def test_integer_custom_extension_dtype_cannot_select_arrow(protocol, class_spoof):
+def test_integer_custom_extension_dtype_takes_pyspark_conversion(protocol, class_spoof):
+    # An extension array of a dtype that equals int64, even of a class that claims to be a NumPy
+    # dtype, does not select the fast path of int64 columns: as PySpark's conversion, which
+    # hands a column of an array with `__arrow_array__` to Arrow as it is, the values are those
+    # that the hook gives, not those of the array.
     from pandas.api.extensions import ExtensionArray, ExtensionDtype, take
 
     arrow_calls = []
@@ -2086,15 +2122,19 @@ def test_integer_custom_extension_dtype_cannot_select_arrow(protocol, class_spoo
     assert isinstance(frame.dtypes.iloc[0], np.dtype) is class_spoof
     schema = T.StructType([T.StructField("renamed", T.LongType())])
     assert prepare_int64_table(frame, schema) is None
+    assert arrow_calls == []
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-        assert state["input_tables"][0].column(0).to_pylist() == values
-    assert arrow_calls == []
+        assert state["input_tables"][0].column(0).to_pylist() == [-7] * len(values)
+    assert arrow_calls == ["arrow"]
 
 
 @pytest.mark.parametrize("custom", ["dtype", "array"])
-def test_integer_nullable_dtype_and_array_subclasses_keep_fallback(protocol, custom):
+def test_integer_nullable_dtype_and_array_subclasses_take_pyspark_conversion(protocol, custom):
+    # A subclass of pandas' nullable integer array or dtype does not select the fast path of
+    # Int64 columns: as PySpark's conversion, which hands the column to Arrow as it is, the
+    # values are those of the subclass's `__arrow_array__`.
     from pandas.core.arrays.integer import Int64Dtype, IntegerArray
 
     arrow_calls = []
@@ -2119,11 +2159,12 @@ def test_integer_nullable_dtype_and_array_subclasses_keep_fallback(protocol, cus
     assert type(frame["a"].array) is CustomArray
     schema = T.StructType([T.StructField("a", T.LongType())])
     assert prepare_int64_table(frame, schema) is None
+    assert arrow_calls == []
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-        assert state["input_tables"][0].column(0).to_pylist() == values
-    assert arrow_calls == []
+        assert state["input_tables"][0].column(0).to_pylist() == [-7] * len(values)
+    assert arrow_calls == ["arrow"]
 
 
 def _integer_guard_process(mode, argument, before_import=False):
@@ -2308,7 +2349,7 @@ def test_integer_warm_importer_without_global_converter_aliases(protocol, monkey
 
 @pytest.mark.parametrize("dtype", ["int64", "Int64"])
 @pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit"])
-def test_integer_rebound_index_data_keeps_native_read_order(
+def test_integer_rebound_index_data_reads_no_more_than_pyspark_conversion(
     protocol, monkeypatch, dtype, schema_kind
 ):
     import json
@@ -2324,67 +2365,42 @@ def test_integer_rebound_index_data_keeps_native_read_order(
         expected_name, nullable, metadata = "renamed", dtype == "Int64", {"source": "native"}
         schema = T.StructType([T.StructField(expected_name, T.LongType(), nullable, metadata)])
     columns, backing = frame.columns, vars(frame.columns)["_data"]
-    original_notna, original_astype = frame.notna, frame.astype
     calls = []
-    normalizing = False
     allowed_reads = None
 
     class ColumnsDataError(RuntimeError):
         pass
 
-    def notna(*args, **kwargs):
-        nonlocal normalizing
-        normalizing = True
-        calls.append("notna")
-        return original_notna(*args, **kwargs)
-
-    def astype(*args, **kwargs):
-        calls.append("astype")
-        return original_astype(*args, **kwargs)
-
     def data(index):
         if index is columns:
-            if not normalizing:
-                calls.append("_data")
-                if allowed_reads is not None and calls.count("_data") > allowed_reads:
-                    raise ColumnsDataError("eligibility added a columns storage read")
-                # Install spies only when the native columns storage hook runs.
-                # Canonical frame methods remain intact before eligibility.
-                monkeypatch.setitem(vars(frame), "notna", notna)
-                monkeypatch.setitem(vars(frame), "astype", astype)
+            calls.append("_data")
+            if allowed_reads is not None and calls.count("_data") > allowed_reads:
+                raise ColumnsDataError("eligibility added a columns storage read")
             return backing
         return vars(index)["_data"]
 
     def set_data(index, value):
         # Preserve ordinary storage initialization for indexes pandas creates
-        # while normalizing values; only reads of the input columns are hooked.
+        # while converting values; only reads of the input columns are hooked.
         vars(index)["_data"] = value
 
     monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
     import pyspark.sql._pandas_input as helper
 
     with _arrow_input_service(protocol) as (spark, state):
-        # Record current master's fallback rather than assuming the old tolist
-        # path's single read. Index iteration reads NumPy-backed _values three
-        # times, and extension-backed _values twice, before normalization.
+        # The reads of PySpark's conversion of the frame, of the labels that it iterates, with
+        # the fast path declined.
         with monkeypatch.context() as baseline:
             baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
             spark.createDataFrame(frame, schema).toArrow()
-        baseline_calls = calls.copy()
-        allowed_reads = baseline_calls.count("_data")
-        assert allowed_reads > 0 and "notna" in baseline_calls
+        allowed_reads = calls.count("_data")
+        assert allowed_reads > 0
         calls.clear()
-        normalizing = False
-        # Restore canonical methods before eligibility, just as for the first
-        # call. The storage hook installs them when native iteration starts.
-        monkeypatch.delitem(vars(frame), "notna")
-        monkeypatch.delitem(vars(frame), "astype")
         spark.createDataFrame(frame, schema).toArrow()
-        # The rebound storage declines the Arrow path without reading the columns more
-        # than the row path does. pandas caches some of these reads, so a later row
-        # conversion of the same frame can read them fewer times than the first.
-        assert "notna" in calls
-        assert calls.count("_data") <= allowed_reads
+        # The rebound storage declines the fast path without reading the labels more than
+        # PySpark's conversion does. pandas caches some of these reads, so a later conversion
+        # of the same frame can read them fewer times than the first.
+        assert 0 < calls.count("_data") <= allowed_reads
         # One read of the settings for each of the two createDataFrame calls, as PySpark's.
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)] * 2
         assert len(state["input_tables"]) == 2
@@ -2392,16 +2408,23 @@ def test_integer_rebound_index_data_keeps_native_read_order(
         assert table.equals(state["input_tables"][0], check_metadata=True)
         assert table.column(0).to_pylist() == values
         assert table.column(0).null_count == sum(value is None for value in values)
-        assert table.schema.equals(
-            pa.schema([pa.field(expected_name, pa.int64(), nullable=nullable)]),
-            check_metadata=True,
-        )
-        assert json.loads(state["relations"][0].local_relation.schema) == {
-            "type": "struct", "fields": [
-                {"name": expected_name, "type": "long", "nullable": nullable,
-                 "metadata": metadata}
-            ],
-        }
+        assert state["column_names"] == [expected_name]
+        if schema_kind == "explicit":
+            assert table.schema.equals(
+                pa.schema([pa.field(expected_name, pa.int64(), nullable=nullable)]),
+                check_metadata=True,
+            )
+            assert json.loads(state["relations"][0].local_relation.schema) == {
+                "type": "struct", "fields": [
+                    {"name": expected_name, "type": "long", "nullable": nullable,
+                     "metadata": metadata}
+                ],
+            }
+        else:
+            # Of the types that Arrow infers, sent without a schema, which toDF names.
+            assert table.schema.equals(pa.schema([pa.field("_0", pa.int64())]),
+                                       check_metadata=True)
+            assert state["spark_schema"] is None
 
 
 @pytest.mark.parametrize("zone", ["UTC", "America/Los_Angeles", "Asia/Kathmandu"])
@@ -2612,9 +2635,12 @@ def test_timestamp_nonnullable_nat_reads_config_before_cast_error(protocol, conf
     ("class", "notna"), ("class", "astype"), ("class", "where"),
 ])
 @pytest.mark.parametrize("behavior", ["mutate", "raise"])
-def test_timestamp_custom_normalization_hooks_keep_native_row_path(
+def test_timestamp_custom_normalization_hooks_are_not_called_as_in_pyspark(
     protocol, monkeypatch, unit, aware, location, method, behavior
 ):
+    # A frame whose notna, astype or where is customized, of its class or of the instance,
+    # declines the timestamp fast path, and converts as PySpark's conversion does, which never
+    # calls them: the values are the frame's, whatever the hooks would raise or change.
     import json
     import time
     from types import MethodType
@@ -2630,13 +2656,10 @@ def test_timestamp_custom_normalization_hooks_keep_native_row_path(
     ])
     original = getattr(pd.DataFrame, method)
     calls, tables = [], []
-    # astype returns a new frame, so the row path never calls an instance where.
-    invokes_hook = (location, method) != ("instance", "where")
-    expected = [None if pd.isna(value) else round(value.to_pydatetime().timestamp() * 1000000)
-                for value in frame["original"]]
-    if invokes_hook:
-        expected[0] = None if method == "notna" else 7000000
-    message = f"custom timestamp {method} precedes configuration"
+    # The microseconds of the values in the session time zone, UTC, whatever the host's zone:
+    # `Timestamp.value` reads a naive value as a UTC wall clock, as the session does.
+    expected = [None if pd.isna(value) else value.value // 1000 for value in frame["original"]]
+    message = f"custom timestamp {method} sentinel"
 
     def customized(self, *args, **kwargs):
         calls.append(method)
@@ -2651,40 +2674,38 @@ def test_timestamp_custom_normalization_hooks_keep_native_row_path(
         monkeypatch.setattr(pd.DataFrame, method, customized)
     else:
         monkeypatch.setitem(vars(frame), method, MethodType(customized, frame))
+    assert helper.timestamp_columns(frame, schema) is None
 
-    # Compare with native row conversion, then restore ordinary dispatch. Any Arrow
-    # configuration read beyond the one of createDataFrame, which PySpark makes before it
-    # converts any data, is observable in the requests.
+    # PySpark's conversion with the fast path declined, then the ordinary dispatch, which
+    # declines it too: neither runs the hooks, nor reads the settings more than once, as
+    # PySpark's createDataFrame reads them before it converts any data.
     for bypass in (True, False):
-        calls.clear()
         with monkeypatch.context() as dispatch:
             if bypass:
                 dispatch.setattr(helper, "timestamp_columns", lambda *_: None)
             with _arrow_input_service(protocol) as (spark, state):
-                if behavior == "raise" and invokes_hook:
-                    with pytest.raises(RuntimeError, match=message):
-                        spark.createDataFrame(frame, schema)
-                    assert state["relations"] == []
-                    assert state["input_tables"] == []
-                else:
-                    spark.createDataFrame(frame, schema).toArrow()
-                    assert len(state["input_tables"]) == 1
-                    table = state["input_tables"][0]
-                    assert state["column_names"] == schema.names
-                    assert table.column(0).cast(pa.int64()).to_pylist() == expected
-                    assert table.column(0).is_null().to_pylist() == [
-                        value is None for value in expected]
-                    assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
-                    tables.append(table)
-                assert calls == ([method] if invokes_hook else [])
+                spark.createDataFrame(frame, schema).toArrow()
+                assert len(state["input_tables"]) == 1
+                table = state["input_tables"][0]
+                assert state["column_names"] == schema.names
+                assert table.column(0).cast(pa.int64()).to_pylist() == expected
+                assert table.column(0).is_null().to_pylist() == [
+                    value is None for value in expected]
+                assert json.loads(state["relations"][0].local_relation.schema) == (
+                    json.loads(schema.json()))
+                tables.append(table)
+                assert calls == []
                 assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
-    if behavior == "mutate" or not invokes_hook:
-        assert tables[0].equals(tables[1], check_metadata=True)
+    assert tables[0].equals(tables[1], check_metadata=True)
 
 
 @pytest.mark.parametrize("custom", ["dtype", "array"])
-def test_timestamp_custom_datetime_array_keeps_row_values(protocol, custom):
+def test_timestamp_custom_datetime_array_converts_as_pyspark(protocol, custom):
+    # A subclass of pandas' datetime array or dtype declines the timestamp fast path. PySpark's
+    # conversion of a timestamp field converts the column with pandas first
+    # (`_check_series_convert_timestamps_internal`), whose result is of pandas' own array, so
+    # the values are those of the column, and the subclass's `__arrow_array__` is not called.
     from pandas.core.arrays.datetimes import DatetimeArray
     from pandas.core.dtypes.dtypes import DatetimeTZDtype
     from pyspark.sql import types as T
@@ -2914,11 +2935,11 @@ def _timestamp_columns_fixture(unit):
     return values, frame, schema
 
 
-def _assert_timestamp_columns_row_input(state, values, schema):
+def _assert_timestamp_columns_input(state, values, schema):
     import json
 
-    # The 80 KB of Arrow data are at least 64 KiB, so the row path reads the settings, and
-    # stays inline below the default threshold.
+    # As PySpark's createDataFrame, the settings are read before any conversion, and the 80 KB
+    # of Arrow data stay inline below the default threshold.
     assert any("spark.sql.session.localRelationCacheThreshold" in keys
                for _, keys in state["config_requests"])
     assert not state["uploads"]
@@ -2941,9 +2962,12 @@ def _assert_timestamp_columns_row_input(state, values, schema):
     "backing_class_getitem", "backing_instance_box",
 ])
 @pytest.mark.parametrize("behavior", ["raise", "mutate"])
-def test_timestamp_columns_iterator_hooks_keep_native_order(
+def test_timestamp_columns_iterator_hooks_run_in_pyspark_conversion(
     protocol, monkeypatch, unit, location, behavior
 ):
+    # As for int64 columns: the fast path declines the customized labels without iterating
+    # them, and PySpark's conversion iterates them, for the columns of `items()`, before it
+    # reads any value. It never calls the frame's notna or astype.
     from pandas.core.base import IndexOpsMixin
 
     values, frame, schema = _timestamp_columns_fixture(unit)
@@ -2970,9 +2994,10 @@ def test_timestamp_columns_iterator_hooks_keep_native_order(
         invoked = True
         calls.append("columns iterator")
         if behavior == "raise":
-            raise ColumnsError("timestamp columns hook precedes pandas normalization")
-        # Install spies only when native iteration reaches the columns hook.
-        # Before eligibility, normalization methods are the canonical methods.
+            raise ColumnsError("timestamp columns hook precedes the conversion of the values")
+        # The spies of the frame's normalization methods are installed once the conversion
+        # iterates the labels, as the values that it reads next are changed: before, the fast
+        # path's guards see the canonical methods.
         monkeypatch.setitem(vars(frame), "notna", notna)
         monkeypatch.setitem(vars(frame), "astype", astype)
         frame.iat[0, 0] = pd.Timestamp(7000000, unit="us", tz="UTC")
@@ -3035,8 +3060,9 @@ def test_timestamp_columns_iterator_hooks_keep_native_order(
 
     with _arrow_input_service(protocol) as (spark, state):
         if behavior == "raise":
-            with pytest.raises(ColumnsError,
-                               match="timestamp columns hook precedes pandas normalization"):
+            with pytest.raises(ColumnsError, match=(
+                "timestamp columns hook precedes the conversion of the values"
+            )):
                 spark.createDataFrame(frame, schema)
             assert calls == ["columns iterator"]
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -3047,12 +3073,13 @@ def test_timestamp_columns_iterator_hooks_keep_native_order(
             spark.createDataFrame(frame, schema).toArrow()
             expected = values.copy()
             expected[0], expected[-1] = 7000000, None
-            _assert_timestamp_columns_row_input(state, expected, schema)
-            assert calls == ["columns iterator", "notna", "astype"]
+            _assert_timestamp_columns_input(state, expected, schema)
+            assert calls == ["columns iterator"]
 
 
 @pytest.mark.parametrize("unit", ["ns", "us"])
-def test_timestamp_rebound_index_values_keeps_native_error(protocol, monkeypatch, unit):
+def test_timestamp_rebound_index_values_raise_in_pyspark_conversion(protocol, monkeypatch, unit):
+    # As for int64 columns, PySpark's conversion raises the error of the labels' storage.
     _, frame, schema = _timestamp_columns_fixture(unit)
     columns, original = frame.columns, pd.Index._values.fget
     calls = []
@@ -3060,12 +3087,13 @@ def test_timestamp_rebound_index_values_keeps_native_error(protocol, monkeypatch
     def values(index):
         if index is columns:
             calls.append("_values")
-            raise RuntimeError("columns backing hook precedes timestamp normalization")
+            raise RuntimeError("columns backing hook precedes the conversion of timestamps")
         return original(index)
 
     monkeypatch.setattr(pd.Index, "_values", property(values))
     with _arrow_input_service(protocol) as (spark, state):
-        with pytest.raises(RuntimeError, match="columns backing hook precedes timestamp normalization"):
+        with pytest.raises(RuntimeError,
+                           match="columns backing hook precedes the conversion of timestamps"):
             spark.createDataFrame(frame, schema)
         assert calls == ["_values"]
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -3074,34 +3102,22 @@ def test_timestamp_rebound_index_values_keeps_native_error(protocol, monkeypatch
 
 
 @pytest.mark.parametrize("unit", ["ns", "us"])
-def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, unit):
+def test_timestamp_rebound_index_data_reads_no_more_than_pyspark_conversion(
+    protocol, monkeypatch, unit
+):
     values, frame, schema = _timestamp_columns_fixture(unit)
     columns, backing = frame.columns, vars(frame.columns)["_data"]
-    original_notna, original_astype = frame.notna, frame.astype
-    calls, normalizing = [], False
+    calls = []
     allowed_reads = None
 
     class ColumnsDataError(RuntimeError):
         pass
 
-    def notna(*args, **kwargs):
-        nonlocal normalizing
-        normalizing = True
-        calls.append("notna")
-        return original_notna(*args, **kwargs)
-
-    def astype(*args, **kwargs):
-        calls.append("astype")
-        return original_astype(*args, **kwargs)
-
     def data(index):
         if index is columns:
-            if not normalizing:
-                calls.append("_data")
-                if allowed_reads is not None and calls.count("_data") > allowed_reads:
-                    raise ColumnsDataError("eligibility added a columns storage read")
-                monkeypatch.setitem(vars(frame), "notna", notna)
-                monkeypatch.setitem(vars(frame), "astype", astype)
+            calls.append("_data")
+            if allowed_reads is not None and calls.count("_data") > allowed_reads:
+                raise ColumnsDataError("eligibility added a columns storage read")
             return backing
         return vars(index)["_data"]
 
@@ -3111,31 +3127,24 @@ def test_timestamp_rebound_index_data_keeps_native_read_order(protocol, monkeypa
     monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
     import pyspark.sql._pandas_input as helper
 
-    # Measure current native fallback dispatch without either eligibility probe.
+    # The reads of PySpark's conversion of the frame, with both fast paths declined.
     with monkeypatch.context() as baseline:
         baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
         baseline.setattr(helper, "timestamp_columns", lambda *_: None)
         with _arrow_input_service(protocol) as (spark, state):
             spark.createDataFrame(frame, schema).toArrow()
-            _assert_timestamp_columns_row_input(state, values, schema)
+            _assert_timestamp_columns_input(state, values, schema)
             control_table = state["input_tables"][0]
-    baseline_calls = calls.copy()
-    allowed_reads = baseline_calls.count("_data")
-    assert allowed_reads > 0 and "notna" in baseline_calls
+    allowed_reads = calls.count("_data")
+    assert allowed_reads > 0
     calls.clear()
-    normalizing = False
-    # Restore ordinary methods before candidate eligibility; the storage hook
-    # installs observers only when the native columns iterator starts.
-    monkeypatch.delitem(vars(frame), "notna")
-    monkeypatch.delitem(vars(frame), "astype")
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        # The rebound storage declines the Arrow path without reading the columns more
-        # than the row path does. pandas caches some of these reads, so a later row
-        # conversion of the same frame can read them fewer times than the first.
-        assert "notna" in calls
-        assert calls.count("_data") <= allowed_reads
-        _assert_timestamp_columns_row_input(state, values, schema)
+        # The rebound storage declines the fast path without reading the labels more than
+        # PySpark's conversion does. pandas caches some of these reads, so a later conversion
+        # of the same frame can read them fewer times than the first.
+        assert 0 < calls.count("_data") <= allowed_reads
+        _assert_timestamp_columns_input(state, values, schema)
         assert state["input_tables"][0].equals(control_table, check_metadata=True)
 
 
@@ -3671,26 +3680,25 @@ def test_float64_custom_extension_dtype_cannot_impersonate_numpy_float64(class_s
 
 
 @pytest.mark.parametrize("method", ["astype", "notna"])
-def test_float64_instance_conversion_hooks_keep_row_fallback(protocol, method):
+def test_float64_instance_conversion_hooks_are_not_called_as_in_pyspark(protocol, method):
+    # A frame whose own notna or astype is customized declines the float64 fast path, and
+    # converts as PySpark's conversion does, which never calls them: the values are the
+    # frame's, whatever the hooks would change.
+    from pyspark.sql._pandas_input import prepare_float64_table
+
     values = np.arange(100000, dtype=np.float64)
     frame = pd.DataFrame({"x": values})
     schema = T.StructType([T.StructField("x", T.DoubleType())])
     original = getattr(frame, method)
     calls = []
-    missing = np.zeros(len(values), dtype=bool)
-    expected = values
 
     if method == "astype":
-        expected = values + 7.0
-
         def customized(*args, **kwargs):
             calls.append("astype")
             converted = original(*args, **kwargs)
             converted.iloc[:, 0] = converted.iloc[:, 0] + 7.0
             return converted
     else:
-        missing[::3] = True
-
         def customized():
             calls.append("notna")
             mask = original()
@@ -3698,11 +3706,12 @@ def test_float64_instance_conversion_hooks_keep_row_fallback(protocol, method):
             return mask
 
     setattr(frame, method, customized)
+    assert prepare_float64_table(frame, schema) is None
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert calls == [method]
+        assert calls == []
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-        _assert_float64_ipc(state["input_tables"][0], [expected], schema, missing=[missing])
+        _assert_float64_ipc(state["input_tables"][0], [values], schema)
 
 
 
@@ -3721,9 +3730,11 @@ def _forget_pandas_input(monkeypatch):
 
 @pytest.mark.parametrize("method", ["astype", "notna", "where"])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_float64_class_conversion_hooks_keep_row_fallback(
+def test_float64_class_conversion_hooks_are_not_called_as_in_pyspark(
     protocol, monkeypatch, method, before_import
 ):
+    # As for the instance: customized methods of the class, also before the helpers are
+    # imported, decline the fast path, and PySpark's conversion never calls them.
     import importlib
 
     helper_name = "pyspark.sql._pandas_input"
@@ -3736,46 +3747,36 @@ def test_float64_class_conversion_hooks_keep_row_fallback(
     schema = T.StructType([T.StructField("x", T.DoubleType())])
     original = getattr(pd.DataFrame, method)
     calls = []
-    missing = np.zeros(len(values), dtype=bool)
-    expected = values
 
-    if method == "astype":
-        expected = values + 7.0
-
-        def customized(self, *args, **kwargs):
-            calls.append("astype")
-            converted = original(self, *args, **kwargs)
-            converted.iloc[:, 0] = converted.iloc[:, 0] + 7.0
-            return converted
-    elif method == "notna":
-        missing[::3] = True
-
+    if method == "notna":
         def customized(self):
             calls.append("notna")
             mask = original(self)
             mask.iloc[::3, 0] = False
             return mask
     else:
-        expected = values + 11.0
-
         def customized(self, *args, **kwargs):
-            calls.append("where")
+            calls.append(method)
             converted = original(self, *args, **kwargs)
-            converted.iloc[:, 0] = converted.iloc[:, 0] + 11.0
+            converted.iloc[:, 0] = converted.iloc[:, 0] + 7.0
             return converted
 
     monkeypatch.setattr(pd.DataFrame, method, customized)
     if before_import:
         importlib.import_module(helper_name)
+    assert importlib.import_module(helper_name).prepare_float64_table(frame, schema) is None
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert calls == [method]
+        assert calls == []
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-        _assert_float64_ipc(state["input_tables"][0], [expected], schema, missing=[missing])
+        _assert_float64_ipc(state["input_tables"][0], [values], schema)
 
 
 
-def test_float64_literal_numpy_dtype_custom_backing_keeps_row_error(protocol):
+def test_float64_literal_numpy_dtype_custom_backing_takes_pyspark_conversion(protocol):
+    # An extension array that claims the NumPy dtype float64 does not select the fast path: as
+    # PySpark's conversion, which hands a column of an array with `__arrow_array__` to Arrow as
+    # it is, the values are those that the hook gives.
     from pyspark.sql._pandas_input import prepare_float64_table
 
     calls = []
@@ -3800,13 +3801,10 @@ def test_float64_literal_numpy_dtype_custom_backing_keeps_row_error(protocol):
     assert prepare_float64_table(frame, schema) is None
     assert calls == []
     with _arrow_input_service(protocol) as (spark, state):
-        # This inconsistent ExtensionArray already fails pandas object conversion.
-        # Preserve that baseline error before Arrow hooks or configuration RPCs.
-        with pytest.raises(AttributeError, match="na_value"):
-            spark.createDataFrame(frame, schema)
+        spark.createDataFrame(frame, schema).toArrow()
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-        assert state["input_tables"] == []
-        assert calls == []
+        _assert_float64_ipc(state["input_tables"][0], [np.full(len(values), 999.0)], schema)
+        assert calls == ["arrow"]
 
 
 
@@ -3839,7 +3837,10 @@ def test_float64_ndarray_subclass_converts_as_pyspark(protocol, raises):
         assert state["uploads"] == 0
 
 
-def test_float64_missing_schema_alias_keeps_native_row_path(protocol, monkeypatch):
+def test_float64_missing_schema_alias_takes_pyspark_conversion(protocol, monkeypatch):
+    # A public alias of DoubleType that is missing declines the fast path, without the
+    # module's `__getattr__`, and the frame converts as PySpark's conversion does, with the
+    # classes that its modules hold.
     values = np.arange(100000, dtype=np.float64)
     frame = pd.DataFrame({"x": values})
     schema = T.StructType([T.StructField("x", T.DoubleType())])
@@ -3848,7 +3849,7 @@ def test_float64_missing_schema_alias_keeps_native_row_path(protocol, monkeypatc
     def lazy_attribute(name):
         if name == "DoubleType":
             calls.append(name)
-            raise RuntimeError("schema alias hook must not run before row conversion")
+            raise RuntimeError("schema alias hook must not run in the conversion")
         raise AttributeError(name)
 
     monkeypatch.delitem(vars(T), "DoubleType")
@@ -3945,9 +3946,12 @@ def _assert_float64_columns_guard_payload(state, schema, values):
     "backing_class_getitem", "backing_instance_box", "arrow_class_iter",
 ])
 @pytest.mark.parametrize("behavior", ["raise", "mutate"])
-def test_float64_columns_iterator_hooks_keep_native_order(
+def test_float64_columns_iterator_hooks_run_in_pyspark_conversion(
     protocol, monkeypatch, rows, location, behavior
 ):
+    # As for int64 columns: the fast path declines the customized labels without iterating
+    # them, and PySpark's conversion iterates them, for the columns of `items()`, before it
+    # reads any value. It never calls the frame's notna or astype.
     from pandas.core.base import IndexOpsMixin
 
     values = np.arange(rows, dtype=np.float64)
@@ -3976,9 +3980,10 @@ def test_float64_columns_iterator_hooks_keep_native_order(
         invoked = True
         calls.append("columns iterator")
         if behavior == "raise":
-            raise ColumnsError("columns hook precedes pandas normalization")
-        # Install spies only when native iteration reaches the columns hook.
-        # Before eligibility, normalization methods are the canonical methods.
+            raise ColumnsError("columns hook precedes the conversion of the values")
+        # The spies of the frame's normalization methods are installed once the conversion
+        # iterates the labels, as the values that it reads next are changed: before, the fast
+        # path's guards see the canonical methods.
         monkeypatch.setitem(vars(frame), "notna", notna)
         monkeypatch.setitem(vars(frame), "astype", astype)
         frame.iat[0, 0], frame.iat[-1, 0] = -0.0, np.nan
@@ -4042,7 +4047,7 @@ def test_float64_columns_iterator_hooks_keep_native_order(
     with _arrow_input_service(protocol) as (spark, state):
         if behavior == "raise":
             with pytest.raises(ColumnsError,
-                               match="columns hook precedes pandas normalization"):
+                               match="columns hook precedes the conversion of the values"):
                 spark.createDataFrame(frame, schema)
             assert calls == ["columns iterator"]
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -4053,13 +4058,13 @@ def test_float64_columns_iterator_hooks_keep_native_order(
             expected = values.copy()
             expected[0], expected[-1] = -0.0, np.nan
             _assert_float64_columns_guard_payload(state, schema, [expected])
-            assert calls == ["columns iterator", "notna", "astype"]
+            assert calls == ["columns iterator"]
 
 
 
 @pytest.mark.parametrize("rows", [10000, 100000])
-def test_float64_rebound_index_values_keeps_native_error(protocol, monkeypatch, rows):
-
+def test_float64_rebound_index_values_raise_in_pyspark_conversion(protocol, monkeypatch, rows):
+    # As for int64 columns, PySpark's conversion raises the error of the labels' storage.
     frame = pd.DataFrame({"original": np.arange(rows, dtype=np.float64)})
     schema = T.StructType([T.StructField("renamed", T.DoubleType())])
     columns = frame.columns
@@ -4069,13 +4074,13 @@ def test_float64_rebound_index_values_keeps_native_error(protocol, monkeypatch, 
     def values(index):
         if index is columns:
             calls.append("_values")
-            raise RuntimeError("columns backing hook precedes normalization")
+            raise RuntimeError("columns backing hook precedes the conversion of the values")
         return original(index)
 
     monkeypatch.setattr(pd.Index, "_values", property(values))
     with _arrow_input_service(protocol) as (spark, state):
         with pytest.raises(RuntimeError,
-                           match="columns backing hook precedes normalization"):
+                           match="columns backing hook precedes the conversion of the values"):
             spark.createDataFrame(frame, schema)
         assert calls == ["_values"]
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -4085,37 +4090,24 @@ def test_float64_rebound_index_values_keeps_native_error(protocol, monkeypatch, 
 
 
 @pytest.mark.parametrize("rows", [10000, 100000])
-def test_float64_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, rows):
+def test_float64_rebound_index_data_reads_no_more_than_pyspark_conversion(
+    protocol, monkeypatch, rows
+):
+    import json
+
     frame, schema, values = _float64_columns_guard_input(rows)
     columns, backing = frame.columns, vars(frame.columns)["_data"]
-    original_notna, original_astype = frame.notna, frame.astype
     calls = []
-    normalizing = False
     allowed_reads = None
 
     class ColumnsDataError(RuntimeError):
         pass
 
-    def notna(*args, **kwargs):
-        nonlocal normalizing
-        normalizing = True
-        calls.append("notna")
-        return original_notna(*args, **kwargs)
-
-    def astype(*args, **kwargs):
-        calls.append("astype")
-        return original_astype(*args, **kwargs)
-
     def data(index):
         if index is columns:
-            if not normalizing:
-                calls.append("_data")
-                if allowed_reads is not None and calls.count("_data") > allowed_reads:
-                    raise ColumnsDataError("eligibility added a columns storage read")
-                # Preserve the native first columns read and only then attach
-                # observers; no private optimization call determines fallback.
-                monkeypatch.setitem(vars(frame), "notna", notna)
-                monkeypatch.setitem(vars(frame), "astype", astype)
+            calls.append("_data")
+            if allowed_reads is not None and calls.count("_data") > allowed_reads:
+                raise ColumnsDataError("eligibility added a columns storage read")
             return backing
         return vars(index)["_data"]
 
@@ -4129,28 +4121,18 @@ def test_float64_rebound_index_data_keeps_native_read_order(protocol, monkeypatc
     with _arrow_input_service(protocol, **{
         "spark.sql.session.localRelationCacheThreshold": str(1 << 30),
     }) as (spark, state):
-        # Measure the current native fallback's storage reads, rather than the
-        # former tolist path's single-read contract.
+        # The reads of PySpark's conversion of the frame, with the fast path declined.
         with monkeypatch.context() as baseline:
             baseline.setattr(helper, "prepare_float64_input", lambda *_: None)
             spark.createDataFrame(frame, schema).toArrow()
-        baseline_calls = calls.copy()
-        allowed_reads = baseline_calls.count("_data")
-        assert allowed_reads > 0 and "notna" in baseline_calls
+        allowed_reads = calls.count("_data")
+        assert allowed_reads > 0
         calls.clear()
-        normalizing = False
-        # Restore canonical methods before the candidate eligibility check;
-        # native label iteration will install the spies through the storage hook.
-        monkeypatch.delitem(vars(frame), "notna")
-        monkeypatch.delitem(vars(frame), "astype")
         spark.createDataFrame(frame, schema).toArrow()
-        # The rebound storage declines the columnar path without reading the columns
-        # more than the row path does. pandas caches some of these reads, so a later
-        # row conversion of the same frame can read them fewer times than the first.
-        assert "notna" in calls
-        assert calls.count("_data") <= allowed_reads
-        import json
-
+        # The rebound storage declines the fast path without reading the labels more than
+        # PySpark's conversion does. pandas caches some of these reads, so a later conversion
+        # of the same frame can read them fewer times than the first.
+        assert 0 < calls.count("_data") <= allowed_reads
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)] * 2
         assert state["uploads"] == 0
         assert len(state["input_tables"]) == 2
@@ -4159,7 +4141,6 @@ def test_float64_rebound_index_data_keeps_native_read_order(protocol, monkeypatc
         for table, relation in zip(state["input_tables"], state["relations"]):
             _assert_float64_ipc(table, values, schema)
             assert json.loads(relation.local_relation.schema) == json.loads(schema.json())
-
 
 
 @pytest.mark.parametrize("storage", [
@@ -4193,9 +4174,12 @@ def test_float64_canonical_columns_storage_stays_columnar(protocol, monkeypatch,
     "backing_class_getitem", "backing_instance_box", "arrow_class_iter",
 ])
 @pytest.mark.parametrize("behavior", ["raise", "mutate"])
-def test_string_columns_iterator_hooks_keep_native_order(
+def test_string_columns_iterator_hooks_run_in_pyspark_conversion(
     protocol, monkeypatch, location, behavior
 ):
+    # As for int64 columns: the fast path declines the customized labels without iterating
+    # them, and PySpark's conversion iterates them, for the columns of `items()`, before it
+    # reads any value. It never calls the frame's notna or astype.
     from pandas.core.base import IndexOpsMixin
 
     values = ["plain"] * 10000
@@ -4224,9 +4208,10 @@ def test_string_columns_iterator_hooks_keep_native_order(
         invoked = True
         calls.append("columns iterator")
         if behavior == "raise":
-            raise ColumnsError("columns hook precedes pandas normalization")
-        # Install spies only when native iteration reaches the columns hook.
-        # Before eligibility, normalization methods are the canonical methods.
+            raise ColumnsError("columns hook precedes the conversion of the values")
+        # The spies of the frame's normalization methods are installed once the conversion
+        # iterates the labels, as the values that it reads next are changed: before, the fast
+        # path's guards see the canonical methods.
         monkeypatch.setitem(vars(frame), "notna", notna)
         monkeypatch.setitem(vars(frame), "astype", astype)
         frame.iat[0, 0], frame.iat[-1, 0] = "changed", None
@@ -4290,7 +4275,7 @@ def test_string_columns_iterator_hooks_keep_native_order(
     with _arrow_input_service(protocol) as (spark, state):
         if behavior == "raise":
             with pytest.raises(ColumnsError,
-                               match="columns hook precedes pandas normalization"):
+                               match="columns hook precedes the conversion of the values"):
                 spark.createDataFrame(frame, schema)
             assert calls == ["columns iterator"]
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -4312,12 +4297,12 @@ def test_string_columns_iterator_hooks_keep_native_order(
             assert json.loads(state["relations"][0].local_relation.schema) == json.loads(schema.json())
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
             assert state["uploads"] == 0
-            assert calls == ["columns iterator", "notna", "astype"]
+            assert calls == ["columns iterator"]
 
 
 
-def test_string_rebound_index_values_keeps_native_error(protocol, monkeypatch):
-
+def test_string_rebound_index_values_raise_in_pyspark_conversion(protocol, monkeypatch):
+    # As for int64 columns, PySpark's conversion raises the error of the labels' storage.
     frame = pd.DataFrame({"original": ["plain"] * 10000}, dtype=object)
     schema = T.StructType([T.StructField("renamed", T.StringType())])
     columns = frame.columns
@@ -4327,14 +4312,14 @@ def test_string_rebound_index_values_keeps_native_error(protocol, monkeypatch):
     def values(index):
         if index is columns:
             calls.append("_values")
-            raise RuntimeError("columns backing hook precedes normalization")
+            raise RuntimeError("columns backing hook precedes the conversion of the values")
         return original(index)
 
     monkeypatch.setattr(pd.Index, "_values", property(values))
     assert calls == []
     with _arrow_input_service(protocol) as (spark, state):
         with pytest.raises(RuntimeError,
-                           match="columns backing hook precedes normalization"):
+                           match="columns backing hook precedes the conversion of the values"):
             spark.createDataFrame(frame, schema)
         assert calls == ["_values"]
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -4343,7 +4328,9 @@ def test_string_rebound_index_values_keeps_native_error(protocol, monkeypatch):
 
 
 @pytest.mark.parametrize("nullable", [False, True])
-def test_string_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, nullable):
+def test_string_rebound_index_data_reads_no_more_than_pyspark_conversion(
+    protocol, monkeypatch, nullable
+):
     import json
 
     values = ["plain", "é", "漢字", ""] * 2500
@@ -4354,33 +4341,17 @@ def test_string_rebound_index_data_keeps_native_read_order(protocol, monkeypatch
         T.StructField("renamed", T.StringType(), nullable, {"source": "native"})
     ])
     columns, backing = frame.columns, vars(frame.columns)["_data"]
-    original_notna, original_astype = frame.notna, frame.astype
     calls = []
-    normalizing = False
     allowed_reads = None
 
     class ColumnsDataError(RuntimeError):
         pass
 
-    def notna(*args, **kwargs):
-        nonlocal normalizing
-        normalizing = True
-        calls.append("notna")
-        return original_notna(*args, **kwargs)
-
-    def astype(*args, **kwargs):
-        calls.append("astype")
-        return original_astype(*args, **kwargs)
-
     def data(index):
         if index is columns:
-            if not normalizing:
-                calls.append("_data")
-                if allowed_reads is not None and calls.count("_data") > allowed_reads:
-                    raise ColumnsDataError("eligibility added a columns storage read")
-                # Canonical normalization remains intact before eligibility.
-                monkeypatch.setitem(vars(frame), "notna", notna)
-                monkeypatch.setitem(vars(frame), "astype", astype)
+            calls.append("_data")
+            if allowed_reads is not None and calls.count("_data") > allowed_reads:
+                raise ColumnsDataError("eligibility added a columns storage read")
             return backing
         return vars(index)["_data"]
 
@@ -4392,26 +4363,18 @@ def test_string_rebound_index_data_keeps_native_read_order(protocol, monkeypatch
     import pyspark.sql._pandas_input as helper
 
     with _arrow_input_service(protocol) as (spark, state):
-        # Measure the current native fallback's storage reads, rather than the
-        # former tolist path's single-read contract.
+        # The reads of PySpark's conversion of the frame, with the fast path declined.
         with monkeypatch.context() as baseline:
             baseline.setattr(helper, "prepare_string_input", lambda *_: None)
             spark.createDataFrame(frame, schema).toArrow()
-        baseline_calls = calls.copy()
-        allowed_reads = baseline_calls.count("_data")
-        assert allowed_reads > 0 and "notna" in baseline_calls
+        allowed_reads = calls.count("_data")
+        assert allowed_reads > 0
         calls.clear()
-        normalizing = False
-        # Restore canonical methods before the candidate eligibility check;
-        # native label iteration will install the spies through the storage hook.
-        monkeypatch.delitem(vars(frame), "notna")
-        monkeypatch.delitem(vars(frame), "astype")
         spark.createDataFrame(frame, schema).toArrow()
-        # The rebound storage declines the string path without reading the columns
-        # more than the row path does. pandas caches some of these reads, so a later
-        # row conversion of the same frame can read them fewer times than the first.
-        assert "notna" in calls
-        assert calls.count("_data") <= allowed_reads
+        # The rebound storage declines the fast path without reading the labels more than
+        # PySpark's conversion does. pandas caches some of these reads, so a later conversion
+        # of the same frame can read them fewer times than the first.
+        assert 0 < calls.count("_data") <= allowed_reads
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)] * 2
         assert state["uploads"] == 0
         assert len(state["input_tables"]) == 2
@@ -4430,7 +4393,6 @@ def test_string_rebound_index_data_keeps_native_read_order(protocol, monkeypatch
                  "metadata": {"source": "native"}}
             ],
         }
-
 
 
 @pytest.mark.parametrize("kind", [
@@ -4644,7 +4606,9 @@ def _arrow_string_column(texts, storage):
     return pd.array(texts, dtype="string[pyarrow]")
 
 
-def _force_native_pandas_rows(monkeypatch):
+def _force_pyspark_pandas_conversion(monkeypatch):
+    """Decline the fast paths of plain frames, so that every frame converts with PySpark's
+    conversion of each column to Arrow, the table of which a fast path makes too."""
     import importlib
 
     # Earlier import-hook tests can leave the package attribute pointing at a
@@ -4653,8 +4617,6 @@ def _force_native_pandas_rows(monkeypatch):
     for name in ("prepare_int64_table", "timestamp_columns", "prepare_float64_input",
                  "prepare_string_input", "prepare_date_table"):
         monkeypatch.setattr(helper, name, lambda *_: None)
-    for name in ("accepts_pandas_table", "accepts_pandas_frame"):
-        monkeypatch.setattr(helper, name, lambda *_: False)
 
 
 @pytest.mark.parametrize("cached", [False, True])
@@ -4705,7 +4667,7 @@ def test_arrow_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cac
 @pytest.mark.parametrize("reason", [
     "python_storage", "mixed", "nonnullable_null", "subclass", "small", "atomic_schema",
 ])
-def test_arrow_string_columns_keep_the_row_path(reason):
+def test_arrow_string_columns_decline_the_fast_path(reason):
     from pyspark.sql._pandas_input import prepare_string_input
 
     texts = ["a", None, "b"] * 4000
@@ -4731,31 +4693,30 @@ def test_arrow_string_columns_keep_the_row_path(reason):
 
 
 @pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics"])
-def test_arrow_string_columns_match_the_row_path(protocol, monkeypatch, storage):
+def test_arrow_string_columns_match_pyspark_conversion(protocol, monkeypatch, storage):
     import json
 
     from pyspark.sql.pandas.types import from_arrow_metadata
 
     texts = ["x" * (i % 5) if i % 4 else None for i in range(12000)]
     frame = pd.DataFrame({"v": _arrow_string_column(texts, storage)})
-    schema = T.StructType([T.StructField("v", T.StringType(), True, {"source": "row-control"})])
+    schema = T.StructType([T.StructField("v", T.StringType(), True, {"source": "control"})])
     tables = []
     logical_schemas = []
-    for row_control in (False, True):
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+    for control in (False, True):
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
                 spark.createDataFrame(frame, schema).toArrow()
                 tables.append(state["input_tables"][0])
                 logical_schemas.append(json.loads(state["spark_schema"]))
-                # The relation is at least 64 KiB of Arrow data, so the row path reads the
-                # local relation settings too, as the Arrow importer does.
-                assert state["config_requests"]
+                # As PySpark's createDataFrame, the settings are read before any conversion.
+                assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
     assert tables[0].equals(tables[1])
-    # Row IPC omits field metadata; Spark overlays the explicit logical schema.
-    # The Arrow importer also embeds metadata in IPC, so compare both contracts.
-    assert from_arrow_metadata(tables[0].schema.field(0).metadata) == {"source": "row-control"}
+    # The fast path's IPC carries the field metadata, which the importer embeds; that of
+    # PySpark's conversion carries none. The logical schema of the relation has it either way.
+    assert from_arrow_metadata(tables[0].schema.field(0).metadata) == {"source": "control"}
     assert tables[1].schema.field(0).metadata is None
     assert logical_schemas == [json.loads(schema.json())] * 2
 
@@ -4765,7 +4726,7 @@ def test_arrow_string_columns_match_the_row_path(protocol, monkeypatch, storage)
 def test_arrow_string_generic_explicit_schema_stays_columnar(
     protocol, monkeypatch, storage, layout
 ):
-    from pyspark.sql._pandas_input import accepts_pandas_table, prepare_string_input
+    from pyspark.sql._pandas_input import accepts_pandas_schema, prepare_string_input
 
     texts = ["", None, "中文", "a\x00b"] * (3 if layout == "small" else 3000)
     frame = pd.DataFrame({"v": _arrow_string_column(texts, storage)})
@@ -4776,10 +4737,10 @@ def test_arrow_string_generic_explicit_schema_stays_columnar(
         fields.append(T.StructField("number", T.LongType()))
         expected["number"] = list(range(len(texts)))
     schema = T.StructType(fields)
-    # These ordinary inputs miss the specialized string route but remain eligible
-    # for upstream's generic explicit-schema conversion.
+    # These ordinary inputs miss the specialized string route and take PySpark's conversion of
+    # an explicit schema.
     assert prepare_string_input(frame, schema) is None
-    assert accepts_pandas_table(frame, schema)
+    assert accepts_pandas_schema(schema)
 
     def no_rows(*args, **kwargs):
         raise AssertionError("generic Arrow strings must not materialize pandas rows")
@@ -4832,8 +4793,10 @@ else:
         sys.modules.pop("pyspark.sql.pandas.types")
         assert importlib.import_module("pyspark.sql.pandas.types") is not converter
         assert importer.to_arrow_schema.__globals__ is vars(converter)
+# The rebound name declines the fast path and PySpark's conversion, whose importer resolves the
+# types by their names: the frame takes the row path, as it does without PyArrow.
 assert _pandas_input.prepare_string_input(frame, schema) is None
-assert not _pandas_input.accepts_pandas_table(frame, schema)
+assert not _pandas_input.accepts_pandas_schema(schema)
 class Factory:
     def mktemp(self, name):
         return Path(tempfile.mkdtemp(prefix=name))
@@ -4842,7 +4805,7 @@ tables = []
 for row_control in (False, True):
     with pytest.MonkeyPatch.context() as control:
         if row_control:
-            capture._force_native_pandas_rows(control)
+            capture._without_pyarrow(control)
         with capture._arrow_input_service(protocol) as (spark, state):
             spark.createDataFrame(frame, schema).toArrow()
             # The rows are at least 64 KiB of Arrow data, so the settings are read once.
@@ -4862,9 +4825,13 @@ assert tables[0].equals(tables[1], check_metadata=True)
 @pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics"])
 @pytest.mark.parametrize("schema_kind", ["explicit", "inferred", "names"])
 @pytest.mark.parametrize("instance_hook", [False, True])
-def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
+def test_arrow_string_custom_arrow_hook_values_as_in_pyspark(
     protocol, monkeypatch, instance_hook, schema_kind, storage
 ):
+    # A customized `__arrow_array__` of an Arrow string array, of its class or of the instance,
+    # declines the fast path, without calling it. PySpark's conversion hands each column of such
+    # an array to Arrow, which calls the hook: the values are those that it gives, of each
+    # column of the customized class, or of the customized instance only.
     import importlib
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
@@ -4878,30 +4845,31 @@ def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
     input_schema = {"explicit": schema, "inferred": None, "names": ["first", "v"]}[schema_kind]
     array = frame.iloc[:, 1].array
     calls = []
+    changed = ["changed"] * len(texts)
 
     def changed_arrow(*args, **kwargs):
         calls.append("arrow")
-        return pa.array(["changed"] * len(texts), type=pa.string())
+        return pa.array(changed, type=pa.string())
 
     monkeypatch.setattr(array if instance_hook else type(array), "__arrow_array__", changed_arrow)
     assert _pandas_input.prepare_string_input(frame, schema) is None
-    assert not _pandas_input.accepts_pandas_table(frame, schema)
-    assert not _pandas_input.accepts_pandas_frame(frame)
     assert calls == []
+    expected = {"first": texts if instance_hook else changed, "v": changed}
     tables = []
-    for row_control in (False, True):
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+    for control in (False, True):
+        calls.clear()
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
                 spark.createDataFrame(frame, input_schema).toArrow()
-                tables.append(state["input_tables"][0])
-                # The converted rows are at least 64 KiB of Arrow data, so the native row
-                # path reads the local relation settings once, after the conversion.
+                table = state["input_tables"][0]
+                tables.append(table)
+                assert table.rename_columns(state["column_names"]).to_pydict() == expected
+                assert calls == ["arrow"] * (1 if instance_hook else 2)
+                # As PySpark's createDataFrame, the settings are read before any conversion.
                 assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
-    assert calls == []
-    assert tables[0].to_pydict() == {"first": texts, "v": texts}
     assert tables[0].equals(tables[1], check_metadata=True)
 
 
@@ -4909,12 +4877,15 @@ def test_arrow_string_custom_arrow_hook_keeps_native_row_values(
 @pytest.mark.parametrize("customization", [
     "mixin_hook", "mixin_alias", "partial_alias", "mixin_storage", "mixin_dtype",
 ])
-def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
+def test_arrow_string_numpy_semantics_accessor_converts_as_pyspark(
     protocol, monkeypatch, customization, schema_kind
 ):
+    # pandas 2's NumPy-semantics Arrow string array dispatches its instance lookups through
+    # aliases of its module, whose customization declines the fast path without calling them.
+    # PySpark's conversion hands the column to Arrow through its `__arrow_array__`, which none
+    # of these customizations reaches: the values are the column's, of every pandas.
     import importlib
     import json
-    import traceback
 
     from pandas.core.arrays import _arrow_string_mixins as string_mixins
     from pandas.core.arrays import string_arrow
@@ -4932,11 +4903,9 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
     dynamic_accessor = (helper._raw_class_attribute(array_class, "__getattribute__")[1]
                         is not object.__getattribute__)
     # These warm-ups populate Block.dtype so mixin_dtype reaches class authentication
-    # instead of raising during the earlier native-compatible frame.dtypes read.
+    # instead of raising during an earlier frame.dtypes read.
     for frame in frames:
         assert helper.prepare_string_input(frame, schema) is not None
-        assert helper.accepts_pandas_table(frame, schema)
-        assert helper.accepts_pandas_frame(frame)
     calls = []
 
     def changed_arrow(*args, **kwargs):
@@ -4969,32 +4938,15 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
         # pandas 2.2 dispatches instance lookups through these mutable aliases.
         # Later layouts use object access and remain unaffected by these changes.
         assert (helper.prepare_string_input(frame, schema) is None) == dynamic_accessor
-        assert helper.accepts_pandas_table(frame, schema) == (not dynamic_accessor)
-        assert helper.accepts_pandas_frame(frame) == (not dynamic_accessor)
         assert calls == []
     logical_tables = []
-    outcomes = []
-    for row_control, frame in zip((True, False), frames):
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+    for control, frame in zip((True, False), frames):
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
                 # The mock returns only a row count, not the uploaded data or resolved schema.
-                try:
-                    reply = spark.createDataFrame(frame, input_schema).toArrow()
-                except Exception as error:
-                    assert dynamic_accessor and customization in ("mixin_storage", "mixin_dtype")
-                    assert not isinstance(error, AssertionError)
-                    assert any(
-                        trace_frame.f_globals.get("__name__", "").startswith("pandas.core.arrays.")
-                        for trace_frame, _ in traceback.walk_tb(error.__traceback__)
-                    )
-                    assert state["input_tables"] == []
-                    assert state["config_requests"] == []
-                    assert state["uploads"] == 0
-                    outcomes.append((type(error), str(error)))
-                    continue
-                outcomes.append(None)
+                reply = spark.createDataFrame(frame, input_schema).toArrow()
                 assert reply.to_pydict() == {"rows": [len(texts)]}
                 assert len(state["input_tables"]) == 1
                 uploaded = state["input_tables"][0]
@@ -5003,39 +4955,30 @@ def test_arrow_string_numpy_semantics_accessor_keeps_native_outcomes(
                 assert uploaded.column(0).to_pylist() == texts
                 assert uploaded.column(0).is_null().to_pylist() == [False, True] * 5000
                 assert state["column_names"] == ["v"]
-                if row_control or dynamic_accessor or schema_kind == "explicit":
+                if schema_kind == "explicit":
                     expected_wire = pa.schema([pa.field("v", pa.string())])
                     assert json.loads(state["spark_schema"]) == json.loads(schema.json())
                 else:
-                    # Inherited inferred Arrow conversion sends _n fields without a
-                    # declared schema; Spark infers large_string as StringType and toDF
-                    # applies the actual captured column names above.
+                    # PySpark's conversion without a struct sends _n fields without a schema;
+                    # Spark infers large_string, pandas' storage, as StringType, and toDF
+                    # applies the column names above.
                     expected_wire = pa.schema([pa.field("_0", pa.large_string())])
                     assert state["spark_schema"] is None
                 assert uploaded.schema.equals(expected_wire, check_metadata=True)
-                if row_control or dynamic_accessor:
-                    # The native rows are at least 64 KiB of Arrow data, so the settings are
-                    # read once, after the conversion.
-                    assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-                    assert state["uploads"] == 0
-                else:
-                    assert state["config_requests"]
+                # As PySpark's createDataFrame, the settings are read before any conversion.
+                assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
+                assert state["uploads"] == 0
                 # Compare logical uploaded data only after checking the exact wire
                 # schema and rename plan. This is not a real server schema assertion.
                 renamed = uploaded.rename_columns(state["column_names"])
                 assert from_arrow_schema(renamed.schema) == schema
                 logical_tables.append(renamed.cast(pa.schema([pa.field("v", pa.string())])))
     assert calls == []
-    assert outcomes[0] == outcomes[1]
-    if dynamic_accessor and customization in ("mixin_storage", "mixin_dtype"):
-        assert outcomes[0] is not None
-    if logical_tables:
-        assert len(logical_tables) == 2
-        assert logical_tables[0].equals(logical_tables[1], check_metadata=True)
+    assert len(logical_tables) == 2
+    assert logical_tables[0].equals(logical_tables[1], check_metadata=True)
 
 
-@pytest.mark.parametrize("route", ["specialized", "generic", "inferred"])
-def test_arrow_string_guards_recheck_hooks_between_columns(monkeypatch, route):
+def test_arrow_string_guards_recheck_hooks_between_columns(monkeypatch):
     import importlib
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
@@ -5068,15 +5011,10 @@ def test_arrow_string_guards_recheck_hooks_between_columns(monkeypatch, route):
         indexer = original_iloc.fget(self)
         return RebindingIndexer(indexer) if self is frame else indexer
 
-    # Both guards allow this accessor today. It returns ordinary Series while
+    # The fast path's guard allows this accessor. It returns ordinary Series while
     # rebinding a hook after the first column, invalidating any per-class cache.
     monkeypatch.setattr(pd.DataFrame, "iloc", property(iloc))
-    if route == "specialized":
-        assert _pandas_input.prepare_string_input(frame, schema) is None
-    elif route == "generic":
-        assert not _pandas_input.accepts_pandas_table(frame, schema)
-    else:
-        assert not _pandas_input.accepts_pandas_frame(frame)
+    assert _pandas_input.prepare_string_input(frame, schema) is None
     assert lookups == [0, 1]
     assert calls == []
 
@@ -5098,8 +5036,8 @@ def test_arrow_string_subclass_guard_does_not_hash_custom_metaclass():
     assert calls == []
 
 
-def test_arrow_string_generic_subclass_guard_does_not_read_custom_mro():
-    from pyspark.sql._pandas_input import accepts_pandas_table
+def test_arrow_string_subclass_guard_does_not_read_custom_mro():
+    from pyspark.sql._pandas_input import prepare_string_input
 
     calls = []
     armed = False
@@ -5115,12 +5053,13 @@ def test_arrow_string_generic_subclass_guard_does_not_read_custom_mro():
     class Custom(pd.arrays.ArrowStringArray, metaclass=CustomMeta):
         pass
 
-    # Finish ordinary pandas construction before arming the metaclass callback.
-    frame = pd.DataFrame({"v": Custom(pa.chunked_array([pa.array(["a", None])]))})
+    # Finish ordinary pandas construction before arming the metaclass callback. The column is
+    # long enough for the fast path to reach the classes of its arrays.
+    frame = pd.DataFrame({"v": Custom(pa.chunked_array([pa.array(["a", None] * 5000)]))})
     assert type(frame.iloc[:, 0].array) is Custom
     schema = T.StructType([T.StructField("v", T.StringType())])
     armed = True
-    assert not accepts_pandas_table(frame, schema)
+    assert prepare_string_input(frame, schema) is None
     assert calls == []
 
 
@@ -5201,7 +5140,7 @@ with pytest.MonkeyPatch.context() as control:
     "astype", "isna", "to_numpy", "__getitem__", "dtype", "na_value", "_hasna", "__init__",
     "_from_pyarrow_array", "__new__",
 ])
-def test_arrow_string_custom_row_hooks_keep_native_errors(
+def test_arrow_string_custom_row_hooks_run_as_in_pyspark_conversion(
     protocol, monkeypatch, method, schema_kind, storage
 ):
     if method == "__new__":
@@ -5214,6 +5153,12 @@ def test_arrow_string_custom_row_hooks_keep_native_errors(
 def _check_arrow_string_custom_row_hook(
     protocol, monkeypatch, method, schema_kind, storage
 ):
+    """A customized hook of the class of an Arrow string array declines the fast path without
+    running it. PySpark's conversion hands the column to Arrow through its `__arrow_array__`:
+    only the hooks that pandas runs itself, to iterate the labels, of Arrow strings too but of
+    length one, or to read the dtype of the column, run, which depends on the version of pandas.
+    The outcome, the hook's error or the column's values, is that of PySpark's conversion with
+    the fast path declined."""
     import importlib
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
@@ -5237,22 +5182,22 @@ def _check_arrow_string_custom_row_hook(
     # Warm all guards before rebinding: class authentication must not be cached
     # across calls, even when this exact class was previously accepted. This also
     # populates pandas' Block.dtype cache, so a customized data dtype reaches the
-    # class check; the separate cold-dtype test covers its earlier native error.
+    # class check; the separate cold-dtype test covers its earlier error.
     for frame in frames:
         assert _pandas_input.prepare_string_input(frame, schema) is not None
-        assert _pandas_input.accepts_pandas_table(frame, schema)
-        assert _pandas_input.accepts_pandas_frame(frame)
 
     class HookError(Exception):
         pass
 
     def customized(*args, **kwargs):
         if method == "na_value":
-            # This property receives a StringDtype, including during native label iteration.
+            # This property receives a StringDtype, including during label iteration.
             assert type(args[0]) is pd.StringDtype
+            calls.append(method)
         elif method == "__new__":
             # pandas may pass only the class; no initialized receiver is available.
             assert args[0] is array_class
+            calls.append(method)
         elif method in ("__init__", "_from_pyarrow_array"):
             # __init__ receives an uninitialized object; inspect the subset instead.
             assert type(args[0]) is array_class
@@ -5264,9 +5209,11 @@ def _check_arrow_string_custom_row_hook(
             assert set(kwargs) <= {"dtype"}
             if kwargs:
                 assert type(kwargs["dtype"]) is pd.StringDtype
+            calls.append(method)
         else:
-            assert len(args[0]) == 10000  # Labels have length one; guards must not cast them.
-        calls.append(method)
+            # The receiver, the labels of length one or the column of 10,000 values, which
+            # the fast path's guards read neither of.
+            calls.append((method, len(args[0])))
         raise HookError(f"{method} sentinel")
 
     class FactoryHook:
@@ -5288,17 +5235,15 @@ def _check_arrow_string_custom_row_hook(
         monkeypatch.setattr(array_class, method, customized)
     for frame in frames:
         assert _pandas_input.prepare_string_input(frame, schema) is None
-        assert not _pandas_input.accepts_pandas_table(frame, schema)
-        assert not _pandas_input.accepts_pandas_frame(frame)
         assert calls == []
 
     outcomes = []
     tables = []
-    for row_control, frame in zip((True, False), frames):
+    for control, frame in zip((True, False), frames):
         calls.clear()
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
                 try:
                     result = spark.createDataFrame(frame, input_schema)
@@ -5306,26 +5251,23 @@ def _check_arrow_string_custom_row_hook(
                 except HookError as error:
                     assert type(error) is HookError
                     assert str(error) == f"{method} sentinel"
-                    if method in ("__init__", "_from_pyarrow_array", "__new__"):
-                        assert calls
-                    else:
-                        assert calls == [method]
+                    assert calls
                     outcome = (type(error), str(error))
                     assert state["input_tables"] == []
                 else:
-                    # pandas versions use different subset-construction helpers.
-                    assert method in ("__init__", "_from_pyarrow_array", "__new__")
                     assert len(state["input_tables"]) == 1
                     table = state["input_tables"][0]
                     assert table.column(0).to_pylist() == texts
                     tables.append(table)
                     outcome = None
                 outcomes.append((outcome, tuple(calls)))
-                # A hook that raises does so before the settings read; rows that convert are at
-                # least 64 KiB of Arrow data, so they read the settings once.
+                # As PySpark's createDataFrame, the settings are read before any conversion.
                 assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
     assert outcomes[0] == outcomes[1]
+    # Of the column, pandas reads only the dtype; the other hooks of an array that run are of
+    # the labels.
+    assert all(call[1] == 1 for call in calls if type(call) is tuple and call[0] != "dtype")
     if tables:
         assert len(tables) == 2
         assert tables[0].equals(tables[1], check_metadata=True)
@@ -5363,7 +5305,7 @@ def _check_arrow_string_class_descriptor(monkeypatch, method):
     owner = pd.StringDtype if method == "na_value" else array_class
     monkeypatch.setattr(owner, method, CustomizedDescriptor(), raising=False)
     # These concrete-class checks inspect raw dictionaries. Earlier frame.dtypes
-    # reads are covered separately because they intentionally keep native ordering.
+    # reads are covered separately, as PySpark's conversion makes them too.
     assert not _pandas_input._arrow_string_class_is_canonical(array_class)
     assert not _pandas_input._has_canonical_arrow_string_array(array)
     assert calls == []
@@ -5383,8 +5325,6 @@ def test_arrow_string_label_descriptors_decline_without_binding(monkeypatch, met
     array_class = type(frame.columns._values)
     schema = T.StructType([T.StructField("v", T.StringType())])
     assert _pandas_input.prepare_string_input(frame, schema) is not None
-    assert _pandas_input.accepts_pandas_table(frame, schema)
-    assert _pandas_input.accepts_pandas_frame(frame)
     calls = []
 
     class HookError(Exception):
@@ -5398,8 +5338,6 @@ def test_arrow_string_label_descriptors_decline_without_binding(monkeypatch, met
     owner = pd.StringDtype if method == "na_value" else array_class
     monkeypatch.setattr(owner, method, CustomizedDescriptor())
     assert _pandas_input.prepare_string_input(frame, schema) is None
-    assert not _pandas_input.accepts_pandas_table(frame, schema)
-    assert not _pandas_input.accepts_pandas_frame(frame)
     assert calls == []
 
 
@@ -5511,7 +5449,10 @@ def test_arrow_string_simulated_cast_failures_decline(monkeypatch, error_kind):
     assert calls == [("validate", True), ("cast", pa.string())]
 
 
-def test_arrow_string_object_labels_dtype_error_matches_native_rows(protocol, monkeypatch):
+def test_arrow_string_object_labels_dtype_error_matches_pyspark_conversion(protocol, monkeypatch):
+    # A customized dtype of the class of an Arrow string column, not cached by an earlier read,
+    # raises in the fast path's read of the dtypes, as in PySpark's conversion, which reads the
+    # dtype of the column: the same error, with the fast path declined or not.
     import importlib
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
@@ -5535,19 +5476,16 @@ def test_arrow_string_object_labels_dtype_error_matches_native_rows(protocol, mo
         raise HookError("dtype sentinel")
 
     monkeypatch.setattr(array_class, "dtype", property(customized))
-    # The generic route can authenticate the data class before reading its dtype.
-    assert not _pandas_input.accepts_pandas_table(frames[0], schema)
-    assert calls == []
     errors = []
     with pytest.raises(HookError, match="^dtype sentinel$") as error:
         _pandas_input.prepare_string_input(frames[0], schema)
     errors.append((type(error.value), str(error.value)))
     assert calls == ["dtype"]
-    for row_control, frame in zip((False, True), frames[1:]):
+    for control, frame in zip((False, True), frames[1:]):
         calls.clear()
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
                 with pytest.raises(HookError, match="^dtype sentinel$") as error:
                     spark.createDataFrame(frame, schema)
@@ -5560,40 +5498,61 @@ def test_arrow_string_object_labels_dtype_error_matches_native_rows(protocol, mo
     assert errors[0] == errors[1] == errors[2]
 
 
-def test_arrow_string_custom_label_astype_keeps_native_row_values(protocol, monkeypatch):
+def test_arrow_string_custom_label_astype_runs_as_in_pyspark_conversion(protocol, monkeypatch):
+    # A customized astype of the Arrow string labels declines the fast path without calling it.
+    # PySpark's conversion calls it where pandas casts the labels to iterate them, as pandas 2
+    # does, and not where it does not, as pandas 3: the outcome is that of the conversion with
+    # the fast path declined.
     import importlib
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
 
     texts = ["original", None] * 5000
-    frame = pd.DataFrame({"v": pd.array(texts, dtype="string[pyarrow]")})
-    frame.columns = pd.Index(pd.array(["v"], dtype="string[pyarrow]"))
+    frames = []
+    for _ in range(2):
+        frame = pd.DataFrame({"v": pd.array(texts, dtype="string[pyarrow]")})
+        frame.columns = pd.Index(pd.array(["v"], dtype="string[pyarrow]"))
+        frames.append(frame)
     schema = T.StructType([T.StructField("v", T.StringType())])
     calls = []
 
+    class HookError(Exception):
+        pass
+
     def customized(*args, **kwargs):
         calls.append("label astype")
-        raise AssertionError("native row conversion does not cast column labels")
+        raise HookError("label astype sentinel")
 
-    monkeypatch.setattr(frame.columns._values, "astype", customized)
-    assert _pandas_input.prepare_string_input(frame, schema) is None
-    assert not _pandas_input.accepts_pandas_table(frame, schema)
+    for frame in frames:
+        monkeypatch.setattr(frame.columns._values, "astype", customized)
+        assert _pandas_input.prepare_string_input(frame, schema) is None
     assert calls == []
+    outcomes = []
     tables = []
-    for row_control in (False, True):
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+    for control, frame in zip((True, False), frames):
+        calls.clear()
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
-                spark.createDataFrame(frame, schema).toArrow()
-                tables.append(state["input_tables"][0])
-                # The converted rows are at least 64 KiB of Arrow data, so the settings are read
-                # once, after the conversion.
+                try:
+                    spark.createDataFrame(frame, schema).toArrow()
+                except HookError as error:
+                    assert str(error) == "label astype sentinel"
+                    assert calls == ["label astype"]
+                    assert state["input_tables"] == []
+                    outcomes.append(str(error))
+                else:
+                    assert calls == []
+                    tables.append(state["input_tables"][0])
+                    assert tables[-1].column(0).to_pylist() == texts
+                    outcomes.append(None)
+                # As PySpark's createDataFrame, the settings are read before any conversion.
                 assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
-    assert calls == []
-    assert tables[0].column(0).to_pylist() == texts
-    assert tables[0].equals(tables[1], check_metadata=True)
+    assert outcomes[0] == outcomes[1]
+    if tables:
+        assert tables[0].equals(tables[1], check_metadata=True)
 
 
 def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, monkeypatch):
@@ -5602,9 +5561,9 @@ def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, mon
     from pandas.core.arrays.arrow.array import ArrowExtensionArray
 
     _pandas_input = importlib.import_module("pyspark.sql._pandas_input")
-    # Index uniqueness can cast null labels and invoke indexed masking. Native
-    # normalization may also slice labels while aligning DataFrame.where; guards
-    # must decline without an early callback and preserve that native outcome.
+    # Index uniqueness can cast null labels and invoke indexed masking. The fast path's guard
+    # must decline without an early callback; PySpark's conversion, which iterates the labels,
+    # then has the outcome of the conversion with the fast path declined.
     expected = {"a": ["first"] * 10000, "b": ["second"] * 10000}
     frames = []
     for _ in range(2):
@@ -5625,17 +5584,16 @@ def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, mon
     monkeypatch.setattr(ArrowExtensionArray, "__getitem__", customized)
     for frame in frames:
         assert _pandas_input.prepare_string_input(frame, schema) is None
-        assert not _pandas_input.accepts_pandas_table(frame, schema)
         assert calls == []
 
     outcomes = []
     tables = []
-    # Observe native behavior first, using a fresh equal frame for each route.
-    for row_control, frame in zip((True, False), frames):
+    # Observe the control first, using a fresh equal frame for each route.
+    for control, frame in zip((True, False), frames):
         calls.clear()
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
                 try:
                     spark.createDataFrame(frame, schema).toArrow()
@@ -5652,9 +5610,8 @@ def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, mon
                     tables.append(table)
                     outcome = None
                 outcomes.append((outcome, tuple(calls)))
-                # Whether the hook runs depends on the pandas version. A hook that raises does
-                # so before the settings read; rows that convert are at least 64 KiB of Arrow
-                # data, so they read the settings once.
+                # Whether the hook runs depends on the pandas version. As PySpark's
+                # createDataFrame, the settings are read before any conversion.
                 assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
     assert outcomes[0] == outcomes[1]
@@ -5666,9 +5623,14 @@ def test_arrow_string_null_labels_decline_without_getitem_callback(protocol, mon
 @pytest.mark.parametrize("label_storage", ["object", "pyarrow"])
 @pytest.mark.parametrize("method", ["astype", "__array__", "__getitem__", "__init__"])
 @pytest.mark.parametrize("storage", ["pyarrow", "numpy_semantics"])
-def test_arrow_string_super_row_hooks_keep_native_errors(
+def test_arrow_string_super_row_hooks_run_as_in_pyspark_conversion(
     protocol, monkeypatch, label_storage, method, storage
 ):
+    # A customized hook of the ArrowExtensionArray base of the Arrow string arrays declines the
+    # fast path without running it. PySpark's conversion hands the column to Arrow through its
+    # `__arrow_array__`, so it runs only what pandas runs of these hooks to iterate Arrow string
+    # labels, of a length of one, which depends on the version of pandas: the outcome is that of
+    # the conversion with the fast path declined.
     import importlib
 
     from pandas.core.arrays.arrow.array import ArrowExtensionArray
@@ -5684,8 +5646,6 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
     calls = []
     for frame in frames:
         assert _pandas_input.prepare_string_input(frame, schema) is not None
-        assert _pandas_input.accepts_pandas_table(frame, schema)
-        assert _pandas_input.accepts_pandas_frame(frame)
 
     class HookError(Exception):
         pass
@@ -5696,37 +5656,36 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
             # the 5,000 non-null data values; labels have only one value.
             values = args[0]
             assert values.to_pylist() == ["original"] * 5000
+            calls.append(method)
         else:
-            assert len(self) == 10000  # Preflight must not cast the length-one labels.
-        calls.append(method)
+            # The receiver, the labels of length one or the column of 10,000 values, which
+            # the fast path's guards read neither of.
+            calls.append((method, len(self)))
         raise HookError(f"super {method} sentinel")
 
     monkeypatch.setattr(ArrowExtensionArray, method, customized)
     for frame in frames:
         assert _pandas_input.prepare_string_input(frame, schema) is None
-        assert not _pandas_input.accepts_pandas_table(frame, schema)
-        assert not _pandas_input.accepts_pandas_frame(frame)
     assert calls == []
     outcomes = []
     tables = []
-    # The native control determines whether this pandas layout calls __init__.
-    # pandas 3.1's null-subarray factory instead allocates through __new__.
-    for row_control, frame in zip((True, False), frames):
+    # The control determines whether this pandas layout calls the hook.
+    # pandas 3.1's null-subarray factory allocates through __new__, not __init__.
+    for control, frame in zip((True, False), frames):
         calls.clear()
-        with monkeypatch.context() as control:
-            if row_control:
-                _force_native_pandas_rows(control)
+        with monkeypatch.context() as dispatch:
+            if control:
+                _force_pyspark_pandas_conversion(dispatch)
             with _arrow_input_service(protocol) as (spark, state):
                 try:
                     spark.createDataFrame(frame, schema).toArrow()
                 except HookError as error:
                     assert type(error) is HookError
                     assert str(error) == f"super {method} sentinel"
-                    assert calls == [method]
+                    assert len(calls) == 1
                     assert state["input_tables"] == []
                     outcome = (type(error), str(error))
                 else:
-                    assert method == "__init__"
                     assert calls == []
                     assert len(state["input_tables"]) == 1
                     table = state["input_tables"][0]
@@ -5738,12 +5697,13 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
                     tables.append(table)
                     outcome = None
                 outcomes.append((outcome, tuple(calls)))
-                # Whether the hook runs depends on the pandas version. A hook that raises does
-                # so before the settings read; rows that convert are at least 64 KiB of Arrow
-                # data, so they read the settings once.
+                # Whether the hook runs depends on the pandas version. As PySpark's
+                # createDataFrame, the settings are read before any conversion.
                 assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
                 assert state["uploads"] == 0
     assert outcomes[0] == outcomes[1]
+    # The hooks that run are of the labels, not of the column.
+    assert all(call[1] == 1 for call in calls if type(call) is tuple)
     if tables:
         assert len(tables) == 2
         assert tables[0].equals(tables[1], check_metadata=True)
@@ -5753,7 +5713,14 @@ def test_arrow_string_super_row_hooks_keep_native_errors(
     "string_subclass", "frame_subclass", "nan", "pd_na", "nat", "string_dtype",
     "nonnullable_null", "inferred", "names", "ddl", "small", "collation", "cast", "mixed",
 ])
-def test_string_public_fallback_keeps_row_semantics(protocol, monkeypatch, reason):
+def test_string_public_fallback_converts_as_pyspark(protocol, monkeypatch, reason):
+    # A frame of object strings that the fast path declines, for each of its reasons, converts
+    # as PySpark's conversion does: it hands the column to Arrow, which reads the values of a
+    # str subclass as they are, without its __str__, and it never calls the frame's astype.
+    # Arrow's errors are PySpark's: of a null in a non-nullable field, of a cast of strings to
+    # numbers, and of a value that is not a string.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
     calls = []
 
     class Text(str):
@@ -5790,22 +5757,32 @@ def test_string_public_fallback_keeps_row_semantics(protocol, monkeypatch, reaso
         return astype(self, *args, **kwargs)
 
     monkeypatch.setattr(pd.DataFrame, "astype", record_rows)
+    errors = {
+        "nonnullable_null": (ValueError, "Casting field 'text' with null values to non-nullable"),
+        "cast": (PySparkValueError, (
+            "Exception thrown when converting pandas.Series (object) with name 'text' to Arrow "
+            "Array (int64). It can be caused by overflows or other unsafe conversions warned by "
+            "Arrow. Arrow safe type check can be disabled by using SQL config "
+            "`spark.sql.execution.pandas.convertToArrowArraySafely`.")),
+        "mixed": (PySparkTypeError, (
+            "Exception thrown when converting pandas.Series (object) with name 'text' to Arrow "
+            "Array (string).")),
+    }
     with _arrow_input_service(protocol) as (spark, state):
-        if reason in ("nonnullable_null", "cast", "mixed"):
-            from pyspark.errors import PySparkRuntimeError
-
-            message = ("Column 'text' is declared as non-nullable but contains null values"
-                       if reason == "nonnullable_null" else "Type mismatch in row data")
-            with pytest.raises(PySparkRuntimeError, match=message):
+        if reason in errors:
+            error_type, message = errors[reason]
+            with pytest.raises(error_type) as error:
                 spark.createDataFrame(frame, schema)
-            assert calls == ["astype"]
+            assert type(error.value) is error_type
+            assert str(error.value) == message
+            assert calls == []
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
             assert state["relations"] == []
             return
         spark.createDataFrame(frame, schema).toArrow()
-        assert calls == ["astype"]  # Native extraction keeps str.__str__ overrides uncalled.
+        assert calls == []
         table = state["input_tables"][0]
-        assert table.schema.names == ["renamed" if reason == "names" else "text"]
+        assert state["column_names"] == ["renamed" if reason == "names" else "text"]
         expected = ["plain"] * len(values)
         if reason in ("nan", "pd_na", "nat"):
             expected[-1] = None
@@ -5815,6 +5792,8 @@ def test_string_public_fallback_keeps_row_semantics(protocol, monkeypatch, reaso
 
 @pytest.mark.parametrize("surrogate", ["\ud800", "\udfff"])
 def test_string_surrogate_error_follows_the_settings_read(protocol, monkeypatch, surrogate):
+    from pyspark.errors import PySparkValueError
+
     values = ["plain"] * 10000
     values[-1] = surrogate
     frame = pd.DataFrame({"text": values}, dtype=object)
@@ -5828,11 +5807,20 @@ def test_string_surrogate_error_follows_the_settings_read(protocol, monkeypatch,
 
     monkeypatch.setattr(pd.DataFrame, "astype", record_rows)
     with _arrow_input_service(protocol) as (spark, state):
-        # The UnicodeEncodeError of pyarrow's conversion of PySpark, a ValueError, after the
-        # settings that PySpark's createDataFrame reads before it converts any data.
-        with pytest.raises(UnicodeEncodeError, match="surrogates not allowed"):
+        # The fast path cannot encode the string and declines the frame, which converts as
+        # PySpark's conversion does, after the settings that its createDataFrame reads before
+        # it converts any data: Arrow's UnicodeEncodeError, a ValueError, which PySpark raises
+        # as its PySparkValueError.
+        with pytest.raises(PySparkValueError) as error:
             spark.createDataFrame(frame, schema)
-        assert calls == ["astype"]
+        assert str(error.value) == (
+            "Exception thrown when converting pandas.Series (object) with name 'text' to Arrow "
+            "Array (string). It can be caused by overflows or other unsafe conversions warned by "
+            "Arrow. Arrow safe type check can be disabled by using SQL config "
+            "`spark.sql.execution.pandas.convertToArrowArraySafely`.")
+        assert type(error.value.__cause__) is UnicodeEncodeError
+        assert "surrogates not allowed" in str(error.value.__cause__)
+        assert calls == []
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["relations"] == []
         assert state["uploads"] == 0
@@ -5901,8 +5889,8 @@ with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
     # with the classes that this script patches.
     spark.createDataFrame(frame, schema)._to_table()
     if attribute == "isUTF8BinaryCollation":
-        # Official converts this explicit schema with Arrow, after reading the configuration;
-        # it never reads this attribute, so the result is the same as the row path's.
+        # As official, which converts this explicit schema with Arrow, after reading the
+        # configuration, and never reads this attribute.
         assert state["config_requests"][0][0] == "get", state["config_requests"]
     else:
         assert len(state["config_requests"]) == 1, state["config_requests"]
@@ -5931,7 +5919,11 @@ def test_string_rebound_pandas_alias_keeps_subclass_fallback(monkeypatch):
 
 
 @pytest.mark.parametrize("dtype_mode", ["equal", "class_spoof", "exact_numpy"])
-def test_string_custom_extension_dtype_cannot_impersonate_numpy_object(protocol, dtype_mode):
+def test_string_custom_extension_dtype_takes_pyspark_conversion(protocol, dtype_mode):
+    # An extension array of a dtype that equals, or claims to be, NumPy's object dtype does not
+    # select the fast path of object strings: as PySpark's conversion, which hands a column of
+    # an array with `__arrow_array__` to Arrow as it is, the values are those that the hook
+    # gives, not those of a scan of the array.
     from pandas.api.extensions import ExtensionArray, ExtensionDtype, take
     from pyspark.sql._pandas_input import prepare_string_input
 
@@ -6021,60 +6013,51 @@ def test_string_custom_extension_dtype_cannot_impersonate_numpy_object(protocol,
     assert isinstance(dtype, np.dtype) is (dtype_mode != "equal")
     assert dtype == np.dtype("object")
     assert prepare_string_input(frame, schema) is None
-    with _arrow_input_service(protocol) as (spark, state):
-        if dtype_mode == "exact_numpy":
-            # This deliberately inconsistent EA already fails pandas' row-path
-            # astype(object). Preserve that error before importer configuration.
-            with pytest.raises(TypeError, match="cannot set astype"):
-                spark.createDataFrame(frame, schema)
-            assert state["input_tables"] == []
-            assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
-        else:
-            spark.createDataFrame(frame, schema).toArrow()
-            assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
-            assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
     assert arrow_calls == []
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["input_tables"][0].column(0).to_pylist() == ["different"] * 10000
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
+    assert arrow_calls == ["arrow"]
 
 
 
 @pytest.mark.parametrize("method", ["astype", "notna"])
-def test_string_instance_conversion_hooks_keep_row_fallback(protocol, method):
+def test_string_instance_conversion_hooks_are_not_called_as_in_pyspark(protocol, method):
+    # A frame whose own notna or astype is customized declines the fast path of object strings,
+    # and converts as PySpark's conversion does, which never calls them: the values are the
+    # frame's, whatever the hooks would change.
+    from pyspark.sql._pandas_input import prepare_string_input
+
     frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
     schema = T.StructType([T.StructField("text", T.StringType())])
     original = getattr(frame, method)
     calls = []
-    expected = ["plain"] * 10000
-    if method == "astype":
-        expected[0] = "changed"
 
-        def customized(*args, **kwargs):
-            calls.append(method)
-            result = original(*args, **kwargs)
-            result.iat[0, 0] = "changed"
-            return result
-    else:
-        expected[0] = None
+    def customized(*args, **kwargs):
+        calls.append(method)
+        result = original(*args, **kwargs)
+        result.iat[0, 0] = "changed" if method == "astype" else False
+        return result
 
-        def customized(*args, **kwargs):
-            calls.append(method)
-            result = original(*args, **kwargs)
-            result.iat[0, 0] = False
-            return result
     setattr(frame, method, customized)
+    assert prepare_string_input(frame, schema) is None
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert calls == [method]
+        assert calls == []
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["uploads"] == 0
-        assert state["input_tables"][0].column(0).to_pylist() == expected
+        assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
 
 
 
 @pytest.mark.parametrize("method", ["astype", "notna", "where"])
 @pytest.mark.parametrize("before_import", [False, True])
-def test_string_class_conversion_hooks_keep_row_fallback(
+def test_string_class_conversion_hooks_are_not_called_as_in_pyspark(
     protocol, monkeypatch, method, before_import
 ):
+    # As for the instance: customized methods of the class, also before the helpers are
+    # imported, decline the fast path, and PySpark's conversion never calls them.
     import importlib
 
     name = "pyspark.sql._pandas_input"
@@ -6086,8 +6069,6 @@ def test_string_class_conversion_hooks_keep_row_fallback(
     schema = T.StructType([T.StructField("text", T.StringType())])
     original = getattr(pd.DataFrame, method)
     calls = []
-    expected = ["plain"] * 10000
-    expected[0] = None if method == "notna" else "changed"
 
     def customized(self, *args, **kwargs):
         calls.append(method)
@@ -6096,23 +6077,26 @@ def test_string_class_conversion_hooks_keep_row_fallback(
         return result
 
     monkeypatch.setattr(pd.DataFrame, method, customized)
+    assert importlib.import_module(name).prepare_string_input(frame, schema) is None
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        assert calls == [method]
+        assert calls == []
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         assert state["uploads"] == 0
-        assert state["input_tables"][0].column(0).to_pylist() == expected
+        assert state["input_tables"][0].column(0).to_pylist() == ["plain"] * 10000
 
 
 
-def test_string_instance_where_override_keeps_existing_row_behavior(protocol):
+def test_string_instance_where_override_is_not_called_as_in_pyspark(protocol):
+    # A frame of its own where declines the fast path, and converts as PySpark's conversion
+    # does, which never calls it.
     from pyspark.sql._pandas_input import prepare_string_input
 
     frame = pd.DataFrame({"text": ["plain"] * 10000}, dtype=object)
     schema = T.StructType([T.StructField("text", T.StringType())])
 
     def customized(*args, **kwargs):
-        raise AssertionError("row normalization calls where on the astype result")
+        raise AssertionError("PySpark's conversion never calls the frame's where")
 
     frame.where = customized
     assert prepare_string_input(frame, schema) is None
@@ -6239,14 +6223,15 @@ def test_pandas_explicit_nonnullable_null_raises_as_pyspark(protocol):
     with _arrow_input_service(protocol) as (spark, state):
         with pytest.raises(ValueError) as error:
             spark.createDataFrame(frame, schema)
-    # Official: ValueError, not a PySparkRuntimeError from the row path.
+    # Official: the ValueError of the cast of the table to the schema.
     assert type(error.value) is ValueError
     assert str(error.value) == "Casting field 'a' with null values to non-nullable"
     assert state["input_tables"] == []
 
 
 class _PandasSubclass(pd.DataFrame):
-    """A frame of a class of its own, which the row path converts."""
+    """A frame of a class of its own, which converts as PySpark's conversion converts every
+    pandas DataFrame, whatever its class."""
 
 
 @pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
@@ -6292,12 +6277,14 @@ def test_pandas_frame_of_no_columns_under_a_struct_of_no_fields_as_pyspark(proto
         spark.createDataFrame(frame_class(index=range(2)), T.StructType([]))
 
 
+@pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
 @pytest.mark.parametrize("schema", [None, ["p", "q"], ["p"]], ids=["inferred", "names", "fewer"])
-def test_pandas_inferred_types_are_those_of_arrow_as_pyspark(protocol, schema):
-    # As PySpark Connect's: without a schema, each column converts with PySpark's Arrow
-    # conversion, of the type that Arrow infers, and the table goes without a schema, of
-    # columns _0, _1, ..., which toDF names, by the labels, or the names and _n past them.
-    frame = pd.DataFrame({"a": np.array([1, 2], dtype=np.int8), "b": [{"k": 1}, {"k": 2}]})
+def test_pandas_inferred_types_are_those_of_arrow_as_pyspark(protocol, schema, frame_class):
+    # As PySpark Connect's, of a frame of any class: without a schema, each column converts
+    # with PySpark's Arrow conversion, of the type that Arrow infers (a struct of a column of
+    # dicts), and the table goes without a schema, of columns _0, _1, ..., which toDF names,
+    # by the labels, or the names and _n past them.
+    frame = frame_class({"a": np.array([1, 2], dtype=np.int8), "b": [{"k": 1}, {"k": 2}]})
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         table = state["input_tables"][0]
@@ -6320,10 +6307,12 @@ def test_pandas_inferred_dicts_are_maps_of_infer_pandas_dict_as_map(protocol):
     assert table.column("a").to_pylist() == [[("k", 1)], [("j", 2)]]
 
 
+@pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
 @pytest.mark.parametrize("host", ["America/Los_Angeles", "UTC"])
-def test_pandas_inferred_naive_timestamp_uses_session_zone(protocol, host):
-    # As PySpark Connect's: a naive time is a time of the session zone, whatever the client's.
-    frame = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
+def test_pandas_inferred_naive_timestamp_uses_session_zone(protocol, host, frame_class):
+    # As PySpark Connect's, of a frame of any class: a naive time is a time of the session
+    # zone, whatever the client's.
+    frame = frame_class({"t": [pd.Timestamp("2020-07-01 12:00")]})
     table = _in_host_zone(host, lambda: _pandas_table(
         protocol, frame, None, **{"spark.sql.session.timeZone": "America/Los_Angeles"}))
     assert table.column("_0").to_pylist() == [datetime(2020, 7, 1, 19, tzinfo=timezone.utc)]
@@ -6357,10 +6346,12 @@ def test_pandas_naive_timestamp_uses_session_zone(protocol, host):
     assert table.column("t").to_pylist() == [datetime(2020, 7, 1, 12, tzinfo=timezone.utc)]
 
 
-def test_pandas_naive_timestamp_in_session_zone_is_converted(protocol):
+@pytest.mark.parametrize("frame_class", [pd.DataFrame, _PandasSubclass], ids=["frame", "subclass"])
+def test_pandas_naive_timestamp_in_session_zone_is_converted(protocol, frame_class):
     pytz = pytest.importorskip("pytz")
-    frame = pd.DataFrame({"t": [pd.Timestamp("2020-07-01 12:00")]})
-    # Official with session America/Los_Angeles and a client zone of UTC: 19:00 UTC.
+    frame = frame_class({"t": [pd.Timestamp("2020-07-01 12:00")]})
+    # Official with session America/Los_Angeles and a client zone of UTC, of a frame of any
+    # class: 19:00 UTC.
     table = _in_host_zone(
         "UTC",
         lambda: _pandas_table(
@@ -6370,7 +6361,7 @@ def test_pandas_naive_timestamp_in_session_zone_is_converted(protocol):
     )
     assert table.column("t").to_pylist() == [datetime(2020, 7, 1, 19, tzinfo=timezone.utc)]
 
-    gap = pd.DataFrame({"t": [pd.Timestamp("2020-03-08 02:30")]})
+    gap = frame_class({"t": [pd.Timestamp("2020-03-08 02:30")]})
     with _arrow_input_service(protocol, **{
         "spark.sql.session.timeZone": "America/Los_Angeles",
     }) as (spark, _):
@@ -6582,7 +6573,11 @@ def test_date_column_guard_preserves_row_fallback(reason):
 
 @pytest.mark.parametrize("reason", ["date_subclass", "frame_subclass", "nan", "pd_na", "nat",
                                     "nonnullable_null", "inferred", "ddl", "small"])
-def test_date_public_fallback_keeps_hooks(protocol, monkeypatch, reason):
+def test_date_public_fallback_converts_as_pyspark(protocol, monkeypatch, reason):
+    # A frame of object dates that the fast path declines, for each of its reasons, converts as
+    # PySpark's conversion does: it hands the column to Arrow, which reads the fields of a date
+    # subclass, without its toordinal, and it never calls the frame's astype. A null in a
+    # non-nullable field fails the cast of the table, as PySpark's.
     calls = []
 
     class Day(date):
@@ -6615,24 +6610,20 @@ def test_date_public_fallback_keeps_hooks(protocol, monkeypatch, reason):
     monkeypatch.setattr(pd.DataFrame, "astype", record_rows)
     with _arrow_input_service(protocol) as (spark, state):
         if reason == "nonnullable_null":
-            from pyspark.errors import PySparkRuntimeError
-
-            with pytest.raises(PySparkRuntimeError, match=(
-                "Column 'day' is declared as non-nullable but contains null values"
-            )):
+            with pytest.raises(ValueError) as error:
                 spark.createDataFrame(frame, schema)
-            assert calls == ["astype"]
+            assert type(error.value) is ValueError
+            assert str(error.value) == "Casting field 'day' with null values to non-nullable"
+            assert calls == []
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
+            assert state["relations"] == []
             return
         spark.createDataFrame(frame, schema).toArrow()
-        assert "astype" in calls
+        assert calls == []
         actual = state["input_tables"][0].column(0).to_pylist()
         expected = [date(2020, 1, 1)] * len(values)
-        if reason in ("nan", "pd_na", "nat", "nonnullable_null"):
+        if reason in ("nan", "pd_na", "nat"):
             expected[-1] = None
-        elif reason == "date_subclass":
-            assert calls.count("toordinal") == 1
-            expected[-1] = date(2020, 1, 8)
         assert actual == expected
 
 
@@ -6703,7 +6694,10 @@ with _arrow_input_service(protocol.__wrapped__(Factory())) as (spark, state):
 
 
 @pytest.mark.parametrize("dtype_mode", ["equal", "class_spoof", "exact_numpy"])
-def test_date_custom_extension_dtype_cannot_impersonate_numpy_object(protocol, dtype_mode):
+def test_date_custom_extension_dtype_takes_pyspark_conversion(protocol, dtype_mode):
+    # As for object strings: an extension array of a dtype that equals, or claims to be, NumPy's
+    # object dtype does not select the fast path of object dates, and PySpark's conversion
+    # takes the values that its `__arrow_array__` gives.
     from pandas.api.extensions import ExtensionArray, ExtensionDtype, take
     from pyspark.sql._pandas_input import prepare_date_table
 
@@ -6793,21 +6787,15 @@ def test_date_custom_extension_dtype_cannot_impersonate_numpy_object(protocol, d
     assert isinstance(dtype, np.dtype) is (dtype_mode != "equal")
     assert dtype == np.dtype("object")
     assert prepare_date_table(frame, schema) is None
-    with _arrow_input_service(protocol) as (spark, state):
-        if dtype_mode == "exact_numpy":
-            # This deliberately inconsistent EA already fails pandas' row-path
-            # astype(object). Preserve that error before importer configuration.
-            with pytest.raises(TypeError, match="cannot set astype"):
-                spark.createDataFrame(frame, schema)
-            assert state["input_tables"] == []
-        else:
-            spark.createDataFrame(frame, schema).toArrow()
-            assert state["input_tables"][0].column(0).to_pylist() == [date(2020, 1, 1)] * 10000
-        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
     assert arrow_calls == []
+    with _arrow_input_service(protocol) as (spark, state):
+        spark.createDataFrame(frame, schema).toArrow()
+        assert state["input_tables"][0].column(0).to_pylist() == [date(2020, 1, 2)] * 10000
+        assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
+    assert arrow_calls == ["arrow"]
 
 
-def test_date_rebound_dataframe_alias_keeps_subclass_on_row_path(monkeypatch):
+def test_date_rebound_dataframe_alias_keeps_subclass_off_the_fast_path(monkeypatch):
     from pyspark.sql._pandas_input import prepare_date_table
 
     class Frame(pd.DataFrame):
@@ -6980,9 +6968,12 @@ def test_date_warm_importer_without_global_converter_aliases(protocol, monkeypat
 
 @pytest.mark.parametrize("location", ["class", "instance"])
 @pytest.mark.parametrize("method", ["astype", "notna", "where"])
-def test_date_custom_normalization_hooks_keep_native_row_path(
+def test_date_custom_normalization_hooks_are_not_called_as_in_pyspark(
     protocol, monkeypatch, location, method
 ):
+    # A frame whose notna, astype or where is customized, of its class or of the instance,
+    # declines the fast path of object dates, and converts as PySpark's conversion does, which
+    # never calls them: the values are the frame's, whatever the hooks would change.
     from types import MethodType
 
     from pyspark.sql._pandas_input import prepare_date_table
@@ -7008,26 +6999,19 @@ def test_date_custom_normalization_hooks_keep_native_row_path(
         # Avoid pandas' attribute-to-column routing when installing an instance hook.
         monkeypatch.setitem(vars(frame), method, MethodType(replacement, frame))
     assert prepare_date_table(frame, schema) is None
-    expected = values.copy()
-    if method == "notna":
-        expected[-1] = None
-    elif method == "astype":
-        expected[0] = date(2020, 1, 2)
-    elif location == "class":
-        expected[0] = date(2020, 1, 3)
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
         table = state["input_tables"][0]
         assert table.column_names == ["renamed"]
-        assert table.column(0).to_pylist() == expected
-    # astype returns a new frame, so an original instance's where hook is not
-    # used by the native normalization sequence. Preserve that ordering too.
-    assert calls == ([] if method == "where" and location == "instance" else [method])
+        assert table.column(0).to_pylist() == values
+    assert calls == []
 
 
-def _date_columns_guard_input(native_rows=False):
-    class NativeRows(pd.DataFrame):
+def _date_columns_guard_input(subclass=False):
+    """Three date columns, of a DataFrame subclass with `subclass`, which the fast path declines
+    and PySpark's conversion converts as any other frame."""
+    class Frame(pd.DataFrame):
         pass
 
     days = [date.min, date.max, date(4, 2, 29), date(1600, 2, 29),
@@ -7035,7 +7019,7 @@ def _date_columns_guard_input(native_rows=False):
             date(1970, 1, 1), date(2000, 2, 29), date(2100, 3, 1)] * 1000
     nullable = [None if i % 7 == 0 else value for i, value in enumerate(reversed(days))]
     expected = [days, nullable, [None] * len(days)]
-    frame_type = NativeRows if native_rows else pd.DataFrame
+    frame_type = Frame if subclass else pd.DataFrame
     frame = frame_type(dict(zip(["original", "b", "c"], expected)), dtype=object)
     schema = T.StructType([
         T.StructField("renamed.`day", T.DateType(), False, {"source": "date", "id": 3}),
@@ -7045,7 +7029,7 @@ def _date_columns_guard_input(native_rows=False):
     return frame, schema, expected
 
 
-def _assert_date_columns_guard_payload(state, schema, expected, *, row_path):
+def _assert_date_columns_guard_payload(state, schema, expected, *, fast_path):
     import json
 
     from pyspark.sql.pandas.types import from_arrow_metadata
@@ -7066,10 +7050,12 @@ def _assert_date_columns_guard_payload(state, schema, expected, *, row_path):
         assert column.null_count == sum(value is None for value in values)
         physical = table.schema.field(field.name)
         assert physical.nullable is field.nullable
-        if row_path:
-            assert physical.metadata is None
-        else:
+        # The fast path's IPC carries the field metadata, which the importer embeds; that of
+        # PySpark's conversion carries none. The logical schema has it either way.
+        if fast_path:
             assert from_arrow_metadata(physical.metadata) == field.metadata
+        else:
+            assert physical.metadata is None
     assert json.loads(state["relations"][0].local_relation.schema) == {
         "type": "struct", "fields": [
             {"name": "renamed.`day", "type": "date", "nullable": False,
@@ -7080,23 +7066,27 @@ def _assert_date_columns_guard_payload(state, schema, expected, *, row_path):
              "metadata": {"source": "all-null"}},
         ],
     }
-    # The 120 KB of Arrow data are at least 64 KiB, so both paths read the settings, and the
-    # relation is sent inline below the default threshold.
+    # As PySpark's createDataFrame, both paths read the settings before any conversion, and the
+    # 120 KB of Arrow data are sent inline below the default threshold.
     assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
 
 
-@pytest.mark.parametrize("native_rows", [False, True])
+@pytest.mark.parametrize("subclass", [False, True])
 @pytest.mark.parametrize("location", [
     "subclass", "class", "owner", "backing_subclass_item", "backing_class_iter",
     "backing_class_getitem", "backing_instance_box",
 ])
 @pytest.mark.parametrize("behavior", ["raise", "mutate"])
-def test_date_columns_iterator_hooks_keep_native_order(
-    protocol, monkeypatch, native_rows, location, behavior
+def test_date_columns_iterator_hooks_run_in_pyspark_conversion(
+    protocol, monkeypatch, subclass, location, behavior
 ):
+    # As for int64 columns, of a plain frame or of a subclass: the fast path declines the
+    # customized labels without iterating them, and PySpark's conversion iterates them, for
+    # the columns of `items()`, before it reads any value. It never calls the frame's notna or
+    # astype.
     from pandas.core.base import IndexOpsMixin
 
-    frame, schema, values = _date_columns_guard_input(native_rows)
+    frame, schema, values = _date_columns_guard_input(subclass)
     original_iter = pd.Index.__iter__
     original_notna, original_astype = frame.notna, frame.astype
     calls = []
@@ -7120,9 +7110,10 @@ def test_date_columns_iterator_hooks_keep_native_order(
         invoked = True
         calls.append("columns iterator")
         if behavior == "raise":
-            raise ColumnsError("date columns hook precedes pandas normalization")
-        # Install spies only when native iteration reaches the columns hook.
-        # Before eligibility, normalization methods are the canonical methods.
+            raise ColumnsError("date columns hook precedes the conversion of the values")
+        # The spies of the frame's normalization methods are installed once the conversion
+        # iterates the labels, as the values that it reads next are changed: before, the fast
+        # path's guards see the canonical methods.
         monkeypatch.setitem(vars(frame), "notna", notna)
         monkeypatch.setitem(vars(frame), "astype", astype)
         frame.iat[0, 0] = date(2004, 2, 29)
@@ -7187,7 +7178,7 @@ def test_date_columns_iterator_hooks_keep_native_order(
     with _arrow_input_service(protocol) as (spark, state):
         if behavior == "raise":
             with pytest.raises(ColumnsError,
-                               match="date columns hook precedes pandas normalization"):
+                               match="date columns hook precedes the conversion of the values"):
                 spark.createDataFrame(frame, schema)
             assert calls == ["columns iterator"]
             assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -7198,13 +7189,14 @@ def test_date_columns_iterator_hooks_keep_native_order(
             spark.createDataFrame(frame, schema).toArrow()
             expected = [column.copy() for column in values]
             expected[0][0], expected[1][-1], expected[2][17] = date(2004, 2, 29), None, date.min
-            _assert_date_columns_guard_payload(state, schema, expected, row_path=True)
-            assert calls == ["columns iterator", "notna", "astype"]
+            _assert_date_columns_guard_payload(state, schema, expected, fast_path=False)
+            assert calls == ["columns iterator"]
 
 
-@pytest.mark.parametrize("native_rows", [False, True])
-def test_date_rebound_index_values_keeps_native_error(protocol, monkeypatch, native_rows):
-    frame, schema, _ = _date_columns_guard_input(native_rows)
+@pytest.mark.parametrize("subclass", [False, True])
+def test_date_rebound_index_values_raise_in_pyspark_conversion(protocol, monkeypatch, subclass):
+    # As for int64 columns, PySpark's conversion raises the error of the labels' storage.
+    frame, schema, _ = _date_columns_guard_input(subclass)
     columns = frame.columns
     original = pd.Index._values.fget
     calls = []
@@ -7212,13 +7204,13 @@ def test_date_rebound_index_values_keeps_native_error(protocol, monkeypatch, nat
     def values(index):
         if index is columns:
             calls.append("_values")
-            raise RuntimeError("date columns backing hook precedes normalization")
+            raise RuntimeError("date columns backing hook precedes the conversion of the values")
         return original(index)
 
     monkeypatch.setattr(pd.Index, "_values", property(values))
     with _arrow_input_service(protocol) as (spark, state):
         with pytest.raises(RuntimeError,
-                           match="date columns backing hook precedes normalization"):
+                           match="date columns backing hook precedes the conversion of the values"):
             spark.createDataFrame(frame, schema)
         assert calls == ["_values"]
         assert state["config_requests"] == [("get", _CREATE_DATAFRAME_KEYS)]
@@ -7226,38 +7218,23 @@ def test_date_rebound_index_values_keeps_native_error(protocol, monkeypatch, nat
         assert state["uploads"] == 0
 
 
-@pytest.mark.parametrize("native_rows", [False, True])
-def test_date_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, native_rows):
-    frame, schema, values = _date_columns_guard_input(native_rows)
+@pytest.mark.parametrize("subclass", [False, True])
+def test_date_rebound_index_data_reads_no_more_than_pyspark_conversion(
+    protocol, monkeypatch, subclass
+):
+    frame, schema, values = _date_columns_guard_input(subclass)
     columns, backing = frame.columns, vars(frame.columns)["_data"]
-    original_notna, original_astype = frame.notna, frame.astype
     calls = []
-    normalizing = False
     allowed_reads = None
 
     class ColumnsDataError(RuntimeError):
         pass
 
-    def notna(*args, **kwargs):
-        nonlocal normalizing
-        normalizing = True
-        calls.append("notna")
-        return original_notna(*args, **kwargs)
-
-    def astype(*args, **kwargs):
-        calls.append("astype")
-        return original_astype(*args, **kwargs)
-
     def data(index):
         if index is columns:
-            if not normalizing:
-                calls.append("_data")
-                if allowed_reads is not None and calls.count("_data") > allowed_reads:
-                    raise ColumnsDataError("eligibility added a columns storage read")
-                # Preserve the native first columns read and only then attach
-                # observers; no private optimization call determines fallback.
-                monkeypatch.setitem(vars(frame), "notna", notna)
-                monkeypatch.setitem(vars(frame), "astype", astype)
+            calls.append("_data")
+            if allowed_reads is not None and calls.count("_data") > allowed_reads:
+                raise ColumnsDataError("eligibility added a columns storage read")
             return backing
         return vars(index)["_data"]
 
@@ -7267,31 +7244,24 @@ def test_date_rebound_index_data_keeps_native_read_order(protocol, monkeypatch, 
     monkeypatch.setattr(pd.Index, "_data", property(data, set_data), raising=False)
     import pyspark.sql._pandas_input as helper
 
-    # Measure current native fallback dispatch without either eligibility probe.
+    # The reads of PySpark's conversion of the frame, with both fast paths declined.
     with monkeypatch.context() as baseline:
         baseline.setattr(helper, "prepare_int64_table", lambda *_: None)
         baseline.setattr(helper, "prepare_date_table", lambda *_: None)
         with _arrow_input_service(protocol) as (spark, state):
             spark.createDataFrame(frame, schema).toArrow()
-            _assert_date_columns_guard_payload(state, schema, values, row_path=True)
+            _assert_date_columns_guard_payload(state, schema, values, fast_path=False)
             control_table = state["input_tables"][0]
-    baseline_calls = calls.copy()
-    allowed_reads = baseline_calls.count("_data")
-    assert allowed_reads > 0 and "notna" in baseline_calls
+    allowed_reads = calls.count("_data")
+    assert allowed_reads > 0
     calls.clear()
-    normalizing = False
-    # Restore ordinary methods before candidate eligibility; the storage hook
-    # installs observers only when the native columns iterator starts.
-    monkeypatch.delitem(vars(frame), "notna")
-    monkeypatch.delitem(vars(frame), "astype")
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        # The rebound storage declines the Arrow path without reading the columns more
-        # than the row path does. pandas caches some of these reads, so a later row
-        # conversion of the same frame can read them fewer times than the first.
-        assert "notna" in calls
-        assert calls.count("_data") <= allowed_reads
-        _assert_date_columns_guard_payload(state, schema, values, row_path=True)
+        # The rebound storage declines the fast path without reading the labels more than
+        # PySpark's conversion does. pandas caches some of these reads, so a later conversion
+        # of the same frame can read them fewer times than the first.
+        assert 0 < calls.count("_data") <= allowed_reads
+        _assert_date_columns_guard_payload(state, schema, values, fast_path=False)
         assert state["input_tables"][0].equals(control_table, check_metadata=True)
 
 
@@ -7313,4 +7283,4 @@ def test_date_canonical_columns_storage_stays_columnar(protocol, monkeypatch, st
     monkeypatch.setattr(pd.DataFrame, "values", property(no_rows))
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
-        _assert_date_columns_guard_payload(state, schema, values, row_path=False)
+        _assert_date_columns_guard_payload(state, schema, values, fast_path=True)
