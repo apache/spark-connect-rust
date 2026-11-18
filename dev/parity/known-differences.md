@@ -456,8 +456,12 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   transport's lists of them in step, where PySpark's is a `threading.local` of a plain set and
   list. The global list of the extensions is a subclass of `list` too. A set of tags refuses an
   object that is neither a str nor bytes when it is added, where PySpark's raises the `TypeError`
-  of the field of the tags when it builds a request. A list that the attribute of a `copy.copy` of
-  a client is set to is not one that the requests of the session carry.
+  of the field of the tags when it builds a request. An extension that is not an `Any` fails each
+  call whose requests carry the extensions, as PySpark's requests fail when they are built, of
+  upb's `TypeError`, which names the runtime's class of `Any`
+  (`pyspark.sql.connect.proto._rust.any_pb2.Any`) where PySpark's names
+  `google.protobuf.any_pb2.Any`. A list that the attribute of a `copy.copy` of a client is set to
+  is not one that the requests of the session carry.
 - **Plans of a DataFrame's relation** (intentional; DESIGN). `df._plan.plan(client)` is a
   placeholder that holds the DataFrame's relation, which the core builds at the call, as
   PySpark's `plan` does, with its pickles, warnings and errors: the core builds the relation, and
@@ -626,6 +630,14 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 
 ## `pyspark.sql.connect.proto` and plugins
 
+- **Pickles of `Any` and `Timestamp`** (intentional). The drop-in's protobuf runtime has classes
+  of its own of the well-known types, of its modules `pyspark.sql.connect.proto._rust.any_pb2` and
+  `timestamp_pb2`, as `protobuf`'s modules of them (`google.protobuf.any_pb2`) are `protobuf`'s,
+  which the drop-in leaves as they are. So the pickle of its `Any` or `Timestamp` names that module,
+  and loads where the drop-in is installed, with or without `protobuf`, but not in PySpark, such as
+  in the Python worker of the server that runs a UDF that holds one, where upb's names
+  `google.protobuf.any_pb2.Any`, which loads in the drop-in as a message of `protobuf`'s class,
+  which the runtime's fields take as they are.
 - **Generated modules of a plugin's protos** (intentional; DESIGN). A module that protoc
   generates of a proto3 file that imports the protos of Spark Connect, directly or through the
   files it imports (Delta Lake's `delta/connect/relations.proto` and `commands.proto`), gets the

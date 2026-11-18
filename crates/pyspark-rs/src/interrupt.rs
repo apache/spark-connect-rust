@@ -224,7 +224,7 @@ pub(crate) fn interruptible_outcome<T: Send, E: Send + Into<Box<SparkError>>>(
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<Result<T, Box<SparkError>>> {
-    run_interruptible(py, session, f, false)
+    run_interruptible(py, session, f, false, true)
 }
 
 /// As [`interruptible_outcome`], for a call that PySpark makes in a `try` whose `except Exception`
@@ -235,7 +235,33 @@ pub(crate) fn interruptible_caught<T: Send, E: Send + Into<Box<SparkError>>>(
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<Result<T, Box<SparkError>>> {
-    run_interruptible(py, session, f, true)
+    run_interruptible(py, session, f, true, true)
+}
+
+/// As [`interruptible`], for a call whose requests carry no user context extensions, as PySpark's
+/// requests of the artifacts, `CloneSession`, `ReleaseSession` and `GetStatus` carry none: the
+/// extensions are not serialized again before it (see [`refresh_user_context`]), so that one that
+/// is not an `Any`, which fails each call whose requests carry them, does not fail it, as in
+/// PySpark.
+pub(crate) fn interruptible_without_user_context<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<T> {
+    run_interruptible(py, session, f, false, false)?.to_pyerr()
+}
+
+/// As [`interruptible_outcome`], for a call whose requests carry no user context extensions (see
+/// [`interruptible_without_user_context`]).
+pub(crate) fn interruptible_outcome_without_user_context<
+    T: Send,
+    E: Send + Into<Box<SparkError>>,
+>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<Result<T, Box<SparkError>>> {
+    run_interruptible(py, session, f, false, false)
 }
 
 /// Bring the user context extensions of `session` up to date before a call sends its requests,
@@ -243,7 +269,9 @@ pub(crate) fn interruptible_caught<T: Send, E: Send + Into<Box<SparkError>>>(
 /// `PySparkSession::_set_user_context_refresh`), which serializes the `google.protobuf.Any`
 /// messages of its lists again, as PySpark serializes them when it builds each request, so that
 /// a change of a message in place is sent. Its error is raised, as PySpark raises that of the
-/// serialization from the call.
+/// serialization from the call, such as upb's `TypeError` of an extension that is not an `Any`:
+/// so a call whose requests carry no extensions does not run it (see
+/// [`interruptible_without_user_context`]).
 pub(crate) fn refresh_user_context(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
     if let Some(refresher) = session.user_context_refresher() {
         if let Some(refresh) = refresher.downcast_ref::<Py<PyAny>>() {
@@ -254,14 +282,18 @@ pub(crate) fn refresh_user_context(py: Python<'_>, session: &SparkSession) -> Py
 }
 
 /// The wait of [`interruptible_outcome`], of whose results a failed interrupt is the inner one
-/// when `catch_interrupt_failure`.
+/// when `catch_interrupt_failure`, after the user context extensions are brought up to date when
+/// `refresh_extensions`.
 fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     py: Python<'_>,
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
     catch_interrupt_failure: bool,
+    refresh_extensions: bool,
 ) -> PyResult<Result<T, Box<SparkError>>> {
-    refresh_user_context(py, session)?;
+    if refresh_extensions {
+        refresh_user_context(py, session)?;
+    }
     let watch = Arc::new(SignalWatch {
         session: session.clone(),
         interrupted: AtomicBool::new(false),

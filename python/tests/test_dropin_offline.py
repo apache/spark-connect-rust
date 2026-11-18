@@ -26134,6 +26134,130 @@ def test_the_thread_local_of_a_client_is_a_threading_local_of_live_tags_and_exte
     assert spark.getTags() == set() and run() == ([], [])
 
 
+def test_user_context_extensions_that_are_not_anys_fail_each_request_as_pyspark(mock_connect):
+    # As PySpark's lists of the user context extensions, which take any object: an extension that
+    # is not an Any (another message, or not a message), or an item that is not a pair, stays in
+    # its list, and each call that sends a request raises upb's TypeError (or the error of the
+    # unpacking of the item) before the request is sent, as PySpark's
+    # `_update_request_with_user_context_extensions` raises it when it builds the request of an
+    # execution, an analysis, a configuration or an interrupt, of the global extensions first. The
+    # requests of another thread, which has a list of its own, are sent, and so are those of the
+    # thread once the extension is removed.
+    import re
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    good = Any(type_url="type.googleapis.com/good")
+    other_class = re.escape(
+        "Parameter to MergeFrom() must be instance of same class: expected "
+        "<class 'pyspark.sql.connect.proto._rust.any_pb2.Any'> got "
+        "<class 'pyspark.sql.connect.proto.relations_pb2.Relation'>."
+    )
+    calls = [
+        lambda: spark.range(1).collect(),
+        lambda: spark.range(1).filter("id > 0").schema,
+        lambda: spark.conf.get("spark.sql.shuffle.partitions"),
+        lambda: spark.interruptAll(),
+    ]
+
+    def sent():
+        return [
+            len(service.execute_requests),
+            len(service.analyze_requests),
+            len(service.config_requests),
+            len(service.interrupt_requests),
+        ]
+
+    def sent_extensions():
+        spark.range(1).collect()
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        return [extension.type_url for extension in request.user_context.extensions]
+
+    def fails(error, exception=TypeError):
+        before = sent()
+        for call in calls:
+            with pytest.raises(exception, match=f"^{error}$"):
+                call()
+        assert sent() == before
+
+    for add in (
+        client.add_threadlocal_user_context_extension,
+        client.add_global_user_context_extension,
+    ):
+        for bad, error in [
+            (pb2.Relation(range=pb2.Range(end=1)), other_class),
+            ("x", re.escape("Expected a message object, but got 'x'.")),
+            (None, re.escape("Expected a message object, but got None.")),
+        ]:
+            good_id = add(good)
+            bad_id = add(bad)
+            if add == client.add_global_user_context_extension:
+                held = client.global_user_context_extensions
+            else:
+                held = client.thread_local.user_context_extensions
+            assert held == [(good_id, good), (bad_id, bad)]
+            fails(error)
+            assert held == [(good_id, good), (bad_id, bad)]
+            if add == client.add_threadlocal_user_context_extension:
+                other = []
+                thread = threading.Thread(target=lambda: other.append(sent_extensions()))
+                thread.start()
+                thread.join()
+                assert other == [[]]
+            client.remove_user_context_extension(bad_id)
+            assert sent_extensions() == ["type.googleapis.com/good"]
+            client.clear_user_context_extensions()
+    # The global extensions are added first, as PySpark's request adds them.
+    client.add_threadlocal_user_context_extension(pb2.Relation())
+    client.add_global_user_context_extension("x")
+    fails(re.escape("Expected a message object, but got 'x'."))
+    client.clear_user_context_extensions()
+    # A list that the attributes are set to, and an item that is not a pair of a list.
+    client.global_user_context_extensions = [("global_x", "x")]
+    fails(re.escape("Expected a message object, but got 'x'."))
+    client.global_user_context_extensions = [("global_x", good)]
+    client.thread_local.user_context_extensions = [("threadlocal_x", pb2.Relation())]
+    fails(other_class)
+    client.thread_local.user_context_extensions = [("threadlocal_x", good)]
+    assert sent_extensions() == ["type.googleapis.com/good", "type.googleapis.com/good"]
+    client.thread_local.user_context_extensions.append("abc")
+    fails(r"too many values to unpack \(expected 2(, got 3)?\)", ValueError)
+    client.clear_user_context_extensions()
+    assert sent_extensions() == []
+
+
+def test_calls_whose_requests_carry_no_user_context_extensions_take_one_that_is_not_an_any(
+    mock_connect, tmp_path
+):
+    # As PySpark's requests of the artifacts, CloneSession, ReleaseSession and GetStatus, which
+    # carry no user context extensions: an extension that is not an Any, which fails the calls
+    # whose requests carry them, does not fail these.
+    import pyspark.sql.connect.proto as pb2
+
+    spark, service = mock_connect
+    client = spark.client
+    client.add_global_user_context_extension(pb2.Relation())
+    client.add_threadlocal_user_context_extension("x")
+    path = tmp_path / "a.txt"
+    path.write_text("x")
+    spark.addArtifacts(str(path), file=True)
+    client.add_artifacts(str(path), pyfile=False, archive=False, file=True)
+    spark.copyFromLocalToFs(str(path), "/dest/a.txt")
+    client.copy_from_local_to_fs(str(path), "/dest/b.txt")
+    clone = spark.cloneSession()
+    client._get_operation_statuses()
+    assert len(service.clone_requests) == 1 and len(service.get_status_requests) == 1
+    with pytest.raises(TypeError, match="^Expected a message object|^Parameter to MergeFrom"):
+        spark.range(1).collect()
+    clone.stop()
+    spark.stop()
+    assert spark.is_stopped
+
+
 def test_client_members_that_pysparks_tests_read_are_pysparks(mock_connect):
     # As PySpark Connect's SparkConnectClient, whose tests and libraries read these members:
     # _builder is the DefaultChannelBuilder of the connection; _session_id the session ID of the

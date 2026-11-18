@@ -1901,7 +1901,7 @@ class _GlobalUserContextExtensions(list):
         super().__init__(extensions)
         self._session_ref = weakref.ref(session)
 
-    def _sync(self) -> None:
+    def _sync(self, at_request: bool = False) -> None:
         session = self._session_ref()
         if session is None:
             return
@@ -1910,7 +1910,7 @@ class _GlobalUserContextExtensions(list):
         # that the requests read, as in PySpark, and neither is a copy's.
         if state is None or state.get("global_user_context_extensions") is not self:
             return
-        session._set_global_user_context_extensions(_serialized_extensions(self))
+        session._set_global_user_context_extensions(_serialized_extensions(self, at_request))
 
     def __reduce_ex__(self, protocol: Any) -> Any:
         return (list, (list(self),))
@@ -1948,8 +1948,8 @@ class _ThreadExtensions(list):
         session._share_thread_user_context_extensions(extensions._handle)
         return extensions
 
-    def _sync(self) -> None:
-        self._handle._replace(_serialized_extensions(self))
+    def _sync(self, at_request: bool = False) -> None:
+        self._handle._replace(_serialized_extensions(self, at_request))
 
     def _copy(self) -> "_ThreadExtensions":
         # A list of deep copies of the extensions, which no thread has yet.
@@ -2017,16 +2017,38 @@ class _ThreadTags(set):
         return copy.deepcopy(set(self), memo)
 
 
-def _serialized_extensions(extensions: Iterable[Any]) -> list[tuple[Any, bytes]]:
+def _serialized_extensions(
+    extensions: Iterable[Any], at_request: bool = False
+) -> list[tuple[Any, bytes]]:
     # The IDs and the bytes of the google.protobuf.Any of `extensions`, as the Rust transport takes
-    # them for the user context of its requests.
-    return [(extension_id, extension.SerializeToString()) for extension_id, extension in extensions]
+    # them for the user context of its requests. Each is added to the extensions of a UserContext,
+    # as PySpark's `_update_request_with_user_context_extensions` adds it to the request that it
+    # builds, so an item that is not a pair, or an extension that is not an Any (another message,
+    # or not a message), fails as it fails there, of upb's TypeError. The lists take it, as
+    # PySpark's do: a change of a list leaves it out, and the serialization before each call whose
+    # requests carry the extensions (`at_request`) raises its error, as each of those requests of
+    # PySpark raises it.
+    from pyspark.sql.connect.proto import UserContext
+
+    serialized = []
+    for item in extensions:
+        try:
+            extension_id, extension = item
+            context = UserContext()
+            context.extensions.append(extension)
+        except Exception:
+            if at_request:
+                raise
+            continue
+        serialized.append((extension_id, context.extensions[0].SerializeToString()))
+    return serialized
 
 
 def _synced(base: type, name: str) -> Any:
     # A method of `base`, a list or a set, that changes it, after which the Rust transport takes
-    # the extensions or the tags: a change that it does not take, of an object that it cannot
-    # send, is undone, and its error raised.
+    # the extensions or the tags: a change that it does not take, of a tag that it cannot send,
+    # is undone, and its error raised. An extension that it cannot send stays in the list, and
+    # fails each call (see `_serialized_extensions`).
     method = getattr(base, name)
 
     def synced(self: Any, *args: Any, **kwargs: Any) -> Any:
@@ -2179,7 +2201,9 @@ def _refresh_user_context_extensions(session_ref: Any) -> None:
     """Serialize the user context extensions of the session of ``session_ref`` again for the
     Rust transport, of its clients' global list and of the list of the current thread, before a
     call of the session sends requests, as PySpark serializes them when it builds each request:
-    so a ``google.protobuf.Any`` of the lists that was changed in place is sent as it is now."""
+    so a ``google.protobuf.Any`` of the lists that was changed in place is sent as it is now, and
+    an extension that is not an Any raises upb's ``TypeError`` from the call, of the global list
+    first, as PySpark's request adds the global extensions first."""
     session = session_ref()
     if session is None:
         return
@@ -2188,10 +2212,10 @@ def _refresh_user_context_extensions(session_ref: Any) -> None:
         return
     extensions = state.get("global_user_context_extensions")
     if isinstance(extensions, _GlobalUserContextExtensions) and extensions:
-        extensions._sync()
+        extensions._sync(at_request=True)
     own = getattr(state.get("thread_local"), "user_context_extensions", None)
     if isinstance(own, _ThreadExtensions) and own:
-        own._sync()
+        own._sync(at_request=True)
 
 
 # The client of each session, by its ID, while it is in use.
