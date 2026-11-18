@@ -1351,6 +1351,13 @@ impl SparkSession {
         self.client.add_global_user_context_extension(extension)
     }
 
+    /// Replace the global user context extensions with `extensions`, of their IDs, in their order.
+    /// Mirrors a change of PySpark's `global_user_context_extensions` of a client, which its
+    /// requests take.
+    pub fn set_global_user_context_extensions(&self, extensions: Vec<(String, prost_types::Any)>) {
+        self.client.set_global_user_context_extensions(extensions);
+    }
+
     /// Remove the user context extension of `extension_id`. Mirrors PySpark's
     /// `remove_user_context_extension`.
     pub fn remove_user_context_extension(&self, extension_id: &str) {

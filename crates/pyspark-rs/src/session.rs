@@ -3282,6 +3282,26 @@ impl PySparkSession {
             .collect()
     }
 
+    /// Replace the global user context extensions of this session with `extensions`, their IDs
+    /// and the bytes of each `google.protobuf.Any`, in their order: for the
+    /// `global_user_context_extensions` of `client`, whose changes the requests take.
+    fn _set_global_user_context_extensions(
+        &self,
+        extensions: Vec<(String, Vec<u8>)>,
+    ) -> PyResult<()> {
+        use prost::Message;
+        let extensions = extensions
+            .into_iter()
+            .map(|(id, extension)| {
+                prost_types::Any::decode(extension.as_slice())
+                    .map(|extension| (id, extension))
+                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        self.session.set_global_user_context_extensions(extensions);
+        Ok(())
+    }
+
     /// Remove the user context extension of `extension_id`, for `client`.
     fn _remove_user_context_extension(&self, extension_id: &str) {
         self.session.remove_user_context_extension(extension_id);

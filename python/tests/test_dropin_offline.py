@@ -4067,6 +4067,9 @@ def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
     class Session:
         session_id = "x"
 
+        def _user_context_extensions(self, is_global):
+            return []
+
     client = SparkConnectClient._of_session(Session())
     relation = pb2.Relation()
     relation.sql.query = "q" * 2000
@@ -22647,6 +22650,9 @@ def test_client_analysis_requests_and_results_are_those_of_pyspark():
         response = pb2.AnalyzePlanResponse()
         sent = None
 
+        def _user_context_extensions(self, is_global):
+            return []
+
         def _analyze_plan(self, data):
             Session.sent = pb2.AnalyzePlanRequest.FromString(data)
             return Session.response.SerializeToString()
@@ -22980,6 +22986,46 @@ def test_client_of_a_connection_sends_its_settings_as_pyspark(mock_connect):
     finally:
         service.release_response()
         client.close()
+
+
+def test_client_raises_the_argument_errors_of_pyspark(mock_connect):
+    # As PySpark Connect's SparkConnectClient: cache_artifact and cache_artifacts raise the
+    # TypeError of hashlib for a blob that is not bytes-like, which its ArtifactManager hashes
+    # before it sends anything (test_dropin_e2e.py caches bytes-like ones), and register_udf and
+    # register_udtf raise the UNSUPPORTED_OPERATION of pyspark_types_to_proto_types for a return
+    # type that is neither a DataType nor a DDL string, before they pickle the function.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    client = spark.client
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    for blob, message in [
+        ("text", "Strings must be encoded before hashing"),
+        (None, "object supporting the buffer API required"),
+        (5, "object supporting the buffer API required"),
+    ]:
+        with pytest.raises(TypeError) as error:
+            client.cache_artifact(blob)
+        assert str(error.value) == message
+        with pytest.raises(TypeError) as error:
+            client.cache_artifacts([b"one", blob])
+        assert str(error.value) == message
+    with pytest.raises(TypeError, match="'int' object is not iterable"):
+        client.cache_artifacts(5)
+
+    class Table:
+        def eval(self):
+            yield (1,)
+
+    for return_type in (None, 5):
+        with pytest.raises(PySparkValueError) as error:
+            client.register_udf(lambda x: x, return_type)
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert error.value.getMessageParameters() == {"operation": f"data type {return_type}"}
+    with pytest.raises(PySparkValueError) as error:
+        client.register_udtf(Table, 5, "t")
+    assert error.value.getMessageParameters() == {"operation": "data type 5"}
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
 
 
 def test_client_registers_functions_and_artifacts_as_pyspark(mock_connect, tmp_path):
