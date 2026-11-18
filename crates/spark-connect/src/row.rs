@@ -173,6 +173,31 @@ impl Value {
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
     }
+
+    /// The value of a calendar interval (`CalendarIntervalType`) of `months`, `days` and
+    /// `nanoseconds`, as a collect gives it: there is no variant of this type, so it is the
+    /// [`Value::String`] of its parts, as `"1 months 2 days 11045500000000 ns"`, which
+    /// [`Value::calendar_interval_parts`] reads back.
+    pub fn calendar_interval(months: i32, days: i32, nanoseconds: i64) -> Value {
+        Value::String(format!("{months} months {days} days {nanoseconds} ns"))
+    }
+
+    /// The months, days and nanoseconds of a calendar interval as [`Value::calendar_interval`]
+    /// gives it, or None for any other value.
+    pub fn calendar_interval_parts(&self) -> Option<(i32, i32, i64)> {
+        let mut words = self.as_str()?.split(' ');
+        let mut part = |unit: &str| {
+            let number = words.next()?;
+            (words.next()? == unit).then_some(number)
+        };
+        let months = part("months")?.parse().ok()?;
+        let days = part("days")?.parse().ok()?;
+        let nanoseconds = part("ns")?.parse().ok()?;
+        words
+            .next()
+            .is_none()
+            .then_some((months, days, nanoseconds))
+    }
 }
 
 impl fmt::Display for Value {
@@ -499,6 +524,39 @@ mod tests {
             Some(&Value::String("Alice".to_string()))
         );
         assert_eq!(row.get_by_name("nonexistent"), None);
+    }
+
+    #[test]
+    fn calendar_interval_text_reads_back_its_parts() {
+        // The documented text of a calendar interval, which the Python client reads back to
+        // give PySpark's pyarrow.MonthDayNano of it.
+        let value = Value::calendar_interval(14, 25, 18_367_500_000_000);
+        assert_eq!(value.as_str(), Some("14 months 25 days 18367500000000 ns"));
+        assert_eq!(
+            value.calendar_interval_parts(),
+            Some((14, 25, 18_367_500_000_000))
+        );
+        for (months, days, nanoseconds) in [(0, 0, 0), (-1, -2, -3), (i32::MIN, i32::MAX, i64::MIN)]
+        {
+            assert_eq!(
+                Value::calendar_interval(months, days, nanoseconds).calendar_interval_parts(),
+                Some((months, days, nanoseconds))
+            );
+        }
+        for text in [
+            "",
+            "1 months 2 days",
+            "1 months 2 days 3 ns extra",
+            "1 month 2 days 3 ns",
+            "x months 2 days 3 ns",
+            "1 months 2 days 3 ms",
+        ] {
+            assert_eq!(
+                Value::String(text.to_string()).calendar_interval_parts(),
+                None
+            );
+        }
+        assert_eq!(Value::Long(1).calendar_interval_parts(), None);
     }
 
     #[test]

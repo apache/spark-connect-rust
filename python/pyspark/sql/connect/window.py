@@ -14,11 +14,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Window / WindowSpec under the connect import path."""
+"""Window / WindowSpec under the connect import path, as PySpark Connect's
+``pyspark.sql.connect.window``: its ``Window`` is a class of its own, a subclass of
+``pyspark.sql.window.Window``, and its ``WindowSpec`` the class of the window specifications."""
 from pyspark import cloudpickle as _cloudpickle
 from pyspark.sql.connect import _window_reduce
-from pyspark.sql.window import Window, WindowSpec
+from pyspark.sql.window import Window as _ParentWindow
+from pyspark.sql.window import WindowSpec
 
 __all__ = ["Window", "WindowSpec"]
+
+
+# As PySpark Connect's Window, a subclass of pyspark.sql.window.Window, of its static methods and
+# attributes, which make the WindowSpecs of this module. No docstring, as PySpark's has none.
+class Window(_ParentWindow):
+    pass
+
 
 _cloudpickle.register_pickle_by_value(_window_reduce)

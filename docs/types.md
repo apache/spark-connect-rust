@@ -95,7 +95,7 @@ rounding the sub-microsecond digits down; `DataFrame::to_arrow` keeps the nanose
 |---|---|---|---|
 | YearMonthIntervalType | `interval year to month` (`interval year`, `interval month`) | `DataType::YearMonthInterval { start_field: 0, end_field: 1 }` | `Value::YearMonthInterval(i32)`: months |
 | DayTimeIntervalType | `interval day to second` (`interval day`, `interval hour to minute`, ...) | `DataType::DayTimeInterval { start_field: 0, end_field: 3 }` | `Value::DayTimeInterval(i64)`: microseconds |
-| CalendarIntervalType | `interval` | `DataType::CalendarInterval` | `Value::String(String)`, as `"1 months 2 days 11045500000000 ns"` |
+| CalendarIntervalType | `interval` | `DataType::CalendarInterval` | `Value::String(String)`, as `"1 months 2 days 11045500000000 ns"`, whose parts `Value::calendar_interval_parts` reads |
 
 `start_field` and `end_field` are the first and the last field of an interval:
 `YearMonthIntervalType::YEAR` (0) and `MONTH` (1), or `DayTimeIntervalType::DAY` (0), `HOUR`
@@ -108,7 +108,11 @@ the narrower interval types, such as `interval year` or `interval hour to minute
 
 `interval` alone is the calendar interval, of months, days and microseconds, that functions
 such as `make_interval` return. It has no `Value` variant: it is collected as the text of its
-months, days and nanoseconds, and `create_dataframe` cannot take it.
+months, days and nanoseconds, which `Value::calendar_interval(months, days, nanoseconds)` gives
+and `Value::calendar_interval_parts` reads back, and `create_dataframe` cannot take it. The
+Python client's `toLocalIterator` gives it as pyarrow's `MonthDayNano`, also in arrays, maps and
+structs, as PySpark's does, while its `collect` and `toArrow` raise
+`UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` and `toPandas` gives a `pandas.DateOffset`.
 
 ### Arrays, maps and structs
 

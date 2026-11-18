@@ -2,7 +2,6 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString, PyTuple};
-use spark_connect::dataframe::DataFrame;
 use spark_connect::expression::Expression;
 use spark_connect::observation::Observation;
 use spark_connect::SparkSession;
@@ -24,6 +23,26 @@ pub struct PyObservation {
     /// The `_result` and `_error` of an Observation unpickled from the state of PySpark's (see
     /// `__setstate__`), which no action sets, and which `get` gives back as PySpark's does.
     restored: Restored,
+    /// A name that UTF-8 cannot encode, as it was given, which `_name` gives back: PySpark keeps
+    /// it, and its `CollectMetrics` plan sets it when it builds the plan, which fails the requests
+    /// of each DataFrame that it observes (see [`observe`]). `inner` is of its rendering.
+    unencodable_name: Option<Py<PyString>>,
+}
+
+/// The state of an Observation of the name `name`, None or a str, and the name itself if UTF-8
+/// cannot encode it (see `PyObservation::unencodable_name`).
+fn named(name: Option<&Bound<'_, PyAny>>) -> PyResult<(Observation, Option<Py<PyString>>)> {
+    let Some(name) = name.filter(|name| !name.is_none()) else {
+        return Ok((Observation::unnamed(), None));
+    };
+    let name = name.cast::<PyString>()?;
+    Ok(match name.to_cow() {
+        Ok(text) => (Observation::new(&text), None),
+        Err(_) => (
+            Observation::new(&crate::plan_args::rendered(name.as_any())?),
+            Some(name.clone().unbind()),
+        ),
+    })
 }
 
 /// The `_result` and `_error` of the state of a pickled Observation, which its Rust state does
@@ -69,29 +88,39 @@ impl PyObservation {
                 ));
             }
             Some(name) => {
-                let name: String = name.extract()?;
-                if name.is_empty() {
+                if name.eq("")? {
                     return Err(raise_pyspark(
                         py,
                         "PySparkValueError",
                         "VALUE_NOT_NON_EMPTY_STR",
-                        &[("arg_name", "name"), ("arg_value", &name)],
+                        &[("arg_name", "name"), ("arg_value", "")],
                     ));
                 }
-                Observation::new(&name)
+                let (inner, unencodable_name) = named(Some(name))?;
+                return Ok(PyObservation {
+                    inner,
+                    restored: Restored::default(),
+                    unencodable_name,
+                });
             }
         };
         Ok(PyObservation {
             inner,
             restored: Restored::default(),
+            unencodable_name: None,
         })
     }
 
     /// The name of the observation, as PySpark's `_name`: None for an unnamed observation
-    /// before it is used.
+    /// before it is used, and a name that UTF-8 cannot encode as it was given.
     #[getter(_name)]
-    fn name(&self) -> Option<String> {
-        self.inner.name()
+    fn name(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        if let Some(name) = &self.unencodable_name {
+            return Some(name.clone_ref(py).into_any());
+        }
+        self.inner
+            .name()
+            .map(|name| PyString::new(py, &name).into_any().unbind())
     }
 
     /// The observed metrics, as PySpark's `Observation.get`: a dict of the metrics that the
@@ -123,7 +152,7 @@ impl PyObservation {
             .iter()
             .map(|c| c.column.expression().clone())
             .collect();
-        observe(slf.py(), &df.dataframe, slf, exprs)
+        observe(slf.py(), &df, slf, exprs)
     }
 
     /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the name, the
@@ -135,6 +164,10 @@ impl PyObservation {
         let copy = PyObservation {
             inner: this.inner.shallow_copy(),
             restored: this.restored.clone_ref(py),
+            unencodable_name: this
+                .unencodable_name
+                .as_ref()
+                .map(|name| name.clone_ref(py)),
         };
         let copy = Bound::new(py, copy)?;
         copy_attributes(slf, &copy, None)?;
@@ -150,11 +183,17 @@ impl PyObservation {
     ) -> PyResult<Bound<'py, PyObservation>> {
         let py = slf.py();
         let inner = slf.borrow().inner.detached();
+        let unencodable_name = slf
+            .borrow()
+            .unencodable_name
+            .as_ref()
+            .map(|name| name.clone_ref(py));
         let copy = Bound::new(
             py,
             PyObservation {
                 inner,
                 restored: Restored::default(),
+                unencodable_name,
             },
         )?;
         // The copy is the Observation of the state that the deep copy of a DataFrame of the call
@@ -220,7 +259,7 @@ impl PyObservation {
             }),
         };
         let state = PyDict::new(py);
-        state.set_item("_name", this.inner.name())?;
+        state.set_item("_name", this.name(py))?;
         state.set_item("_result", result)?;
         state.set_item("_error", error)?;
         state.call_method1("update", (slf.getattr(pyo3::intern!(py, "__dict__"))?,))?;
@@ -240,15 +279,13 @@ impl PyObservation {
             }
             Ok(value.filter(|value| !value.is_none()))
         };
-        let name: Option<String> = take("_name")?.map(|name| name.extract()).transpose()?;
+        let (inner, unencodable_name) = named(take("_name")?.as_ref())?;
         let result = take("_result")?.map(Bound::unbind);
         let error = take("_error")?.map(Bound::unbind);
         {
             let mut this = slf.borrow_mut();
-            this.inner = match name {
-                Some(name) => Observation::new(&name),
-                None => Observation::unnamed(),
-            };
+            this.inner = inner;
+            this.unencodable_name = unencodable_name;
             this.restored = Restored { result, error };
         }
         slf.getattr(pyo3::intern!(py, "__dict__"))?
@@ -358,10 +395,11 @@ fn copy_attributes(
 /// an Observation of their plans.
 pub(crate) fn observe(
     py: Python<'_>,
-    df: &DataFrame,
+    frame: &PyDataFrame,
     observation: &Bound<'_, PyObservation>,
-    exprs: Vec<Expression>,
+    mut exprs: Vec<Expression>,
 ) -> PyResult<PyDataFrame> {
+    let df = &frame.dataframe;
     // An Observation unpickled from a used one is used, as PySpark's of a `_result`.
     if observation.borrow().restored.result.is_some() {
         return Err(raise_pyspark(
@@ -371,14 +409,22 @@ pub(crate) fn observe(
             &[],
         ));
     }
+    // A name that UTF-8 cannot encode fails the requests of the DataFrame, as PySpark's
+    // `CollectMetrics` sets it when it builds the plan, before the metrics.
+    let mut args = crate::plan_args::PlanArgs::new();
+    if let Some(name) = &observation.borrow().unencodable_name {
+        args.str(name.bind(py).as_any())?;
+    }
+    let args = args.before(&mut exprs);
     let inner = observation.borrow().inner.clone();
+    // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once.
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
-        df.observe_with(&inner, exprs)
+        df.observe_with_streaming(&inner, exprs, || frame.streaming_once())
     })?;
     // The plan holds the state of the Observation, as PySpark's holds the Observation itself,
     // which a deep copy of the plan copies with the memo of the call.
     keep_handle(observation)?;
-    Ok(PyDataFrame::new(observed))
+    Ok(PyDataFrame::new(args.plan(observed)))
 }
 
 /// Have the executions of `session` convert the metrics of the Observations of their plans as

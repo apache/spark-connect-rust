@@ -23,22 +23,24 @@ mod dispatch {
 /// - name: str - name of the UDF
 /// - return_type: DataType - return type of the UDF
 /// - eval_type: int - evaluation type (from PythonEvalType)
-/// - command_bytes: bytes - cloudpickled command (usually (func, output_type))
+/// - command: bytes - cloudpickled command (usually (func, output_type)), or a function of no
+///   arguments that returns it, which each request that builds the plan calls, as PySpark's
+///   `PythonUDF.to_plan` pickles the function each time
 /// - python_ver: str - Python version (e.g., "3.9")
 /// - *args: Column - argument columns
 /// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=true, named_args=Vec::new()))]
+#[pyo3(signature = (name, return_type, eval_type, command, python_ver, *args, deterministic=true, named_args=Vec::new()))]
 #[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udf(
     name: String,
     return_type: &Bound<'_, PyAny>,
     eval_type: i32,
-    command_bytes: Vec<u8>,
+    command: &Bound<'_, PyAny>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
-    named_args: Vec<(String, Bound<'_, PyAny>)>,
+    named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
 ) -> PyResult<PyColumn> {
     // Accept any DataType object (our type classes / DataType) or a DDL string.
     let return_data_type = crate::types::py_to_proto_data_type(return_type)?;
@@ -50,7 +52,14 @@ fn pyfunc_make_udf(
         .collect();
 
     // Create the Python UDF payload
-    let python_udf = PythonUDFPayload::new(return_data_type, eval_type, command_bytes, python_ver);
+    let python_udf = match crate::udf_command::UdfCommand::of(command) {
+        crate::udf_command::UdfCommand::Pickled(bytes) => {
+            PythonUDFPayload::new(return_data_type, eval_type, bytes, python_ver)
+        }
+        crate::udf_command::UdfCommand::AtBuild(pickler) => {
+            PythonUDFPayload::pickled_at_build(return_data_type, eval_type, pickler, python_ver)
+        }
+    };
 
     // Create the UDF expression
     let udf_expr =
@@ -68,7 +77,7 @@ fn pyfunc_make_udf(
 /// message, as PySpark's `ColumnReference` of it fails.
 fn udf_arguments(
     args: Vec<Bound<'_, PyAny>>,
-    named_args: Vec<(String, Bound<'_, PyAny>)>,
+    named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
     table_args: bool,
 ) -> PyResult<Vec<Column>> {
     let argument = |arg: &Bound<'_, PyAny>| -> PyResult<Column> {
@@ -78,9 +87,9 @@ fn udf_arguments(
             }
         }
         // As PySpark's `to_expr` of a UDF call: a column name is a ColumnReference of it,
-        // without the origin of `col`.
+        // without the origin of `col`, which sets the name when it builds the plan.
         if arg.is_instance_of::<pyo3::types::PyString>() {
-            return Ok(Column::new(Expression::column(arg.extract::<String>()?)));
+            return crate::plan_args::column_reference(arg);
         }
         // As PySpark's `to_expr`: a Column is its expression.
         if arg.is_instance_of::<PyColumn>() {
@@ -94,9 +103,12 @@ fn udf_arguments(
     }
     for (key, value) in named_args {
         let value = argument(&value)?.expression().clone();
-        columns.push(Column::new(
-            ExpressionNode::NamedArgument(Box::new(NamedArgument::new(key, value))).into(),
-        ));
+        // The key, which PySpark's `NamedArgumentExpression` sets when it builds the plan, before
+        // its value.
+        let mut key_args = crate::plan_args::PlanArgs::new();
+        let key = key_args.str(key.as_any())?;
+        let named = ExpressionNode::NamedArgument(Box::new(NamedArgument::new(key, value))).into();
+        columns.push(Column::new(key_args.expression(named)));
     }
     Ok(columns)
 }
@@ -106,25 +118,27 @@ fn udf_arguments(
 /// (a `CommonInlineUserDefinedTableFunction` relation) via the session's TVF.
 ///
 /// - session: the SparkSession the UDTF is evaluated against
-/// - name/return_type/eval_type/command_bytes/python_ver: as for `make_udf`
-///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF})
+/// - name/return_type/eval_type/command/python_ver: as for `make_udf`
+///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF}); a function
+///   for `command` pickles the handler class each time a request builds the plan, as PySpark's
+///   `PythonUDTF.to_plan` does
 /// - *args: Column arguments
 /// - deterministic: whether the UDTF is deterministic, which a PySpark UDTF is not unless
 ///   `asDeterministic()` makes it so
 /// - named_args: (str, Column) pairs - the keyword arguments, in order
 #[pyfunction]
-#[pyo3(signature = (session, name, return_type, eval_type, command_bytes, python_ver, *args, deterministic=false, named_args=Vec::new()))]
+#[pyo3(signature = (session, name, return_type, eval_type, command, python_ver, *args, deterministic=false, named_args=Vec::new()))]
 #[allow(clippy::too_many_arguments)]
 fn pyfunc_make_udtf(
     session: PyRef<'_, PySparkSession>,
     name: String,
     return_type: Option<&Bound<'_, PyAny>>,
     eval_type: i32,
-    command_bytes: Vec<u8>,
+    command: &Bound<'_, PyAny>,
     python_ver: String,
     args: Vec<Bound<'_, PyAny>>,
     deterministic: bool,
-    named_args: Vec<(String, Bound<'_, PyAny>)>,
+    named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
 ) -> PyResult<PyDataFrame> {
     let col_args = udf_arguments(args, named_args, true)?;
     // Connect leaves DDL parsing and validation to the server. In particular,
@@ -140,15 +154,27 @@ fn pyfunc_make_udtf(
             }
         })
         .transpose()?;
-    let df = session.session.tvf().udtf(
-        &name,
-        col_args,
-        rt,
-        eval_type,
-        command_bytes,
-        python_ver,
-        deterministic,
-    );
+    let tvf = session.session.tvf();
+    let df = match crate::udf_command::UdfCommand::of(command) {
+        crate::udf_command::UdfCommand::Pickled(bytes) => tvf.udtf(
+            &name,
+            col_args,
+            rt,
+            eval_type,
+            bytes,
+            python_ver,
+            deterministic,
+        ),
+        crate::udf_command::UdfCommand::AtBuild(pickler) => tvf.udtf_pickled_at_build(
+            &name,
+            col_args,
+            rt,
+            eval_type,
+            pickler,
+            python_ver,
+            deterministic,
+        ),
+    };
     Ok(PyDataFrame::new(df))
 }
 
@@ -174,23 +200,6 @@ pub fn register_functions(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<
     m.add_function(wrap_pyfunction!(pyfunc_variant_strip_nulls, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window, m)?)?;
     m.add_function(wrap_pyfunction!(pyfunc_window_with_slide_and_start, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_from_avro, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_from_avro_with_options, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_to_avro_with_schema, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_from_protobuf, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_from_protobuf_with_descriptor, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_from_protobuf_with_options, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        pyfunc_from_protobuf_with_descriptor_and_options,
-        m
-    )?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_to_protobuf, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_to_protobuf_with_descriptor, m)?)?;
-    m.add_function(wrap_pyfunction!(pyfunc_to_protobuf_with_options, m)?)?;
-    m.add_function(wrap_pyfunction!(
-        pyfunc_to_protobuf_with_descriptor_and_options,
-        m
-    )?)?;
     Ok(())
 }
 
@@ -236,27 +245,34 @@ fn integer_literal(value: i64) -> LiteralExpression {
 
 /// Exact built-in primitives need no Enum, NumPy or non-primitive scalar probing.
 /// Subclasses and out-of-range ints retain the generic conversion order in the callers.
-fn exact_primitive_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>> {
+fn exact_primitive_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<Expression>> {
     if let Ok(boolean) = obj.cast_exact::<pyo3::types::PyBool>() {
-        return Ok(Some(LiteralExpression::boolean(boolean.extract()?)));
+        return Ok(Some(Expression::literal(LiteralExpression::boolean(
+            boolean.extract()?,
+        ))));
     }
     if let Ok(integer) = obj.cast_exact::<pyo3::types::PyInt>() {
         if let Ok(value) = integer.extract::<i64>() {
-            return Ok(Some(integer_literal(value)));
+            return Ok(Some(Expression::literal(integer_literal(value))));
         }
     }
     if let Ok(float) = obj.cast_exact::<pyo3::types::PyFloat>() {
-        return Ok(Some(LiteralExpression::double(float.extract()?)));
+        return Ok(Some(Expression::literal(LiteralExpression::double(
+            float.extract()?,
+        ))));
     }
     if let Ok(string) = obj.cast_exact::<pyo3::types::PyString>() {
-        // A str that UTF-8 cannot encode raises the `UnicodeEncodeError` of its encoding, as
-        // the str of a subclass below.
-        return Ok(Some(LiteralExpression::string(string.extract::<String>()?)));
+        // A str that UTF-8 cannot encode fails the requests of its plans with the
+        // `UnicodeEncodeError` of its encoding, as PySpark sets the literal when it builds the
+        // plan, as the str of a subclass below.
+        return Ok(Some(crate::plan_args::string_literal(string)?));
     }
     if obj.is_exact_instance_of::<pyo3::types::PyBytes>()
         || obj.is_exact_instance_of::<pyo3::types::PyByteArray>()
     {
-        return Ok(Some(LiteralExpression::Binary(obj.extract()?)));
+        return Ok(Some(Expression::literal(LiteralExpression::Binary(
+            obj.extract()?,
+        ))));
     }
     Ok(None)
 }
@@ -268,7 +284,7 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         return Ok(col.borrow().column.clone());
     }
     if let Some(lit) = exact_primitive_literal(obj)? {
-        return Ok(Column::new(Expression::literal(lit)));
+        return Ok(Column::new(lit));
     }
     // An Enum is the literal of its value, as PySpark's.
     let obj = &enum_to_value(obj)?;
@@ -337,12 +353,11 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
         ))));
     }
 
-    if obj.is_instance_of::<pyo3::types::PyString>() {
-        // A str that UTF-8 cannot encode (a lone surrogate) raises the `UnicodeEncodeError` of
-        // its encoding, as protobuf's string field does when PySpark sends the literal.
-        return Ok(Column::new(Expression::literal(LiteralExpression::string(
-            obj.extract::<String>()?,
-        ))));
+    if let Ok(text) = obj.cast::<pyo3::types::PyString>() {
+        // A str that UTF-8 cannot encode (a lone surrogate) fails the requests of its plans with
+        // the `UnicodeEncodeError` of its encoding, as protobuf's string field does when PySpark
+        // sends the literal.
+        return Ok(Column::new(crate::plan_args::string_literal(text)?));
     }
 
     // As PySpark's literal conversion for a value of another type.
@@ -366,11 +381,15 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 /// A NumPy array is not a value, as PySpark's `_from_value` does not take it, though `lit` does.
 pub(crate) fn to_value_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     if let Some(lit) = exact_primitive_literal(obj)? {
-        return Ok(Column::new(Expression::literal(lit)));
+        return Ok(Column::new(lit));
     }
     let obj = &enum_to_value(obj)?;
     if let Ok(list) = obj.cast::<pyo3::types::PyList>() {
-        return Ok(Column::new(Expression::literal(typed_array_literal(list)?)));
+        // Its strs are set when the plan is built, of which one that UTF-8 cannot encode fails
+        // the requests of the plan.
+        let mut args = crate::plan_args::PlanArgs::new();
+        let literal = typed_array_literal(list, &mut args)?;
+        return Ok(Column::new(args.expression(Expression::literal(literal))));
     }
     if numpy_ndarray_ndim(obj)?.is_some() {
         return Err(crate::column::raise_pyspark(
@@ -438,8 +457,12 @@ impl Drop for ListLevel {
 
 /// The array literal of a list, of the type of its first element, as PySpark's
 /// `LiteralExpression` infers it. The first element's literal gives that type, and each other
-/// element is converted to it once, by `literal_as`.
-fn typed_array_literal(list: &Bound<'_, pyo3::types::PyList>) -> PyResult<LiteralExpression> {
+/// element is converted to it once, by `literal_as`. Its `to_plan` sets the strs when it builds
+/// the plan (`args`).
+fn typed_array_literal(
+    list: &Bound<'_, pyo3::types::PyList>,
+    args: &mut crate::plan_args::PlanArgs,
+) -> PyResult<LiteralExpression> {
     let _level = ListLevel::enter()?;
     let Some(first) = list.iter().next().filter(|first| !first.is_none()) else {
         return Err(crate::column::raise_pyspark(
@@ -450,13 +473,13 @@ fn typed_array_literal(list: &Bound<'_, pyo3::types::PyList>) -> PyResult<Litera
         ));
     };
     let first = match first.cast::<pyo3::types::PyList>() {
-        Ok(inner) => with_stack_for_a_list_level(|| typed_array_literal(inner))?,
-        Err(_) => scalar_literal_of(&first)?,
+        Ok(inner) => with_stack_for_a_list_level(|| typed_array_literal(inner, args))?,
+        Err(_) => scalar_literal_of(&first, args)?,
     };
     let element_type = literal_data_type(&first);
     let mut elements = vec![first];
     for item in list.iter().skip(1) {
-        elements.push(literal_as(&item, &element_type)?);
+        elements.push(literal_as(&item, &element_type, args)?);
     }
     Ok(LiteralExpression::Array {
         element_type: Box::new(element_type),
@@ -536,9 +559,15 @@ pub(crate) fn typed_pair_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<Lite
     if !data_type.is_instance(pyo3::types::PyTuple::new(obj.py(), classes)?.as_any())? {
         return Err(pyo3::exceptions::PyAssertionError::new_err(()));
     }
-    // As `to_plan`, which converts the type as `pyspark_types_to_proto_types` does.
+    // As `to_plan`, which converts the type as `pyspark_types_to_proto_types` does, and which
+    // `serialize` calls at once: a str that protobuf does not take raises here.
     let data_type = crate::types::py_to_proto_data_type(&data_type)?;
-    literal_as(&pair.get_item(0)?, &data_type).map(Some)
+    let mut args = crate::plan_args::PlanArgs::new();
+    let literal = literal_as(&pair.get_item(0)?, &data_type, &mut args)?;
+    if let Some(error) = args.error() {
+        return Err(crate::errors::spark_error_to_py_exception(error.clone()));
+    }
+    Ok(Some(literal))
 }
 
 /// The literal of `obj` as a value of `data_type`, as PySpark's `LiteralExpression(obj, type)`:
@@ -551,6 +580,7 @@ pub(crate) fn typed_pair_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<Lite
 fn literal_as(
     obj: &Bound<'_, PyAny>,
     data_type: &spark_connect::types::DataType,
+    args: &mut crate::plan_args::PlanArgs,
 ) -> PyResult<LiteralExpression> {
     use spark_connect::types::DataType;
     let assertion = || pyo3::exceptions::PyAssertionError::new_err(());
@@ -567,7 +597,7 @@ fn literal_as(
             let _level = ListLevel::enter()?;
             let elements = with_stack_for_a_list_level(|| {
                 list.iter()
-                    .map(|item| literal_as(&item, element_type))
+                    .map(|item| literal_as(&item, element_type, args))
                     .collect::<PyResult<Vec<_>>>()
             })?;
             LiteralExpression::Array {
@@ -634,8 +664,8 @@ fn literal_as(
             if !obj.is_instance_of::<pyo3::types::PyString>() {
                 return Err(assertion());
             }
-            // A str that UTF-8 cannot encode raises, as in `to_column`.
-            LiteralExpression::String(obj.extract::<String>()?)
+            // A str that UTF-8 cannot encode fails the requests of the plan, as in `to_column`.
+            LiteralExpression::String(args.str(obj)?)
         }
         // As PySpark's `to_plan`, which sends `bytes(value)`.
         DataType::Binary => match crate::infer::bytes_of(obj)? {
@@ -720,8 +750,18 @@ fn is_numpy_scalar(obj: &Bound<'_, PyAny>, classes: &[&str]) -> PyResult<bool> {
 }
 
 /// The literal of a value that is not a list, as `to_column` builds it.
-fn scalar_literal_of(obj: &Bound<'_, PyAny>) -> PyResult<LiteralExpression> {
-    match to_column(obj)?.expression().node() {
+fn scalar_literal_of(
+    obj: &Bound<'_, PyAny>,
+    args: &mut crate::plan_args::PlanArgs,
+) -> PyResult<LiteralExpression> {
+    let column = to_column(obj)?;
+    // The literal of a str that UTF-8 cannot encode, whose error the requests of the plan raise.
+    if let ExpressionNode::Unbuildable(unbuildable) = column.expression().node() {
+        if let Some(error) = &unbuildable.before {
+            args.record(error.clone());
+        }
+    }
+    match column.expression().built().node() {
         ExpressionNode::Literal(literal) => Ok(literal.clone()),
         _ => {
             let type_name = obj
@@ -947,11 +987,12 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     Ok(None)
 }
 
+/// `F.col(name)`, as PySpark Connect's ([`crate::plan_args::col`]).
 #[pyfunction]
-fn pyfunc_col(name: &str) -> PyResult<PyColumn> {
+fn pyfunc_col(name: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
     // As PySpark's `col`, of `_with_origin`.
     let _origin = crate::origin::with_origin("col")?;
-    Ok(PyColumn::new(spark_funcs::col(name)))
+    Ok(PyColumn::new(crate::plan_args::col(name)?))
 }
 
 #[pyfunction]
@@ -960,9 +1001,10 @@ fn pyfunc_lit(_py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
     Ok(PyColumn::new(col))
 }
 
+/// `F.expr(text)`, as PySpark Connect's ([`crate::plan_args::expr`]).
 #[pyfunction]
-fn pyfunc_expr(expr_str: &str) -> PyColumn {
-    PyColumn::new(spark_funcs::expr(expr_str))
+fn pyfunc_expr(expr_str: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
+    Ok(PyColumn::new(crate::plan_args::expr(expr_str)?))
 }
 
 #[pyfunction]
@@ -987,7 +1029,7 @@ fn pyfunc_count(col: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
     } else if col.is_instance_of::<pyo3::types::PyString>() {
         // As PySpark's `_to_col`, by `col`, of its origin.
         let _origin = crate::origin::with_origin("col")?;
-        spark_funcs::col(&col.extract::<String>()?)
+        crate::plan_args::col(col)?
     } else {
         let type_name = col.get_type().name()?.to_string();
         return Err(crate::column::raise_pyspark(
@@ -1082,18 +1124,35 @@ fn pyfunc_lambda_function(body: &PyColumn, arg_names: Vec<String>) -> PyColumn {
 }
 
 /// Build a Column wrapping a `CallFunction` expression (a named function call
-/// carrying its argument columns). Mirrors `functions.call_function`.
+/// carrying its argument columns). Mirrors `functions.call_function`, whose `CallFunction`
+/// asserts a str name, and sets it when it builds the plan, before the arguments.
 #[pyfunction]
 #[pyo3(signature = (name, *args))]
-fn pyfunc_call_named_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
+fn pyfunc_call_named_function(
+    name: &Bound<'_, PyAny>,
+    args: Vec<Bound<'_, PyAny>>,
+) -> PyResult<PyColumn> {
     let mut arg_exprs = Vec::with_capacity(args.len());
     for arg in args {
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
-    let result = Column::new(
-        ExpressionNode::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs))).into(),
-    );
-    Ok(PyColumn::new(result))
+    let (name_args, name) = function_name(name)?;
+    let call = ExpressionNode::CallFunction(Box::new(CallFunctionWrapper::new(name, arg_exprs)));
+    Ok(PyColumn::new(Column::new(
+        name_args.expression(call.into()),
+    )))
+}
+
+/// The name of a function of an expression, as PySpark's `UnresolvedFunction` and `CallFunction`
+/// take it: they assert a str (another object is a bare `AssertionError`), and set it when they
+/// build the plan, as [`crate::plan_args::PlanArgs`] converts it.
+fn function_name(name: &Bound<'_, PyAny>) -> PyResult<(crate::plan_args::PlanArgs, String)> {
+    if !name.is_instance_of::<pyo3::types::PyString>() {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    let mut args = crate::plan_args::PlanArgs::new();
+    let name = args.str(name)?;
+    Ok((args, name))
 }
 
 /// Build a Column wrapping an `UnresolvedFunction` for ANY name, unconditionally
@@ -1103,13 +1162,18 @@ fn pyfunc_call_named_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyRe
 /// not part of the generated dispatch.
 #[pyfunction]
 #[pyo3(signature = (name, *args))]
-fn pyfunc_invoke_function(name: String, args: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
+fn pyfunc_invoke_function(
+    name: &Bound<'_, PyAny>,
+    args: Vec<Bound<'_, PyAny>>,
+) -> PyResult<PyColumn> {
     let mut arg_exprs = Vec::with_capacity(args.len());
     for arg in args {
         arg_exprs.push(to_column(&arg)?.expression().clone());
     }
-    let result = Column::new(Expression::function(name, arg_exprs));
-    Ok(PyColumn::new(result))
+    let (name_args, name) = function_name(name)?;
+    Ok(PyColumn::new(Column::new(
+        name_args.expression(Expression::function(name, arg_exprs)),
+    )))
 }
 
 // ============================================================================
@@ -1150,140 +1214,5 @@ fn pyfunc_window_with_slide_and_start(
         window_duration,
         slide_duration,
         start_time,
-    ))
-}
-
-/// Wrapper for from_avro(data, jsonFormatSchema).
-#[pyfunction]
-fn pyfunc_from_avro(data: &PyColumn, json_format_schema: &str) -> PyColumn {
-    PyColumn::new(spark_funcs::from_avro(
-        data.column.clone(),
-        json_format_schema,
-    ))
-}
-
-/// Wrapper for from_avro_with_options(data, jsonFormatSchema, options).
-#[pyfunction]
-fn pyfunc_from_avro_with_options(
-    data: &PyColumn,
-    json_format_schema: &str,
-    options: &PyColumn,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::from_avro_with_options(
-        data.column.clone(),
-        json_format_schema,
-        options.column.clone(),
-    ))
-}
-
-/// Wrapper for to_avro_with_schema(data, jsonFormatSchema).
-#[pyfunction]
-fn pyfunc_to_avro_with_schema(data: &PyColumn, json_format_schema: &str) -> PyColumn {
-    PyColumn::new(spark_funcs::to_avro_with_schema(
-        data.column.clone(),
-        json_format_schema,
-    ))
-}
-
-/// Wrapper for from_protobuf(data, messageName).
-#[pyfunction]
-fn pyfunc_from_protobuf(data: &PyColumn, message_name: &str) -> PyColumn {
-    PyColumn::new(spark_funcs::from_protobuf(
-        data.column.clone(),
-        message_name,
-    ))
-}
-
-/// Wrapper for from_protobuf_with_descriptor(data, messageName, binaryDescriptorSet).
-#[pyfunction]
-fn pyfunc_from_protobuf_with_descriptor(
-    data: &PyColumn,
-    message_name: &str,
-    binary_descriptor_set: Vec<u8>,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::from_protobuf_with_descriptor(
-        data.column.clone(),
-        message_name,
-        binary_descriptor_set,
-    ))
-}
-
-/// Wrapper for from_protobuf_with_options(data, messageName, options).
-#[pyfunction]
-fn pyfunc_from_protobuf_with_options(
-    data: &PyColumn,
-    message_name: &str,
-    options: &PyColumn,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::from_protobuf_with_options(
-        data.column.clone(),
-        message_name,
-        options.column.clone(),
-    ))
-}
-
-/// Wrapper for from_protobuf_with_descriptor_and_options(data, messageName, binaryDescriptorSet, options).
-#[pyfunction]
-fn pyfunc_from_protobuf_with_descriptor_and_options(
-    data: &PyColumn,
-    message_name: &str,
-    binary_descriptor_set: Vec<u8>,
-    options: &PyColumn,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::from_protobuf_with_descriptor_and_options(
-        data.column.clone(),
-        message_name,
-        binary_descriptor_set,
-        options.column.clone(),
-    ))
-}
-
-/// Wrapper for to_protobuf(data, messageName).
-#[pyfunction]
-fn pyfunc_to_protobuf(data: &PyColumn, message_name: &str) -> PyColumn {
-    PyColumn::new(spark_funcs::to_protobuf(data.column.clone(), message_name))
-}
-
-/// Wrapper for to_protobuf_with_descriptor(data, messageName, binaryDescriptorSet).
-#[pyfunction]
-fn pyfunc_to_protobuf_with_descriptor(
-    data: &PyColumn,
-    message_name: &str,
-    binary_descriptor_set: Vec<u8>,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::to_protobuf_with_descriptor(
-        data.column.clone(),
-        message_name,
-        binary_descriptor_set,
-    ))
-}
-
-/// Wrapper for to_protobuf_with_options(data, messageName, options).
-#[pyfunction]
-fn pyfunc_to_protobuf_with_options(
-    data: &PyColumn,
-    message_name: &str,
-    options: &PyColumn,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::to_protobuf_with_options(
-        data.column.clone(),
-        message_name,
-        options.column.clone(),
-    ))
-}
-
-/// Wrapper for to_protobuf_with_descriptor_and_options(data, messageName, binaryDescriptorSet, options).
-#[pyfunction]
-fn pyfunc_to_protobuf_with_descriptor_and_options(
-    data: &PyColumn,
-    message_name: &str,
-    binary_descriptor_set: Vec<u8>,
-    options: &PyColumn,
-) -> PyColumn {
-    PyColumn::new(spark_funcs::to_protobuf_with_descriptor_and_options(
-        data.column.clone(),
-        message_name,
-        binary_descriptor_set,
-        options.column.clone(),
     ))
 }

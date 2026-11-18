@@ -296,6 +296,9 @@ pub enum SparkErrorKind {
     /// ``RuntimeError``, a Python builtin: the release of an execution once the interpreter has
     /// begun to shut down, which the thread pool of the reference client's releases refuses.
     BuiltinRuntimeError,
+    /// ``AttributeError``, a Python builtin: an argument that lacks a method that the reference
+    /// client calls when it builds the plan of a request, such as the `to_plan` of a join's `on`.
+    BuiltinAttributeError,
     /// ``pyspark.errors.exceptions.base.SparkRuntimeException``
     SparkRuntime,
     /// ``pyspark.errors.exceptions.base.SparkUpgradeException``
@@ -383,6 +386,15 @@ impl SparkError {
     pub fn builtin_value_msg(message: impl Into<String>) -> Self {
         let mut error = Self::value_msg(message);
         error.kind = SparkErrorKind::BuiltinValueError;
+        error
+    }
+
+    /// Create a `BuiltinAttributeError`-kind error with a plain message: an `AttributeError` of
+    /// the Python builtin, as the reference client raises it when it builds a plan of an object
+    /// that lacks the method that it calls.
+    pub fn builtin_attribute(message: impl Into<String>) -> Self {
+        let mut error = Self::value_msg(message);
+        error.kind = SparkErrorKind::BuiltinAttributeError;
         error
     }
 

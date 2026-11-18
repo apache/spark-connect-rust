@@ -17,7 +17,8 @@
 //! Left out, with the finding that keeps it out (see [`LOAD_LEFT_OUT`]): the load of the
 //! StopWordsRemover stages. [`LEFT_OUT`] and [`CLASS_LEFT_OUT`] list the entries and class methods
 //! left out whole, of which there are none now. The Delete that PySpark sends for the temporary
-//! model of a QuantileDiscretizer's fit is not compared (see [`without_deletes`]).
+//! model of a QuantileDiscretizer's fit is compared apart from the other commands, as the replay
+//! records the deletes apart (see [`assert_deletes`]).
 #[path = "common/feature_cases.rs"]
 #[macro_use]
 mod feature_cases;
@@ -405,17 +406,51 @@ fn check_members(server: &ReplayServer, model: &Fitted, members: &Json, key: &st
     }
 }
 
-/// The entry without its Delete commands, and their results. PySpark releases the temporary model
-/// of a QuantileDiscretizer's fit inside the fit, which sends a Delete of it in the entry. The
-/// replay does not record a delete of a released object, so the commands that it compares leave
-/// the deletes out too.
-fn without_deletes(entry: &Json) -> Json {
+/// The ML command of a golden command.
+fn golden_command(command: &Json) -> proto::MlCommand {
     use base64::{engine::general_purpose::STANDARD, Engine};
     use prost::Message;
+    let bytes = STANDARD.decode(command.as_str().unwrap()).unwrap();
+    proto::MlCommand::decode(bytes.as_slice()).unwrap()
+}
+
+/// The Delete commands of a golden entry, in order.
+fn golden_deletes(entry: &Json) -> Vec<proto::ml_command::Delete> {
+    entry["commands"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|command| match golden_command(command).command {
+            Some(proto::ml_command::Command::Delete(delete)) => Some(delete),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Asserts that the deletes that the client sent since they were last taken are the Delete
+/// commands of the golden `entry`. The client releases a temporary model in the background when
+/// it drops it, so the deletes that the golden has are waited for.
+fn assert_deletes(server: &ReplayServer, entry: &Json, at: &str) {
+    let expected = golden_deletes(entry);
+    let started = std::time::Instant::now();
+    let mut deletes = server.take_deletes();
+    while deletes.len() < expected.len() && started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        deletes.extend(server.take_deletes());
+    }
+    assert_eq!(deletes, expected, "{at}: the deletes");
+}
+
+/// The entry without its Delete commands, and their results. PySpark releases the temporary model
+/// of a QuantileDiscretizer's fit inside the fit, which sends a Delete of it in the entry. The
+/// replay records the deletes apart from the commands that [`assert_commands`] compares, so the
+/// entry of those leaves them out, and [`assert_deletes`] compares them.
+fn without_deletes(entry: &Json) -> Json {
     let is_delete = |command: &Json| {
-        let bytes = STANDARD.decode(command.as_str().unwrap()).unwrap();
-        let command = proto::MlCommand::decode(bytes.as_slice()).unwrap();
-        matches!(command.command, Some(proto::ml_command::Command::Delete(_)))
+        matches!(
+            golden_command(command).command,
+            Some(proto::ml_command::Command::Delete(_))
+        )
     };
     let mut entry = entry.clone();
     let commands = entry["commands"].as_array().unwrap().clone();
@@ -472,6 +507,7 @@ fn check_model(golden: &Json, persistence: &Json, key: &str) {
     let input = session.range(1).unwrap();
     let model = fitted(key, &input);
     assert_commands(&server, &fit_entry, key);
+    assert_deletes(&server, &fit["fit"], key);
     assert_eq!(model.class(), official["class"], "{key}");
     check_members(&server, &model, &official["members"], key);
 
@@ -510,6 +546,11 @@ fn a_pipeline_fit_of_a_quantile_discretizer_gives_a_bucketizer_of_a_new_uid() {
     let mut pipeline = Pipeline::new().set_stages(vec![PipelineStage::estimator(discretizer)]);
     let model = pipeline.fit(&input).unwrap();
     assert_commands(&server, &fit, "QuantileDiscretizer.pipeline");
+    assert_deletes(
+        &server,
+        &golden["fits"]["QuantileDiscretizer"]["fit"],
+        "QuantileDiscretizer.pipeline",
+    );
     let pipeline_model = (*model)
         .as_any()
         .downcast_ref::<PipelineModel>()

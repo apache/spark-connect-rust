@@ -33,16 +33,21 @@ fn cols(items: Vec<Bound<'_, PyAny>>) -> PyResult<Vec<spark_connect::column::Col
 #[pymethods]
 impl PyTableValuedFunction {
     /// The shallow copy of the table-valued functions, as PySpark's `copy.copy`: of the same
-    /// session.
-    fn __copy__(&self) -> PyTableValuedFunction {
-        PyTableValuedFunction::new(self.inner.clone())
+    /// session, with the instance attributes of these.
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+        let py = slf.py();
+        let copy = Py::new(py, PyTableValuedFunction::new(slf.borrow().inner.clone()))?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        Ok(copy)
     }
 
     /// The reduce of the table-valued functions, as PySpark's: `tvf` of their session, which
-    /// unpickles with it.
-    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
-        let session = crate::session::session_object(py, self.inner.spark_session())?;
-        crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "tvf")
+    /// unpickles with it, and their instance attributes.
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let session = crate::session::session_object(py, slf.borrow().inner.spark_session())?;
+        let reduced = crate::reduce::getattr_reduce(py, session.into_bound(py).into_any(), "tvf")?;
+        crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
     }
 
     /// Each argument is taken by its `int()`, as PySpark's `spark.tvf.range` takes them, which
@@ -57,8 +62,9 @@ impl PyTableValuedFunction {
         step: crate::session::RangeStep,
         numPartitions: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let mut args = crate::plan_args::PlanArgs::new();
         let (start, end, step, num_partitions) =
-            crate::session::range_arguments(start, end, step, numPartitions)?;
+            crate::session::range_arguments(&mut args, start, end, step, numPartitions)?;
         let df = py
             .detach(|| {
                 self.inner
@@ -66,7 +72,7 @@ impl PyTableValuedFunction {
                     .map_err(Box::new)
             })
             .to_pyerr()?;
-        Ok(PyDataFrame::new(df))
+        Ok(PyDataFrame::new(args.plan(df)))
     }
 
     fn explode(&self, py: Python<'_>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {

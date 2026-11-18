@@ -81,15 +81,10 @@ fn lit_binary(b: Vec<u8>) -> Expression {
 /// Mirrors `pyspark.sql.functions.col`.
 ///
 /// `"*"` and any `"prefix.*"` become an `UnresolvedStar` (so `count("*")`,
-/// `select("*")`, `col("t.*")` resolve on the server), matching pyspark.
+/// `select("*")`, `col("t.*")` resolve on the server), matching pyspark: it is
+/// [`crate::column::col`].
 pub fn col(name: &str) -> Column {
-    if name == "*" {
-        Column::new(ExpressionNode::UnresolvedStar(None, None).into())
-    } else if let Some(prefix) = name.strip_suffix(".*") {
-        Column::new(ExpressionNode::UnresolvedStar(Some(format!("{prefix}.*")), None).into())
-    } else {
-        Column::new(Expression::column(name))
-    }
+    crate::column::col(name)
 }
 
 /// Mirrors `pyspark.sql.functions.column`.
@@ -4246,7 +4241,8 @@ pub fn try_variant_insert(v: Column, path: Column, value: Column) -> Column {
     )
 }
 
-/// Mirrors `pyspark.sql.functions.try_variant_set`.
+/// Mirrors `pyspark.sql.functions.try_variant_set(v, path, value)`, which sends `create_if_missing` of
+/// its default, true, as PySpark's does.
 pub fn try_variant_set(v: Column, path: Column, value: Column) -> Column {
     func(
         "try_variant_set",
@@ -4254,6 +4250,7 @@ pub fn try_variant_set(v: Column, path: Column, value: Column) -> Column {
             v.expression().clone(),
             path.expression().clone(),
             value.expression().clone(),
+            lit_bool(true),
         ],
     )
 }
@@ -4324,7 +4321,8 @@ pub fn variant_insert(v: Column, path: Column, value: Column) -> Column {
     )
 }
 
-/// Mirrors `pyspark.sql.functions.variant_set`.
+/// Mirrors `pyspark.sql.functions.variant_set(v, path, value)`, which sends `create_if_missing` of
+/// its default, true, as PySpark's does.
 pub fn variant_set(v: Column, path: Column, value: Column) -> Column {
     func(
         "variant_set",
@@ -4332,6 +4330,7 @@ pub fn variant_set(v: Column, path: Column, value: Column) -> Column {
             v.expression().clone(),
             path.expression().clone(),
             value.expression().clone(),
+            lit_bool(true),
         ],
     )
 }
@@ -4568,45 +4567,77 @@ pub fn tuple_sketch_theta_integer(col: Column) -> Column {
     func("tuple_sketch_theta_integer", vec![col.expression().clone()])
 }
 
-/// Mirrors `pyspark.sql.functions.tuple_union_agg_double`.
+/// Mirrors `pyspark.sql.functions.tuple_union_agg_double`, which sends the default `lgNomEntries` (12) and
+/// `mode` ("sum"), as `tuple_sketch_agg_double` does.
 pub fn tuple_union_agg_double(col: Column) -> Column {
-    func("tuple_union_agg_double", vec![col.expression().clone()])
+    func(
+        "tuple_union_agg_double",
+        vec![col.expression().clone(), lit_int(12), lit_str("sum")],
+    )
 }
 
-/// Mirrors `pyspark.sql.functions.tuple_union_agg_integer`.
+/// Mirrors `pyspark.sql.functions.tuple_union_agg_integer`, which sends the default `lgNomEntries` (12) and
+/// `mode` ("sum"), as `tuple_sketch_agg_integer` does.
 pub fn tuple_union_agg_integer(col: Column) -> Column {
-    func("tuple_union_agg_integer", vec![col.expression().clone()])
+    func(
+        "tuple_union_agg_integer",
+        vec![col.expression().clone(), lit_int(12), lit_str("sum")],
+    )
 }
 
-/// Mirrors `pyspark.sql.functions.tuple_union_double`.
+/// Mirrors `pyspark.sql.functions.tuple_union_double`, which sends the default `lgNomEntries` (12) and
+/// `mode` ("sum"), as `tuple_sketch_agg_double` does.
 pub fn tuple_union_double(col1: Column, col2: Column) -> Column {
     func(
         "tuple_union_double",
-        vec![col1.expression().clone(), col2.expression().clone()],
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 
-/// Mirrors `pyspark.sql.functions.tuple_union_integer`.
+/// Mirrors `pyspark.sql.functions.tuple_union_integer`, which sends the default `lgNomEntries` (12) and
+/// `mode` ("sum"), as `tuple_sketch_agg_double` does.
 pub fn tuple_union_integer(col1: Column, col2: Column) -> Column {
     func(
         "tuple_union_integer",
-        vec![col1.expression().clone(), col2.expression().clone()],
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 
-/// Mirrors `pyspark.sql.functions.tuple_union_theta_double`.
+/// Mirrors `pyspark.sql.functions.tuple_union_theta_double`, which sends the default `lgNomEntries` (12) and
+/// `mode` ("sum"), as `tuple_sketch_agg_double` does.
 pub fn tuple_union_theta_double(col1: Column, col2: Column) -> Column {
     func(
         "tuple_union_theta_double",
-        vec![col1.expression().clone(), col2.expression().clone()],
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 
-/// Mirrors `pyspark.sql.functions.tuple_union_theta_integer`.
+/// Mirrors `pyspark.sql.functions.tuple_union_theta_integer`, which sends the default `lgNomEntries` (12) and
+/// `mode` ("sum"), as `tuple_sketch_agg_double` does.
 pub fn tuple_union_theta_integer(col1: Column, col2: Column) -> Column {
     func(
         "tuple_union_theta_integer",
-        vec![col1.expression().clone(), col2.expression().clone()],
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            lit_int(12),
+            lit_str("sum"),
+        ],
     )
 }
 

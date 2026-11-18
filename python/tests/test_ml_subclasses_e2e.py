@@ -91,6 +91,105 @@ def test_pysparks_readers_and_writers_save_and_load_native_objects(frame):
     assert loaded.getStages()[0].uid == stage.uid
 
 
+def test_a_set_param_of_a_subclass_is_sent_and_refused_by_the_server(frame):
+    # PySpark's `serialize_ml_params` sends every param of `_paramMap` of a fit, a transform, an
+    # evaluate and a save: the server refuses a param of a Python subclass that is set ("Param
+    # myParam does not exist."), and a param of only a default is not sent.
+    import tempfile
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.ml.param import Param, Params
+
+    def extra():
+        return Param(Params._dummy(), "myParam", "a param of the subclass")
+
+    class MyLR(_cls("classification", "LogisticRegression")):
+        myParam = extra()
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._setDefault(myParam=1)
+
+    class MyTokenizer(_cls("feature", "Tokenizer")):
+        myParam = extra()
+
+    class MyEvaluator(_cls("evaluation", "RegressionEvaluator")):
+        myParam = extra()
+
+    estimator = MyLR(maxIter=2)
+    assert type(estimator.fit(frame)).__name__ == "LogisticRegressionModel"
+    estimator._set(myParam=5)
+    path = tempfile.mkdtemp(prefix="ml-subclass-param-") + "/estimator"
+    tokenizer = MyTokenizer(inputCol="x", outputCol="w")._set(myParam="v")
+    evaluator = MyEvaluator(predictionCol="x")._set(myParam=0.5)
+    for call in [
+        lambda: estimator.fit(frame),
+        lambda: estimator.write().save(path),
+        lambda: tokenizer.transform(frame).collect(),
+        lambda: evaluator.evaluate(frame),
+    ]:
+        with pytest.raises(SparkConnectGrpcException, match="Param myParam does not exist."):
+            call()
+
+
+def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame):
+    # PySpark's `DefaultParamsWriter` writes the class of the object (`instance.__module__ + "." +
+    # instance.__class__.__name__`), so of a Python subclass. Its readers of a OneVsRest and a
+    # Pipeline load the file as of their own class; those of the validators read the grid of a
+    # class of no `pyspark.ml.` as of the JVM's writer, of a JSON string, which fails; and a stage of
+    # a pipeline loads of its class, which a class of a function is not an attribute of its module of.
+    import glob
+    import json
+    import tempfile
+
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    OneVsRest = _cls("classification", "OneVsRest")
+    Pipeline = _cls("pipeline", "Pipeline")
+    CrossValidator = _cls("tuning", "CrossValidator")
+    TrainValidationSplit = _cls("tuning", "TrainValidationSplit")
+
+    class MyOVR(OneVsRest):
+        pass
+
+    class MyPipeline(Pipeline):
+        pass
+
+    class MyCV(CrossValidator):
+        pass
+
+    class MyTVS(TrainValidationSplit):
+        pass
+
+    lr = _cls("classification", "LogisticRegression")(maxIter=2)
+    shared = {
+        "estimator": lr,
+        "estimatorParamMaps": ParamGridBuilder().addGrid(lr.maxIter, [1, 2]).build(),
+        "evaluator": _cls("evaluation", "BinaryClassificationEvaluator")(),
+    }
+    base = tempfile.mkdtemp(prefix="ml-subclass-metadata-")
+    for obj, cls in [
+        (MyOVR(classifier=lr), OneVsRest),
+        (MyPipeline(stages=[lr]), Pipeline),
+        (MyCV(**shared), CrossValidator),
+        (MyTVS(**shared), TrainValidationSplit),
+    ]:
+        name = type(obj).__name__
+        path = f"{base}/{name}"
+        obj.write().save(path)
+        (part,) = glob.glob(os.path.join(path, "metadata", "part-*"))
+        with open(part) as file:
+            assert json.load(file)["class"] == f"{type(obj).__module__}.{name}"
+        if cls in (CrossValidator, TrainValidationSplit):
+            with pytest.raises(TypeError, match="^the JSON object must be str, bytes or bytearray"):
+                cls.load(path)
+        else:
+            assert type(cls.load(path)) is cls
+        Pipeline(stages=[obj]).write().save(f"{path}-in-pipeline")
+        with pytest.raises(AttributeError, match=f"has no attribute '{name}'"):
+            Pipeline.load(f"{path}-in-pipeline")
+
+
 def test_the_copies_of_a_pipeline_and_a_validator_fit_the_subclass(frame):
     LR = _cls("classification", "LogisticRegression")
     Pipeline = _cls("pipeline", "Pipeline")
@@ -136,6 +235,13 @@ def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
         copy.deepcopy(summary)
     with pytest.raises(AttributeError, match="Can't pickle local object"):
         pickle.dumps(summary)
+    # The pickle of a summary of an evaluation, which keeps its model, or of a training summary of
+    # the transform of the model (a KMeans's), raises the TypeError of the model's lock first.
+    KMeans = _cls("clustering", "KMeans")
+    for other in (model.evaluate(frame), KMeans(k=2, maxIter=2, seed=1).fit(frame).summary):
+        for call in (lambda: copy.deepcopy(other), lambda: pickle.dumps(other)):
+            with pytest.raises(TypeError, match=r"^cannot pickle '_thread.lock' object$"):
+                call()
     # A PipelineModel of transformers copies, copies deep and pickles, of its stages.
     fitted = Pipeline(stages=[Binarizer(threshold=4.5, inputCol="x", outputCol="b")]).fit(frame)
     for copied in (copy.copy(fitted), copy.deepcopy(fitted), pickle.loads(pickle.dumps(fitted))):
@@ -157,3 +263,16 @@ def test_a_summary_of_no_server_side_object_raises_pysparks_errors(session):
     KMeansSummary = _cls("clustering", "KMeansSummary")
     with pytest.raises(AttributeError, match="^'NoneType' object has no attribute 'split'$"):
         KMeansSummary().k
+    # As PySpark's `invoke_remote_attribute_relation`: a DataFrame member of a summary of the
+    # `summary` method first (`"<id>.summary"`) reads its `_summary_dataset`, which PySpark's fit
+    # sets, and a summary of another id builds a DataFrame that the server refuses.
+    for summary in (Summary("abc.summary"), KMeansSummary("abc.summary")):
+        message = f"^'{type(summary).__name__}' object has no attribute '_summary_dataset'$"
+        with pytest.raises(AttributeError, match=message):
+            summary.predictions
+    with pytest.raises(Exception, match="The MLCache key abc is invalid"):
+        KMeansSummary("abc").predictions.collect()
+    with_dataset = KMeansSummary("abc.summary")
+    with_dataset._summary_dataset = session.range(1)
+    with pytest.raises(Exception, match="The MLCache key abc is invalid"):
+        with_dataset.cluster.collect()

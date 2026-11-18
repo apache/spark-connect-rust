@@ -102,8 +102,9 @@ test against a Spark 4.3.0 Connect server.
    `pyspark` and ours both own the `pyspark` namespace.
 2. **Install Python dependencies** inline in the workflow. It does not install
    `requirements-connect-test.txt`.
-3. **Download Spark 4.3.0** (`spark-4.3.0-bin-hadoop3-connect.tgz` from archive.apache.org,
-   cached in `~/spark-dist`) and start its Connect server with `--driver-memory 3g` and
+3. **Download Spark 4.3.0** (`spark-4.3.0-bin-hadoop3-connect.tgz`, with
+   `scripts/download_spark_dist.sh` from the Apache CDN, or else from archive.apache.org; cached in
+   `~/spark-dist`) and start its Connect server with `--driver-memory 3g` and
    `spark.sql.session.localRelationSizeLimit=1073741824`. The job waits up to 90 seconds for
    port 15002. The drop-in job starts the server from `SPARK_HOME`, because the ML tests read
    relative data paths.

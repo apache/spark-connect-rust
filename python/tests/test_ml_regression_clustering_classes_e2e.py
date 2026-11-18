@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """The classes of the objects that the native regression and clustering classes make, against a
-live Connect server. Every object that this client makes in Rust, of a fit, a fit of param maps,
-fitMultiple, a load, a copy, a summary, an evaluation, DistributedLDAModel.toLocal and the trees of
-an ensemble, is of the public class of pyspark.ml.connect, as PySpark's is of its class. The
+live Connect server. Every object that this client makes in Rust, of a fit (of a param map too), a
+fit of a list of param maps, fitMultiple, a load (of its class and of read()), a copy (of extra
+params too), a summary, an evaluation, DistributedLDAModel.toLocal and the trees of an ensemble, is
+of the public class of pyspark.ml.connect, as PySpark's is of its class. The
 vendored pyspark.ml.Pipeline, CrossValidator and TrainValidationSplit fit, save and load the
 native stages. Official PySpark runs the tests too, as the reference, of its classes
 (`_native_classes.native_class`).
@@ -98,6 +99,13 @@ def official(module, name):
     return getattr(importlib.import_module(module), name)
 
 
+def _extra(stage):
+    # A param map of a param of the stage of a value that it has, for a copy with extra params and
+    # a fit of a param map, as the feature tests make it.
+    param = next(p for p in stage.params if stage.isDefined(p))
+    return {param: stage.getOrDefault(param)}
+
+
 @pytest.fixture(scope="module")
 def session():
     remote = os.environ.get("SPARK_REMOTE")
@@ -136,7 +144,10 @@ def test_models_and_estimators_made_in_rust_are_of_their_public_classes(
     model = est.fit(df)
     assert type(model) is model_class
     assert type(model.copy()) is model_class
+    assert type(model.copy(_extra(model))) is model_class
     assert type(est.copy()) is estimator_class
+    assert type(est.copy(_extra(est))) is estimator_class
+    assert type(est.fit(df, _extra(est))) is model_class
     (listed,) = est.fit(df, [{}])
     assert type(listed) is model_class
     index, fitted = next(est.fitMultiple(df, [{}]))
@@ -146,8 +157,10 @@ def test_models_and_estimators_made_in_rust_are_of_their_public_classes(
     loaded = model_class.load(scratch + "/model")
     assert type(loaded) is model_class
     assert type(loaded.copy()) is model_class
+    assert type(model_class.read().load(scratch + "/model")) is model_class
     est.write().overwrite().save(scratch + "/estimator")
     assert type(estimator_class.load(scratch + "/estimator")) is estimator_class
+    assert type(estimator_class.read().load(scratch + "/estimator")) is estimator_class
 
     if name in SUMMARIES:
         training, evaluated = SUMMARIES[name]
@@ -180,6 +193,7 @@ def test_the_lda_models_are_of_their_public_classes(session, frames, scratch):
     assert isinstance(distributed.toLocal(), base)
     local.write().overwrite().save(scratch + "/local")
     assert type(local_class.load(scratch + "/local")) is local_class
+    assert type(local_class.read().load(scratch + "/local")) is local_class
 
 
 def test_power_iteration_clustering_loads_as_its_public_class(session, scratch):
@@ -187,7 +201,9 @@ def test_power_iteration_clustering_loads_as_its_public_class(session, scratch):
     pic = pic_class(k=2, maxIter=5)
     pic.write().overwrite().save(scratch + "/pic")
     assert type(pic_class.load(scratch + "/pic")) is pic_class
+    assert type(pic_class.read().load(scratch + "/pic")) is pic_class
     assert type(pic.copy()) is pic_class
+    assert type(pic.copy(_extra(pic))) is pic_class
 
 
 def test_the_vendored_pipeline_fits_saves_and_loads_native_stages(session, frames, scratch):

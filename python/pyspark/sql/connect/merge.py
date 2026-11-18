@@ -14,7 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""MergeIntoWriter under the connect import path."""
-from pyspark.sql.merge import MergeIntoWriter
+"""MergeIntoWriter under the connect import path, as PySpark Connect's
+``pyspark.sql.connect.merge``: its ``MergeIntoWriter``, of ``DataFrame.mergeInto``, which the Rust
+extension implements. ``pyspark.sql.merge`` has PySpark's classic class, of which it is not, as in
+PySpark."""
+from pyspark._pyspark import MergeIntoWriter
 
 __all__ = ["MergeIntoWriter"]

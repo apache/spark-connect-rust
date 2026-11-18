@@ -91,6 +91,32 @@ def test_udf_column_and_column_name_arguments_are_accepted(udf_session):
     assert isinstance(Echo(a=F.lit(3)), DataFrame)
 
 
+def test_udf_names_and_keywords_that_utf8_cannot_encode_fail_when_the_plan_is_built(udf_session):
+    # As PySpark's UDF and UDTF calls, whose ColumnReference of a column name and
+    # NamedArgumentExpression of a keyword set the name and the key in protobuf string fields
+    # when a request builds the plan: a str that UTF-8 cannot encode makes the Column or the
+    # DataFrame, whose requests fail with the UnicodeEncodeError of its encoding, and are not sent.
+    from pyspark.sql import functions as F
+
+    spark, service = udf_session
+    udf, Echo = _udfs()
+    bad = "a\ud800b"
+    message = "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    for plan in (
+        spark.range(1).select(udf(bad)),
+        spark.range(1).select(udf(**{bad: F.col("id")})),
+        Echo(bad),
+        Echo(a=bad),
+        Echo(**{bad: F.lit(1)}),
+    ):
+        for request in (lambda: plan.schema, plan.collect):
+            with pytest.raises(UnicodeEncodeError) as error:
+                request()
+            assert str(error.value) == message
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+
 def test_udtf_has_no_name_until_it_is_set(udf_session):
     from pyspark.sql.udtf import UserDefinedTableFunction, udtf
 

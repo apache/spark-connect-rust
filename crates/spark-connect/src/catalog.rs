@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use spark_connect_core::error::{Result, SparkError};
 use spark_connect_proto as proto;
 
-use crate::dataframe::{decode_arrow_batch, DataFrame};
+use crate::dataframe::DataFrame;
 use crate::row::{Row, Value};
 use crate::session::SparkSession;
 
@@ -533,27 +533,27 @@ impl Catalog {
     }
 
     /// Create an external table of a schema and options, mirroring
-    /// `Catalog.createExternalTable(tableName, path, source, schema, **options)`.
+    /// `Catalog.createExternalTable(tableName, path, source, schema, **options)`. Deprecated since
+    /// Spark 4.0, PySpark's creates the table as `createTable(tableName, path, source, schema,
+    /// **options)` does, so it sends a `CreateTable`, of the `description` option as the
+    /// description of the table, as that keyword binds to the parameter of `createTable`.
     pub fn create_external_table_with(
         &self,
         table_name: &str,
         path: Option<&str>,
         source: Option<&str>,
         schema: Option<&crate::types::DataType>,
-        options: HashMap<String, String>,
+        mut options: HashMap<String, String>,
     ) -> Result<DataFrame> {
-        let create_ext = proto::CreateExternalTable {
-            table_name: table_name.to_string(),
-            path: path.map(str::to_string),
-            source: source.map(str::to_string),
-            schema: schema.map(|s| s.to_proto()),
+        let description = options.remove("description");
+        self.create_table_with(
+            table_name,
+            path,
+            source,
+            schema,
+            description.as_deref(),
             options,
-        };
-
-        let mut catalog_msg = proto::Catalog::default();
-        catalog_msg.cat_type = Some(proto::catalog::CatType::CreateExternalTable(create_ext));
-
-        self.execute_catalog_eagerly(&catalog_msg)
+        )
     }
 
     /// Create a table.
@@ -1055,20 +1055,12 @@ impl Catalog {
         Ok(rows.iter().map(parse_table).collect())
     }
 
+    /// Run a catalog operation at once and return its rows, as PySpark's `_execute_and_fetch`
+    /// runs every operation, `DataFrame(plan)._to_table()`: as the execution of the DataFrame of
+    /// the operation, whose relation has its plan ID, as `_create_proto_relation` gives each
+    /// relation one, and the request the tags of the thread, on the reattachable path.
     fn execute_catalog(&self, catalog: &proto::Catalog) -> Result<Vec<Row>> {
-        let request = self.build_execute_catalog_request(catalog)?;
-        // On the reattachable path, as PySpark's client runs a catalog operation, so that an
-        // error carries the operation id of the request.
-        let mut stream = self.session.execute_plan(request)?;
-        let mut rows = vec![];
-        while let Some(resp) = stream.next_message()? {
-            if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
-                resp.response_type
-            {
-                rows.extend(decode_arrow_batch(&batch).map_err(|e| stream.fail(e))?);
-            }
-        }
-        Ok(rows)
+        self.execute_catalog_as_dataframe(catalog)?.collect()
     }
 
     /// Helper: expose a catalog operation as a lazy DataFrame.
@@ -1091,25 +1083,5 @@ impl Catalog {
         let df = self.execute_catalog_as_dataframe(catalog)?;
         df.to_arrow()?;
         Ok(df)
-    }
-
-    /// Build an ExecutePlanRequest for a catalog operation.
-    fn build_execute_catalog_request(
-        &self,
-        catalog: &proto::Catalog,
-    ) -> Result<proto::ExecutePlanRequest> {
-        let mut relation = proto::Relation::default();
-        relation.common = Some(proto::RelationCommon::default());
-        relation.rel_type = Some(proto::relation::RelType::Catalog(catalog.clone()));
-
-        let mut plan = proto::Plan::default();
-        plan.op_type = Some(proto::plan::OpType::Root(relation));
-
-        let mut request = proto::ExecutePlanRequest::default();
-        request.session_id = self.session.client().session_id().to_string();
-        request.user_context = Some(proto::UserContext::default());
-        request.plan = Some(plan);
-
-        Ok(request)
     }
 }

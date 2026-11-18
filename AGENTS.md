@@ -138,10 +138,14 @@ over the Rust transport - `execute_command(pb2.Command)` and the ML cache RPCs -
 exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are not vendored, only
 their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where
 `protobuf` is installed, the runtime also adds the files of the protos to protobuf's default pool,
-so that a plugin's generated modules that import them build; protobuf's messages of those take
-ours only through bytes or dicts (see `docs/compatibility.md`).
+so that a plugin's generated modules that import them build, and wraps protobuf's builder, so that
+those modules get the runtime's classes, whose fields take ours as they are: their files are added
+to the runtime's pool at run time (`pbmsg::pool::register`; see `docs/compatibility.md`).
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
-that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is.
+that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the shallow
+placeholder that `DataFrame._plan.plan(session)` gives of the relation of a DataFrame, which the
+core replaces in the inputs of the plans of `pyspark.ml` and in the messages of the extensions of
+a plugin's relations and commands (`plan::resolve_relation`, `resolve_command`).
 
 ## 3. Close API gaps (three layers)
 
@@ -478,7 +482,7 @@ For every method matching a pyspark name:
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
   the progress data structure is not.
 - **The pandas-parity gate runs OFFICIAL pyspark over our TRANSPORT — not our drop-in classes.**
-  `.github/workflows/pandas-parity.yml` puts the apache/spark v4.2.0 checkout on `PYTHONPATH` and
+  `.github/workflows/pandas-parity.yml` puts the apache/spark v4.3.0 checkout on `PYTHONPATH` and
   loads `scripts/rust_transport_plugin.py`, which monkeypatches `SparkConnectClient` so official
   pyspark builds every proto (Column/lit/isin/createDataFrame) and only the gRPC transport is ours.
   **So Rust Column/lit/`__repr__` changes do NOT move this gate** — a failure here is in the transport
@@ -497,7 +501,7 @@ For every method matching a pyspark name:
     on the resample/describe tests, whose data includes the 2021-03-14 02:00 spring-forward gap. UTC
     also matches how Apache runs its PYTHON connect tests (the runner's UTC); the pom.xml
     `America/Los_Angeles` is only for the JVM/Scala maven-surefire tests, not the python connect server.
-  - **Pin pandas to the supported range (`>=2.2,<3.0`).** v4.2.0 pandas-on-Spark warns pandas ≥ 3.0.0
+  - **Pin pandas to the supported range (`>=2.2,<3.0`).** v4.3.0 pandas-on-Spark warns pandas ≥ 3.0.0
     is unsupported and has 3.0-only branches that misbehave (e.g. `test_frame_loc_setitem` no-ops a
     reordered multi-column `.loc` assignment). Also add test-only deps the suite needs (scipy for the
     corr tests, pyyaml for pipelines) — matching Apache's own pandas test environment.

@@ -189,6 +189,13 @@ pub enum TreeFlag {
     ValueContainsNull,
 }
 
+/// The writers of the flags and of the type names of a tree string (see
+/// [`DataType::tree_string_with_names`]).
+struct TreeText<'a, F, N> {
+    flag: &'a mut F,
+    name: &'a mut N,
+}
+
 impl DataType {
     /// Parses a DDL-formatted string into a DataType, mirroring `DataType.fromDDL()`.
     ///
@@ -310,7 +317,7 @@ impl DataType {
     /// For example:
     /// - "int", "string", "boolean"
     /// - "decimal(10,0)", "char(50)", "varchar(100)"
-    /// - "array<int>", "map<string,int>", "struct<name:string,age:int>"
+    /// - `"array<int>"`, `"map<string,int>"`, `"struct<name:string,age:int>"`
     /// - "interval day to second"
     pub fn simple_string(&self) -> String {
         match self {
@@ -537,7 +544,7 @@ impl DataType {
         parse_json_value(value, "", &CollationsMap::new())
     }
 
-    /// Parses a JSON string into a DataType (convenience over [`from_json`]).
+    /// Parses a JSON string into a DataType (convenience over [`DataType::from_json`]).
     pub fn from_json_str(s: &str) -> Result<DataType> {
         let value: serde_json::Value = serde_json::from_str(s)
             .map_err(|e| SparkError::value("INVALID_JSON", &[("detail", &e.to_string())]))?;
@@ -945,6 +952,147 @@ impl StructField {
         })?;
         parse_json_field(field)
     }
+
+    /// Whether this field equals `other` as PySpark's `StructField.__eq__` compares them, by
+    /// their `__dict__` (see [`DataType::eq_as_python`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn eq_as_python(&self, other: &StructField) -> bool {
+        self.name == other.name
+            && self.nullable == other.nullable
+            && self.data_type.eq_as_python(&other.data_type)
+            && self.metadata.len() == other.metadata.len()
+            && self.metadata.iter().all(|(key, value)| {
+                other
+                    .metadata
+                    .get(key)
+                    .is_some_and(|other| json_eq_as_python(value, other))
+            })
+    }
+}
+
+impl DataType {
+    /// Whether this type equals `other` as PySpark's `DataType.__eq__` compares them, by their
+    /// `__dict__`: as `==` does, but for the metadata of the fields of a struct, whose values are
+    /// compared as Python compares the values of `json.loads` of them. A number equals a number of
+    /// the same value of another type, as `1 == 1.0`, and a bool the number of its value, as
+    /// `True == 1`. Not a stable API.
+    #[doc(hidden)]
+    pub fn eq_as_python(&self, other: &DataType) -> bool {
+        match (self, other) {
+            (DataType::Struct { fields: a }, DataType::Struct { fields: b }) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.eq_as_python(b))
+            }
+            (
+                DataType::Array {
+                    element_type: a,
+                    contains_null: a_null,
+                },
+                DataType::Array {
+                    element_type: b,
+                    contains_null: b_null,
+                },
+            ) => a_null == b_null && a.eq_as_python(b),
+            (
+                DataType::Map {
+                    key_type: a_key,
+                    value_type: a_value,
+                    value_contains_null: a_null,
+                },
+                DataType::Map {
+                    key_type: b_key,
+                    value_type: b_value,
+                    value_contains_null: b_null,
+                },
+            ) => a_null == b_null && a_key.eq_as_python(b_key) && a_value.eq_as_python(b_value),
+            (
+                DataType::Udt {
+                    type_str: a_str,
+                    jvm_class: a_jvm,
+                    python_class: a_python,
+                    serialized_python_class: a_serialized,
+                    sql_type: a_sql,
+                },
+                DataType::Udt {
+                    type_str: b_str,
+                    jvm_class: b_jvm,
+                    python_class: b_python,
+                    serialized_python_class: b_serialized,
+                    sql_type: b_sql,
+                },
+            ) => {
+                a_str == b_str
+                    && a_jvm == b_jvm
+                    && a_python == b_python
+                    && a_serialized == b_serialized
+                    && match (a_sql, b_sql) {
+                        (Some(a), Some(b)) => a.eq_as_python(b),
+                        (a, b) => a.is_none() && b.is_none(),
+                    }
+            }
+            (a, b) => a == b,
+        }
+    }
+}
+
+/// Whether the JSON values `a` and `b` are equal as Python's `==` compares the values that
+/// `json.loads` gives of them: numbers by their values, whatever their types, a bool as the
+/// number of its value, and arrays and objects of equal items.
+fn json_eq_as_python(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_eq_as_python(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(key, value)| {
+                    b.get(key)
+                        .is_some_and(|other| json_eq_as_python(value, other))
+                })
+        }
+        _ => match (python_number(a), python_number(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        },
+    }
+}
+
+/// A JSON number or bool as Python compares it: an int, or a float.
+#[derive(Clone, Copy)]
+enum PythonNumber {
+    Int(i128),
+    Float(f64),
+}
+
+impl PartialEq for PythonNumber {
+    /// As Python compares an int and a float, exactly: `2**53 + 1` does not equal
+    /// `float(2**53 + 1)`, which is `2**53`.
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (PythonNumber::Int(a), PythonNumber::Int(b)) => a == b,
+            (PythonNumber::Float(a), PythonNumber::Float(b)) => a == b,
+            (PythonNumber::Int(int), PythonNumber::Float(float))
+            | (PythonNumber::Float(float), PythonNumber::Int(int)) => {
+                // An integral float within the range of an i128 converts to it exactly.
+                float.fract() == 0.0 && float.abs() < 2f64.powi(127) && float as i128 == int
+            }
+        }
+    }
+}
+
+/// The number of `value` as Python compares it, if it is a number or a bool.
+fn python_number(value: &serde_json::Value) -> Option<PythonNumber> {
+    match value {
+        serde_json::Value::Bool(flag) => Some(PythonNumber::Int(i128::from(*flag))),
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .map(|int| PythonNumber::Int(int.into()))
+            .or_else(|| number.as_u64().map(|int| PythonNumber::Int(int.into())))
+            .or_else(|| number.as_f64().map(PythonNumber::Float)),
+        _ => None,
+    }
 }
 
 /// Helper methods for StructType operations, mirroring `pyspark.sql.types.StructType`.
@@ -1045,9 +1193,28 @@ impl DataType {
     ///
     /// Not a stable API: it exists for the Python client, which keeps the flags as given.
     #[doc(hidden)]
-    pub fn tree_string_with_flags<F>(&self, max_depth: i32, mut flag: F) -> Result<String>
+    pub fn tree_string_with_flags<F>(&self, max_depth: i32, flag: F) -> Result<String>
     where
         F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
+    {
+        self.tree_string_with_names(max_depth, flag, |_| None)
+    }
+
+    /// Like [`DataType::tree_string_with_flags`], but a type that `name` gives a name of is
+    /// written with that name, rather than the core's: the Python client names here the types
+    /// of Python classes that it holds as [`DataType::Unparsed`], whose name is not the core's.
+    ///
+    /// Not a stable API: it exists for the Python client.
+    #[doc(hidden)]
+    pub fn tree_string_with_names<F, N>(
+        &self,
+        max_depth: i32,
+        mut flag: F,
+        mut name: N,
+    ) -> Result<String>
+    where
+        F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
+        N: FnMut(&DataType) -> Option<String>,
     {
         match self {
             DataType::Struct { .. } => {
@@ -1057,7 +1224,10 @@ impl DataType {
                     " |",
                     if max_depth > 0 { max_depth } else { i32::MAX },
                     &mut Vec::new(),
-                    &mut flag,
+                    &mut TreeText {
+                        flag: &mut flag,
+                        name: &mut name,
+                    },
                 );
                 Ok(out)
             }
@@ -1066,6 +1236,14 @@ impl DataType {
                 &[("detail", "treeString() can only be called on StructType")],
             )),
         }
+    }
+
+    /// The name of the type in a tree string, as `name` gives it, or else the core's.
+    fn tree_name_of<F, N>(&self, text: &mut TreeText<'_, F, N>) -> String
+    where
+        N: FnMut(&DataType) -> Option<String>,
+    {
+        (text.name)(self).unwrap_or_else(|| self.tree_type_name())
     }
 
     fn tree_type_name(&self) -> String {
@@ -1081,16 +1259,17 @@ impl DataType {
     }
 
     /// Appends the tree below `self`, whose path from the root is `path`; see
-    /// [`DataType::tree_string_with_flags`].
-    fn append_tree<F>(
+    /// [`DataType::tree_string_with_names`].
+    fn append_tree<F, N>(
         &self,
         out: &mut String,
         prefix: &str,
         remaining: i32,
         path: &mut Vec<TreeStep>,
-        flag: &mut F,
+        text: &mut TreeText<'_, F, N>,
     ) where
         F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
+        N: FnMut(&DataType) -> Option<String>,
     {
         if remaining <= 0 {
             return;
@@ -1102,17 +1281,17 @@ impl DataType {
                     out.push_str(prefix);
                     out.push_str("-- ");
                     push_escaped_name(out, &f.name);
-                    let nullable = flag(&path[..], TreeFlag::Nullable(i), f.nullable);
+                    let nullable = (text.flag)(&path[..], TreeFlag::Nullable(i), f.nullable);
                     writeln!(
                         out,
                         ": {} (nullable = {})",
-                        f.data_type.tree_type_name(),
+                        f.data_type.tree_name_of(text),
                         nullable
                     )
                     .expect("writing to a String cannot fail");
                     path.push(TreeStep::Field(i));
                     f.data_type
-                        .append_tree(out, &child_prefix, remaining - 1, path, flag);
+                        .append_tree(out, &child_prefix, remaining - 1, path, text);
                     path.pop();
                 }
             }
@@ -1121,17 +1300,17 @@ impl DataType {
                 contains_null,
             } => {
                 let child_prefix = format!("{prefix}    |");
-                let contains_null = flag(&path[..], TreeFlag::ContainsNull, *contains_null);
+                let contains_null = (text.flag)(&path[..], TreeFlag::ContainsNull, *contains_null);
                 writeln!(
                     out,
                     "{}-- element: {} (containsNull = {})",
                     prefix,
-                    element_type.tree_type_name(),
+                    element_type.tree_name_of(text),
                     contains_null
                 )
                 .expect("writing to a String cannot fail");
                 path.push(TreeStep::Element);
-                element_type.append_tree(out, &child_prefix, remaining - 1, path, flag);
+                element_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
             }
             DataType::Map {
@@ -1140,23 +1319,23 @@ impl DataType {
                 value_contains_null,
             } => {
                 let child_prefix = format!("{prefix}    |");
-                writeln!(out, "{}-- key: {}", prefix, key_type.tree_type_name())
+                writeln!(out, "{}-- key: {}", prefix, key_type.tree_name_of(text))
                     .expect("writing to a String cannot fail");
                 path.push(TreeStep::Key);
-                key_type.append_tree(out, &child_prefix, remaining - 1, path, flag);
+                key_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
                 let value_contains_null =
-                    flag(&path[..], TreeFlag::ValueContainsNull, *value_contains_null);
+                    (text.flag)(&path[..], TreeFlag::ValueContainsNull, *value_contains_null);
                 writeln!(
                     out,
                     "{}-- value: {} (valueContainsNull = {})",
                     prefix,
-                    value_type.tree_type_name(),
+                    value_type.tree_name_of(text),
                     value_contains_null
                 )
                 .expect("writing to a String cannot fail");
                 path.push(TreeStep::Value);
-                value_type.append_tree(out, &child_prefix, remaining - 1, path, flag);
+                value_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
             }
             _ => {}
@@ -2934,6 +3113,76 @@ mod tests {
     }
 
     #[test]
+    fn eq_as_python_compares_the_metadata_as_python_compares_its_values() {
+        // As PySpark's `StructField.__eq__` of the `__dict__` of the fields, whose metadata holds
+        // the values of `json.loads`: numbers by their values whatever their types, exactly, and
+        // bools as the numbers 0 and 1, also in lists, dicts and the fields of nested types.
+        use serde_json::json;
+        let field = |value: serde_json::Value| StructField {
+            name: "a".to_string(),
+            data_type: DataType::Long,
+            nullable: true,
+            metadata: BTreeMap::from([("x".to_string(), value)]),
+        };
+        let of = |value: serde_json::Value| DataType::Struct {
+            fields: vec![field(value)],
+        };
+        let nested = |value: serde_json::Value| DataType::Array {
+            element_type: Box::new(DataType::Map {
+                key_type: Box::new(DataType::Long),
+                value_type: Box::new(of(value)),
+                value_contains_null: true,
+            }),
+            contains_null: false,
+        };
+        let float_of_2_pow_53 = 9007199254740992.0;
+        for (a, b) in [
+            (json!(1), json!(1.0)),
+            (json!(1), json!(true)),
+            (json!(0.0), json!(false)),
+            (json!(-0.0), json!(0)),
+            (json!(u64::MAX), json!(u64::MAX)),
+            (json!(9007199254740992_i64), json!(float_of_2_pow_53)),
+            (json!([1, {"y": 2}]), json!([1.0, {"y": 2.0}])),
+            (json!(null), json!(null)),
+        ] {
+            assert!(
+                field(a.clone()).eq_as_python(&field(b.clone())),
+                "{a} == {b}"
+            );
+            assert!(of(a.clone()).eq_as_python(&of(b.clone())), "{a} == {b}");
+            assert!(
+                nested(a.clone()).eq_as_python(&nested(b.clone())),
+                "{a} == {b}"
+            );
+        }
+        for (a, b) in [
+            (json!(1), json!(2)),
+            (json!(1), json!(1.5)),
+            (json!(1), json!("1")),
+            (json!(9007199254740993_i64), json!(float_of_2_pow_53)),
+            (json!(u64::MAX), json!(-1)),
+            (json!([1]), json!([1, 1])),
+            (json!({"y": 1}), json!({"z": 1})),
+            (json!(null), json!(0)),
+        ] {
+            assert!(!of(a.clone()).eq_as_python(&of(b.clone())), "{a} != {b}");
+            assert!(
+                !nested(a.clone()).eq_as_python(&nested(b.clone())),
+                "{a} != {b}"
+            );
+        }
+        // The other parts of the types compare as `==` does.
+        assert!(!of(json!(1)).eq_as_python(&DataType::Struct { fields: vec![] }));
+        assert!(!DataType::Long.eq_as_python(&DataType::Integer));
+        let renamed = StructField {
+            name: "b".to_string(),
+            ..field(json!(1))
+        };
+        assert!(!field(json!(1)).eq_as_python(&renamed));
+    }
+
+    #[test]
     fn test_struct_field_simple_string() {
         let field = StructField {
             name: "field_name".to_string(),
@@ -4069,6 +4318,63 @@ mod tests {
             struct_type
                 .tree_string_with_flags(i32::MAX, |_, _, truth| truth.to_string())
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn tree_string_with_names_writes_the_names_it_gives_of_the_types() {
+        // The types that the name gives a name of, at every position of a type in a tree, and
+        // the core's names of the others.
+        let unparsed = |name: &str| DataType::Unparsed {
+            data_type_string: name.to_string(),
+        };
+        let struct_type = DataType::Struct {
+            fields: vec![
+                StructField {
+                    name: "a".to_string(),
+                    data_type: unparsed("atomic"),
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "m".to_string(),
+                    data_type: DataType::Map {
+                        key_type: Box::new(unparsed("data")),
+                        value_type: Box::new(DataType::Array {
+                            element_type: Box::new(unparsed("numeric")),
+                            contains_null: false,
+                        }),
+                        value_contains_null: true,
+                    },
+                    nullable: false,
+                    metadata: BTreeMap::new(),
+                },
+                StructField {
+                    name: "u".to_string(),
+                    data_type: unparsed("int"),
+                    nullable: true,
+                    metadata: BTreeMap::new(),
+                },
+            ],
+        };
+        let text = struct_type
+            .tree_string_with_names(
+                i32::MAX,
+                |_, _, truth| truth.to_string(),
+                |data_type| match data_type {
+                    DataType::Unparsed { data_type_string } if data_type_string != "int" => {
+                        Some(data_type_string.clone())
+                    }
+                    _ => None,
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            text,
+            "root\n |-- a: atomic (nullable = true)\n |-- m: map (nullable = false)\n \
+             |    |-- key: data\n |    |-- value: array (valueContainsNull = true)\n \
+             |    |    |-- element: numeric (containsNull = false)\n \
+             |-- u: unparsed (nullable = true)\n"
         );
     }
 

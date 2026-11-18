@@ -61,10 +61,6 @@ use crate::interrupt::interruptible;
 enum Kind {
     /// `toInt`: an `Integer` literal when the int fits 32 bits, else a `Long`.
     Int,
-    /// `toInt` of a param that PySpark compares but never sends, OneVsRest's `parallelism`: an
-    /// int beyond 64 bits becomes the bound of its sign, rather than an int that PySpark cannot
-    /// send.
-    ClampedInt,
     /// `toFloat`: a `Double` literal.
     Float,
     /// `toString`: a `String` literal.
@@ -75,6 +71,8 @@ enum Kind {
     StrList,
     /// `toListFloat`: an array literal of doubles.
     FloatList,
+    /// `toListInt`: the array literal of `LiteralExpression._from_value` of the list, of the type
+    /// of its first element (see [`int_list`]).
     IntList,
     FloatListList,
     Identity,
@@ -87,7 +85,7 @@ enum Kind {
 impl Kind {
     fn converter(self) -> &'static str {
         match self {
-            Kind::Int | Kind::ClampedInt => "toInt",
+            Kind::Int => "toInt",
             Kind::Float => "toFloat",
             Kind::Str => "toString",
             Kind::Bool => "toBoolean",
@@ -111,15 +109,18 @@ enum Converted {
     /// NullPointerException), and reads a null bootstrap as false.
     Null,
     Int(i64),
-    /// An int beyond a long (or a list of ints with one), which PySpark's `LiteralExpression`
-    /// cannot send, of the `repr` of the converted value, which its getter returns.
+    /// A value that PySpark's `LiteralExpression` cannot send, of the `repr` of the converted
+    /// value, which its getter returns: an int beyond a long, or a list of ints whose literal
+    /// fails (see [`int_list`]). The next fit, transform or save raises the error of its literal
+    /// (see [`params_api::unsendable_error`]).
     Unsendable(String),
     Float(f64),
     Str(String),
     Bool(bool),
     StrList(Vec<String>),
     FloatList(Vec<f64>),
-    IntList(Vec<i64>),
+    /// The array literal of a list of ints (see [`int_list`]).
+    IntList(spark_connect_proto::expression::Literal),
     Vector(MlVector),
     FloatListList(Vec<Vec<f64>>),
     Raw(Py<PyAny>),
@@ -151,20 +152,12 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
             Ok(value) => Converted::Int(value),
             Err(_) => Converted::Unsendable(converted.repr()?.to_string()),
         },
-        Kind::ClampedInt => Converted::Int(match converted.extract::<i64>() {
-            Ok(value) => value,
-            Err(_) if converted.gt(0)? => i64::MAX,
-            Err(_) => i64::MIN,
-        }),
         Kind::Float => Converted::Float(converted.extract()?),
         Kind::Str => Converted::Str(converted.extract()?),
         Kind::Bool => Converted::Bool(converted.extract()?),
         Kind::StrList => Converted::StrList(converted.extract()?),
         Kind::FloatList => Converted::FloatList(converted.extract()?),
-        Kind::IntList => match converted.extract::<Vec<i64>>() {
-            Ok(value) => Converted::IntList(value),
-            Err(_) => Converted::Unsendable(converted.repr()?.to_string()),
-        },
+        Kind::IntList => int_list(&converted)?,
         Kind::FloatListList => Converted::FloatListList(converted.extract()?),
         Kind::Identity => Converted::Raw(converted.unbind()),
         Kind::Vector => {
@@ -219,13 +212,37 @@ fn convert(name: &str, kind: Kind, value: &Bound<'_, PyAny>) -> PyResult<Convert
     })
 }
 
+/// The value of a `toListInt` param of the list `converted` that its converter returned, as
+/// PySpark's serialization of the params sends it (`serialize_param`): the literal of
+/// `LiteralExpression._from_value` of the list, as the values of the ML fetches are built
+/// (`functions::to_value_column`). Its type is the type of its first element (`_infer_type`), an
+/// integer, else a long, and each element is a `LiteralExpression` of that type. A list of which
+/// it fails is unsendable, of the error of the literal at the next fit, transform or save: an
+/// element out of the range of the first's type fails its `assert` (a bare `AssertionError`), a
+/// first element beyond a long is `VALUE_NOT_BETWEEN`, and an empty list
+/// `CANNOT_INFER_ARRAY_ELEMENT_TYPE`.
+fn int_list(converted: &Bound<'_, PyAny>) -> PyResult<Converted> {
+    let literal = crate::functions::to_value_column(converted)
+        .ok()
+        .and_then(|column| match column.expression().node() {
+            spark_connect::expression::ExpressionNode::Literal(literal) => {
+                Some(literal.to_literal_proto())
+            }
+            _ => None,
+        });
+    Ok(match literal {
+        Some(literal) => Converted::IntList(literal),
+        None => Converted::Unsendable(converted.repr()?.to_string()),
+    })
+}
+
 /// A wrapper of a core ML object, whose params Python sets.
 trait Native {
     type Core: Clone;
     fn inner(&self) -> &Self::Core;
-    fn snapshot_core(&self, _py: Python<'_>) -> PyResult<Self::Core> {
-        Ok(self.inner().clone())
-    }
+    /// The params of the core object `core`, of a copy of [`Native::inner`] that a fit, transform
+    /// or evaluate sends (see `snapshot`).
+    fn core_params_mut(core: &mut Self::Core) -> &mut Params;
     fn raw_params_mut(&mut self) -> Option<&mut Vec<(&'static str, Py<PyAny>)>> {
         None
     }
@@ -260,6 +277,9 @@ macro_rules! native {
             type Core = $core;
             fn inner(&self) -> &$core {
                 &self.inner
+            }
+            fn core_params_mut(core: &mut $core) -> &mut Params {
+                core.params_mut()
             }
             fn params_mut(&mut self) -> &mut Params {
                 self.inner.params_mut()
@@ -301,7 +321,7 @@ fn apply<T: Native>(target: &mut T, name: &'static str, value: Converted) {
         Converted::Bool(value) => params.set_param_bool(jvm, value),
         Converted::StrList(values) => params.set_param_string_array(jvm, values),
         Converted::FloatList(values) => params.set_param_double_array(jvm, values),
-        Converted::IntList(values) => params.set_param_int_array(jvm, values),
+        Converted::IntList(literal) => params.set_param_literal(jvm, literal),
         Converted::Vector(value) => params.set_param_vector(jvm, value),
         Converted::FloatListList(value) => params.set_param_double_arrays(jvm, value),
         Converted::Raw(value) => {
@@ -538,24 +558,49 @@ fn check_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 }
 
 /// The core object of `slf`, cloned under a short borrow, so that a setter that another
-/// thread calls while a fit, transform or evaluate waits for the server does not fail. As
-/// PySpark's serialization of the params, it first raises `VALUE_NOT_BETWEEN` of an int
-/// that PySpark cannot send, and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list param without
-/// elements, whose element type PySpark cannot infer.
+/// thread calls while a fit, transform or evaluate waits for the server does not fail, of the
+/// params that PySpark's `serialize_ml_params` sends of it (see [`params_api::sent_params`]): its
+/// own, the values of its params of the converter `identity`, and the params of a Python subclass
+/// that its `_paramMap` holds. As PySpark's serialization of the params, it first raises the
+/// error of a value that PySpark cannot send, of the first of `_paramMap`: `VALUE_NOT_BETWEEN` of
+/// an int beyond a long (see [`params_api::unsendable_error`]), `CANNOT_INFER_ARRAY_ELEMENT_TYPE`
+/// of a list param without elements, whose element type PySpark cannot infer, and the error of a
+/// value of no literal.
 fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
-    let this = slf.try_borrow()?;
-    if !this.unsendable().is_empty() {
-        return Err(crate::functions::value_not_between(slf.py()));
+    core_of(slf, true)
+}
+
+/// The core object of `slf` (see [`snapshot`]), of the params of a Python subclass that its
+/// `_paramMap` holds if `subclass_params`: a helper call that sends some of the params of the
+/// object, rather than its `_paramMap`, sends none of them (PowerIterationClustering's
+/// `assignClusters`).
+fn core_of<T: Native + PyClass>(slf: &Bound<'_, T>, subclass_params: bool) -> PyResult<T::Core> {
+    let py = slf.py();
+    let (mut core, unsendable, raw) = {
+        let this = slf.try_borrow()?;
+        let unsendable: Vec<&'static str> = this
+            .unsendable()
+            .iter()
+            .map(|name| T::jvm_name(name))
+            .collect();
+        (
+            this.inner().clone(),
+            unsendable,
+            params_api::raw_values::<T>(py, &*this),
+        )
+    };
+    // The serialization of the params runs Python code: of the copies, after the borrow.
+    let params = T::core_params_mut(&mut core);
+    let map = if subclass_params {
+        params_api::param_map_items(slf.as_any())?
+    } else {
+        None
+    };
+    let sent = params_api::sent_params(slf.as_any(), params, &unsendable, &raw, map)?;
+    for (name, literal) in sent {
+        *params = std::mem::take(params).set_param_literal(&name, literal);
     }
-    if this.params().has_empty_array() {
-        return Err(crate::column::raise_pyspark(
-            slf.py(),
-            "PySparkTypeError",
-            "CANNOT_INFER_ARRAY_ELEMENT_TYPE",
-            &[],
-        ));
-    }
-    this.snapshot_core(slf.py())
+    Ok(core)
 }
 
 /// The dataset of `method`, a Spark DataFrame. Another object raises the `AttributeError` of
@@ -571,6 +616,28 @@ fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
         "{method}() takes a Spark DataFrame, not '{}'",
         dataset.get_type().name()?
     )))
+}
+
+/// Have the ML fits of `session` log the warning that the server sends with the model of a fit,
+/// of a tree training that the memory control of its ML cache stopped early, as PySpark's
+/// `try_remote_fit` logs it: `_logger.warning(warning_msg)` of `pyspark.ml.util`, to the logger
+/// `pyspark.ml.util` at WARNING, of the server's message as it is, from the line of that call (see
+/// `_native_classes._log_as`). The core calls it of every fit (see
+/// `SparkSession::set_ml_fit_warning_handler`): of an estimator, the stages of a Pipeline, the
+/// classes of a OneVsRest and the fits of a validator. It logs once the result of the fit has
+/// arrived, before the model is made of it (before the fetch of a forest's trees), on the thread
+/// of the fit, as PySpark's logs on the thread of the pool of a OneVsRest or a validator. An
+/// exception of the logging (of a filter that raises) is the exception of the fit, as PySpark's.
+pub(crate) fn log_fit_warnings(session: &spark_connect::SparkSession) {
+    session.set_ml_fit_warning_handler(|warning| {
+        Python::attach(|py| -> PyResult<()> {
+            let pysparks = py.import("pyspark.ml.util")?.getattr("try_remote_fit")?;
+            py.import("pyspark.ml._native_classes")?
+                .call_method1("_log_as", (pysparks, "_logger", warning))?;
+            Ok(())
+        })
+        .map_err(crate::errors::callback_error)
+    });
 }
 
 /// Fit a native estimator on `dataset`, as `try_remote_fit` does, and make its typed model of the core
@@ -1795,6 +1862,10 @@ pub struct PyOneVsRest {
     inner: OneVsRest,
     /// The Python values of the identity params, which the core does not hold: the classifier.
     raw: Vec<(&'static str, Py<PyAny>)>,
+    /// The order of the set params, of which a load makes PySpark's `_paramMap` (the classifier,
+    /// then the params of the metadata in its order); the defaults of a load are of the names of
+    /// the params, as its `_resetUid` makes them.
+    set_order: params_api::SetOrder,
 }
 
 const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
@@ -1804,17 +1875,13 @@ const ONE_VS_REST_PARAMS: &[(&str, Kind)] = &[
     ("predictionCol", Kind::Str),
     ("rawPredictionCol", Kind::Str),
     ("weightCol", Kind::Str),
-    ("parallelism", Kind::ClampedInt),
+    // PySpark compares it in Python and never sends it, so an int of any size is kept as it is
+    // (an int beyond a long under the reserved key of `put_model_param`), as its `_paramMap`
+    // holds it, and saved and loaded as it is.
+    ("parallelism", Kind::Int),
 ];
 
 impl params_api::ParamsHolder for PyOneVsRest {
-    fn param_kind(&self, name: &str) -> Option<Kind> {
-        ONE_VS_REST_PARAMS
-            .iter()
-            .find(|(n, _)| *n == name)
-            .map(|(_, kind)| *kind)
-    }
-
     fn set_value(&self, py: Python<'_>, name: &str) -> PyResult<Option<Py<PyAny>>> {
         if let Some((_, value)) = self.raw.iter().find(|(n, _)| *n == name) {
             return Ok(Some(value.clone_ref(py)));
@@ -1832,6 +1899,7 @@ impl params_api::ParamsHolder for PyOneVsRest {
             }
             value => object::put_model_param(py, params, name, value)?,
         };
+        self.set_order.put(name);
         Ok(())
     }
 
@@ -1839,7 +1907,13 @@ impl params_api::ParamsHolder for PyOneVsRest {
         self.raw.retain(|(n, _)| *n != name);
         let params = std::mem::take(self.inner.params_mut()).clear_param(name);
         *self.inner.params_mut() = params;
+        self.set_order.unset(name);
         Ok(())
+    }
+
+    /// The defaults of the names of the params, and the set params in the order of their setting.
+    fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+        Some((Vec::new(), self.set_order.names()))
     }
 }
 
@@ -1865,6 +1939,7 @@ native_pymethods! {
         let mut this = Self {
             inner: OneVsRest::new(),
             raw: Vec::new(),
+            set_order: params_api::SetOrder::default(),
         };
         check_classifier_kwarg(kwargs)?;
         set_ovr_params(&mut this, args.py(), "__init__", args, kwargs)?;
@@ -1937,7 +2012,7 @@ native_pymethods! {
         slf: Bound<'py, Self>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
-        set_ovr(slf, "parallelism", Kind::ClampedInt, value)
+        set_ovr(slf, "parallelism", Kind::Int, value)
     }
 
     /// The classifier, as `OneVsRest.setClassifier`: a native classification estimator, or None.
@@ -1963,94 +2038,26 @@ native_pymethods! {
             let py = slf.py();
             // PySpark's `_fit` reads the classifier of the param, which raises its KeyError when
             // it is unset.
-            let classifier = slf.call_method0("getClassifier")?.unbind();
-            // The native fit is that of a native classifier on a Spark DataFrame. PySpark's own
-            // `OneVsRest._fit` fits any other over this object's params, as PySpark does: a
-            // classifier that is not a native one (PySpark's own classes, or a Python subclass of
-            // them), whose model is PySpark's `OneVsRestModel` of the classifier's models; a None
-            // classifier, which fails at its first use there; and a dataset that is not a Spark
-            // DataFrame, such as a pandas DataFrame, which fails at the read of its max label.
-            let spark_df = dataset
-                .extract::<PyRef<'_, PyDataFrame>>()
-                .ok()
-                .map(|df| df.dataframe.clone());
-            let df = match spark_df {
-                Some(df) if is_native_classifier(classifier.bind(py)) => df,
-                _ => {
-                    return Ok(py
-                        .import("pyspark.ml.classification")?
-                        .getattr("OneVsRest")?
-                        .getattr("_fit")?
-                        .call1((slf, dataset))?
-                        .unbind());
-                }
-            };
-            let defaults = params_api::fit_defaults(slf)?;
-            let mut core = slf.try_borrow()?.inner.clone();
-            core.check_required_params().to_pyerr()?;
-            let session = df.spark_session();
-            let max = interruptible(py, &session, || core.max_label(&df).map_err(Box::new))?;
-            // `numClasses = int(max) + 1`, by Python's own `int` and `min` below, so that a null, NaN
-            // or infinite max, and a null parallelism, raise their errors of this Python.
-            let builtins = py.import("builtins")?;
-            let num_classes = builtins.getattr("int")?.call1((max,))?.add(1)?;
-            // PySpark passes the weight to the classifiers that are a `HasWeightCol`, and warns of
-            // the others by the classifier's `str` (its uid), as `"...{}...".format(classifier)`.
-            let supports_weight = native_classifier(classifier.bind(py), false)?.supports_weight();
-            if !supports_weight && core.weight_col().is_some_and(|s| !s.is_empty()) {
-                let text = format!(
-                    "weightCol is ignored, as it is not supported by {} now.",
-                    classifier.bind(py).str()?
-                );
-                py.import("warnings")?.call_method1("warn", (text,))?;
+            let classifier = slf.call_method0("getClassifier")?;
+            // The native fit is that of a classifier of exactly a native class on a Spark
+            // DataFrame. PySpark's own `OneVsRest._fit` fits any other over this object's params,
+            // as PySpark does: a classifier that is not a native one (PySpark's own classes), or
+            // that is of a Python subclass of a native class, whose `fit` and `_fit` the fit of
+            // each class runs (`classifier.fit(trainingDataset, paramMap)`), and whose model is
+            // PySpark's `OneVsRestModel` of the classifier's models; a None classifier, which
+            // fails at its first use there; and a dataset that is not a Spark DataFrame, such as a
+            // pandas DataFrame, which fails at the read of its max label.
+            let native = dataset.extract::<PyRef<'_, PyDataFrame>>().is_ok()
+                && is_native_classifier(&classifier);
+            if !native {
+                return Ok(py
+                    .import("pyspark.ml.classification")?
+                    .getattr("OneVsRest")?
+                    .getattr("_fit")?
+                    .call1((slf, dataset))?
+                    .unbind());
             }
-            // `ThreadPool(processes=min(parallelism, numClasses))`, which raises this ValueError for
-            // fewer than one process.
-            let threads = builtins
-                .getattr("min")?
-                .call1((core.parallelism_i64(), &num_classes))?;
-            // At most `parallelism`, a 64-bit int, so an int that does not fit 64 bits is below it.
-            let threads = threads.extract::<i64>().unwrap_or(i64::MIN);
-            if threads < 1 {
-                return Err(PyValueError::new_err(
-                    "Number of processes must be at least 1",
-                ));
-            }
-            // PySpark would fit that many classifiers; refuse a label that no class index fits.
-            let num_classes = match num_classes.extract::<i32>() {
-                Ok(classes) => classes as usize,
-                Err(_) => {
-                    return Err(PyValueError::new_err(
-                        "OneVsRest requires a finite nonnegative maximum class label",
-                    ))
-                }
-            };
-            // The classifier's params are serialized by its fits, which run in that pool.
-            core = core.set_classifier(native_classifier(classifier.bind(py), true)?);
-            core.ensure_operator();
-            // The columns of the fit, which the submodels of the model are made of.
-            let fit = classification_api::OneVsRestFit {
-                train: df.clone(),
-                label: core.label_col().to_string(),
-                features: core.features_col().to_string(),
-                weight: core
-                    .weight_col()
-                    .filter(|name| !name.is_empty() && supports_weight)
-                    .map(str::to_string),
-            };
-            let model = interruptible(py, &session, || {
-                core.fit_classes(&df, num_classes, threads as usize)
-                    .map_err(Box::new)
-            })?;
-            // The model has the defaults of the estimator, as `_copyValues` gives it.
-            let mut fitted = classification_api::PyOneVsRestModel::fitted(
-                py,
-                Box::new(model),
-                fit,
-                classifier,
-            )?;
-            params_api::copy_defaults(py, defaults, &mut fitted)?;
-            Ok(object::new_py(py, fitted)?.into_any())
+            fit_one_vs_rest(slf, dataset, &classifier)
         })
     }
 
@@ -2124,6 +2131,149 @@ native_pymethods! {
     }
 }
 
+/// The fit of the OneVsRest `slf` of the classifier `classifier`, of a native class, on the Spark
+/// DataFrame `dataset`, as PySpark's `OneVsRest._fit`: its DataFrame operations are PySpark's own,
+/// of this client's DataFrame, in its order and of its Python values and errors, and the fits of
+/// the classes are native, of the classifier's params.
+fn fit_one_vs_rest(
+    slf: &Bound<'_, PyOneVsRest>,
+    dataset: &Bound<'_, PyAny>,
+    classifier: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let py = slf.py();
+    let builtins = py.import("builtins")?;
+    let defaults = params_api::fit_defaults(slf)?;
+    let label_col = slf.call_method0("getLabelCol")?;
+    let features_col = slf.call_method0("getFeaturesCol")?;
+    // `numClasses = int(dataset.agg({labelCol: "max"}).head()["max(" + labelCol + ")"]) + 1`, of
+    // the max of the label column as it is (of a string column, its greatest string) and of
+    // Python's `int`, which raises its errors of a null, a NaN, an infinity or a string that is no
+    // integer.
+    let measures = PyDict::new(py);
+    measures.set_item(&label_col, "max")?;
+    let head = dataset
+        .call_method1("agg", (measures,))?
+        .call_method0("head")?;
+    let key = pyo3::types::PyString::new(py, "max(")
+        .add(&label_col)?
+        .add(")")?;
+    let num_classes = builtins
+        .getattr("int")?
+        .call1((head.get_item(key)?,))?
+        .add(1)?;
+    // The weight column of a classifier that is a `HasWeightCol`; PySpark warns of the others, by
+    // the classifier's `str` (its uid), as `"...{}...".format(classifier)`.
+    let mut weight = None;
+    let weight_param = slf.getattr("weightCol")?;
+    if slf
+        .call_method1("isDefined", (weight_param,))?
+        .is_truthy()?
+        && slf.call_method0("getWeightCol")?.is_truthy()?
+    {
+        let has_weight = py
+            .import("pyspark.ml.param.shared")?
+            .getattr("HasWeightCol")?;
+        if classifier.is_instance(&has_weight)? {
+            weight = Some(slf.call_method0("getWeightCol")?);
+        } else {
+            let text = format!(
+                "weightCol is ignored, as it is not supported by {} now.",
+                classifier.str()?
+            );
+            // PySpark's UserWarning, attributed as PySpark's is: to the line of its
+            // `warnings.warn` in `OneVsRest._fit` and to `pyspark.ml.classification` (see
+            // `_native_classes._warn_as`).
+            let pysparks = py
+                .import("pyspark.ml.classification")?
+                .getattr("OneVsRest")?
+                .getattr("_fit")?;
+            py.import("pyspark.ml._native_classes")?.call_method1(
+                "_warn_as",
+                (
+                    pysparks,
+                    text,
+                    py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                ),
+            )?;
+        }
+    }
+    // `multiclassLabeled = dataset.select(labelCol, featuresCol[, weightCol])`.
+    let mut columns = vec![label_col, features_col];
+    columns.extend(weight.clone());
+    let multiclass = dataset.call_method1("select", PyTuple::new(py, columns)?)?;
+    // `handlePersistence = dataset.storageLevel == StorageLevel(False, False, False, False)`.
+    let storage_level = py.import("pyspark.storagelevel")?.getattr("StorageLevel")?;
+    let not_persisted = dataset
+        .getattr("storageLevel")?
+        .eq(storage_level.call1((false, false, false, false))?)?;
+    // `with _cache_spark_dataset(multiclassLabeled, storageLevel=StorageLevel.MEMORY_AND_DISK,
+    // enable=handlePersistence) as multiclassLabeled:`, PySpark's own, which persists it, or saves
+    // it under `SPARKML_TEMP_DFS_PATH` and reads it back, and releases it after the fits.
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("storageLevel", storage_level.getattr("MEMORY_AND_DISK")?)?;
+    kwargs.set_item("enable", not_persisted)?;
+    let cache = py
+        .import("pyspark.ml.util")?
+        .getattr("_cache_spark_dataset")?
+        .call((multiclass,), Some(&kwargs))?;
+    let cached = cache.call_method0("__enter__")?;
+    let fitted = (|| {
+        // The list of the tasks of the classes, `[trainSingleClass] * numClasses`, which has at
+        // most an index-sized number of items; this client takes at most `i32::MAX` classes,
+        // beyond which PySpark's list runs out of memory.
+        if num_classes.gt(i64::MAX)? {
+            return Err(pyo3::exceptions::PyOverflowError::new_err(
+                "cannot fit 'int' into an index-sized integer",
+            ));
+        }
+        if num_classes.gt(i32::MAX)? {
+            return Err(pyo3::exceptions::PyMemoryError::new_err(()));
+        }
+        // `ThreadPool(processes=min(self.getParallelism(), numClasses))`, of Python's `min` (of
+        // an int of any size, and the TypeError of a None), which needs one process at least.
+        let threads = builtins
+            .getattr("min")?
+            .call1((slf.call_method0("getParallelism")?, &num_classes))?;
+        if threads.lt(1)? {
+            return Err(PyValueError::new_err(
+                "Number of processes must be at least 1",
+            ));
+        }
+        let threads: usize = threads.extract()?;
+        let num_classes: usize = num_classes.extract()?;
+        // The classifier's params are serialized by its fits, which run in that pool.
+        let mut core = slf.try_borrow()?.inner.clone();
+        core = core.set_classifier(native_classifier(classifier, true)?);
+        core.ensure_operator();
+        let training = cached
+            .extract::<PyRef<'_, PyDataFrame>>()?
+            .dataframe
+            .clone();
+        let weight = weight.map(|name| name.extract::<String>()).transpose()?;
+        let session = training.spark_session();
+        let (model, datasets) = interruptible(py, &session, || {
+            core.fit_classes(&training, num_classes, threads, weight.as_deref())
+                .map_err(Box::new)
+        })?;
+        // The typed models of the classes, of their binary training sets, which the fits of
+        // PySpark's classifier make in the pool, before the cache is released.
+        let fit = classification_api::OneVsRestFit {
+            train: training,
+            datasets,
+        };
+        classification_api::PyOneVsRestModel::fitted(
+            py,
+            Box::new(model),
+            fit,
+            classifier.clone().unbind(),
+        )
+    })();
+    let mut fitted = tuning_api::exit_context(&cache, fitted)?;
+    // The model has the defaults of the estimator, as `_copyValues` gives it.
+    params_api::copy_defaults(py, defaults, &mut fitted)?;
+    Ok(object::new_py(py, fitted)?.into_any())
+}
+
 /// Set the param `name` of a OneVsRest of the converter kind `kind`, and return `slf`, as `_set`.
 fn set_ovr<'py>(
     slf: Bound<'py, PyOneVsRest>,
@@ -2176,6 +2326,7 @@ impl params_api::NativeInstance for PyOneVsRest {
             Self {
                 inner: self.inner.clone(),
                 raw,
+                set_order: self.set_order.clone(),
             },
         )
     }
@@ -2200,17 +2351,24 @@ fn check_classifier_kwarg(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
     Ok(())
 }
 
-/// Whether `value` is of one of the native classification estimators that
-/// [`native_classifier`] takes, or of a subclass of one.
+/// Whether `value` is of exactly one of the native classification estimators that
+/// [`native_classifier`] takes: of its public class (or of the native class itself), and not of a
+/// Python subclass of it, whose `fit` and `_fit` PySpark's `OneVsRest._fit` runs for each class.
 fn is_native_classifier(value: &Bound<'_, PyAny>) -> bool {
-    value.is_instance_of::<PyLogisticRegression>()
-        || value.is_instance_of::<PyLinearSVC>()
-        || value.is_instance_of::<PyDecisionTreeClassifier>()
-        || value.is_instance_of::<PyRandomForestClassifier>()
-        || value.is_instance_of::<PyGBTClassifier>()
-        || value.is_instance_of::<PyNaiveBayes>()
-        || value.is_instance_of::<PyFMClassifier>()
-        || value.is_instance_of::<PyMultilayerPerceptronClassifier>()
+    fn exactly<T: pyo3::PyTypeInfo>(value: &Bound<'_, PyAny>) -> bool {
+        let py = value.py();
+        let class = value.get_type();
+        class.is(T::type_object(py))
+            || object::public_class::<T>(py).is_some_and(|public| class.is(&public))
+    }
+    exactly::<PyLogisticRegression>(value)
+        || exactly::<PyLinearSVC>(value)
+        || exactly::<PyDecisionTreeClassifier>(value)
+        || exactly::<PyRandomForestClassifier>(value)
+        || exactly::<PyGBTClassifier>(value)
+        || exactly::<PyNaiveBayes>(value)
+        || exactly::<PyFMClassifier>(value)
+        || exactly::<PyMultilayerPerceptronClassifier>(value)
 }
 
 // Snapshot at fit time, retaining PySpark's reference semantics for a classifier
@@ -6295,7 +6453,7 @@ native_pymethods! {
     fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         use spark_connect::ml::{attribute_relation, FetchArg, MlTarget};
         let py = slf.py();
-        let algorithm = snapshot(slf)?;
+        let algorithm = core_of(slf, false)?;
         let session = crate::session::active_session(py)
             .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err(()))?
             .borrow(py)

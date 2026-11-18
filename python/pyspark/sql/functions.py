@@ -604,14 +604,10 @@ def map_zip_with(col1, col2, f):
     return _invoke_higher_order_function("map_zip_with", [col1, col2], [f])
 
 
-# ``random`` is an alias for ``rand`` (matches pyspark.sql.functions).
+# ``random`` and ``column`` are the functions ``rand`` and ``col``, as PySpark binds them, so
+# their ``__name__`` is that of the function and a pickle names it.
 random = rand  # noqa: F821 - from functions_generated
-
-
-# ``column`` is an alias of ``col`` (matches pyspark.sql.functions).
-def column(col):
-    """Returns a Column based on the given column name (alias of ``col``)."""
-    return _pyfunc_col(col)
+column = col
 
 
 def call_udf(udfName, *cols):

@@ -647,6 +647,47 @@ def test_year_month_intervals_are_not_collected_as_pyspark(session):
         datetime.timedelta(days=1, seconds=7384))
 
 
+def test_local_iterator_raises_the_error_of_an_execution_before_its_year_month_error(session):
+    # As PySpark's toLocalIterator, which converts each record batch as it arrives: an execution
+    # that fails before its first batch raises its own error, not the NOT_IMPLEMENTED of its
+    # year-month interval, which an empty result raises, of the batch of no rows that the
+    # server sends for it.
+    from pyspark.errors import PySparkNotImplementedError
+
+    query = session.sql("SELECT INTERVAL '1' YEAR AS ym, raise_error('boom') AS e")
+    with pytest.raises(Exception) as error:
+        list(query.toLocalIterator())
+    assert error.value.getCondition() == "USER_RAISED_EXCEPTION"
+    for empty in ("SELECT INTERVAL '1' YEAR AS ym LIMIT 0",
+                  "SELECT INTERVAL '1' YEAR AS ym WHERE false"):
+        with pytest.raises(PySparkNotImplementedError):
+            list(session.sql(empty).toLocalIterator())
+
+
+def test_local_iterator_gives_calendar_intervals_as_pyarrow_month_day_nano_as_pyspark(session):
+    # As PySpark's toLocalIterator, whose conversion of the rows has no converter of a calendar
+    # interval, so its values are pyarrow's MonthDayNano, also in arrays, maps and structs; its
+    # collect and toArrow raise, and toPandas gives a DateOffset.
+    import pandas as pd
+    import pyarrow as pa
+    from pyspark.errors import PySparkTypeError
+
+    df = session.sql("SELECT make_interval(1, 2, 3, 4, 5, 6, 7.5) AS c, "
+                     "array(make_interval(0, 1)) AS a, named_struct('x', make_interval(0, 0, 0, 1)) "
+                     "AS s, map('k', make_interval(-1)) AS m")
+    nanos = pa.MonthDayNano
+    [row] = df.toLocalIterator()
+    assert type(row.c) is nanos and row.c == nanos([14, 25, 18367500000000])
+    assert type(row.a[0]) is nanos and row.a == [nanos([1, 0, 0])]
+    assert type(row.s.x) is nanos and row.s.x == nanos([0, 1, 0])
+    assert type(row.m["k"]) is nanos and row.m == {"k": nanos([-12, 0, 0])}
+    for convert in (df.collect, df.toArrow):
+        with pytest.raises(PySparkTypeError) as e:
+            convert()
+        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+    assert df.toPandas()["c"][0] == pd.DateOffset(months=14, days=25, nanoseconds=18367500000000)
+
+
 def test_repartition_by_range_without_a_count_lets_the_server_pick_it(session):
     # As PySpark's: the str/Column forms send no partition count, so the server picks it
     # and returns the rows.
@@ -892,6 +933,37 @@ def test_map_functions_take_a_ddl_schema(session):
         grouped.cogroup(grouped).applyInArrow(lambda left, right: left, schema),
     ):
         assert sorted(tuple(r) for r in result.collect()) == [(1, 1.0), (1, 2.0), (2, 3.0)]
+
+
+def test_cogroup_functions_take_the_whole_cogroups_as_pyspark(session):
+    # As PySpark's, whose function of a cogroup binds no columns: it takes the cogroups of all the
+    # columns of each side, whatever their names.
+    import pandas as pd
+    import pyarrow as pa
+
+    left = session.range(3).withColumn("a", F.lit(1))
+    right = session.range(3).withColumn("b", F.lit(2))
+    cogrouped = left.groupBy("id").cogroup(right.groupBy("id"))
+
+    def pandas_names(first, second):
+        names = ",".join(first.columns) + "|" + ",".join(second.columns)
+        return pd.DataFrame({"id": first["id"], "names": [names] * len(first)})
+
+    def arrow_names(first, second):
+        names = ",".join(first.column_names) + "|" + ",".join(second.column_names)
+        return pa.table({"id": first.column("id"), "names": [names] * first.num_rows})
+
+    for result in (cogrouped.applyInPandas(pandas_names, "id long, names string"),
+                   cogrouped.applyInArrow(arrow_names, "id long, names string")):
+        assert sorted(tuple(r) for r in result.collect()) == [(i, "id,a|id,b") for i in range(3)]
+
+
+def test_python_functions_registered_of_a_ddl_return_type_run_from_sql_as_pyspark(session):
+    # As PySpark's register of a function with a DDL string, whose wrapper and command parse it.
+    registered = session.udf.register("ddl_return_type_plus_one", lambda x: x + 1, "long")
+    assert registered.returnType == LongType()
+    rows = session.sql("SELECT ddl_return_type_plus_one(id) AS r FROM range(2)").collect()
+    assert rows == [Row(r=1), Row(r=2)]
 
 
 def test_inheritable_threads_run_with_the_tags_of_their_parents_as_pyspark(session):
@@ -1687,6 +1759,122 @@ def test_catalog_and_stream_start_errors_carry_their_operation_id(session):
         assert isinstance(error.value.operation_id, str) and error.value.operation_id
 
 
+def test_udf_functions_are_pickled_when_their_plans_are_built_as_pyspark(session):
+    # As PySpark's PythonUDF.to_plan and PythonUDTF.to_plan: the function of a UDF, a pandas UDF,
+    # a UDTF or a map or group-map function is pickled each time a request builds a plan that
+    # holds it. So a value that the function reads, changed after the function was applied and
+    # before the action, is the value that the action runs with, and so for each later action;
+    # and a function that does not pickle raises from the first request, not from the call.
+    import pickle
+    import threading
+
+    import pandas as pd
+    from pyspark.sql.functions import pandas_udf, udf, udtf
+
+    state = {"factor": 1}
+    df = session.range(1, 3)
+
+    @pandas_udf("long")
+    def scaled(s: pd.Series) -> pd.Series:
+        return s * state["factor"]
+
+    @udtf(returnType="v: long")
+    class Scaled:
+        def eval(self, x):
+            yield (x * state["factor"],)
+
+    grouped = df.groupBy("id")
+    frames = [
+        df.select(udf(lambda x: x * state["factor"], "long")("id")),
+        df.select(scaled("id")),
+        df.lateralJoin(Scaled(F.col("id").outer())).select("v"),
+        df.mapInPandas(lambda it: (p * state["factor"] for p in it), "id long"),
+        grouped.applyInPandas(lambda p: p * state["factor"], "id long"),
+        grouped.cogroup(grouped).applyInPandas(lambda left, _: left * state["factor"], "id long"),
+    ]
+    for factor in (10, 100):
+        state["factor"] = factor
+        for frame in frames:
+            assert sorted(row[0] for row in frame.collect()) == [factor, 2 * factor]
+
+    lock = threading.Lock()
+    unpicklable = df.select(udf(lambda x: (lock, x)[1], "long")("id"))
+    with pytest.raises(pickle.PicklingError, match="^Could not serialize object: TypeError"):
+        unpicklable.schema
+
+
+def test_deep_copies_copy_the_functions_of_udfs_as_pyspark(session):
+    # As PySpark's copy.deepcopy of a Column, a DataFrame, grouped data and a table argument,
+    # which deep-copies the function of each UDF with the memo of the call: a callable object, a
+    # bound method and a partial are copies, which a change of the original does not reach; a
+    # closure is the function itself, which runs with the value that it reads at the action.
+    import copy
+    import functools
+
+    from pyspark.sql.functions import udf, udtf
+
+    base = session.range(1, 2)
+
+    # Of the test, so that cloudpickle pickles it by value, for the Python worker of the server.
+    class Scale:
+        def __init__(self, factor):
+            self.factor = factor
+
+        def __call__(self, x):
+            return x * self.factor
+
+        def scaled(self, x):
+            return x * self.factor
+
+    @udtf(returnType="v long")
+    class Echo:
+        def eval(self, row):
+            yield (row["v"],)
+
+    def values(frame):
+        return [row[-1] for row in frame.collect()]
+
+    def callables():
+        scale, method, box, closure_box = Scale(10), Scale(10), [10], [10]
+
+        def closure(x):
+            return x * closure_box[0]
+
+        def change():
+            scale.factor = method.factor = box[0] = closure_box[0] = 100
+
+        return [
+            (scale, 10),
+            (method.scaled, 10),
+            (functools.partial(lambda x, box: x * box[0], box=box), 10),
+            (closure, 100),
+        ], change
+
+    holders = [
+        (lambda u: u("id"), lambda held: base.select(held)),
+        (lambda u: base.select(u("id").alias("v")), lambda held: held),
+        (lambda u: base.groupBy(u("id").alias("v")), lambda held: held.count().select("v")),
+        (lambda u: base.select(u("id").alias("v")).asTable(), Echo),
+    ]
+    for index in range(4):
+        for hold, plan_of in holders:
+            made, change = callables()
+            function, copied = made[index]
+            original = hold(udf(function, "long"))
+            deep = copy.deepcopy(original)
+            change()
+            assert values(plan_of(original)) == [100]
+            assert values(plan_of(deep)) == [copied]
+
+    # The copies of one deep copy share the copy of the callable object, as they share it.
+    scale = Scale(10)
+    u = udf(scale, "long")
+    column, frame, copied_scale = copy.deepcopy([u("id"), base.select(u("id")), scale])
+    copied_scale.factor = 7
+    scale.factor = 100
+    assert values(base.select(column)) == [7] and values(frame) == [7]
+
+
 def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     # As PySpark's, the functions are of pyspark.sql.functions.builtin: a UDF that captures one
     # pickles it by its name, of which the Python worker of the server imports PySpark's.
@@ -1839,6 +2027,38 @@ def test_create_dataframe_rows_column_names(session, data, schema, columns, rows
     assert df.columns == columns
     assert [tuple(r) for r in df.collect()] == rows
     assert df.isLocal() is (schema is None)
+
+
+def test_create_dataframe_of_a_struct_of_another_width(session):
+    # A pandas DataFrame of another width than a struct schema raises AXIS_LENGTH_MISMATCH,
+    # where PySpark's conversion drops the columns past the fields, fails the rename of fewer and
+    # takes the index of a frame of no columns as its columns (dev/parity/known-differences.md).
+    # As official PySpark 4.3.0's, a frame of no columns under a struct of no fields is the table
+    # of its index, which the struct then checks, and a pyarrow Table is cast to the struct,
+    # which checks its names.
+    pd = pytest.importorskip("pandas")
+    long_a = StructType([StructField("a", LongType())])
+    for frame, schema, expected, actual in [
+        (pd.DataFrame({"a": [1], "b": [2]}), long_a, "1", "2"),
+        (pd.DataFrame({"a": [1]}), "x long, y long", "2", "1"),
+        (pd.DataFrame({"a": [1, 2]}), StructType([]), "0", "1"),
+        (pd.DataFrame(index=[5, 6]), long_a, "1", "0"),
+        (pd.DataFrame(index=[0, 1]), StructType([]), "0", "1"),
+    ]:
+        with pytest.raises(PySparkValueError) as error:
+            session.createDataFrame(frame, schema)
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert error.value.getMessageParameters() == {
+            "expected_length": expected, "actual_length": actual}
+    assert session.createDataFrame(
+        pd.DataFrame(index=range(2)), StructType([])).collect() == [Row(), Row()]
+    for schema, names in ((long_a, "['a']"), ("x long, y long, z long", "['x', 'y', 'z']")):
+        with pytest.raises(ValueError) as error:
+            session.createDataFrame(pa.table({"a": [1], "b": [2]}), schema)
+        assert type(error.value) is ValueError
+        assert str(error.value) == (
+            f"Target schema's field names are not matching the table's field names: ['a', 'b'], "
+            f"{names}")
 
 
 @pytest.mark.parametrize(
@@ -2689,7 +2909,8 @@ def test_progress_handlers_receive_the_progress_of_executions_as_pyspark(session
 
 
 
-def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
+@pytest.mark.parametrize("ddl", [False, True])
+def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path, ddl):
     import pandas as pd
 
     def count(key, frames, state):
@@ -2699,6 +2920,9 @@ def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
 
     output = StructType([StructField("k", LongType()), StructField("c", LongType())])
     state = StructType([StructField("c", LongType())])
+    if ddl:
+        # As PySpark's, which sends the schemas as they are given, for the server to parse.
+        output, state = "k long, c long", "c long"
     df = session.createDataFrame([(1,), (1,), (2,)], "k long")
     # The server takes the function in a streaming query only, as with PySpark.
     with pytest.raises(Exception, match="applyInPandasWithState is unsupported in batch query"):
@@ -2712,14 +2936,14 @@ def test_apply_in_pandas_with_state_runs_as_pyspark(session, tmp_path):
         query = (
             session.readStream.schema("k long").parquet(source).groupBy("k")
             .applyInPandasWithState(count, output, state, "update", "NoTimeout")
-            .writeStream.format("memory").queryName("apply_in_pandas_with_state")
+            .writeStream.format("memory").queryName(f"apply_in_pandas_with_state_{ddl}")
             .outputMode("update").option("checkpointLocation", str(tmp_path / "checkpoint"))
             .trigger(availableNow=True).start()
         )
         try:
             query.awaitTermination(120)
             assert query.exception() is None
-            rows = session.table("apply_in_pandas_with_state").collect()
+            rows = session.table(f"apply_in_pandas_with_state_{ddl}").collect()
             assert sorted(tuple(r) for r in rows) == [(1, 2), (2, 1)]
         finally:
             query.stop()
@@ -3421,7 +3645,8 @@ def test_column_alias_names_every_column_and_keeps_its_metadata(session):
 def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
     # As PySpark Connect's: the Arrow types of the Spark types, of UTC timestamps and of strings
     # even of large var types, and the errors of the types that PySpark does not convert to
-    # Arrow and of duplicate names of nested fields.
+    # Arrow and of duplicate names of nested fields, which the Arrow schema of the analyzed schema
+    # raises before the query runs, so also of a query that fails.
     import pyarrow as pa
     from pyspark.errors import PySparkTypeError, UnsupportedOperationException
 
@@ -3437,15 +3662,16 @@ def test_to_arrow_casts_to_the_arrow_schema_of_the_schema_as_pyspark(session):
             session.conf.set(key, value)
     assert table.schema.field("s").type == pa.string()
     assert table.schema.field("t").type == pa.timestamp("us", tz="UTC")
-    for expr, data_type in [("INTERVAL '1-2' YEAR TO MONTH", "YearMonthIntervalType(0, 1)"),
-                            ("make_interval(1)", "CalendarIntervalType()")]:
-        with pytest.raises(PySparkTypeError) as e:
-            session.sql(f"SELECT {expr} AS v").toArrow()
-        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
-        assert e.value.getMessageParameters() == {"data_type": data_type}
-    with pytest.raises(UnsupportedOperationException) as e:
-        session.sql("SELECT named_struct('a', 1, 'a', 2) AS v").toArrow()
-    assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
+    for failing in ("", ", raise_error('boom') AS e"):
+        for expr, data_type in [("INTERVAL '1-2' YEAR TO MONTH", "YearMonthIntervalType(0, 1)"),
+                                ("make_interval(1)", "CalendarIntervalType()")]:
+            with pytest.raises(PySparkTypeError) as e:
+                session.sql(f"SELECT {expr} AS v{failing}").toArrow()
+            assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+            assert e.value.getMessageParameters() == {"data_type": data_type}
+        with pytest.raises(UnsupportedOperationException) as e:
+            session.sql(f"SELECT named_struct('a', 1, 'a', 2) AS v{failing}").toArrow()
+        assert e.value.getCondition() == "DUPLICATED_FIELD_NAME_IN_ARROW_STRUCT"
 
 def test_a_derived_dataframe_of_a_local_checkpoint_outlives_the_checkpoint_as_pyspark(session):
     # The checkpoint is released when its last DataFrame goes: a DataFrame derived from it keeps
@@ -3525,6 +3751,20 @@ def test_window_order_by_a_column_sorts_nulls_first_as_pyspark(session):
     ):
         rows = df.select("o", F.row_number().over(window).alias("rn")).orderBy("rn").collect()
         assert [(r.o, r.rn) for r in rows] == expected
+
+
+def test_chained_window_specs_partition_and_order_by_their_last_columns_as_pyspark(session):
+    # As PySpark's WindowSpec.partitionBy and orderBy, of the columns of the last call only: a
+    # count over the rows of the last partitioning, and a row number of the last ordering.
+    from pyspark.sql import Window
+
+    df = session.createDataFrame([(1, 10), (2, 10), (3, 20)], ["a", "b"])
+    partitioned = Window.partitionBy("a").partitionBy("b")
+    rows = df.select("a", F.count("*").over(partitioned).alias("n")).orderBy("a").collect()
+    assert [r.n for r in rows] == [2, 2, 1]
+    ordered = Window.orderBy("a").orderBy(F.col("b").desc(), "a")
+    rows = df.select("a", F.row_number().over(ordered).alias("rn")).orderBy("a").collect()
+    assert [r.rn for r in rows] == [2, 3, 1]
 
 
 def test_create_dataframe_of_a_numpy_array_as_pyspark(session):

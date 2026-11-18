@@ -20,6 +20,7 @@ use spark_connect::row::{StructValue, Value};
 use spark_connect::types::{DataType, GeographyType, GeometryType, StructField};
 
 use crate::column::raise_pyspark;
+use crate::interrupt::ConversionBudget;
 use crate::values::{geography_class, geometry_class, variant_val_class};
 
 static DECIMAL: PyOnceLock<Py<PyType>> = PyOnceLock::new();
@@ -267,18 +268,21 @@ enum Source {
 
 /// The options that inference passes down, as PySpark does. `infer_dict_as_struct` and
 /// `infer_array_from_first_element` always come from the configurations, and the other two
-/// shift where PySpark passes them on.
+/// shift where PySpark passes them on. The budget is that of the conversion, of a step for each
+/// value that inference types.
 #[derive(Clone, Copy)]
 pub(crate) struct Options<'c> {
     confs: &'c InferenceConfs,
+    budget: &'c ConversionBudget,
     map_from_first_pair: Source,
     prefer_timestamp_ntz: Source,
 }
 
 impl<'c> Options<'c> {
-    pub(crate) fn new(confs: &'c InferenceConfs) -> Self {
+    pub(crate) fn new(confs: &'c InferenceConfs, budget: &'c ConversionBudget) -> Self {
         Options {
             confs,
+            budget,
             map_from_first_pair: Source::MapFromFirstPair,
             prefer_timestamp_ntz: Source::PreferTimestampNtz,
         }
@@ -390,6 +394,7 @@ impl Drop for Nesting {
 pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<DataType> {
     let _nesting = Nesting::enter()?;
     let py = obj.py();
+    o.budget.step(py)?;
     if obj.is_none() {
         return Ok(DataType::Null);
     }
@@ -1238,19 +1243,20 @@ fn arrow_list(
     element_type: &DataType,
     contains_null: bool,
     late: &mut Late,
+    budget: &ConversionBudget,
 ) -> PyResult<Value> {
     let py = obj.py();
     let mut items = Vec::new();
     // A list and a tuple, the values of most rows, are read first: neither is a NumPy array.
     if let Ok(list) = obj.cast::<PyList>() {
         for item in list.iter() {
-            items.push(convert(&item, element_type, contains_null, late)?);
+            items.push(convert(&item, element_type, contains_null, late, budget)?);
         }
         return Ok(Value::List(items));
     }
     if let Ok(tuple) = obj.cast::<PyTuple>() {
         for item in tuple.iter() {
-            items.push(convert(&item, element_type, contains_null, late)?);
+            items.push(convert(&item, element_type, contains_null, late, budget)?);
         }
         return Ok(Value::List(items));
     }
@@ -1284,13 +1290,13 @@ fn arrow_list(
                 Bound::from_owned_ptr_or_err(py, pyo3::ffi::PySequence_GetItem(obj.as_ptr(), index))
             };
             match item {
-                Ok(item) => items.push(convert(&item, element_type, contains_null, late)?),
+                Ok(item) => items.push(convert(&item, element_type, contains_null, late, budget)?),
                 Err(err) => return Ok(late.defer(|| Err(err))),
             }
         }
     } else if obj.is_instance_of::<PySet>() || obj.is_instance_of::<PyDictValues>() {
         for item in obj.try_iter()? {
-            items.push(convert(&item?, element_type, contains_null, late)?);
+            items.push(convert(&item?, element_type, contains_null, late, budget)?);
         }
     } else {
         return Ok(late.defer(|| {
@@ -1356,14 +1362,17 @@ fn arrow_type_text(dt: &DataType) -> Option<String> {
     })
 }
 
-/// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it.
+/// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it. Each
+/// value, also of an array, a map or a struct, is a step of `budget`.
 pub(crate) fn convert(
     obj: &Bound<'_, PyAny>,
     dt: &DataType,
     nullable: bool,
     late: &mut Late,
+    budget: &ConversionBudget,
 ) -> PyResult<Value> {
     let py = obj.py();
+    budget.step(py)?;
     if obj.is_none() {
         // A null type takes None either way.
         if !nullable && !matches!(dt, DataType::Null) {
@@ -1381,7 +1390,7 @@ pub(crate) fn convert(
                 obj.str()?
             ),
         )),
-        DataType::Struct { fields } => convert_struct(obj, fields, late),
+        DataType::Struct { fields } => convert_struct(obj, fields, late, budget),
         DataType::Array {
             element_type,
             contains_null,
@@ -1390,7 +1399,7 @@ pub(crate) fn convert(
             // array.array, which the converter iterates, and another array is taken as it is,
             // by PyArrow (`arrow_list`).
             if !needs_converter(dt, nullable) {
-                return arrow_list(obj, dt, element_type, *contains_null, late);
+                return arrow_list(obj, dt, element_type, *contains_null, late, budget);
             }
             if !obj.is_instance_of::<PyList>()
                 && !obj.is_instance(ARRAY.import(py, "array", "array")?.as_any())?
@@ -1399,7 +1408,7 @@ pub(crate) fn convert(
             }
             let mut items = Vec::with_capacity(obj.len().unwrap_or(0));
             for item in obj.try_iter()? {
-                items.push(convert(&item?, element_type, *contains_null, late)?);
+                items.push(convert(&item?, element_type, *contains_null, late, budget)?);
             }
             Ok(Value::List(items))
         }
@@ -1412,8 +1421,8 @@ pub(crate) fn convert(
             let mut entries = Vec::with_capacity(dict.len());
             for (key, value) in dict.iter() {
                 entries.push((
-                    convert(&key, key_type, false, late)?,
-                    convert(&value, value_type, *value_contains_null, late)?,
+                    convert(&key, key_type, false, late, budget)?,
+                    convert(&value, value_type, *value_contains_null, late, budget)?,
                 ));
             }
             Ok(Value::Map(entries))
@@ -1553,7 +1562,7 @@ pub(crate) fn convert(
                 serialized_python_class.as_deref(),
             )?;
             let serialized = udt.call_method1(intern!(py, "serialize"), (obj,))?;
-            convert(&serialized, sql_type, nullable, late)
+            convert(&serialized, sql_type, nullable, late, budget)
         }
         _ => Err(unsupported(obj)?),
     }
@@ -1959,6 +1968,7 @@ fn convert_struct(
     obj: &Bound<'_, PyAny>,
     fields: &[StructField],
     late: &mut Late,
+    budget: &ConversionBudget,
 ) -> PyResult<Value> {
     let py = obj.py();
     let values = if let Ok(tuple) = obj.cast::<PyTuple>() {
@@ -1975,19 +1985,20 @@ fn convert_struct(
             obj.str()?
         )));
     };
-    struct_of(&values, fields, late)
+    struct_of(&values, fields, late, budget)
 }
 
 fn struct_of(
     values: &[Bound<'_, PyAny>],
     fields: &[StructField],
     late: &mut Late,
+    budget: &ConversionBudget,
 ) -> PyResult<Value> {
     let names: std::sync::Arc<[String]> = fields.iter().map(|f| f.name.clone()).collect();
     let values = values
         .iter()
         .zip(fields)
-        .map(|(value, f)| convert(value, &f.data_type, f.nullable, late))
+        .map(|(value, f)| convert(value, &f.data_type, f.nullable, late, budget))
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Value::Struct(StructValue::new(names, values)))
 }

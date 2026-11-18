@@ -46,6 +46,9 @@ class ChannelBuilder:
     parameters apply. A custom gRPC channel (``toChannel``), its interceptors and its channel
     options do not: the transport has no gRPC channel to give them to."""
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     PARAM_USE_SSL = "use_ssl"
     PARAM_TOKEN = "token"
     PARAM_USER_ID = "user_id"
@@ -237,6 +240,9 @@ class DefaultChannelBuilder(ChannelBuilder):
     True
     """
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     @staticmethod
     def default_port() -> int:
         # The port of a Spark Connect server, which the drop-in does not discover from a local
@@ -341,6 +347,9 @@ class PlanObservedMetrics(ObservedMetrics):
     ``DataFrame.executionInfo.flows``. Mirrors ``pyspark.sql.connect.client.core
     .PlanObservedMetrics``; the Rust transport has already decoded the literal values."""
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     def __init__(self, name: str, metrics: list[Any], keys: list[str]):
         self._name = name
         self._metrics = metrics
@@ -429,6 +438,20 @@ class SparkConnectClient:
         # The state of the current thread of the session, as SparkConnectClient's thread_local.
         self.thread_local = _ThreadLocalOfClient(session)
         self.global_user_context_extensions_lock = threading.Lock()
+
+    def __copy__(self) -> "SparkConnectClient":
+        # As copy.copy of PySpark's client, a plain object: a client of the same attributes.
+        copied = object.__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        return copied
+
+    def __reduce__(self) -> Any:
+        # PySpark's client keeps its thread-local state in a threading.local, which pickle,
+        # cloudpickle and copy.deepcopy refuse: so they fail at one, with the error of each
+        # protocol ("cannot pickle '_thread._local' object", or '_local' at 0 and 1).
+        import threading
+
+        return (type(self), (threading.local(),))
 
     @property
     def global_user_context_extensions(self) -> list[Any]:

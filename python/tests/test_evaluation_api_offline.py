@@ -8,6 +8,9 @@
   `Evaluator.evaluate` does, so that the request sends the params of the copy and the evaluator
   keeps its own.
 - The names of the module: those of pyspark.ml.evaluation, its `Evaluator` PySpark's own.
+
+Official PySpark runs them too, as the reference (`_native_classes.native_class`), and skips the
+test of the names of the native module.
 """
 
 import json
@@ -15,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from _evaluation_api_cases import EVALUATORS, MODULE, REFERENCE, params_api_cases
-from _native_classes import native_class
+from _native_classes import native_class, native_module
 from pyspark.sql.connect import proto as pb2
 from test_ml_offline import (
     _commands_but_deletes,
@@ -44,6 +47,8 @@ def test_evaluator_is_pysparks():
 
     from pyspark.ml import evaluation
 
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
     module = importlib.import_module(MODULE)
     assert module.Evaluator is evaluation.Evaluator
     assert module.__all__ == evaluation.__all__

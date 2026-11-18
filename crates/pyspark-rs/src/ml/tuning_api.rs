@@ -137,7 +137,7 @@ fn converted_to_py(py: Python<'_>, value: Converted) -> PyResult<Py<PyAny>> {
     Ok(match value {
         Converted::Null => py.None(),
         Converted::Int(value) => value.into_py_any(py)?,
-        // An int beyond a long, as the `repr` of the converted value.
+        // A value that PySpark cannot send, of the `repr` of the converted value.
         Converted::Unsendable(text) => py
             .import("ast")?
             .getattr("literal_eval")?
@@ -148,7 +148,10 @@ fn converted_to_py(py: Python<'_>, value: Converted) -> PyResult<Py<PyAny>> {
         Converted::Bool(value) => value.into_py_any(py)?,
         Converted::StrList(value) => value.into_py_any(py)?,
         Converted::FloatList(value) => value.into_py_any(py)?,
-        Converted::IntList(value) => value.into_py_any(py)?,
+        Converted::IntList(literal) => {
+            let value = spark_connect::ml::MlValue::from_literal(&literal).to_pyerr()?;
+            object::ml_value_to_py(py, &value)?
+        }
         Converted::FloatListList(value) => value.into_py_any(py)?,
         Converted::Raw(value) => value,
         Converted::Vector(_) | Converted::Matrix(_) => {
@@ -198,6 +201,15 @@ macro_rules! validator {
             fn unset(&mut self, name: &'static str) -> PyResult<()> {
                 self.values.unset(name);
                 Ok(())
+            }
+
+            /// The maps in the order of PySpark's: the defaults in the order in which the
+            /// constructor sets them (or of their names, of a load or a copy), and the set params
+            /// in the order of their first setting.
+            fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
+                let defaults = self.values.default_names(<Self as Validator>::DEFAULTS);
+                let set = self.values.set.iter().map(|(name, _)| *name).collect();
+                Some((defaults, set))
             }
         }
 
@@ -567,7 +579,7 @@ fn cross_validator_folds<'py>(
 /// The end of a `with` of the context manager `cm` of the result of its block: `__exit__` of the
 /// error of the block, if any, else of none. The context managers here (`_cache_spark_dataset`)
 /// do not suppress an error.
-fn exit_context<T>(cm: &Bound<'_, PyAny>, result: PyResult<T>) -> PyResult<T> {
+pub(super) fn exit_context<T>(cm: &Bound<'_, PyAny>, result: PyResult<T>) -> PyResult<T> {
     let py = cm.py();
     match result {
         Ok(value) => {
@@ -1570,15 +1582,10 @@ fn save_impl<T: Validator>(
         .map(|(key, value)| Ok((key.to_string(), compact_json(value)?)))
         .collect::<PyResult<Vec<_>>>()?;
     let uid: String = instance.as_any().getattr("uid")?.extract()?;
+    let class = super::pipeline_api::metadata_class::<T>(instance.as_any(), T::METADATA_CLASS)?;
     interruptible(py, session, || {
         let version = session.version()?;
-        let mut metadata = Metadata::new(
-            T::METADATA_CLASS,
-            &uid,
-            &version,
-            param_map,
-            default_param_map,
-        );
+        let mut metadata = Metadata::new(&class, &uid, &version, param_map, default_param_map);
         metadata.extra = extra;
         save_metadata(session, path, &metadata.to_json()).map_err(Box::new)
     })?;

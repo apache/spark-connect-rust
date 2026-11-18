@@ -146,12 +146,8 @@ fn is_frame(entry: &Value) -> bool {
 fn check_member(server: &ReplayServer, entry: &Value, actual: Member, label: &str) {
     match entry.get("error") {
         Some(error) => {
-            let message = error["message"].as_str().unwrap();
-            let error = actual.expect_err(&format!("{label}: expected an error"));
-            assert!(
-                error.to_string().contains(message),
-                "{label}: {error} does not carry {message}"
-            );
+            let actual = actual.expect_err(&format!("{label}: expected an error"));
+            ml_golden::assert_error(&actual.to_string(), error, label);
         }
         None => assert_close(
             &actual.unwrap_or_else(|error| panic!("{label}: {error}")),

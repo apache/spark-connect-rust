@@ -46,11 +46,17 @@ pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<Strin
 )]
 pub struct PyColumn {
     pub(crate) column: Column,
+    /// Set once the value is written, so that `__traverse__` reads nothing else of an object that
+    /// the garbage collector traverses while it is created (see `PyDataFrame`).
+    gc_ready: std::sync::atomic::AtomicBool,
 }
 
 impl PyColumn {
     pub fn new(column: Column) -> Self {
-        PyColumn { column }
+        PyColumn {
+            column,
+            gc_ready: std::sync::atomic::AtomicBool::new(true),
+        }
     }
 }
 
@@ -62,7 +68,7 @@ fn py_obj_to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
 /// The Column of an operand of a binary operator, as PySpark's `_bin_op` takes it: a Column, or
 /// a literal (see `is_literal_operand`). Another object is looked up for its `_expr`, as PySpark
 /// does, so that its AttributeError, or a Row's PySparkAttributeError, is the one it raises.
-fn operand_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
+pub(crate) fn operand_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     operand(obj, true)
 }
 
@@ -158,7 +164,7 @@ impl PyColumn {
     /// dict). Mirrors `Column.alias(*alias, **kwargs)`, which names a generator's columns in
     /// order, takes metadata for a single name only, and sends it as `json.dumps(metadata)`.
     #[pyo3(signature = (*alias, **kwargs))]
-    fn alias(
+    pub(crate) fn alias(
         &self,
         py: Python<'_>,
         alias: &Bound<'_, PyTuple>,
@@ -192,29 +198,14 @@ impl PyColumn {
         }
         let single = alias.len() == 1;
         // A name is of a string field of the plan, which PySpark's `ColumnAlias.to_plan` sets when
-        // it builds the plan: a str, a bytes of its UTF-8, and the error of the first other value
-        // (`str_argument`), which the request of the plan raises before it builds the child, of a
-        // placeholder name here.
-        let mut names = Vec::with_capacity(alias.len());
-        let mut before = None;
-        for name in alias.iter() {
-            match crate::dataframe::unbuildable_str_error(&name)? {
-                None => names.push(crate::options::str_argument(&name)?),
-                Some(error) => {
-                    before.get_or_insert(error);
-                    // A str that UTF-8 does not encode renders escaped (PySpark's `__repr__` shows
-                    // it as it is, which a rendering of UTF-8 cannot hold); another value renders
-                    // as nothing, of a `__repr__` that fails.
-                    names.push(if name.is_instance_of::<pyo3::types::PyString>() {
-                        name.call_method1("encode", ("utf-8", "backslashreplace"))?
-                            .call_method1("decode", ("utf-8",))?
-                            .extract()?
-                    } else {
-                        String::new()
-                    });
-                }
-            }
-        }
+        // it builds the plan: a str, a bytes of its UTF-8, and the error of the first other value,
+        // which the request of the plan raises before it builds the child. Such a name renders as
+        // `crate::plan_args::rendered` gives it: a str that UTF-8 does not encode escaped
+        // (PySpark's `__repr__` shows it as it is, which a rendering of UTF-8 cannot hold), and
+        // another value as nothing, of a `__repr__` that fails.
+        let mut names_args = crate::plan_args::PlanArgs::new();
+        let names = names_args.strs(alias.iter())?;
+        let mut before = names_args.error().cloned();
         let mut after = None;
         let mut node = Alias::with_names(self.column.expression().clone(), names);
         if let Some(metadata) = metadata {
@@ -290,12 +281,7 @@ impl PyColumn {
         }
         // A DDL string keeps the unparsed type_str form (reference cast("int"));
         // any DataType object is converted to a typed cast.
-        if let Ok(s) = dataType.extract::<String>() {
-            Ok(PyColumn::new(self.column.clone().cast_str(&s)))
-        } else {
-            let dt = crate::types::py_to_proto_data_type(dataType)?;
-            Ok(PyColumn::new(self.column.clone().cast(dt)))
-        }
+        cast_column(&self.column, dataType, false)
     }
 
     /// Alias for `cast` (pyspark `Column.astype`).
@@ -319,12 +305,7 @@ impl PyColumn {
                 "DataType or str",
             ));
         }
-        if let Ok(s) = dataType.extract::<String>() {
-            Ok(PyColumn::new(self.column.clone().try_cast_str(&s)))
-        } else {
-            let dt = crate::types::py_to_proto_data_type(dataType)?;
-            Ok(PyColumn::new(self.column.clone().try_cast(dt)))
-        }
+        cast_column(&self.column, dataType, true)
     }
 
     /// Get an item from a list/map by key (pyspark `Column.getItem`), with PySpark's
@@ -562,10 +543,15 @@ impl PyColumn {
 
     /// An attribute that a Column does not have is the field of that name, as
     /// `col["name"]`. Mirrors `Column.__getattr__`, which raises for `_jc` and for a name
-    /// that starts with `__`.
-    fn __getattr__(&self, py: Python<'_>, item: &str) -> PyResult<PyColumn> {
+    /// that starts with `__`. The name is the str of the attribute as it is: one that UTF-8
+    /// cannot encode is the field of a literal that fails the plans of the Column, as `col[name]`.
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        item: &Bound<'_, pyo3::types::PyString>,
+    ) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__getattr__")?;
-        if item == "_jc" {
+        if item.as_any().eq("_jc")? {
             return Err(raise_pyspark(
                 py,
                 "PySparkAttributeError",
@@ -573,15 +559,15 @@ impl PyColumn {
                 &[("attr_name", "_jc")],
             ));
         }
-        if item.starts_with("__") {
-            return Err(raise_pyspark(
+        if item.call_method1("startswith", ("__",))?.is_truthy()? {
+            return Err(crate::errors::raise_pyspark_of(
                 py,
                 "PySparkAttributeError",
                 "ATTRIBUTE_NOT_SUPPORTED",
-                &[("attr_name", item)],
+                &[("attr_name", item.as_any())],
             ));
         }
-        self.__getitem__(pyo3::types::PyString::new(py, item).as_any())
+        self.__getitem__(item.as_any())
     }
 
     /// Equality (==) - returns a Column condition
@@ -776,6 +762,62 @@ impl PyColumn {
         self._expr().to_plan(py, session)
     }
 
+    /// As a Column of PySpark Connect, a Python object whose expression Python's garbage collector
+    /// sees: the functions of its UDFs, which a request pickles when it builds a plan of the
+    /// Column, as PySpark's expression keeps them, that only this Column keeps alive are reported
+    /// to the collector, so that a reference cycle through a function and the Column is freed, as
+    /// PySpark frees it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        crate::udf_command::visit_pickler_objects(
+            self.column.expression().exclusive_pickler_objects(),
+            &visit,
+        )
+    }
+
+    /// The shallow copy of a Column, as PySpark's `copy.copy`, which shares the expression of the
+    /// Column and the values of its attributes: so the functions of its UDFs are pickled when a
+    /// request builds a plan of the copy, as those of the Column, and not when it is copied.
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
+        let copy = Bound::new(slf.py(), PyColumn::new(slf.get().column.clone()))?;
+        let state = crate::group::instance_state(slf.as_any())?;
+        if !state.is_none() {
+            copy.getattr("__dict__")?.call_method1("update", (state,))?;
+        }
+        Ok(copy)
+    }
+
+    /// The deep copy of a Column, as PySpark's `copy.deepcopy`, which deep-copies its expression,
+    /// of the function of each UDF with `memo` (`deep_copied_picklers`): a function is the same
+    /// object, so the copy pickles it as it is at its requests, and a callable object, a bound
+    /// method or a partial is a copy; the expression is shared up to the UDFs of the copies. Then
+    /// of deep copies of its attributes, with `memo`, which has the copy before them, as `copy`
+    /// reconstructs an object of its arguments.
+    fn __deepcopy__<'py>(
+        slf: &Bound<'py, Self>,
+        memo: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, Self>> {
+        let py = slf.py();
+        let column = &slf.get().column;
+        let copies =
+            crate::udf_command::deep_copied_picklers(py, column.expression().picklers(), memo)?;
+        let column = if copies.is_empty() {
+            column.clone()
+        } else {
+            Column::new(column.expression().with_pickler_copies(&copies))
+        };
+        let copy = Bound::new(py, PyColumn::new(column))?;
+        let state = crate::group::instance_state(slf.as_any())?;
+        if !state.is_none() {
+            memo.set_item(slf.as_ptr() as usize, &copy)?;
+            let state = py.import("copy")?.call_method1("deepcopy", (state, memo))?;
+            copy.getattr("__dict__")?.call_method1("update", (state,))?;
+        }
+        Ok(copy)
+    }
+
     /// A Column pickles, as PySpark Connect's, which pickles its expression: of the bytes of the
     /// `spark.connect.Expression` of this column and of its rendering, of which the function of
     /// `pyspark.sql.connect.column._reduce_column` gives back the Column, also on a Python worker
@@ -786,17 +828,27 @@ impl PyColumn {
     /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
     /// A Column too deep to be sent is the `RecursionError` that PySpark's pickler raises for it.
     /// A user-set attribute of the instance is the reduce's state, as of a plain object, so
-    /// that `copy`, `deepcopy` and `pickle` keep it, as they do of PySpark's Column.
+    /// that `pickle` keeps it, as it does of PySpark's Column. The function of a UDF of the
+    /// Column is pickled now, into the command of the expression, as PySpark's pickle of the
+    /// Column pickles the function with it; one that does not pickle raises the error of its
+    /// pickling.
     fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let this = slf.borrow();
         // Of an expression that a request fails to build, as PySpark's Column of an alias of a
         // name that protobuf refuses: its proto of what this client builds, and the errors of
         // a request and of the `__repr__` of it, which the unpickled Column raises as it did.
-        let (expression, levels, unbuildable) = this
-            .column
-            .expression()
-            .try_to_proto_with_levels_and_unbuildable()
-            .to_pyerr()?;
+        let (expression, levels, unbuildable) = crate::origin::pickling(|| {
+            this.column
+                .expression()
+                .try_to_proto_with_levels_and_unbuildable()
+        })
+        .to_pyerr()?;
+        if let Some(exception) = unbuildable
+            .as_ref()
+            .and_then(crate::errors::callback_exception)
+        {
+            return Err(exception);
+        }
         let build_error = unbuildable
             .as_ref()
             .map(|error| error_description(py, error))
@@ -1125,23 +1177,29 @@ impl PyColumn {
         let Ok(value) = col.extract::<PyRef<'_, PyColumn>>() else {
             return Err(not_expected_type(col, "col", "Column"));
         };
-        let field_name: String = fieldName.extract()?;
+        // Its `WithField` sets the name when it builds the plan, after the struct.
+        let mut args = crate::plan_args::PlanArgs::new();
+        let field_name = args.str(fieldName)?;
         Ok(PyColumn::new(
-            self.column
-                .clone()
-                .with_field(&field_name, value.column.clone()),
+            args.column_after(
+                self.column
+                    .clone()
+                    .with_field(&field_name, value.column.clone()),
+            ),
         ))
     }
     #[pyo3(name = "dropFields", signature = (*fieldNames))]
     fn drop_fields(&self, py: Python<'_>, fieldNames: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("dropFields")?;
-        // As PySpark's, of strings, at least one.
+        // As PySpark's, of strings, at least one, which each `DropField` sets when it builds the
+        // plan, after the struct.
+        let mut args = crate::plan_args::PlanArgs::new();
         let mut names = Vec::with_capacity(fieldNames.len());
         for name in &fieldNames {
             if !name.is_instance_of::<pyo3::types::PyString>() {
                 return Err(not_expected_type(name, "fieldName", "str"));
             }
-            names.push(name.extract::<String>()?);
+            names.push(args.str(name)?);
         }
         if names.is_empty() {
             return Err(raise_pyspark(
@@ -1152,8 +1210,63 @@ impl PyColumn {
             ));
         }
         let refs: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
-        Ok(PyColumn::new(self.column.clone().drop_fields(refs)))
+        Ok(PyColumn::new(
+            args.column_after(self.column.clone().drop_fields(refs)),
+        ))
     }
+}
+
+/// The cast of `column` to `data_type`, a DataType or a str, as PySpark's `CastExpression`, whose
+/// `to_plan` sets the type after its child, when it builds the plan: a str as the unparsed type,
+/// of which one that UTF-8 cannot encode fails the requests of the plan with its
+/// `UnicodeEncodeError`, and a DataType as the type. A DataType that PySpark's
+/// `pyspark_types_to_proto_types` does not convert, of none of its types
+/// ([`crate::plan_args::unsupported_type_error`]) or with a `StructField` as a type in it, fails
+/// them with its `UNSUPPORTED_OPERATION`, and renders as its `simpleString()` of PySpark, as
+/// PySpark's `__repr__`. A `try_cast` for `try_`.
+fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyResult<PyColumn> {
+    let mut args = crate::plan_args::PlanArgs::new();
+    let unparsed = |text: &str| match try_ {
+        false => column.clone().cast_str(text),
+        true => column.clone().try_cast_str(text),
+    };
+    if data_type.is_instance_of::<pyo3::types::PyString>() {
+        let text = args.str(data_type)?;
+        return Ok(PyColumn::new(args.column_after(unparsed(&text))));
+    }
+    let error = match crate::plan_args::unsupported_type_error(data_type)? {
+        Some(error) => error,
+        None => {
+            let parsed = crate::types::py_to_data_type(data_type)?;
+            let Some(field) = crate::types::unsendable_field_repr(data_type, &parsed)? else {
+                return Ok(PyColumn::new(match try_ {
+                    false => column.clone().cast(parsed),
+                    true => column.clone().try_cast(parsed),
+                }));
+            };
+            spark_connect_core::error::SparkError::classed(
+                spark_connect_core::error::SparkErrorKind::ValueError,
+                "UNSUPPORTED_OPERATION",
+                &[("operation", &format!("data type {field}"))],
+            )
+        }
+    };
+    args.record(error);
+    // As PySpark's `simpleString`, which is the `typeName` of the type, unless its class has a
+    // `simpleString` of its own, as a `StructField` has.
+    let base = data_type
+        .py()
+        .import("pyspark.sql.types")?
+        .getattr("DataType")?
+        .getattr("simpleString")?;
+    let simple_string = data_type.get_type().getattr("simpleString")?;
+    let name = if simple_string.is(&base) {
+        "typeName"
+    } else {
+        "simpleString"
+    };
+    let text: String = data_type.call_method0(name)?.extract()?;
+    Ok(PyColumn::new(args.column_after(unparsed(&text))))
 }
 
 /// The description of `error`, of an expression that a request does not build or whose
@@ -1164,6 +1277,21 @@ fn error_description<'py>(
     py: Python<'py>,
     error: &spark_connect_core::error::SparkError,
 ) -> PyResult<Bound<'py, PyTuple>> {
+    described_error(py, error)?.ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "cannot pickle a Column whose plan fails with {}",
+            error.message
+        ))
+    })
+}
+
+/// The description of `error`, of a plan or an expression that PySpark's client fails to build,
+/// as [`error_description`] gives it, of which `pyspark.sql.connect._column_reduce.raise_error`
+/// raises the error again: None for the error of another kind, which no pickle keeps.
+pub(crate) fn described_error<'py>(
+    py: Python<'py>,
+    error: &spark_connect_core::error::SparkError,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
     use pyo3::types::PyBytes;
     use pyo3::IntoPyObjectExt;
     use spark_connect_core::error::SparkErrorKind as K;
@@ -1192,12 +1320,7 @@ fn error_description<'py>(
             error.error_class.clone(),
             error.params.clone().into_bound_py_any(py)?,
         ),
-        _ => {
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "cannot pickle a Column whose plan fails with {}",
-                error.message
-            )))
-        }
+        _ => return Ok(None),
     };
     PyTuple::new(
         py,
@@ -1207,6 +1330,7 @@ fn error_description<'py>(
             payload,
         ],
     )
+    .map(Some)
 }
 
 /// The error of `description`, of [`error_description`].

@@ -130,6 +130,14 @@ VENDORED_FILES=(
   # spark.remote and SPARK_REMOTE and makes the session of Spark Connect, the native class of
   # pyspark.sql.connect.session, with that class's builder; its classmethods run that class's.
   "sql/session.py"
+  # PySpark's classic classes of these names, as in PySpark, of which the objects of a session
+  # are not: the RuntimeConfig, the TableValuedFunction and the MergeIntoWriter of PySpark
+  # Classic, and its Observation, whose __new__ makes the Observation of Spark Connect. The
+  # native classes are those of pyspark.sql.connect.{conf,tvf,merge,observation}.
+  "sql/conf.py"
+  "sql/tvf.py"
+  "sql/merge.py"
+  "sql/observation.py"
 
   # PEP 561: the package is typed, and the type aliases of PySpark's stubs.
   "py.typed"

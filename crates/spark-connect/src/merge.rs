@@ -3,7 +3,6 @@
 //! Builds a `MergeIntoTableCommand` from a fluent set of `whenMatched` /
 //! `whenNotMatched` / `whenNotMatchedBySource` clauses and executes it.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use spark_connect_core::error::Result;
@@ -17,7 +16,7 @@ use crate::session::SparkSession;
 fn merge_action(
     action_type: proto::merge_action::ActionType,
     condition: Option<&Column>,
-    assignments: Option<HashMap<String, Column>>,
+    assignments: Option<Vec<(String, Column)>>,
 ) -> MergeClause {
     MergeClause {
         action_type,
@@ -26,13 +25,25 @@ fn merge_action(
     }
 }
 
+/// The assignments of an `update` or an `insert`, in the order of `assignments`, in which the merge
+/// sends them, as PySpark's `_build_merge_action` sends those of `assignments.items()`: a `Vec` or
+/// an ordered map keeps the order of its pairs, and a `HashMap` sends its pairs in its own order.
+fn assignment_pairs<K: Into<String>>(
+    assignments: impl IntoIterator<Item = (K, Column)>,
+) -> Vec<(String, Column)> {
+    assignments
+        .into_iter()
+        .map(|(key, value)| (key.into(), value))
+        .collect()
+}
+
 /// A clause of a merge: its action, and its condition and assignments, which are serialized when
 /// the merge runs, as a request serializes them (see [`MergeIntoWriter::merge`]).
 #[derive(Clone)]
 struct MergeClause {
     action_type: proto::merge_action::ActionType,
     condition: Option<Column>,
-    assignments: Option<HashMap<String, Column>>,
+    assignments: Option<Vec<(String, Column)>>,
 }
 
 impl MergeClause {
@@ -193,11 +204,16 @@ impl WhenMatched {
         self.writer
     }
 
-    pub fn update(mut self, assignments: HashMap<String, Column>) -> MergeIntoWriter {
+    /// Update the matched rows with `assignments`, of the target columns and their values, which
+    /// the merge sends in their order ([`assignment_pairs`]).
+    pub fn update<K: Into<String>>(
+        mut self,
+        assignments: impl IntoIterator<Item = (K, Column)>,
+    ) -> MergeIntoWriter {
         let action = merge_action(
             proto::merge_action::ActionType::Update,
             self.condition.as_ref(),
-            Some(assignments),
+            Some(assignment_pairs(assignments)),
         );
         self.writer.matched_actions.push(action);
         self.writer
@@ -231,11 +247,16 @@ impl WhenNotMatched {
         self.writer
     }
 
-    pub fn insert(mut self, assignments: HashMap<String, Column>) -> MergeIntoWriter {
+    /// Insert the rows that do not match with `assignments`, of the target columns and their
+    /// values, which the merge sends in their order ([`assignment_pairs`]).
+    pub fn insert<K: Into<String>>(
+        mut self,
+        assignments: impl IntoIterator<Item = (K, Column)>,
+    ) -> MergeIntoWriter {
         let action = merge_action(
             proto::merge_action::ActionType::Insert,
             self.condition.as_ref(),
-            Some(assignments),
+            Some(assignment_pairs(assignments)),
         );
         self.writer.not_matched_actions.push(action);
         self.writer
@@ -259,11 +280,17 @@ impl WhenNotMatchedBySource {
         self.writer
     }
 
-    pub fn update(mut self, assignments: HashMap<String, Column>) -> MergeIntoWriter {
+    /// Update the rows of the target that the source does not match with `assignments`, of the
+    /// target columns and their values, which the merge sends in their order
+    /// ([`assignment_pairs`]).
+    pub fn update<K: Into<String>>(
+        mut self,
+        assignments: impl IntoIterator<Item = (K, Column)>,
+    ) -> MergeIntoWriter {
         let action = merge_action(
             proto::merge_action::ActionType::Update,
             self.condition.as_ref(),
-            Some(assignments),
+            Some(assignment_pairs(assignments)),
         );
         self.writer.not_matched_by_source_actions.push(action);
         self.writer
@@ -393,6 +420,52 @@ mod tests {
 
         assert_eq!(writer.matched_actions.len(), 1);
         assert_eq!(writer.not_matched_actions.len(), 1);
+    }
+
+    #[test]
+    fn merge_assignments_are_sent_in_their_order() {
+        // As PySpark's `_build_merge_action`, of `assignments.items()`: the pairs of a `Vec` in
+        // their order, whatever the order of their names.
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let names = ["v", "id", "a"];
+        let pairs = || names.map(|name| (name, crate::column::col("x")));
+        let writer = df
+            .merge_into("target_table", crate::column::col("id"))
+            .when_matched(None)
+            .update(pairs())
+            .when_not_matched(None)
+            .insert(pairs())
+            .when_not_matched_by_source(None)
+            .update(pairs());
+        let sent = |clause: &super::MergeClause| -> Vec<String> {
+            let proto = clause.to_proto().unwrap();
+            let Some(spark_connect_proto::expression::ExprType::MergeAction(action)) =
+                proto.expr_type
+            else {
+                panic!("not a merge action: {proto:?}");
+            };
+            action
+                .assignments
+                .iter()
+                .map(
+                    |assignment| match &assignment.key.as_ref().unwrap().expr_type {
+                        Some(spark_connect_proto::expression::ExprType::ExpressionString(sql)) => {
+                            sql.expression.clone()
+                        }
+                        other => panic!("not a SQL expression: {other:?}"),
+                    },
+                )
+                .collect()
+        };
+        for clause in writer
+            .matched_actions
+            .iter()
+            .chain(&writer.not_matched_actions)
+            .chain(&writer.not_matched_by_source_actions)
+        {
+            assert_eq!(sent(clause), names);
+        }
     }
 
     #[test]

@@ -2,7 +2,8 @@
 //! the order of their numbers, packs repeated numeric fields, writes a map entry's key and value,
 //! and ends with the unknown fields that the message read; [`merge`] reads every wire type, takes
 //! a repeated numeric field packed or not, merges a message that a field repeats into the one it
-//! holds, and keeps the fields that the message type has no field for.
+//! holds, and keeps the fields that the message type has no field for, and the map entries that
+//! have such fields.
 
 use pyo3::prelude::*;
 
@@ -169,6 +170,27 @@ impl<'a> Reader<'a> {
         self.pos >= self.data.len()
     }
 
+    /// The field number and the wire type of a tag, as upb reads a tag: a varint of at most five
+    /// bytes whose value fits in 32 bits, so a field number is at most 2^29 - 1. A longer tag, or
+    /// one of more bits, is corrupt (and not cut to the bits of a field number).
+    fn tag(&mut self) -> PyResult<(u32, u8)> {
+        let mut value = 0u64;
+        for shift in (0..35).step_by(7) {
+            let byte = *self
+                .data
+                .get(self.pos)
+                .ok_or_else(|| decode_error("truncated tag"))?;
+            self.pos += 1;
+            value |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                let tag =
+                    u32::try_from(value).map_err(|_| decode_error("tag of more than 32 bits"))?;
+                return Ok((tag >> 3, (tag & 7) as u8));
+            }
+        }
+        Err(decode_error("tag of more than five bytes"))
+    }
+
     fn varint(&mut self) -> PyResult<u64> {
         let mut value = 0u64;
         for shift in (0..70).step_by(7) {
@@ -244,7 +266,8 @@ impl<'a> Reader<'a> {
         })
     }
 
-    /// Skip the value of a field of `wire_type`, a group up to its end.
+    /// Skip the value of a field of `wire_type`, a group up to its end. As upb skips a group, the
+    /// tags of its fields are read as tags are, but a field number of 0 among them is not corrupt.
     fn skip(&mut self, wire_type: u8, number: u32) -> PyResult<()> {
         match wire_type {
             0 => {
@@ -260,8 +283,7 @@ impl<'a> Reader<'a> {
                 self.take(4)?;
             }
             3 => loop {
-                let tag = self.varint()?;
-                let (inner, inner_type) = ((tag >> 3) as u32, (tag & 7) as u8);
+                let (inner, inner_type) = self.tag()?;
                 if inner_type == 4 {
                     if inner != number {
                         return Err(decode_error("mismatched end of group"));
@@ -276,18 +298,15 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Merge the encoded message `data` into `message`, as protobuf's `MergeFromString` does.
-/// Merge `data` into `message`. A failure is upb's `DecodeError` of the message type: "Error
-/// parsing message with type 'spark.connect.Plan': Wire format was corrupt".
+/// Merge the encoded message `data` into `message`, as protobuf's `MergeFromString` does. A
+/// failure is upb's `DecodeError` of the message type, also of a failure in a message that it
+/// holds: "Error parsing message with type 'spark.connect.Plan': Wire format was corrupt".
 pub(crate) fn merge(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> PyResult<()> {
-    grow(|| merge_inner(py, message, data)).map_err(|err| {
+    merge_message(py, message, data).map_err(|err| {
         if !err.is_instance_of::<DecodeError>(py) {
             return err;
         }
         let what = err.value(py).to_string();
-        if what.starts_with("Error parsing message with type ") {
-            return err;
-        }
         let full_name = message.borrow().desc.full_name.clone();
         DecodeError::new_err(format!(
             "Error parsing message with type '{full_name}': {}",
@@ -296,13 +315,18 @@ pub(crate) fn merge(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8])
     })
 }
 
+/// Merge `data` into `message`, one level of a merge, on a stack with room for it, with the
+/// cause of a failure.
+fn merge_message(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> PyResult<()> {
+    grow(|| merge_inner(py, message, data))
+}
+
 fn merge_inner(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> PyResult<()> {
     let desc = message.borrow().desc.clone();
     let mut reader = Reader::new(data);
     while !reader.done() {
         let start = reader.pos;
-        let tag = reader.varint()?;
-        let (number, wire_type) = ((tag >> 3) as u32, (tag & 7) as u8);
+        let (number, wire_type) = reader.tag()?;
         if number == 0 {
             return Err(decode_error("invalid field number 0"));
         }
@@ -341,7 +365,7 @@ fn merge_field(
             return Ok(false);
         }
         let entry = reader.len_delimited()?;
-        merge_map_entry(py, message, index, map, entry)?;
+        merge_map_entry(py, message, field, map, entry)?;
         return Ok(true);
     }
     if field.kind == Kind::Message {
@@ -351,14 +375,14 @@ fn merge_field(
         let bytes = reader.len_delimited()?;
         if field.repeated {
             let child = new_instance(py, &field.type_name)?;
-            merge(py, &child, bytes)?;
+            merge_message(py, &child, bytes)?;
             let container = message
                 .borrow_mut()
                 .composite(py, index, Some(weak(message)?))?;
             container.bind(py).borrow_mut().items.push(child.unbind());
         } else {
             let child = message.borrow_mut().child_for_merge(py, index)?;
-            merge(py, &child, bytes)?;
+            merge_message(py, &child, bytes)?;
         }
         return Ok(true);
     }
@@ -388,34 +412,65 @@ fn merge_field(
     Ok(true)
 }
 
+/// Merge the map entry `entry` of the map field `field` into `message`, as upb decodes one: as a
+/// message of the entry type, whose key and value are set in the map. An entry with fields that
+/// the entry type has no field for, or with a key or value of another wire type (which upb reads
+/// as such fields), is not set: the message keeps it in its unknown fields, as upb encodes the
+/// entry message again, of its key and value (each written as a field of a message is, so a
+/// scalar of the default is not) and then those fields.
 fn merge_map_entry(
     py: Python<'_>,
     message: &Bound<'_, PyMessage>,
-    index: usize,
+    field: &FieldDesc,
     map: &MapDesc,
     entry: &[u8],
 ) -> PyResult<()> {
     let mut key = Scalar::default_of(map.key);
     let mut scalar = None;
     let mut child: Option<Bound<'_, PyMessage>> = None;
+    let mut unknown = Vec::new();
     let mut reader = Reader::new(entry);
     while !reader.done() {
-        let tag = reader.varint()?;
-        let (number, wire_type) = ((tag >> 3) as u32, (tag & 7) as u8);
+        let start = reader.pos;
+        let (number, wire_type) = reader.tag()?;
         match number {
+            0 => return Err(decode_error("invalid field number 0")),
             1 if wire_type == map.key.wire_type() => key = reader.value(map.key)?,
             2 if map.value == Kind::Message && wire_type == 2 => {
                 let bytes = reader.len_delimited()?;
                 if child.is_none() {
                     child = Some(new_instance(py, &map.value_type)?);
                 }
-                merge(py, child.as_ref().expect("made above"), bytes)?;
+                merge_message(py, child.as_ref().expect("made above"), bytes)?;
             }
             2 if map.value != Kind::Message && wire_type == map.value.wire_type() => {
                 scalar = Some(reader.value(map.value)?);
             }
-            _ => reader.skip(wire_type, number)?,
+            _ => {
+                reader.skip(wire_type, number)?;
+                unknown.extend_from_slice(&entry[start..reader.pos]);
+            }
         }
+    }
+    if !unknown.is_empty() {
+        let mut bytes = Vec::new();
+        if !key.is_default() {
+            write_tag(&mut bytes, 1, map.key.wire_type());
+            write_value(&mut bytes, map.key, &key);
+        }
+        match (&child, scalar) {
+            (Some(child), _) => encode_message_field(py, 2, child.as_unbound(), &mut bytes)?,
+            (None, Some(value)) if !value.is_default() => {
+                write_tag(&mut bytes, 2, map.value.wire_type());
+                write_value(&mut bytes, map.value, &value);
+            }
+            _ => {}
+        }
+        bytes.extend_from_slice(&unknown);
+        let mut m = message.borrow_mut();
+        write_tag(&mut m.unknown, field.number, 2);
+        write_len_delimited(&mut m.unknown, &bytes);
+        return Ok(());
     }
     let value = if map.value == Kind::Message {
         let child = match child {
@@ -426,7 +481,10 @@ fn merge_map_entry(
     } else {
         MapValue::Scalar(scalar.unwrap_or_else(|| Scalar::default_of(map.value)))
     };
-    let container = message.borrow_mut().map(py, index, Some(weak(message)?))?;
-    container.bind(py).borrow_mut().insert(key, value);
+    let container = message
+        .borrow_mut()
+        .map(py, field.index, Some(weak(message)?))?;
+    // The value that the entry replaces is dropped once the map is no longer borrowed.
+    let _replaced = container.bind(py).borrow_mut().insert(key, value);
     Ok(())
 }

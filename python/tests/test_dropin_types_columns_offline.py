@@ -1,12 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """The drop-in's types and Columns as official PySpark 4.3.0's, without a server: the JSON type
-strings of `_parse_datatype_json_value`, the pickle of a CalendarIntervalType, the origins of the
-expressions that Column methods send, the names of `Column.alias` and `Column.name`, and the
-user-set attributes of a Column's copies. The expected values are official PySpark's, of the same
-calls."""
+strings of `_parse_datatype_json_value`, the types that official PySpark pickled, the abstract
+classes of the types (`DataType`, `AtomicType`, ...) as types of their own, the pickle of a
+CalendarIntervalType, the parameters of the types as attributes, the parameters of the methods of
+the types, the origins of the expressions that Column methods send, the names of `Column.alias`
+and `Column.name`, and the user-set attributes of a Column's copies. The expected values are
+official PySpark's, of the same calls."""
 
+import base64
 import copy
+import datetime
+import inspect
+import json
 import pickle
+from pathlib import Path
 
 import pytest
 from _mock_connect_server import mock_connect_session
@@ -84,11 +91,662 @@ def test_json_type_values_that_are_not_strings_raise_the_type_error_of_pyspark(v
     assert str(error.value) == message
 
 
+# Official PySpark 4.3.0's pickles of its types, at the protocols 0 to 5, with its repr, JSON,
+# simpleString and attributes of each type, of scripts/capture_type_pickles_golden.py.
+PYSPARK_PICKLES = json.loads(
+    (Path(__file__).resolve().parents[2] / "tests/golden/type_pickles.json").read_text()
+)
+
+
+def _pysparks_pickle(key, protocol):
+    return pickle.loads(base64.b64decode(PYSPARK_PICKLES[key][str(protocol)]))
+
+
+def _attributes(t, case):
+    """The repr of each attribute of PySpark's type of `case`, of its `__dict__`, and the repr of
+    the attribute of the drop-in's type `t`. The `_crs` and `_alg` that PySpark's spatial types
+    keep of their SRID are not attributes of the drop-in's."""
+    expected = {k: v for k, v in case["attributes"].items() if k not in ("_crs", "_alg")}
+    return {k: repr(getattr(t, k)) for k in expected}, expected
+
+
+@pytest.mark.parametrize("protocol", [2, 3, 4, 5])
+def test_types_that_pyspark_pickled_load_as_its_types(protocol):
+    # PySpark's types are plain classes, which pickle as `copyreg.__newobj__(cls)` and their
+    # `__dict__`: the drop-in's class makes a type of `cls.__new__(cls)`, without arguments, and
+    # sets the attributes of the `__dict__`, of which the type then is, also in a struct, an
+    # array or a map. They are its parameters, not entries of its own `__dict__`. A type of
+    # PySpark's `DataTypeSingleton` is the one instance, which `cls.__new__(cls)` gives, where
+    # PySpark's own unpickling gives another object.
+    from pyspark.ml.linalg import VectorUDT
+
+    names = dict(vars(T), VectorUDT=VectorUDT)
+    singletons = (
+        T.NullType, T.BooleanType, T.ByteType, T.ShortType, T.IntegerType, T.LongType,
+        T.FloatType, T.DoubleType, T.BinaryType, T.DateType, T.TimestampType,
+        T.TimestampNTZType, T.CalendarIntervalType,
+    )
+    loaded = _pysparks_pickle("pickles", protocol)
+    assert len(loaded) == len(PYSPARK_PICKLES["cases"])
+    for t, case in zip(loaded, PYSPARK_PICKLES["cases"]):
+        made = eval(case["type"], names)
+        assert type(t) is type(made), case["type"]
+        assert t == made and hash(t) == hash(made), case["type"]
+        assert (t is made) is isinstance(made, singletons), case["type"]
+        assert (repr(t), t.json(), t.simpleString()) == (
+            case["repr"], case["json"], case["simpleString"]
+        )
+        got, expected = _attributes(t, case)
+        assert got == expected, case["type"]
+        assert vars(t) == {}, case["type"]
+
+
+@pytest.mark.parametrize("protocol", [0, 1])
+def test_types_that_pyspark_pickled_below_protocol_2_do_not_load(protocol):
+    # Below protocol 2, pickle makes PySpark's type of `copyreg._reconstructor(cls, object,
+    # None)`, which calls `object.__new__(cls)`, and CPython refuses it for a class of a native
+    # base, of which every type of the drop-in is: pickle's default protocol is above.
+    message = r"^object\.__new__\(NullType\) is not safe, use NullType\.__new__\(\)$"
+    with pytest.raises(TypeError, match=message):
+        _pysparks_pickle("pickles", protocol)
+
+
+@pytest.mark.parametrize("protocol", [2, 3, 4, 5])
+def test_types_that_pyspark_pickled_after_an_edit_load_as_they_were(protocol):
+    # The attributes as they were set, which no constructor makes: a `hasPrecisionInfo` of
+    # another value and an attribute of the user, which is in the `__dict__`, a set parameter, and
+    # the names and the `_needConversion` of a struct, which an edit of a field does not change.
+    loaded = _pysparks_pickle("edited_pickles", protocol)
+    assert set(loaded) == set(PYSPARK_PICKLES["edited"])
+    for name, t in loaded.items():
+        case = PYSPARK_PICKLES["edited"][name]
+        assert (repr(t), t.simpleString()) == (case["repr"], case["simpleString"]), name
+        got, expected = _attributes(t, case)
+        assert got == expected, name
+        if name != "set_srid":
+            assert t.json() == case["json"], name
+    decimal = loaded["decimal_attributes"]
+    assert vars(decimal) == {"tag": "x"}
+    assert decimal != T.DecimalType(10, 2) and hash(decimal) == hash(T.DecimalType(10, 2))
+    assert loaded["set_scale"] == T.DecimalType(10, 3)
+    assert loaded["retyped_field"]._needSerializeAnyField is True
+    # PySpark's JSON of a GeometryType of a set SRID is that of the CRS of its constructor, which
+    # it keeps as `_crs`; the drop-in's type is of the SRID, so it is GeometryType(0), of its JSON.
+    assert PYSPARK_PICKLES["edited"]["set_srid"]["json"] == '"geometry(OGC:CRS84)"'
+    assert loaded["set_srid"] == T.GeometryType(0)
+    assert loaded["set_srid"].json() == '"geometry(SRID:0)"'
+
+
+# The abstract classes of PySpark's type hierarchy, with the name of each without `Type` in lower
+# case, PySpark's `typeName()` of the class.
+ABSTRACT_TYPES = [
+    ("DataType", "data"),
+    ("AtomicType", "atomic"),
+    ("NumericType", "numeric"),
+    ("IntegralType", "integral"),
+    ("FractionalType", "fractional"),
+    ("DatetimeType", "datetime"),
+    ("AnyTimeType", "anytime"),
+    ("SpatialType", "spatial"),
+    ("AnsiIntervalType", "ansiinterval"),
+]
+
+# Official PySpark 4.3.0's pickles at the protocols 2 to 5 of `AtomicType()`, of its class, which
+# `copyreg.__newobj__` makes, and of no state of its empty `__dict__`; the pickle at protocol 2 of
+# each abstract class, of the name of the class; and the pickles of an `AtomicType()` of an
+# attribute that was set, of its `__dict__`.
+PYSPARKS_ATOMIC_TYPE_PICKLES = {
+    2: b"\x80\x02cpyspark.sql.types\nAtomicType\nq\x00)\x81q\x01.",
+    3: b"\x80\x03cpyspark.sql.types\nAtomicType\nq\x00)\x81q\x01.",
+    4: b"\x80\x04\x95'\x00\x00\x00\x00\x00\x00\x00\x8c\x11pyspark.sql.types\x94\x8c\nAtomicType"
+       b"\x94\x93\x94)\x81\x94.",
+    5: b"\x80\x05\x95'\x00\x00\x00\x00\x00\x00\x00\x8c\x11pyspark.sql.types\x94\x8c\nAtomicType"
+       b"\x94\x93\x94)\x81\x94.",
+}
+PYSPARKS_PROTOCOL_2_PICKLE = b"\x80\x02cpyspark.sql.types\n%s\nq\x00)\x81q\x01."
+PYSPARKS_TAGGED_ATOMIC_TYPE_PICKLES = {
+    2: b"\x80\x02cpyspark.sql.types\nAtomicType\nq\x00)\x81q\x01}q\x02X\x03\x00\x00\x00tagq\x03"
+       b"X\x01\x00\x00\x00xq\x04sb.",
+    5: b"\x80\x05\x955\x00\x00\x00\x00\x00\x00\x00\x8c\x11pyspark.sql.types\x94\x8c\nAtomicType"
+       b"\x94\x93\x94)\x81\x94}\x94\x8c\x03tag\x94\x8c\x01x\x94sb.",
+}
+
+
+@pytest.mark.parametrize("name", [name for name, _ in ABSTRACT_TYPES])
+def test_the_abstract_types_pickle_as_pysparks(name):
+    # PySpark's abstract classes are plain classes, which pickle as their class and their
+    # `__dict__`: the drop-in's pickle of the type at the protocols 2 and up is PySpark's own, so
+    # each client loads the other's, and the one at the protocols 0 and 1, of
+    # `copyreg.__newobj__(cls)` rather than PySpark's `copyreg._reconstructor`, loads in both
+    # clients too. A copy is of the class, and IntegralType's is its one instance.
+    cls = getattr(T, name)
+    t = cls()
+    assert pickle.dumps(t, protocol=2) == PYSPARKS_PROTOCOL_2_PICKLE % name.encode()
+    assert type(pickle.loads(PYSPARKS_PROTOCOL_2_PICKLE % name.encode())) is cls
+    for protocol in range(6):
+        loaded = pickle.loads(pickle.dumps(t, protocol=protocol))
+        assert type(loaded) is cls and loaded == t and vars(loaded) == {}, protocol
+        assert (loaded is t) is (cls is T.IntegralType), protocol
+    for copied in (copy.copy(t), copy.deepcopy(t)):
+        assert type(copied) is cls and copied == t and (copied is t) is (cls is T.IntegralType)
+
+
+def test_an_abstract_type_pickles_its_attributes_as_pysparks():
+    # Of the protocols 2 to 5 of PySpark's pickle of `AtomicType()`, and of its pickle of the
+    # `__dict__` of an attribute that was set, which the drop-in's pickle keeps too.
+    for protocol, pickled in PYSPARKS_ATOMIC_TYPE_PICKLES.items():
+        assert pickle.dumps(T.AtomicType(), protocol=protocol) == pickled
+        assert pickle.loads(pickled) == T.AtomicType()
+    tagged = T.AtomicType()
+    tagged.tag = "x"
+    for protocol, pickled in PYSPARKS_TAGGED_ATOMIC_TYPE_PICKLES.items():
+        assert pickle.dumps(tagged, protocol=protocol) == pickled
+        loaded = pickle.loads(pickled)
+        assert type(loaded) is T.AtomicType and vars(loaded) == {"tag": "x"}
+        assert loaded == tagged and loaded != T.AtomicType()
+    assert vars(copy.deepcopy(tagged)) == {"tag": "x"}
+
+
 def test_calendar_interval_type_pickles_of_its_json_name():
     # As the JSON of the type, "interval", which official PySpark's parser reads too.
     t = T.CalendarIntervalType()
     assert t.__reduce__()[1] == ('"interval"',)
     assert pickle.loads(pickle.dumps(t)) == t
+
+
+# Of a parameter that is set: the type, the parameter and its value, official PySpark's repr and
+# JSON of the type after `setattr(t, name, value)`, and the constructor's type of the parameters.
+SET_PARAMETERS = [
+    ("DecimalType(10, 2)", "scale", 3, "DecimalType(10,3)", '"decimal(10,3)"',
+     "DecimalType(10, 3)"),
+    ("DecimalType(10, 2)", "precision", 12, "DecimalType(12,2)", '"decimal(12,2)"',
+     "DecimalType(12, 2)"),
+    ("StringType()", "collation", "UTF8_LCASE", "StringType('UTF8_LCASE')",
+     '"string collate UTF8_LCASE"', "StringType('UTF8_LCASE')"),
+    ("StringType('UTF8_LCASE')", "collation", "UTF8_BINARY", "StringType()", '"string"',
+     "StringType()"),
+    ("CharType(5)", "length", 6, "CharType(6)", '"char(6)"', "CharType(6)"),
+    ("VarcharType(5)", "length", 6, "VarcharType(6)", '"varchar(6)"', "VarcharType(6)"),
+    ("TimeType(3)", "precision", 4, "TimeType(4)", '"time(4)"', "TimeType(4)"),
+    ("DayTimeIntervalType(0, 3)", "startField", 1, "DayTimeIntervalType(1, 3)",
+     '"interval hour to second"', "DayTimeIntervalType(1, 3)"),
+    ("DayTimeIntervalType(0, 3)", "endField", 1, "DayTimeIntervalType(0, 1)",
+     '"interval day to hour"', "DayTimeIntervalType(0, 1)"),
+    ("DayTimeIntervalType(0, 1)", "startField", 3, "DayTimeIntervalType(3, 1)",
+     '"interval second to hour"', "DayTimeIntervalType(3, 1)"),
+    ("DayTimeIntervalType(0, 3)", "startField", 1.0, "DayTimeIntervalType(1, 3)",
+     '"interval hour to second"', "DayTimeIntervalType(1, 3)"),
+    ("YearMonthIntervalType(0, 1)", "startField", 1, "YearMonthIntervalType(1, 1)",
+     '"interval month"', "YearMonthIntervalType(1, 1)"),
+    ("YearMonthIntervalType(0, 1)", "endField", 0, "YearMonthIntervalType(0, 0)",
+     '"interval year"', "YearMonthIntervalType(0, 0)"),
+]
+
+
+@pytest.mark.parametrize(
+    "made, name, value, shown, json_text, same",
+    SET_PARAMETERS,
+    ids=[f"{made}.{name}={value!r}" for made, name, value, *_ in SET_PARAMETERS],
+)
+def test_type_parameters_are_plain_attributes_as_pysparks(
+    made, name, value, shown, json_text, same
+):
+    # PySpark's parameters are plain attributes: an assignment of one makes the type of it, as its
+    # repr, JSON, simpleString, `==` and hash show, as of the constructor's type of the same
+    # parameters, and the type is no longer equal to the one it was made as.
+    t, same = eval(made, vars(T)), eval(same, vars(T))
+    setattr(t, name, value)
+    assert getattr(t, name) == value
+    assert (repr(t), t.json()) == (shown, json_text)
+    assert t.simpleString() == same.simpleString()
+    assert t == same and hash(t) == hash(same)
+    assert t != eval(made, vars(T))
+
+
+def test_type_parameters_set_in_a_nested_type_are_of_the_containing_type_as_pysparks():
+    # As PySpark's, whose struct, array and map read the attributes of their types: a parameter
+    # set on a type in one of them is of it, also of the collations of a field in its metadata.
+    t = T.StructType([
+        T.StructField("a", T.DecimalType(10, 2)),
+        T.StructField("b", T.ArrayType(T.StringType())),
+        T.StructField("m", T.MapType(T.StringType(), T.TimeType(3))),
+    ])
+    t.fields[0].dataType.scale = 4
+    t.fields[1].dataType.elementType.collation = "UTF8_LCASE"
+    t["m"].dataType.valueType.precision = 5
+    assert t.simpleString() == (
+        "struct<a:decimal(10,4),b:array<string collate UTF8_LCASE>,m:map<string,time(5)>>"
+    )
+    assert t.json() == (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"decimal(10,4)"},'
+        '{"metadata":{"__COLLATIONS":{"b.element":"spark.UTF8_LCASE"}},"name":"b",'
+        '"nullable":true,"type":{"containsNull":true,"elementType":"string","type":"array"}},'
+        '{"metadata":{},"name":"m","nullable":true,"type":{"keyType":"string","type":"map",'
+        '"valueContainsNull":true,"valueType":"time(5)"}}],"type":"struct"}'
+    )
+    assert t == T.StructType([
+        T.StructField("a", T.DecimalType(10, 4)),
+        T.StructField("b", T.ArrayType(T.StringType("UTF8_LCASE"))),
+        T.StructField("m", T.MapType(T.StringType(), T.TimeType(5))),
+    ])
+
+
+def test_set_spatial_srids_and_precision_info_as_pysparks():
+    # A set `srid` shows in the repr and simpleString of the type, as PySpark's; PySpark's JSON
+    # stays that of the CRS of its constructor, which it keeps as `_crs` (`geometry(OGC:CRS84)`),
+    # so that its type is equal to no GeometryType(0), where the drop-in's type is of the SRID,
+    # also of its JSON. The mixed SRID -1, of which `GeographyType("ANY")` is, is an SRID too.
+    geometry = T.GeometryType(4326)
+    geometry.srid = 0
+    assert (repr(geometry), geometry.simpleString()) == ("GeometryType(0)", "geometry(0)")
+    assert geometry == T.GeometryType(0) and geometry.json() == '"geometry(SRID:0)"'
+    geography = T.GeographyType(4326)
+    geography.srid = -1
+    assert (repr(geography), geography.simpleString()) == ("GeographyType(ANY)", "geography(any)")
+    assert geography == T.GeographyType("ANY")
+    # `hasPrecisionInfo`, which PySpark's `__init__` sets true, is a plain attribute too, which
+    # `==` compares, as PySpark's `__dict__`, and the repr and hash do not show.
+    decimal = T.DecimalType(10, 2)
+    decimal.hasPrecisionInfo = False
+    assert decimal.hasPrecisionInfo is False and repr(decimal) == "DecimalType(10,2)"
+    assert decimal != T.DecimalType(10, 2) and hash(decimal) == hash(T.DecimalType(10, 2))
+
+
+def test_type_parameters_take_the_values_of_their_constructors():
+    # PySpark's attributes take any value, of which its repr, JSON or simpleString may fail later
+    # (the TypeError of `%d` of a str, the KeyError of a field that the type does not have). The
+    # drop-in's core type holds the values that the constructor takes, so another raises the
+    # constructor's error at the assignment, and the type stays as it was.
+    from pyspark.errors import IllegalArgumentException, PySparkRuntimeError
+
+    decimal, interval, geometry = T.DecimalType(10, 2), T.DayTimeIntervalType(), T.GeometryType(0)
+    with pytest.raises(TypeError):
+        decimal.scale = "3"
+    with pytest.raises(TypeError):
+        T.StringType().collation = 5
+    for name, value, parameters in [
+        ("startField", 7, {"start_field": "7", "end_field": "3"}),
+        ("endField", None, {"start_field": "0", "end_field": "None"}),
+    ]:
+        with pytest.raises(PySparkRuntimeError) as e:
+            setattr(interval, name, value)
+        assert e.value.getCondition() == "INVALID_INTERVAL_CASTING"
+        assert e.value.getMessageParameters() == parameters
+    for t, srid in [(geometry, 1234), (T.GeographyType(4326), 0)]:
+        with pytest.raises(IllegalArgumentException) as e:
+            t.srid = srid
+        assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+    assert (decimal, interval, geometry) == (
+        T.DecimalType(10, 2), T.DayTimeIntervalType(), T.GeometryType(0)
+    )
+    # The `"ANY"` of the constructor is the mixed SRID, which PySpark's attribute keeps as a str.
+    geometry.srid = "ANY"
+    assert geometry.srid == -1 and geometry == T.GeometryType("ANY")
+
+
+@pytest.mark.parametrize("name, stem", ABSTRACT_TYPES, ids=[name for name, _ in ABSTRACT_TYPES])
+def test_the_abstract_types_are_types_of_their_classes_as_pysparks(name, stem):
+    # As PySpark's plain classes, of the methods of its base DataType: the repr and str of the
+    # class, the typeName, simpleString and jsonValue of the name of the class, no conversion of
+    # the values, and the equality of the class and the `__dict__`. IntegralType is a singleton
+    # of PySpark's DataTypeSingleton, whose `__call__` takes no arguments; `object.__new__` of
+    # the others takes none either, and the class shows no parameters.
+    cls = getattr(T, name)
+    t, value = cls(), object()
+    assert repr(t) == str(t) == f"{name}()"
+    assert t.typeName() == cls.typeName() == t.simpleString() == t.jsonValue() == stem
+    assert t.json() == f'"{stem}"'
+    assert t.needConversion() is False
+    assert t.toInternal(value) is value and t.fromInternal(value) is value
+    assert t == cls() and not t != cls() and hash(t) == hash(cls()) == hash(f"{name}()")
+    assert vars(t) == {}
+    assert (t is cls()) is (cls is T.IntegralType)
+    assert list(inspect.signature(cls).parameters) == []
+    if cls is T.IntegralType:
+        errors = [
+            (lambda: cls(1), "takes 1 positional argument but 2 were given"),
+            (lambda: cls(1, 2), "takes 1 positional argument but 3 were given"),
+            (lambda: cls(x=1), "got an unexpected keyword argument 'x'"),
+            (lambda: cls(1, x=1), "got an unexpected keyword argument 'x'"),
+        ]
+        errors = [(make, f"DataTypeSingleton.__call__() {message}") for make, message in errors]
+    else:
+        errors = [
+            (make, f"{name}() takes no arguments")
+            for make in (lambda: cls(1), lambda: cls(None, 2), lambda: cls(x=1),
+                         lambda: cls.__new__(cls, 1))
+        ]
+    for make, message in errors:
+        with pytest.raises(TypeError) as e:
+            make()
+        assert str(e.value) == message
+
+
+def test_the_abstract_types_are_equal_of_their_classes_and_attributes_as_pysparks():
+    # PySpark's `isinstance(other, self.__class__) and self.__dict__ == other.__dict__`, of which
+    # `==` calls the `__eq__` of the subclass first, as Python does: so a type is equal to a type
+    # of its class only, not of a subclass, nor of a base class. A direct `__eq__` of a base
+    # class compares the `__dict__` of a subclass, which of a type of parameters holds them.
+    for a, b in [
+        (T.AtomicType(), T.DataType()),
+        (T.DataType(), T.AtomicType()),
+        (T.DataType(), T.IntegerType()),
+        (T.IntegerType(), T.DataType()),
+        (T.NumericType(), T.IntegralType()),
+        (T.IntegralType(), T.ByteType()),
+        (T.FractionalType(), T.DoubleType()),
+        (T.DatetimeType(), T.DateType()),
+        (T.AnyTimeType(), T.TimeType()),
+        (T.SpatialType(), T.GeometryType(0)),
+        (T.AnsiIntervalType(), T.DayTimeIntervalType()),
+        (T.AtomicType(), T.StringType()),
+        (T.DataType(), T.NullType()),
+        (T.DataType(), T.StructType()),
+        (T.DataType(), T.StructField("a", T.IntegerType())),
+        (T.AtomicType(), 5),
+    ]:
+        assert a != b and not a == b, (a, b)
+    assert [
+        T.DataType().__eq__(T.AtomicType()),
+        T.DataType().__eq__(T.IntegerType()),
+        T.DataType().__eq__(T.VariantType()),
+        T.NumericType().__eq__(T.IntegralType()),
+        T.AtomicType().__eq__(T.StringType()),
+        T.AtomicType().__eq__(T.DecimalType()),
+        T.DataType().__eq__(T.StructField("a", T.IntegerType())),
+        T.DataType().__ne__(T.AtomicType()),
+    ] == [True, True, True, True, False, False, False, False]
+    tagged, other = T.AtomicType(), T.AtomicType()
+    tagged.tag = other.tag = "x"
+    assert tagged == other and tagged != T.AtomicType()
+    assert hash(tagged) == hash(T.AtomicType())
+
+
+def test_types_of_the_abstract_types_are_pysparks():
+    # A struct, array or map of a type of its class only names it by its typeName, in its
+    # simpleString, JSON and tree string, as PySpark's, and converts no values of it.
+    struct = T.StructType([
+        T.StructField("a", T.DataType()),
+        T.StructField("b", T.ArrayType(T.SpatialType()), False),
+    ])
+    assert repr(struct) == (
+        "StructType([StructField('a', DataType(), True), "
+        "StructField('b', ArrayType(SpatialType(), True), False)])"
+    )
+    assert struct.simpleString() == "struct<a:data,b:array<spatial>>"
+    assert struct.json() == (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"data"},'
+        '{"metadata":{},"name":"b","nullable":false,"type":{"containsNull":true,'
+        '"elementType":"spatial","type":"array"}}],"type":"struct"}'
+    )
+    assert struct.jsonValue() == {"type": "struct", "fields": [
+        {"name": "a", "type": "data", "nullable": True, "metadata": {}},
+        {"name": "b", "type": {"type": "array", "elementType": "spatial", "containsNull": True},
+         "nullable": False, "metadata": {}},
+    ]}
+    assert struct.treeString() == (
+        "root\n |-- a: data (nullable = true)\n |-- b: array (nullable = false)\n"
+        " |    |-- element: spatial (containsNull = true)\n"
+    )
+    assert repr(struct.toNullable()) == (
+        "StructType([StructField('a', DataType(), True), "
+        "StructField('b', ArrayType(SpatialType(), True), True)])"
+    )
+    assert struct.needConversion() is True and struct.fieldNames() == ["a", "b"]
+    assert struct.toInternal((1, [2])) == (1, [2]) and struct.fromInternal((1, [2])) == (1, [2])
+    assert struct.add("c", T.AnyTimeType()).simpleString() == (
+        "struct<a:data,b:array<spatial>,c:anytime>"
+    )
+    field = T.StructField("c", T.AnsiIntervalType())
+    assert (repr(field), field.simpleString(), field.json()) == (
+        "StructField('c', AnsiIntervalType(), True)",
+        "c:ansiinterval",
+        '{"metadata":{},"name":"c","nullable":true,"type":"ansiinterval"}',
+    )
+    map_type = T.MapType(T.StringType(), T.IntegralType())
+    assert (repr(map_type), map_type.simpleString(), map_type.json()) == (
+        "MapType(StringType(), IntegralType(), True)",
+        "map<string,integral>",
+        '{"keyType":"string","type":"map","valueContainsNull":true,"valueType":"integral"}',
+    )
+    assert map_type.valueType is T.IntegralType() and map_type.needConversion() is False
+    assert map_type.toInternal({"a": 1}) == map_type.fromInternal({"a": 1}) == {"a": 1}
+    array = T.ArrayType(T.NumericType(), False)
+    assert (repr(array), array.simpleString(), array.json(), repr(array.toNullable())) == (
+        "ArrayType(NumericType(), False)",
+        "array<numeric>",
+        '{"containsNull":false,"elementType":"numeric","type":"array"}',
+        "ArrayType(NumericType(), True)",
+    )
+    assert array == T.ArrayType(T.NumericType(), False) and array != T.ArrayType(T.DataType(), False)
+    assert hash(array) == hash(repr(array))
+
+
+# Official PySpark 4.3.0's pickles at protocol 2 of types of the abstract types, of the `__dict__`
+# of each type.
+PYSPARKS_PICKLES_OF_ABSTRACT_TYPES = [
+    ("MapType(StringType(), IntegralType())",
+     b"\x80\x02cpyspark.sql.types\nMapType\nq\x00)\x81q\x01}q\x02(X\x07\x00\x00\x00keyTypeq\x03c"
+     b"pyspark.sql.types\nStringType\nq\x04)\x81q\x05}q\x06X\t\x00\x00\x00collationq\x07X\x0b\x00"
+     b"\x00\x00UTF8_BINARYq\x08sbX\t\x00\x00\x00valueTypeq\tcpyspark.sql.types\nIntegralType\nq"
+     b"\n)\x81q\x0bX\x11\x00\x00\x00valueContainsNullq\x0c\x88ub."),
+    ("ArrayType(DataType(), False)",
+     b"\x80\x02cpyspark.sql.types\nArrayType\nq\x00)\x81q\x01}q\x02(X\x0b\x00\x00\x00elementType"
+     b"q\x03cpyspark.sql.types\nDataType\nq\x04)\x81q\x05X\x0c\x00\x00\x00containsNullq\x06\x89u"
+     b"b."),
+    ("StructType([StructField('a', NumericType())])",
+     b"\x80\x02cpyspark.sql.types\nStructType\nq\x00)\x81q\x01}q\x02(X\x06\x00\x00\x00fieldsq"
+     b"\x03]q\x04cpyspark.sql.types\nStructField\nq\x05)\x81q\x06}q\x07(X\x04\x00\x00\x00nameq"
+     b"\x08X\x01\x00\x00\x00aq\tX\x08\x00\x00\x00dataTypeq\ncpyspark.sql.types\nNumericType\nq"
+     b"\x0b)\x81q\x0cX\x08\x00\x00\x00nullableq\r\x88X\x08\x00\x00\x00metadataq\x0e}q\x0fubaX"
+     b"\x05\x00\x00\x00namesq\x10]q\x11h\taX\x0f\x00\x00\x00_needConversionq\x12]q\x13\x89aX\x16"
+     b"\x00\x00\x00_needSerializeAnyFieldq\x14\x89ub."),
+]
+
+
+@pytest.mark.parametrize(
+    "made, pickled",
+    PYSPARKS_PICKLES_OF_ABSTRACT_TYPES,
+    ids=[made for made, _ in PYSPARKS_PICKLES_OF_ABSTRACT_TYPES],
+)
+def test_types_of_the_abstract_types_pickle_as_pysparks(made, pickled):
+    # PySpark's pickle of the `__dict__` of a struct, array or map of a type of its class only
+    # loads as the same type. The drop-in's own pickles it of the types it is made of, as of a
+    # user-defined type, since PySpark's `_parse_datatype_json_string` does not parse the JSON
+    # of an abstract type (`"integral"`): both clients load it at every protocol.
+    made = eval(made, vars(T))
+    loaded = pickle.loads(pickled)
+    assert type(loaded) is type(made) and loaded == made
+    assert (repr(loaded), loaded.json()) == (repr(made), made.json())
+    for protocol in range(6):
+        copied = pickle.loads(pickle.dumps(made, protocol=protocol))
+        assert type(copied) is type(made) and copied == made, protocol
+        assert (repr(copied), copied.json()) == (repr(made), made.json()), protocol
+    reduced, _ = made.__reduce__()
+    assert reduced is type(made)
+
+
+def test_the_abstract_types_have_no_proto_nor_arrow_type_as_pysparks():
+    # PySpark's `pyspark_types_to_proto_types` has no proto of a type of its class only, of which
+    # it raises UNSUPPORTED_OPERATION, also in a struct, an array or a map. `cast` and `try_cast`
+    # convert their type when the plan is built, as PySpark's: the Column renders the type's
+    # `simpleString`, and its plan raises the error (see docs/compatibility.md).
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+
+    cases = [
+        (T.AtomicType(), "AtomicType()", "ATOMIC"),
+        (T.ArrayType(T.DataType()), "DataType()", "ARRAY<DATA>"),
+        (T.MapType(T.StringType(), T.IntegralType()), "IntegralType()", "MAP<STRING,INTEGRAL>"),
+        (T.StructType([T.StructField("a", T.NumericType())]), "NumericType()", "STRUCT<A:NUMERIC>"),
+    ]
+    with mock_connect_session() as (spark, _):
+        for t, shown, rendered in cases:
+            with pytest.raises(PySparkValueError) as e:
+                pyspark_types_to_proto_types(t)
+            assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+            assert e.value.getMessageParameters() == {"operation": f"data type {shown}"}
+            for name, cast in (("CAST", F.col("a").cast), ("TRY_CAST", F.col("a").try_cast)):
+                c = cast(t)
+                assert repr(c) == f"Column<'{name}(a AS {rendered})'>"
+                with pytest.raises(PySparkValueError) as e:
+                    spark.range(1).select(c).schema
+                assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+                assert e.value.getMessageParameters() == {"operation": f"data type {shown}"}
+    # Nor an Arrow type, of which PySpark's conversion of local rows raises its error, and the
+    # plan of `DataFrame.to` raises UNSUPPORTED_OPERATION at the action, as PySpark's.
+    from pyspark.errors import PySparkTypeError
+
+    schema = T.StructType([T.StructField("a", T.AtomicType())])
+    with mock_connect_session() as (spark, _):
+        with pytest.raises(PySparkTypeError) as e:
+            spark.createDataFrame([(1,)], schema)
+        assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+        assert e.value.getMessageParameters() == {"data_type": "AtomicType()"}
+        with pytest.raises(PySparkValueError) as e:
+            spark.range(1).to(schema).collect()
+        assert e.value.getMessageParameters() == {"operation": "data type AtomicType()"}
+
+
+def test_python_subclasses_of_the_abstract_types_are_made_as_pysparks():
+    # As PySpark's plain classes, whose `object.__new__` takes the arguments that the `__init__`
+    # of a subclass takes, such as that of a UserDefinedType of parameters, and raises them
+    # otherwise. A subclass is a type of its class, whose `typeName` is the name of the class,
+    # and whose state is its `__dict__`.
+    class Q(T.DataType):
+        pass
+
+    class R(T.AtomicType):
+        def __new__(cls, *args):
+            return super().__new__(cls, *args)
+
+    class S(T.NumericType):
+        def __init__(self, x):
+            self.x = x
+
+    class U(T.DataType):
+        def __init__(self, x):
+            super().__init__(x)
+
+    for make, message in [
+        (lambda: Q(1), "Q() takes no arguments"),
+        (lambda: T.UserDefinedType(1), "UserDefinedType() takes no arguments"),
+        (lambda: T.VariantType(1), "VariantType() takes no arguments"),
+        (lambda: R(1), "object.__new__() takes exactly one argument (the type to instantiate)"),
+        (lambda: U(1), "object.__init__() takes exactly one argument (the instance to initialize)"),
+        (lambda: S(), f"{S.__init__.__qualname__}() missing 1 required positional argument: 'x'"),
+    ]:
+        with pytest.raises(TypeError) as e:
+            make()
+        assert str(e.value) == message
+    assert (Q.typeName(), Q().simpleString(), Q().json()) == ("", "", '""')
+    assert repr(R()) == "R()" and vars(S(1)) == {"x": 1}
+    assert S(1) == S(1) and S(1) != S(2) and S(1) != T.NumericType()
+    # A native constructor returns an object that exists, or makes one of the class it is called
+    # for, so a Python subclass of IntegralType cannot have the one instance of its own that
+    # PySpark's DataTypeSingleton keeps of each class: it cannot be instantiated.
+    class MyIntegral(T.IntegralType):
+        pass
+
+    with pytest.raises(TypeError, match=r"^cannot create 'MyIntegral' instances$"):
+        MyIntegral()
+
+
+def test_types_of_required_parameters_are_made_as_pysparks():
+    # As PySpark's plain classes, whose `__new__` is `object.__new__`, of any arguments, and whose
+    # `__init__` takes the parameters: a missing one is the TypeError of `__init__`, a type of
+    # `cls.__new__(cls)` is made, as pickle makes it, `__init__` makes a type again, and
+    # `inspect.signature` of a class shows the parameters of `__init__`.
+    for make, message in [
+        (T.ArrayType, "ArrayType.__init__() missing 1 required positional argument: 'elementType'"),
+        (T.MapType, "MapType.__init__() missing 2 required positional arguments: 'keyType' and "
+                    "'valueType'"),
+        (lambda: T.MapType(T.IntegerType()),
+         "MapType.__init__() missing 1 required positional argument: 'valueType'"),
+        (T.StructField, "StructField.__init__() missing 2 required positional arguments: 'name' "
+                        "and 'dataType'"),
+        (T.CharType, "CharType.__init__() missing 1 required positional argument: 'length'"),
+        (T.VarcharType, "VarcharType.__init__() missing 1 required positional argument: 'length'"),
+        (T.GeometryType, "GeometryType.__init__() missing 1 required positional argument: 'srid'"),
+        (T.GeographyType,
+         "GeographyType.__init__() missing 1 required positional argument: 'srid'"),
+        (lambda: T.ArrayType(T.IntegerType(), foo=1),
+         "ArrayType.__init__() got an unexpected keyword argument 'foo'"),
+    ]:
+        with pytest.raises(TypeError) as e:
+            make()
+        assert str(e.value) == message
+    empty = inspect.Parameter.empty
+    for cls, parameters in [
+        (T.ArrayType, [("elementType", empty), ("containsNull", True)]),
+        (T.MapType, [("keyType", empty), ("valueType", empty), ("valueContainsNull", True)]),
+        (T.StructField,
+         [("name", empty), ("dataType", empty), ("nullable", True), ("metadata", None)]),
+        (T.CharType, [("length", empty)]),
+        (T.VarcharType, [("length", empty)]),
+        (T.GeometryType, [("srid", empty)]),
+        (T.GeographyType, [("srid", empty)]),
+    ]:
+        assert type(cls.__new__(cls)) is cls
+        signature = inspect.signature(cls).parameters.values()
+        assert [(p.name, p.default) for p in signature] == parameters
+    array, field = T.ArrayType(T.IntegerType()), T.StructField("a", T.IntegerType())
+    array.__init__(T.LongType(), False)
+    field.__init__("b", T.CharType(3), False, {"k": "v"})
+    assert array == T.ArrayType(T.LongType(), False)
+    assert field == T.StructField("b", T.CharType(3), False, {"k": "v"})
+
+
+def test_the_parameters_of_the_methods_of_the_types_are_pysparks():
+    # The names and the defaults of the parameters of PySpark's methods, without its annotations,
+    # which the keyword arguments of those names take. The class of a type without parameters
+    # shows none, as PySpark's `DataTypeSingleton.__call__(cls)` and `object.__new__` do.
+    empty = inspect.Parameter.empty
+
+    def parameters(method):
+        signature = inspect.signature(method).parameters.values()
+        return [(p.name, p.default) for p in signature if p.name not in ("self", "cls")]
+
+    for method, expected in [
+        (T.StringType.collationProvider, [("collationName", empty)]),
+        (T.DateType.toInternal, [("d", empty)]),
+        (T.DateType.fromInternal, [("v", empty)]),
+        (T.TimeType.toInternal, [("t", empty)]),
+        (T.TimeType.fromInternal, [("nano", empty)]),
+        (T.TimestampType.toInternal, [("dt", empty)]),
+        (T.TimestampType.fromInternal, [("ts", empty)]),
+        (T.TimestampNTZType.toInternal, [("dt", empty)]),
+        (T.TimestampNTZType.fromInternal, [("ts", empty)]),
+        (T.DayTimeIntervalType.toInternal, [("dt", empty)]),
+        (T.DayTimeIntervalType.fromInternal, [("micros", empty)]),
+        (T.GeographyType.toInternal, [("geography", empty)]),
+        (T.GeographyType.fromInternal, [("obj", empty)]),
+        (T.GeometryType.toInternal, [("geometry", empty)]),
+        (T.GeometryType.fromInternal, [("obj", empty)]),
+        (T.DataType.toInternal, [("obj", empty)]),
+        (T.DataType.fromInternal, [("obj", empty)]),
+        (T.ArrayType.fromJson, [("json", empty), ("fieldPath", ""), ("collationsMap", None)]),
+        (T.MapType.fromJson, [("json", empty), ("fieldPath", ""), ("collationsMap", None)]),
+        (T.StructType.add,
+         [("field", empty), ("data_type", None), ("nullable", True), ("metadata", None)]),
+        (T.StringType, [("collation", "UTF8_BINARY")]),
+        (T.NullType, []),
+        (T.IntegerType, []),
+        (T.CalendarIntervalType, []),
+        (T.VariantType, []),
+        (T.UserDefinedType, []),
+    ]:
+        assert parameters(method) == expected, method
+    assert T.StringType.collationProvider(collationName="UNICODE") == "icu"
+    assert T.DateType().toInternal(d=datetime.date(1970, 1, 2)) == 1
+    assert T.DateType().fromInternal(v=1) == datetime.date(1970, 1, 2)
+    assert T.TimeType().toInternal(t=datetime.time(0, 0, 1)) == 1_000_000_000
+    assert T.TimeType().fromInternal(nano=1_000_000_000) == datetime.time(0, 0, 1)
+    assert T.TimestampNTZType().toInternal(dt=datetime.datetime(1970, 1, 1, 0, 0, 1)) == 1_000_000
+    assert T.TimestampNTZType().fromInternal(ts=1_000_000) == datetime.datetime(1970, 1, 1, 0, 0, 1)
+    assert T.DayTimeIntervalType().toInternal(dt=datetime.timedelta(seconds=1)) == 1_000_000
+    assert T.DayTimeIntervalType().fromInternal(micros=1_000_000) == datetime.timedelta(seconds=1)
+    assert T.GeometryType(0).toInternal(geometry=None) is None
+    assert T.GeographyType(4326).toInternal(geography=None) is None
 
 
 def test_a_types_hash_is_the_hash_of_its_repr_as_pysparks():

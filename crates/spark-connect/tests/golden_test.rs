@@ -4,15 +4,16 @@
 //! Goldens live in `tests/golden/exprs.jsonl` (captured by
 //! `scripts/capture_golden.py`, base64-encoded `spark.connect.Expression`). We
 //! normalize out non-deterministic noise (`common`/origin, attribute `plan_id`)
-//! on BOTH sides, then require byte-equality. A required case that is missing
-//! from the goldens or mismatches FAILS the test - no silent skips.
+//! on BOTH sides, then require byte-equality. A case of each golden is required: one that is
+//! missing from the goldens or the cases, or mismatches, FAILS the test - no silent skips.
 
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use spark_connect::column::{col, lit_string, when};
 use spark_connect::expression::{Expression, LiteralExpression};
+use spark_connect::functions;
 use spark_connect::types::DataType;
 use spark_connect_proto as proto;
 
@@ -67,9 +68,7 @@ fn load_goldens() -> HashMap<String, proto::Expression> {
     common::load_goldens("exprs.jsonl", normalize)
 }
 
-/// Build the Rust expression for each golden case name we are responsible for.
-/// (Pure `functions.*` cases like upper/concat/coalesce/sum_agg/count_star are
-/// validated in the functions phase, not here.)
+/// Build the Rust expression for each golden case name.
 // `lit_double` is 3.14 because the golden file was recorded from PySpark with that value.
 #[allow(clippy::approx_constant)]
 fn build(name: &str) -> Option<Expression> {
@@ -109,12 +108,20 @@ fn build(name: &str) -> Option<Expression> {
         "substr" => col("s").substr(cint(1), cint(3)).expression().clone(),
         "getitem" => col("m").get_item(lit_string("k")).expression().clone(),
         "getfield" => col("st").get_field("f").expression().clone(),
+        // Functions of columns, of names as PySpark's take them: `count("*")` counts the star.
+        "upper" => functions::upper(col("s")).expression().clone(),
+        "concat" => functions::concat([col("a"), col("b")]).expression().clone(),
+        "coalesce" => functions::coalesce([col("a"), col("b"), cint(0)])
+            .expression()
+            .clone(),
+        "sum_agg" => functions::sum(col("id")).expression().clone(),
+        "count_star" => functions::count(col("*")).expression().clone(),
         _ => return None,
     };
     Some(e)
 }
 
-/// Cases this test is responsible for (must all be present & match).
+/// The cases of the goldens, each of which must be present and match.
 const REQUIRED: &[&str] = &[
     "col",
     "lit_int",
@@ -139,6 +146,11 @@ const REQUIRED: &[&str] = &[
     "substr",
     "getitem",
     "getfield",
+    "upper",
+    "concat",
+    "coalesce",
+    "sum_agg",
+    "count_star",
 ];
 
 #[test]
@@ -170,6 +182,13 @@ fn expressions_match_reference_golden() {
         failures.len(),
         REQUIRED.len(),
         failures.join("\n")
+    );
+    // A case of each golden: an expression that the capture adds fails until it has its case.
+    let cases: BTreeSet<&str> = REQUIRED.iter().copied().collect();
+    let golden_names: BTreeSet<&str> = goldens.keys().map(String::as_str).collect();
+    assert_eq!(
+        cases, golden_names,
+        "the cases differ from those of the golden"
     );
     println!("all {} golden expression cases passed", REQUIRED.len());
 }

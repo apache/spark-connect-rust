@@ -46,10 +46,11 @@ also why the two are separate implementations that can have separate bugs.
 === "Log on connect"
 
     The first time a session connects, the client emits a one-line `INFO` log on the
-    `pyspark` logger:
+    `pyspark` logger, which names the version of the `pyspark-client-rust` package (that
+    of `pip show pyspark-client-rust`, not `pyspark.__version__`):
 
     ```
-    pyspark-client-rust 4.3.0 active: Spark Connect client backed by the native Rust
+    pyspark-client-rust 4.4.0 active: Spark Connect client backed by the native Rust
     engine (tonic), a drop-in for pyspark-client -- not the reference Python client.
     ```
 
