@@ -1385,8 +1385,14 @@ of their own, as PySpark's plain classes do. `AtomicType()` has the `typeName`, 
 `__dict__` only. It pickles as its class and its `__dict__`: at the protocols 2 and up its pickle
 is PySpark's own, byte for byte, and PySpark loads the drop-in's at every protocol. The struct,
 array or map that holds it names it in its `simpleString`, JSON and tree string, and pickles of
-the types it is made of. `IntegralType()` is one instance, as PySpark's `DataTypeSingleton` makes
-it, and a Python subclass of these classes, such as a `UserDefinedType` of parameters, takes the
+the types it is made of. It compares it, and names it in its `simpleString` and tree string, by the
+object that it holds, as PySpark's does, rather than by its JSON: so two types of the same JSON, of
+one class and different `__dict__`s or of two classes of one `typeName`, stay apart in the types
+that hold them, as `UserDefinedType`s of other parameters do, and `toNullable()` keeps them as they
+are. A struct, array or map made of core types, such as one of `fromJson`, holds the user-defined
+type of its JSON that a type was last made of, if one was. `IntegralType()` is one instance, as
+PySpark's `DataTypeSingleton` makes it, and a Python subclass of these classes, such as a
+`UserDefinedType` of parameters, takes the
 arguments of its `__init__`. A Python subclass of `IntegralType` cannot be instantiated, where
 PySpark's `DataTypeSingleton` makes one instance of each subclass: the constructor of a native
 class either returns an object that exists or makes one of the class it is called for. Neither
