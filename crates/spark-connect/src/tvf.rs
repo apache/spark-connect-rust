@@ -62,7 +62,10 @@ impl TableValuedFunction {
 
     /// As [`TableValuedFunction::udtf`], of a UDTF whose command `pickler` pickles each time a
     /// request builds the plan of the DataFrame, as PySpark's `PythonUDTF.to_plan` pickles the
-    /// handler class for each plan that it builds. Not a stable API.
+    /// handler class for each plan that it builds. A pickler of the return type too
+    /// ([`crate::udf::CommandPickler::with_output_type`]) gives the return type that each build
+    /// sends, as `to_plan` converts the type object of the UDTF then, and `return_type` stands
+    /// for it in a build that meets the picklers first. Not a stable API.
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn udtf_pickled_at_build<C: Into<Column>>(

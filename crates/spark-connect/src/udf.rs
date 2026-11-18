@@ -92,8 +92,9 @@ pub struct CommandPickler(Arc<dyn Pickling>);
 trait Pickling: Send + Sync {
     fn pickle(&self) -> Result<Vec<u8>>;
     fn object(&self) -> &(dyn std::any::Any + Send + Sync);
-    /// Whether the pickle is a `PythonUdf` message of the output type and the command of a UDF
-    /// (see [`CommandPickler::with_output_type`]).
+    /// Whether the pickle is a `PythonUdf` message of the output type and the command of a UDF,
+    /// or a `PythonUdtf` message of the return type and the command of a UDTF (see
+    /// [`CommandPickler::with_output_type`]).
     fn gives_output_type(&self) -> bool;
 }
 
@@ -141,7 +142,11 @@ impl CommandPickler {
     /// changed in place after the UDF was applied is the type that the request sends and the
     /// function's command carries. `pickle` gives the bytes of a `PythonUdf` message of the
     /// `output_type` and the `command`, which [`PythonUDFPayload::to_proto`] takes, or the error
-    /// that the request raises. Not a stable API.
+    /// that the request raises. Of a UDTF, as PySpark's `PythonUDTF.to_plan` converts the return
+    /// type that it keeps and then pickles the handler class at each build, `pickle` gives a
+    /// `PythonUdtf` message of the `return_type`, none for a UDTF of none, and the `command`,
+    /// which the plan of the UDTF sends (`TableValuedFunction::udtf_pickled_at_build`). Not a
+    /// stable API.
     #[doc(hidden)]
     pub fn with_output_type<O: std::any::Any + Send + Sync>(
         object: O,
@@ -159,8 +164,8 @@ impl CommandPickler {
         self.0.pickle()
     }
 
-    /// Whether this pickler gives the output type of its UDF with the command
-    /// ([`CommandPickler::with_output_type`]).
+    /// Whether this pickler gives the output type of its UDF, or the return type of its UDTF,
+    /// with the command ([`CommandPickler::with_output_type`]).
     pub(crate) fn gives_output_type(&self) -> bool {
         self.0.gives_output_type()
     }
@@ -530,6 +535,36 @@ pub(crate) fn command_bytes(command: &[u8], pickler: Option<&CommandPickler>) ->
     }
 }
 
+/// The return type and the command of a UDTF as a request builds its plan, of the `return_type`
+/// and the `command` of the plan, or of its `pickler`. Of a pickler that gives the return type
+/// with the command ([`CommandPickler::with_output_type`]), both are those of the `PythonUdtf`
+/// message that it gives as the request builds the plan, as PySpark's `PythonUDTF.to_plan`
+/// converts the return type and pickles the handler class then: so a type changed in place after
+/// the call is the type that the request sends. `return_type` stands until it gives one, as in
+/// the build of a request that meets the picklers first (see `crate::expression::pickled_command`).
+/// Else `return_type`, and the command of [`command_bytes`].
+pub(crate) fn udtf_return_type_and_command(
+    return_type: Option<&DataType>,
+    command: &[u8],
+    pickler: Option<&CommandPickler>,
+) -> (Option<proto::DataType>, bytes::Bytes) {
+    match pickler.filter(|pickler| pickler.gives_output_type()) {
+        Some(pickler) => {
+            use prost::Message;
+            let built = crate::expression::pickled_command(pickler);
+            let built = proto::PythonUdtf::decode(built.as_slice()).unwrap_or_default();
+            let return_type = built
+                .return_type
+                .or_else(|| return_type.map(DataType::to_proto));
+            (return_type, built.command)
+        }
+        None => (
+            return_type.map(DataType::to_proto),
+            command_bytes(command, pickler),
+        ),
+    }
+}
+
 /// Represents a Python UDF with its serialized command and metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PythonUDFPayload {
@@ -774,6 +809,99 @@ mod tests {
         let built = silent.to_proto();
         assert_eq!(built.output_type, Some(DataType::Integer.to_proto()));
         assert!(built.command.is_empty());
+    }
+
+    #[test]
+    fn test_a_udtf_pickler_with_the_return_type_gives_the_type_and_the_command_of_each_build() {
+        use crate::plan::LogicalPlan;
+        use prost::Message;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Mutex;
+        // As PySpark's `PythonUDTF.to_plan`, which converts the return type of the object that the
+        // call kept and pickles the handler class each time it builds the plan: the type that the
+        // object has then is sent with the command, by a request, which meets the pickler in its
+        // first build and takes its message in the second, and by the Rust API's `to_proto`; a
+        // UDTF of no return type sends none.
+        let current = Arc::new(Mutex::new(Some(DataType::Long)));
+        let picklings = Arc::new(AtomicUsize::new(0));
+        let counted = Arc::clone(&picklings);
+        let pickler = CommandPickler::with_output_type(Arc::clone(&current), move |current| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            let return_type = current.lock().unwrap().clone();
+            let name = return_type
+                .as_ref()
+                .map_or("none".to_string(), DataType::json);
+            Ok(proto::PythonUdtf {
+                return_type: return_type.as_ref().map(DataType::to_proto),
+                command: bytes::Bytes::from(format!("handler of {name}")),
+                ..Default::default()
+            }
+            .encode_to_vec())
+        });
+        let udtf = |return_type: Option<DataType>, pickler: CommandPickler| {
+            LogicalPlan::CommonInlineUdtf {
+                function_name: "t".to_string(),
+                deterministic: false,
+                arguments: vec![Expression::column("x")],
+                return_type,
+                eval_type: eval_type::SQL_TABLE_UDF,
+                command: Vec::new(),
+                python_ver: "3.11".to_string(),
+                pickler: Some(pickler),
+            }
+        };
+        let python_udtf = |relation: proto::Relation| match relation.rel_type {
+            Some(proto::relation::RelType::CommonInlineUserDefinedTableFunction(call)) => {
+                match call.function {
+                    Some(
+                        proto::common_inline_user_defined_table_function::Function::PythonUdtf(
+                            udtf,
+                        ),
+                    ) => udtf,
+                    _ => panic!("expected a PythonUDTF"),
+                }
+            }
+            _ => panic!("expected an inline UDTF"),
+        };
+        let plan = udtf(None, pickler.clone());
+        let built = python_udtf(plan.try_to_proto().unwrap());
+        assert_eq!(built.return_type, Some(DataType::Long.to_proto()));
+        assert_eq!(built.command.as_ref(), b"handler of \"long\"");
+        assert_eq!((built.eval_type, built.python_ver.as_str()), (300, "3.11"));
+        assert_eq!(picklings.load(Ordering::SeqCst), 1);
+        *current.lock().unwrap() = Some(DataType::Double);
+        let built = python_udtf(plan.try_to_proto().unwrap());
+        assert_eq!(built.return_type, Some(DataType::Double.to_proto()));
+        assert_eq!(built.command.as_ref(), b"handler of \"double\"");
+        *current.lock().unwrap() = Some(DataType::Integer);
+        let built = python_udtf(plan.to_proto());
+        assert_eq!(built.return_type, Some(DataType::Integer.to_proto()));
+        assert_eq!(built.command.as_ref(), b"handler of \"integer\"");
+        *current.lock().unwrap() = None;
+        let built = python_udtf(plan.try_to_proto().unwrap());
+        assert_eq!(built.return_type, None);
+        assert_eq!(built.command.as_ref(), b"handler of none");
+        assert_eq!(picklings.load(Ordering::SeqCst), 4);
+        // The type of the plan stands where the pickler gives none; the error of a pickling is
+        // that of the request.
+        let silent = CommandPickler::with_output_type((), |_| Ok(Vec::new()));
+        let built = python_udtf(udtf(Some(DataType::Short), silent).try_to_proto().unwrap());
+        assert_eq!(built.return_type, Some(DataType::Short.to_proto()));
+        assert!(built.command.is_empty());
+        let failing = CommandPickler::with_output_type((), |_| {
+            Err(spark_connect_core::error::SparkError::value_msg("no type"))
+        });
+        let error = udtf(None, failing).try_to_proto().unwrap_err();
+        assert_eq!(error.message, "no type");
+        // A pickler of the command only gives the command as it is, with the type of the plan.
+        let command_only = CommandPickler::new((), |_| Ok(b"handler".to_vec()));
+        let built = python_udtf(
+            udtf(Some(DataType::Long), command_only)
+                .try_to_proto()
+                .unwrap(),
+        );
+        assert_eq!(built.return_type, Some(DataType::Long.to_proto()));
+        assert_eq!(built.command.as_ref(), b"handler");
     }
 
     /// A UDF of `x` whose pickler's object is `tag`.

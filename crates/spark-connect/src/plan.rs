@@ -518,7 +518,9 @@ pub enum LogicalPlan {
         python_ver: String,
         /// The pickling of the command, which a request calls when it builds the plan, in place
         /// of `command`, as PySpark's `PythonUDTF.to_plan` pickles the handler class for each
-        /// plan that it builds. Not a stable API.
+        /// plan that it builds. One of the return type too
+        /// ([`crate::udf::CommandPickler::with_output_type`]) gives the return type of the build,
+        /// in place of `return_type`, as `to_plan` converts it then. Not a stable API.
         #[doc(hidden)]
         pickler: Option<crate::udf::CommandPickler>,
     },
@@ -3345,7 +3347,8 @@ fn transform_with_state_output_schema(
 /// The `CommonInlineUserDefinedTableFunction` of a Python UDTF: of a call with `arguments`,
 /// or of its registration without any. Mirrors PySpark's `CommonInlineUserDefinedTableFunction`
 /// of a `PythonUDTF`, which builds the arguments before the UDTF, whose command is the bytes of
-/// `command`, or that of its pickler, pickled as the plan is built.
+/// `command`, or that of its pickler, pickled as the plan is built, with the return type that the
+/// pickler gives then, if it gives one (`crate::udf::udtf_return_type_and_command`).
 pub(crate) fn common_inline_udtf(
     function_name: &str,
     deterministic: bool,
@@ -3356,10 +3359,12 @@ pub(crate) fn common_inline_udtf(
     python_ver: &str,
 ) -> proto::CommonInlineUserDefinedTableFunction {
     let arguments = arguments.iter().map(Expression::to_proto).collect();
+    let (return_type, command) =
+        crate::udf::udtf_return_type_and_command(return_type, command.0, command.1);
     let udtf = proto::PythonUdtf {
-        return_type: return_type.map(DataType::to_proto),
+        return_type,
         eval_type,
-        command: crate::udf::command_bytes(command.0, command.1),
+        command,
         python_ver: python_ver.to_string(),
     };
     proto::CommonInlineUserDefinedTableFunction {

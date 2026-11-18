@@ -206,11 +206,12 @@ def _python_ver() -> str:
     return f"{sys.version_info.major}.{sys.version_info.minor}"
 
 
-def _pickled_handler(func: Type) -> bytes:
+def _pickled_handler(func: Type, name: Optional[str] = None) -> bytes:
     """The command of a UDTF of the handler class ``func``, as PySpark Connect's
     ``PythonUDTF.to_plan`` pickles it each time it builds a plan that holds the UDTF, and its
     registration when it registers it: ``UDTF_SERIALIZATION_ERROR`` of the name of the class, of
-    a handler that does not pickle. Connect sends the schema separately, in
+    a handler that does not pickle, which is ``name``, the name that the ``PythonUDTF`` of a call
+    read at the call, or else the name of the class now. Connect sends the schema separately, in
     ``PythonUDTF.return_type``, so the command is only the handler class, unlike that of a scalar
     UDF."""
     try:
@@ -219,25 +220,31 @@ def _pickled_handler(func: Type) -> bytes:
         raise PySparkPicklingError(
             errorClass="UDTF_SERIALIZATION_ERROR",
             messageParameters={
-                "name": func.__name__,
+                "name": func.__name__ if name is None else name,
                 "message": "Please check the stack trace and "
                 "make sure the function is serializable.",
             },
         )
 
 
-def _udtf_command(func: Type, returnType: Optional[Any]) -> bytes:
-    """The command of a call of a UDTF of the handler class ``func`` and the return type
-    ``returnType``, as PySpark Connect's ``PythonUDTF.to_plan`` builds it each time it builds a
-    plan that holds the call: it converts the return type first, with
-    ``pyspark_types_to_proto_types``, so the error of a type that does not convert is raised
-    before the handler is pickled, such as ``UNSUPPORTED_OPERATION`` of a value that is not a
-    DataType, and then it pickles the handler (see ``_pickled_handler``)."""
+def _udtf_command(func: Type, name: str, returnType: Optional[Any]) -> bytes:
+    """The ``PythonUDTF`` message of the return type and the command of a call of a UDTF, as
+    PySpark Connect's ``PythonUDTF.to_plan`` builds them each time it builds a plan that holds the
+    call, of what the ``PythonUDTF`` of the call keeps: the handler class ``func``, its ``name``
+    then and the return type object ``returnType``. It converts the return type first, of the
+    object as it is now, with ``pyspark_types_to_proto_types``: so a ``StructType`` changed in
+    place after the call is the type that the request sends, and the error of a type that does not
+    convert, such as ``UNSUPPORTED_OPERATION`` of a value that is not a DataType, is raised before
+    the handler is pickled. Then it pickles the handler (see ``_pickled_handler``). The request
+    sends this type and this command, with the eval type and the Python version of the call."""
+    import pyspark.sql.connect.proto as pb2
     from pyspark.sql.connect.types import pyspark_types_to_proto_types
 
+    udtf = pb2.PythonUDTF()
     if returnType is not None:
-        pyspark_types_to_proto_types(returnType)
-    return _pickled_handler(func)
+        udtf.return_type.CopyFrom(pyspark_types_to_proto_types(returnType))
+    udtf.command = _pickled_handler(func, name)
+    return udtf.SerializeToString()
 
 
 class UserDefinedTableFunction:
@@ -283,20 +290,27 @@ class UserDefinedTableFunction:
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from pyspark import _pyspark
         from pyspark.sql import SparkSession
+        from pyspark.sql.connect.types import UnparsedDataType
 
         # As PySpark's: an argument is ColumnOrName, so a bare string is a column name, of
         # which pyfunc_make_udtf makes a ColumnReference, and each keyword argument is a
-        # NamedArgumentExpression, after the positional ones. As its `PythonUDTF.to_plan`, each
-        # request converts the return type and pickles the handler class when it builds the plan
-        # of the DataFrame, after the arguments.
+        # NamedArgumentExpression, after the positional ones. As its `PythonUDTF`, made at the
+        # call, the plan keeps the handler class, its name and the return type object as they
+        # are now, a str as an UnparsedDataType, so a returnType or a func set after the call is
+        # not that of the call. As its `PythonUDTF.to_plan`, each request converts that type, as
+        # the object is then, and pickles the handler class when it builds the plan of the
+        # DataFrame, after the arguments: `_udtf_command` gives both, so the call passes no type.
         cols = list(args)
         named = list(kwargs.items())
+        returnType = self.returnType
+        if isinstance(returnType, str):
+            returnType = UnparsedDataType(returnType)
         return _pyspark.functions.pyfunc_make_udtf(
             SparkSession.active(),
             self._name,
-            self.returnType,
+            None,
             self.evalType,
-            functools.partial(_udtf_command, self.func, self.returnType),
+            functools.partial(_udtf_command, self.func, self.func.__name__, returnType),
             _python_ver(),
             *cols,
             deterministic=self.deterministic,

@@ -131,8 +131,10 @@ fn udf_arguments(
 /// - session: the SparkSession the UDTF is evaluated against
 /// - name/return_type/eval_type/command/python_ver: as for `make_udf`
 ///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF}); a function
-///   for `command` converts `return_type` and then pickles the handler class each time a request
-///   builds the plan, as PySpark's `PythonUDTF.to_plan` does (the shim's `_udtf_command`)
+///   for `command`, which each request calls when it builds the plan, returns the `PythonUDTF`
+///   message of the return type, which it converts first, and of the pickled handler class, as
+///   PySpark's `PythonUDTF.to_plan` builds them (the shim's `_udtf_command`); `return_type` is
+///   not read for it
 /// - *args: Column arguments
 /// - deterministic: whether the UDTF is deterministic, which a PySpark UDTF is not unless
 ///   `asDeterministic()` makes it so
@@ -159,15 +161,19 @@ fn pyfunc_make_udtf(
     // string is left to the server to parse, and a type that does not convert, such as a value
     // that is not a DataType or a type that `pyspark_types_to_proto_types` has no proto of, also
     // nested, fails each request of the DataFrame with its error, and not the call. A command
-    // pickled at the build converts the type first, as it is then, so the pickling raises that
-    // error in PySpark's order, and the plan has no type in its place; the error of a command of
-    // bytes is recorded in the plan's arguments, after the errors of the arguments.
+    // pickled at the build gives the type that it converts first, of the object as it is then,
+    // with the handler that it pickles next, so a type changed in place after the call is the
+    // type that the request sends, and the pickling raises the error of the type in PySpark's
+    // order: the call converts no type for it. A command of bytes is sent with the type converted
+    // now, whose error is recorded in the plan's arguments, after the errors of the arguments.
     let at_build = matches!(command, crate::udf_command::UdfCommand::AtBuild(_));
     let mut plan_args = crate::plan_args::PlanArgs::new();
-    let rt = match return_type.map(|value| (value, crate::types::udtf_return_type(value))) {
+    let rt = match return_type
+        .filter(|_| !at_build)
+        .map(|value| (value, crate::types::udtf_return_type(value)))
+    {
         None => None,
         Some((_, Ok(Some(data_type)))) => Some(data_type),
-        Some(_) if at_build => None,
         Some((value, Ok(None))) => {
             plan_args.raised(py, crate::types::not_a_type_error(value))?;
             None
