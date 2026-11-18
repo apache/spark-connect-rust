@@ -226,14 +226,17 @@ python scripts/gen_type_stubs.py --pyspark-src "$SPARK_HOME/python"
 
 A module that comes to re-export a native class gets a stub when you add it to `STUB_MODULES` of
 the generator, and a public name that the drop-in's module has and PySpark's does not goes into its
-`EXTRAS`. A method that assigns an instance attribute keeps its body in the stub, from which type
+`EXTRAS`. A module that becomes PySpark's own, vendored as it is, leaves `STUB_MODULES`, as a stub
+would only shadow PySpark's annotated source, and a name of `EXTRAS` that the drop-in's module no
+longer has leaves `EXTRAS`. A method that assigns an instance attribute keeps its body in the stub, from which type
 checkers infer the attribute; the generator fails on a public instance attribute that a stub would
 miss, and one whose type PySpark narrows before it assigns it goes into `ATTRIBUTE_TYPES`.
 `python/tests/test_type_stubs_offline.py` fails on a name that a stub misses or an instance
 attribute that mypy does not type, and on a name that a stub declares and the drop-in does not
 have at run time: give the drop-in the name if it is PySpark's API, list it in `DROPPED` of the
 generator if it is PySpark's plumbing that no annotation needs, or in `TYPE_ONLY` of the test,
-with the reason, if PySpark's annotations need it. It also runs mypy on a user's application.
+with the reason, if PySpark's annotations need it. It also runs mypy, and pyright where it is
+installed (as `coverage.yml` installs it), on a user's application.
 
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).

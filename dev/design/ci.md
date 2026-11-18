@@ -266,12 +266,12 @@ one job does three things:
 - **Offline Python suite**: builds the extension and runs the offline test files that its step
   names under `coverage.py`: every `python/tests/test_*_offline.py` file (those of the drop-in,
   the Rust protobuf runtime, the ML suites, the exit hook, the settings of createDataFrame and
-  the type stubs) and `test_arrow_handoff.py`. `test_type_stubs_offline.py` runs mypy, at the
-  version that the job pins, on a user's application. No other workflow runs these files, so
-  this step is their gate: a failing test fails the job, and a guard step at the start of the
-  job fails when one of the files is not in the step's list. `-rs` prints every skipped test
-  with its reason. The scope of the Python number is the hand-written shim, as
-  `python/.coveragerc` defines it.
+  the type stubs) and `test_arrow_handoff.py`. `test_type_stubs_offline.py` runs mypy and
+  pyright, at the versions that the job pins, on a user's application and on the stubs. No
+  other workflow runs these files, so this step is their gate: a failing test fails the job, and
+  a guard step at the start of the job fails when one of the files is not in the step's list.
+  `-rs` prints every skipped test with its reason. The scope of the Python number is the
+  hand-written shim, as `python/.coveragerc` defines it.
 - **Coverage floors**: the last step fails the job when a number is below its floor,
   `RUST_COVERAGE_FLOOR` (Rust line coverage) or `PYTHON_COVERAGE_FLOOR` (Python line and
   branch coverage), both set in the `env` block of the workflow. The step runs after the

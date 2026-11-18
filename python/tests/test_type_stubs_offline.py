@@ -8,16 +8,19 @@ mypy found 518 of the 562 names of ``pyspark.sql.functions.__all__`` missing, an
 their bodies, so mypy sees what it sees of the official pyspark-client.
 
 mypy runs as a user's does: on files of a directory of their own, with the drop-in on the path
-of the interpreter as an installed package, whose own errors it does not report.
+of the interpreter as an installed package, whose own errors it does not report. So does pyright,
+when it is installed (coverage.yml installs it), on the same files.
 """
 
 import ast
 import importlib
 import importlib.util
 import inspect
+import json
 import os
 import pkgutil
 import re
+import shutil
 import subprocess
 import sys
 import types
@@ -105,6 +108,24 @@ ATTRIBUTE_TYPES = {
     "pyspark.sql.udf.UserDefinedFunction.func": "def (*Any, **Any) -> Any",
     "pyspark.sql.connect.session.SparkSession.release_session_on_close": "bool",
 }
+
+
+# The same, as pyright reveals them with the official pyspark-client 4.3.0.
+PYRIGHT_ATTRIBUTE_TYPES = {
+    "pyspark.sql.types.StructType.fields": "List[StructField]",
+    "pyspark.sql.types.StructType.names": "list[str]",
+    "pyspark.sql.types.StructField.dataType": "DataType",
+    "pyspark.sql.types.StructField.metadata": "Dict[str, Any]",
+    "pyspark.sql.types.ArrayType.elementType": "DataType",
+    "pyspark.sql.types.DecimalType.precision": "int",
+    "pyspark.sql.types.GeometryType.srid": "int",
+    "pyspark.storagelevel.StorageLevel.useDisk": "bool",
+    "pyspark.sql.udf.UserDefinedFunction.func": "(...) -> Any",
+    "pyspark.sql.connect.session.SparkSession.release_session_on_close": "bool",
+}
+
+# pyright, at the version that coverage.yml installs; the tests of pyright skip without it.
+PYRIGHT = shutil.which(os.environ.get("PYRIGHT", "pyright"))
 
 
 def _stubs():
@@ -241,6 +262,38 @@ def _of(run, file_name):
     return [d[1:] for d in run["diagnostics"] if d[0] == (run["app"] / file_name).resolve()]
 
 
+@pytest.fixture(scope="module")
+def user_pyright(user_mypy):
+    """pyright's diagnostics, as _run_mypy's, of one run over the files of `user_mypy`, with the
+    drop-in first on the path of the interpreter: (absolute path, line, severity, message), the
+    revealed types as `Revealed type is "..."`, of each error and of each revealed type."""
+    if PYRIGHT is None:
+        pytest.skip("pyright is not installed")
+    app = user_mypy["app"]
+    path = os.pathsep.join(p for p in (str(PYTHON_ROOT), os.environ.get("PYTHONPATH")) if p)
+    files = [USER_APP.name, "probe_functions.py", "probe_modules.py", "probe_attributes.py"]
+    result = subprocess.run(
+        [PYRIGHT, "--pythonpath", sys.executable, "--outputjson", *files],
+        cwd=app,
+        env={**os.environ, "PYTHONPATH": path},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode in (0, 1), result.stdout + result.stderr
+    diagnostics = []
+    for d in json.loads(result.stdout)["generalDiagnostics"]:
+        message = d["message"].split("\n")[0]
+        revealed = re.match(r'^Type of ".*" is "(.*)"$', message)
+        if d["severity"] == "information" and revealed:
+            message = f'Revealed type is "{revealed.group(1)}"'
+        elif d["severity"] != "error":
+            continue  # such as reportMissingModuleSource of pyspark.sql.functions.builtin
+        line = d["range"]["start"]["line"] + 1
+        diagnostics.append((Path(d["file"]).resolve(), line, d["severity"], message))
+    return {**user_mypy, "diagnostics": diagnostics}
+
+
 def test_user_application_has_only_its_deliberate_error(user_mypy):
     # As on the official client: PySpark's DataFrame, col and reader, and the one error.
     source = USER_APP.read_text().splitlines()
@@ -310,6 +363,47 @@ def test_stubs_type_the_instance_attributes(user_mypy):
     assert [name for name, revealed_type in revealed.items() if revealed_type == "Any"] == []
     assert {name: revealed.get(name) for name in ATTRIBUTE_TYPES} == ATTRIBUTE_TYPES
     assert len(revealed) > 50
+
+
+def test_pyright_sees_the_user_application_as_with_the_official_client(user_pyright):
+    # As mypy: PySpark's DataFrame, col and reader, and the one error.
+    source = USER_APP.read_text().splitlines()
+    deliberate = next(i for i, line in enumerate(source, 1) if line.startswith("rows: str ="))
+    found = _of(user_pyright, USER_APP.name)
+    errors = [(line, message) for line, severity, message in found if severity == "error"]
+    assert errors == [(deliberate, 'Type "int" is not assignable to declared type "str"')]
+    revealed = [m for _, severity, m in found if m.startswith("Revealed type is ")]
+    assert revealed[:2] == [
+        'Revealed type is "DataFrame"',
+        'Revealed type is "(col: str) -> Column"',
+    ]
+    assert revealed[2].startswith('Revealed type is "(path: str | List[str] | Unknown | DataFrame')
+    assert revealed[2].endswith(') -> DataFrame"'), revealed[2]
+    assert len(revealed) == 3
+
+
+def test_pyright_types_every_function_and_name_and_instance_attribute(user_pyright):
+    # The probes of the tests of mypy above: the 562 functions of pyspark.sql.functions.__all__,
+    # none Unknown, every public name of the modules, and the public instance attributes of the
+    # stubbed classes, none Unknown, with the types of the official client.
+    functions = _of(user_pyright, "probe_functions.py")
+    assert [f for f in functions if f[1] == "error"] == []
+    revealed = [m for _, severity, m in functions if m.startswith("Revealed type is ")]
+    assert len(revealed) == 562
+    assert [m for m in revealed if m == 'Revealed type is "Unknown"'] == []
+    modules = _of(user_pyright, "probe_modules.py")
+    uses = user_pyright["module_uses"]
+    assert [f"{uses.get(line, line)}: {m}" for line, s, m in modules if s == "error"] == []
+    attributes = _of(user_pyright, "probe_attributes.py")
+    uses = user_pyright["attribute_uses"]
+    assert [(uses.get(line, line), m) for line, s, m in attributes if s == "error"] == []
+    types = {
+        uses[line]: m[len('Revealed type is "') : -1]
+        for line, severity, m in attributes
+        if m.startswith("Revealed type is ")
+    }
+    assert [name for name, revealed_type in types.items() if revealed_type == "Unknown"] == []
+    assert {n: types.get(n) for n in PYRIGHT_ATTRIBUTE_TYPES} == PYRIGHT_ATTRIBUTE_TYPES
 
 
 def _stub_declarations(gen, tree):
