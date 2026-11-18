@@ -1552,7 +1552,7 @@ fn udf_builders_client_side() {
     let _ = gd.apply_in_pandas(udf());
     let _ = gd.apply_in_arrow(udf());
     let _ = gd.apply_in_pandas_with_state(udf(), empty_struct(), "append", "");
-    let _ = gd.transform_with_state(udf(), "append", "NoTime", None, None);
+    let _ = gd.transform_with_state(udf(), empty_struct(), "append", "NoTime", None, None);
     let _ =
         gd.transform_with_state_in_pandas(udf(), empty_struct(), "append", "NoTime", None, None);
 

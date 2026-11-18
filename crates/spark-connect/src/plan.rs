@@ -434,6 +434,13 @@ pub enum LogicalPlan {
         func: CommonInlineUserDefinedFunctionExpression,
         is_barrier: bool,
         profile_id: Option<i32>,
+        /// The id of the resource profile as a request reads it when it builds the plan, after
+        /// the function and the flag, in the place of `profile_id`: as PySpark's plan reads
+        /// `profile.id`, which creates the profile on the server the first time. It is read as a
+        /// command is pickled (see [`crate::udf::CommandPickler`]), of the four bytes of the id
+        /// as a little-endian `i32`. Not a stable API.
+        #[doc(hidden)]
+        profile_id_reader: Option<crate::udf::CommandPickler>,
     },
     /// GroupMap: `GroupedData.applyInPandas` / `applyInArrow`, and the stateful
     /// `transformWithState[InPandas]`.
@@ -1785,7 +1792,14 @@ impl LogicalPlan {
                 pending.push(Of(col));
                 pending.extend(fractions.iter().map(|(stratum, _)| Of(stratum)));
             }
-            LogicalPlan::MapPartitions { func, .. } => pending.push(Udf(func)),
+            LogicalPlan::MapPartitions {
+                func,
+                profile_id_reader,
+                ..
+            } => {
+                pending.push(Udf(func));
+                pending.extend(profile_id_reader.iter().map(Pickler));
+            }
             LogicalPlan::GroupMap {
                 grouping_expressions,
                 func,
@@ -2909,12 +2923,19 @@ impl LogicalPlan {
                 func,
                 is_barrier,
                 profile_id,
+                profile_id_reader,
             } => {
                 let mut mp = proto::MapPartitions::default();
                 mp.input = Some(Box::new(relation_of(input, plan_ids)));
                 mp.func = Some(func.to_proto());
                 mp.is_barrier = Some(*is_barrier);
-                mp.profile_id = *profile_id;
+                // As PySpark's, which reads `profile.id` once it set the function and the flag.
+                mp.profile_id = match profile_id_reader {
+                    Some(reader) => <[u8; 4]>::try_from(crate::expression::pickled_command(reader))
+                        .ok()
+                        .map(i32::from_le_bytes),
+                    None => *profile_id,
+                };
                 relation.rel_type = Some(proto::relation::RelType::MapPartitions(Box::new(mp)));
             }
             LogicalPlan::GroupMap {

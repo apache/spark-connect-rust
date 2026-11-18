@@ -494,7 +494,8 @@ impl DataFrame {
         Self::new_with_cached_schema(self.session.clone(), plan, self.cached_schema())
     }
 
-    /// Set operations propagate only exactly equal cached schemas from the same session.
+    /// Set operations propagate only equal cached schemas from the same session, as PySpark's
+    /// `_merge_cached_schema` compares them with `==` ([`DataType::eq_as_python`]).
     fn with_merged_schema(&self, other: &DataFrame, plan: LogicalPlan) -> Self {
         // A right-hand plan from another session is analyzed in our session;
         // its previously resolved schema is not evidence about that resolution.
@@ -503,7 +504,7 @@ impl DataFrame {
         }
         // Snapshot separately, including for self-unions; never lock both inputs.
         let schema = match (self.cached_schema(), other.cached_schema()) {
-            (Some(left), Some(right)) if left == right => Some(left),
+            (Some(left), Some(right)) if left.eq_as_python(&right) => Some(left),
             _ => None,
         };
         Self::new_with_cached_schema(self.session.clone(), plan, schema)
@@ -990,6 +991,20 @@ impl DataFrame {
         self.map_partitions(func, is_barrier, profile_id)
     }
 
+    /// As [`DataFrame::map_in_pandas_with_profile`] and [`DataFrame::map_in_arrow_with_profile`],
+    /// of a resource profile whose id a request reads with `profile_id_reader` when it builds the
+    /// plan, as PySpark's plan reads `profile.id`, which creates the profile on the server the
+    /// first time (see `LogicalPlan::MapPartitions`). Not a stable API.
+    #[doc(hidden)]
+    pub fn map_in_python_with_profile_reader(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id_reader: Option<crate::udf::CommandPickler>,
+    ) -> DataFrame {
+        self.map_partitions_of(func, is_barrier, None, profile_id_reader)
+    }
+
     /// Build a `MapPartitions` relation from an already-constructed UDF.
     fn map_partitions(
         &self,
@@ -997,12 +1012,23 @@ impl DataFrame {
         is_barrier: bool,
         profile_id: Option<i32>,
     ) -> DataFrame {
+        self.map_partitions_of(func, is_barrier, profile_id, None)
+    }
+
+    fn map_partitions_of(
+        &self,
+        func: CommonInlineUserDefinedFunctionExpression,
+        is_barrier: bool,
+        profile_id: Option<i32>,
+        profile_id_reader: Option<crate::udf::CommandPickler>,
+    ) -> DataFrame {
         let schema = func.python_udf.output_type.clone();
         let plan = LogicalPlan::MapPartitions {
             input: Arc::clone(&self.plan),
             func,
             is_barrier,
             profile_id,
+            profile_id_reader,
         };
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }
@@ -1531,6 +1557,25 @@ impl DataFrame {
             is_local_cache: Arc::new(Mutex::new(None)),
             execution: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The schema of this DataFrame if it is cached, without a request, as the `_cached_schema`
+    /// of PySpark's DataFrame that the state of its pickle keeps. Not a stable API.
+    #[doc(hidden)]
+    pub fn known_schema(&self) -> Option<DataType> {
+        self.cached_schema().map(|schema| (*schema).clone())
+    }
+
+    /// As [`DataFrame::shallow_copy`], with `schema` as the cached schema, or none, as PySpark's
+    /// unpickle of a DataFrame sets the `_cached_schema` of the state of the pickle, after its
+    /// request of the schema. A schema that is not a struct is not cached, as [`DataFrame::to`]
+    /// does not cache one. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_known_schema(&self, schema: Option<DataType>) -> DataFrame {
+        let mut copy = self.shallow_copy();
+        let schema = schema.filter(|schema| matches!(schema, DataType::Struct { .. }));
+        copy.schema_cache = Arc::new(Mutex::new(schema.map(Arc::new)));
+        copy
     }
 
     /// The copy of this DataFrame that PySpark's `copy.deepcopy` makes, of `session`, the copy of
@@ -2204,6 +2249,20 @@ impl DataFrame {
         observation: &crate::observation::Observation,
         exprs: impl IntoIterator<Item = C>,
     ) -> Result<DataFrame> {
+        self.observe_with_streaming(observation, exprs, || self.is_streaming())
+    }
+
+    /// As [`DataFrame::observe_with`], of `is_streaming`, which answers whether this DataFrame is
+    /// streaming once the observation is checked: PySpark's `Observation._on` reads the
+    /// `isStreaming` of the DataFrame, a `functools.cached_property`, so a client of the core
+    /// gives the answer that it keeps for the DataFrame. Not a stable API.
+    #[doc(hidden)]
+    pub fn observe_with_streaming<C: Into<Column>>(
+        &self,
+        observation: &crate::observation::Observation,
+        exprs: impl IntoIterator<Item = C>,
+        is_streaming: impl FnOnce() -> Result<bool>,
+    ) -> Result<DataFrame> {
         let exprs = expressions_of(exprs);
         // As PySpark's `observe`, which checks this first.
         if exprs.is_empty() {
@@ -2214,7 +2273,7 @@ impl DataFrame {
             ));
         }
         let name = observation.name_to_observe()?;
-        if self.is_streaming()? {
+        if is_streaming()? {
             return Err(SparkError::classed(
                 spark_connect_core::error::SparkErrorKind::IllegalArgument,
                 "UNSUPPORTED_OPERATION",
@@ -5330,6 +5389,60 @@ mod cache_tests {
         let other_session = spark.new_session();
         let other = other_session.range(3).unwrap().to(left.schema().unwrap());
         assert!(left.union(&other).cached_schema().is_none());
+    }
+
+    #[test]
+    fn schema_propagation_merges_schemas_whose_metadata_python_compares_equal() {
+        // As PySpark's `_merge_cached_schema`, which compares the cached schemas with `==`, of the
+        // metadata of their fields as Python compares the dicts: `1 == 1.0 == True`. The schema
+        // of the left side is kept.
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        let of = |value: serde_json::Value| {
+            let schema = serde_json::json!({
+                "type": "struct",
+                "fields": [{"name": "id", "type": "long", "nullable": true,
+                            "metadata": {"x": value}}]
+            });
+            df.to(DataType::from_json(&schema).unwrap())
+        };
+        let left = of(serde_json::json!(1));
+        for same in [serde_json::json!(1.0), serde_json::json!(true)] {
+            for merged in [left.union(&of(same.clone())), left.intersect(&of(same))] {
+                assert_eq!(merged.cached_schema(), left.cached_schema());
+            }
+        }
+        for other in [
+            serde_json::json!(2),
+            serde_json::json!(1.5),
+            serde_json::json!("1"),
+        ] {
+            assert!(left.union(&of(other)).cached_schema().is_none());
+        }
+    }
+
+    #[test]
+    fn a_known_schema_is_cached_as_an_unpickled_dataframe_sets_it_as_pyspark() {
+        // As PySpark's unpickle of a DataFrame, which sets the `_cached_schema` of the state of the
+        // pickle: of a struct, none for none, and a type that is not a struct is not cached.
+        let spark = SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let df = spark.range(3).unwrap();
+        assert!(df.known_schema().is_none());
+        let schema = DataType::Struct { fields: vec![] };
+        let known = df.with_known_schema(Some(schema.clone()));
+        assert_eq!(known.known_schema(), Some(schema.clone()));
+        assert_eq!(known.schema().unwrap(), schema);
+        assert!(known.with_known_schema(None).known_schema().is_none());
+        assert!(df
+            .with_known_schema(Some(DataType::Long))
+            .known_schema()
+            .is_none());
     }
 
     #[test]

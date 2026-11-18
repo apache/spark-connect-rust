@@ -258,6 +258,26 @@ impl PyStorageLevel {
         PyTuple::empty(py)
     }
 
+    /// The reduce of an instance at `protocol`, so that it pickles at every protocol, as one of
+    /// PySpark's plain class does: that of `object` from the protocol 2 ([`Self::__getnewargs__`]),
+    /// and the same form at the protocols 0 and 1, where `copyreg._reduce_ex` refuses a class of a
+    /// native base, of `copyreg.__newobj__`, the class and its attributes, which those protocols
+    /// store too.
+    fn __reduce_ex__<'py>(slf: &Bound<'py, Self>, protocol: i32) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let object = py.import("builtins")?.getattr("object")?;
+        if protocol >= 2 {
+            return object.call_method1("__reduce_ex__", (slf, protocol));
+        }
+        let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+        let args = PyTuple::new(py, [slf.get_type()])?;
+        let state = match crate::reduce::plain_object_state(slf.as_any())? {
+            Some(state) => state,
+            None => py.None().into_bound(py),
+        };
+        Ok(PyTuple::new(py, [newobj, args.into_any(), state])?.into_any())
+    }
+
     // Preset levels (class attributes), matching pyspark.
     #[classattr]
     #[allow(non_snake_case)]

@@ -16,25 +16,9 @@
 #
 """Protobuf functions, mirroring ``pyspark.sql.protobuf.functions``."""
 
-from pyspark import _pyspark
-
 # As PySpark's `_to_col`, which raises NOT_EXPECTED_TYPE for a `data` that is not a Column or a str.
 from pyspark.sql.functions import _column_or_name as _to_col
-from pyspark.sql.functions import _dict_to_options_column
-
-_functions = _pyspark.functions
-_pyfunc_from_protobuf = _functions.pyfunc_from_protobuf
-_pyfunc_from_protobuf_with_descriptor = _functions.pyfunc_from_protobuf_with_descriptor
-_pyfunc_from_protobuf_with_descriptor_and_options = (
-    _functions.pyfunc_from_protobuf_with_descriptor_and_options
-)
-_pyfunc_from_protobuf_with_options = _functions.pyfunc_from_protobuf_with_options
-_pyfunc_to_protobuf = _functions.pyfunc_to_protobuf
-_pyfunc_to_protobuf_with_descriptor = _functions.pyfunc_to_protobuf_with_descriptor
-_pyfunc_to_protobuf_with_descriptor_and_options = (
-    _functions.pyfunc_to_protobuf_with_descriptor_and_options
-)
-_pyfunc_to_protobuf_with_options = _functions.pyfunc_to_protobuf_with_options
+from pyspark.sql.functions import _dict_to_options_column, _invoke_function, lit
 
 
 def _descriptor_set(descFilePath, binaryDescriptorSet):
@@ -45,6 +29,20 @@ def _descriptor_set(descFilePath, binaryDescriptorSet):
         with open(descFilePath, "rb") as f:
             return f.read()
     return None
+
+
+def _protobuf_function(name, data, messageName, descriptor, options):
+    """The Column of the Protobuf function `name`, as PySpark's: the message name and the
+    descriptor set are the literals of the values as they are given, which PySpark does not check,
+    and which a request sets when it builds the plan, as the server reads them, so a str that
+    UTF-8 cannot encode fails each DataFrame of the Column then, and a message name that is not a
+    str, such as 5, bytes or None, is the server's error of the function."""
+    arguments = [_to_col(data), lit(messageName)]
+    if descriptor is not None:
+        arguments.append(lit(descriptor))
+    if options is not None:
+        arguments.append(_dict_to_options_column(options))
+    return _invoke_function(name, *arguments)
 
 
 def from_protobuf(
@@ -60,18 +58,7 @@ def from_protobuf(
         binaryDescriptorSet: the protobuf descriptor set as bytes, instead of a file.
     """
     descriptor = _descriptor_set(descFilePath, binaryDescriptorSet)
-    column = _to_col(data)
-    if descriptor is None:
-        if options is None:
-            return _pyfunc_from_protobuf(column, messageName)
-        return _pyfunc_from_protobuf_with_options(
-            column, messageName, _dict_to_options_column(options)
-        )
-    if options is None:
-        return _pyfunc_from_protobuf_with_descriptor(column, messageName, descriptor)
-    return _pyfunc_from_protobuf_with_descriptor_and_options(
-        column, messageName, descriptor, _dict_to_options_column(options)
-    )
+    return _protobuf_function("from_protobuf", data, messageName, descriptor, options)
 
 
 def to_protobuf(
@@ -87,18 +74,7 @@ def to_protobuf(
         binaryDescriptorSet: the protobuf descriptor set as bytes, instead of a file.
     """
     descriptor = _descriptor_set(descFilePath, binaryDescriptorSet)
-    column = _to_col(data)
-    if descriptor is None:
-        if options is None:
-            return _pyfunc_to_protobuf(column, messageName)
-        return _pyfunc_to_protobuf_with_options(
-            column, messageName, _dict_to_options_column(options)
-        )
-    if options is None:
-        return _pyfunc_to_protobuf_with_descriptor(column, messageName, descriptor)
-    return _pyfunc_to_protobuf_with_descriptor_and_options(
-        column, messageName, descriptor, _dict_to_options_column(options)
-    )
+    return _protobuf_function("to_protobuf", data, messageName, descriptor, options)
 
 
 __all__ = ["from_protobuf", "to_protobuf"]

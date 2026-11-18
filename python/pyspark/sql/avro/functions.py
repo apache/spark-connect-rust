@@ -16,15 +16,15 @@
 #
 """Avro functions, mirroring ``pyspark.sql.avro.functions``."""
 
-from pyspark import _pyspark
 from pyspark.errors import PySparkTypeError
 from pyspark.sql.column import Column
-from pyspark.sql.functions import _call_function, _dict_to_options_column, _to_col
-
-_functions = _pyspark.functions
-_pyfunc_from_avro = _functions.pyfunc_from_avro
-_pyfunc_from_avro_with_options = _functions.pyfunc_from_avro_with_options
-_pyfunc_to_avro_with_schema = _functions.pyfunc_to_avro_with_schema
+from pyspark.sql.functions import (
+    _call_function,
+    _dict_to_options_column,
+    _invoke_function,
+    _to_col,
+    lit,
+)
 
 
 def _check_data(data):
@@ -54,10 +54,12 @@ def from_avro(data, jsonFormatSchema, options=None):
             errorClass="INVALID_TYPE",
             messageParameters={"arg_name": "options", "arg_type": "dict, optional"},
         )
+    # As PySpark's, the schema is the literal of the str, which a request sets when it builds
+    # the plan: one that UTF-8 cannot encode fails each DataFrame of the Column then.
     if options is None:
-        return _pyfunc_from_avro(_to_col(data), jsonFormatSchema)
-    return _pyfunc_from_avro_with_options(
-        _to_col(data), jsonFormatSchema, _dict_to_options_column(options)
+        return _invoke_function("from_avro", _to_col(data), lit(jsonFormatSchema))
+    return _invoke_function(
+        "from_avro", _to_col(data), lit(jsonFormatSchema), _dict_to_options_column(options)
     )
 
 
@@ -76,7 +78,7 @@ def to_avro(data, jsonFormatSchema=""):
         )
     if jsonFormatSchema == "":
         return _call_function("to_avro", _to_col(data))
-    return _pyfunc_to_avro_with_schema(_to_col(data), jsonFormatSchema)
+    return _invoke_function("to_avro", _to_col(data), lit(jsonFormatSchema))
 
 
 __all__ = ["from_avro", "to_avro"]

@@ -2,7 +2,6 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString, PyTuple};
-use spark_connect::dataframe::DataFrame;
 use spark_connect::expression::Expression;
 use spark_connect::observation::Observation;
 use spark_connect::SparkSession;
@@ -153,7 +152,7 @@ impl PyObservation {
             .iter()
             .map(|c| c.column.expression().clone())
             .collect();
-        observe(slf.py(), &df.dataframe, slf, exprs)
+        observe(slf.py(), &df, slf, exprs)
     }
 
     /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the name, the
@@ -396,10 +395,11 @@ fn copy_attributes(
 /// an Observation of their plans.
 pub(crate) fn observe(
     py: Python<'_>,
-    df: &DataFrame,
+    frame: &PyDataFrame,
     observation: &Bound<'_, PyObservation>,
     mut exprs: Vec<Expression>,
 ) -> PyResult<PyDataFrame> {
+    let df = &frame.dataframe;
     // An Observation unpickled from a used one is used, as PySpark's of a `_result`.
     if observation.borrow().restored.result.is_some() {
         return Err(raise_pyspark(
@@ -417,8 +417,9 @@ pub(crate) fn observe(
     }
     let args = args.before(&mut exprs);
     let inner = observation.borrow().inner.clone();
+    // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once.
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
-        df.observe_with(&inner, exprs)
+        df.observe_with_streaming(&inner, exprs, || frame.streaming_once())
     })?;
     // The plan holds the state of the Observation, as PySpark's holds the Observation itself,
     // which a deep copy of the plan copies with the memo of the call.

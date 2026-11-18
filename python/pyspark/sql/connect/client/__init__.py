@@ -439,6 +439,20 @@ class SparkConnectClient:
         self.thread_local = _ThreadLocalOfClient(session)
         self.global_user_context_extensions_lock = threading.Lock()
 
+    def __copy__(self) -> "SparkConnectClient":
+        # As copy.copy of PySpark's client, a plain object: a client of the same attributes.
+        copied = object.__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        return copied
+
+    def __reduce__(self) -> Any:
+        # PySpark's client keeps its thread-local state in a threading.local, which pickle,
+        # cloudpickle and copy.deepcopy refuse: so they fail at one, with the error of each
+        # protocol ("cannot pickle '_thread._local' object", or '_local' at 0 and 1).
+        import threading
+
+        return (type(self), (threading.local(),))
+
     @property
     def global_user_context_extensions(self) -> list[Any]:
         """The global user context extensions, as SparkConnectClient's: of their IDs."""

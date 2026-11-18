@@ -678,29 +678,34 @@ impl PyDataStreamReader {
 
     /// Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
     /// which raises `NOT_EXPECTED_TYPE` for a name that is not a str, and
-    /// `INVALID_STREAMING_SOURCE_NAME` for one of other characters than ASCII letters, digits
-    /// and underscores.
+    /// `INVALID_STREAMING_SOURCE_NAME`, of the name as it is, unless
+    /// `re.match(r"^[a-zA-Z0-9_]+$", source_name)` matches it: a name of other characters than
+    /// ASCII letters, digits and underscores, a lone surrogate too, but one of a final newline,
+    /// before which `$` matches, which the server refuses when it reads the plan.
     fn name<'py>(
         mut slf: PyRefMut<'py, Self>,
         source_name: &Bound<'_, PyAny>,
     ) -> PyResult<PyRefMut<'py, Self>> {
-        let Ok(name) = source_name.cast::<pyo3::types::PyString>() else {
+        let py = source_name.py();
+        if !source_name.is_instance_of::<pyo3::types::PyString>() {
             return Err(crate::stat_arguments::not_expected_type(
                 source_name,
                 "source_name",
                 "str",
             ));
-        };
-        let name = name.to_cow()?;
-        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-            return Err(crate::column::raise_pyspark(
-                source_name.py(),
+        }
+        let matched = py
+            .import("re")?
+            .call_method1("match", (r"^[a-zA-Z0-9_]+$", source_name))?;
+        if matched.is_none() {
+            return Err(crate::errors::raise_pyspark_of(
+                py,
                 "PySparkValueError",
                 "INVALID_STREAMING_SOURCE_NAME",
-                &[("source_name", &name)],
+                &[("source_name", source_name)],
             ));
         }
-        let state = slf.state().name(&name);
+        let state = slf.state().name(&source_name.extract::<String>()?);
         slf.set_state(state);
         Ok(slf)
     }

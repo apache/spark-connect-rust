@@ -42,8 +42,36 @@ fn map_partitions_to_proto() {
         func: udf(),
         is_barrier: true,
         profile_id: None,
+        profile_id_reader: None,
     };
     assert!(p.to_proto().rel_type.is_some());
+}
+
+#[test]
+fn map_partitions_reads_the_id_of_its_profile_reader_when_it_is_built() {
+    use spark_connect_proto::relation::RelType;
+
+    // A build outside a request reads the id then, of the four bytes of a little-endian i32, in
+    // the place of `profile_id`; a reader that fails sends no id.
+    let sent_id = |reader: spark_connect::udf::CommandPickler| {
+        let p = LogicalPlan::MapPartitions {
+            input: Arc::new(base()),
+            func: udf(),
+            is_barrier: false,
+            profile_id: Some(1),
+            profile_id_reader: Some(reader),
+        };
+        match p.to_proto().rel_type {
+            Some(RelType::MapPartitions(map)) => map.profile_id,
+            other => panic!("expected MapPartitions, got {other:?}"),
+        }
+    };
+    let read = spark_connect::udf::CommandPickler::new(7_i32, |id| Ok(id.to_le_bytes().to_vec()));
+    assert_eq!(sent_id(read), Some(7));
+    let failing = spark_connect::udf::CommandPickler::new((), |_| {
+        Err(spark_connect_core::error::SparkError::value_msg("no id"))
+    });
+    assert_eq!(sent_id(failing), None);
 }
 
 #[test]

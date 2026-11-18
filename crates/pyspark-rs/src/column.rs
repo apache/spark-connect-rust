@@ -164,7 +164,7 @@ impl PyColumn {
     /// dict). Mirrors `Column.alias(*alias, **kwargs)`, which names a generator's columns in
     /// order, takes metadata for a single name only, and sends it as `json.dumps(metadata)`.
     #[pyo3(signature = (*alias, **kwargs))]
-    fn alias(
+    pub(crate) fn alias(
         &self,
         py: Python<'_>,
         alias: &Bound<'_, PyTuple>,
@@ -543,10 +543,15 @@ impl PyColumn {
 
     /// An attribute that a Column does not have is the field of that name, as
     /// `col["name"]`. Mirrors `Column.__getattr__`, which raises for `_jc` and for a name
-    /// that starts with `__`.
-    fn __getattr__(&self, py: Python<'_>, item: &str) -> PyResult<PyColumn> {
+    /// that starts with `__`. The name is the str of the attribute as it is: one that UTF-8
+    /// cannot encode is the field of a literal that fails the plans of the Column, as `col[name]`.
+    fn __getattr__(
+        &self,
+        py: Python<'_>,
+        item: &Bound<'_, pyo3::types::PyString>,
+    ) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("__getattr__")?;
-        if item == "_jc" {
+        if item.as_any().eq("_jc")? {
             return Err(raise_pyspark(
                 py,
                 "PySparkAttributeError",
@@ -554,15 +559,15 @@ impl PyColumn {
                 &[("attr_name", "_jc")],
             ));
         }
-        if item.starts_with("__") {
-            return Err(raise_pyspark(
+        if item.call_method1("startswith", ("__",))?.is_truthy()? {
+            return Err(crate::errors::raise_pyspark_of(
                 py,
                 "PySparkAttributeError",
                 "ATTRIBUTE_NOT_SUPPORTED",
-                &[("attr_name", item)],
+                &[("attr_name", item.as_any())],
             ));
         }
-        self.__getitem__(pyo3::types::PyString::new(py, item).as_any())
+        self.__getitem__(item.as_any())
     }
 
     /// Equality (==) - returns a Column condition
@@ -1272,6 +1277,21 @@ fn error_description<'py>(
     py: Python<'py>,
     error: &spark_connect_core::error::SparkError,
 ) -> PyResult<Bound<'py, PyTuple>> {
+    described_error(py, error)?.ok_or_else(|| {
+        pyo3::exceptions::PyTypeError::new_err(format!(
+            "cannot pickle a Column whose plan fails with {}",
+            error.message
+        ))
+    })
+}
+
+/// The description of `error`, of a plan or an expression that PySpark's client fails to build,
+/// as [`error_description`] gives it, of which `pyspark.sql.connect._column_reduce.raise_error`
+/// raises the error again: None for the error of another kind, which no pickle keeps.
+pub(crate) fn described_error<'py>(
+    py: Python<'py>,
+    error: &spark_connect_core::error::SparkError,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
     use pyo3::types::PyBytes;
     use pyo3::IntoPyObjectExt;
     use spark_connect_core::error::SparkErrorKind as K;
@@ -1300,12 +1320,7 @@ fn error_description<'py>(
             error.error_class.clone(),
             error.params.clone().into_bound_py_any(py)?,
         ),
-        _ => {
-            return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                "cannot pickle a Column whose plan fails with {}",
-                error.message
-            )))
-        }
+        _ => return Ok(None),
     };
     PyTuple::new(
         py,
@@ -1315,6 +1330,7 @@ fn error_description<'py>(
             payload,
         ],
     )
+    .map(Some)
 }
 
 /// The error of `description`, of [`error_description`].

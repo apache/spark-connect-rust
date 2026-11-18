@@ -952,6 +952,147 @@ impl StructField {
         })?;
         parse_json_field(field)
     }
+
+    /// Whether this field equals `other` as PySpark's `StructField.__eq__` compares them, by
+    /// their `__dict__` (see [`DataType::eq_as_python`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn eq_as_python(&self, other: &StructField) -> bool {
+        self.name == other.name
+            && self.nullable == other.nullable
+            && self.data_type.eq_as_python(&other.data_type)
+            && self.metadata.len() == other.metadata.len()
+            && self.metadata.iter().all(|(key, value)| {
+                other
+                    .metadata
+                    .get(key)
+                    .is_some_and(|other| json_eq_as_python(value, other))
+            })
+    }
+}
+
+impl DataType {
+    /// Whether this type equals `other` as PySpark's `DataType.__eq__` compares them, by their
+    /// `__dict__`: as `==` does, but for the metadata of the fields of a struct, whose values are
+    /// compared as Python compares the values of `json.loads` of them. A number equals a number of
+    /// the same value of another type, as `1 == 1.0`, and a bool the number of its value, as
+    /// `True == 1`. Not a stable API.
+    #[doc(hidden)]
+    pub fn eq_as_python(&self, other: &DataType) -> bool {
+        match (self, other) {
+            (DataType::Struct { fields: a }, DataType::Struct { fields: b }) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.eq_as_python(b))
+            }
+            (
+                DataType::Array {
+                    element_type: a,
+                    contains_null: a_null,
+                },
+                DataType::Array {
+                    element_type: b,
+                    contains_null: b_null,
+                },
+            ) => a_null == b_null && a.eq_as_python(b),
+            (
+                DataType::Map {
+                    key_type: a_key,
+                    value_type: a_value,
+                    value_contains_null: a_null,
+                },
+                DataType::Map {
+                    key_type: b_key,
+                    value_type: b_value,
+                    value_contains_null: b_null,
+                },
+            ) => a_null == b_null && a_key.eq_as_python(b_key) && a_value.eq_as_python(b_value),
+            (
+                DataType::Udt {
+                    type_str: a_str,
+                    jvm_class: a_jvm,
+                    python_class: a_python,
+                    serialized_python_class: a_serialized,
+                    sql_type: a_sql,
+                },
+                DataType::Udt {
+                    type_str: b_str,
+                    jvm_class: b_jvm,
+                    python_class: b_python,
+                    serialized_python_class: b_serialized,
+                    sql_type: b_sql,
+                },
+            ) => {
+                a_str == b_str
+                    && a_jvm == b_jvm
+                    && a_python == b_python
+                    && a_serialized == b_serialized
+                    && match (a_sql, b_sql) {
+                        (Some(a), Some(b)) => a.eq_as_python(b),
+                        (a, b) => a.is_none() && b.is_none(),
+                    }
+            }
+            (a, b) => a == b,
+        }
+    }
+}
+
+/// Whether the JSON values `a` and `b` are equal as Python's `==` compares the values that
+/// `json.loads` gives of them: numbers by their values, whatever their types, a bool as the
+/// number of its value, and arrays and objects of equal items.
+fn json_eq_as_python(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::String(a), Value::String(b)) => a == b,
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| json_eq_as_python(a, b))
+        }
+        (Value::Object(a), Value::Object(b)) => {
+            a.len() == b.len()
+                && a.iter().all(|(key, value)| {
+                    b.get(key)
+                        .is_some_and(|other| json_eq_as_python(value, other))
+                })
+        }
+        _ => match (python_number(a), python_number(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        },
+    }
+}
+
+/// A JSON number or bool as Python compares it: an int, or a float.
+#[derive(Clone, Copy)]
+enum PythonNumber {
+    Int(i128),
+    Float(f64),
+}
+
+impl PartialEq for PythonNumber {
+    /// As Python compares an int and a float, exactly: `2**53 + 1` does not equal
+    /// `float(2**53 + 1)`, which is `2**53`.
+    fn eq(&self, other: &Self) -> bool {
+        match (*self, *other) {
+            (PythonNumber::Int(a), PythonNumber::Int(b)) => a == b,
+            (PythonNumber::Float(a), PythonNumber::Float(b)) => a == b,
+            (PythonNumber::Int(int), PythonNumber::Float(float))
+            | (PythonNumber::Float(float), PythonNumber::Int(int)) => {
+                // An integral float within the range of an i128 converts to it exactly.
+                float.fract() == 0.0 && float.abs() < 2f64.powi(127) && float as i128 == int
+            }
+        }
+    }
+}
+
+/// The number of `value` as Python compares it, if it is a number or a bool.
+fn python_number(value: &serde_json::Value) -> Option<PythonNumber> {
+    match value {
+        serde_json::Value::Bool(flag) => Some(PythonNumber::Int(i128::from(*flag))),
+        serde_json::Value::Number(number) => number
+            .as_i64()
+            .map(|int| PythonNumber::Int(int.into()))
+            .or_else(|| number.as_u64().map(|int| PythonNumber::Int(int.into())))
+            .or_else(|| number.as_f64().map(PythonNumber::Float)),
+        _ => None,
+    }
 }
 
 /// Helper methods for StructType operations, mirroring `pyspark.sql.types.StructType`.
@@ -2969,6 +3110,76 @@ mod tests {
             scale: 1,
         };
         assert_ne!(dt1, dt3);
+    }
+
+    #[test]
+    fn eq_as_python_compares_the_metadata_as_python_compares_its_values() {
+        // As PySpark's `StructField.__eq__` of the `__dict__` of the fields, whose metadata holds
+        // the values of `json.loads`: numbers by their values whatever their types, exactly, and
+        // bools as the numbers 0 and 1, also in lists, dicts and the fields of nested types.
+        use serde_json::json;
+        let field = |value: serde_json::Value| StructField {
+            name: "a".to_string(),
+            data_type: DataType::Long,
+            nullable: true,
+            metadata: BTreeMap::from([("x".to_string(), value)]),
+        };
+        let of = |value: serde_json::Value| DataType::Struct {
+            fields: vec![field(value)],
+        };
+        let nested = |value: serde_json::Value| DataType::Array {
+            element_type: Box::new(DataType::Map {
+                key_type: Box::new(DataType::Long),
+                value_type: Box::new(of(value)),
+                value_contains_null: true,
+            }),
+            contains_null: false,
+        };
+        let float_of_2_pow_53 = 9007199254740992.0;
+        for (a, b) in [
+            (json!(1), json!(1.0)),
+            (json!(1), json!(true)),
+            (json!(0.0), json!(false)),
+            (json!(-0.0), json!(0)),
+            (json!(u64::MAX), json!(u64::MAX)),
+            (json!(9007199254740992_i64), json!(float_of_2_pow_53)),
+            (json!([1, {"y": 2}]), json!([1.0, {"y": 2.0}])),
+            (json!(null), json!(null)),
+        ] {
+            assert!(
+                field(a.clone()).eq_as_python(&field(b.clone())),
+                "{a} == {b}"
+            );
+            assert!(of(a.clone()).eq_as_python(&of(b.clone())), "{a} == {b}");
+            assert!(
+                nested(a.clone()).eq_as_python(&nested(b.clone())),
+                "{a} == {b}"
+            );
+        }
+        for (a, b) in [
+            (json!(1), json!(2)),
+            (json!(1), json!(1.5)),
+            (json!(1), json!("1")),
+            (json!(9007199254740993_i64), json!(float_of_2_pow_53)),
+            (json!(u64::MAX), json!(-1)),
+            (json!([1]), json!([1, 1])),
+            (json!({"y": 1}), json!({"z": 1})),
+            (json!(null), json!(0)),
+        ] {
+            assert!(!of(a.clone()).eq_as_python(&of(b.clone())), "{a} != {b}");
+            assert!(
+                !nested(a.clone()).eq_as_python(&nested(b.clone())),
+                "{a} != {b}"
+            );
+        }
+        // The other parts of the types compare as `==` does.
+        assert!(!of(json!(1)).eq_as_python(&DataType::Struct { fields: vec![] }));
+        assert!(!DataType::Long.eq_as_python(&DataType::Integer));
+        let renamed = StructField {
+            name: "b".to_string(),
+            ..field(json!(1))
+        };
+        assert!(!field(json!(1)).eq_as_python(&renamed));
     }
 
     #[test]

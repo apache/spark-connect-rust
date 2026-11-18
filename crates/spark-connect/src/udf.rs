@@ -694,6 +694,7 @@ mod tests {
             func: udf_of("map"),
             is_barrier: false,
             profile_id: None,
+            profile_id_reader: None,
         };
         let holders = || vec![PicklerHolder::Plan(&mapped)];
         assert_eq!(tags(exclusive_pickler_objects(holders())), ["map"]);

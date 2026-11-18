@@ -416,6 +416,20 @@ def _worker_stream_writer(
     return writer
 
 
+class _PlanOfDataFrame:
+    """The DataFrame ``df``, which a pickle keeps as PySpark's pickle keeps the plan of a
+    DataFrame of an object that holds its plan and not the DataFrame, as PySpark's
+    DataStreamWriter does: it unpickles as the DataFrame, without the request of the schema of the
+    unpickle of a DataFrame (``_reduce_dataframe``)."""
+
+    def __init__(self, df: Any) -> None:
+        self.df = df
+
+    def __reduce__(self) -> tuple[Callable[..., Any], tuple[Any, ...]]:
+        creator, args = self.df.__reduce__()
+        return creator, (*args[:-1], False)
+
+
 def stream_writer_reduce(
     frame: Any,
     format: Optional[str],
@@ -427,12 +441,13 @@ def stream_writer_reduce(
     trigger: Optional[tuple[str, Optional[str]]],
     functions: list[tuple[str, Any]],
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
-    """The reduce of a DataStreamWriter of ``frame``, of the state that ``_of_state`` takes."""
+    """The reduce of a DataStreamWriter of ``frame``, of the state that ``_of_state`` takes, which
+    holds the plan of ``frame``, as PySpark's writer holds the plan and not the DataFrame."""
     return _state_reduce(
         "DataStreamWriter",
         _worker_stream_writer,
         (
-            frame,
+            _PlanOfDataFrame(frame),
             format,
             output_mode,
             options,

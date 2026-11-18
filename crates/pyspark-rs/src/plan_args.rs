@@ -244,8 +244,16 @@ pub(crate) fn unsupported_type_error(data_type: &Bound<'_, PyAny>) -> PyResult<O
     Ok(Some(SparkError::classed(
         spark_connect_core::error::SparkErrorKind::ValueError,
         "UNSUPPORTED_OPERATION",
-        &[("operation", &format!("data type {}", data_type.str()?))],
+        &[("operation", &data_type_operation(data_type)?)],
     )))
+}
+
+/// The `operation` of PySpark's `UNSUPPORTED_OPERATION` of the data type `data_type`, which it
+/// raises when it builds the plan: `f"data type {data_type}"`, of the str of `data_type` as it is,
+/// a lone surrogate too, as [`crate::errors::str_param`] holds it.
+pub(crate) fn data_type_operation(data_type: &Bound<'_, PyAny>) -> PyResult<String> {
+    let operation = PyString::new(data_type.py(), "data type ").add(data_type.str()?)?;
+    crate::errors::str_param(operation.cast::<PyString>()?)
 }
 
 /// The text of `value` in the place of a value that protobuf does not take: a str with its lone
