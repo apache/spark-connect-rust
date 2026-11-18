@@ -297,6 +297,7 @@ NOT_DISPATCHED = {
     "map_filter": "takes a Rust closure",
     "map_zip_with": "takes a Rust closure",
     "reduce": "takes a Rust closure",
+    "reduce_with_finish": "takes a Rust closure",
     "transform": "takes a Rust closure",
     "transform_idx": "takes a Rust closure",
     "transform_keys": "takes a Rust closure",

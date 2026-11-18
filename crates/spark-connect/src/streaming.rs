@@ -27,6 +27,9 @@ pub struct DataStreamReader {
     schema: String,
     options: HashMap<String, String>,
     source_name: Option<String>,
+    /// The error of the first name that PySpark's `name` refuses, which each DataFrame of the
+    /// reader fails with (see [`DataStreamReader::name`]).
+    name_error: Option<SparkError>,
 }
 
 impl DataStreamReader {
@@ -56,6 +59,17 @@ impl DataStreamReader {
             schema: String::new(),
             options: HashMap::new(),
             source_name: None,
+            name_error: None,
+        }
+    }
+
+    /// The DataFrame of `plan`, a read of this reader, which fails with the error of a name that
+    /// PySpark refuses, at each request, if the reader was given one.
+    fn dataframe_of(&self, plan: LogicalPlan) -> DataFrame {
+        let dataframe = DataFrame::new(self.session.clone(), plan);
+        match &self.name_error {
+            Some(error) => dataframe.unbuildable(error.clone()),
+            None => dataframe,
         }
     }
 
@@ -90,8 +104,28 @@ impl DataStreamReader {
         self
     }
 
-    /// Set the source name for checkpoint stability.
+    /// Set the source name for checkpoint stability, as PySpark's `DataStreamReader.name`, which
+    /// raises `INVALID_STREAMING_SOURCE_NAME` of the name unless `re.match(r"^[a-zA-Z0-9_]+$",
+    /// source_name)` matches it: a name of no characters, or of other characters than ASCII
+    /// letters, digits and underscores, but one of a final newline, before which `$` matches,
+    /// which the server refuses when it reads the plan. As PySpark's call raises the error before
+    /// the reader is used, each DataFrame of the reader fails with the error of the first name
+    /// that it refuses, at each request, and sends nothing.
     pub fn name(mut self, source_name: &str) -> Self {
+        let body = source_name.strip_suffix('\n').unwrap_or(source_name);
+        if body.is_empty()
+            || !body
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            self.name_error.get_or_insert_with(|| {
+                SparkError::value(
+                    "INVALID_STREAMING_SOURCE_NAME",
+                    &[("source_name", source_name)],
+                )
+            });
+            return self;
+        }
         self.source_name = Some(source_name.to_string());
         self
     }
@@ -126,7 +160,7 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        DataFrame::new(self.session, plan)
+        self.dataframe_of(plan)
     }
 
     /// Read a named streaming table.
@@ -138,18 +172,19 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        DataFrame::new(self.session, plan)
+        self.dataframe_of(plan)
     }
 
     /// Read the streaming CDC changes of a named table. Mirrors
-    /// `DataStreamReader.changes` (`is_streaming = true`).
+    /// `DataStreamReader.changes` (`is_streaming = true`), which raises an `AnalysisException` of
+    /// `_LEGACY_ERROR_TEMP_1189` for a reader of a schema, as `DataFrameReader::changes` does.
     pub fn changes(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::RelationChanges {
             table_name: table_name.to_string(),
             options: self.options.clone(),
             is_streaming: Some(true),
         };
-        DataFrame::new(self.session, plan)
+        crate::readwriter::changes_of_schema(self.dataframe_of(plan), &self.schema)
     }
 
     /// Read streaming JSON data from a path.
@@ -167,7 +202,7 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        DataFrame::new(self.session, plan)
+        self.dataframe_of(plan)
     }
 
     /// Read streaming Parquet data from a path.
@@ -185,7 +220,7 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        DataFrame::new(self.session, plan)
+        self.dataframe_of(plan)
     }
 
     /// Read streaming CSV data from a path.
@@ -203,7 +238,7 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        DataFrame::new(self.session, plan)
+        self.dataframe_of(plan)
     }
 
     /// Read streaming ORC data from a path.
@@ -221,7 +256,7 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        DataFrame::new(self.session, plan)
+        self.dataframe_of(plan)
     }
 
     /// Read streaming text data from a path, as PySpark's `text(path)`: of its `wholetext=False`,
@@ -243,8 +278,42 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        DataFrame::new(self.session, plan)
+        self.dataframe_of(plan)
     }
+}
+
+/// The `timeout_ms` of the `timeout` of `awaitTermination` and `awaitAnyTermination`, in seconds,
+/// as PySpark's: a timeout that is not positive raises `VALUE_NOT_POSITIVE` of the name of its
+/// type, `float`, and then `int(timeout * 1000)`, which the request sets in its int64 field,
+/// raises the `ValueError` of a NaN and the `OverflowError` of an infinity, and protobuf's
+/// `ValueError` of a count beyond a long.
+fn timeout_ms(timeout: f64) -> Result<i64> {
+    if timeout <= 0.0 {
+        return Err(SparkError::value(
+            "VALUE_NOT_POSITIVE",
+            &[("arg_name", "timeout"), ("arg_value", "float")],
+        ));
+    }
+    let ms = timeout * 1000.0;
+    if ms.is_nan() {
+        return Err(SparkError::builtin_value_msg(
+            "cannot convert float NaN to integer",
+        ));
+    }
+    if ms.is_infinite() {
+        let mut error = SparkError::builtin_value_msg("cannot convert float infinity to integer");
+        error.kind = SparkErrorKind::BuiltinOverflowError;
+        return Err(error);
+    }
+    // The int of a float truncates it, and a float of 2**63 or more is beyond a long: its digits
+    // are those of the int, which Rust prints exactly.
+    let ms = ms.trunc();
+    if ms >= 9_223_372_036_854_775_808.0 {
+        return Err(SparkError::builtin_value_msg(format!(
+            "Value out of range: {ms:.0}"
+        )));
+    }
+    Ok(ms as i64)
 }
 
 /// Trigger for streaming queries.
@@ -417,13 +486,17 @@ impl DataStreamWriter {
         self
     }
 
-    /// Set a foreach batch function (PythonUDF payload).
+    /// Set a foreach batch function (PythonUDF payload), such as one of
+    /// [`PythonUDFPayload::function`]. As PySpark's `foreachBatch`, the function is sent with its
+    /// command and its Python version only: the output type and the eval type of `payload` are
+    /// not sent, as the function is not a UDF.
     pub fn foreach_batch(mut self, payload: PythonUDFPayload) -> Self {
         self.foreach_batch_payload = Some(payload);
         self
     }
 
-    /// Set a foreach function (PythonUDF payload).
+    /// Set a foreach function (PythonUDF payload), which is sent as
+    /// [`DataStreamWriter::foreach_batch`] sends its function, as PySpark's `foreach`.
     pub fn foreach(mut self, payload: PythonUDFPayload) -> Self {
         self.foreach_payload = Some(payload);
         self
@@ -517,16 +590,17 @@ impl DataStreamWriter {
             let mut foreach_func = proto::StreamingForeachFunction::default();
             foreach_func.function =
                 Some(proto::streaming_foreach_function::Function::PythonFunction(
-                    foreach_batch.to_proto(),
+                    foreach_batch.to_function_proto(),
                 ));
             write_op.foreach_batch = Some(foreach_func);
         }
 
         if let Some(foreach) = &self.foreach_payload {
             let mut foreach_func = proto::StreamingForeachFunction::default();
-            foreach_func.function = Some(
-                proto::streaming_foreach_function::Function::PythonFunction(foreach.to_proto()),
-            );
+            foreach_func.function =
+                Some(proto::streaming_foreach_function::Function::PythonFunction(
+                    foreach.to_function_proto(),
+                ));
             write_op.foreach_writer = Some(foreach_func);
         }
 
@@ -654,19 +728,16 @@ impl StreamingQuery {
         Ok(())
     }
 
-    /// Wait for the query to terminate with optional timeout in seconds.
+    /// Wait for the query to terminate with optional timeout in seconds. As PySpark's
+    /// `awaitTermination`, a timeout that is not positive is a `VALUE_NOT_POSITIVE` error, before
+    /// any request, and a NaN, an infinite or a too large one is the error of its
+    /// `int(timeout * 1000)`.
     pub fn await_termination(&self, timeout_sec: Option<f64>) -> Result<Option<bool>> {
         let mut cmd = proto::StreamingQueryCommand::default();
         let mut await_term = proto::streaming_query_command::AwaitTerminationCommand::default();
 
         if let Some(timeout) = timeout_sec {
-            if timeout <= 0.0 {
-                return Err(SparkError::value(
-                    "INVALID_TIMEOUT",
-                    &[("value", &timeout.to_string())],
-                ));
-            }
-            await_term.timeout_ms = Some((timeout * 1000.0) as i64);
+            await_term.timeout_ms = Some(timeout_ms(timeout)?);
         }
 
         cmd.command = Some(proto::streaming_query_command::Command::AwaitTermination(
@@ -2011,20 +2082,15 @@ impl StreamingQueryManager {
         Ok(None)
     }
 
-    /// Wait for any streaming query to terminate with optional timeout in seconds.
+    /// Wait for any streaming query to terminate with optional timeout in seconds, of the
+    /// errors of PySpark's `awaitAnyTermination`, as [`StreamingQuery::await_termination`].
     pub fn await_any_termination(&self, timeout_sec: Option<f64>) -> Result<Option<bool>> {
         let mut cmd = proto::StreamingQueryManagerCommand::default();
         let mut await_term =
             proto::streaming_query_manager_command::AwaitAnyTerminationCommand::default();
 
         if let Some(timeout) = timeout_sec {
-            if timeout <= 0.0 {
-                return Err(SparkError::value(
-                    "INVALID_TIMEOUT",
-                    &[("value", &timeout.to_string())],
-                ));
-            }
-            await_term.timeout_ms = Some((timeout * 1000.0) as i64);
+            await_term.timeout_ms = Some(timeout_ms(timeout)?);
         }
 
         cmd.command =
@@ -2097,7 +2163,9 @@ impl StreamingQueryManager {
     }
 
     /// Stream listener events from the server incrementally (live).
-    /// Returns a ListenerEventStream that yields events as they arrive.
+    /// Returns a ListenerEventStream that yields events as they arrive. As PySpark's
+    /// `_register_server_side_listener`, whose `execute_command_as_iterator` sends the tags of
+    /// the thread that registers the listener.
     pub fn listener_event_stream(&self) -> Result<ListenerEventStream> {
         let mut cmd = proto::Command::default();
         let mut listener_bus_cmd = proto::StreamingQueryListenerBusCommand::default();
@@ -2114,6 +2182,7 @@ impl StreamingQueryManager {
         let request = proto::ExecutePlanRequest {
             session_id: self.session.client().session_id().to_string(),
             user_context: Some(proto::UserContext::default()),
+            tags: self.session.tags()?,
             plan: Some(plan),
             ..Default::default()
         };
@@ -3119,6 +3188,40 @@ mod tests {
         assert!(state.server_registration_held);
     }
 
+    /// As PySpark's `_register_server_side_listener`, whose `execute_command_as_iterator` sends
+    /// the tags of the thread that adds the listener: the ExecutePlan that registers the listener
+    /// bus has them.
+    #[test]
+    fn the_listener_bus_is_registered_with_the_tags_of_the_thread_as_pyspark() {
+        let spark = unreachable_session_without_retries();
+        spark.add_tag("listener").unwrap();
+        let seen: Arc<Mutex<Vec<proto::ExecutePlanRequest>>> = Arc::default();
+        let requests = Arc::clone(&seen);
+        let hook: crate::ExecutePlanHook = Arc::new(move |request| {
+            requests.lock().unwrap().push(request);
+            Err(SparkError::value_msg("not sent"))
+        });
+        spark.set_execute_plan_hook(Some(hook));
+        assert!(spark.streams().listener_event_stream().is_err());
+        let seen = seen.lock().unwrap();
+        let [request] = seen.as_slice() else {
+            panic!("expected the registration: {seen:?}");
+        };
+        assert_eq!(request.tags, ["listener"]);
+        let Some(proto::plan::OpType::Command(proto::Command {
+            command_type: Some(proto::command::CommandType::StreamingQueryListenerBusCommand(bus)),
+        })) = request.plan.as_ref().and_then(|plan| plan.op_type.as_ref())
+        else {
+            panic!("expected the listener bus command: {request:?}");
+        };
+        assert_eq!(
+            bus.command,
+            Some(
+                proto::streaming_query_listener_bus_command::Command::AddListenerBusListener(true)
+            )
+        );
+    }
+
     /// The listener bus has no `Progress` in PySpark, so its stream never calls the progress
     /// handlers of the session, not even with the done notification when the stream ends.
     #[test]
@@ -3410,6 +3513,71 @@ mod tests {
         }
     }
 
+    /// As PySpark's `foreach` and `foreachBatch`, which set the command and the Python version of
+    /// the `PythonUDF` of the function of the sink only, as the function is not a UDF: the output
+    /// type and the eval type of a payload are not sent.
+    #[test]
+    fn the_functions_of_the_foreach_sinks_are_sent_as_pyspark_sends_them() {
+        let spark = unreachable_session_without_retries();
+        let seen: Arc<Mutex<Vec<proto::ExecutePlanRequest>>> = Arc::default();
+        let requests = Arc::clone(&seen);
+        let hook: crate::ExecutePlanHook = Arc::new(move |request| {
+            requests.lock().unwrap().push(request);
+            Err(SparkError::value_msg("not sent"))
+        });
+        spark.set_execute_plan_hook(Some(hook));
+        let function = proto::PythonUdf {
+            command: bytes::Bytes::from_static(b"function"),
+            python_ver: "3.11".to_string(),
+            ..Default::default()
+        };
+        let df = spark.read_stream().format("rate").load(None);
+        let of_a_udf = || {
+            PythonUDFPayload::new(
+                crate::types::DataType::Long,
+                100,
+                b"function".to_vec(),
+                "3.11".to_string(),
+            )
+        };
+        let of_a_function = || PythonUDFPayload::function(b"function".to_vec(), "3.11".to_string());
+        for payload in [of_a_udf(), of_a_function()] {
+            assert!(df.write_stream().foreach_batch(payload).start("").is_err());
+        }
+        for payload in [of_a_udf(), of_a_function()] {
+            assert!(df.write_stream().foreach(payload).start("").is_err());
+        }
+        let sent = |request: &proto::ExecutePlanRequest| {
+            let Some(proto::plan::OpType::Command(proto::Command {
+                command_type: Some(proto::command::CommandType::WriteStreamOperationStart(start)),
+            })) = request.plan.as_ref().and_then(|plan| plan.op_type.clone())
+            else {
+                panic!("expected a WriteStreamOperationStart: {request:?}");
+            };
+            let function_of = |sink: Option<proto::StreamingForeachFunction>| match sink {
+                Some(proto::StreamingForeachFunction {
+                    function: Some(proto::streaming_foreach_function::Function::PythonFunction(f)),
+                }) => Some(f),
+                _ => None,
+            };
+            (
+                function_of(start.foreach_batch),
+                function_of(start.foreach_writer),
+            )
+        };
+        let seen = seen.lock().unwrap();
+        let sent: Vec<_> = seen.iter().map(sent).collect();
+        assert_eq!(
+            sent,
+            [
+                (Some(function.clone()), None),
+                (Some(function.clone()), None),
+                (None, Some(function.clone())),
+                (None, Some(function)),
+            ]
+        );
+    }
+
     #[test]
     fn stream_writer_option_options() {
         let spark = session();
@@ -3422,6 +3590,99 @@ mod tests {
         opts.insert("key2".to_string(), "val2".to_string());
         let writer = writer.options(opts);
         assert_eq!(writer.options.get("key2"), Some(&"val2".to_string()));
+    }
+
+    /// As PySpark's `awaitTermination` and `awaitAnyTermination`: `VALUE_NOT_POSITIVE` of the
+    /// type name of a timeout that is not positive, before any request, and then the errors of
+    /// `int(timeout * 1000)` in the int64 field of the request.
+    #[test]
+    fn await_timeouts_raise_the_errors_of_pyspark() {
+        let spark = unreachable_session_without_retries();
+        let seen: Arc<Mutex<Vec<proto::ExecutePlanRequest>>> = Arc::default();
+        let requests = Arc::clone(&seen);
+        let hook: crate::ExecutePlanHook = Arc::new(move |request| {
+            requests.lock().unwrap().push(request);
+            Err(SparkError::value_msg("not sent"))
+        });
+        spark.set_execute_plan_hook(Some(hook));
+        let query = StreamingQuery {
+            session: spark.clone(),
+            query_id: "id".to_string(),
+            run_id: "run".to_string(),
+            name: None,
+        };
+        let not_positive =
+            "[VALUE_NOT_POSITIVE] Value for `timeout` must be positive, got 'float'.";
+        for timeout in [0.0, -1.5, f64::NEG_INFINITY] {
+            let error = query.await_termination(Some(timeout)).unwrap_err();
+            assert_eq!(
+                (error.kind, error.message().as_str()),
+                (SparkErrorKind::ValueError, not_positive)
+            );
+            let error = spark
+                .streams()
+                .await_any_termination(Some(timeout))
+                .unwrap_err();
+            assert_eq!(error.message(), not_positive);
+        }
+        assert!(seen.lock().unwrap().is_empty());
+        // `int(nan)`, `int(inf)`, and protobuf's error of an int beyond a long, of its digits.
+        for (timeout, kind, message) in [
+            (
+                f64::NAN,
+                SparkErrorKind::BuiltinValueError,
+                "cannot convert float NaN to integer".to_string(),
+            ),
+            (
+                f64::INFINITY,
+                SparkErrorKind::BuiltinOverflowError,
+                "cannot convert float infinity to integer".to_string(),
+            ),
+            (
+                9.3e15,
+                SparkErrorKind::BuiltinValueError,
+                "Value out of range: 9300000000000000000".to_string(),
+            ),
+            (
+                1e300,
+                SparkErrorKind::BuiltinValueError,
+                concat!(
+                    "Value out of range: 10000000000000000001617650767864564382126686462316",
+                    "5943829549501710111749922573874786526024303421391525377977356818033741",
+                    "6027445820567779199643391541606026068611150746122284976177256650044200",
+                    "5272768073270676904621126614275001970512264898982606787633914493760885",
+                    "47292320814127957486330655468919122263277568",
+                )
+                .to_string(),
+            ),
+        ] {
+            let error = timeout_ms(timeout).unwrap_err();
+            assert_eq!((error.kind, error.message()), (kind, message));
+        }
+        // The int of a float truncates it: a timeout below a millisecond is 0.
+        assert_eq!(timeout_ms(1e-9).unwrap(), 0);
+        assert_eq!(timeout_ms(1.5).unwrap(), 1500);
+        assert_eq!(timeout_ms(9.2e15).unwrap(), 9_200_000_000_000_000_000);
+        // A positive timeout is sent.
+        assert!(query.await_termination(Some(2.0)).is_err());
+        let seen = seen.lock().unwrap();
+        let [request] = seen.as_slice() else {
+            panic!("expected the await: {seen:?}");
+        };
+        let Some(proto::plan::OpType::Command(proto::Command {
+            command_type: Some(proto::command::CommandType::StreamingQueryCommand(command)),
+        })) = request.plan.as_ref().and_then(|plan| plan.op_type.as_ref())
+        else {
+            panic!("expected a StreamingQueryCommand: {request:?}");
+        };
+        assert_eq!(
+            command.command,
+            Some(proto::streaming_query_command::Command::AwaitTermination(
+                proto::streaming_query_command::AwaitTerminationCommand {
+                    timeout_ms: Some(2000)
+                }
+            ))
+        );
     }
 
     #[test]

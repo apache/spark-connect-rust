@@ -267,6 +267,48 @@ impl DataType {
         }
     }
 
+    /// The name of PySpark's class of this type, `type(dt).__name__`, by which PySpark's errors
+    /// name the type of an argument, such as `LongType`: the class of a user-defined type is the
+    /// one that its `pyClass` names.
+    pub fn class_name(&self) -> String {
+        let name = match self {
+            DataType::Null => "NullType",
+            DataType::Boolean => "BooleanType",
+            DataType::Byte => "ByteType",
+            DataType::Short => "ShortType",
+            DataType::Integer => "IntegerType",
+            DataType::Long => "LongType",
+            DataType::Float => "FloatType",
+            DataType::Double => "DoubleType",
+            DataType::Decimal { .. } => "DecimalType",
+            DataType::String { .. } => "StringType",
+            DataType::Char { .. } => "CharType",
+            DataType::Varchar { .. } => "VarcharType",
+            DataType::Binary => "BinaryType",
+            DataType::Date => "DateType",
+            DataType::Timestamp => "TimestampType",
+            DataType::TimestampNtz => "TimestampNTZType",
+            DataType::Time { .. } => "TimeType",
+            DataType::TimestampNtzNanos { .. } => "TimestampNTZNanosType",
+            DataType::TimestampLtzNanos { .. } => "TimestampLTZNanosType",
+            DataType::CalendarInterval => "CalendarIntervalType",
+            DataType::YearMonthInterval { .. } => "YearMonthIntervalType",
+            DataType::DayTimeInterval { .. } => "DayTimeIntervalType",
+            DataType::Array { .. } => "ArrayType",
+            DataType::Map { .. } => "MapType",
+            DataType::Struct { .. } => "StructType",
+            DataType::Variant => "VariantType",
+            DataType::Geometry { .. } => "GeometryType",
+            DataType::Geography { .. } => "GeographyType",
+            DataType::Unparsed { .. } => "UnparsedDataType",
+            DataType::Udt { python_class, .. } => {
+                let class = python_class.as_deref().unwrap_or("UserDefinedType");
+                return class.rsplit('.').next().unwrap_or(class).to_string();
+            }
+        };
+        name.to_string()
+    }
+
     /// Returns the type name, mirroring `DataType.typeName()`.
     ///
     /// For most types, this is the class name with the "Type" suffix removed and lowercased.

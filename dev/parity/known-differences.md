@@ -105,14 +105,20 @@ difference is intentional or tracked for a fix.
   first request that sends the type, with protobuf's `UnicodeEncodeError` of a name, or with the
   server's error of the string of a lone surrogate (`Unpaired surrogate`) of the JSON in which
   `json.dumps` escapes it.
-- **The removal of the relation of a dropped checkpoint** (intentional; a drop does not wait).
-  As PySpark's `CachedRemoteRelation.__del__`, the drop of the last DataFrame of a checkpoint
-  sends one ExecutePlan of the removal, which is not reattachable and goes to no hook, with the
-  tags and the user context extensions of the thread that drops it. PySpark's finalizer waits
-  for the server; this client sends it without waiting, as a drop may run on a thread of the
-  transport's runtime, or in a finalizer that holds the GIL, which another thread may need to
-  read the responses of the same connection. The relation may still be on the server for a
-  moment after the drop.
+- **The removal of the relation of a dropped checkpoint, and the deletion of a dropped model**
+  (intentional; a drop does not wait). As PySpark's `CachedRemoteRelation.__del__`, the drop of
+  the last DataFrame of a checkpoint sends one ExecutePlan of the removal, which is not
+  reattachable and goes to no hook, with the tags and the user context extensions of the thread
+  that drops it. As PySpark's `RemoteModelRef`, whose `_delete_ml_cache` runs an
+  `execute_command`, the drop of the last reference to a model of the native ML classes (and of
+  the Rust API) sends the deletion of the model from the ML cache of the server as an execution of
+  the thread that drops it: of its tags and its user context extensions, reattachable, and through
+  the hooks of the executions. PySpark's finalizers wait for the server; this client sends both
+  without waiting, as a drop may run on a thread of the transport's runtime, or in a finalizer
+  that holds the GIL, which another thread may need to read the responses of the same
+  connection. The relation or the model may still be on the server for a moment after the drop,
+  and the deletion reports nothing to the progress handlers of the session, which PySpark's
+  `execute_command` calls, of its done notification too, on the thread of the finalizer.
 - **`schema` and `columns` of a join on a tuple** (intentional). As in PySpark, the plan fails with
   the `AttributeError` of `to_plan` of the tuple when it is built, and `schema`, a property, then
   gives a Column of the `__getattr__` of the DataFrame: of `schema`, where PySpark's is of

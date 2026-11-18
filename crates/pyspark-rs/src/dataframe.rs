@@ -2134,23 +2134,23 @@ impl PyDataFrame {
         Ok(slf)
     }
 
-    /// Mark the DataFrame as non-persistent. As PySpark's, which sets `blocking` in the bool
-    /// field of its request unless it is None, as [`crate::streaming::proto_bool`] converts it;
-    /// None unpersists as False does.
-    #[pyo3(signature = (blocking=None), text_signature = "($self, blocking=False)")]
+    /// Mark the DataFrame as non-persistent. As PySpark's `unpersist(blocking=False)`, which sets
+    /// `blocking` in the bool field of its request unless it is None, as
+    /// [`crate::streaming::proto_bool`] converts it: None sends no `blocking`.
+    #[pyo3(
+        signature = (blocking=ProtoBool::default()),
+        text_signature = "($self, blocking=False)"
+    )]
     fn unpersist<'py>(
         slf: PyRef<'py, Self>,
         py: Python<'py>,
-        blocking: Option<&Bound<'py, PyAny>>,
+        blocking: ProtoBool,
     ) -> PyResult<PyRef<'py, Self>> {
-        let blocking = blocking
-            .map(crate::streaming::proto_bool)
-            .transpose()?
-            .unwrap_or(false);
+        let blocking = blocking.value_unless_none(py)?;
         // As PySpark's, which returns the DataFrame itself.
         let df = slf.dataframe.clone();
         interruptible(py, &df.spark_session(), || {
-            df.unpersist(blocking).map_err(Box::new)
+            df.unpersist_opt(blocking).map_err(Box::new)
         })?;
         Ok(slf)
     }
@@ -2914,7 +2914,8 @@ impl PyDataFrame {
                 &[("attr_name", name)],
             ));
         }
-        Ok(PyColumn::new(self.dataframe.col(name)))
+        // As PySpark's `self._col(name)`, of the name `*` too.
+        Ok(PyColumn::new(self.dataframe.column_reference(name)))
     }
 
     /// Private bridge used by pyspark.sql.dataframe.DataFrame.__getattr__ for

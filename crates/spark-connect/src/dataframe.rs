@@ -783,20 +783,45 @@ impl DataFrame {
 
     /// Lateral join with another DataFrame (a `LATERAL` correlated subquery join).
     ///
-    /// Mirrors `pyspark.sql.DataFrame.lateralJoin`.
+    /// Mirrors `pyspark.sql.DataFrame.lateralJoin`, whose `LateralJoin` plan takes an inner, a
+    /// left outer or a cross join only: of another join type, it raises the `AnalysisException`
+    /// of `UNSUPPORTED_JOIN_TYPE` of the name of the join type, as `how.lower().replace("_", "")`
+    /// gives it, such as `fullouter`, before any request, so each request of the DataFrame fails
+    /// with it then, and sends nothing.
     pub fn lateral_join(
         &self,
         right: &DataFrame,
         on: Option<Column>,
         join_type: JoinType,
     ) -> DataFrame {
+        let unsupported = match join_type {
+            JoinType::Inner | JoinType::LeftOuter | JoinType::Cross => None,
+            JoinType::RightOuter => Some("rightouter"),
+            JoinType::FullOuter => Some("fullouter"),
+            JoinType::LeftSemi => Some("leftsemi"),
+            JoinType::LeftAnti => Some("leftanti"),
+        };
         let plan = LogicalPlan::LateralJoin {
             left: Arc::clone(&self.plan),
             right: Arc::clone(&right.plan),
             join_type,
             on,
         };
-        DataFrame::new(self.session.clone(), plan)
+        let joined = DataFrame::new(self.session.clone(), plan);
+        match unsupported {
+            Some(typ) => joined.unbuildable(SparkError::classed(
+                SparkErrorKind::Analysis,
+                "UNSUPPORTED_JOIN_TYPE",
+                &[
+                    ("typ", typ),
+                    (
+                        "supported",
+                        "'inner', 'leftouter', 'left', 'left_outer', 'cross'",
+                    ),
+                ],
+            )),
+            None => joined,
+        }
     }
 
     /// Union with another DataFrame.
@@ -1906,14 +1931,25 @@ impl DataFrame {
 
     /// Remove this DataFrame from cache. Mirrors `DataFrame.unpersist(blocking)`.
     pub fn unpersist(&self, blocking: bool) -> Result<DataFrame> {
-        let unpersist = proto::analyze_plan_request::Unpersist {
-            relation: Some(self.relation()?),
-            blocking: Some(blocking),
-        };
-        let request =
-            self.analyze_request(proto::analyze_plan_request::Analyze::Unpersist(unpersist));
+        self.unpersist_opt(Some(blocking))
+    }
+
+    /// Remove this DataFrame from cache, with `blocking` optional: `None` sends no `blocking`,
+    /// as PySpark's `unpersist(blocking=None)`, whose request sets it unless it is None, for the
+    /// server to take its default.
+    pub fn unpersist_opt(&self, blocking: Option<bool>) -> Result<DataFrame> {
+        let request = self.unpersist_request(blocking)?;
         block_on(self.session.client().analyze_plan(request))?;
         Ok(self.clone())
+    }
+
+    /// The request of [`Self::unpersist_opt`], of no `blocking` for `None`.
+    fn unpersist_request(&self, blocking: Option<bool>) -> Result<proto::AnalyzePlanRequest> {
+        let unpersist = proto::analyze_plan_request::Unpersist {
+            relation: Some(self.relation()?),
+            blocking,
+        };
+        Ok(self.analyze_request(proto::analyze_plan_request::Analyze::Unpersist(unpersist)))
     }
 
     /// Checkpoint this DataFrame to disk.
@@ -2548,10 +2584,23 @@ impl DataFrame {
         self.session.plan_ids().id_of(&self.plan)
     }
 
-    /// The column `name` of this DataFrame. It refers to this DataFrame by its plan ID, so that
-    /// the server resolves it against this DataFrame's plan, as in a join of DataFrames of the
-    /// same column names. Mirrors `df[name]`, `df.name` and `DataFrame._col` of PySpark Connect.
+    /// The column `name` of this DataFrame, as PySpark Connect's `df[name]`: it refers to this
+    /// DataFrame by its plan ID, so that the server resolves it against this DataFrame's plan,
+    /// as in a join of DataFrames of the same column names, and the name `*` is the star of this
+    /// DataFrame ([`DataFrame::star`]).
     pub fn col(&self, name: &str) -> Column {
+        if name == "*" {
+            return self.star();
+        }
+        self.column_reference(name)
+    }
+
+    /// The column reference `name` of this DataFrame, by its plan ID, of the name `*` too, as
+    /// PySpark Connect's `DataFrame._col`, of which `df.name` and `_joinAsOf` are: where
+    /// [`DataFrame::col`] makes `*` the star, as `df[name]` does, this refers to a column of that
+    /// name. Not a stable API.
+    #[doc(hidden)]
+    pub fn column_reference(&self, name: &str) -> Column {
         let reference = crate::expression::ColumnReference::new(name).with_plan_id(self.plan_id());
         Column::new(ExpressionNode::ColumnReference(reference).into())
     }
@@ -3112,7 +3161,9 @@ impl DataFrame {
     }
 
     /// A subquery of `subquery_type` of this DataFrame's plan, which refers to the plan by
-    /// its plan ID in the session.
+    /// its plan ID in the session of this DataFrame, with which the plan is sent, as PySpark's
+    /// subquery refers to the plan by its `_plan_id`: so a subquery of a DataFrame of another
+    /// session than its query's refers to the plan as the columns of the plan do.
     pub(crate) fn subquery(
         &self,
         subquery_type: crate::expression::SubqueryType,
@@ -6055,6 +6106,23 @@ mod plan_construction_tests {
     }
 
     #[test]
+    fn unpersist_of_no_blocking_sends_none_as_pyspark() {
+        // As PySpark's unpersist(blocking=None), whose request sets `blocking` unless it is
+        // None, and unpersist(), of its default False, which it sends.
+        let df = session().range(1).unwrap();
+        let sent = |blocking: Option<bool>| match df.unpersist_request(blocking) {
+            Ok(proto::AnalyzePlanRequest {
+                analyze: Some(proto::analyze_plan_request::Analyze::Unpersist(unpersist)),
+                ..
+            }) => unpersist.blocking,
+            other => panic!("not an unpersist request: {other:?}"),
+        };
+        assert_eq!(sent(None), None);
+        assert_eq!(sent(Some(false)), Some(false));
+        assert_eq!(sent(Some(true)), Some(true));
+    }
+
+    #[test]
     fn actions_of_a_plan_past_the_depth_bound_are_recursion_errors_without_a_request() {
         // Offline: the plan is refused before any request, so no server is needed.
         let spark = session();
@@ -6392,6 +6460,44 @@ mod plan_construction_tests {
             .err()
             .expect("a session mismatch");
         assert_eq!(error.get_error_class().as_deref(), Some("SESSION_NOT_SAME"));
+    }
+
+    /// As PySpark's `LateralJoin` plan, which takes an inner, a left outer or a cross join, and
+    /// raises `UNSUPPORTED_JOIN_TYPE` of the name of another one before any request.
+    #[test]
+    fn lateral_joins_of_other_join_types_fail_as_pyspark() {
+        let spark = session();
+        let left = spark.range(3).unwrap();
+        let right = spark.range(2).unwrap();
+        for join_type in [JoinType::Inner, JoinType::LeftOuter, JoinType::Cross] {
+            let joined = left
+                .lateral_join(&right, None, join_type)
+                .relation()
+                .unwrap();
+            assert!(matches!(
+                joined.rel_type,
+                Some(proto::relation::RelType::LateralJoin(_))
+            ));
+        }
+        for (join_type, typ) in [
+            (JoinType::FullOuter, "fullouter"),
+            (JoinType::RightOuter, "rightouter"),
+            (JoinType::LeftSemi, "leftsemi"),
+            (JoinType::LeftAnti, "leftanti"),
+        ] {
+            let error = left
+                .lateral_join(&right, None, join_type)
+                .relation()
+                .unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::Analysis);
+            assert_eq!(
+                error.message(),
+                format!(
+                    "[UNSUPPORTED_JOIN_TYPE] Unsupported join type: '{typ}'. Supported join types \
+                     include: 'inner', 'leftouter', 'left', 'left_outer', 'cross'."
+                )
+            );
+        }
     }
 
     /// The deep copy of `df` whose Observations are detached copies of its own, as the Python
@@ -8741,6 +8847,21 @@ mod plan_id_column_tests {
             (metadata.plan_id, metadata.is_metadata_column),
             (left_id, Some(true))
         );
+        // As PySpark's `df["*"]`, the column `*` is the star of the DataFrame, where its `_col`,
+        // of `df.name` and `_joinAsOf`, refers to a column of the name `*`.
+        assert_eq!(
+            left.col("*").expression().to_proto(),
+            left.star().expression().to_proto()
+        );
+        let Some(ExprType::UnresolvedAttribute(reference)) =
+            left.column_reference("*").expression().to_proto().expr_type
+        else {
+            panic!("expected an attribute");
+        };
+        assert_eq!(
+            (reference.unparsed_identifier.as_str(), reference.plan_id),
+            ("*", left_id)
+        );
     }
 }
 
@@ -8822,6 +8943,66 @@ mod subquery_tests {
             inner.relation().unwrap().rel_type,
             Some(RelType::Project(_))
         ));
+    }
+
+    /// As PySpark's, whose plans have their plan IDs whatever the session that sends them: a
+    /// subquery of a DataFrame of another session, as of `newSession()`, refers to the plan by
+    /// its plan ID in the session of the DataFrame, and the `WithRelations` sends the plan of
+    /// those IDs, also of its columns, as that session sends the plan, in either direction.
+    #[test]
+    fn subqueries_of_a_dataframe_of_another_session_are_sent_with_its_plan_ids() {
+        let spark = session();
+        let other = spark.new_session();
+        let o = other.range(3).unwrap();
+        // A plan of a column of its own DataFrame, by its plan ID in the other session.
+        let inner = o.select(vec![max(o.col("id"))]);
+        let listed = other.range(2).unwrap().select(vec![col("id")]);
+        let first = spark.range(1).unwrap();
+        let cases = [
+            (
+                spark
+                    .range(1)
+                    .unwrap()
+                    .select(vec![inner.scalar().alias("m")]),
+                &inner,
+                &other,
+            ),
+            (
+                spark
+                    .range(5)
+                    .unwrap()
+                    .filter(col("id").isin_subquery(&listed)),
+                &listed,
+                &other,
+            ),
+            (
+                other.range(2).unwrap().filter(first.exists()),
+                &first,
+                &spark,
+            ),
+        ];
+        for (df, plan, its_session) in &cases {
+            let relation = df.relation().unwrap();
+            let (root, references) = with_relations(&relation);
+            let condition = match &root.rel_type {
+                Some(RelType::Project(project)) => match &project.expressions[0].expr_type {
+                    Some(proto::expression::ExprType::Alias(alias)) => {
+                        alias.expr.as_deref().unwrap().clone()
+                    }
+                    other => panic!("expected an alias: {other:?}"),
+                },
+                Some(RelType::Filter(filter)) => filter.condition.clone().unwrap(),
+                other => panic!("expected a select or a filter: {other:?}"),
+            };
+            let plan_id_of_the_subquery = subquery(&condition).plan_id;
+            assert_eq!(
+                plan_id_of_the_subquery,
+                its_session.plan_ids().id_of(&plan.plan)
+            );
+            assert_eq!(references.len(), 1);
+            assert_eq!(plan_id(&references[0]), Some(plan_id_of_the_subquery));
+            assert_eq!(references[0], plan.relation().unwrap());
+        }
     }
 
     /// The relations below a relation with subqueries, and the plans that they refer to,

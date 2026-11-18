@@ -555,3 +555,55 @@ fn catalog_calls_send_the_plans_of_official_pyspark() {
         failures.join("\n")
     );
 }
+
+/// As PySpark's `createTable`, and `createExternalTable`, which calls it: a schema that is not a
+/// struct type raises `NOT_EXPECTED_TYPE` of the name of its class, before any request.
+#[test]
+fn create_table_of_a_schema_that_is_not_a_struct_fails_as_pyspark() {
+    let (remote, sent) = serve();
+    let spark = SparkSession::builder()
+        .remote(&remote)
+        .get_or_create()
+        .unwrap();
+    let catalog = spark.catalog();
+    let array = DataType::Array {
+        element_type: Box::new(DataType::Integer),
+        contains_null: true,
+    };
+    for (result, class) in [
+        (
+            catalog.create_table_with(
+                TABLE,
+                None,
+                None,
+                Some(&DataType::Long),
+                None,
+                HashMap::new(),
+            ),
+            "LongType",
+        ),
+        (
+            catalog.create_external_table_with(
+                TABLE,
+                Some(PATH),
+                None,
+                Some(&array),
+                HashMap::new(),
+            ),
+            "ArrayType",
+        ),
+    ] {
+        let Err(error) = result else {
+            panic!("the schema {class} was taken");
+        };
+        assert_eq!(
+            error.kind,
+            spark_connect_core::error::SparkErrorKind::TypeError
+        );
+        assert_eq!(
+            error.message(),
+            format!("[NOT_EXPECTED_TYPE] Argument `schema` should be struct type, got {class}.")
+        );
+    }
+    assert!(sent.lock().unwrap().is_empty());
+}

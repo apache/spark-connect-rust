@@ -107,6 +107,43 @@ fn aggregate_functions() {
     assert_eq!(row.get_by_name("c").and_then(|v| v.as_i64()), Some(3));
 }
 
+/// As PySpark's `F.reduce`, which sends the function `reduce`: the column of the name and the
+/// value of the official client's, with and without a finish lambda.
+#[test]
+fn reduce_is_named_and_valued_as_pyspark() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = s.sql("SELECT array(1, 2, 3) AS a").unwrap();
+    let merge = "lambdafunction((namedlambdavariable() + namedlambdavariable()), \
+                 namedlambdavariable(), namedlambdavariable())";
+    let reduced = df.select(vec![f::reduce(col("a"), lit(0), |args| {
+        args[0].clone() + args[1].clone()
+    })]);
+    assert_eq!(
+        reduced.columns().unwrap(),
+        [format!(
+            "reduce(a, 0, {merge}, lambdafunction(namedlambdavariable(), namedlambdavariable()))"
+        )]
+    );
+    assert_eq!(val(&reduced, col("*")).as_i64(), Some(6));
+    let finished = df.select(vec![f::reduce_with_finish(
+        col("a"),
+        lit(0),
+        |args| args[0].clone() + args[1].clone(),
+        |args| args[0].clone() * lit(2),
+    )]);
+    assert_eq!(
+        finished.columns().unwrap(),
+        [format!(
+            "reduce(a, 0, {merge}, lambdafunction((namedlambdavariable() * 2), \
+             namedlambdavariable()))"
+        )]
+    );
+    assert_eq!(val(&finished, col("*")).as_i64(), Some(12));
+}
+
 /// As PySpark, whose random functions draw a seed for each call: two `uuid()` and two `rand()`
 /// columns differ, as do the `uuid()` of two queries, while a DataFrame keeps its seeds across
 /// executions and a given seed gives the same values in every query.

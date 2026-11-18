@@ -4,17 +4,18 @@
 //! as the reference PySpark client. Lambda variable names are non-deterministic
 //! across runs (depend on counter state), so we canonicalize them on both sides
 //! before comparing: rename every distinct UnresolvedNamedLambdaVariable name_parts
-//! to v0, v1, ... in first-appearance order.
+//! to v0, v1, ... in first-appearance order. A case of each golden is required: one that is
+//! missing from the goldens or the cases, or mismatches, FAILS the test.
 
 mod common;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::functions::{
-    aggregate, aggregate_with_finish, exists, filter, forall, map_filter, map_zip_with, transform,
-    transform_idx, transform_keys, transform_values, zip_with,
+    aggregate, aggregate_with_finish, exists, filter, forall, map_filter, map_zip_with, reduce,
+    reduce_with_finish, transform, transform_idx, transform_keys, transform_values, zip_with,
 };
 use spark_connect_proto as proto;
 
@@ -143,6 +144,18 @@ fn build(name: &str) -> Option<Expression> {
         )
         .expression()
         .clone(),
+        // As PySpark's `reduce`, the function `reduce` of the arguments of `aggregate`.
+        "reduce" => reduce(col("a"), cint(0), |args| args[0].clone() + args[1].clone())
+            .expression()
+            .clone(),
+        "reduce_finish" => reduce_with_finish(
+            col("a"),
+            cint(0),
+            |args| args[0].clone() + args[1].clone(),
+            |args| args[0].clone() * cint(2),
+        )
+        .expression()
+        .clone(),
         "zip_with" => zip_with(col("a"), col("b"), |args| args[0].clone() + args[1].clone())
             .expression()
             .clone(),
@@ -173,6 +186,8 @@ const REQUIRED: &[&str] = &[
     "forall",
     "aggregate",
     "aggregate_finish",
+    "reduce",
+    "reduce_finish",
     "zip_with",
     "transform_keys",
     "transform_values",
@@ -213,6 +228,13 @@ fn hof_expressions_match_reference_golden() {
         failures.len(),
         REQUIRED.len(),
         failures.join("\n")
+    );
+    // A case of each golden: a function that the capture adds fails until it has its case.
+    let cases: BTreeSet<&str> = REQUIRED.iter().copied().collect();
+    let golden_names: BTreeSet<&str> = goldens.keys().map(String::as_str).collect();
+    assert_eq!(
+        cases, golden_names,
+        "the cases differ from those of the golden"
     );
     println!("all {} golden HOF expression cases passed", REQUIRED.len());
 }

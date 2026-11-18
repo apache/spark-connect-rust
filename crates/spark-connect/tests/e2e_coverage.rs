@@ -512,7 +512,7 @@ fn agg_na_stat_reshape_surface() {
         .approx_quantile(vec!["val"], vec![0.5], 0.1)
         .collect()
         .unwrap();
-    let _ = st.corr("id", "val").unwrap();
+    let _ = st.corr("id", "val", None).unwrap();
     let _ = st.cov("id", "val").unwrap();
 
     // describe / summary / unpivot
@@ -1061,6 +1061,17 @@ fn read_write_roundtrip_surface() {
         .save_as_table("cov_rw_bucketed")
         .unwrap();
     assert_eq!(s.table("cov_rw_bucketed").unwrap().count().unwrap(), 5);
+    // As PySpark's `bucketBy(0, "id")`, which sends no bucketing, that the server would refuse.
+    let _ = s
+        .sql("DROP TABLE IF EXISTS cov_rw_bucketed_0")
+        .unwrap()
+        .collect();
+    df.write()
+        .mode("overwrite")
+        .bucket_by(0, vec!["id".to_string()])
+        .save_as_table("cov_rw_bucketed_0")
+        .unwrap();
+    assert_eq!(s.table("cov_rw_bucketed_0").unwrap().count().unwrap(), 5);
 
     // options(map) plural form on the reader.
     let mut opts = HashMap::new();

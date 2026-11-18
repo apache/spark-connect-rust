@@ -88,6 +88,38 @@ fn type_name_matches_pyspark() {
     assert_eq!(DataType::Date.type_name(), "date");
 }
 
+/// As `type(dt).__name__` of PySpark's types, by which its errors name the type of an argument:
+/// a user-defined type is the class that its `pyClass` names.
+#[test]
+fn class_name_matches_pyspark() {
+    assert_eq!(DataType::Long.class_name(), "LongType");
+    assert_eq!(DataType::TimestampNtz.class_name(), "TimestampNTZType");
+    assert_eq!(
+        DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }
+        .class_name(),
+        "DecimalType"
+    );
+    assert_eq!(
+        DataType::Struct { fields: vec![] }.class_name(),
+        "StructType"
+    );
+    let udt = |python_class: Option<&str>| DataType::Udt {
+        type_str: "udt".to_string(),
+        jvm_class: None,
+        python_class: python_class.map(str::to_string),
+        serialized_python_class: None,
+        sql_type: Some(Box::new(DataType::Integer)),
+    };
+    assert_eq!(
+        udt(Some("pyspark.ml.linalg.VectorUDT")).class_name(),
+        "VectorUDT"
+    );
+    assert_eq!(udt(None).class_name(), "UserDefinedType");
+}
+
 #[test]
 fn from_ddl_parses_to_correct_types() {
     assert_eq!(DataType::from_ddl("int").unwrap(), DataType::Integer);

@@ -234,6 +234,32 @@ fn column_membership_conditional_window() {
         .unwrap();
 }
 
+/// As PySpark's `rangeBetween(0, 0)` and `rowsBetween(-sys.maxsize, 0)`, whose frames are of the
+/// current row and unbounded: the values of the official client.
+#[test]
+fn frames_of_the_current_row_and_unbounded_are_pysparks() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::window::{FrameBound, Window};
+    let s = session();
+    let df = s
+        .sql("SELECT * FROM VALUES ('a', 1), ('b', 2), ('b', 3) AS t(s, v)")
+        .unwrap();
+    let range =
+        Window::order_by(["s"]).range_between(FrameBound::Preceding(0), FrameBound::Following(0));
+    assert_eq!(
+        i64s(&one(&df, f::sum(col("v")).over(range))),
+        vec![Some(1), Some(5), Some(5)]
+    );
+    let rows = Window::order_by(["s", "v"])
+        .rows_between(FrameBound::Preceding(i64::MAX), FrameBound::Following(0));
+    assert_eq!(
+        i64s(&one(&df, f::sum(col("v")).over(rows))),
+        vec![Some(1), Some(3), Some(6)]
+    );
+}
+
 /// As PySpark's `F.col`, `col("*")`, and the name `*` where an API takes a column, is the star of
 /// every column, and `t.*` that of the table `t`: a select, a count, a struct and its JSON read
 /// the columns as PySpark's do, where a reference of a column named `*` does not resolve.
@@ -254,6 +280,14 @@ fn a_star_of_col_or_of_a_name_reads_every_column_as_pyspark() {
         vec![Some(r#"{"id":1,"name":"apple","val":10.0}"#.to_string())]
     );
     assert_eq!(df.alias("t").select(["t.*"]).columns().unwrap(), names);
+    // As PySpark's `df["*"]`, the star of the DataFrame, by its plan ID: of each side of a join.
+    assert_eq!(df.select(vec![df.col("*")]).columns().unwrap(), names);
+    let other = s.range(1).unwrap();
+    let joined = df
+        .cross_join(&other)
+        .select(vec![other.col("*"), df.col("id")]);
+    assert_eq!(joined.columns().unwrap(), ["id", "id"]);
+    assert_eq!(joined.collect().unwrap().len(), 3);
 }
 
 #[test]

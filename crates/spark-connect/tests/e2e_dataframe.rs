@@ -657,6 +657,45 @@ fn pivot_values_of_floats_and_year_month_intervals_match_discovered_pivots() {
     );
 }
 
+/// As PySpark's createDataFrame of an Arrow table of no rows and a schema, which sends the schema
+/// alone: the DataFrame of the official client, of the schema, whatever the Arrow columns.
+#[test]
+fn create_dataframe_from_arrow_of_no_rows_is_of_the_schema_as_pyspark() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::types::{DataType, StructField};
+
+    let s = session();
+    let field = |name: &str, data_type| StructField {
+        name: name.into(),
+        data_type,
+        nullable: true,
+        metadata: Default::default(),
+    };
+    let schema = DataType::Struct {
+        fields: vec![
+            field("x", DataType::Long),
+            field(
+                "y",
+                DataType::String {
+                    collation: "UTF8_BINARY".into(),
+                },
+            ),
+        ],
+    };
+    let arrow_schema = std::sync::Arc::new(arrow::datatypes::Schema::new(vec![
+        arrow::datatypes::Field::new("a", arrow::datatypes::DataType::Int64, true),
+    ]));
+    let empty = arrow::record_batch::RecordBatch::new_empty(arrow_schema);
+    let df = s.create_dataframe_from_arrow(vec![empty], schema).unwrap();
+    assert!(df.collect().unwrap().is_empty());
+    assert_eq!(
+        df.schema().unwrap().simple_string(),
+        "struct<x:bigint,y:string>"
+    );
+}
+
 /// As PySpark's createDataFrame, whose `cache_threshold <= _table.nbytes` applies at any size:
 /// with a cache threshold of 64 bytes, a few short rows and columns are uploaded as cached
 /// artifacts, which the server reads back.
@@ -1152,6 +1191,54 @@ fn subqueries_return_the_rows_of_pyspark() {
     assert_eq!(
         int_pairs(&t1.filter(f::r#struct(vec![col("a"), col("b")]).isin_subquery(&pairs))),
         vec![(1, 2)]
+    );
+}
+
+/// As PySpark's, of `spark.newSession()`: the subqueries of a DataFrame of another session, in
+/// either direction, return the rows of the official client, of a plan of a column of its own
+/// DataFrame too.
+#[test]
+fn subqueries_of_a_dataframe_of_another_session_return_the_rows_of_pyspark() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let other = s.new_session();
+    let ids = |df: &DataFrame| -> Vec<i64> {
+        df.collect()
+            .unwrap()
+            .iter()
+            .map(|row| row.get(0).unwrap().as_i64().unwrap())
+            .collect()
+    };
+    let listed = s.range(2).unwrap().select(vec![col("id")]);
+    assert_eq!(
+        ids(&other
+            .range(5)
+            .unwrap()
+            .filter(col("id").isin_subquery(&listed))),
+        [0, 1]
+    );
+    let largest = s.range(3).unwrap().select(vec![f::max(col("id"))]);
+    let m = other
+        .range(1)
+        .unwrap()
+        .select(vec![largest.scalar().alias("m")]);
+    assert_eq!(ids(&m), [2]);
+    assert_eq!(
+        other
+            .range(2)
+            .unwrap()
+            .filter(s.range(1).unwrap().exists())
+            .count()
+            .unwrap(),
+        2
+    );
+    let o = other.range(3).unwrap();
+    let of_its_column = o.select(vec![f::max(o.col("id"))]).scalar();
+    assert_eq!(
+        ids(&s.range(1).unwrap().select(vec![of_its_column.alias("m")])),
+        [2]
     );
 }
 

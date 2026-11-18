@@ -2,10 +2,10 @@
 """Capture golden Expression protos for higher-order functions (lambda-taking).
 
 These are the functions the generic auto-capture skips because they need Python
-lambdas: transform, filter, exists, forall, aggregate, zip_with, map_filter,
-transform_keys/values, map_zip_with, array_sort(comparator). Their protos use
-LambdaFunction + UnresolvedNamedLambdaVariable, which the Rust expression layer
-must support. Output: tests/golden/functions_hof.jsonl.
+lambdas: transform, filter, exists, forall, aggregate, reduce, zip_with,
+map_filter, transform_keys/values, map_zip_with, array_sort(comparator). Their
+protos use LambdaFunction + UnresolvedNamedLambdaVariable, which the Rust
+expression layer must support. Output: tests/golden/functions_hof.jsonl.
 """
 
 from __future__ import annotations
@@ -39,6 +39,12 @@ def cases(F):
     yield "transform_values", F.transform_values(F.col("m"), lambda k, v: v + 1)
     yield "map_filter", F.map_filter(F.col("m"), lambda k, v: v > 0)
     yield "map_zip_with", F.map_zip_with(F.col("m1"), F.col("m2"), lambda k, a, b: a + b)
+    # After the others, so that their lambda variables keep their names in the golden.
+    yield "reduce", F.reduce(F.col("a"), F.lit(0), lambda acc, x: acc + x)
+    yield (
+        "reduce_finish",
+        F.reduce(F.col("a"), F.lit(0), lambda acc, x: acc + x, lambda acc: acc * 2),
+    )
 
 
 def main() -> None:

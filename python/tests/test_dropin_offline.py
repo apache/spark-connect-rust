@@ -2370,7 +2370,8 @@ def test_is_empty_reads_the_binary_setting_after_its_execution_as_pyspark(mock_c
 
 def test_corr_and_cov_send_their_statistic_as_it_is_as_pyspark(mock_connect):
     # As PySpark's corr and cov, which take the first value of _to_table() of their statistic:
-    # the root of the plan is the statistic, with no limit over it, and no setting is read.
+    # the root of the plan is the statistic, with no limit over it, and no setting is read. The
+    # method of corr, "pearson" when it is not given, is sent.
     import pyspark.sql.connect.proto as pb2
 
     spark, service = mock_connect
@@ -2378,10 +2379,14 @@ def test_corr_and_cov_send_their_statistic_as_it_is_as_pyspark(mock_connect):
     before = len(service.rpc_events)
     for stat in (df.corr, df.cov, df.stat.corr, df.stat.cov):
         stat("id", "id")
-    roots = [pb2.ExecutePlanRequest.FromString(request).plan.root.WhichOneof("rel_type")
+    df.corr("id", "id", "pearson")
+    df.stat.corr("id", "id", method="")
+    roots = [pb2.ExecutePlanRequest.FromString(request).plan.root
              for request in service.execute_requests]
-    assert roots == ["corr", "cov", "corr", "cov"]
-    assert service.rpc_events[before:] == ["execute"] * 4
+    assert [root.WhichOneof("rel_type") for root in roots] == [
+        "corr", "cov", "corr", "cov", "corr", "corr"]
+    assert all(root.corr.method == "pearson" for root in roots if root.HasField("corr"))
+    assert service.rpc_events[before:] == ["execute"] * 6
 
 
 def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypatch, mock_connect):
@@ -5634,6 +5639,15 @@ def test_dataframe_columns_refer_to_it_by_its_plan_id_as_pyspark(mock_connect):
         (field,) = set(expression) & {2, 5, 8}
         ids.append(parse_message(expression[field][0])[2][0])
     assert ids == [left_id, right_id, left_id, left_id]
+    # As PySpark's `_col("*")`, of `df.name` and `_joinAsOf`, a reference of a column named `*`,
+    # where `df["*"]` is the star: Expression.unresolved_attribute=2, of
+    # UnresolvedAttribute.unparsed_identifier=1 and plan_id=2.
+    left.select(left._col("*"), getattr(left, "*")).collect()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    project = parse_message(parse_message(plan)[3][0])
+    for expression in project[3]:
+        attribute = parse_message(parse_message(expression)[2][0])
+        assert (attribute[1], attribute[2]) == ([b"*"], [plan_id(project[1][0])])
 
 
 def test_row_count_and_index():
@@ -10764,12 +10778,17 @@ def test_catalog_writer_and_unpersist_flags_convert_as_pyspark(mock_connect):
     with pytest.raises(TypeError, match="^'str' object"):
         catalog.dropTable("t", ifExists="x", purge=1.5)
     assert len(service.execute_requests) == requests
-    # AnalyzePlanRequest.unpersist=15 -> Unpersist.blocking=2, which None does not set in PySpark,
-    # and unpersists without blocking as False does.
-    for blocking, sent in [(1, [1]), (np.bool_(False), [0])]:
-        spark.range(1).unpersist(blocking=blocking)
-        assert parse_message(parse_message(service.analyze_requests[-1])[15][0])[2] == sent
-    spark.range(1).unpersist(None)
+    # AnalyzePlanRequest.unpersist=15 -> Unpersist.blocking=2, which PySpark's request sets
+    # unless it is None: of its default False too, and not of None, which leaves the server's.
+    for call, sent in [
+        (lambda: spark.range(1).unpersist(blocking=1), [1]),
+        (lambda: spark.range(1).unpersist(np.bool_(False)), [0]),
+        (lambda: spark.range(1).unpersist(), [0]),
+        (lambda: spark.range(1).unpersist(None), None),
+        (lambda: spark.range(1).unpersist(blocking=None), None),
+    ]:
+        call()
+        assert parse_message(parse_message(service.analyze_requests[-1])[15][0]).get(2) == sent
 
     def sent_mode():
         # ExecutePlanRequest.plan=3 -> Plan.command=2 -> Command.write_operation=2 ->
@@ -16408,6 +16427,14 @@ def test_with_metadata_and_pivot_refer_to_their_column_through_the_dataframe_as_
     input_plan_id, attribute_plan_id = attribute_and_input_plan_ids(
         aggregate[1][0], pivot[1][0])
     assert attribute_plan_id == input_plan_id
+
+    # And the column `*` of withMetadata, self["*"], is the star of the DataFrame:
+    # Expression.unresolved_star=5, UnresolvedStar.plan_id=2.
+    with_columns = parse_message(root(df.withMetadata("*", {"a": "b"}))[23][0])
+    star = parse_message(parse_message(with_columns[2][0])[1][0])
+    assert 2 not in star
+    input_plan_id = parse_message(parse_message(with_columns[1][0])[1][0])[2][0]
+    assert parse_message(star[5][0])[2] == [input_plan_id]
 
 
 def test_ordinals_and_names_of_columns_carry_the_origin_of_col_as_pyspark():
@@ -28322,6 +28349,19 @@ def test_streaming_queries_check_their_timeouts_as_pyspark(mock_connect):
                 "arg_name": "timeout",
                 "arg_value": type(timeout).__name__,
             }
+    # And then the errors of PySpark's `int(timeout * 1000)`, which it sets in the int64 field of
+    # its command: the OverflowError of an infinity, and protobuf's ValueError of a count beyond a
+    # long, before any request.
+    requests = len(service.execute_requests)
+    for timeout, error, message in (
+        (float("inf"), OverflowError, "cannot convert float infinity to integer"),
+        (9.3e15, ValueError, "Value out of range: 9300000000000000000"),
+    ):
+        for wait in (query.awaitTermination, spark.streams.awaitAnyTermination):
+            with pytest.raises(error) as e:
+                wait(timeout)
+            assert type(e.value) is error and str(e.value) == message
+    assert len(service.execute_requests) == requests
     # As protobuf's default (upb) backend, which reads the `extended` that PySpark sets in its
     # ExplainCommand as a C long, true when it is not 0, and a NumPy bool by its truth: another
     # object raises the error of that conversion, and a NumPy array protobuf's TypeError.
@@ -28392,10 +28432,12 @@ def test_stream_writer_triggers_are_checked_as_pyspark(offline_spark, kwargs, co
 
 def test_foreach_sends_the_function_of_each_partition_as_pyspark(mock_connect):
     # As PySpark's foreach: the command (func, None, serializer, serializer) of the function of
-    # _construct_foreach_function, which calls a function with each row of a partition;
+    # _construct_foreach_function, which calls a function with each row of a partition, in a
+    # PythonUDF of the command and the Python version only, as of foreachBatch;
     # ATTRIBUTE_NOT_CALLABLE for an object without a callable process, open or close; and
     # STREAMING_CONNECT_SERIALIZATION_ERROR for a function that does not pickle, as of
     # foreachBatch.
+    import sys
     import threading
 
     from pyspark import cloudpickle
@@ -28422,6 +28464,15 @@ def test_foreach_sends_the_function_of_each_partition_as_pyspark(mock_connect):
     assert return_type is None and input_serializer is output_serializer
     with pytest.raises(ValueError, match="the row 7"):
         function(0, iter([7]))
+    # PythonUDF: command=3 and python_ver=4, and no output_type=1 nor eval_type=2, which
+    # PySpark's DataStreamWriter does not set. And so of foreachBatch=14.
+    python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert sorted(udf) == [3, 4] and udf[4] == [python_ver.encode()]
+    writer.foreachBatch(lambda df, batch_id: None).start()
+    plan = parse_message(parse_message(service.execute_requests[-1])[3][0])
+    start = parse_message(parse_message(plan[2][0])[6][0])
+    udf = parse_message(parse_message(start[14][0])[1][0])
+    assert sorted(udf) == [3, 4] and udf[4] == [python_ver.encode()]
 
     class NoProcess:
         pass
