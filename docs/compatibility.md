@@ -1235,8 +1235,13 @@ their plans with `CopyFrom` of the package's messages, of the bytes, text and JS
 with either implementation of `protobuf`. The relation of a DataFrame that such a message takes
 (`df._plan.plan(session)`, as `merge` takes the plan of its source DataFrame) is a shallow
 placeholder of the relation of the DataFrame of this client, as in the plans of `pyspark.ml`: the
-core replaces it when the plan or the command reaches it, also in the message of an extension, of a
-type that it does not know, so the server receives the relation, as PySpark's plugins send it.
+core replaces it when the plan or the command reaches it, so the server receives the relation, as
+PySpark's plugins send it: also anywhere in the message of the extension of a relation or of a
+command, of a type that it does not know, as long as the message holds the placeholder as
+`plan(session)` gives it. "SparkSession.client" below lists the places where the core replaces it:
+a placeholder under a relation of another type that a plugin builds itself (a `Project` of its
+own), or one that a plugin changes (`plan.common.plan_id = ...`) in the message of an extension, is
+sent as it is, which the server refuses.
 Its classes are the runtime's, as those of the package (not `google.protobuf.message.Message`'s),
 and the rest of such a module is `protobuf`'s:
 
@@ -1314,18 +1319,23 @@ where it looks for it:
   `same_semantics`, `semantic_hash`) or of `DataFrame(plan, session)`, and as the relation of the
   analyses of a relation (`persist`, `unpersist`, `get_storage_level`);
 - under it, as the input of the relations of `pyspark.ml` (an `MlRelation`'s input, its model
-  summary dataset and its fetched arguments, and a `WithRelations`'s root and references), and as
-  the dataset of the ML commands (`Fit`, `Evaluate`, `CreateSummary`) and the arguments of a
-  `Fetch`;
+  summary dataset and its fetched arguments, and a `WithRelations`'s root and references), as the
+  input of a `SubqueryAlias`, such as those of `pyspark.sql.connect.plan`
+  (`SubqueryAlias(df._plan, "s")`, and the views of its `SQL`, such as
+  `SQL("SELECT * FROM v", views=[SubqueryAlias(df._plan, "v")])`, which are aliases among the
+  references of a `WithRelations`), and as the dataset of the ML commands (`Fit`, `Evaluate`,
+  `CreateSummary`) and the arguments of a `Fetch`;
 - anywhere in the message of the extension of a relation or of a command, a plugin's message such
-  as Delta Lake's `MergeIntoTable` (see the Delta Lake paragraph above).
+  as Delta Lake's `MergeIntoTable` (see the Delta Lake paragraph above), where the message holds it
+  as `plan(session)` gives it.
 
 Elsewhere it is sent as it is, and the server rejects the plan with
-`CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation: as the input of
-another relation built in Python over it, such as a `Limit`, a `Join` or a `SubqueryAlias`, also in
-a `WithRelations`; as the relation of a command that is neither an ML command nor an extension,
-such as a `WriteOperation`, a `CreateDataFrameView` or a `CheckpointCommand`; and in the extension
-of an expression.
+`CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation: as the input of a
+relation of another type built in Python over it, by a plugin or with `pyspark.sql.connect.proto`,
+such as a `Limit`, a `Join` or a `Project`, also under a `SubqueryAlias` or in a `WithRelations`;
+as the relation of a command that is neither an ML command nor an extension, such as a
+`WriteOperation`, a `CreateDataFrameView` or a `CheckpointCommand`; in the extension of an
+expression; and in the message of an extension that changes it (`plan.common.plan_id = ...`).
 
 `get_tags` returns a copy of the tags of the thread, where PySpark returns the set that its client
 keeps, which the later changes of the tags change too. The official tests of the client

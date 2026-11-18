@@ -20666,6 +20666,51 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     gc.collect()
 
 
+def test_subquery_aliases_of_python_plans_send_the_relations_of_their_dataframes(mock_connect):
+    # As PySpark's SubqueryAlias of pyspark.sql.connect.plan over the plan of a DataFrame, which
+    # Delta Lake's DeltaTable.alias builds over its own plans, and the views of its SQL, which are
+    # such aliases in the references of a WithRelations: the server receives the relation of the
+    # DataFrame, of which the plan holds a placeholder, there and in the message of a plugin's
+    # extension under an alias. The Observations of the DataFrame are those of the alias.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SQL, LogicalPlan, SubqueryAlias
+    from pyspark.sql.connect.proto import example_plugins_pb2 as plugins
+
+    class PluginPlan(LogicalPlan):
+        def plan(self, session):
+            plan = self._create_proto_relation()
+            plan.extension.Pack(plugins.ExamplePluginRelation(input=self._child.plan(session)))
+            return plan
+
+    spark, service = mock_connect
+    source = spark.range(3).withColumnRenamed("id", "k")
+    relation = pb2.Relation.FromString(source._relation_bytes())
+
+    def sent():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+
+    DataFrame(SubqueryAlias(SubqueryAlias(source._plan, "s"), "t"), spark).collect()
+    assert sent().subquery_alias.alias == "t"
+    assert sent().subquery_alias.input.subquery_alias.input == relation
+
+    DataFrame(SQL("SELECT * FROM v", views=[SubqueryAlias(source._plan, "v")]), spark).collect()
+    assert sent().with_relations.references[0].subquery_alias.input == relation
+
+    DataFrame(SubqueryAlias(PluginPlan(source._plan), "p"), spark).collect()
+    plugin = plugins.ExamplePluginRelation()
+    assert sent().subquery_alias.input.extension.Unpack(plugin) and plugin.input == relation
+
+    observation = Observation("o")
+    observed = source.observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, metrics = _count_batch_and_observed_metrics(service, observed)
+    service.execute_payload = batch + metrics("o", varint_field(7, 3), "c")
+    assert DataFrame(SubqueryAlias(observed._plan, "s"), spark).count() == 3
+    assert observation.get == {"c": 3}
+
+
 def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):
     # As PySpark's DataFrame, a Python object: a cycle through a DataFrame of a Python plan, whose
     # plan keeps an object that keeps the DataFrame (as a pyspark.ml model keeps its summary's

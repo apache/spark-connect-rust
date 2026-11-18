@@ -848,12 +848,13 @@ pub(crate) fn placeholder_relation(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) 
     }
 }
 
-/// The Observations of the DataFrame whose placeholder `relation`, a relation of `pyspark.ml`,
-/// holds as its child: the relation itself, or the input of a transform, the dataset of a model
-/// summary or the root of a `WithRelations`, and so on down, as PySpark's `TransformerRelation`,
-/// `AttributeRelation` and `WithRelations` collect the `observations` of their child (see
-/// [`LogicalPlan::observations`]). Taken before the placeholders are replaced, which then no
-/// longer name their DataFrames.
+/// The Observations of the DataFrame whose placeholder `relation`, a relation of `pyspark.ml` or
+/// a `SubqueryAlias` of `pyspark.sql.connect.plan`, holds as its child: the relation itself, or
+/// the input of a transform, the dataset of a model summary, the root of a `WithRelations` or the
+/// input of a `SubqueryAlias`, and so on down, as PySpark's `TransformerRelation`,
+/// `AttributeRelation`, `WithRelations` and `SubqueryAlias` collect the `observations` of their
+/// child (see [`LogicalPlan::observations`]). Taken before the placeholders are replaced, which
+/// then no longer name their DataFrames.
 pub(crate) fn child_observations(
     relation: &proto::Relation,
 ) -> Vec<(String, crate::observation::Observation)> {
@@ -877,6 +878,7 @@ pub(crate) fn child_observations(
                 _ => ml.model_summary_dataset.as_deref(),
             },
             Some(proto::relation::RelType::WithRelations(with)) => with.root.as_deref(),
+            Some(proto::relation::RelType::SubqueryAlias(alias)) => alias.input.as_deref(),
             _ => None,
         };
         match child {
@@ -888,9 +890,12 @@ pub(crate) fn child_observations(
 
 /// Replace the placeholders of `relation` by the relations of their DataFrames, and of the
 /// relations that the plans of `pyspark.ml` take as input (their `ml_relation`, `with_relations`
-/// and fetched arguments), and of the messages of the extensions of a plugin (see
-/// [`resolve_extension`]). Each replacement is the relation of a DataFrame of the core, which has
-/// no placeholder.
+/// and fetched arguments), of the inputs of the `SubqueryAlias` of `pyspark.sql.connect.plan` (and
+/// so of the views of its `SQL`, the references of a `with_relations`), and of the messages of
+/// the extensions of a plugin there (see [`resolve_extension`]). Each replacement is the relation
+/// of a DataFrame of the core, which has no placeholder. A placeholder under a relation of another
+/// type, which a plan that Python builds of its own relations can hold, such as one of a plugin or
+/// one that `SparkSession.client` is given, is sent as it is.
 pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
     resolve_relation_at(relation, 1).map(|_| ())
 }
@@ -925,7 +930,10 @@ fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<u
     }
     let mut deepest = level;
     let mut below = |relation: &mut proto::Relation| -> Result<()> {
-        deepest = deepest.max(resolve_relation_at(relation, level + 1)?);
+        // Aliases over aliases are as deep as the Python plan that builds them.
+        let levels =
+            crate::expression::with_stack_for_a_level(|| resolve_relation_at(relation, level + 1))?;
+        deepest = deepest.max(levels);
         Ok(())
     };
     match relation.rel_type.as_mut() {
@@ -951,6 +959,14 @@ fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<u
             }
             for reference in with.references.iter_mut() {
                 below(reference)?;
+            }
+        }
+        // As PySpark's SubqueryAlias of pyspark.sql.connect.plan, over the plan of a DataFrame
+        // (`SubqueryAlias(df._plan, "s")` and the views of its SQL), which Delta Lake's
+        // `DeltaTable.alias` builds over its own plans.
+        Some(proto::relation::RelType::SubqueryAlias(alias)) => {
+            if let Some(input) = alias.input.as_mut() {
+                below(input)?;
             }
         }
         Some(proto::relation::RelType::Extension(extension)) => resolve_extension(extension)?,
@@ -4443,6 +4459,72 @@ mod placeholder_tests {
         std::mem::drop(gone);
         let error = resolve_relation(&mut plan).unwrap_err();
         assert!(error.to_string().contains("no longer exists"), "{error}");
+    }
+
+    #[test]
+    fn placeholders_resolve_under_the_subquery_aliases_of_python_plans() {
+        // As the SubqueryAlias of pyspark.sql.connect.plan over the plan of a DataFrame
+        // (`SubqueryAlias(df._plan, "s")`), the views of its SQL, which are such aliases among
+        // the references of a WithRelations, and an alias over a plugin's extension that holds
+        // the plan of a DataFrame: the placeholders are replaced, a level below the alias.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let (relation, levels) = relation_with_ids_and_levels(&node, &ids).unwrap();
+        let shallow = placeholder(&node, &ids);
+        let alias = |input: proto::Relation| proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::SubqueryAlias(Box::new(
+                proto::SubqueryAlias {
+                    input: Some(Box::new(input)),
+                    alias: "s".to_string(),
+                    qualifier: Vec::new(),
+                },
+            ))),
+        };
+        let mut plan = alias(alias(shallow.clone()));
+        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 2 + levels);
+        assert_eq!(plan, alias(alias(relation.clone())));
+
+        let sql = |view: proto::Relation| proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::WithRelations(Box::new(
+                proto::WithRelations {
+                    root: Some(Box::new(proto::Relation {
+                        common: None,
+                        rel_type: Some(proto::relation::RelType::Sql(proto::Sql {
+                            query: "SELECT * FROM s".to_string(),
+                            ..Default::default()
+                        })),
+                    })),
+                    references: vec![view],
+                },
+            ))),
+        };
+        let mut plan = sql(alias(shallow.clone()));
+        resolve_relation(&mut plan).unwrap();
+        assert_eq!(plan, sql(alias(relation.clone())));
+
+        let plugin = |input: &proto::Relation| proto::SubqueryAlias {
+            input: Some(Box::new(input.clone())),
+            alias: "p".to_string(),
+            qualifier: Vec::new(),
+        };
+        let mut plan = alias(extension_of(&plugin(&shallow)));
+        resolve_relation(&mut plan).unwrap();
+        assert_eq!(plan, alias(extension_of(&plugin(&relation))));
+
+        // A placeholder under a relation of another type, as a plan that Python builds of its own
+        // relations holds one, is left as it is.
+        let limit = |input: proto::Relation| proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Limit(Box::new(proto::Limit {
+                input: Some(Box::new(input)),
+                limit: 1,
+            }))),
+        };
+        let mut plan = alias(limit(shallow.clone()));
+        resolve_relation(&mut plan).unwrap();
+        assert_eq!(plan, alias(limit(shallow)));
     }
 
     #[test]

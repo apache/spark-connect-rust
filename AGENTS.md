@@ -146,8 +146,11 @@ to the runtime's pool at run time (`pbmsg::pool::register`; see `docs/compatibil
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
 that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the shallow
 placeholder that `DataFrame._plan.plan(session)` gives of the relation of a DataFrame, which the
-core replaces in the inputs of the plans of `pyspark.ml` and in the messages of the extensions of
-a plugin's relations and commands (`plan::resolve_relation`, `resolve_command`).
+core replaces in the inputs of the plans of `pyspark.ml`, under a `SubqueryAlias` (those of
+`pyspark.sql.connect.plan`, and the views of its `SQL`), and in the messages of the extensions of a
+plugin's relations and commands there (`plan::resolve_relation`, `resolve_command`), but not under
+a relation of another type: "Plans of a DataFrame's relation" in `dev/parity/known-differences.md`
+says where.
 
 ## 3. Close API gaps (three layers)
 
