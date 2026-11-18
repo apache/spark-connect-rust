@@ -1247,11 +1247,12 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   of a map, or a value of a repeated field that the constructor takes), where upb holds the GIL
   until they end (but in the `update` and `MergeFrom` of a map and the constructor of a map of
   scalars, which run `MutableMapping.update` in Python), so another thread can use a message that
-  one of them reads meanwhile. `SerializeToString`, `==` and the release of a message hold the GIL
-  until they end, as upb's do: 0.07 s, 0.05 s and 0.07 s for a million messages, where upb's take
-  0.04 s, 0.14 s and 2 ms. The messages that the runtime makes, of a parse, a copy or a read of an
-  unset field, are not tracked by the garbage collector (`gc.is_tracked`), as they make no
-  reference cycles, so that a collection does not go through the messages of a large message;
+  one of them reads meanwhile. `SerializeToString`, `==` of two messages of the runtime and the
+  release of a message hold the GIL until they end, as upb's do: 0.07 s, 0.05 s and 0.07 s for a
+  million messages, where upb's take 0.04 s, 0.14 s and 2 ms. The messages that the runtime makes,
+  of a parse, a copy or a read of an unset field, are not tracked by the garbage collector
+  (`gc.is_tracked`), as they make no reference cycles, so that a collection does not go through the
+  messages of a large message;
 - the pickle of a message of a nested type names its class, which loads without `protobuf`,
   where upb's names protobuf's `_InternalConstructMessage` of the full name of its type, which
   loads where `protobuf` is installed (as a message of the runtime, whose classes of the protos of
@@ -1266,11 +1267,12 @@ protos that import them (those of a plugin, such as Delta Lake's Connect client)
 `json_format` finds the types of an `Any`. Such a module, of a proto3 file that imports the protos
 of Spark Connect directly or through the files it imports, gets the classes of the runtime when
 `protobuf`'s builder builds it (the drop-in wraps `builder.BuildTopDescriptorsAndMessages`, which
-the generated modules call), and its files are added to the runtime's pool. So their message
-fields take the messages of `pyspark.sql.connect.proto` as they are, as `protobuf`'s messages of
-PySpark's plugins take PySpark's: Delta Lake 4.0's `DeltaTable.delete`, `update` and `merge` build
-their plans with `CopyFrom` of the package's messages, of the bytes, text and JSON of PySpark's,
-with either implementation of `protobuf`. The relation of a DataFrame that such a message takes
+the modules of protoc 3.20 and later call, but not those of an older protoc, as below), and its
+files are added to the runtime's pool. So their message fields take the messages of
+`pyspark.sql.connect.proto` as they are, as `protobuf`'s messages of PySpark's plugins take
+PySpark's: Delta Lake 4.0's `DeltaTable.delete`, `update` and `merge` build their plans with
+`CopyFrom` of the package's messages, of the bytes, text and JSON of PySpark's, with either
+implementation of `protobuf`. The relation of a DataFrame that such a message takes
 (`df._plan.plan(session)`, as `merge` takes the plan of its source DataFrame) is a shallow
 placeholder of the relation of the DataFrame of this client, as in the plans of `pyspark.ml`: the
 core replaces it when the plan or the command reaches it, so the server receives the relation, as
@@ -1293,16 +1295,28 @@ and the rest of such a module is `protobuf`'s:
   `delta/connect/base.proto`) keeps `protobuf`'s classes in its own module. A message field of the
   runtime of one of its types takes `protobuf`'s messages of the type, by their full name and
   bytes, and gives a message of the runtime's class of the type, which is not the module's class:
-  `isinstance(relation.scan.table, base_pb2.DeltaTable)` is false, and such a message pickles only
-  within the message that holds it;
+  `isinstance(relation.scan.table, base_pb2.DeltaTable)` is false, such a message pickles only
+  within the message that holds it, and the module's class takes it only through its bytes or a
+  dict (`base_pb2.DeltaTable().CopyFrom(relation.scan.table)` raises `TypeError`), though the two
+  are equal (`==`) of the same contents, as below;
 - a file that is not proto3 (of proto2 or of editions, whose presence, defaults and packing the
   runtime does not read), or that imports one, or a well-known type other than `Any` and
   `Timestamp` (`protobuf`'s classes of `Duration`, `Struct` and the others have methods that the
-  runtime's classes would lack), keeps `protobuf`'s classes, which take the package's messages
-  only through bytes or dicts.
+  runtime's classes would lack), keeps `protobuf`'s classes, which take the package's messages,
+  and those of a module of a file that it imports that has the runtime's classes (a proto3 file
+  of the plugin that imports the protos of Spark Connect), only through bytes or dicts, where
+  upb's take them as they are;
+- a module of protoc before 3.20, which makes its classes with `protobuf`'s
+  `reflection.GeneratedProtocolMessageType` rather than with its builder, keeps `protobuf`'s
+  classes, which take the package's messages only through bytes or dicts, whatever its file.
 
 The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their
-types as they are, and an `Any` of either packs and unpacks a message of either.
+types as they are, and an `Any` of either packs and unpacks a message of either. A message of the
+runtime equals (`==`, on either side) a message of `protobuf`'s of its type of `protobuf`'s default
+pool of the same contents, as upb's messages of its one class of a type do: the runtime parses the
+bytes of `protobuf`'s message to compare it, as a field of the runtime takes it, so `in`, `remove`
+and `==` of the containers find such messages too. A message of a type of another pool, of
+another class for upb too, is not equal.
 
 `google.protobuf.unknown_fields.UnknownFieldSet` is the drop-in's wrapper of `protobuf`'s class,
 once `pyspark.sql.connect.proto` is imported, which takes the messages of the package too, where

@@ -480,9 +480,21 @@ pub(crate) fn name_and_bytes(message: &Bound<'_, PyAny>) -> PyResult<(String, Ve
     Ok((name, bytes))
 }
 
+/// Whether `value`, an object other than a message of the runtime, has the `DESCRIPTOR` of the
+/// message type `full_name`, as a message of protobuf's of the type has.
+fn is_described_as(value: &Bound<'_, PyAny>, full_name: &str) -> bool {
+    value
+        .getattr("DESCRIPTOR")
+        .and_then(|d| d.getattr("full_name"))
+        .and_then(|n| n.extract::<String>())
+        .is_ok_and(|n| n == full_name)
+}
+
 /// A new message of the type `full_name` of `value`: a copy of a message of that type, of this
 /// runtime or of protobuf's, or a message whose fields are the items of a mapping, each message
-/// that it copies or builds a step of `budget`.
+/// that it copies or builds a step of `budget`. A message of protobuf's of the type is taken as a
+/// message before any mapping but a dict, as it can have a field named `keys`
+/// (`Expression.Literal.Map` has one), which made it a mapping without `items`.
 pub(crate) fn message_from_value<'py>(
     py: Python<'py>,
     full_name: &str,
@@ -495,21 +507,63 @@ pub(crate) fn message_from_value<'py>(
         }
         return duplicate_with(py, m, budget);
     }
-    if value.cast::<PyDict>().is_ok() || value.hasattr("keys").unwrap_or(false) {
+    let from_mapping = || -> PyResult<Bound<'py, PyMessage>> {
         let child = new_instance(py, full_name)?;
         child
             .borrow_mut()
             .init_from_mapping_with(py, value, budget)?;
-        return Ok(child);
+        Ok(child)
+    };
+    if value.cast::<PyDict>().is_ok() {
+        return from_mapping();
     }
-    if let Ok((name, bytes)) = name_and_bytes(value) {
-        if name == full_name {
+    if is_described_as(value, full_name) {
+        if let Ok((_, bytes)) = name_and_bytes(value) {
             let child = new_instance(py, full_name)?;
             codec::merge_in(py, &child, &bytes, budget)?;
             return Ok(child);
         }
     }
+    if value.hasattr("keys").unwrap_or(false) {
+        return from_mapping();
+    }
     Err(not_initializing(py, full_name, value))
+}
+
+/// `other`, an object that `==` compares a message of the runtime with, as a message of the
+/// runtime of the type of `message`, when it is a message of protobuf's of that type that
+/// protobuf's default pool describes, the pool whose files the runtime holds: as a message field
+/// of the runtime takes it (see [`message_from_value`]), of its bytes, each message that it
+/// builds a step of a full budget, as for a parse. None of any other object, such as a class, or a
+/// message of a type of another pool, which upb's `==` gives `NotImplemented` of, as a message of
+/// another class: upb has one class of each type of a pool, so its messages of a type compare by
+/// their contents, where the runtime has a class of the type besides protobuf's.
+fn as_message_of_type<'py>(
+    py: Python<'py>,
+    message: &Bound<'py, PyMessage>,
+    other: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyMessage>>> {
+    if other.is_none() || other.is_instance_of::<PyType>() {
+        return Ok(None);
+    }
+    let Some(descriptor) = other.getattr_opt("DESCRIPTOR").ok().flatten() else {
+        return Ok(None);
+    };
+    let full_name = message.borrow().desc.full_name.clone();
+    let of_default_pool = || -> PyResult<bool> {
+        if descriptor.getattr("full_name")?.extract::<String>()? != full_name {
+            return Ok(false);
+        }
+        let pool = descriptor.getattr("file")?.getattr("pool")?;
+        let default = py
+            .import("google.protobuf.descriptor_pool")?
+            .call_method0("Default")?;
+        Ok(pool.is(&default))
+    };
+    if !of_default_pool().unwrap_or(false) {
+        return Ok(None);
+    }
+    message_from_value(py, &full_name, other, &ConversionBudget::full()).map(Some)
 }
 
 /// A new message of the type `full_name` of `value`, as a message field of a constructor takes
@@ -531,12 +585,7 @@ fn message_for_field<'py>(
         }
     }
     let is_mapping = value.cast::<PyDict>().is_ok() || value.hasattr("keys").unwrap_or(false);
-    let is_of_type = runtime_message.is_none()
-        && value
-            .getattr("DESCRIPTOR")
-            .and_then(|d| d.getattr("full_name"))
-            .and_then(|n| n.extract::<String>())
-            .is_ok_and(|n| n == full_name);
+    let is_of_type = runtime_message.is_none() && is_described_as(value, full_name);
     if !is_mapping && !is_of_type && assigns_values(py, full_name) {
         let child = new_instance(py, full_name)?;
         child.call_method1("_internal_assign", (value,))?;
@@ -1783,10 +1832,19 @@ impl PyMessage {
         let py = slf.py();
         match op {
             CompareOp::Eq | CompareOp::Ne => {
-                let Ok(other) = other.cast::<PyMessage>() else {
-                    return Ok(py.NotImplemented());
+                // A message of protobuf's of the type, which upb's `==` of its one class of the
+                // type compares by its contents: protobuf's class of the type of a plugin's file
+                // that keeps it (`relation.scan.table == base_pb2.DeltaTable(...)`), of
+                // `message_factory` or `symbol_database`, or of a pickle of upb. It is compared
+                // this way when it is on either side, as Python reflects the `==` of protobuf's
+                // message, which gives `NotImplemented` of the runtime's.
+                let equal = match other.cast::<PyMessage>() {
+                    Ok(other) => content_eq(py, slf, other)?,
+                    Err(_) => match as_message_of_type(py, slf, other)? {
+                        Some(other) => content_eq(py, slf, &other)?,
+                        None => return Ok(py.NotImplemented()),
+                    },
                 };
-                let equal = content_eq(py, slf, other)?;
                 (if matches!(op, CompareOp::Eq) {
                     equal
                 } else {

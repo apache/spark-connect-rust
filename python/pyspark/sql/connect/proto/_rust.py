@@ -704,7 +704,9 @@ def _hook_protobuf_builder() -> None:
     A file of another pool, such as one that a test builds, keeps protobuf's classes. One hook
     wraps the builder's own function, of the runtime of the last install. A protobuf of no builder
     (before 3.20), or whose builder has no such function, is passed over, as the drop-in itself
-    needs none of this."""
+    needs none of this. A module of protoc before 3.20 makes its classes with protobuf's
+    ``reflection.GeneratedProtocolMessageType``, not with the builder, so it keeps protobuf's
+    classes."""
     try:
         from google.protobuf import descriptor_pool
         from google.protobuf.internal import builder
