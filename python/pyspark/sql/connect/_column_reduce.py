@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The function that a pickled Column of the client unpickles with, and the parser of the deep
-messages that a pickled Column or DataFrame carries.
+"""The functions that a pickled Column and table argument of the client unpickle with, and the
+parser of the deep messages that a pickled Column, DataFrame or table argument carries.
 
 ``pyspark.sql.connect.column`` registers this module with cloudpickle to pickle by value, so a
 Column that a UDF or a ``foreachBatch`` function captures unpickles on a Python worker of the
@@ -207,20 +207,92 @@ def column_of(
     )
 
 
+def table_arg_of(
+    session_id: str,
+    relation: bytes,
+    levels: int,
+    partition: list[Any],
+    order: list[Any],
+    single_partition: bool,
+    build_error: Optional[tuple[str, str, Any]] = None,
+) -> Any:
+    """The table argument of ``relation``, the bytes of the relation of ``levels`` levels of the
+    plan of a DataFrame of the session of ``session_id``, partitioned by the Columns of
+    ``partition``, or of a single partition, and ordered by the Columns of ``order``, as a
+    pickled table argument unpickles: with no request, as PySpark's unpickle of the objects of
+    its plan sends none. Of ``build_error``, the description of the error of a plan that did not
+    build, the requests of a plan of it raise that error, as PySpark's raise it when they build
+    the plan.
+
+    On the client, it is the ``asTable()`` of the DataFrame of the relation, of its plan ID, of
+    the active session of that ID (``SparkSession._getActiveSessionIfMatches``), and of the calls
+    that made it: ``partitionBy`` or ``withSinglePartition``, then ``orderBy``. On a Python worker
+    of the server, whose PySpark has no Rust client and no session, it is PySpark Connect's table
+    argument of the relation, of the same calls, as PySpark's table argument, which holds no
+    session, unpickles there. A function of the module, so that a plain pickle of a table argument
+    pickles it by its name, as a plain pickle of PySpark's table argument succeeds."""
+    try:
+        from pyspark import _pyspark
+    except ImportError:
+        from pyspark.sql.connect import proto
+        from pyspark.sql.connect.expressions import SubqueryExpression
+        from pyspark.sql.connect.plan import LogicalPlan
+        from pyspark.sql.connect.table_arg import TableArg
+
+        # Without annotations: the class body looks its names up by name, which cloudpickle
+        # does not pickle with the function.
+        class Relation(LogicalPlan):
+            """The plan of a relation as it was sent, of its plan ID, which the subquery of the
+            table argument refers to."""
+
+            def __init__(self, relation):  # type: ignore[no-untyped-def]
+                super().__init__(None)
+                self._relation = relation
+                if relation.common.HasField("plan_id"):
+                    self._root_plan_id = relation.common.plan_id
+
+            def plan(self, session):  # type: ignore[no-untyped-def]
+                if build_error is not None:
+                    raise_error(build_error)
+                sent = proto.Relation()
+                sent.CopyFrom(self._relation)
+                return sent
+
+        plan = Relation(parse_deep(proto.Relation, relation))
+        table = TableArg(SubqueryExpression(plan, subquery_type="table_arg"))
+    else:
+        from pyspark.sql.connect.session import SparkSession
+
+        session = SparkSession._getActiveSessionIfMatches(session_id)
+        table = _pyspark.TableArg._of_relation(session, relation, levels, build_error)
+    if partition:
+        table = table.partitionBy(*partition)
+    if single_partition:
+        table = table.withSinglePartition()
+    if order:
+        table = table.orderBy(*order)
+    return table
+
+
 def raise_error(error: tuple[str, str, Any]) -> None:
-    """Raise the error of ``error``, the ``(kind, text, payload)`` of a pickled Column of an
-    expression that a request did not build, or whose ``__repr__`` failed, as PySpark raised it:
-    a builtin error of its message, the error of UTF-8 of the str or bytes of the payload, or
-    ``PySparkValueError`` of its error class and parameters."""
+    """Raise the error of ``error``, the ``(kind, text, payload)`` of a pickled Column or
+    DataFrame of an expression or a plan that a request did not build, or of an expression whose
+    ``__repr__`` failed, as PySpark raised it: a builtin error of its message, the error of UTF-8
+    of the str or bytes of the payload, or the error of one of PySpark's error classes, such as
+    ``PySparkAttributeError``, of its error class and parameters."""
     kind, text, payload = error
     if kind == "UnicodeEncodeError":
         payload.encode("utf-8")
     if kind == "UnicodeDecodeError":
         payload.decode("utf-8")
-    if kind == "PySparkValueError":
-        from pyspark.errors import PySparkValueError
+    if kind.startswith("PySpark"):
+        import pyspark.errors
 
-        raise PySparkValueError(errorClass=text, messageParameters=payload)
-    raise {"TypeError": TypeError, "ValueError": ValueError, "OverflowError": OverflowError}[kind](
-        text
-    )
+        raise getattr(pyspark.errors, kind)(errorClass=text, messageParameters=payload)
+    builtins = {
+        "TypeError": TypeError,
+        "ValueError": ValueError,
+        "OverflowError": OverflowError,
+        "AttributeError": AttributeError,
+    }
+    raise builtins[kind](text)

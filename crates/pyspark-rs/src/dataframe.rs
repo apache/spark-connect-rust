@@ -57,6 +57,16 @@ pub struct PyDataFrame {
     /// (`_execution_info`), which each access returns until another execution replaces it.
     execution_info_object:
         std::sync::Mutex<Option<(spark_connect::session::ExecutionInfo, Py<PyAny>)>>,
+    /// The schema that the copy, the deep copy or the unpickle of which this DataFrame is made
+    /// requested, as PySpark's `_cached_schema_serialized`: its reconstruction reads the columns
+    /// of the new DataFrame, which requests the schema and keeps it, before the state sets the
+    /// `_cached_schema` of the DataFrame that it is of. `schema` gives it, and so do
+    /// `printSchema`, `toArrow`, the schema that a set operation keeps and the numeric
+    /// aggregations of grouped data, which read `schema`; `columns`, `dtypes`, `__repr__`, the
+    /// column lookups and the DataFrames of methods that copy the cached schema read the cached
+    /// one, as PySpark's `_schema`. It is kept with a cached schema only: without one, PySpark's
+    /// next read of `_schema` requests the schema and keeps it as both.
+    copy_schema: Option<spark_connect::types::DataType>,
 }
 
 /// The answer kept in `cell`, else that of `ask`, which is kept unless it fails, as
@@ -266,6 +276,24 @@ impl PyDataFrame {
             input_files: std::sync::OnceLock::new(),
             schema_object: None,
             execution_info_object: std::sync::Mutex::new(None),
+            copy_schema: None,
+        }
+    }
+
+    /// The schema that the copy or the unpickle of which this DataFrame is made requested, which
+    /// PySpark's `schema` gives (see `copy_schema`): the one place that reads it, for
+    /// `schema`, `printSchema`, the merge of a set operation and the numeric aggregations of
+    /// grouped data.
+    pub(crate) fn copy_schema(&self) -> Option<spark_connect::types::DataType> {
+        self.copy_schema.clone()
+    }
+
+    /// Keep `requested`, the schema that the copy or the unpickle of which this DataFrame is made
+    /// requested, if this DataFrame has a cached schema, as PySpark's `_cached_schema_serialized`
+    /// is read only then (see `copy_schema`).
+    fn keep_copy_schema(&mut self, requested: spark_connect::types::DataType) {
+        if self.schema_object.is_some() || self.dataframe.known_schema().is_some() {
+            self.copy_schema = Some(requested);
         }
     }
 
@@ -320,14 +348,19 @@ impl PyDataFrame {
 
     /// The schema request that PySpark's `copy` of a DataFrame makes for the new DataFrame of its
     /// reconstruction, `hasattr(copy, "__setstate__")`, which reads the columns of a DataFrame that
-    /// has no schema yet, even when this one has one. The request is that of a DataFrame of the
-    /// same relation, which has no schema cached, so that it fails as PySpark's does.
-    fn fresh_schema_request(&self, py: Python<'_>) -> PyResult<()> {
+    /// has no schema yet, even when this one has one: the schema that it gives, which the copy
+    /// keeps (see `copy_schema`). The request is that of a DataFrame of the same relation,
+    /// which has no schema cached, so that it fails as PySpark's does, of the error of its plan
+    /// as the read of the columns raises it ([`columns_read_error`]).
+    fn fresh_schema_request(&self, py: Python<'_>) -> PyResult<spark_connect::types::DataType> {
         let session = self.dataframe.spark_session();
-        let relation = self.dataframe.to_relation().to_pyerr()?;
+        let relation = self
+            .dataframe
+            .to_relation()
+            .to_pyerr()
+            .map_err(|err| columns_read_error(py, err))?;
         let fresh = DataFrame::from_sent_relation(session.clone(), relation);
-        interruptible(py, &session, || fresh.schema())?;
-        Ok(())
+        interruptible(py, &session, || fresh.schema())
     }
 
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
@@ -1044,15 +1077,17 @@ impl PyDataFrame {
     /// The shallow copy of a DataFrame, as PySpark's `copy.copy` of its `__reduce__`: the same
     /// plan, and so the same Observations, as PySpark's copy shares its plan, with the
     /// `_support_repr_html` and the schema that its state carries, the one that it keeps as an
-    /// object, of `to` or of a map function, as the same object, and an `executionInfo` of its
-    /// own, None until it executes, as that of PySpark's `DataFrame(plan, session)`.
+    /// object, of `to` or of a map function, as the same object, the schema that its
+    /// reconstruction requests (see `copy_schema`), and an `executionInfo` of its own, None
+    /// until it executes, as that of PySpark's `DataFrame(plan, session)`.
     fn __copy__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
-        self.fresh_schema_request(py)?;
+        let requested = self.fresh_schema_request(py)?;
         let mut copy = self.copy_of(self.dataframe.shallow_copy());
         copy.schema_object = self
             .schema_object
             .as_ref()
             .map(|schema| schema.clone_ref(py));
+        copy.keep_copy_schema(requested);
         Ok(copy)
     }
 
@@ -1067,16 +1102,19 @@ impl PyDataFrame {
     /// a deep copy raises `NO_ACTIVE_SESSION` where no session is active, as on another thread,
     /// and `PySparkAssertionError` where another one is, while `copy.copy` keeps the session.
     /// PySpark's copy of the plan deep-copies the function of each UDF of it, with `memo`, before
-    /// the session: so do these (`deep_copied_picklers`), of which the plan of a copy in the
-    /// session of this DataFrame is made, which pickles them at each request, as PySpark's copy
-    /// does; a copy in another session is of the relation (`deep_copy_with_pickler_copies`).
+    /// the session: so do these (`deep_copied_picklers`), of which, and of the copies of the
+    /// Observations, the plan of a copy in the session of this DataFrame is made, which its
+    /// requests build, as PySpark's copy does: they pickle the copied functions, warn of a window
+    /// of no partitions, and give the `and` of the conditions of a join the origin of its call
+    /// site then. A copy in another session is of the relation (`deep_copy_with_pickler_copies`).
     fn __deepcopy__(&self, py: Python<'_>, memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         // As PySpark's: `copy.deepcopy` looks up `__deepcopy__` through `__getattr__`, whose check
         // reads the columns, so the schema is requested unless it is cached. On a stopped session,
         // that request raises the SparkConnectException of its closed client, before the session
         // is copied, which raises a PySparkRuntimeError.
         let session = self.dataframe.spark_session();
-        interruptible(py, &session, || self.dataframe.schema())?;
+        interruptible(py, &session, || self.dataframe.schema())
+            .map_err(|err| columns_read_error(py, err))?;
         // As PySpark's copy of the plan, which copies the objects of `pyspark.ml` that it keeps
         // (see `__reduce_ex__`): the TypeError of the lock of a model, after a copy of the
         // `_summary_dataset` of the training summary of a DataFrame of a method of the summary, of
@@ -1117,10 +1155,10 @@ impl PyDataFrame {
         })
         .to_pyerr()?;
         // As PySpark's reconstruction of the copy, which requests its schema, as the copy has none,
-        // before it sets the deep copy of the state, of the schema that it keeps as an object too,
-        // which the deep copy of the plan shares in `memo`.
+        // and keeps it, before it sets the deep copy of the state, of the schema that it keeps as
+        // an object too, which the deep copy of the plan shares in `memo`.
         let mut copy = self.copy_of(copy);
-        copy.fresh_schema_request(py)?;
+        let requested = copy.fresh_schema_request(py)?;
         if let Some(schema) = &self.schema_object {
             copy.schema_object = Some(
                 py.import("copy")?
@@ -1128,16 +1166,18 @@ impl PyDataFrame {
                     .unbind(),
             );
         }
+        copy.keep_copy_schema(requested);
         Ok(copy)
     }
 
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
     /// pickled DataFrame unpickles, with the `_support_repr_html` and the `_cached_schema` of its
     /// state. As PySpark's unpickle, whose lookup of the `__setstate__` of the new DataFrame reads
-    /// its columns, it requests the schema of the relation, whose error it raises, and then the
-    /// DataFrame has the cached schema of the pickled one, none when it had none, so that its
-    /// `schema` requests it again then. Without `request_schema`, of an object that PySpark
-    /// pickles of the plan of the DataFrame, as a DataStreamWriter, the schema is not requested.
+    /// its columns, it requests the schema of the relation, whose error it raises, and keeps it
+    /// (see `copy_schema`), and then the DataFrame has the cached schema of the pickled one,
+    /// none when it had none, so that its `schema` requests it again then. Without
+    /// `request_schema`, of an object that PySpark pickles of the plan of the DataFrame, as a
+    /// DataStreamWriter, the schema is not requested.
     #[staticmethod]
     #[pyo3(signature = (
         session, relation, levels=1, support_repr_html=false, cached_schema=None, request_schema=true
@@ -1166,11 +1206,17 @@ impl PyDataFrame {
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
-        if request_schema {
+        let requested = if request_schema {
             let schema = interruptible(py, &dataframe.spark_session(), || dataframe.schema())?;
             check_schema_conversion(py, Some(&schema))?;
+            Some(schema)
+        } else {
+            None
+        };
+        let mut dataframe = PyDataFrame::new(dataframe.with_known_schema(known_schema));
+        if let Some(requested) = requested {
+            dataframe.keep_copy_schema(requested);
         }
-        let dataframe = PyDataFrame::new(dataframe.with_known_schema(known_schema));
         dataframe
             .support_repr_html
             .store(support_repr_html, std::sync::atomic::Ordering::SeqCst);
@@ -2927,9 +2973,10 @@ impl PyDataFrame {
     /// argument. Mirrors `DataFrame.asTable()`.
     #[pyo3(name = "asTable")]
     fn as_table(&self) -> crate::tablearg::PyTableArg {
-        crate::tablearg::PyTableArg::new(spark_connect::table_arg::TableArg::new(
-            self.dataframe.clone(),
-        ))
+        crate::tablearg::PyTableArg::new(
+            spark_connect::table_arg::TableArg::new(self.dataframe.clone()),
+            self.dataframe.spark_session().session_id().to_string(),
+        )
     }
 
     /// Deprecated alias for dropDuplicates.
@@ -3432,6 +3479,12 @@ impl PyDataFrame {
     /// that is an object, a deep copy of it, as PySpark's (see `property_schema`).
     #[getter]
     fn schema(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        // As PySpark's loads of `_cached_schema_serialized`, of the schema that the copy or the
+        // unpickle of which this DataFrame is made requested.
+        if let Some(schema) = slf.borrow().copy_schema() {
+            check_schema_conversion(slf.py(), Some(&schema))?;
+            return crate::types::data_type_to_py(slf.py(), &schema);
+        }
         Self::property_schema(slf)?.schema(slf.py())
     }
 
@@ -3594,7 +3647,16 @@ impl PyDataFrame {
             Some(level) if level.is_truthy()? => Some(level),
             _ => None,
         };
-        let tree = match Self::property_schema(slf)? {
+        // `self.schema` is the schema that a copy or an unpickle requested, if any (see
+        // `copy_schema`), else that of `property_schema`.
+        let property = match slf.borrow().copy_schema() {
+            Some(schema) => {
+                check_schema_conversion(py, Some(&schema))?;
+                PropertySchema::Core(schema)
+            }
+            None => Self::property_schema(slf)?,
+        };
+        let tree = match property {
             // A schema that is an object (see `property_schema`) is printed as PySpark's
             // `print(self.schema.treeString(level))`, of a copy of it, whose `treeString` raises
             // its own AttributeError, and that of a Column is a Column, whose call raises.
@@ -7084,7 +7146,8 @@ pub(crate) fn check_schema_conversion(
 /// equal, else none. The core keeps that of two cached structs; of a schema that a DataFrame
 /// keeps as a Python object, the schema of `to` that is not a DataType or the `StructType` of a
 /// map function, the objects are compared as they are now, as PySpark compares them with `==`,
-/// and the result keeps a deep copy of that of `this`, as `this.schema` gives.
+/// and the result keeps a deep copy of that of `this`, as `this.schema` gives. Of a copy or an
+/// unpickle, `this.schema` is the schema that it requested (see `copy_schema`).
 fn set_operation_result(
     py: Python<'_>,
     this: &PyDataFrame,
@@ -7092,7 +7155,12 @@ fn set_operation_result(
     dataframe: DataFrame,
 ) -> PyResult<PyDataFrame> {
     if this.schema_object.is_none() && other.schema_object.is_none() {
-        return Ok(PyDataFrame::new(dataframe));
+        return Ok(PyDataFrame::new(
+            match (this.copy_schema(), dataframe.known_schema()) {
+                (Some(requested), Some(_)) => dataframe.with_known_schema(Some(requested)),
+                _ => dataframe,
+            },
+        ));
     }
     let cached = |df: &PyDataFrame| -> PyResult<Option<Py<PyAny>>> {
         match &df.schema_object {
@@ -7107,6 +7175,11 @@ fn set_operation_result(
     };
     if let (Some(left), Some(right)) = (cached(this)?, cached(other)?) {
         if left.bind(py).eq(right.bind(py))? {
+            if let Some(requested) = this.copy_schema() {
+                return Ok(PyDataFrame::new(
+                    dataframe.with_known_schema(Some(requested)),
+                ));
+            }
             return Ok(match &this.schema_object {
                 Some(schema) => {
                     let mut result = PyDataFrame::new(dataframe.with_known_schema(None));
@@ -7237,6 +7310,23 @@ fn object_dtypes<'py>(py: Python<'py>, schema: &Bound<'py, PyAny>) -> PyResult<B
         pairs.append((name, simple))?;
     }
     Ok(pairs)
+}
+
+/// The error that PySpark's read of the columns of a DataFrame, `[field.name for field in
+/// self._schema.fields]`, raises of `err`, the error of its schema: of an `AttributeError`, of a
+/// plan that does not build, the property `_schema` falls back to the Column of the `__getattr__`
+/// of the DataFrame, whose `fields` is a Column, which is not iterable: `NOT_ITERABLE` of
+/// `Column`. Another error is raised as it is.
+fn columns_read_error(py: Python<'_>, err: PyErr) -> PyErr {
+    if !err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) {
+        return err;
+    }
+    crate::column::raise_pyspark(
+        py,
+        "PySparkTypeError",
+        "NOT_ITERABLE",
+        &[("objectName", "Column")],
+    )
 }
 
 /// The error of a value that protobuf refuses in a field of a plan, which PySpark's plan raises as

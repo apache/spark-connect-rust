@@ -1872,9 +1872,13 @@ Column share its expression, of which a deep copy makes again only the levels ab
 functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy` does; PySpark's
 `copy.deepcopy` raises a `RecursionError` from about 165 levels.
 
-The frame bounds of `Window.rowsBetween` and `rangeBetween`, which PySpark's client converts when
-it builds the plan, the drop-in converts when it builds the window: their errors are PySpark's,
-raised at the call rather than when the plan is built. The type of `cast` and `try_cast` is converted when the plan is
+The frame bounds of `Window.rowsBetween` and `rangeBetween` are converted when the plan is built,
+as in PySpark: a bound of a row frame beyond an int, such as a start of `-2**40` or of
+`Window.unboundedFollowing`, makes a window that shows it as it is, of which each request of a plan
+raises `VALUE_NOT_BETWEEN`, of the start and then of the end. A bound of `True`, which protobuf's
+int field refuses, or of an int beyond a long, which the window of the drop-in does not hold, raises
+at the call the error that PySpark raises when it builds the plan, the first of the start and of
+the end. The type of `cast` and `try_cast` is converted when the plan is
 built, as in PySpark: a `StructField`, the base `DataType()`, an abstract type such as `AtomicType()`
 and a Python subclass of them, also one nested in the type, make a Column that renders as the
 `simpleString` of the type, and whose plans raise PySpark's `UNSUPPORTED_OPERATION`.
@@ -2094,12 +2098,23 @@ which JSON has no value of, raises the `ValueError` of serde_json when the field
 (`expected value at line 1 column 7`), where PySpark's makes the field: the server refuses such
 metadata in every request, so only the local uses of the field differ.
 
-The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
-pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's. Its `_subquery_expr` is an
-expression of `pyspark.sql.connect.expressions`, as a Column's `_expr` is, of PySpark's `to_plan`
-and `repr`, which is made at each access as a property of the native class: `vars()` of the table
-argument does not show it and it cannot be set, where PySpark's is an instance attribute, a
-`SubqueryExpression` with the fields of the subquery. `_is_partitioned()` is PySpark's.
+A `TableArg`, of `DataFrame.asTable()`, pickles at every protocol, plainly and by cloudpickle, as
+PySpark's, of its user-set attributes, and `copy.copy` and `copy.deepcopy` copy it as PySpark's. Its
+pickle keeps the relation of the plan of its DataFrame, as a pickled DataFrame does (see "What a
+plan build does for a pickle or a deep copy" in `dev/parity/known-differences.md`), and its
+partitioning, ordering and single partition; the unpickle sends no request, as PySpark's, and the
+table argument that it gives sends the same plan and subquery, of the same plan ID. A plan that does
+not build pickles too, and the requests of the unpickled table argument raise its error, as
+PySpark's. The pickle names the session of its DataFrame by its ID, so it unpickles only where the
+session of that ID is active, as a pickled DataFrame does: it raises `NO_ACTIVE_SESSION` where none
+is, such as on another thread, and `PySparkAssertionError` where another one is, where PySpark's,
+whose plan holds no session, unpickles anywhere. On a
+Python worker of the server it unpickles as PySpark Connect's table argument of the relation, which
+needs no session. Its `_subquery_expr` is an expression of `pyspark.sql.connect.expressions`, as a
+Column's `_expr` is, of PySpark's `to_plan` and `repr`, which is made at each access as a property
+of the native class: `vars()` of the table argument does not show it and it cannot be set, where
+PySpark's is an instance attribute, a `SubqueryExpression` with the fields of the subquery.
+`_is_partitioned()` is PySpark's.
 
 The `__repr__` of a Column of a subquery names its plan by its plan ID,
 `SubqueryExpression(plan=<plan 2>, type=scalar)`, where PySpark's shows the repr of its plan
@@ -2286,10 +2301,13 @@ PySpark's is the schema.
 
 A DataFrame whose plan fails to build pickles, also by cloudpickle, and its unpickle raises the
 error, as PySpark's: its pickle keeps the objects of the plan, and its unpickle builds the plan to
-read the columns of the new DataFrame. `alias`, a hint, `dropDuplicates`, `observe`, `filter`,
-`sort`, `sortWithinPartitions` and the repartitions of such a value keep the cached schema of the
-DataFrame that they are of, as PySpark copies it, so their `schema` is known without a request,
-and their other requests raise the error.
+read the columns of the new DataFrame. Of an `AttributeError`, such as of a join on a tuple or on a
+list of conditions whose `&` fails, PySpark's read of the columns falls back from its `_schema` to
+the Column of `__getattr__`, whose `fields` is a Column, which is not iterable: so the unpickle, a
+`copy.copy` and a `copy.deepcopy`, which read the columns too, raise `NOT_ITERABLE`, in both.
+`alias`, a hint, `dropDuplicates`, `observe`, `filter`, `sort`, `sortWithinPartitions` and the
+repartitions of such a value keep the cached schema of the DataFrame that they are of, as PySpark
+copies it, so their `schema` is known without a request, and their other requests raise the error.
 
 The `barrier` of `mapInPandas` and `mapInArrow` is a protobuf bool, which their plan sets once it
 pickled the function, when it is built: an int is taken, as `barrier=1`, and another value, such
@@ -2384,18 +2402,20 @@ DataFrame or the Column that holds it, such as through a bound method of an obje
 DataFrame, is collected. So do the objects that hold such Columns, or the plan of a DataFrame, as
 PySpark's do: grouped data and their cogroups, a table argument, a window specification, the
 writers of `write`, `writeTo` and `writeStream`, `na` and `stat`, a merge builder and its clauses,
-and the generator of `toLocalIterator`, which holds its DataFrame until it ends, as PySpark's
-generator holds `self`. Those that hold their DataFrame report it, and the DataFrame reports the
-functions of the plan that they share, so a cycle through the DataFrame alone, such as
-`df.back = df.groupBy("id")`, is collected too. A function that a Column and a DataFrame of it
-share, or two DataFrames, or a DataFrame and a table argument of it, which holds its plan and not
-the DataFrame, as PySpark's does, is reported by neither, so that no reference is counted twice: a
-cycle through it is freed only when it is broken, where PySpark collects it. A stream writer holds
-its DataFrame, where PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed
-by the collector, where PySpark frees it with its last reference. The functions of `foreachBatch`
-and `foreach` are kept as their pickles, as PySpark's stream writer keeps them, so a function that
-keeps its writer is freed with its last reference, and a copy or a pickle of the writer carries the
-pickle of the call. The registration of `dataSource` reports its session, and the builder of
+the generator of `toLocalIterator`, which holds its DataFrame until it ends, as PySpark's
+generator holds `self`, and the expression of a Column (`Column._expr`) and of a table argument
+(`TableArg._subquery_expr`), which `copy.copy` and `copy.deepcopy` copy as they copy a Column.
+Those that hold their DataFrame report it, and the DataFrame reports the functions of the plan
+that they share, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`, is
+collected too. A function that a Column and a DataFrame of it share, or two DataFrames, or a
+DataFrame and a table argument of it, which holds its plan and not the DataFrame, as PySpark's
+does, is reported by neither, so that no reference is counted twice: a cycle through it is freed
+only when it is broken, where PySpark collects it. A stream writer holds its DataFrame, where
+PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed by the collector,
+where PySpark frees it with its last reference. The functions of `foreachBatch` and `foreach` are
+kept as their pickles, as PySpark's stream writer keeps them, so a function that keeps its writer
+is freed with its last reference, and a copy or a pickle of the writer carries the pickle of the
+call. The registration of `dataSource` reports its session, and the builder of
 `pyspark.sql.connect.session.SparkSession` its channel builder and its hook factories, as PySpark's
 plain objects hold them, so a session that keeps its `dataSource`, or a channel builder or a hook
 factory that keeps its builder, is collected. One that a copy of the builder shares is reported by
@@ -2510,16 +2530,17 @@ again. So does the unpickle of an object that PySpark pickles with its DataFrame
 callback, grouped data, `na` and `stat`; a stream writer, which PySpark's pickles of the plan of
 the DataFrame, requests nothing.
 
-The drop-in does not keep the schema that a copy, a deep copy or an unpickle of a DataFrame
-requests, where PySpark's keeps it apart from the cached schema of the state, as the
-`_cached_schema_serialized` that its `schema` returns. So the two differ when the schema on the
-server changed since the DataFrame cached it, such as that of a view that was replaced: PySpark's
-copy gives the schema that it requested for `schema`, `printSchema`, `toArrow` and the set
-operations of equal cached schemas (`c.union(c).schema`), and the cached schema for `columns`,
-`dtypes`, `repr`, the column lookups and the methods that copy the cached schema, such as
-`filter`; the drop-in's copy gives the cached schema for all, so its `toArrow` raises the
-`ValueError` of the cast of the table to it. Of a DataFrame that had no cached schema, both give
-the schema of the server.
+A copy, a deep copy or an unpickle of a DataFrame keeps the schema that it requests apart from the
+cached schema of the state, as PySpark's keeps it as the `_cached_schema_serialized` that its
+`schema` returns. So the two differ when the schema on the server changed since the DataFrame
+cached it, such as that of a view that was replaced, and the copy gives, as PySpark's, the schema
+that it requested for `schema`, `printSchema`, `toArrow`, the set operations of equal cached
+schemas (`c.union(c).schema`) and the numeric aggregations of its grouped data (`sum()` of no
+columns), and the cached schema for `columns`, `dtypes`, `repr`, the column lookups and the
+methods that copy the cached schema, such as `filter`. A copy of such a copy keeps the schema that
+its own reconstruction requests, and the cached schema, which a pickle of it carries too. Of a
+DataFrame that had no cached schema, both give the schema of the server, which the next read of the
+copy requests again.
 
 `to` caches its schema whatever it is, as the object that it is, as PySpark's, so of a DataType that
 is not a struct, such as `LongType()`, `schema` gives a copy of it without a request, while its plan

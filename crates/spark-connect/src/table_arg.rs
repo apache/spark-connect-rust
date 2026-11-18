@@ -48,6 +48,22 @@ impl TableArg {
         }
     }
 
+    /// The relation of the plan of this table argument, of the plan IDs of the session of its
+    /// DataFrame, as that DataFrame sends it, and the levels of the plan, which a pickle of the
+    /// table argument keeps: [`DataFrame::from_sent_relation_levels`] gives back a DataFrame of
+    /// the plan ID of the plan, whose table argument refers to the plan as this one does. A plan
+    /// that a request fails to build gives the error of its build. Not a stable API.
+    #[doc(hidden)]
+    pub fn relation_with_levels(&self) -> Result<(spark_connect_proto::Relation, usize)> {
+        let ids = self
+            .subquery
+            .plan_ids
+            .clone()
+            .unwrap_or_else(|| std::sync::Arc::new(crate::plan::PlanIds::new()));
+        let relation = crate::plan::relation_with_ids(&self.subquery.plan, &ids)?;
+        Ok((relation, self.subquery.plan.depth()))
+    }
+
     /// The picklers of the UDFs of the plan and of the expressions of this table argument, each
     /// once, which a deep copy of it copies. Not a stable API.
     #[doc(hidden)]
@@ -440,6 +456,50 @@ mod tests {
             &same.subquery.plan,
             &table.subquery.plan
         ));
+    }
+
+    /// As PySpark's pickle of a table argument, which keeps the objects of its plan, of its plan
+    /// ID: the relation that a pickle keeps is the one that its DataFrame sends, of its levels,
+    /// and the table argument of the DataFrame of that relation refers to it by the same plan
+    /// ID, of which a UDTF of it sends the same relation.
+    #[test]
+    fn the_relation_of_a_table_argument_gives_back_its_plan_of_its_plan_id() {
+        let spark = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("failed to build session");
+        let df = spark.range(3).unwrap().select([col("id")]);
+        let table = TableArg::new(df.clone())
+            .partition_by(vec![col("id")])
+            .unwrap();
+        let (relation, levels) = table.relation_with_levels().unwrap();
+        assert_eq!(relation, df.to_relation().unwrap());
+        assert_eq!(levels, df.plan_levels());
+        let sent = TableArg::new(
+            DataFrame::from_sent_relation_levels(spark.clone(), relation, levels).unwrap(),
+        )
+        .partition_by(vec![col("id")])
+        .unwrap();
+        assert_eq!(sent.subquery.plan_id, table.subquery.plan_id);
+        let reference = |table: &TableArg| {
+            let udtf = spark.tvf().udtf(
+                "t",
+                [table.to_column()],
+                None,
+                300,
+                vec![],
+                "3.11".into(),
+                false,
+            );
+            let Some(proto::relation::RelType::WithRelations(with)) =
+                udtf.relation().unwrap().rel_type
+            else {
+                panic!("a WithRelations");
+            };
+            with.references[0].clone()
+        };
+        assert_eq!(reference(&sent), reference(&table));
+        assert_eq!(subquery_proto(&sent), subquery_proto(&table));
     }
 
     #[test]

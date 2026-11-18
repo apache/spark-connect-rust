@@ -1727,9 +1727,12 @@ impl DataFrame {
     /// As [`DataFrame::deep_copy_with`], of `copies`, the copies of the picklers of the UDFs of the
     /// plan, as PySpark's deep copy copies the functions of the UDFs of its plan: the copy is of
     /// this plan with the copies of its picklers and of its Observations, of the same plan IDs,
-    /// which pickles the copied functions at each request, as PySpark's copy does. A copy in
-    /// another session, of plan IDs of its own, is that of [`DataFrame::deep_copy_with`], whose
-    /// relation carries the plan IDs. Not a stable API.
+    /// which pickles the copied functions at each request, as PySpark's copy does. A copy of no
+    /// such copies shares the plan, of which its requests build the relation, as those of
+    /// PySpark's copy build its plan objects: each warns of a window of no partitions and gives
+    /// the `and` of the conditions of a join the origin of its call site. A copy in another
+    /// session, of plan IDs of its own, is that of [`DataFrame::deep_copy_with`], whose relation
+    /// carries the plan IDs. Not a stable API.
     #[doc(hidden)]
     pub fn deep_copy_with_pickler_copies(
         &self,
@@ -1737,9 +1740,7 @@ impl DataFrame {
         observations: Vec<(String, crate::observation::Observation)>,
         copies: &crate::udf::PicklerCopies,
     ) -> Result<DataFrame> {
-        if copies.is_empty()
-            || !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared())
-        {
+        if !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared()) {
             return self.deep_copy_with(session, observations);
         }
         let plan = crate::udf::PicklerRebuild::new(copies, &observations)
@@ -6981,8 +6982,9 @@ mod plan_construction_tests {
     /// As PySpark's `copy.deepcopy` of a DataFrame of UDFs, which copies the functions of the UDFs
     /// of its plan with the plan: the plan of the copy holds the copies of the picklers and of the
     /// Observations that it is given, of the plan IDs of the DataFrame, so its requests pickle
-    /// the copies and its actions set the copied Observations. A copy in another session is of
-    /// the relation, as a copy without UDFs.
+    /// the copies and its actions set the copied Observations. So is a copy of no copies of
+    /// picklers, of the plan, which its requests build; a copy in another session is of the
+    /// relation.
     #[test]
     fn a_deep_copy_of_copies_of_picklers_holds_them_of_the_plan_ids_as_pyspark_deep_copies() {
         use crate::observation::Observation;
@@ -7026,16 +7028,31 @@ mod plan_construction_tests {
         report_count(&copy, 3);
         assert_eq!(counts(&given), [3]);
         assert!(counts(&observation).is_empty());
-        // Of no copies, or in another session: the copy of the relation.
+        // In another session: the copy of the relation.
         let other = spark.new_session();
         let moved = df
             .deep_copy_with_pickler_copies(other, Vec::new(), &copies)
             .unwrap();
         assert!(matches!(moved.plan.as_ref(), LogicalPlan::Raw { .. }));
+        // Of no copies of picklers: the plan, rebuilt above the copy of the Observation, which
+        // sends the relation of the DataFrame, and the plan itself of no Observation.
+        let again = observation.detached();
         let plain = df
+            .deep_copy_with_pickler_copies(
+                spark.clone(),
+                vec![("c".into(), again.clone())],
+                &PicklerCopies::new(),
+            )
+            .unwrap();
+        assert!(!matches!(plain.plan.as_ref(), LogicalPlan::Raw { .. }));
+        assert!(!Arc::ptr_eq(&plain.plan, &df.plan));
+        assert_eq!(sent(&plain), sent(&df));
+        assert!(plain.observations()[0].1.same(&again));
+        let unobserved = spark.range(3).unwrap();
+        let shared = unobserved
             .deep_copy_with_pickler_copies(spark.clone(), Vec::new(), &PicklerCopies::new())
             .unwrap();
-        assert!(matches!(plain.plan.as_ref(), LogicalPlan::Raw { .. }));
+        assert!(Arc::ptr_eq(&shared.plan, &unobserved.plan));
     }
 
     /// As PySpark's unpickled plan, which has copies of the Observations of the pickled one: a

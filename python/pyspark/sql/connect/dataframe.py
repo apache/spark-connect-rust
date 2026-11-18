@@ -72,9 +72,12 @@ def _reduce_dataframe(
     pickle looks its ``__setstate__`` up through its ``__getattr__``, which reads its columns,
     the function requests the schema of the relation, whose error it raises, and then sets the
     ``_cached_schema`` of the state. A plan that did not build is pickled of ``build_error``, the
-    description of its error, which it raises instead (``_column_reduce.raise_error``). Without
-    ``request_schema``, of an object that PySpark pickles of the plan of the DataFrame and not of
-    the DataFrame, such as a DataStreamWriter, the schema is not requested.
+    description of its error, which it raises instead (``_column_reduce.raise_error``): but for
+    an ``AttributeError``, of which PySpark's ``_schema`` falls back to the Column of the
+    ``__getattr__`` of the DataFrame, whose ``fields``, a Column too, its columns iterate, which
+    raises ``NOT_ITERABLE``. Without ``request_schema``, of an object that PySpark pickles of the
+    plan of the DataFrame and not of the DataFrame, such as a DataStreamWriter, the schema is not
+    requested.
 
     On a Python worker of the server, whose PySpark has no Rust client, such as the worker of a
     ``foreachBatch`` function, which has the active session of the query, the function gives
@@ -91,6 +94,12 @@ def _reduce_dataframe(
         request_schema: bool = True,
     ) -> Any:
         if build_error is not None:
+            if request_schema and build_error[0] in ("AttributeError", "PySparkAttributeError"):
+                from pyspark.errors import PySparkTypeError
+
+                raise PySparkTypeError(
+                    errorClass="NOT_ITERABLE", messageParameters={"objectName": "Column"}
+                )
             _raise_error(build_error)
         try:
             from pyspark import _pyspark

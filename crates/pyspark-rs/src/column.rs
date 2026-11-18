@@ -129,17 +129,68 @@ fn is_literal_operand(value: &Bound<'_, PyAny>, with_timedelta: bool) -> PyResul
 #[pyclass(name = "_ColumnExpression", module = "pyspark.sql.connect.expressions")]
 pub struct PyColumnExpression {
     column: Column,
+    /// Set once the value is written, as `__traverse__` reads `column` (see
+    /// [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyColumnExpression {
     /// The expression of `column`.
     pub(crate) fn new(column: Column) -> Self {
-        PyColumnExpression { column }
+        PyColumnExpression {
+            column,
+            gc_ready: crate::gc::GcReady::new(),
+        }
     }
 }
 
 #[pymethods]
 impl PyColumnExpression {
+    /// The shallow copy of the expression, as PySpark's `copy.copy` of an expression, a Python
+    /// object, which shares its fields: of the same expression, as the copy of a Column shares it.
+    fn __copy__(&self) -> PyColumnExpression {
+        PyColumnExpression::new(self.column.clone())
+    }
+
+    /// The deep copy of the expression, as PySpark's `copy.deepcopy` of an expression, which
+    /// copies its fields with `memo`, of the function of each UDF of it and of the plan of a
+    /// subquery, as the deep copy of a Column copies them (`deep_copied_picklers`): a function is
+    /// the same object, and a callable object, a bound method or a partial is a copy.
+    fn __deepcopy__(
+        &self,
+        py: Python<'_>,
+        memo: &Bound<'_, PyAny>,
+    ) -> PyResult<PyColumnExpression> {
+        let expression = self.column.expression();
+        let copies = crate::udf_command::deep_copied_picklers(py, expression.picklers(), memo)?;
+        Ok(PyColumnExpression::new(if copies.is_empty() {
+            self.column.clone()
+        } else {
+            Column::new(expression.with_pickler_copies(&copies))
+        }))
+    }
+
+    /// As PySpark's expression, a Python object whose fields Python's garbage collector sees: the
+    /// functions of its UDFs, also of the plan of a subquery, that only this expression keeps
+    /// alive are reported, as those of a Column, so that a reference cycle through a function and
+    /// the expression is collected, as PySpark collects it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        crate::udf_command::visit_pickler_objects(
+            self.column.expression().exclusive_pickler_objects(),
+            &visit,
+        )
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the expression is
+    /// replaced by one that holds nothing, which drops the objects that `__traverse__` reported.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.column = Column::new(spark_connect::expression::Expression::column(""));
+        }
+    }
     /// As PySpark's `__repr__` of the expression, which raises its error of an expression that it
     /// does not render (a `ColumnAlias` of names that are not all `str`).
     fn __repr__(&self) -> PyResult<String> {
@@ -801,9 +852,7 @@ impl PyColumn {
     /// its metrics.
     #[getter]
     fn _expr(&self) -> PyColumnExpression {
-        PyColumnExpression {
-            column: self.column.clone(),
-        }
+        PyColumnExpression::new(self.column.clone())
     }
 
     /// The `spark.connect.Expression` of this column, as PySpark Connect's `Column.to_plan`: that
@@ -1335,9 +1384,31 @@ fn error_description<'py>(
     })
 }
 
+/// The kinds of the errors of PySpark's error classes that a plan or an expression carries, as
+/// [`crate::errors::pyspark_class_error`] gives them, by the names of their classes in
+/// `pyspark.errors`, which a pickle of the error keeps.
+const PYSPARK_ERROR_CLASSES: [(spark_connect_core::error::SparkErrorKind, &str); 10] = {
+    use spark_connect_core::error::SparkErrorKind as K;
+    [
+        (K::ValueError, "PySparkValueError"),
+        (K::TypeError, "PySparkTypeError"),
+        (K::IndexError, "PySparkIndexError"),
+        (K::AttributeError, "PySparkAttributeError"),
+        (K::KeyError, "PySparkKeyError"),
+        (K::RuntimeError, "PySparkRuntimeError"),
+        (K::NotImplementedError, "PySparkNotImplementedError"),
+        (K::AssertionError, "PySparkAssertionError"),
+        (K::PicklingError, "PySparkPicklingError"),
+        (K::ImportError, "PySparkImportError"),
+    ]
+};
+
 /// The description of `error`, of a plan or an expression that PySpark's client fails to build,
 /// as [`error_description`] gives it, of which `pyspark.sql.connect._column_reduce.raise_error`
-/// raises the error again: None for the error of another kind, which no pickle keeps.
+/// raises the error again: a builtin `TypeError`, `ValueError`, `OverflowError` or
+/// `AttributeError` of its message, the error of UTF-8 of its value, or an error of one of
+/// PySpark's error classes, of its error class and parameters. None for the error of another
+/// kind, which no pickle keeps.
 pub(crate) fn described_error<'py>(
     py: Python<'py>,
     error: &spark_connect_core::error::SparkError,
@@ -1350,6 +1421,7 @@ pub(crate) fn described_error<'py>(
         K::BuiltinTypeError => ("TypeError", error.message.clone(), none()),
         K::BuiltinValueError => ("ValueError", error.message.clone(), none()),
         K::BuiltinOverflowError => ("OverflowError", error.message.clone(), none()),
+        K::BuiltinAttributeError => ("AttributeError", error.message.clone(), none()),
         // The str that UTF-8 does not encode, and the bytes that it does not decode.
         K::UnicodeEncode => {
             let utf32le = error.unencodable_value().unwrap_or_default();
@@ -1365,12 +1437,14 @@ pub(crate) fn described_error<'py>(
                 PyBytes::new(py, &bytes).into_any(),
             )
         }
-        K::ValueError => (
-            "PySparkValueError",
-            error.error_class.clone(),
-            error.params.clone().into_bound_py_any(py)?,
-        ),
-        _ => return Ok(None),
+        kind => match PYSPARK_ERROR_CLASSES.iter().find(|(of, _)| *of == kind) {
+            Some((_, class)) if !error.error_class.is_empty() => (
+                *class,
+                error.error_class.clone(),
+                error.params.clone().into_bound_py_any(py)?,
+            ),
+            _ => return Ok(None),
+        },
     };
     PyTuple::new(
         py,
@@ -1384,7 +1458,7 @@ pub(crate) fn described_error<'py>(
 }
 
 /// The error of `description`, of [`error_description`].
-fn error_of_description(
+pub(crate) fn error_of_description(
     description: &Bound<'_, PyAny>,
 ) -> PyResult<spark_connect_core::error::SparkError> {
     use spark_connect_core::error::{SparkError, SparkErrorKind as K};
@@ -1397,23 +1471,27 @@ fn error_of_description(
         "TypeError" => builtin(K::BuiltinTypeError),
         "ValueError" => builtin(K::BuiltinValueError),
         "OverflowError" => builtin(K::BuiltinOverflowError),
+        "AttributeError" => builtin(K::BuiltinAttributeError),
         "UnicodeEncodeError" | "UnicodeDecodeError" => {
             crate::dataframe::unbuildable_str_error(&payload)?.ok_or_else(|| {
                 pyo3::exceptions::PyValueError::new_err(format!("no {kind} of the value"))
             })?
         }
-        "PySparkValueError" => {
+        class => {
+            let Some((of_class, _)) = PYSPARK_ERROR_CLASSES
+                .iter()
+                .find(|(_, name)| *name == class)
+            else {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "no error of the kind {class}"
+                )));
+            };
             let params: std::collections::BTreeMap<String, String> = payload.extract()?;
             let params: Vec<(&str, &str)> = params
                 .iter()
                 .map(|(key, value)| (key.as_str(), value.as_str()))
                 .collect();
-            SparkError::classed(K::ValueError, &text, &params)
-        }
-        _ => {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "no error of the kind {kind}"
-            )))
+            SparkError::classed(*of_class, &text, &params)
         }
     })
 }
