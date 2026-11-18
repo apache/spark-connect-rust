@@ -21,6 +21,40 @@ pub enum FrameBound {
     UnboundedFollowing,
 }
 
+impl FrameBound {
+    /// The bound as the int of PySpark's `rowsBetween` and `rangeBetween`, as
+    /// [`crate::expression::FrameBoundary::offset`] gives it.
+    fn offset(&self) -> i128 {
+        match self {
+            FrameBound::UnboundedPreceding => i64::MIN.into(),
+            FrameBound::Preceding(n) => -i128::from(*n),
+            FrameBound::CurrentRow => 0,
+            FrameBound::Following(n) => (*n).into(),
+            FrameBound::UnboundedFollowing => i64::MAX.into(),
+        }
+    }
+
+    /// This bound as the start of a frame of PySpark's `rowsBetween` and `rangeBetween`: one at
+    /// or before `Window._PRECEDING_THRESHOLD`, `-sys.maxsize`, is unbounded preceding.
+    fn into_start(self) -> Self {
+        if self.offset() <= -i128::from(i64::MAX) {
+            FrameBound::UnboundedPreceding
+        } else {
+            self
+        }
+    }
+
+    /// This bound as the end of a frame, as [`FrameBound::into_start`]: one at or after
+    /// `Window._FOLLOWING_THRESHOLD`, `sys.maxsize`, is unbounded following.
+    fn into_end(self) -> Self {
+        if self.offset() >= i128::from(i64::MAX) {
+            FrameBound::UnboundedFollowing
+        } else {
+            self
+        }
+    }
+}
+
 /// Frame type for window specifications.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameType {
@@ -98,15 +132,24 @@ impl WindowSpec {
         self
     }
 
-    /// Set the frame specification for ROWS.
+    /// Set the frame specification for ROWS, as PySpark's `WindowSpec.rowsBetween(start, end)`
+    /// of the ints of the bounds: a start at or before `Window._PRECEDING_THRESHOLD`
+    /// (`-sys.maxsize`, `Preceding(i64::MAX)`) is unbounded preceding, and an end at or after
+    /// `Window._FOLLOWING_THRESHOLD` (`sys.maxsize`) unbounded following. The frame is sent as
+    /// PySpark's `WindowExpression` sends it: a bound of 0 is the current row, the unbounded
+    /// start and end are unbounded, and another bound is the int literal of its offset. As
+    /// PySpark's, a request of an offset beyond an int, such as an unbounded following start,
+    /// fails with `VALUE_NOT_BETWEEN` of `start` or `end`.
     pub fn rows_between(mut self, start: FrameBound, end: FrameBound) -> Self {
-        self.frame_spec = Some((FrameType::Row, start, end));
+        self.frame_spec = Some((FrameType::Row, start.into_start(), end.into_end()));
         self
     }
 
-    /// Set the frame specification for RANGE.
+    /// Set the frame specification for RANGE, as PySpark's `WindowSpec.rangeBetween(start, end)`
+    /// of the ints of the bounds, which it takes as [`WindowSpec::rows_between`] takes them, and
+    /// sends a bound that is not the current row nor unbounded as the long literal of its offset.
     pub fn range_between(mut self, start: FrameBound, end: FrameBound) -> Self {
-        self.frame_spec = Some((FrameType::Range, start, end));
+        self.frame_spec = Some((FrameType::Range, start.into_start(), end.into_end()));
         self
     }
 }
@@ -353,17 +396,129 @@ mod tests {
                 Some(LiteralType::Long(1))
             ]
         );
-        // The int literals of a row frame, and a long for a value out of the range of an int,
-        // for the server to reject.
+        // The int literals of a row frame, of which a value out of the range of an int fails the
+        // request with PySpark's `VALUE_NOT_BETWEEN` (a serialization that does not fail sends
+        // its long).
+        let beyond_an_int = WindowSpec::new()
+            .rows_between(FrameBound::Preceding(1), FrameBound::Following(1 << 40));
         assert_eq!(
-            literals(
-                WindowSpec::new()
-                    .rows_between(FrameBound::Preceding(1), FrameBound::Following(1 << 40))
-            ),
+            literals(beyond_an_int.clone()),
             [
                 Some(LiteralType::Integer(-1)),
                 Some(LiteralType::Long(1 << 40))
             ]
+        );
+        let not_between = |spec: WindowSpec| {
+            crate::functions::sum(crate::column::col("id"))
+                .over(spec)
+                .try_to_proto()
+                .unwrap_err()
+                .message()
+        };
+        assert_eq!(
+            not_between(beyond_an_int),
+            "[VALUE_NOT_BETWEEN] Value for `end` must be between -2147483648 and 2147483647."
+        );
+    }
+
+    /// As PySpark's `rowsBetween` and `rangeBetween`, of the ints of the bounds, and its
+    /// `WindowExpression`, which sends a bound of 0 as the current row, and the start of
+    /// `Window.unboundedPreceding` and the end of `Window.unboundedFollowing` as unbounded: a
+    /// start of `-sys.maxsize` or less and an end of `sys.maxsize` or more are unbounded, and an
+    /// unbounded bound on the other side is the literal of its int.
+    #[test]
+    fn frame_boundaries_of_the_current_row_and_unbounded_are_sent_as_pyspark() {
+        use crate::expression::LiteralExpression;
+        use spark_connect_core::error::SparkErrorKind;
+        use spark_connect_proto::expression::window::window_frame::frame_boundary::Boundary;
+        use spark_connect_proto::expression::ExprType;
+        use FrameBound::*;
+
+        let over = |spec: WindowSpec| crate::functions::sum(crate::column::col("id")).over(spec);
+        let boundaries = |spec: WindowSpec| {
+            let Some(ExprType::Window(window)) = over(spec).expression().to_proto().expr_type
+            else {
+                panic!("expected a window expression");
+            };
+            let frame = window.frame_spec.expect("a frame");
+            [frame.lower.unwrap().boundary, frame.upper.unwrap().boundary]
+        };
+        let long = |n: i64| {
+            let literal = Expression::literal(LiteralExpression::long(n)).to_proto();
+            Some(Boundary::Value(Box::new(literal)))
+        };
+        let current = Some(Boundary::CurrentRow(true));
+        let unbounded = Some(Boundary::Unbounded(true));
+        for spec in [
+            WindowSpec::new().rows_between(Preceding(0), Following(0)),
+            WindowSpec::new().range_between(Following(0), Preceding(0)),
+        ] {
+            assert_eq!(boundaries(spec), [current.clone(), current.clone()]);
+        }
+        for spec in [
+            WindowSpec::new().rows_between(Preceding(i64::MAX), Following(i64::MAX)),
+            WindowSpec::new().range_between(UnboundedPreceding, UnboundedFollowing),
+            WindowSpec::new().range_between(Preceding(i64::MAX), Preceding(i64::MIN)),
+        ] {
+            assert_eq!(boundaries(spec), [unbounded.clone(), unbounded.clone()]);
+        }
+        // `rangeBetween(Window.unboundedFollowing, 0)` and `rangeBetween(0,
+        // Window.unboundedPreceding)`: the long literals of the unbounded ints.
+        assert_eq!(
+            boundaries(WindowSpec::new().range_between(UnboundedFollowing, CurrentRow)),
+            [long(i64::MAX), current.clone()]
+        );
+        assert_eq!(
+            boundaries(WindowSpec::new().range_between(CurrentRow, UnboundedPreceding)),
+            [current.clone(), long(i64::MIN)]
+        );
+        // Which a row frame refuses, as an int beyond an int32, of the start first.
+        let error = |spec: WindowSpec| over(spec).try_to_proto().unwrap_err();
+        for (spec, name) in [
+            (
+                WindowSpec::new().rows_between(UnboundedFollowing, CurrentRow),
+                "start",
+            ),
+            (
+                WindowSpec::new().rows_between(CurrentRow, UnboundedPreceding),
+                "end",
+            ),
+            (
+                WindowSpec::new().rows_between(Preceding(1 << 31 | 1), Following(1 << 31)),
+                "start",
+            ),
+        ] {
+            let error = error(spec);
+            assert_eq!(error.kind, SparkErrorKind::ValueError);
+            assert_eq!(
+                error.message(),
+                format!(
+                    "[VALUE_NOT_BETWEEN] Value for `{name}` must be between -2147483648 and \
+                     2147483647."
+                )
+            );
+        }
+        // The start of 2**63 of a range frame, beyond a long: protobuf's `ValueError`.
+        let error = error(WindowSpec::new().range_between(Preceding(i64::MIN), CurrentRow));
+        assert_eq!(
+            (error.kind, error.message()),
+            (
+                SparkErrorKind::BuiltinValueError,
+                "Value out of range: 9223372036854775808".to_string()
+            )
+        );
+        // And the repr of the window is of the ints of its bounds, as PySpark's.
+        assert_eq!(
+            WindowSpec::new()
+                .rows_between(Preceding(i64::MAX), Following(i64::MAX))
+                .repr(),
+            "WindowSpec(WindowFrame(ROW_FRAME, -9223372036854775808, 9223372036854775807))"
+        );
+        assert_eq!(
+            WindowSpec::new()
+                .range_between(UnboundedFollowing, UnboundedPreceding)
+                .repr(),
+            "WindowSpec(WindowFrame(RANGE_FRAME, 9223372036854775807, -9223372036854775808))"
         );
     }
 

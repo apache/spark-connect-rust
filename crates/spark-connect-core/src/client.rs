@@ -1690,13 +1690,42 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
+        self.extend_user_context(&mut request.user_context);
+        self.execute_plan_reattachable_in_context(request).await
+    }
+
+    /// Run `request` as [`SparkConnectClient::execute_plan_reattachable`] runs it, without
+    /// waiting for it, as PySpark's `RemoteModelRef` deletes a model from the ML cache of the
+    /// server when its last reference goes: one `execute_command` of the thread that drops it,
+    /// whose responses are read to the end and then released.
+    ///
+    /// The request takes the user context extensions of the calling thread now, as PySpark's
+    /// request is of the thread of its finalizer; the caller gives it the tags of that thread. It
+    /// is then sent on the shared runtime, so that a drop never blocks on it, and its errors are
+    /// ignored, as PySpark's `_delete_ml_cache` ignores them. Not a stable API.
+    #[doc(hidden)]
+    pub fn spawn_execute_plan_reattachable(&self, mut request: ExecutePlanRequest) {
+        self.extend_user_context(&mut request.user_context);
+        let client = self.clone();
+        drop(crate::runtime::get_runtime().spawn(async move {
+            if let Ok(mut stream) = client.execute_plan_reattachable_in_context(request).await {
+                while let Ok(Some(_)) = stream.message().await {}
+            }
+        }));
+    }
+
+    /// [`SparkConnectClient::execute_plan_reattachable`] of a request whose user context has the
+    /// user context extensions of its thread already.
+    async fn execute_plan_reattachable_in_context(
+        &self,
+        mut request: ExecutePlanRequest,
+    ) -> Result<ReattachableResponseStream> {
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context and the client type of this request, and the request of the hook, as
         // PySpark's iterator is of the request that the hooks return.
         self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         add_result_chunking_option(&mut request, self.result_chunking);
-        self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         if let Some(plan) = request.plan.as_mut() {
             self.compress_plan(plan).await;

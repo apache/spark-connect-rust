@@ -371,6 +371,17 @@ pub(crate) fn batch_data_size(batch: &RecordBatch) -> usize {
         .sum()
 }
 
+/// The relation of `batches` of no rows of `schema`, as PySpark's createDataFrame sends empty data
+/// (`LocalRelation(table=None, schema)`): the schema alone, once the batches are validated as the
+/// other paths validate them, and with no request.
+pub(crate) fn empty_relation(batches: &[RecordBatch], schema: DataType) -> Result<LogicalPlan> {
+    normalize_map_names(batches)?;
+    Ok(LogicalPlan::LocalRelation {
+        schema: Some(schema),
+        data: None,
+    })
+}
+
 pub(crate) fn inline_relation(
     batches: &[RecordBatch],
     schema: Option<DataType>,
@@ -956,6 +967,46 @@ mod tests {
         let decoded = reader.next().unwrap().unwrap();
         decoded.column(0).to_data().validate_full().unwrap();
         assert_eq!(decoded.schema(), normalized[0].schema());
+    }
+
+    #[test]
+    fn zero_row_arrow_input_of_a_schema_is_the_schema_alone_as_pyspark() {
+        // As PySpark's createDataFrame of empty data of a schema, `LocalRelation(table=None,
+        // schema)`, with no request: the Arrow columns, which need not be those of the schema,
+        // are not sent. No batches are none.
+        let session = crate::SparkSession::builder()
+            .remote("sc://127.0.0.1:1")
+            .get_or_create()
+            .unwrap();
+        let field = |name: &str, data_type| crate::types::StructField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: Default::default(),
+        };
+        let schema = DataType::Struct {
+            fields: vec![
+                field("x", DataType::Long),
+                field(
+                    "y",
+                    DataType::String {
+                        collation: "UTF8_BINARY".to_string(),
+                    },
+                ),
+            ],
+        };
+        for batches in [vec![batch(0..0)], vec![map_batch(0), map_batch(0)], vec![]] {
+            let dataframe = session
+                .create_dataframe_from_arrow(batches, Some(schema.clone()))
+                .unwrap();
+            let Some(spark_connect_proto::relation::RelType::LocalRelation(local)) =
+                dataframe.to_relation().unwrap().rel_type
+            else {
+                panic!("expected a local relation");
+            };
+            assert_eq!(local.data, None);
+            assert_eq!(local.schema, Some(schema.json()));
+        }
     }
 
     #[test]

@@ -160,7 +160,8 @@ conversion path takes its settings from that request, including the relation's c
 threshold, and empty data reads none. The Rust API's `create_dataframe` and
 `create_dataframe_from_columns` read the same settings in one request, once they have converted
 their rows or columns, and apply the cache threshold at any size too. Of no rows, or columns of
-no rows, they send the schema alone and read none, as PySpark's empty data does.
+no rows, they send the schema alone and read none, as PySpark's empty data does, and so does
+`create_dataframe_from_arrow` of batches of no rows and a schema.
 Every pandas DataFrame, of any class, labels and arrays, converts with PySpark's conversion of
 each column to Arrow, in the session time zone (`prepare_pandas_table` and
 `prepare_inferred_pandas_table` of `pyspark/sql/_pandas_input.py`, of the vendored

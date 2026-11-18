@@ -1644,12 +1644,8 @@ impl PyDataStreamWriter {
         func: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         let command = streaming_function_command(py, func, "foreachBatch")?;
-        let payload = PythonUDFPayload::new(
-            spark_connect::types::DataType::Struct { fields: vec![] },
-            0, // eval type is unused for the streaming foreach sinks
-            command,
-            crate::dataframe::py_version(py),
-        );
+        // As PySpark's, the function's command and Python version only.
+        let payload = PythonUDFPayload::function(command, crate::dataframe::py_version(py));
         slf.borrow().record("foreachBatch", func);
 
         slf.borrow().inner.update(|w| w.foreach_batch(payload));
@@ -1689,12 +1685,7 @@ impl PyDataStreamWriter {
             ],
         )?;
         let command = streaming_function_command(py, command_tuple.as_any(), "foreach")?;
-        let payload = PythonUDFPayload::new(
-            spark_connect::types::DataType::Struct { fields: vec![] },
-            0,
-            command,
-            crate::dataframe::py_version(py),
-        );
+        let payload = PythonUDFPayload::function(command, crate::dataframe::py_version(py));
         slf.borrow().record("foreach", f);
 
         slf.borrow().inner.update(|w| w.foreach(payload));
@@ -1755,6 +1746,15 @@ impl ProtoBool {
         match &self.0 {
             Some(obj) => proto_bool(obj.bind(py)),
             None => Ok(false),
+        }
+    }
+
+    /// As [`ProtoBool::value`], of an argument that PySpark's request sets unless it is None,
+    /// such as the `blocking` of `unpersist`: None for None, which the request does not set.
+    pub(crate) fn value_unless_none(&self, py: Python<'_>) -> PyResult<Option<bool>> {
+        match &self.0 {
+            Some(obj) if obj.is_none(py) => Ok(None),
+            _ => self.value(py).map(Some),
         }
     }
 }

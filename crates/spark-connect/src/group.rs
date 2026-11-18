@@ -769,15 +769,27 @@ impl StatFunctions {
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
-    /// Compute correlation between two columns.
+    /// Compute correlation between two columns, as PySpark's `corr(col1, col2, method=None)`:
+    /// the method is "pearson", the default of `None` or an empty one, else a `VALUE_NOT_ALLOWED`
+    /// error, before any request, and the request sends it.
     ///
     /// Executes the stat aggregation and returns the resulting `f64`
     /// (NaN when the correlation is undefined, e.g. an empty relation).
-    pub fn corr(&self, col1: &str, col2: &str) -> Result<f64> {
+    pub fn corr(&self, col1: &str, col2: &str, method: Option<&str>) -> Result<f64> {
+        let method = method
+            .filter(|method| !method.is_empty())
+            .unwrap_or("pearson");
+        if method != "pearson" {
+            return Err(SparkError::value(
+                "VALUE_NOT_ALLOWED",
+                &[("arg_name", "method"), ("allowed_values", "['pearson']")],
+            ));
+        }
         let plan = LogicalPlan::StatCorr {
             input: Arc::clone(&self.dataframe.plan),
             col1: col1.to_string(),
             col2: col2.to_string(),
+            method: method.to_string(),
         };
         let df = DataFrame::new(self.dataframe.session.clone(), plan);
         Ok(df
@@ -1602,13 +1614,31 @@ mod tests {
             });
         spark.set_execute_plan_hook(Some(hook));
         let stat = spark.range(3).unwrap().stat();
-        assert!(stat.corr("id", "id").is_err());
+        assert!(stat.corr("id", "id", None).is_err());
         assert!(stat.cov("id", "id").is_err());
+        // As PySpark's `corr(col1, col2, method=None)`, whose method is "pearson" when it is not
+        // given or empty, which the request sends, and `VALUE_NOT_ALLOWED` of another one, before
+        // any request.
+        assert!(stat.corr("id", "id", Some("")).is_err());
+        assert!(stat.corr("id", "id", Some("pearson")).is_err());
+        for method in ["spearman", "Pearson"] {
+            let error = stat.corr("id", "id", Some(method)).unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::ValueError);
+            assert_eq!(
+                error.message(),
+                "[VALUE_NOT_ALLOWED] Value for `method` has to be amongst the following values: \
+                 ['pearson']."
+            );
+        }
         let roots = roots.lock().unwrap();
-        assert!(
-            matches!(roots.as_slice(), [RelType::Corr(_), RelType::Cov(_)]),
-            "{roots:?}"
-        );
+        let [RelType::Corr(corr), RelType::Cov(_), RelType::Corr(empty), RelType::Corr(pearson)] =
+            roots.as_slice()
+        else {
+            panic!("{roots:?}");
+        };
+        for corr in [corr, empty, pearson] {
+            assert_eq!(corr.method.as_deref(), Some("pearson"));
+        }
     }
 
     #[test]

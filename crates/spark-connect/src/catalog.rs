@@ -4,12 +4,13 @@
 
 use std::collections::HashMap;
 
-use spark_connect_core::error::{Result, SparkError};
+use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
 use crate::row::{Row, Value};
 use crate::session::SparkSession;
+use crate::types::DataType;
 
 /// Metadata result classes returned by the typed catalog methods, mirroring
 /// `pyspark.sql.catalog.{CatalogMetadata,Database,Table,Column,Function,TablePartition}`.
@@ -570,7 +571,8 @@ impl Catalog {
     }
 
     /// Create a table of a schema and options, mirroring
-    /// `Catalog.createTable(tableName, path, source, schema, description, **options)`.
+    /// `Catalog.createTable(tableName, path, source, schema, description, **options)`, which
+    /// raises `NOT_EXPECTED_TYPE` for a schema that is not a struct type, before any request.
     pub fn create_table_with(
         &self,
         table_name: &str,
@@ -580,6 +582,17 @@ impl Catalog {
         description: Option<&str>,
         options: HashMap<String, String>,
     ) -> Result<DataFrame> {
+        if let Some(schema) = schema.filter(|schema| !matches!(schema, DataType::Struct { .. })) {
+            return Err(SparkError::classed(
+                SparkErrorKind::TypeError,
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("arg_name", "schema"),
+                    ("expected_type", "struct type"),
+                    ("arg_type", &schema.class_name()),
+                ],
+            ));
+        }
         let create_tbl = proto::CreateTable {
             table_name: table_name.to_string(),
             path: path.map(str::to_string),

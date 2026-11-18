@@ -287,7 +287,7 @@ pub(crate) fn cov(
 }
 
 /// `df.corr(col1, col2, method)`, of two column names and the method "pearson", the default,
-/// else `VALUE_NOT_ALLOWED`, as PySpark's.
+/// else `VALUE_NOT_ALLOWED`, as PySpark's, whose request sends the method.
 pub(crate) fn corr(
     py: Python<'_>,
     stat: &StatFunctions,
@@ -309,8 +309,9 @@ pub(crate) fn corr(
             ));
         }
     }
+    // The method, checked, is "pearson", which the core's default sends.
     interruptible(py, &stat.spark_session(), || {
-        stat.corr(&col1, &col2).map_err(Box::new)
+        stat.corr(&col1, &col2, None).map_err(Box::new)
     })
 }
 

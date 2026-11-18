@@ -328,7 +328,8 @@ pub(crate) fn df_col(df: &DataFrame, name: &Bound<'_, PyAny>, metadata: bool) ->
     let column = if metadata {
         df.metadata_column(&text)
     } else {
-        df.col(&text)
+        // Of the name `*` too, which `_col` does not make a star.
+        df.column_reference(&text)
     };
     Ok(args.column(column))
 }

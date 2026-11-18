@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use spark_connect::plan::LogicalPlan;
 use spark_connect::readwriter::ReadType;
 use spark_connect::{DataFrame, SparkSession};
+use spark_connect_core::error::SparkErrorKind;
 use spark_connect_proto as proto;
 
 /// The data source of the streaming read of `df`.
@@ -199,6 +200,83 @@ fn test_stream_read_with_source_name() {
             }
         }
         _ => panic!("Expected Read relation"),
+    }
+}
+
+/// As PySpark's `DataStreamReader.name`, which raises `INVALID_STREAMING_SOURCE_NAME` of a name
+/// that `re.match(r"^[a-zA-Z0-9_]+$", source_name)` does not match, before the reader is used: each
+/// DataFrame of the reader fails with it, from the first such name on, and a name of a final
+/// newline, before which `$` matches, is sent.
+#[test]
+fn stream_reader_names_are_checked_as_pyspark() {
+    let spark = SparkSession::builder()
+        .remote("sc://127.0.0.1:1")
+        .get_or_create()
+        .unwrap();
+    for name in ["ok_1", "Ab9", "ok\n"] {
+        let df = spark.read_stream().format("rate").name(name).load(None);
+        assert_eq!(stream_data_source(&df).source_name.as_deref(), Some(name));
+    }
+    for name in ["bad name", "a-b", "", "\n", "ok\n\n", "é"] {
+        let refused = || spark.read_stream().format("rate").name(name);
+        for df in [
+            refused().load(None),
+            refused().name("ok").load(None),
+            refused().table("t"),
+            refused().changes("t"),
+            refused().json("p"),
+        ] {
+            let error = df.to_relation().unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::ValueError);
+            assert_eq!(
+                error.message(),
+                format!(
+                    "[INVALID_STREAMING_SOURCE_NAME] Invalid streaming source name '{name}'. \
+                     Source names must contain only ASCII letters, digits, and underscores."
+                )
+            );
+        }
+    }
+}
+
+/// As PySpark's `DataFrameReader.changes` and `DataStreamReader.changes`, which raise an
+/// `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a schema (`if self._schema:`,
+/// so not of the schema `""`): each request of the DataFrame fails with it.
+#[test]
+fn changes_of_a_reader_of_a_schema_fail_as_pyspark() {
+    let spark = SparkSession::builder()
+        .remote("sc://127.0.0.1:1")
+        .get_or_create()
+        .unwrap();
+    for df in [
+        spark.read().schema("a INT".to_string()).changes("t"),
+        spark.read_stream().schema("a INT").changes("t"),
+    ] {
+        let error = df.to_relation().unwrap_err();
+        assert_eq!(error.kind, SparkErrorKind::Analysis);
+        assert_eq!(
+            error.get_condition().as_deref(),
+            Some("_LEGACY_ERROR_TEMP_1189")
+        );
+        assert_eq!(
+            error.message(),
+            "[_LEGACY_ERROR_TEMP_1189] User specified schema not supported with `changes`."
+        );
+        assert_eq!(
+            error.get_message_parameters(),
+            Some([("operation".to_string(), "changes".to_string())].into())
+        );
+    }
+    for df in [
+        spark.read().schema(String::new()).changes("t"),
+        spark.read_stream().schema("").changes("t"),
+    ] {
+        let Some(proto::relation::RelType::RelationChanges(changes)) =
+            df.to_relation().unwrap().rel_type
+        else {
+            panic!("expected the changes of the table");
+        };
+        assert_eq!(changes.unparsed_identifier, "t");
     }
 }
 

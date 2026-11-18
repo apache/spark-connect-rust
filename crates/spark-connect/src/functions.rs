@@ -3539,12 +3539,42 @@ where
     )
 }
 
-/// Mirrors `pyspark.sql.functions.reduce` (alias for aggregate).
+/// Mirrors `pyspark.sql.functions.reduce` with a 2-arg merge lambda, as PySpark Connect sends it:
+/// the function `reduce`, an alias of `aggregate` on the server, which names the column after it.
+/// `reduce(col, init, lambda (acc, x): merge(acc, x))`
 pub fn reduce<F>(col: Column, init: Column, f: F) -> Column
 where
     F: FnOnce(Vec<Column>) -> Column,
 {
-    aggregate(col, init, f)
+    let lambda = make_lambda(2, f);
+    func(
+        "reduce",
+        vec![
+            col.expression().clone(),
+            init.expression().clone(),
+            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+        ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.reduce` with both merge and finish lambdas, as [`reduce`].
+/// `reduce(col, init, lambda (acc, x): merge(acc, x), lambda acc: finish(acc))`
+pub fn reduce_with_finish<F, G>(col: Column, init: Column, merge_f: F, finish_f: G) -> Column
+where
+    F: FnOnce(Vec<Column>) -> Column,
+    G: FnOnce(Vec<Column>) -> Column,
+{
+    let merge_lambda = make_lambda(2, merge_f);
+    let finish_lambda = make_lambda(1, finish_f);
+    func(
+        "reduce",
+        vec![
+            col.expression().clone(),
+            init.expression().clone(),
+            ExpressionNode::LambdaFunction(Box::new(merge_lambda)).into(),
+            ExpressionNode::LambdaFunction(Box::new(finish_lambda)).into(),
+        ],
+    )
 }
 
 // ============================================================================
