@@ -2693,7 +2693,12 @@ impl SparkConnectClient {
         allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
+        // A user agent that PySpark refuses raises as its finalizer builds the request, before
+        // anything is sent, and the error of a finalizer is only reported.
+        if let Err(error) = self.fill_client_type(&mut request.client_type) {
+            tracing::warn!("ExecutePlan of a finalizer was not sent: {error}");
+            return;
+        }
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let operation_id = request
             .operation_id
