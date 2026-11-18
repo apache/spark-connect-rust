@@ -22,5 +22,125 @@ import pyspark.ml.recommendation as _pysparks
 
 __all__ = ['ALS', 'ALSModel']
 
-class ALS(_pysparks.ALS): ...
-class ALSModel(_pysparks.ALSModel): ...
+class ALS(_pysparks.ALS):
+    """Alternating Least Squares (ALS) matrix factorization.
+
+    ALS attempts to estimate the ratings matrix `R` as the product of
+    two lower-rank matrices, `X` and `Y`, i.e. `X * Yt = R`. Typically
+    these approximations are called 'factor' matrices. The general
+    approach is iterative. During each iteration, one of the factor
+    matrices is held constant, while the other is solved for using least
+    squares. The newly-solved factor matrix is then held constant while
+    solving for the other factor matrix.
+
+    This is a blocked implementation of the ALS factorization algorithm
+    that groups the two sets of factors (referred to as "users" and
+    "products") into blocks and reduces communication by only sending
+    one copy of each user vector to each product block on each
+    iteration, and only for the product blocks that need that user's
+    feature vector. This is achieved by pre-computing some information
+    about the ratings matrix to determine the "out-links" of each user
+    (which blocks of products it will contribute to) and "in-link"
+    information for each product (which of the feature vectors it
+    receives from each user block it will depend on). This allows us to
+    send only an array of feature vectors between each user block and
+    product block, and have the product block find the users' ratings
+    and update the products based on these messages.
+
+    For implicit preference data, the algorithm used is based on
+    `"Collaborative Filtering for Implicit Feedback Datasets",
+    <https://doi.org/10.1109/ICDM.2008.22>`_, adapted for the blocked
+    approach used here.
+
+    Essentially instead of finding the low-rank approximations to the
+    rating matrix `R`, this finds the approximations for a preference
+    matrix `P` where the elements of `P` are 1 if r > 0 and 0 if r <= 0.
+    The ratings then act as 'confidence' values related to strength of
+    indicated user preferences rather than explicit ratings given to
+    items.
+
+    .. versionadded:: 1.4.0
+
+    Notes
+    -----
+    The input rating dataframe to the ALS implementation should be deterministic.
+    Nondeterministic data can cause failure during fitting ALS model.
+    For example, an order-sensitive operation like sampling after a repartition makes
+    dataframe output nondeterministic, like `df.repartition(2).sample(False, 0.5, 1618)`.
+    Checkpointing sampled dataframe or adding a sort before sampling can help make the
+    dataframe deterministic.
+
+    Examples
+    --------
+    >>> df = spark.createDataFrame(
+    ...     [(0, 0, 4.0), (0, 1, 2.0), (1, 1, 3.0), (1, 2, 4.0), (2, 1, 1.0), (2, 2, 5.0)],
+    ...     ["user", "item", "rating"])
+    >>> als = ALS(rank=10, seed=0)
+    >>> als.setMaxIter(5)
+    ALS...
+    >>> als.getMaxIter()
+    5
+    >>> als.setRegParam(0.1)
+    ALS...
+    >>> als.getRegParam()
+    0.1
+    >>> als.clear(als.regParam)
+    >>> model = als.fit(df)
+    >>> model.getBlockSize()
+    4096
+    >>> model.getUserCol()
+    'user'
+    >>> model.setUserCol("user")
+    ALSModel...
+    >>> model.getItemCol()
+    'item'
+    >>> model.setPredictionCol("newPrediction")
+    ALS...
+    >>> model.rank
+    10
+    >>> model.userFactors.orderBy("id").collect()
+    [Row(id=0, features=[...]), Row(id=1, ...), Row(id=2, ...)]
+    >>> test = spark.createDataFrame([(0, 2), (1, 0), (2, 0)], ["user", "item"])
+    >>> predictions = sorted(model.transform(test).collect(), key=lambda r: r[0])
+    >>> predictions[0]
+    Row(user=0, item=2, newPrediction=0.6929...)
+    >>> predictions[1]
+    Row(user=1, item=0, newPrediction=3.47356...)
+    >>> predictions[2]
+    Row(user=2, item=0, newPrediction=-0.899198...)
+    >>> user_recs = model.recommendForAllUsers(3)
+    >>> user_recs.where(user_recs.user == 0)        .select("recommendations.item", "recommendations.rating").collect()
+    [Row(item=[0, 1, 2], rating=[3.910..., 1.997..., 0.692...])]
+    >>> item_recs = model.recommendForAllItems(3)
+    >>> item_recs.where(item_recs.item == 2)        .select("recommendations.user", "recommendations.rating").collect()
+    [Row(user=[2, 1, 0], rating=[4.892..., 3.991..., 0.692...])]
+    >>> user_subset = df.where(df.user == 2)
+    >>> user_subset_recs = model.recommendForUserSubset(user_subset, 3)
+    >>> user_subset_recs.select("recommendations.item", "recommendations.rating").first()
+    Row(item=[2, 1, 0], rating=[4.892..., 1.076..., -0.899...])
+    >>> item_subset = df.where(df.item == 0)
+    >>> item_subset_recs = model.recommendForItemSubset(item_subset, 3)
+    >>> item_subset_recs.select("recommendations.user", "recommendations.rating").first()
+    Row(user=[0, 1, 2], rating=[3.910..., 3.473..., -0.899...])
+    >>> als_path = temp_path + "/als"
+    >>> als.save(als_path)
+    >>> als2 = ALS.load(als_path)
+    >>> als.getMaxIter()
+    5
+    >>> model_path = temp_path + "/als_model"
+    >>> model.save(model_path)
+    >>> model2 = ALSModel.load(model_path)
+    >>> model.rank == model2.rank
+    True
+    >>> sorted(model.userFactors.collect()) == sorted(model2.userFactors.collect())
+    True
+    >>> sorted(model.itemFactors.collect()) == sorted(model2.itemFactors.collect())
+    True
+    >>> model.transform(test).take(1) == model2.transform(test).take(1)
+    True
+    """
+class ALSModel(_pysparks.ALSModel):
+    """Model fitted by ALS.
+
+    .. versionadded:: 1.4.0
+    """

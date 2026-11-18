@@ -269,8 +269,9 @@ one job does three things:
   the Rust protobuf runtime, the ML suites, the exit hook, the settings of createDataFrame and
   the type stubs) and `test_arrow_handoff.py`. `test_type_stubs_offline.py` runs mypy and
   pyright, at the versions that the job pins, on a user's application and on probes of the names,
-  the instance attributes and the class members of the stubbed modules, and mypy on PySpark's
-  vendored stub of `pyspark.sql.pandas.functions`. No
+  the instance attributes and the class members of the stubbed modules, mypy on PySpark's
+  vendored stub of `pyspark.sql.pandas.functions`, and compares the docstrings of the stubs with
+  those of `pyspark-client` 4.3.0 (`tests/golden/stub_docstrings.json`). No
   other workflow runs these files, but `test_proto_rust_offline.py`, which connect-parity also
   runs without protobuf (see above), so this step is their gate: a failing test fails the job,
   and a guard step at the start of the job fails when one of the files is not in the step's list,

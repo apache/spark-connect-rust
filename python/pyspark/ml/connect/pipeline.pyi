@@ -25,5 +25,27 @@ from pyspark.ml.pipeline import PipelineModelReader as PipelineModelReader
 from pyspark.ml.pipeline import PipelineModelWriter as PipelineModelWriter
 from pyspark.ml.pipeline import PipelineSharedReadWrite as PipelineSharedReadWrite
 
-class Pipeline(_pysparks.Pipeline): ...
-class PipelineModel(_pysparks.PipelineModel): ...
+class Pipeline(_pysparks.Pipeline):
+    """A simple pipeline, which acts as an estimator. A Pipeline consists
+    of a sequence of stages, each of which is either an
+    :py:class:`Estimator` or a :py:class:`Transformer`. When
+    :py:meth:`Pipeline.fit` is called, the stages are executed in
+    order. If a stage is an :py:class:`Estimator`, its
+    :py:meth:`Estimator.fit` method will be called on the input
+    dataset to fit a model. Then the model, which is a transformer,
+    will be used to transform the dataset as the input to the next
+    stage. If a stage is a :py:class:`Transformer`, its
+    :py:meth:`Transformer.transform` method will be called to produce
+    the dataset for the next stage. The fitted model from a
+    :py:class:`Pipeline` is a :py:class:`PipelineModel`, which
+    consists of fitted models and transformers, corresponding to the
+    pipeline stages. If stages is an empty list, the pipeline acts as an
+    identity transformer.
+
+    .. versionadded:: 1.3.0
+    """
+class PipelineModel(_pysparks.PipelineModel):
+    """Represents a compiled pipeline with transformers and fitted models.
+
+    .. versionadded:: 1.3.0
+    """

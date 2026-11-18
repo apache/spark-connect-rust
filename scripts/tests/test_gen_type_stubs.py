@@ -134,6 +134,8 @@ from pyspark._pyspark import helper
 """
 
 EXPECTED = """
+\"\"\"PySpark's module.\"\"\"
+
 import sys
 from typing import Optional, overload
 from pyspark.sql.column import Column as Column
@@ -146,13 +148,15 @@ def _kept(x: int) -> int: ...
 
 alias = _kept
 
-def col(name: str, flag: bool=True, *, sep: str=",") -> Column: ...
+def col(name: str, flag: bool=True, *, sep: str=",") -> Column:
+    \"\"\"Returns a Column.\"\"\"
 @overload
 def lit(value: int) -> Column: ...
 @overload
 def lit(value: str) -> Column: ...
 
 class Reader:
+    \"\"\"docs\"\"\"
     limit: int = ...
     def __init__(self, df: 'DataFrame') -> None:
         self._df = df
@@ -234,9 +238,11 @@ class TransformTests(unittest.TestCase):
         outputs = tree.generate(["pyspark.sql.reader"])
         stub = outputs[Path("python/pyspark/sql/reader.pyi")]
         self.assertIn("from python/pyspark/sql/reader.py of Apache Spark v9.9.9", stub)
-        # Bodies, docstrings, the doctests, the implementation of the overloads, the identity
-        # decorator, the unreferenced private function and the unneeded imports are dropped,
-        # but the body of __init__, which assigns the instance attribute _df. Column is
+        # PySpark's docstrings at run time are kept, of the module, of col and of Reader, whose
+        # `Reader.__doc__ = "docs"` replaces its own. Bodies, the doctests, the implementation of
+        # the overloads, the identity decorator, the unreferenced private function and the
+        # unneeded imports are dropped, but the body of __init__, which assigns the instance
+        # attribute _df. Column is
         # re-exported, as PySpark's module imports it at run time, and so is helper, which the
         # drop-in's pyspark.sql.utils has, unlike missing_helper. DataFrame, of the
         # TYPE_CHECKING block, is imported for the annotations only. Defaults keep their text.
@@ -292,7 +298,7 @@ class TransformTests(unittest.TestCase):
             ]
         )
         # A type checker infers each attribute from the body that its method keeps, as
-        # PySpark's source writes it, but its docstring: Field.name and Field.metadata, of
+        # PySpark's source writes it, after its docstring: Field.name and Field.metadata, of
         # __init__ and rename. The other methods are stubs. pyright does not narrow fields in a
         # stub, which ATTRIBUTE_TYPES declares. The import of os is kept for the body that reads
         # it, not the function-local import of helper, nor the import of Column.
@@ -306,6 +312,7 @@ from pyspark.sql.column import Column as Column
 class Field:
     kind: str = ...
     def __init__(self, name: str, metadata: Optional[Dict[str, str]]=None) -> None:
+        \"\"\"A field.\"\"\"
         from pyspark.sql.utils import helper
 
         self.name = name  # as PySpark writes it
@@ -687,6 +694,8 @@ class BinaryTrainingSummary(BinarySummary, TrainingSummary): ...
 
 
 class Model(_Base["Model"]):
+    '''A model.'''
+
     def summary(self) -> BinaryTrainingSummary: ...
 
 
@@ -792,8 +801,8 @@ class MLConnectTests(unittest.TestCase):
             stub,
         )
         # Each native class is of the public classes of its nearest native bases, which come
-        # first, and of PySpark's class; the module re-exports what it imports of pyspark.ml and
-        # the class that it binds of PySpark's module, and keeps its __all__.
+        # first, and of PySpark's class, of its docstring; the module re-exports what it imports
+        # of pyspark.ml and the class that it binds of PySpark's module, and keeps its __all__.
         self.assertEqual(
             body(stub),
             "\nimport pyspark.ml.classification as _pysparks\n"
@@ -805,7 +814,8 @@ class MLConnectTests(unittest.TestCase):
             "class TrainingSummary(Summary, _pysparks.TrainingSummary): ...\n"
             "class BinaryTrainingSummary(BinarySummary, TrainingSummary, "
             "_pysparks.BinaryTrainingSummary): ...\n"
-            "class Model(_pysparks.Model): ...\n",
+            "class Model(_pysparks.Model):\n"
+            '    """A model."""\n',
         )
 
     def test_the_package_reexports_and_the_module_of_the_features_has_the_stages(self):
@@ -865,6 +875,137 @@ class MLConnectTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(gen.GeneratorError, "the native class Other"):
             self.generate(tree)
+
+
+# PySpark's sources of the docstrings below: a classic module and a module of PySpark Connect
+# that copies its docstrings, as PySpark's do.
+PYSPARKS_INIT = """
+from typing import Callable, TypeVar, Union
+
+_F = TypeVar("_F", bound=Callable)
+
+
+def since(version: Union[str, float]) -> Callable[[_F], _F]: ...
+"""
+
+CLASSIC_THING = '''
+from pyspark import since
+
+
+class Base:
+    """The base."""
+
+    def run(self) -> None:
+        """Runs."""
+
+    @property
+    def name(self) -> str:
+        """The name."""
+
+
+class Thing(Base):
+    """A thing."""
+
+    def run(self) -> None:
+        pass
+
+    @since("3.0.0")
+    def go(self) -> None:
+        """Goes.
+
+        Parameters
+        ----------
+        """
+
+    @classmethod
+    def make(cls) -> "Thing":
+        """Makes."""
+'''
+
+CONNECT_THING = """
+import functools
+
+from pyspark.sql.thing import Thing as PySparkThing, Base
+
+
+class Thing(Base):
+    __doc__ = PySparkThing.__doc__
+
+    def go(self) -> None: ...
+
+    go.__doc__ = PySparkThing.go.__doc__
+
+    @classmethod
+    def make(cls) -> "Thing": ...
+
+    make.__doc__ = PySparkThing.make.__doc__
+
+    @functools.cache
+    def run(self) -> None: ...
+
+
+def helper() -> None: ...
+
+
+helper.__doc__ = PySparkThing.run.__doc__
+"""
+
+
+class DocstringTests(unittest.TestCase):
+    def docs(self) -> "gen.Docs":
+        tree = Tree(self)
+        tree.write(tree.src, "pyspark/__init__.py", PYSPARKS_INIT)
+        tree.write(tree.src, "pyspark/sql/thing.py", CLASSIC_THING)
+        tree.write(tree.src, "pyspark/sql/connect/thing.py", CONNECT_THING)
+        return gen.Docs(tree.src)
+
+    def test_the_docstrings_are_those_of_pysparks_objects_at_run_time(self):
+        docs = self.docs()
+        classic, connect = "pyspark.sql.thing", "pyspark.sql.connect.thing"
+        # Its own, of a property too, and that of the first class of the MRO that has one, as
+        # inspect.getdoc looks it up; pyspark.since appends the version as it does at run time.
+        self.assertEqual(docs.getdoc(classic, "Base.name"), "The name.")
+        self.assertEqual(docs.getdoc(classic, "Thing.run"), "Runs.")
+        self.assertEqual(
+            docs.getdoc(classic, "Thing.go"),
+            "Goes.\n\nParameters\n----------\n\n.. versionadded:: 3.0.0",
+        )
+        # The copies of PySpark Connect: of a class body's __doc__ and of a method, the __doc__
+        # of PySpark's object, of its own and not inherited (Thing.run has none).
+        self.assertEqual(docs.getdoc(connect, "Thing"), "A thing.")
+        self.assertEqual(docs.getdoc(connect, "Thing.go"), docs.getdoc(classic, "Thing.go"))
+        self.assertIsNone(docs.getdoc(connect, "helper"))
+        # The __doc__ that is set of a classmethod is the wrapper's, not of the method that the
+        # class gives; inspect.getdoc looks no base up of a cache of functools.
+        self.assertIsNone(docs.getdoc(connect, "Thing.make"))
+        self.assertIsNone(docs.getdoc(connect, "Thing.run"))
+        # An inherited member, of the class's base.
+        self.assertEqual(docs.getdoc(connect, "Thing.name"), "The name.")
+
+    def test_a_decorator_that_may_change_a_docstring_is_an_error(self):
+        tree = Tree(self)
+        tree.write(tree.src, "pyspark/sql/other.py", "@unknown\ndef f() -> None:\n    '''Doc.'''\n")
+        with self.assertRaisesRegex(gen.GeneratorError, "the decorator unknown"):
+            gen.Docs(tree.src).getdoc("pyspark.sql.other", "f")
+
+    def test_a_docstring_is_written_as_a_literal_of_its_text(self):
+        # Of each text, the literal's docstring, as inspect.cleandoc and type checkers read it,
+        # is the text: a raw literal of a backslash, the escapes of quotes and of a control
+        # character, and a first line that begins with a space, which cleandoc keeps when its
+        # other lines are less indented.
+        texts = [
+            "One line.",
+            "Lines.\n\nParameters\n----------\nx : int\n    the x.",
+            "A regex \\d+ of a backslash.",
+            'Quotes """ and a last "',
+            "A control \x01 and a \\ backslash.",
+            " Normalizes.\n\n.. versionadded:: 1.4.0",
+        ]
+        for text in texts:
+            lines = gen.docstring_lines(text, "    ")
+            function = ast.parse("def f():\n" + "\n".join(lines) + "\n").body[0]
+            self.assertEqual(ast.get_docstring(function), text, lines)
+        self.assertEqual(gen.docstring_lines("A regex \\d+.", ""), ['r"""A regex \\d+."""'])
 
 
 class CheckTests(unittest.TestCase):

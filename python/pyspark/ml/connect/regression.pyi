@@ -24,23 +24,579 @@ from pyspark.ml.regression import Regressor as Regressor
 
 __all__ = ['AFTSurvivalRegression', 'AFTSurvivalRegressionModel', 'DecisionTreeRegressor', 'DecisionTreeRegressionModel', 'GBTRegressor', 'GBTRegressionModel', 'GeneralizedLinearRegression', 'GeneralizedLinearRegressionModel', 'GeneralizedLinearRegressionSummary', 'GeneralizedLinearRegressionTrainingSummary', 'IsotonicRegression', 'IsotonicRegressionModel', 'LinearRegression', 'LinearRegressionModel', 'LinearRegressionSummary', 'LinearRegressionTrainingSummary', 'RandomForestRegressor', 'RandomForestRegressionModel', 'FMRegressor', 'FMRegressionModel']
 
-class AFTSurvivalRegression(_pysparks.AFTSurvivalRegression): ...
-class AFTSurvivalRegressionModel(_pysparks.AFTSurvivalRegressionModel): ...
-class DecisionTreeRegressionModel(_pysparks.DecisionTreeRegressionModel): ...
-class DecisionTreeRegressor(_pysparks.DecisionTreeRegressor): ...
-class FMRegressionModel(_pysparks.FMRegressionModel): ...
-class FMRegressor(_pysparks.FMRegressor): ...
-class GBTRegressionModel(_pysparks.GBTRegressionModel): ...
-class GBTRegressor(_pysparks.GBTRegressor): ...
-class GeneralizedLinearRegression(_pysparks.GeneralizedLinearRegression): ...
-class GeneralizedLinearRegressionModel(_pysparks.GeneralizedLinearRegressionModel): ...
-class GeneralizedLinearRegressionSummary(_pysparks.GeneralizedLinearRegressionSummary): ...
-class GeneralizedLinearRegressionTrainingSummary(GeneralizedLinearRegressionSummary, _pysparks.GeneralizedLinearRegressionTrainingSummary): ...
-class IsotonicRegression(_pysparks.IsotonicRegression): ...
-class IsotonicRegressionModel(_pysparks.IsotonicRegressionModel): ...
-class LinearRegression(_pysparks.LinearRegression): ...
-class LinearRegressionModel(_pysparks.LinearRegressionModel): ...
-class LinearRegressionSummary(_pysparks.LinearRegressionSummary): ...
-class LinearRegressionTrainingSummary(LinearRegressionSummary, _pysparks.LinearRegressionTrainingSummary): ...
-class RandomForestRegressionModel(_pysparks.RandomForestRegressionModel): ...
-class RandomForestRegressor(_pysparks.RandomForestRegressor): ...
+class AFTSurvivalRegression(_pysparks.AFTSurvivalRegression):
+    """Accelerated Failure Time (AFT) Model Survival Regression
+
+    Fit a parametric AFT survival regression model based on the Weibull distribution
+    of the survival time.
+
+    Notes
+    -----
+    For more information see Wikipedia page on
+    `AFT Model <https://en.wikipedia.org/wiki/Accelerated_failure_time_model>`_
+
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0), 1.0),
+    ...     (1e-40, Vectors.sparse(1, [], []), 0.0)], ["label", "features", "censor"])
+    >>> aftsr = AFTSurvivalRegression()
+    >>> aftsr.setMaxIter(10)
+    AFTSurvivalRegression...
+    >>> aftsr.getMaxIter()
+    10
+    >>> aftsr.clear(aftsr.maxIter)
+    >>> model = aftsr.fit(df)
+    >>> model.getMaxBlockSizeInMB()
+    0.0
+    >>> model.setFeaturesCol("features")
+    AFTSurvivalRegressionModel...
+    >>> model.predict(Vectors.dense(6.3))
+    1.0
+    >>> model.predictQuantiles(Vectors.dense(6.3))
+    DenseVector([0.0101, 0.0513, 0.1054, 0.2877, 0.6931, 1.3863, 2.3026, 2.9957, 4.6052])
+    >>> model.transform(df).show()
+    +-------+---------+------+----------+
+    |  label| features|censor|prediction|
+    +-------+---------+------+----------+
+    |    1.0|    [1.0]|   1.0|       1.0|
+    |1.0E-40|(1,[],[])|   0.0|       1.0|
+    +-------+---------+------+----------+
+    ...
+    >>> aftsr_path = temp_path + "/aftsr"
+    >>> aftsr.save(aftsr_path)
+    >>> aftsr2 = AFTSurvivalRegression.load(aftsr_path)
+    >>> aftsr2.getMaxIter()
+    100
+    >>> model_path = temp_path + "/aftsr_model"
+    >>> model.save(model_path)
+    >>> model2 = AFTSurvivalRegressionModel.load(model_path)
+    >>> model.coefficients == model2.coefficients
+    True
+    >>> model.intercept == model2.intercept
+    True
+    >>> model.scale == model2.scale
+    True
+    >>> model.transform(df).take(1) == model2.transform(df).take(1)
+    True
+
+    .. versionadded:: 1.6.0
+    """
+class AFTSurvivalRegressionModel(_pysparks.AFTSurvivalRegressionModel):
+    """Model fitted by :class:`AFTSurvivalRegression`.
+
+    .. versionadded:: 1.6.0
+    """
+class DecisionTreeRegressionModel(_pysparks.DecisionTreeRegressionModel):
+    """Model fitted by :class:`DecisionTreeRegressor`.
+
+    .. versionadded:: 1.4.0
+    """
+class DecisionTreeRegressor(_pysparks.DecisionTreeRegressor):
+    """`Decision tree <http://en.wikipedia.org/wiki/Decision_tree_learning>`_
+    learning algorithm for regression.
+    It supports both continuous and categorical features.
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> dt = DecisionTreeRegressor(maxDepth=2)
+    >>> dt.setVarianceCol("variance")
+    DecisionTreeRegressor...
+    >>> model = dt.fit(df)
+    >>> model.getVarianceCol()
+    'variance'
+    >>> model.setLeafCol("leafId")
+    DecisionTreeRegressionModel...
+    >>> model.depth
+    1
+    >>> model.numNodes
+    3
+    >>> model.featureImportances
+    SparseVector(1, {0: 1.0})
+    >>> model.numFeatures
+    1
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> model.predict(test0.head().features)
+    0.0
+    >>> result = model.transform(test0).head()
+    >>> result.prediction
+    0.0
+    >>> model.predictLeaf(test0.head().features)
+    0.0
+    >>> result.leafId
+    0.0
+    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
+    >>> model.transform(test1).head().prediction
+    1.0
+    >>> dtr_path = temp_path + "/dtr"
+    >>> dt.save(dtr_path)
+    >>> dt2 = DecisionTreeRegressor.load(dtr_path)
+    >>> dt2.getMaxDepth()
+    2
+    >>> model_path = temp_path + "/dtr_model"
+    >>> model.save(model_path)
+    >>> model2 = DecisionTreeRegressionModel.load(model_path)
+    >>> model.numNodes == model2.numNodes
+    True
+    >>> model.depth == model2.depth
+    True
+    >>> model.transform(test1).head().variance
+    0.0
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    >>> df3 = spark.createDataFrame([
+    ...     (1.0, 0.2, Vectors.dense(1.0)),
+    ...     (1.0, 0.8, Vectors.dense(1.0)),
+    ...     (0.0, 1.0, Vectors.sparse(1, [], []))], ["label", "weight", "features"])
+    >>> dt3 = DecisionTreeRegressor(maxDepth=2, weightCol="weight", varianceCol="variance")
+    >>> model3 = dt3.fit(df3)
+    >>> print(model3.toDebugString)
+    DecisionTreeRegressionModel...depth=1, numNodes=3...
+    """
+class FMRegressionModel(_pysparks.FMRegressionModel):
+    """Model fitted by :class:`FMRegressor`.
+
+    .. versionadded:: 3.0.0
+    """
+class FMRegressor(_pysparks.FMRegressor):
+    """Factorization Machines learning algorithm for regression.
+
+    solver Supports:
+
+    * gd (normal mini-batch gradient descent)
+    * adamW (default)
+
+    .. versionadded:: 3.0.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> from pyspark.ml.regression import FMRegressor
+    >>> df = spark.createDataFrame([
+    ...     (2.0, Vectors.dense(2.0)),
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>>
+    >>> fm = FMRegressor(factorSize=2)
+    >>> fm.setSeed(16)
+    FMRegressor...
+    >>> model = fm.fit(df)
+    >>> model.getMaxIter()
+    100
+    >>> test0 = spark.createDataFrame([
+    ...     (Vectors.dense(-2.0),),
+    ...     (Vectors.dense(0.5),),
+    ...     (Vectors.dense(1.0),),
+    ...     (Vectors.dense(4.0),)], ["features"])
+    >>> model.transform(test0).show(10, False)
+    +--------+-------------------+
+    |features|prediction         |
+    +--------+-------------------+
+    |[-2.0]  |-1.9989237712341565|
+    |[0.5]   |0.4956682219523814 |
+    |[1.0]   |0.994586620589689  |
+    |[4.0]   |3.9880970124135344 |
+    +--------+-------------------+
+    ...
+    >>> model.intercept
+    -0.0032501766849261557
+    >>> model.linear
+    DenseVector([0.9978])
+    >>> model.factors
+    DenseMatrix(1, 2, [0.0173, 0.0021], 1)
+    >>> model_path = temp_path + "/fm_model"
+    >>> model.save(model_path)
+    >>> model2 = FMRegressionModel.load(model_path)
+    >>> model2.intercept
+    -0.0032501766849261557
+    >>> model2.linear
+    DenseVector([0.9978])
+    >>> model2.factors
+    DenseMatrix(1, 2, [0.0173, 0.0021], 1)
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    """
+class GBTRegressionModel(_pysparks.GBTRegressionModel):
+    """Model fitted by :class:`GBTRegressor`.
+
+    .. versionadded:: 1.4.0
+    """
+class GBTRegressor(_pysparks.GBTRegressor):
+    """`Gradient-Boosted Trees (GBTs) <http://en.wikipedia.org/wiki/Gradient_boosting>`_
+    learning algorithm for regression.
+    It supports both continuous and categorical features.
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> from numpy import allclose
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> gbt = GBTRegressor(maxDepth=2, seed=42, leafCol="leafId")
+    >>> gbt.setMaxIter(5)
+    GBTRegressor...
+    >>> gbt.setMinWeightFractionPerNode(0.049)
+    GBTRegressor...
+    >>> gbt.getMaxIter()
+    5
+    >>> print(gbt.getImpurity())
+    variance
+    >>> print(gbt.getFeatureSubsetStrategy())
+    all
+    >>> model = gbt.fit(df)
+    >>> model.featureImportances
+    SparseVector(1, {0: 1.0})
+    >>> model.numFeatures
+    1
+    >>> allclose(model.treeWeights, [1.0, 0.1, 0.1, 0.1, 0.1])
+    True
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> model.predict(test0.head().features)
+    0.0
+    >>> model.predictLeaf(test0.head().features)
+    DenseVector([0.0, 0.0, 0.0, 0.0, 0.0])
+    >>> result = model.transform(test0).head()
+    >>> result.prediction
+    0.0
+    >>> result.leafId
+    DenseVector([0.0, 0.0, 0.0, 0.0, 0.0])
+    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
+    >>> model.transform(test1).head().prediction
+    1.0
+    >>> gbtr_path = temp_path + "gbtr"
+    >>> gbt.save(gbtr_path)
+    >>> gbt2 = GBTRegressor.load(gbtr_path)
+    >>> gbt2.getMaxDepth()
+    2
+    >>> model_path = temp_path + "gbtr_model"
+    >>> model.save(model_path)
+    >>> model2 = GBTRegressionModel.load(model_path)
+    >>> model.featureImportances == model2.featureImportances
+    True
+    >>> model.treeWeights == model2.treeWeights
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    >>> model.trees
+    [DecisionTreeRegressionModel...depth=..., DecisionTreeRegressionModel...]
+    >>> validation = spark.createDataFrame([(0.0, Vectors.dense(-1.0))],
+    ...              ["label", "features"])
+    >>> model.evaluateEachIteration(validation, "squared")
+    [0.0, 0.0, 0.0, 0.0, 0.0]
+    >>> gbt = gbt.setValidationIndicatorCol("validationIndicator")
+    >>> gbt.getValidationIndicatorCol()
+    'validationIndicator'
+    >>> gbt.getValidationTol()
+    0.01
+    """
+class GeneralizedLinearRegression(_pysparks.GeneralizedLinearRegression):
+    """Generalized Linear Regression.
+
+    Fit a Generalized Linear Model specified by giving a symbolic description of the linear
+    predictor (link function) and a description of the error distribution (family). It supports
+    "gaussian", "binomial", "poisson", "gamma" and "tweedie" as family. Valid link functions for
+    each family is listed below. The first link function of each family is the default one.
+
+    * "gaussian" -> "identity", "log", "inverse"
+
+    * "binomial" -> "logit", "probit", "cloglog"
+
+    * "poisson"  -> "log", "identity", "sqrt"
+
+    * "gamma"    -> "inverse", "identity", "log"
+
+    * "tweedie"  -> power link function specified through "linkPower".                     The default link power in the tweedie family is 1 - variancePower.
+
+    .. versionadded:: 2.0.0
+
+    Notes
+    -----
+    For more information see Wikipedia page on
+    `GLM <https://en.wikipedia.org/wiki/Generalized_linear_model>`_
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(0.0, 0.0)),
+    ...     (1.0, Vectors.dense(1.0, 2.0)),
+    ...     (2.0, Vectors.dense(0.0, 0.0)),
+    ...     (2.0, Vectors.dense(1.0, 1.0)),], ["label", "features"])
+    >>> glr = GeneralizedLinearRegression(family="gaussian", link="identity", linkPredictionCol="p")
+    >>> glr.setRegParam(0.1)
+    GeneralizedLinearRegression...
+    >>> glr.getRegParam()
+    0.1
+    >>> glr.clear(glr.regParam)
+    >>> glr.setMaxIter(10)
+    GeneralizedLinearRegression...
+    >>> glr.getMaxIter()
+    10
+    >>> glr.clear(glr.maxIter)
+    >>> model = glr.fit(df)
+    >>> model.setFeaturesCol("features")
+    GeneralizedLinearRegressionModel...
+    >>> model.getMaxIter()
+    25
+    >>> model.getAggregationDepth()
+    2
+    >>> transformed = model.transform(df)
+    >>> abs(transformed.head().prediction - 1.5) < 0.001
+    True
+    >>> abs(transformed.head().p - 1.5) < 0.001
+    True
+    >>> model.coefficients
+    DenseVector([1.5..., -1.0...])
+    >>> model.numFeatures
+    2
+    >>> abs(model.intercept - 1.5) < 0.001
+    True
+    >>> glr_path = temp_path + "/glr"
+    >>> glr.save(glr_path)
+    >>> glr2 = GeneralizedLinearRegression.load(glr_path)
+    >>> glr.getFamily() == glr2.getFamily()
+    True
+    >>> model_path = temp_path + "/glr_model"
+    >>> model.save(model_path)
+    >>> model2 = GeneralizedLinearRegressionModel.load(model_path)
+    >>> model.intercept == model2.intercept
+    True
+    >>> bool(model.coefficients[0] == model2.coefficients[0])
+    True
+    >>> model.transform(df).take(1) == model2.transform(df).take(1)
+    True
+    """
+class GeneralizedLinearRegressionModel(_pysparks.GeneralizedLinearRegressionModel):
+    """Model fitted by :class:`GeneralizedLinearRegression`.
+
+    .. versionadded:: 2.0.0
+    """
+class GeneralizedLinearRegressionSummary(_pysparks.GeneralizedLinearRegressionSummary):
+    """Generalized linear regression results evaluated on a dataset.
+
+    .. versionadded:: 2.0.0
+    """
+class GeneralizedLinearRegressionTrainingSummary(GeneralizedLinearRegressionSummary, _pysparks.GeneralizedLinearRegressionTrainingSummary):
+    """Generalized linear regression training results.
+
+    .. versionadded:: 2.0.0
+    """
+class IsotonicRegression(_pysparks.IsotonicRegression):
+    """Currently implemented using parallelized pool adjacent violators algorithm.
+    Only univariate (single feature) algorithm supported.
+
+    .. versionadded:: 1.6.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> ir = IsotonicRegression()
+    >>> model = ir.fit(df)
+    >>> model.setFeaturesCol("features")
+    IsotonicRegressionModel...
+    >>> model.numFeatures
+    1
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> model.transform(test0).head().prediction
+    0.0
+    >>> model.predict(test0.head().features[model.getFeatureIndex()])
+    0.0
+    >>> model.boundaries
+    DenseVector([0.0, 1.0])
+    >>> ir_path = temp_path + "/ir"
+    >>> ir.save(ir_path)
+    >>> ir2 = IsotonicRegression.load(ir_path)
+    >>> ir2.getIsotonic()
+    True
+    >>> model_path = temp_path + "/ir_model"
+    >>> model.save(model_path)
+    >>> model2 = IsotonicRegressionModel.load(model_path)
+    >>> model.boundaries == model2.boundaries
+    True
+    >>> model.predictions == model2.predictions
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    """
+class IsotonicRegressionModel(_pysparks.IsotonicRegressionModel):
+    """Model fitted by :class:`IsotonicRegression`.
+
+    .. versionadded:: 1.6.0
+    """
+class LinearRegression(_pysparks.LinearRegression):
+    """Linear regression.
+
+    The learning objective is to minimize the specified loss function, with regularization.
+    This supports two kinds of loss:
+
+    * squaredError (a.k.a squared loss)
+    * huber (a hybrid of squared error for relatively small errors and absolute error for     relatively large ones, and we estimate the scale parameter from training data)
+
+    This supports multiple types of regularization:
+
+    * none (a.k.a. ordinary least squares)
+    * L2 (ridge regression)
+    * L1 (Lasso)
+    * L2 + L1 (elastic net)
+
+    .. versionadded:: 1.4.0
+
+    Notes
+    -----
+    Fitting with huber loss only supports none and L2 regularization.
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (1.0, 2.0, Vectors.dense(1.0)),
+    ...     (0.0, 2.0, Vectors.sparse(1, [], []))], ["label", "weight", "features"])
+    >>> lr = LinearRegression(regParam=0.0, solver="normal", weightCol="weight")
+    >>> lr.setMaxIter(5)
+    LinearRegression...
+    >>> lr.getMaxIter()
+    5
+    >>> lr.setRegParam(0.1)
+    LinearRegression...
+    >>> lr.getRegParam()
+    0.1
+    >>> lr.setRegParam(0.0)
+    LinearRegression...
+    >>> model = lr.fit(df)
+    >>> model.setFeaturesCol("features")
+    LinearRegressionModel...
+    >>> model.setPredictionCol("newPrediction")
+    LinearRegressionModel...
+    >>> model.getMaxIter()
+    5
+    >>> model.getMaxBlockSizeInMB()
+    0.0
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> abs(model.predict(test0.head().features) - (-1.0)) < 0.001
+    True
+    >>> abs(model.transform(test0).head().newPrediction - (-1.0)) < 0.001
+    True
+    >>> bool(abs(model.coefficients[0] - 1.0) < 0.001)
+    True
+    >>> abs(model.intercept - 0.0) < 0.001
+    True
+    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
+    >>> abs(model.transform(test1).head().newPrediction - 1.0) < 0.001
+    True
+    >>> lr.setParams(featuresCol="vector")
+    LinearRegression...
+    >>> lr_path = temp_path + "/lr"
+    >>> lr.save(lr_path)
+    >>> lr2 = LinearRegression.load(lr_path)
+    >>> lr2.getMaxIter()
+    5
+    >>> model_path = temp_path + "/lr_model"
+    >>> model.save(model_path)
+    >>> model2 = LinearRegressionModel.load(model_path)
+    >>> bool(model.coefficients[0] == model2.coefficients[0])
+    True
+    >>> bool(model.intercept == model2.intercept)
+    True
+    >>> bool(model.transform(test0).take(1) == model2.transform(test0).take(1))
+    True
+    >>> model.numFeatures
+    1
+    >>> model.write().format("pmml").save(model_path + "_2")
+    """
+class LinearRegressionModel(_pysparks.LinearRegressionModel):
+    """Model fitted by :class:`LinearRegression`.
+
+    .. versionadded:: 1.4.0
+    """
+class LinearRegressionSummary(_pysparks.LinearRegressionSummary):
+    """Linear regression results evaluated on a dataset.
+
+    .. versionadded:: 2.0.0
+    """
+class LinearRegressionTrainingSummary(LinearRegressionSummary, _pysparks.LinearRegressionTrainingSummary):
+    """Linear regression training results. Currently, the training summary ignores the
+    training weights except for the objective trace.
+
+    .. versionadded:: 2.0.0
+    """
+class RandomForestRegressionModel(_pysparks.RandomForestRegressionModel):
+    """Model fitted by :class:`RandomForestRegressor`.
+
+    .. versionadded:: 1.4.0
+    """
+class RandomForestRegressor(_pysparks.RandomForestRegressor):
+    """`Random Forest <http://en.wikipedia.org/wiki/Random_forest>`_
+    learning algorithm for regression.
+    It supports both continuous and categorical features.
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> from numpy import allclose
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> rf = RandomForestRegressor(numTrees=2, maxDepth=2)
+    >>> rf.getMinWeightFractionPerNode()
+    0.0
+    >>> rf.setSeed(42)
+    RandomForestRegressor...
+    >>> model = rf.fit(df)
+    >>> model.getBootstrap()
+    True
+    >>> model.getSeed()
+    42
+    >>> model.setLeafCol("leafId")
+    RandomForestRegressionModel...
+    >>> model.featureImportances
+    SparseVector(1, {0: 1.0})
+    >>> allclose(model.treeWeights, [1.0, 1.0])
+    True
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> model.predict(test0.head().features)
+    0.0
+    >>> model.predictLeaf(test0.head().features)
+    DenseVector([0.0, 0.0])
+    >>> result = model.transform(test0).head()
+    >>> result.prediction
+    0.0
+    >>> result.leafId
+    DenseVector([0.0, 0.0])
+    >>> model.numFeatures
+    1
+    >>> model.trees
+    [DecisionTreeRegressionModel...depth=..., DecisionTreeRegressionModel...]
+    >>> model.getNumTrees
+    2
+    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
+    >>> model.transform(test1).head().prediction
+    0.5
+    >>> rfr_path = temp_path + "/rfr"
+    >>> rf.save(rfr_path)
+    >>> rf2 = RandomForestRegressor.load(rfr_path)
+    >>> rf2.getNumTrees()
+    2
+    >>> model_path = temp_path + "/rfr_model"
+    >>> model.save(model_path)
+    >>> model2 = RandomForestRegressionModel.load(model_path)
+    >>> model.featureImportances == model2.featureImportances
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    """

@@ -28,6 +28,33 @@ from pyspark.sql.connect.client import SparkConnectClient
 from pyspark.sql.connect.window import WindowSpec
 
 class Column(ParentColumn):
+    """A column in a DataFrame.
+
+    .. versionadded:: 1.3.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+
+    Examples
+    --------
+    Column instances can be created by
+
+    >>> df = spark.createDataFrame(
+    ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+
+    Select a column out of a DataFrame
+    >>> df.name
+    Column<'name'>
+    >>> df["name"]
+    Column<'name'>
+
+    Create from an expression
+
+    >>> df.age + 1
+    Column<...>
+    >>> 1 / df.age
+    Column<...>
+    """
     def __new__(cls, *args: Any, **kwargs: Any) -> 'Column': ...
     def __getnewargs__(self) -> Tuple[Any, ...]: ...
     def __init__(self, expr: 'Expression') -> None:
@@ -59,7 +86,69 @@ class Column(ParentColumn):
     def __rpow__(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
     def __ge__(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
     def __le__(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
-    def eqNullSafe(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
+    def eqNullSafe(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn:
+        """Equality test that is safe for null values.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column`
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df1 = spark.createDataFrame([
+        ...     Row(id=1, value='foo'),
+        ...     Row(id=2, value=None)
+        ... ])
+        >>> df1.select(
+        ...     df1['value'] == 'foo',
+        ...     df1['value'].eqNullSafe('foo'),
+        ...     df1['value'].eqNullSafe(None)
+        ... ).show()
+        +-------------+---------------+----------------+
+        |(value = foo)|(value <=> foo)|(value <=> NULL)|
+        +-------------+---------------+----------------+
+        |         true|           true|           false|
+        |         NULL|          false|            true|
+        +-------------+---------------+----------------+
+        >>> df2 = spark.createDataFrame([
+        ...     Row(value = 'bar'),
+        ...     Row(value = None)
+        ... ])
+        >>> df1.join(df2, df1["value"] == df2["value"]).count()
+        0
+        >>> df1.join(df2, df1["value"].eqNullSafe(df2["value"])).count()
+        1
+        >>> df2 = spark.createDataFrame([
+        ...     Row(id=1, value=float('NaN')),
+        ...     Row(id=2, value=42.0),
+        ...     Row(id=3, value=None)
+        ... ])
+        >>> df2.select(
+        ...     df2['value'].eqNullSafe(None),
+        ...     df2['value'].eqNullSafe(float('NaN')),
+        ...     df2['value'].eqNullSafe(42.0)
+        ... ).show()
+        +----------------+---------------+----------------+
+        |(value <=> NULL)|(value <=> NaN)|(value <=> 42.0)|
+        +----------------+---------------+----------------+
+        |           false|           true|           false|
+        |           false|          false|            true|
+        |            true|          false|           false|
+        +----------------+---------------+----------------+
+
+        Notes
+        -----
+        Unlike Pandas, PySpark doesn't consider NaN values to be NULL. See the
+        `NaN Semantics <https://spark.apache.org/docs/latest/sql-ref-datatypes.html#nan-semantics>`_
+        for details.
+        """
     def __neg__(self) -> ParentColumn: ...
     def __and__(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
     def __or__(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
@@ -67,47 +156,1138 @@ class Column(ParentColumn):
     def __rand__(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
     def __ror__(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
     def __contains__(self, item: Any) -> None: ...
-    def bitwiseOR(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
-    def bitwiseAND(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
-    def bitwiseXOR(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
-    def isNull(self) -> ParentColumn: ...
-    def isNotNull(self) -> ParentColumn: ...
-    def isNaN(self) -> ParentColumn: ...
-    def __ne__(self, other: Any) -> ParentColumn: ...  # type: ignore[override]
-    def contains(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
-    def startswith(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
-    def endswith(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn: ...
-    def when(self, condition: ParentColumn, value: Any) -> ParentColumn: ...
-    def otherwise(self, value: Any) -> ParentColumn: ...
-    def like(self: ParentColumn, other: str) -> ParentColumn: ...
-    def rlike(self: ParentColumn, other: str) -> ParentColumn: ...
-    def ilike(self: ParentColumn, other: str) -> ParentColumn: ...
-    def substr(self, startPos: Union[int, ParentColumn], length: Union[int, ParentColumn]) -> ParentColumn: ...
-    def __eq__(self, other: Any) -> ParentColumn: ...  # type: ignore[override]
+    def bitwiseOR(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn:
+        """Compute bitwise OR of this expression with another expression.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column` to calculate bitwise or(|) with
+            this :class:`Column`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(a=170, b=75)])
+        >>> df.select(df.a.bitwiseOR(df.b)).collect()
+        [Row((a | b)=235)]
+        """
+    def bitwiseAND(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn:
+        """Compute bitwise AND of this expression with another expression.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column` to calculate bitwise and(&) with
+            this :class:`Column`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(a=170, b=75)])
+        >>> df.select(df.a.bitwiseAND(df.b)).collect()
+        [Row((a & b)=10)]
+        """
+    def bitwiseXOR(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn:
+        """Compute bitwise XOR of this expression with another expression.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            a value or :class:`Column` to calculate bitwise xor(^) with
+            this :class:`Column`.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(a=170, b=75)])
+        >>> df.select(df.a.bitwiseXOR(df.b)).collect()
+        [Row((a ^ b)=225)]
+        """
+    def isNull(self) -> ParentColumn:
+        """True if the current expression is null.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(name='Tom', height=80), Row(name='Alice', height=None)])
+        >>> df.filter(df.height.isNull()).collect()
+        [Row(name='Alice', height=None)]
+        """
+    def isNotNull(self) -> ParentColumn:
+        """True if the current expression is NOT null.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(name='Tom', height=80), Row(name='Alice', height=None)])
+        >>> df.filter(df.height.isNotNull()).collect()
+        [Row(name='Tom', height=80)]
+        """
+    def isNaN(self) -> ParentColumn:
+        """True if the current expression is NaN.
+
+        .. versionadded:: 4.0.0
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [Row(name='Tom', height=80.0), Row(name='Alice', height=float('nan'))])
+        >>> df.filter(df.height.isNaN()).collect()
+        [Row(name='Alice', height=nan)]
+        """
+    def __ne__(self, other: Any) -> ParentColumn:  # type: ignore[override]
+        """binary function"""
+    def contains(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn:
+        """Contains the other element. Returns a boolean :class:`Column` based on a string match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other
+            string in line. A value as a literal or a :class:`Column`.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.contains('o')).collect()
+        [Row(age=5, name='Bob')]
+        """
+    def startswith(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn:
+        """String starts with. Returns a boolean :class:`Column` based on a string match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`Column` or str
+            string at start of line (do not use a regex `^`)
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.startswith('Al')).collect()
+        [Row(age=2, name='Alice')]
+        >>> df.filter(df.name.startswith('^Al')).collect()
+        []
+        """
+    def endswith(self, other: Union[ParentColumn, 'LiteralType', 'DecimalLiteral', 'DateTimeLiteral']) -> ParentColumn:
+        """String ends with. Returns a boolean :class:`Column` based on a string match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : :class:`Column` or str
+            string at end of line (do not use a regex `$`)
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.endswith('ice')).collect()
+        [Row(age=2, name='Alice')]
+        >>> df.filter(df.name.endswith('ice$')).collect()
+        []
+        """
+    def when(self, condition: ParentColumn, value: Any) -> ParentColumn:
+        """Evaluates a list of conditions and returns one of multiple possible result expressions.
+        If :func:`Column.otherwise` is not invoked, None is returned for unmatched conditions.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        condition : :class:`Column`
+            a boolean :class:`Column` expression.
+        value
+            a literal value, or a :class:`Column` expression.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is in conditions.
+
+        Examples
+        --------
+        Example 1: Using :func:`when` with conditions and values to create a new Column
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> result = df.select(df.name, sf.when(df.age > 4, 1).when(df.age < 3, -1).otherwise(0))
+        >>> result.show()
+        +-----+------------------------------------------------------------+
+        | name|CASE WHEN (age > 4) THEN 1 WHEN (age < 3) THEN -1 ELSE 0 END|
+        +-----+------------------------------------------------------------+
+        |Alice|                                                          -1|
+        |  Bob|                                                           1|
+        +-----+------------------------------------------------------------+
+
+        Example 2: Chaining multiple :func:`when` conditions
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(1, "Alice"), (4, "Bob"), (6, "Charlie")], ["age", "name"])
+        >>> result = df.select(
+        ...     df.name,
+        ...     sf.when(df.age < 3, "Young").when(df.age < 5, "Middle-aged").otherwise("Old")
+        ... )
+        >>> result.show()
+        +-------+---------------------------------------------------------------------------+
+        |   name|CASE WHEN (age < 3) THEN Young WHEN (age < 5) THEN Middle-aged ELSE Old END|
+        +-------+---------------------------------------------------------------------------+
+        |  Alice|                                                                      Young|
+        |    Bob|                                                                Middle-aged|
+        |Charlie|                                                                        Old|
+        +-------+---------------------------------------------------------------------------+
+
+        Example 3: Using literal values as conditions
+
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> result = df.select(
+        ...     df.name, sf.when(sf.lit(True), 1).otherwise(
+        ...         sf.raise_error("unreachable")).alias("when"))
+        >>> result.show()
+        +-----+----+
+        | name|when|
+        +-----+----+
+        |Alice|   1|
+        |  Bob|   1|
+        +-----+----+
+
+        See Also
+        --------
+        pyspark.sql.functions.when
+        """
+    def otherwise(self, value: Any) -> ParentColumn:
+        """Evaluates a list of conditions and returns one of multiple possible result expressions.
+        If :func:`Column.otherwise` is not invoked, None is returned for unmatched conditions.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        value
+            a literal value, or a :class:`Column` expression.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is unmatched conditions.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.name, sf.when(df.age > 3, 1).otherwise(0)).show()
+        +-----+-------------------------------------+
+        | name|CASE WHEN (age > 3) THEN 1 ELSE 0 END|
+        +-----+-------------------------------------+
+        |Alice|                                    0|
+        |  Bob|                                    1|
+        +-----+-------------------------------------+
+
+        See Also
+        --------
+        pyspark.sql.functions.when
+        """
+    def like(self: ParentColumn, other: str) -> ParentColumn:
+        """SQL like expression. Returns a boolean :class:`Column` based on a SQL LIKE match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : str
+            a SQL LIKE pattern
+
+        See Also
+        --------
+        pyspark.sql.Column.rlike
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element
+            in the Column is matched by SQL LIKE pattern.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.like('Al%')).collect()
+        [Row(age=2, name='Alice')]
+        """
+    def rlike(self: ParentColumn, other: str) -> ParentColumn:
+        """SQL RLIKE expression (LIKE with Regex). Returns a boolean :class:`Column` based on a regex
+        match.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : str
+            an extended regex expression
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element
+            in the Column is matched by extended regex expression.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.rlike('ice$')).collect()
+        [Row(age=2, name='Alice')]
+        """
+    def ilike(self: ParentColumn, other: str) -> ParentColumn:
+        """SQL ILIKE expression (case insensitive LIKE). Returns a boolean :class:`Column`
+        based on a case insensitive match.
+
+        .. versionadded:: 3.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        other : str
+            a SQL LIKE pattern
+
+        See Also
+        --------
+        pyspark.sql.Column.rlike
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element
+            in the Column is matched by SQL LIKE pattern.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.filter(df.name.ilike('%Ice')).collect()
+        [Row(age=2, name='Alice')]
+        """
+    def substr(self, startPos: Union[int, ParentColumn], length: Union[int, ParentColumn]) -> ParentColumn:
+        """Return a :class:`Column` which is a substring of the column.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        startPos : :class:`Column` or int
+            start position
+        length : :class:`Column` or int
+            length of the substring
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is substr of origin Column.
+
+        Examples
+        --------
+
+        Example 1. Using integers for the input arguments.
+
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.name.substr(1, 3).alias("col")).collect()
+        [Row(col='Ali'), Row(col='Bob')]
+
+        Example 2. Using columns for the input arguments.
+
+        >>> df = spark.createDataFrame(
+        ...      [(3, 4, "Alice"), (2, 3, "Bob")], ["sidx", "eidx", "name"])
+        >>> df.select(df.name.substr(df.sidx, df.eidx).alias("col")).collect()
+        [Row(col='ice'), Row(col='ob')]
+        """
+    def __eq__(self, other: Any) -> ParentColumn:  # type: ignore[override]
+        """binary function"""
     def to_plan(self, session: 'SparkConnectClient') -> proto.Expression: ...
-    def alias(self, *alias: str, **kwargs: Any) -> ParentColumn: ...
+    def alias(self, *alias: str, **kwargs: Any) -> ParentColumn:
+        """Returns this column aliased with a new name or names (in the case of expressions that
+        return more than one column, such as explode).
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        alias : str
+            desired column names (collects all positional arguments passed)
+
+        Other Parameters
+        ----------------
+        metadata: dict
+            a dict of information to be stored in ``metadata`` attribute of the
+            corresponding :class:`StructField <pyspark.sql.types.StructField>` (optional, keyword
+            only argument)
+
+            .. versionchanged:: 2.2.0
+               Added optional ``metadata`` argument.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is aliased with new name or names.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.age.alias("age2")).collect()
+        [Row(age2=2), Row(age2=5)]
+        >>> df.select(df.age.alias("age3", metadata={'max': 99})).schema['age3'].metadata['max']
+        99
+        """
     name = alias
-    def asc(self) -> ParentColumn: ...
-    def asc_nulls_first(self) -> ParentColumn: ...
-    def asc_nulls_last(self) -> ParentColumn: ...
-    def desc(self) -> ParentColumn: ...
-    def desc_nulls_first(self) -> ParentColumn: ...
-    def desc_nulls_last(self) -> ParentColumn: ...
-    def cast(self, dataType: Union[DataType, str]) -> ParentColumn: ...
+    def asc(self) -> ParentColumn:
+        """Returns a sort expression based on the ascending order of the column.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([('Tom', 80), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.asc()).collect()
+        [Row(name='Alice'), Row(name='Tom')]
+        """
+    def asc_nulls_first(self) -> ParentColumn:
+        """Returns a sort expression based on ascending order of the column, and null values
+        return before non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.asc_nulls_first()).collect()
+        [Row(name=None), Row(name='Alice'), Row(name='Tom')]
+        """
+    def asc_nulls_last(self) -> ParentColumn:
+        """Returns a sort expression based on ascending order of the column, and null values
+        appear after non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.asc_nulls_last()).collect()
+        [Row(name='Alice'), Row(name='Tom'), Row(name=None)]
+        """
+    def desc(self) -> ParentColumn:
+        """Returns a sort expression based on the descending order of the column.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([('Tom', 80), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.desc()).collect()
+        [Row(name='Tom'), Row(name='Alice')]
+        """
+    def desc_nulls_first(self) -> ParentColumn:
+        """Returns a sort expression based on the descending order of the column, and null values
+        appear before non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.desc_nulls_first()).collect()
+        [Row(name=None), Row(name='Tom'), Row(name='Alice')]
+        """
+    def desc_nulls_last(self) -> ParentColumn:
+        """Returns a sort expression based on the descending order of the column, and null values
+        appear after non-null values.
+
+        .. versionadded:: 2.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame(
+        ...     [('Tom', 80), (None, 60), ('Alice', None)], ["name", "height"])
+        >>> df.select(df.name).orderBy(df.name.desc_nulls_last()).collect()
+        [Row(name='Tom'), Row(name='Alice'), Row(name=None)]
+        """
+    def cast(self, dataType: Union[DataType, str]) -> ParentColumn:
+        """Casts the column into type ``dataType``.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        dataType : :class:`DataType` or str
+            a DataType or Python string literal with a DDL-formatted string
+            to use when parsing the column to the same type.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is cast into new type.
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import StringType
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.age.cast("string").alias('ages')).collect()
+        [Row(ages='2'), Row(ages='5')]
+        >>> df.select(df.age.cast(StringType()).alias('ages')).collect()
+        [Row(ages='2'), Row(ages='5')]
+        """
     astype = cast
-    def try_cast(self, dataType: Union[DataType, str]) -> ParentColumn: ...
+    def try_cast(self, dataType: Union[DataType, str]) -> ParentColumn:
+        """This is a special version of `cast` that performs the same operation, but returns a NULL
+        value instead of raising an error if the invoke method throws exception.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        dataType : :class:`DataType` or str
+            a DataType or Python string literal with a DDL-formatted string
+            to use when parsing the column to the same type.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column is cast into new type.
+
+        Examples
+        --------
+        Example 1: Cast with a Datatype
+
+        >>> from pyspark.sql.types import LongType
+        >>> df = spark.createDataFrame(
+        ...      [(2, "123"), (5, "Bob"), (3, None)], ["age", "name"])
+        >>> df.select(df.name.try_cast(LongType())).show()
+        +----+
+        |name|
+        +----+
+        | 123|
+        |NULL|
+        |NULL|
+        +----+
+
+        Example 2: Cast with a DDL string
+
+        >>> df = spark.createDataFrame(
+        ...      [(2, "123"), (5, "Bob"), (3, None)], ["age", "name"])
+        >>> df.select(df.name.try_cast("double")).show()
+        +-----+
+        | name|
+        +-----+
+        |123.0|
+        | NULL|
+        | NULL|
+        +-----+
+        """
     def __repr__(self) -> str: ...
-    def over(self, window: 'WindowSpec') -> ParentColumn: ...  # type: ignore[override]
-    def transform(self, f: Callable[[ParentColumn], ParentColumn]) -> ParentColumn: ...
-    def outer(self) -> ParentColumn: ...
-    def isin(self, *cols: Any) -> ParentColumn: ...
-    def between(self, lowerBound: Union[ParentColumn, 'LiteralType', 'DateTimeLiteral', 'DecimalLiteral'], upperBound: Union[ParentColumn, 'LiteralType', 'DateTimeLiteral', 'DecimalLiteral']) -> ParentColumn: ...
-    def getItem(self, key: Any) -> ParentColumn: ...
-    def getField(self, name: Any) -> ParentColumn: ...
-    def withField(self, fieldName: str, col: ParentColumn) -> ParentColumn: ...
-    def dropFields(self, *fieldNames: str) -> ParentColumn: ...
-    def __getattr__(self, item: Any) -> ParentColumn: ...
-    def __getitem__(self, k: Any) -> ParentColumn: ...
+    def over(self, window: 'WindowSpec') -> ParentColumn:  # type: ignore[override]
+        """Define a windowing column.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        window : :class:`WindowSpec`
+
+        Returns
+        -------
+        :class:`Column`
+
+        Examples
+        --------
+        >>> from pyspark.sql import Window
+        >>> window = (
+        ...     Window.partitionBy("name")
+        ...     .orderBy("age")
+        ...     .rowsBetween(Window.unboundedPreceding, Window.currentRow)
+        ... )
+        >>> from pyspark.sql.functions import rank, min, desc
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.withColumn(
+        ...      "rank", rank().over(window)
+        ... ).withColumn(
+        ...      "min", min('age').over(window)
+        ... ).sort(desc("age")).show()
+        +---+-----+----+---+
+        |age| name|rank|min|
+        +---+-----+----+---+
+        |  5|  Bob|   1|  5|
+        |  2|Alice|   1|  2|
+        +---+-----+----+---+
+        """
+    def transform(self, f: Callable[[ParentColumn], ParentColumn]) -> ParentColumn:
+        """Applies a transformation function to this column.
+
+        This method allows you to apply a function that takes a Column and returns a Column,
+        enabling method chaining and functional transformations.
+
+        .. versionadded:: 4.1.0
+
+        Parameters
+        ----------
+        f : callable
+            A function that takes a :class:`Column` and returns a :class:`Column`.
+
+        Returns
+        -------
+        :class:`Column`
+            The result of applying the function to this column.
+
+        Examples
+        --------
+        Example 1: Chain built-in functions
+
+        >>> from pyspark.sql.functions import trim, upper
+        >>> df = spark.createDataFrame([("  hello  ",), ("  world  ",)], ["text"])
+        >>> df.select(df.text.transform(trim).transform(upper).alias("result")).show()
+        +------+
+        |result|
+        +------+
+        | HELLO|
+        | WORLD|
+        +------+
+
+        Example 2: Use lambda functions
+
+        >>> df = spark.createDataFrame([(10,), (20,), (30,)], ["value"])
+        >>> df.select(
+        ...     df.value.transform(lambda c: c + 5)
+        ...     .transform(lambda c: c * 2)
+        ...     .transform(lambda c: c - 10).alias("result")
+        ... ).show()
+        +------+
+        |result|
+        +------+
+        |    20|
+        |    40|
+        |    60|
+        +------+
+        """
+    def outer(self) -> ParentColumn:
+        """Mark this column as an outer column if its expression refers to columns from an outer query.
+
+        This is used to trigger lazy analysis of Spark Classic DataFrame, so that we can use it
+        to build subquery expressions. Spark Connect DataFrame is always lazily analyzed and
+        does not need to use this function.
+
+        .. versionadded:: 4.0.0
+
+        See Also
+        --------
+        pyspark.sql.DataFrame.scalar
+        pyspark.sql.DataFrame.exists
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> employees = spark.createDataFrame(
+        ...     [
+        ...         (1, "Alice", 45000, 101), (2, "Bob", 54000, 101), (3, "Charlie", 29000, 102),
+        ...         (4, "David", 61000, 102), (5, "Eve", 48000, 101),
+        ...     ],
+        ...     ["id", "name", "salary", "department_id"],
+        ... )
+        >>> employees.alias("e1").where(
+        ...     sf.col("salary") > employees.alias("e2").where(
+        ...         sf.col("e2.department_id") == sf.col("e1.department_id").outer()
+        ...     ).select(sf.avg("salary")).scalar()
+        ... ).select("name", "salary", "department_id").orderBy("name").show()
+        +-----+------+-------------+
+        | name|salary|department_id|
+        +-----+------+-------------+
+        |  Bob| 54000|          101|
+        |David| 61000|          102|
+        +-----+------+-------------+
+        """
+    def isin(self, *cols: Any) -> ParentColumn:
+        """A boolean expression that is evaluated to true if the value of this
+        expression is contained by the evaluated values of the arguments.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        .. versionchanged:: 4.1.0
+            Also takes a single :class:`DataFrame` to be used as IN subquery.
+
+        Parameters
+        ----------
+        cols : Any
+            The values to compare with the column values. The result will only be true at a location
+            if any value matches in the Column.
+
+        Returns
+        -------
+        :class:`Column`
+            Column of booleans showing whether each element in the Column is contained in cols.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob"), (8, "Mike")], ["age", "name"])
+
+        Example 1: Filter rows with names in the specified values
+
+        >>> df[df.name.isin("Bob", "Mike")].orderBy("age").show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  5| Bob|
+        |  8|Mike|
+        +---+----+
+
+        Example 2: Filter rows with ages in the specified list
+
+        >>> df[df.age.isin([1, 2, 3])].show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        +---+-----+
+
+        Example 3: Filter rows with names not in the specified values
+
+        >>> df[~df.name.isin("Alice", "Bob")].show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  8|Mike|
+        +---+----+
+
+        Example 4: Take a :class:`DataFrame` and work as IN subquery
+
+        >>> df.where(df.age.isin(spark.range(6))).orderBy("age").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  5|  Bob|
+        +---+-----+
+
+        Example 5: Multiple values for IN subquery
+
+        >>> from pyspark.sql.functions import lit, struct
+        >>> df.where(struct(df.age, df.name).isin(spark.range(6).select("id", lit("Bob")))).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |  5| Bob|
+        +---+----+
+        """
+    def between(self, lowerBound: Union[ParentColumn, 'LiteralType', 'DateTimeLiteral', 'DecimalLiteral'], upperBound: Union[ParentColumn, 'LiteralType', 'DateTimeLiteral', 'DecimalLiteral']) -> ParentColumn:
+        """Check if the current column's values are between the specified lower and upper
+        bounds, inclusive.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        lowerBound : :class:`Column`, int, float, string, bool, datetime, date or Decimal
+            The lower boundary value, inclusive.
+        upperBound : :class:`Column`, int, float, string, bool, datetime, date or Decimal
+            The upper boundary value, inclusive.
+
+        Returns
+        -------
+        :class:`Column`
+            A new column of boolean values indicating whether each element in the original
+            column is within the specified range (inclusive).
+
+        Examples
+        --------
+        Using between with integer values.
+
+        >>> df = spark.createDataFrame([(2, "Alice"), (5, "Bob")], ["age", "name"])
+        >>> df.select(df.name, df.age.between(2, 4)).show()
+        +-----+---------------------------+
+        | name|((age >= 2) AND (age <= 4))|
+        +-----+---------------------------+
+        |Alice|                       true|
+        |  Bob|                      false|
+        +-----+---------------------------+
+
+        Using between with string values.
+
+        >>> df = spark.createDataFrame([("Alice", "A"), ("Bob", "B")], ["name", "initial"])
+        >>> df.select(df.name, df.initial.between("A", "B")).show()
+        +-----+-----------------------------------+
+        | name|((initial >= A) AND (initial <= B))|
+        +-----+-----------------------------------+
+        |Alice|                               true|
+        |  Bob|                               true|
+        +-----+-----------------------------------+
+
+        Using between with float values.
+
+        >>> df = spark.createDataFrame(
+        ...     [(2.5, "Alice"), (5.5, "Bob")], ["height", "name"])
+        >>> df.select(df.name, df.height.between(2.0, 5.0)).show()
+        +-----+-------------------------------------+
+        | name|((height >= 2.0) AND (height <= 5.0))|
+        +-----+-------------------------------------+
+        |Alice|                                 true|
+        |  Bob|                                false|
+        +-----+-------------------------------------+
+
+        Using between with date values.
+
+        >>> import pyspark.sql.functions as sf
+        >>> df = spark.createDataFrame(
+        ...     [("Alice", "2023-01-01"), ("Bob", "2023-02-01")], ["name", "date"])
+        >>> df = df.withColumn("date", sf.to_date(df.date))
+        >>> df.select(df.name, df.date.between("2023-01-01", "2023-01-15")).show()
+        +-----+-----------------------------------------------+
+        | name|((date >= 2023-01-01) AND (date <= 2023-01-15))|
+        +-----+-----------------------------------------------+
+        |Alice|                                           true|
+        |  Bob|                                          false|
+        +-----+-----------------------------------------------+
+        >>> from datetime import date
+        >>> df.select(df.name, df.date.between(date(2023, 1, 1), date(2023, 1, 15))).show()
+        +-----+-------------------------------------------------------------+
+        | name|((date >= DATE '2023-01-01') AND (date <= DATE '2023-01-15'))|
+        +-----+-------------------------------------------------------------+
+        |Alice|                                                         true|
+        |  Bob|                                                        false|
+        +-----+-------------------------------------------------------------+
+
+        Using between with timestamp values.
+
+        >>> import pyspark.sql.functions as sf
+        >>> df = spark.createDataFrame(
+        ...     [("Alice", "2023-01-01 10:00:00"), ("Bob", "2023-02-01 10:00:00")],
+        ...     schema=["name", "timestamp"])
+        >>> df = df.withColumn("timestamp", sf.to_timestamp(df.timestamp))
+        >>> df.select(df.name, df.timestamp.between("2023-01-01", "2023-02-01")).show()
+        +-----+---------------------------------------------------------+
+        | name|((timestamp >= 2023-01-01) AND (timestamp <= 2023-02-01))|
+        +-----+---------------------------------------------------------+
+        |Alice|                                                     true|
+        |  Bob|                                                    false|
+        +-----+---------------------------------------------------------+
+        >>> df.select(df.name, df.timestamp.between("2023-01-01", "2023-02-01 12:00:00")).show()
+        +-----+------------------------------------------------------------------+
+        | name|((timestamp >= 2023-01-01) AND (timestamp <= 2023-02-01 12:00:00))|
+        +-----+------------------------------------------------------------------+
+        |Alice|                                                              true|
+        |  Bob|                                                              true|
+        +-----+------------------------------------------------------------------+
+        """
+    def getItem(self, key: Any) -> ParentColumn:
+        """An expression that gets an item at position ``ordinal`` out of a list,
+        or gets an item by key out of a dict.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        key
+            a literal value, or a :class:`Column` expression.
+            The result will only be true at a location if the item matches in the column.
+
+             .. deprecated:: 3.0.0
+                 :class:`Column` as a parameter is deprecated.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing the item(s) got at position out of a list or by key out of a dict.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([([1, 2], {"key": "value"})], ["l", "d"])
+        >>> df.select(df.l.getItem(0), df.d.getItem("key")).show()
+        +----+------+
+        |l[0]|d[key]|
+        +----+------+
+        |   1| value|
+        +----+------+
+        """
+    def getField(self, name: Any) -> ParentColumn:
+        """An expression that gets a field by name in a :class:`StructType`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        name
+            a literal value, or a :class:`Column` expression.
+            The result will only be true at a location if the field matches in the Column.
+
+             .. deprecated:: 3.0.0
+                 :class:`Column` as a parameter is deprecated.
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column got by name.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> df = spark.createDataFrame([Row(r=Row(a=1, b="b"))])
+        >>> df.select(df.r.getField("b")).show()
+        +---+
+        |r.b|
+        +---+
+        |  b|
+        +---+
+        >>> df.select(df.r.a).show()
+        +---+
+        |r.a|
+        +---+
+        |  1|
+        +---+
+        """
+    def withField(self, fieldName: str, col: ParentColumn) -> ParentColumn:
+        """An expression that adds/replaces a field in :class:`StructType` by name.
+
+        .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        fieldName : str
+            a literal value.
+            The result will only be true at a location if any field matches in the Column.
+        col : :class:`Column`
+            A :class:`Column` expression for the column with `fieldName`.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column
+            which field was added/replaced by fieldName.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> from pyspark.sql.functions import lit
+        >>> df = spark.createDataFrame([Row(a=Row(b=1, c=2))])
+        >>> df.withColumn('a', df['a'].withField('b', lit(3))).select('a.b').show()
+        +---+
+        |  b|
+        +---+
+        |  3|
+        +---+
+        >>> df.withColumn('a', df['a'].withField('d', lit(4))).select('a.d').show()
+        +---+
+        |  d|
+        +---+
+        |  4|
+        +---+
+        """
+    def dropFields(self, *fieldNames: str) -> ParentColumn:
+        """An expression that drops fields in :class:`StructType` by name.
+        This is a no-op if the schema doesn't contain field name(s).
+
+        .. versionadded:: 3.1.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        fieldNames : str
+            Desired field names (collects all positional arguments passed)
+            The result will drop at a location if any field matches in the Column.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing whether each element of Column with field dropped by fieldName.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> from pyspark.sql.functions import col, lit
+        >>> df = spark.createDataFrame([
+        ...     Row(a=Row(b=1, c=2, d=3, e=Row(f=4, g=5, h=6)))])
+        >>> df.withColumn('a', df['a'].dropFields('b')).show()
+        +-----------------+
+        |                a|
+        +-----------------+
+        |{2, 3, {4, 5, 6}}|
+        +-----------------+
+
+        >>> df.withColumn('a', df['a'].dropFields('b', 'c')).show()
+        +--------------+
+        |             a|
+        +--------------+
+        |{3, {4, 5, 6}}|
+        +--------------+
+
+        This method supports dropping multiple nested fields directly e.g.
+
+        >>> df.withColumn("a", col("a").dropFields("e.g", "e.h")).show()
+        +--------------+
+        |             a|
+        +--------------+
+        |{1, 2, 3, {4}}|
+        +--------------+
+
+        However, if you are going to add/replace multiple nested fields,
+        it is preferred to extract out the nested struct before
+        adding/replacing multiple fields e.g.
+
+        >>> df.select(col("a").withField(
+        ...     "e", col("a.e").dropFields("g", "h")).alias("a")
+        ... ).show()
+        +--------------+
+        |             a|
+        +--------------+
+        |{1, 2, 3, {4}}|
+        +--------------+
+        """
+    def __getattr__(self, item: Any) -> ParentColumn:
+        """An expression that gets an item at position ``ordinal`` out of a list,
+        or gets an item by key out of a dict.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        item
+            a literal value.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing the item got by key out of a dict.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([('abcedfg', {"key": "value"})], ["l", "d"])
+        >>> df.select(df.d.key).show()
+        +------+
+        |d[key]|
+        +------+
+        | value|
+        +------+
+        """
+    def __getitem__(self, k: Any) -> ParentColumn:
+        """An expression that gets an item at position ``ordinal`` out of a list,
+        or gets an item by key out of a dict.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        k
+            a literal value, or a slice object without step.
+
+        Returns
+        -------
+        :class:`Column`
+            Column representing the item got by key out of a dict, or substrings sliced by
+            the given slice object.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([('abcedfg', {"key": "value"})], ["l", "d"])
+        >>> df.select(df.l[slice(1, 3)], df.d['key']).show()
+        +---------------+------+
+        |substr(l, 1, 3)|d[key]|
+        +---------------+------+
+        |            abc| value|
+        +---------------+------+
+        """
     def __iter__(self) -> None: ...
     def __nonzero__(self) -> None: ...
     __bool__ = __nonzero__

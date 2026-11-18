@@ -31,7 +31,108 @@ from pyspark.ml.tuning import TrainValidationSplitModelWriter as TrainValidation
 
 __all__ = ['ParamGridBuilder', 'CrossValidator', 'CrossValidatorModel', 'TrainValidationSplit', 'TrainValidationSplitModel']
 
-class CrossValidator(_pysparks.CrossValidator): ...
-class CrossValidatorModel(_pysparks.CrossValidatorModel): ...
-class TrainValidationSplit(_pysparks.TrainValidationSplit): ...
-class TrainValidationSplitModel(_pysparks.TrainValidationSplitModel): ...
+class CrossValidator(_pysparks.CrossValidator):
+    """K-fold cross validation performs model selection by splitting the dataset into a set of
+    non-overlapping randomly partitioned folds which are used as separate training and test datasets
+    e.g., with k=3 folds, K-fold cross validation will generate 3 (training, test) dataset pairs,
+    each of which uses 2/3 of the data for training and 1/3 for testing. Each fold is used as the
+    test set exactly once.
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.classification import LogisticRegression
+    >>> from pyspark.ml.evaluation import BinaryClassificationEvaluator
+    >>> from pyspark.ml.linalg import Vectors
+    >>> from pyspark.ml.tuning import CrossValidator, ParamGridBuilder, CrossValidatorModel
+    >>> import tempfile
+    >>> dataset = spark.createDataFrame(
+    ...     [(Vectors.dense([0.0]), 0.0),
+    ...      (Vectors.dense([0.4]), 1.0),
+    ...      (Vectors.dense([0.5]), 0.0),
+    ...      (Vectors.dense([0.6]), 1.0),
+    ...      (Vectors.dense([1.0]), 1.0)] * 10,
+    ...     ["features", "label"])
+    >>> lr = LogisticRegression()
+    >>> grid = ParamGridBuilder().addGrid(lr.maxIter, [0, 1]).build()
+    >>> evaluator = BinaryClassificationEvaluator()
+    >>> cv = CrossValidator(estimator=lr, estimatorParamMaps=grid, evaluator=evaluator,
+    ...     parallelism=2)
+    >>> cvModel = cv.fit(dataset)
+    >>> cvModel.getNumFolds()
+    3
+    >>> float(cvModel.avgMetrics[0])
+    0.5
+    >>> path = tempfile.mkdtemp()
+    >>> model_path = path + "/model"
+    >>> cvModel.write().save(model_path)
+    >>> cvModelRead = CrossValidatorModel.read().load(model_path)
+    >>> cvModelRead.avgMetrics
+    [0.5, ...
+    >>> evaluator.evaluate(cvModel.transform(dataset))
+    0.8333...
+    >>> evaluator.evaluate(cvModelRead.transform(dataset))
+    0.8333...
+    """
+class CrossValidatorModel(_pysparks.CrossValidatorModel):
+    """CrossValidatorModel contains the model with the highest average cross-validation
+    metric across folds and uses this model to transform input data. CrossValidatorModel
+    also tracks the metrics for each param map evaluated.
+
+    .. versionadded:: 1.4.0
+
+    Notes
+    -----
+    Since version 3.3.0, CrossValidatorModel contains a new attribute "stdMetrics",
+    which represent standard deviation of metrics for each paramMap in
+    CrossValidator.estimatorParamMaps.
+    """
+class TrainValidationSplit(_pysparks.TrainValidationSplit):
+    """Validation for hyper-parameter tuning. Randomly splits the input dataset into train and
+    validation sets, and uses evaluation metric on the validation set to select the best model.
+    Similar to :class:`CrossValidator`, but only splits the set once.
+
+    .. versionadded:: 2.0.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.classification import LogisticRegression
+    >>> from pyspark.ml.evaluation import BinaryClassificationEvaluator
+    >>> from pyspark.ml.linalg import Vectors
+    >>> from pyspark.ml.tuning import TrainValidationSplit, ParamGridBuilder
+    >>> from pyspark.ml.tuning import TrainValidationSplitModel
+    >>> import tempfile
+    >>> dataset = spark.createDataFrame(
+    ...     [(Vectors.dense([0.0]), 0.0),
+    ...      (Vectors.dense([0.4]), 1.0),
+    ...      (Vectors.dense([0.5]), 0.0),
+    ...      (Vectors.dense([0.6]), 1.0),
+    ...      (Vectors.dense([1.0]), 1.0)] * 10,
+    ...     ["features", "label"]).repartition(1)
+    >>> lr = LogisticRegression()
+    >>> grid = ParamGridBuilder().addGrid(lr.maxIter, [0, 1]).build()
+    >>> evaluator = BinaryClassificationEvaluator()
+    >>> tvs = TrainValidationSplit(estimator=lr, estimatorParamMaps=grid, evaluator=evaluator,
+    ...     parallelism=1, seed=42)
+    >>> tvsModel = tvs.fit(dataset)
+    >>> tvsModel.getTrainRatio()
+    0.75
+    >>> tvsModel.validationMetrics
+    [0.5, ...
+    >>> path = tempfile.mkdtemp()
+    >>> model_path = path + "/model"
+    >>> tvsModel.write().save(model_path)
+    >>> tvsModelRead = TrainValidationSplitModel.read().load(model_path)
+    >>> tvsModelRead.validationMetrics
+    [0.5, ...
+    >>> evaluator.evaluate(tvsModel.transform(dataset))
+    0.833...
+    >>> evaluator.evaluate(tvsModelRead.transform(dataset))
+    0.833...
+    """
+class TrainValidationSplitModel(_pysparks.TrainValidationSplitModel):
+    """Model from train validation split.
+
+    .. versionadded:: 2.0.0
+    """

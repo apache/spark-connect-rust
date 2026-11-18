@@ -253,7 +253,14 @@ probes of the stubbed modules, and fails:
   name if it is PySpark's API, list it in `DROPPED` of the generator if it is PySpark's plumbing
   that no annotation needs, or in `TYPE_ONLY` of the test, with the reason, if PySpark's
   annotations need it;
-- on a name of `DROPPED` that the drop-in has at run time, which the stub would miss.
+- on a name of `DROPPED` that the drop-in has at run time, which the stub would miss;
+- on a docstring of a stub that is not that of PySpark's object at run time, of
+  `tests/golden/stub_docstrings.json`, which `scripts/capture_stub_docstrings_golden.py` takes
+  with `pyspark-client` 4.3.0: recapture it when the declarations of the stubs change.
+
+The stubs keep the docstring of each of PySpark's objects as it has it at run time, of its
+decorators too: one that the generator does not know is an error, which `DOC_KEEPING_DECORATORS`
+takes when the decorator keeps the docstring.
 
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).
