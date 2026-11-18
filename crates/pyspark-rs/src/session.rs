@@ -1368,6 +1368,8 @@ impl PySparkSession {
     /// A DataFrame of local rows, as PySpark Connect creates one: the schema is given, or
     /// inferred by merging the types of every row, and each value is converted to the type
     /// of its field. A list of names names the inferred fields and is applied with `toDF`.
+    /// `schema` is the `StructType` of a schema that was given, whose user-defined type objects
+    /// serialize the values of their types, as PySpark's converters of its fields do.
     fn create_from_local(
         &self,
         py: Python<'_>,
@@ -1375,6 +1377,7 @@ impl PySparkSession {
         spec: Spec,
         checks: LocalChecks<'_>,
         options: Option<spark_connect::ArrowInputOptions>,
+        schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
         use crate::infer;
 
@@ -1507,6 +1510,21 @@ impl PySparkSession {
                 &[("data_type", &field.repr()?.to_cow()?)],
             ));
         }
+        // Then, as PySpark makes the converters of the fields of the schema: those of a
+        // user-defined type hold the type object of the schema, which serializes each value.
+        let objects = match schema {
+            Some(schema)
+                if fields
+                    .iter()
+                    .any(|field| crate::types::has_udt(&field.data_type)) =>
+            {
+                let struct_type = DataType::Struct {
+                    fields: fields.clone(),
+                };
+                Some(infer::UdtObjects::of(schema, &struct_type)?)
+            }
+            _ => None,
+        };
         // The values of each row, whose vector its first value allocates, within the steps of the
         // conversion.
         let row_count = parts.len();
@@ -1515,10 +1533,12 @@ impl PySparkSession {
         {
             let _quanta = infer::DecimalQuanta::new();
             for (i, field) in fields.iter().enumerate() {
+                let field_objects = objects.as_ref().and_then(|objects| objects.field(i));
                 for (index, row) in parts.iter().enumerate() {
                     let value = infer::convert(
                         &row[i],
                         &field.data_type,
+                        field_objects,
                         field.nullable,
                         &mut late,
                         &budget,
@@ -1794,6 +1814,7 @@ impl PySparkSession {
                 PyList::empty(py).as_any(),
                 spec,
                 LocalChecks::default(),
+                None,
                 None,
             );
         }
@@ -3035,9 +3056,10 @@ impl PySparkSession {
                 non_bool_nullable: false,
                 nested: Some(class_type.clone()),
             };
-            return self.create_from_local(py, data, spec, checks, options);
+            return self.create_from_local(py, data, spec, checks, options, None);
         }
-        let checks = match schema.filter(|s| s.is_instance_of::<crate::types::PyStructType>()) {
+        let struct_schema = schema.filter(|s| s.is_instance_of::<crate::types::PyStructType>());
+        let checks = match struct_schema {
             Some(schema) if !data.len().is_ok_and(|n| n == 0) => LocalChecks {
                 non_bool_nullable: crate::types::has_non_bool_converter_flag(py, schema)?,
                 nested: match &spec {
@@ -3052,7 +3074,7 @@ impl PySparkSession {
             },
             _ => LocalChecks::default(),
         };
-        self.create_from_local(py, data, spec, checks, options)
+        self.create_from_local(py, data, spec, checks, options, struct_schema)
     }
 
     /// Get the catalog API (`spark.catalog`): the same object at each access, as PySpark
