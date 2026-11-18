@@ -158,6 +158,70 @@ def test_table_arg_deepcopy_keeps_user_attributes(spark):
     assert deep.foo is not table.foo
 
 
+def test_table_arg_pickles_as_pyspark(spark, _shared_mock_connect):
+    # As PySpark's table argument, a plain object of the objects of its plan, its partitioning,
+    # its ordering and its single partition, which pickles at every protocol, plainly and by
+    # cloudpickle, of no session: the unpickled table argument is of the relation of the plan, of
+    # its plan ID, as the calls that made it, and of its user-set attributes, with no request, as
+    # PySpark's unpickle sends none, and a UDTF of it sends what one of the table argument sends.
+    # Of the active session of the ID of the session of the pickled one, it raises
+    # NO_ACTIVE_SESSION where none is, as on another thread. Of a plan that does not build, it
+    # unpickles, and its requests raise the error of the plan, as PySpark's do.
+    import threading
+
+    import cloudpickle
+    from pyspark.errors import PySparkRuntimeError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.proto import Relation
+
+    _, service = _shared_mock_connect
+
+    @F.udtf(returnType="id: bigint")
+    class Echo:
+        def eval(self, row):
+            yield (row["id"],)
+
+    def references(table):
+        return list(Relation.FromString(Echo(table)._relation_bytes()).with_relations.references)
+
+    df = spark.range(3).withColumn("k", F.col("id") % 2)
+    tables = [
+        df.asTable(),
+        df.asTable().partitionBy("k"),
+        df.asTable().partitionBy(F.col("k"), "id").orderBy(F.col("id").desc(), "k"),
+        df.asTable().withSinglePartition().orderBy(F.col("id").asc_nulls_last()),
+    ]
+    tables[0].note = [1, 2]
+    requests = (len(service.analyze_requests), len(service.execute_requests))
+    for table in tables:
+        pickles = [pickle.dumps(table, protocol) for protocol in range(pickle.HIGHEST_PROTOCOL + 1)]
+        for loaded in [pickle.loads(data) for data in pickles] + [
+                cloudpickle.loads(cloudpickle.dumps(table))]:
+            assert type(loaded) is type(table)
+            assert loaded.to_plan(spark.client) == table.to_plan(spark.client)
+            assert loaded._is_partitioned() == table._is_partitioned()
+            assert vars(loaded) == vars(table)
+            assert references(loaded) == references(table)
+    assert (len(service.analyze_requests), len(service.execute_requests)) == requests
+    bad = spark.range(1).alias(5).asTable()
+    loaded = cloudpickle.loads(cloudpickle.dumps(bad))
+    for table in (bad, loaded):
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            Echo(table)._relation_bytes()
+    errors = []
+
+    def unpickle(data):
+        try:
+            cloudpickle.loads(data)
+        except PySparkRuntimeError as error:
+            errors.append(error.getCondition())
+
+    thread = threading.Thread(target=unpickle, args=(cloudpickle.dumps(tables[1]),))
+    thread.start()
+    thread.join()
+    assert errors == ["NO_ACTIVE_SESSION"]
+
+
 def test_window_objects_and_members_are_those_of_pyspark():
     # As PySpark's Window, a plain class of static methods and of the thresholds of the frames,
     # and PySpark Connect's subclass of `_spec`: its objects, also of a subclass, have no state,

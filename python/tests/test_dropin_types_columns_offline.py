@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 from _mock_connect_server import mock_connect_session
-from pyspark.errors import PySparkValueError
+from pyspark.errors import PySparkAttributeError, PySparkTypeError, PySparkValueError
 from pyspark.sql import functions as F
 from pyspark.sql import types as T
 from pyspark.sql.connect.proto import base_pb2
@@ -2019,17 +2019,25 @@ def test_a_column_of_an_alias_that_fails_copies_and_pickles_as_pysparks():
         (("TypeError", "no", None), TypeError, "no"),
         (("ValueError", "no", None), ValueError, "no"),
         (("OverflowError", "no", None), OverflowError, "no"),
+        (("AttributeError", "no", None), AttributeError, "no"),
         (("UnicodeEncodeError", "", "\ud800"), UnicodeEncodeError, "surrogates not allowed"),
         (("UnicodeDecodeError", "", b"\xff"), UnicodeDecodeError, "invalid start byte"),
         (("PySparkValueError", "CANNOT_PROVIDE_METADATA", {}), PySparkValueError, "single column"),
+        (("PySparkAttributeError", "ATTRIBUTE_NOT_SUPPORTED", {"attr_name": "_expr"}),
+         PySparkAttributeError, "Attribute `_expr` is not supported"),
+        (("PySparkTypeError", "NOT_ITERABLE", {"objectName": "Column"}), PySparkTypeError,
+         "Column is not iterable"),
     ],
 )
 def test_a_pickled_columns_errors_raise_on_a_worker_as_pysparks(error, raised, message):
-    # The errors that a Python worker of the server raises of a pickled Column, of PySpark's.
+    # The errors that a Python worker of the server raises of a pickled Column or DataFrame, of
+    # PySpark's: a builtin error, the error of UTF-8 of a value, or the error of one of PySpark's
+    # error classes, of its error class and parameters, as the plan raised it.
     from pyspark.sql.connect._column_reduce import raise_error
 
-    with pytest.raises(raised, match=message):
+    with pytest.raises(raised, match=message) as caught:
         raise_error(error)
+    assert type(caught.value) is raised
 
 
 def test_alias_takes_bytes_as_pyspark():

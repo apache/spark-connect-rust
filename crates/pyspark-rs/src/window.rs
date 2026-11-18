@@ -169,56 +169,75 @@ fn boundary_not_between(py: Python<'_>, name: &str) -> PyErr {
     )
 }
 
-/// The bound `name` of a frame argument, as the plan of PySpark's `WindowExpression` converts
-/// it, in a row frame if `rows`, else in a range frame: an int of 0 (False too) is the current
-/// row; a row frame sets any other int of an int32 in the int32 literal, which protobuf's default
-/// (upb) backend refuses of a bool, and raises `VALUE_NOT_BETWEEN` of an int beyond an int32;
-/// and a range frame sets it in the long literal, which refuses a bool and an int beyond a long,
-/// as [`crate::stat_arguments::proto_int`] does. A `FrameBound` of a row frame is checked as
-/// such an int.
+/// A frame bound as the window of the core holds it, or, of a bound that it does not hold, the
+/// error that the plan of PySpark's `WindowExpression` raises of it.
+enum ConvertedBound {
+    Held(FrameBound),
+    Unheld(PyErr),
+}
+
+/// The bound `name` of a frame argument, in a row frame if `rows`, else in a range frame, as the
+/// window of the core holds it: 0 (False too) is the current row, and another int of a long the
+/// offset of its sign, which the core converts when a request builds the plan, as the plan of
+/// PySpark's `WindowExpression` converts it then (an int beyond an int32 of a row frame fails
+/// with `VALUE_NOT_BETWEEN`). The core does not hold True, which PySpark sets in the int field of
+/// the literal, which protobuf's default (upb) backend refuses of a bool, nor an int beyond a
+/// long, of `VALUE_NOT_BETWEEN` in a row frame and of the `ValueError` of upb's long field in a
+/// range frame: these give the error.
 fn converted_frame_bound(
     py: Python<'_>,
     argument: FrameArgument<'_, '_>,
     name: &str,
     rows: bool,
-) -> PyResult<FrameBound> {
+) -> PyResult<ConvertedBound> {
     let value = match argument {
-        FrameArgument::Bound(bound) => {
-            let offset = match &bound {
-                FrameBound::Preceding(n) => Some(n.saturating_neg()),
-                FrameBound::Following(n) => Some(*n),
-                _ => None,
-            };
-            if rows && offset.is_some_and(|n| i32::try_from(n).is_err()) {
-                return Err(boundary_not_between(py, name));
-            }
-            return Ok(bound);
-        }
+        FrameArgument::Bound(bound) => return Ok(ConvertedBound::Held(bound)),
         FrameArgument::Value(value) => value,
     };
-    let long = value.extract::<i64>().ok();
-    if long == Some(0) {
-        return Ok(FrameBound::CurrentRow);
+    if value.is_instance_of::<pyo3::types::PyBool>() {
+        let field = if rows {
+            ROW_BOUNDARY_FIELD
+        } else {
+            RANGE_BOUNDARY_FIELD
+        };
+        return Ok(if value.is_truthy()? {
+            ConvertedBound::Unheld(crate::stat_arguments::bool_not_proto_int(field))
+        } else {
+            ConvertedBound::Held(FrameBound::CurrentRow)
+        });
     }
-    if !rows {
-        return crate::stat_arguments::proto_int::<i64>(value, RANGE_BOUNDARY_FIELD)
-            .map(frame_bound_of);
-    }
-    match long.and_then(|n| i32::try_from(n).ok()) {
-        Some(_) if value.is_instance_of::<pyo3::types::PyBool>() => Err(
-            crate::stat_arguments::bool_not_proto_int(ROW_BOUNDARY_FIELD),
-        ),
-        Some(n) => Ok(frame_bound_of(n.into())),
-        None => Err(boundary_not_between(py, name)),
-    }
+    Ok(match value.extract::<i64>() {
+        Ok(n) => ConvertedBound::Held(frame_bound_of(n)),
+        Err(_) if rows => ConvertedBound::Unheld(boundary_not_between(py, name)),
+        Err(_) => ConvertedBound::Unheld(crate::session::value_out_of_range(value)),
+    })
+}
+
+/// The error that a request raises of the held bound `bound` of a row frame, its start if
+/// `lower`, else its end, as the core converts it when it builds the plan
+/// (`to_proto_frame_boundary`): an offset beyond an int32 that is neither the current row nor
+/// the unbounded bound of its side is `VALUE_NOT_BETWEEN`. A range frame holds no failing bound.
+fn held_bound_error(py: Python<'_>, bound: &FrameBound, rows: bool, lower: bool) -> Option<PyErr> {
+    let offset = match bound {
+        FrameBound::UnboundedPreceding => i128::from(i64::MIN),
+        FrameBound::Preceding(n) => -i128::from(*n),
+        FrameBound::CurrentRow => 0,
+        FrameBound::Following(n) => i128::from(*n),
+        FrameBound::UnboundedFollowing => i128::from(i64::MAX),
+    };
+    let unbounded = i128::from(if lower { i64::MIN } else { i64::MAX });
+    let fails = rows && offset != 0 && offset != unbounded && i32::try_from(offset).is_err();
+    fails.then(|| boundary_not_between(py, if lower { "start" } else { "end" }))
 }
 
 /// The bounds of `rowsBetween(start, end)` if `rows`, else of `rangeBetween(start, end)`, a
 /// plain int (negative is preceding, positive following) or a `FrameBound` each, as PySpark's:
 /// it compares the start and then the end with the thresholds of their sides, and WindowFrame
 /// then asserts that the start and then the end that is not past its threshold is an int (a
-/// bool included), a bare `AssertionError` of a NumPy int, a float or a Decimal. The errors of
-/// the plan, which converts the start and then the end, are raised here, after those.
+/// bool included), a bare `AssertionError` of a NumPy int, a float or a Decimal. The plan converts
+/// the start and then the end when a request builds it, as the window of the core does of the
+/// bounds that it holds (see [`converted_frame_bound`]). Of a bound that it does not hold, the
+/// error that PySpark's build raises first, of the start and then of the end, is raised here.
 fn frame_bounds(
     py: Python<'_>,
     start: &Bound<'_, PyAny>,
@@ -234,10 +253,15 @@ fn frame_bounds(
             }
         }
     }
-    Ok((
-        converted_frame_bound(py, start, "start", rows)?,
-        converted_frame_bound(py, end, "end", rows)?,
-    ))
+    let start = converted_frame_bound(py, start, "start", rows)?;
+    let end = converted_frame_bound(py, end, "end", rows)?;
+    match (start, end) {
+        (ConvertedBound::Held(start), ConvertedBound::Held(end)) => Ok((start, end)),
+        (ConvertedBound::Unheld(error), _) => Err(error),
+        (ConvertedBound::Held(start), ConvertedBound::Unheld(error)) => {
+            Err(held_bound_error(py, &start, rows, true).unwrap_or(error))
+        }
+    }
 }
 
 #[pymethods]

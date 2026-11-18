@@ -157,14 +157,14 @@ difference is intentional or tracked for a fix.
   differs.
 
 - **What a plan build does for a pickle or a deep copy** (intentional; DESIGN). A pickled
-  DataFrame or Column, and a deep copy of a DataFrame whose plan holds no function of a UDF or
-  that is copied into another session, carry the relation that the drop-in builds for them,
-  where PySpark's keep their plan objects and build them at each request. (A deep copy of a
-  DataFrame of such functions in its session is a copy of its plan, of copies of them, which
-  its requests build, as PySpark's; see "A deep copy of a DataFrame into another session".)
-  So the requests of an unpickled DataFrame or Column, or of such a deep copy, do not warn of a
-  window of no partitions (`WARN WindowExpression: No Partition Defined ...`), which
-  PySpark's do at each build, and the `and` of the conditions of a join of a list of
+  DataFrame, Column or table argument, and a deep copy of a DataFrame that is copied into another
+  session, carry the relation that the drop-in builds for them, where PySpark's keep their plan
+  objects and build them at each request. (A deep copy of a DataFrame in its session is a copy of
+  its plan, of copies of the functions of its UDFs and of its Observations, which its requests
+  build, as PySpark's; see "A deep copy of a DataFrame into another session".)
+  So the requests of an unpickled DataFrame, Column or table argument, or of such a deep copy, do
+  not warn of a window of no partitions (`WARN WindowExpression: No Partition Defined ...`),
+  which PySpark's do at each build, and the `and` of the conditions of a join of a list of
   Columns keeps the origin of its call site at the pickle or the copy, where PySpark's has
   the call site of each request. The pickle itself does not warn, as PySpark's does not, but
   PySpark's unpickle of a DataFrame warns once, as it builds the plan to read the columns of the
@@ -288,7 +288,8 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 - **Garbage collection** (tracked). A DataFrame or a Column reports the functions of its UDFs that
   it alone holds to Python's garbage collector, and so do grouped data and their cogroups, a table
   argument, a window specification, the writers, `na`, `stat`, a merge builder and its clauses,
-  and the rows of `toLocalIterator`, of the Columns and the plans that they hold. Those that hold
+  the rows of `toLocalIterator`, and the expression of a Column and of a table argument (`_expr`,
+  `_subquery_expr`) and its copies, of the Columns and the plans that they hold. Those that hold
   their DataFrame report it, which reports the functions of the plan that they share
   (`crate::gc::Holders`). A function that a Column and a DataFrame of it share, or two DataFrames,
   or a DataFrame and a table argument of it, which holds the plan and not the DataFrame, is

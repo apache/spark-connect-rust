@@ -10570,6 +10570,63 @@ def test_copies_of_a_dataframe_request_its_schema_as_pyspark_does(mock_connect):
     assert schema_requests(lambda: copy.deepcopy(cached)) == 1
 
 
+def test_copies_keep_the_schema_that_they_request_apart_from_the_cached_one_as_pyspark(
+        mock_connect):
+    # As PySpark's reconstruction of a copy, a deep copy or an unpickle of a DataFrame, which reads
+    # the columns of the new DataFrame, so that it requests its schema and keeps it as its
+    # `_cached_schema_serialized`, before the state sets the `_cached_schema` of the DataFrame:
+    # `schema`, `printSchema`, the set operations of equal cached schemas and the numeric
+    # aggregations of grouped data give the schema that it requested, and `columns`, `dtypes`,
+    # `repr` and the DataFrames of the methods that copy the cached schema give the cached one,
+    # with no more request. They differ when the schema on the server changed since it was
+    # cached. So do the copies of a copy, of the schema that they request. A copy of a DataFrame of
+    # no cached schema requests it again, as PySpark's `_schema` does, which keeps it as both.
+    import contextlib
+    import copy
+    import io
+
+    import cloudpickle
+    from pyspark.sql.connect.proto import Relation
+
+    spark, service = mock_connect
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
+                     "spark.sql.repl.eagerEval.maxNumRows": "20",
+                     "spark.sql.repl.eagerEval.truncate": "20"}
+    df = spark.range(1)
+    df.schema
+    service.data_type = ddl_data_type("a int, b string")
+    requested = "struct<a:int,b:string>"
+    copies = [copy.copy, copy.deepcopy, lambda frame: cloudpickle.loads(cloudpickle.dumps(frame))]
+    for make in copies:
+        before = len(service.analyze_requests)
+        c = make(df)
+        assert len(service.analyze_requests) == before + 1
+        assert c.schema.simpleString() == requested
+        printed = io.StringIO()
+        with contextlib.redirect_stdout(printed):
+            c.printSchema()
+        assert printed.getvalue() == c.schema.treeString() + "\n"
+        assert c.columns == ["id"] and c.dtypes == [("id", "bigint")]
+        assert repr(c) == "DataFrame[id: bigint]"
+        for result in (c.union(c), c.intersect(c), c.subtract(c), c.unionByName(c), c.union(df)):
+            assert result.schema.simpleString() == requested
+        for result in (df.union(c), c.filter("true"), c.alias("t"), c.limit(1)):
+            assert result.schema.simpleString() == "struct<id:bigint>"
+        aggregate = Relation.FromString(c.groupBy().sum()._relation_bytes()).aggregate
+        assert [expression.unresolved_function.arguments[0].unresolved_attribute.unparsed_identifier
+                for expression in aggregate.aggregate_expressions] == ["a"]
+        assert len(service.analyze_requests) == before + 1
+        service.data_type = ddl_data_type("z string")
+        again = copy.copy(c)
+        assert again.schema.simpleString() == "struct<z:string>" and again.columns == ["id"]
+        service.data_type = ddl_data_type("a int, b string")
+    fresh = spark.range(1)
+    before = len(service.analyze_requests)
+    c = copy.copy(fresh)
+    assert c.schema.simpleString() == requested and c.columns == ["a", "b"]
+    assert len(service.analyze_requests) == before + 2
+
+
 def test_reader_strings_that_utf8_cannot_encode_fail_the_plan_as_pyspark(mock_connect):
     # As PySpark's DataSource, which builds its plan at a request: its format is set before its
     # paths, and protobuf's string fields raise the UnicodeEncodeError of a str that UTF-8 cannot
@@ -12700,8 +12757,9 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
     # of a UDF, a map function and a UDTF. So it is through the objects that hold such a Column or
     # the plan of such a DataFrame, as PySpark's do: grouped data and their cogroups, a table
     # argument, a window specification, the writers, the null and statistics functions, a merge
-    # builder and its clauses, and the generator of toLocalIterator. A function that live Columns
-    # and DataFrames share is kept, and pickles at their requests.
+    # builder and its clauses, the generator of toLocalIterator, and the expression of a Column
+    # and of a table argument, and their copies. A function that live Columns and DataFrames share
+    # is kept, and pickles at their requests.
     import copy
     import gc
     import weakref
@@ -12759,6 +12817,11 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
         lambda job: df.mergeInto("t", F.lit(True)).whenMatched(udf_column(job, "boolean")),
         lambda job: df.mergeInto("t", F.lit(True)).whenNotMatched().insert(
             {"id": udf_column(job)}),
+        lambda job: udf_column(job)._expr,
+        lambda job: copy.copy(udf_column(job)._expr),
+        lambda job: copy.deepcopy(udf_column(job)._expr),
+        lambda job: udf_frame(job).asTable()._subquery_expr,
+        lambda job: df.asTable().partitionBy(udf_column(job))._subquery_expr,
     ]
     for holder in holders:
         job = Job()
@@ -12809,14 +12872,18 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
 
     state = ["<live>"]
     shared = F.udf(lambda x: state[0], "long")("id")
-    kept = [df.select(shared), copy.copy(shared), copy.deepcopy(shared)]
+    kept = [df.select(shared), copy.copy(shared), copy.deepcopy(shared), shared._expr,
+            copy.copy(shared._expr), copy.deepcopy(shared._expr)]
     for _ in range(3):
         gc.collect()
-    for column in [shared] + kept[1:]:
+    for column in [shared] + kept[1:3]:
         df.select(column).explain()
         root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
         command = root.project.expressions[0].common_inline_user_defined_function.python_udf.command
         assert b"<live>" in command
+    for expression in kept[3:]:
+        udf = expression.to_plan(None).common_inline_user_defined_function
+        assert b"<live>" in udf.python_udf.command
 
 
 def test_cycles_through_the_dataframes_of_their_objects_are_collected_as_pyspark(mock_connect):
@@ -13942,12 +14009,17 @@ def test_unpickled_dataframes_request_their_schema_and_keep_the_cached_one_as_py
     # columns, and then sets the `_cached_schema` of the state of the pickle: one request at each
     # unpickle, whose error the unpickle raises, and then the schema of a DataFrame that had one
     # is known, while one that had none is requested again. A plan that does not build pickles,
-    # and its unpickle raises the error of its build, with no request.
+    # and its unpickle raises the error of its build, with no request: of an AttributeError, such
+    # as of a join on a tuple or on a Row, PySpark's `_schema` falls back to the Column of
+    # `__getattr__`, whose `fields` the columns iterate, so the unpickle, a copy and a deep copy,
+    # which read the columns too, raise NOT_ITERABLE.
+    import copy
     import pickle
 
-    from pyspark.errors import PySparkValueError
+    from pyspark.errors import PySparkTypeError, PySparkValueError
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException
     from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import Row
 
     spark, service = mock_connect
     serializer = CloudPickleSerializer()
@@ -13973,6 +14045,17 @@ def test_unpickled_dataframes_request_their_schema_and_keep_the_cached_one_as_py
         with pytest.raises(error_type) as error:
             serializer.loads(data)
         assert type(error.value) is error_type and str(error.value) == message
+        with pytest.raises(AttributeError, match="Can't pickle local object"):
+            pickle.dumps(df)
+    joins = [cached.join(cached, ("id",)), cached.join(cached, [cached.id == cached.id, Row(a=1)])]
+    for df in joins:
+        data = serializer.dumps(df)
+        for call in (lambda: serializer.loads(data), lambda: copy.copy(df),
+                     lambda: copy.deepcopy(df)):
+            with pytest.raises(PySparkTypeError) as error:
+                call()
+            assert error.value.getCondition() == "NOT_ITERABLE"
+            assert error.value.getMessageParameters() == {"objectName": "Column"}
         with pytest.raises(AttributeError, match="Can't pickle local object"):
             pickle.dumps(df)
     assert (len(service.analyze_requests), len(service.execute_requests)) == requests
@@ -17509,8 +17592,9 @@ def test_aggregates_range_partitions_and_join_conditions_carry_pysparks_origins(
     # `F.col`, and their functions have no origin; repartitionByRange sorts a column by its
     # `asc`, whose sort order is of `asc_nulls_first`; and the plans of join and _joinAsOf of a
     # list of Columns reduce them with `&` each time they are built, so their `and`s are of
-    # `__and__` at the call site of the request, not of the join. In a new interpreter, whose
-    # first column of a session reads spark.python.sql.dataFrameDebugging.enabled.
+    # `__and__` at the call site of the request, not of the join, also of a deep copy, as
+    # PySpark's copy of the plan objects builds them at each request too. In a new interpreter,
+    # whose first column of a session reads spark.python.sql.dataFrameDebugging.enabled.
     import subprocess
     import sys
     from pathlib import Path
@@ -17558,6 +17642,8 @@ if __name__ == "__main__":
         condition = root(df._joinAsOf(df, "id", "id", on=[df.id == df.id, df.id == df.id]))
         condition = condition.as_of_join.join_expr
         found.append((origin(condition), arguments(condition)))
+        condition = root(__import__("copy").deepcopy(joined)).join.join_condition
+        found.append((origin(condition), arguments(condition)))
         print(found)
 """
     tests = str(Path(__file__).resolve().parent)
@@ -17570,6 +17656,7 @@ if __name__ == "__main__":
         [("asc_nulls_first", 35), ("desc_nulls_last", 35)],
         (("__and__", 22), [("__and__", 22), ("__eq__", 37)]),
         (("__and__", 22), [("__eq__", 40), ("__eq__", 40)]),
+        (("__and__", 22), [("__and__", 22), ("__eq__", 37)]),
     ])
 
 
@@ -21973,7 +22060,8 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     # the allocations before each object shifted by one, meets each kind of object there: also the
     # grouped data, the cogroups, the table arguments, the window specifications, the null and
     # statistics functions, the merge clauses, the stream writers, the data source registrations
-    # and the session builders, and their copies, and the rows of toLocalIterator.
+    # and the session builders, and their copies, the rows of toLocalIterator, and the expressions
+    # of Columns and table arguments, and their copies.
     import copy
     import gc
 
@@ -21993,6 +22081,7 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     data_source = spark.dataSource
     builder = ConnectSession.builder._registerHook(lambda session: None).channelBuilder(
         DefaultChannelBuilder("sc://localhost"))
+    column = F.col("id") + 1
     makers = [
         lambda: df.write, lambda: copy.copy(writer), lambda: df.writeTo("t"),
         lambda: copy.copy(writer_v2), lambda: df.mergeInto("t", F.lit(True)),
@@ -22010,6 +22099,8 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
         lambda: copy.copy(data_source), lambda: type(data_source)(spark),
         lambda: ConnectSession.builder, lambda: ConnectSession.Builder(),
         lambda: copy.copy(builder), lambda: df.toLocalIterator(),
+        lambda: F.col("id")._expr, lambda: copy.copy(column._expr),
+        lambda: copy.deepcopy(column._expr), lambda: table._subquery_expr,
     ]
     thresholds = gc.get_threshold()
     gc.collect()
@@ -26041,6 +26132,7 @@ def test_windows_of_no_partitions_warn_at_each_plan_build_as_pyspark(mock_connec
     # pickle, which keeps the plan objects without building them. A warning of one place, which
     # the default filter shows once, and which the error filter raises from the request, before
     # it is sent.
+    import copy
     import warnings
 
     import cloudpickle
@@ -26072,6 +26164,15 @@ def test_windows_of_no_partitions_warn_at_each_plan_build_as_pyspark(mock_connec
         df.collect()
         df.collect()
     assert len(record) == 1
+    # A deep copy is of the plan, which its requests build, so each of them warns, as PySpark's
+    # copy of the plan objects does: the request of the schema of its reconstruction, and those
+    # after it.
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        copied = copy.deepcopy(df)
+        copied.collect()
+        copied.collect()
+    assert [str(warning.message) for warning in record] == [message] * 6
     requests = len(service.execute_requests)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
@@ -26126,12 +26227,14 @@ def test_chained_partition_by_and_order_by_replace_the_spec_as_pyspark():
 def test_window_frames_and_columns_are_checked_as_pyspark():
     # As PySpark's: a start of -sys.maxsize or less is unbounded preceding and an end of
     # sys.maxsize or more unbounded following; a row frame raises VALUE_NOT_BETWEEN for a
-    # boundary out of the range of an int, as a start of Window.unboundedFollowing; and the
+    # boundary out of the range of an int, as a start of Window.unboundedFollowing, at each build
+    # of a plan of it, of the window as it was given, which a later frame replaces; and the
     # columns are Columns or column names, else NOT_EXPECTED_TYPE of `col`.
     import sys
 
     from pyspark.errors import PySparkTypeError, PySparkValueError
     from pyspark.sql import Window
+    from pyspark.sql import functions as F
 
     o = Window.orderBy("id")
     assert repr(o.rowsBetween(-sys.maxsize, sys.maxsize)) == (
@@ -26143,12 +26246,21 @@ def test_window_frames_and_columns_are_checked_as_pyspark():
         "WindowSpec(OrderBy(id ASC NULLS FIRST), WindowFrame(RANGE_FRAME, -1099511627776, 0))")
     for start, end, name in ((-(1 << 31) - 1, 0, "start"), (0, 1 << 31, "end"),
                              (Window.unboundedFollowing, 0, "start"),
-                             (0, Window.unboundedPreceding, "end")):
-        with pytest.raises(PySparkValueError) as error:
-            o.rowsBetween(start, end)
-        assert error.value.getCondition() == "VALUE_NOT_BETWEEN"
-        assert error.value.getMessageParameters() == {
-            "arg_name": name, "min": "-2147483648", "max": "2147483647"}
+                             (0, Window.unboundedPreceding, "end"),
+                             (-(1 << 40), 1 << 40, "start")):
+        spec = o.rowsBetween(start, end)
+        assert repr(spec) == (
+            f"WindowSpec(OrderBy(id ASC NULLS FIRST), WindowFrame(ROW_FRAME, {start}, {end}))")
+        assert repr(spec._frame) == f"WindowFrame(ROW_FRAME, {start}, {end})"
+        for column in (F.sum("id").over(spec), F.sum("id").over(spec.partitionBy("id"))):
+            for _ in range(2):
+                with pytest.raises(PySparkValueError) as error:
+                    column._expr.to_plan(None)
+                assert error.value.getCondition() == "VALUE_NOT_BETWEEN"
+                assert error.value.getMessageParameters() == {
+                    "arg_name": name, "min": "-2147483648", "max": "2147483647"}
+        replaced = F.sum("id").over(spec.rowsBetween(-1, 1))._expr.to_plan(None)
+        assert replaced.window.frame_spec.lower.value.literal.integer == -1
     with pytest.raises(AssertionError):
         o.rowsBetween(1.5, 2)
     # A float bound past the threshold of its side is unbounded, as PySpark compares it with
@@ -26177,10 +26289,13 @@ def test_window_frame_bounds_are_compared_asserted_and_converted_as_pyspark():
     # thresholds of their sides, with Python's <= and >=, whose TypeError a type that does not
     # compare with an int raises; WindowFrame then asserts that the start and then the end that
     # is not past its threshold is an int, a bare AssertionError of a NumPy int or a Decimal;
-    # and the plan converts the start and then the end, whose errors are raised at the call: 0,
-    # False too, is the current row, a row frame sets an int of an int32 in the integer literal,
-    # and a range frame any other int in the long literal, both of which protobuf's default
-    # (upb) backend refuses of a bool, and the long of an int beyond a long.
+    # and the plan converts the start and then the end when it is built, whose errors its
+    # requests raise: 0, False too, is the current row, a row frame sets an int of an int32 in
+    # the integer literal, and raises VALUE_NOT_BETWEEN of an int beyond, and a range frame any
+    # other int in the long literal, both of which protobuf's default (upb) backend refuses of a
+    # bool, and the long of an int beyond a long. The window of the drop-in holds no bound of True
+    # nor of an int beyond a long: of such a frame, the call raises the error that PySpark's build
+    # raises first, of the start and then of the end.
     from pyspark.errors import PySparkValueError
     from pyspark.sql import Window
     from pyspark.sql import functions as F
@@ -26227,9 +26342,16 @@ def test_window_frame_bounds_are_compared_asserted_and_converted_as_pyspark():
             with pytest.raises(TypeError) as error:
                 between(start, end)
             assert str(error.value) == integer
-        with pytest.raises(PySparkValueError) as error:
-            between(2**40, True)
-        assert error.value.getMessageParameters()["arg_name"] == "start"
+        for start, end, name in [(2**40, True, "start"), (2**64, 0, "start"),
+                                 (0, -(2**64), "end"), (2**40, -(2**64), "start")]:
+            with pytest.raises(PySparkValueError) as error:
+                between(start, end)
+            assert error.value.getMessageParameters()["arg_name"] == name
+        for start, end, name in [(2**40, 0, "start"), (0, -(2**40), "end"),
+                                 (Window.unboundedFollowing, Window.unboundedPreceding, "start")]:
+            with pytest.raises(PySparkValueError) as error:
+                bounds(between(start, end))
+            assert error.value.getMessageParameters()["arg_name"] == name
     for between in ranges:
         assert bounds(between(-(2**31) - 1, 2**40)) == (("long", -(2**31) - 1), ("long", 2**40))
         assert bounds(between(Window.unboundedFollowing, Window.unboundedPreceding)) == (

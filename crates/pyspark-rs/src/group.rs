@@ -211,7 +211,8 @@ impl PyGroupedData {
 
     /// `sum`, `avg`, `mean`, `min` and `max`, as PySpark's `_numeric_agg`: of column names,
     /// which it asserts, every numeric column without any, and `NOT_NUMERIC_COLUMNS` for a
-    /// column that is not numeric.
+    /// column that is not numeric, of the columns of `self._df.schema`, which of a copy or an
+    /// unpickle is the schema that it requested (see `PyDataFrame::copy_schema`).
     fn numeric_agg(
         &self,
         py: Python<'_>,
@@ -225,7 +226,23 @@ impl PyGroupedData {
             };
             names.push(name.to_cow().ok().map(|name| name.into_owned()));
         }
-        let grouped = &self.grouped_data;
+        let requested = self.frame.bind(py).borrow().copy_schema();
+        let of_requested;
+        let grouped = match requested {
+            Some(schema) => {
+                let grouped = &self.grouped_data;
+                of_requested = RustGroupedData::from_parts(
+                    grouped.dataframe().with_known_schema(Some(schema)),
+                    grouped.grouping_columns().to_vec(),
+                    grouped.group_type(),
+                    grouped.pivot_column(),
+                    grouped.pivot_value_columns(),
+                    grouped.grouping_set_columns().to_vec(),
+                );
+                &of_requested
+            }
+            None => &self.grouped_data,
+        };
         if names.iter().any(Option::is_none) {
             // A name that UTF-8 cannot encode is no column of the schema, which the server
             // sends: PySpark reads the schema, and raises `NOT_NUMERIC_COLUMNS` of the `str` of
