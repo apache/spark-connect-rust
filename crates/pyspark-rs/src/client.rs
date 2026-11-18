@@ -261,6 +261,44 @@ pub(crate) fn warn_of_spent_retries() {
     spark_connect_core::retries::set_listener(Some(std::sync::Arc::new(RetriesWarning)));
 }
 
+/// Make the client log the errors of its channels that grpcio logs, as PySpark's client shows
+/// them: the line of gRPC's C core on stderr, which `_log_grpc_error` of
+/// `pyspark.sql.connect.client` writes, on the thread of the channel. Unless `GRPC_VERBOSITY` is
+/// `NONE` when the extension loads, as grpcio reads it when it initializes and then logs no error.
+pub(crate) fn log_grpc_errors() {
+    let silenced = std::env::var("GRPC_VERBOSITY")
+        .is_ok_and(|verbosity| verbosity.eq_ignore_ascii_case("NONE"));
+    if silenced {
+        return;
+    }
+    spark_connect_core::grpc_log::set_listener(Some(std::sync::Arc::new(
+        |logged: &spark_connect_core::grpc_log::Logged| {
+            // Only on a thread of Python, as that of a channel of a session is: a thread of the
+            // runtime has no thread state of Python, and does not wait for the GIL.
+            // SAFETY: reads the thread state that the interpreter keeps for this thread, without
+            // the GIL, which it does not need.
+            if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+                return;
+            }
+            let location = logged.location;
+            let file = location
+                .file()
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or_default();
+            Python::attach(|py| {
+                // An error that cannot be logged is dropped, as gRPC's core goes on.
+                let _ = py.import("pyspark.sql.connect.client").and_then(|client| {
+                    client.call_method1(
+                        "_log_grpc_error",
+                        (file, location.line(), logged.message.as_str()),
+                    )
+                });
+            });
+        },
+    )));
+}
+
 /// Set the retry policy of `session` to `parameters`, from the calls that start from now on.
 pub(crate) fn set_retry_policy(session: &SparkSession, parameters: RetryParameters) {
     session.set_retry_policy(RetryPolicy {

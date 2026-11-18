@@ -2022,3 +2022,22 @@ def _warn_retries_exceeded(retry_exception: bool) -> None:
         _RETRIES_MODULE,
         registry,
     )
+
+
+def _log_grpc_error(file: str, line: int, message: str) -> None:
+    """Log an error of a channel that the client goes on from as grpcio does, for the Rust
+    transport, which calls this on the thread of the channel: a proxy variable that is not an HTTP
+    proxy, or a file of TLS roots that cannot be read. PySpark's client shows them only as the
+    line that gRPC's C core writes to the stderr of the process for an error, of the form
+    ``E<month><day> <time> <thread> <file>:<line>] <message>``, where ``file`` and ``line`` are of
+    the Rust source of the call here."""
+    import datetime
+    import threading
+
+    now = datetime.datetime.now()
+    entry = f"E{now:%m%d %H:%M:%S.%f} {threading.get_native_id():7d} {file}:{line}] {message}\n"
+    try:
+        os.write(2, entry.encode())
+    except OSError:
+        # As gRPC's core, which goes on when stderr is closed.
+        pass

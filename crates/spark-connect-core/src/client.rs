@@ -62,28 +62,40 @@ fn with_keepalive(
 const SSL_ROOTS_FILE_VAR: &str = "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH";
 
 /// The PEM roots that `path`, the value of [`SSL_ROOTS_FILE_VAR`], names, as grpcio reads them:
-/// `None` (the system's roots) without a value, or with a warning for a file that cannot be read
-/// or is empty.
+/// `None` (the system's roots) without a value or of an empty file, and of a file that cannot be
+/// read, which is logged as grpcio's core logs it (see [`crate::grpc_log`]).
 fn ssl_roots_pem(path: Option<std::ffi::OsString>) -> Option<Vec<u8>> {
     let path = path.filter(|path| !path.is_empty())?;
     let path = std::path::Path::new(&path);
-    let reason = match std::fs::read(path) {
-        Ok(pem) if !pem.is_empty() => return Some(pem),
-        Ok(_) => "is empty".to_owned(),
-        Err(error) => format!("cannot be read ({error})"),
-    };
-    tracing::warn!(
-        "{SSL_ROOTS_FILE_VAR} names {}, which {reason}; using the system's roots",
-        path.display()
-    );
-    None
+    match std::fs::read(path) {
+        Ok(pem) => (!pem.is_empty()).then_some(pem),
+        Err(error) => {
+            crate::grpc_log::error(format!(
+                "{SSL_ROOTS_FILE_VAR} names {}, which cannot be read ({error}); using the \
+                 system's roots",
+                path.display()
+            ));
+            None
+        }
+    }
+}
+
+/// The roots of the TLS channels, of [`ssl_roots_pem`], read when the first TLS channel of the
+/// process is made: grpcio computes its default roots once, and a later change of the variable
+/// or of the file is not seen, nor logged again.
+fn ssl_roots() -> Option<&'static [u8]> {
+    static ROOTS: std::sync::OnceLock<Option<Vec<u8>>> = std::sync::OnceLock::new();
+    ROOTS
+        .get_or_init(|| ssl_roots_pem(std::env::var_os(SSL_ROOTS_FILE_VAR)))
+        .as_deref()
 }
 
 /// The deadline of a connection, as grpcio's 20 s connect deadline: one deadline from the start
 /// of the connection, which its parts share, the TCP connection and the TLS handshake of a
 /// direct connection, or the TCP connection to the proxy, the tunnel, and the TLS handshake
-/// inside it. A connection that is not done by then fails with `UNAVAILABLE`, which is retried,
-/// as in grpcio.
+/// inside it, and the HTTP/2 settings of the server of a plaintext connection (see
+/// [`ServerStream`]). A connection that is not done by then fails with `UNAVAILABLE`, which is
+/// retried, as in grpcio.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A lazy channel to `endpoint`, connected directly.
@@ -94,7 +106,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 /// and never answers the TLS handshake would hold the call until its own deadline. The TCP
 /// connection has the same bound in the connector, which divides it among the addresses of the
 /// host that it tries in turn, so that an address that does not answer leaves time for the
-/// next one.
+/// next one. The server of a plaintext connection has the rest of the deadline to send its
+/// settings (see [`DirectConnector`]).
 fn connect_directly(endpoint: tonic::transport::Endpoint) -> Channel {
     // As tonic's own connector of an endpoint (`Endpoint::http_connector`), of the endpoint's
     // defaults: an `https` URI goes through it too (tonic negotiates TLS on its stream), and
@@ -105,7 +118,200 @@ fn connect_directly(endpoint: tonic::transport::Endpoint) -> Channel {
     connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
     endpoint
         .connect_timeout(CONNECT_TIMEOUT)
-        .connect_with_connector_lazy(connector)
+        .connect_with_connector_lazy(DirectConnector(connector))
+}
+
+/// When the server of a connection to `uri` of the deadline `deadline` has to have sent its
+/// settings (see [`ServerStream`]): at that deadline for a plaintext connection, never for TLS.
+fn settings_deadline(
+    uri: &tonic::codegen::http::Uri,
+    deadline: tokio::time::Instant,
+) -> Option<tokio::time::Instant> {
+    (uri.scheme_str() != Some("https")).then_some(deadline)
+}
+
+/// Connects to the server of a URI directly, with tonic's own connector. The server of a
+/// plaintext connection has until the deadline of the connection, [`CONNECT_TIMEOUT`] from when
+/// tonic calls the connector, to send its settings (see [`ServerStream`]).
+#[derive(Clone)]
+struct DirectConnector(HttpConnector);
+
+impl tonic::codegen::Service<tonic::codegen::http::Uri> for DirectConnector {
+    type Response = TokioIo<ServerStream>;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        tonic::codegen::Service::poll_ready(&mut self.0, cx).map_err(Into::into)
+    }
+
+    fn call(&mut self, uri: tonic::codegen::http::Uri) -> Self::Future {
+        let deadline = settings_deadline(&uri, tokio::time::Instant::now() + CONNECT_TIMEOUT);
+        let connecting = tonic::codegen::Service::call(&mut self.0, uri);
+        Box::pin(async move {
+            let stream = connecting.await?.into_inner();
+            Ok(TokioIo::new(ServerStream::new(stream, deadline)))
+        })
+    }
+}
+
+/// The details of the failure of a connection whose server sends no settings by its deadline,
+/// grpcio's, which it gives as the last error of the connection (`failed to connect to all
+/// addresses; last error: UNKNOWN: ipv4:127.0.0.1:15002: connection attempt timed out before
+/// receiving SETTINGS frame`).
+const SETTINGS_TIMEOUT: &str = "connection attempt timed out before receiving SETTINGS frame";
+
+/// The length of the header of an HTTP/2 frame (RFC 9113, section 4.1).
+const FRAME_HEADER_LEN: usize = 9;
+
+/// The stream of a connection to the server, whose server has until a deadline, the connect
+/// deadline of a plaintext connection, to send its first HTTP/2 frame, the SETTINGS that it sends
+/// first: grpcio waits for them within its connect deadline before a connection takes calls.
+/// hyper sends the preface of the client at once, as grpcio does, but takes the connection as made
+/// without the server's, so that a server that accepts the connection and never answers would
+/// hold its calls until the keepalive ends the connection, 80 s by default. Past the deadline, a
+/// read fails with [`SETTINGS_TIMEOUT`], which ends the connection and fails its calls with
+/// `UNAVAILABLE`, which is retried. A server that sends its settings late but within the
+/// deadline, or only once it has the client's preface, is read as any other.
+///
+/// A TLS stream has no deadline: tonic bounds its handshake by the connect timeout, and the frames
+/// come in the TLS session, which this stream, under it, does not see.
+struct ServerStream {
+    stream: TcpStream,
+    /// Until the server's first frame has arrived: what of it has, and the deadline.
+    first_frame: Option<(FirstFrame, std::pin::Pin<Box<tokio::time::Sleep>>)>,
+}
+
+impl ServerStream {
+    /// `stream`, whose server has until `deadline` to send its first frame, if there is one.
+    fn new(stream: TcpStream, deadline: Option<tokio::time::Instant>) -> Self {
+        let first_frame = deadline.map(|deadline| {
+            (
+                FirstFrame::default(),
+                Box::pin(tokio::time::sleep_until(deadline)),
+            )
+        });
+        Self {
+            stream,
+            first_frame,
+        }
+    }
+}
+
+/// The first frame of the server while it arrives.
+#[derive(Default)]
+struct FirstFrame {
+    /// The header of the frame, as far as it has arrived.
+    header: [u8; FRAME_HEADER_LEN],
+    /// The count of the bytes of the stream that have arrived.
+    received: usize,
+}
+
+impl FirstFrame {
+    /// Whether the frame has arrived whole with `bytes`, the next bytes of the stream: its header,
+    /// and the payload of the length that the header gives.
+    fn arrived(&mut self, bytes: &[u8]) -> bool {
+        let start = self.received.min(FRAME_HEADER_LEN);
+        let header = bytes.len().min(FRAME_HEADER_LEN - start);
+        self.header[start..start + header].copy_from_slice(&bytes[..header]);
+        self.received += bytes.len();
+        // A length of 24 bits: of a header that has not all arrived, too long to be reached.
+        let [a, b, c, ..] = self.header;
+        let length = u32::from_be_bytes([0, a, b, c]) as usize;
+        self.received >= FRAME_HEADER_LEN + length
+    }
+}
+
+impl tokio::io::AsyncRead for ServerStream {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        let this = &mut *self;
+        let filled = buf.filled().len();
+        let read = tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut this.stream), cx, buf);
+        if let Some((first_frame, deadline)) = &mut this.first_frame {
+            match &read {
+                Poll::Ready(Ok(())) if first_frame.arrived(&buf.filled()[filled..]) => {
+                    this.first_frame = None;
+                }
+                Poll::Pending if std::future::Future::poll(deadline.as_mut(), cx).is_ready() => {
+                    return Poll::Ready(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        SETTINGS_TIMEOUT,
+                    )));
+                }
+                _ => {}
+            }
+        }
+        read
+    }
+}
+
+impl tokio::io::AsyncWrite for ServerStream {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(&mut self.stream), cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        tokio::io::AsyncWrite::poll_write_vectored(std::pin::Pin::new(&mut self.stream), cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        tokio::io::AsyncWrite::is_write_vectored(&self.stream)
+    }
+
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.stream), cx)
+    }
+
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        tokio::io::AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut self.stream), cx)
+    }
+}
+
+/// The connection of the TCP stream, which hyper reads its addresses of.
+impl hyper_util::client::legacy::connect::Connection for ServerStream {
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+        hyper_util::client::legacy::connect::Connection::connected(&self.stream)
+    }
+}
+
+/// The details of the failed call of `status` as grpcio gives them: tonic's message, but of a
+/// connection that [`ServerStream`] ends, which tonic reports as a transport error, grpcio's
+/// [`SETTINGS_TIMEOUT`].
+pub(crate) fn status_details(status: &tonic::Status) -> String {
+    let settings_timeout = |error: &(dyn std::error::Error + 'static)| {
+        error.downcast_ref::<std::io::Error>().is_some_and(|error| {
+            error.kind() == std::io::ErrorKind::TimedOut && error.to_string() == SETTINGS_TIMEOUT
+        })
+    };
+    let mut errors =
+        std::iter::successors(std::error::Error::source(status), |error| error.source());
+    if errors.any(settings_timeout) {
+        SETTINGS_TIMEOUT.to_string()
+    } else {
+        status.message().to_string()
+    }
 }
 
 /// A lazy channel to `endpoint` through an HTTP CONNECT tunnel of `proxy`. tonic negotiates
@@ -130,12 +336,13 @@ const MAX_PROXY_RESPONSE: usize = 8192;
 /// [`CONNECT_TIMEOUT`] from when tonic calls the connector, which it does before it starts its
 /// own bound of the whole connection: a proxy that does not open the tunnel in time fails the
 /// connection with an error that names it, at the deadline of the connection, as grpcio's tunnel
-/// shares the connect deadline with the TLS handshake.
+/// shares the connect deadline with the TLS handshake. The server of a plaintext connection has
+/// the same deadline to send its settings in the tunnel (see [`ServerStream`]).
 #[derive(Clone)]
 struct ProxyConnector(std::sync::Arc<HttpProxy>);
 
 impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
-    type Response = TokioIo<TcpStream>;
+    type Response = TokioIo<ServerStream>;
     type Error = Box<dyn std::error::Error + Send + Sync>;
     type Future = tonic::codegen::BoxFuture<Self::Response, Self::Error>;
 
@@ -151,6 +358,7 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
         // When tonic calls the connector, before it starts its own bound, rather than when the
         // connection is first polled: the tunnel's deadline is then no later than tonic's.
         let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
+        let settings = settings_deadline(&uri, deadline);
         Box::pin(async move {
             let host = uri.host().ok_or("the endpoint has no host")?;
             let default_port = if uri.scheme_str() == Some("https") {
@@ -160,7 +368,7 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
             };
             let port = uri.port_u16().unwrap_or(default_port);
             match tokio::time::timeout_at(deadline, open_tunnel(&proxy, host, port)).await {
-                Ok(stream) => Ok(TokioIo::new(stream?)),
+                Ok(stream) => Ok(TokioIo::new(ServerStream::new(stream?, settings))),
                 Err(_) => Err("the proxy did not open the tunnel in time".into()),
             }
         })
@@ -810,7 +1018,7 @@ impl SparkConnectClient {
             // The server name of an IPv6 host is its address without the brackets of the URL.
             let domain = builder.host().trim_start_matches('[').trim_end_matches(']');
             let config = ClientTlsConfig::new().domain_name(domain);
-            let tls_config = match ssl_roots_pem(std::env::var_os(SSL_ROOTS_FILE_VAR)) {
+            let tls_config = match ssl_roots() {
                 Some(pem) => config.ca_certificate(Certificate::from_pem(pem)),
                 None => config.with_native_roots(),
             };
@@ -3518,6 +3726,97 @@ mod tests {
             Some(dir.path().as_os_str().to_owned()),
         ] {
             assert_eq!(ssl_roots_pem(path), None);
+        }
+    }
+
+    #[test]
+    fn only_a_roots_file_that_cannot_be_read_is_logged() {
+        // As grpcio, which logs the error of a file that it cannot load and takes an empty one as
+        // no file, silently.
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty.pem");
+        std::fs::write(&empty, b"").unwrap();
+        let missing = dir.path().join("missing.pem");
+        let (roots, logged) = crate::grpc_log::logged_by(|| {
+            [
+                None,
+                Some(empty.into_os_string()),
+                Some(missing.clone().into_os_string()),
+            ]
+            .map(ssl_roots_pem)
+        });
+        assert_eq!(roots, [None, None, None]);
+        assert_eq!(logged.len(), 1, "{logged:?}");
+        let message = &logged[0].message;
+        assert!(
+            message.starts_with(&format!(
+                "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH names {}, which cannot be read (",
+                missing.display()
+            )),
+            "{message}"
+        );
+        assert!(
+            message.ends_with("); using the system's roots"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn the_first_frame_of_the_server_is_its_header_and_the_payload_of_its_length() {
+        // A SETTINGS frame of one setting: the length 6 in its header, then 6 bytes, which may
+        // arrive in any reads.
+        let frame = [0, 0, 6, 4, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 100];
+        for split in 0..=frame.len() {
+            let mut first_frame = FirstFrame::default();
+            let (head, tail) = frame.split_at(split);
+            assert_eq!(first_frame.arrived(head), split == frame.len(), "{split}");
+            assert!(split == frame.len() || first_frame.arrived(tail), "{split}");
+        }
+        let mut first_frame = FirstFrame::default();
+        let whole = frame.map(|byte| first_frame.arrived(&[byte]));
+        assert_eq!(whole.iter().position(|&whole| whole), Some(frame.len() - 1));
+        // An empty SETTINGS frame is its header, and the bytes after a frame are of the next.
+        let empty = [0, 0, 0, 4, 0, 0, 0, 0, 0];
+        assert!(!FirstFrame::default().arrived(&empty[..8]));
+        assert!(FirstFrame::default().arrived(&empty));
+        assert!(FirstFrame::default().arrived(&[&empty[..], &[0, 0, 4]].concat()));
+    }
+
+    /// An error of the message `transport error` whose source is an I/O error, as tonic's
+    /// transport error of a connection that a read error ends.
+    #[derive(Debug)]
+    struct TransportError(std::io::Error);
+
+    impl std::fmt::Display for TransportError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("transport error")
+        }
+    }
+
+    impl std::error::Error for TransportError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+
+    #[test]
+    fn a_connection_whose_server_sends_no_settings_has_grpcio_s_details() {
+        let transport_error = |kind, message: &str| {
+            tonic::Status::from_error(Box::new(TransportError(std::io::Error::new(
+                kind,
+                message.to_string(),
+            ))))
+        };
+        let status = transport_error(std::io::ErrorKind::TimedOut, SETTINGS_TIMEOUT);
+        assert_eq!(status.message(), "transport error");
+        assert_eq!(status_details(&status), SETTINGS_TIMEOUT);
+        // Any other status keeps tonic's message.
+        for status in [
+            transport_error(std::io::ErrorKind::TimedOut, "Connection timed out"),
+            transport_error(std::io::ErrorKind::ConnectionReset, SETTINGS_TIMEOUT),
+            tonic::Status::unavailable("tcp connect error"),
+        ] {
+            assert_eq!(status_details(&status), status.message());
         }
     }
 

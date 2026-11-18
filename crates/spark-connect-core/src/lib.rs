@@ -9,6 +9,7 @@ pub mod bytes_codec;
 pub mod channel;
 pub mod client;
 pub mod error;
+pub mod grpc_log;
 mod proxy;
 pub mod reattach;
 pub mod retries;

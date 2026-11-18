@@ -656,6 +656,118 @@ async fn a_tls_handshake_that_stalls_on_a_direct_connection_is_unavailable() {
     assert_eq!(*accepted.lock().unwrap(), 1);
 }
 
+#[tokio::test]
+async fn a_server_that_never_sends_its_settings_is_unavailable_at_the_connect_deadline() {
+    // As grpcio, which waits for the HTTP/2 settings of the server within the 20 s connect
+    // deadline and fails the connection past it with `UNAVAILABLE`, which is retried: a plaintext
+    // server that accepts the TCP connection and never answers, directly or in a tunnel that
+    // opens, rather than the keepalive of the connection, 80 s later.
+    let env = EnvTurn::take().await;
+    let (address, accepted) = silent_server().await;
+    let proxy = Proxy::start(Behavior::Stall).await;
+    let start = Instant::now();
+    let failures = env
+        .with(&[("https_proxy", &proxy.url())], async {
+            let call = |url: String| async move {
+                let mut client = client(&url).await;
+                client.set_retry_policy(RetryPolicy {
+                    max_retries: Some(0),
+                    ..RetryPolicy::default()
+                });
+                let error = tokio::time::timeout(Duration::from_secs(40), client.config(config()))
+                    .await
+                    .expect("the connection is bounded")
+                    .unwrap_err();
+                (error, start.elapsed())
+            };
+            // A loopback host is never proxied, and `spark.invalid` is reached only by the proxy.
+            tokio::join!(
+                call(format!("sc://{address}/;session_id={SESSION}")),
+                call(format!("sc://spark.invalid:15002/;session_id={SESSION}")),
+            )
+        })
+        .await;
+    for (error, elapsed) in [failures.0, failures.1] {
+        assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
+        assert!(
+            error
+                .to_string()
+                .contains("connection attempt timed out before receiving SETTINGS frame"),
+            "{error}"
+        );
+        assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
+    }
+    assert_eq!(*accepted.lock().unwrap(), 1);
+    assert_eq!(proxy.connects().len(), 1);
+}
+
+/// When a plaintext server in front of the Spark server sends its first bytes, its settings.
+#[derive(Clone, Copy)]
+enum Settings {
+    /// This time after the TCP connection.
+    After(Duration),
+    /// Once the client has sent its first bytes, as a server that tells HTTP/1.1 from HTTP/2 by
+    /// the preface of the client.
+    AfterTheClient,
+}
+
+/// A forwarder to the Spark server `upstream`, which connects to it, so that its settings reach
+/// the client, at `settings`. It returns its address.
+async fn server_of_late_settings(upstream: SocketAddr, settings: Settings) -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((mut client, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let mut first = vec![0u8; 4096];
+                let read = match settings {
+                    Settings::After(delay) => {
+                        tokio::time::sleep(delay).await;
+                        0
+                    }
+                    Settings::AfterTheClient => client.read(&mut first).await.unwrap_or(0),
+                };
+                let mut server = TcpStream::connect(upstream).await.unwrap();
+                server.write_all(&first[..read]).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+            });
+        }
+    });
+    address
+}
+
+#[tokio::test]
+async fn a_server_whose_settings_come_within_the_connect_deadline_connects() {
+    // As grpcio, whose connection waits for the settings of the server until its connect
+    // deadline: settings 12 s after the connection, or only after the preface of the client,
+    // connect the call.
+    let env = EnvTurn::take().await;
+    let server = spark_server().await;
+    let delay = Duration::from_secs(12);
+    let late = server_of_late_settings(server.address, Settings::After(delay)).await;
+    let after_the_client = server_of_late_settings(server.address, Settings::AfterTheClient).await;
+    let start = Instant::now();
+    let (late, after_the_client) = env
+        .with(&[], async {
+            let call = |address: SocketAddr| async move {
+                let mut client = client(&format!("sc://{address}/;session_id={SESSION}")).await;
+                client.set_retry_policy(RetryPolicy {
+                    max_retries: Some(0),
+                    ..RetryPolicy::default()
+                });
+                tokio::time::timeout(Duration::from_secs(40), client.config(config()))
+                    .await
+                    .expect("the connection is bounded")
+                    .unwrap();
+                start.elapsed()
+            };
+            tokio::join!(call(late), call(after_the_client))
+        })
+        .await;
+    assert!(late >= delay, "{late:?}");
+    assert!(after_the_client < delay, "{after_the_client:?}");
+}
+
 /// A Spark server whose accept queue is full until `free_after`, and the task that serves it.
 /// Linux drops the SYN of a connection to a full queue, so a client connects with the first SYN
 /// that it sends again after that.
@@ -773,6 +885,28 @@ async fn an_invalid_proxy_address_fails_the_connection() {
         "{message}"
     );
     assert!(!message.contains("hunter2"), "{message}");
+}
+
+#[tokio::test]
+async fn an_invalid_proxy_address_does_not_fail_a_host_of_no_proxy() {
+    let env = EnvTurn::take().await;
+    // As grpcio, which resolves the address of the proxy only for a host that it proxies: a host
+    // of the no-proxy list connects directly, whatever that address.
+    for no_proxy in ["no_proxy", "no_grpc_proxy"] {
+        let error = env
+            .with(
+                &[("grpc_proxy", "http://proxy:80837"), (no_proxy, ".invalid")],
+                async {
+                    let client =
+                        client(&format!("sc://spark.invalid:15002/;session_id={SESSION}")).await;
+                    // Directly, the host does not resolve.
+                    bounded(client.config(config())).await.unwrap_err()
+                },
+            )
+            .await;
+        assert_eq!(error.grpc_code, Some(Code::Unavailable as i32), "{error:?}");
+        assert!(!error.to_string().contains("proxy"), "{error}");
+    }
 }
 
 #[tokio::test]

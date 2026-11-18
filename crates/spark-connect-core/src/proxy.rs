@@ -6,11 +6,16 @@
 //! Rust client connects wherever PySpark does:
 //!
 //! - the proxy is the first of `grpc_proxy`, `https_proxy` and `http_proxy` that is set, even
-//!   empty (an empty or invalid value means no proxy, with a warning for an invalid one);
+//!   empty (an empty value means no proxy, as does one that is not a proxy URI, with the error
+//!   that grpcio logs for it, see [`crate::grpc_log`], and one that is not UTF-8, of which grpcio
+//!   reads the bytes);
 //! - only the lowercase names are read, as gRPC reads them on POSIX;
-//! - only an `http` proxy is supported; another scheme, or no host, connects directly, with a
-//!   warning, while a host or port that is not valid is an error (where grpcio does not connect,
-//!   but takes a port past 65535 modulo 65536 and connects to that port);
+//! - only an `http` proxy is supported; another scheme, or no host, connects directly, with that
+//!   error, for any host, as grpcio logs it for every channel;
+//! - a host or port of the proxy that is not valid is an error of a host that the proxy applies
+//!   to (where grpcio does not connect, but takes a port past 65535 modulo 65536 and connects to
+//!   that port), and of no other: grpcio resolves the address of the proxy only for a host that
+//!   it proxies, so a host that the no-proxy list excludes connects directly;
 //! - the userinfo of the proxy URI, percent-decoded, is sent as `Proxy-Authorization: Basic`;
 //! - a proxy without a port is on port 443;
 //! - `no_grpc_proxy`, or else `no_proxy`, lists the hosts that are not proxied: a host matches
@@ -74,16 +79,12 @@ impl ProxyEnv {
 
     /// The proxy to reach `host` (as the connection string has it, an IPv6 address in
     /// brackets) through, or `None` to connect directly. The error is a proxy address that
-    /// cannot be connected to; it names the variable but not its value, which can hold a
-    /// password.
+    /// cannot be connected to, of a host that the proxy applies to; it names the variable but
+    /// not its value, which can hold a password.
     pub(crate) fn proxy_for(&self, host: &str) -> Result<Option<HttpProxy>, String> {
         let Some((name, value)) = self.proxy.as_ref() else {
             return Ok(None);
         };
-        let host = host.trim_start_matches('[').trim_end_matches(']');
-        if is_loopback(host) {
-            return Ok(None);
-        }
         let Some(value) = value.to_str() else {
             tracing::warn!("{name} is not valid UTF-8; not using a proxy");
             return Ok(None);
@@ -91,22 +92,30 @@ impl ProxyEnv {
         if value.is_empty() {
             return Ok(None);
         }
+        // As grpcio, which reads the proxy URI for every channel and logs one that is not a
+        // proxy, whatever the host, and then resolves the address of the proxy only for a host
+        // that it proxies: an address that is not valid is the error of no other host.
         let proxy = match HttpProxy::parse(value) {
-            Ok(proxy) => proxy,
+            Ok(proxy) => Ok(proxy),
             Err(ProxyUriError::NotAProxy(reason)) => {
-                tracing::warn!("{reason} in {name}; not using a proxy");
+                crate::grpc_log::error(format!("{reason} in {name}; not using a proxy"));
                 return Ok(None);
             }
-            Err(ProxyUriError::Invalid(reason)) => {
-                return Err(format!("Invalid HTTP proxy address in {name}: {reason}"));
-            }
+            Err(ProxyUriError::Invalid(reason)) => Err(reason),
         };
-        let excluded = self
-            .no_proxy
-            .as_ref()
-            .and_then(|list| list.to_str())
-            .is_some_and(|list| no_proxy_matches(list, host));
-        Ok((!excluded).then_some(proxy))
+        let host = host.trim_start_matches('[').trim_end_matches(']');
+        let excluded = is_loopback(host)
+            || self
+                .no_proxy
+                .as_ref()
+                .and_then(|list| list.to_str())
+                .is_some_and(|list| no_proxy_matches(list, host));
+        if excluded {
+            return Ok(None);
+        }
+        proxy
+            .map(Some)
+            .map_err(|reason| format!("Invalid HTTP proxy address in {name}: {reason}"))
     }
 }
 
@@ -412,6 +421,26 @@ mod tests {
     }
 
     #[test]
+    fn a_value_that_is_not_a_proxy_is_logged_for_every_host() {
+        // As grpcio, which logs it as an error of its core for every channel, whatever its host,
+        // a host of the no-proxy list or a loopback host too.
+        let vars = [
+            ("grpc_proxy", "socks5://p:1080"),
+            ("no_proxy", "spark.example"),
+        ];
+        let (direct, logged) = crate::grpc_log::logged_by(|| {
+            ["spark.example", "other.example", "localhost"]
+                .map(|host| env(&vars).proxy_for(host).unwrap().is_none())
+        });
+        assert_eq!(direct, [true; 3]);
+        let messages: Vec<_> = logged.iter().map(|entry| entry.message.as_str()).collect();
+        let message = "the 'socks5' scheme of the proxy URI is not supported in grpc_proxy; \
+                       not using a proxy";
+        assert_eq!(messages, [message; 3]);
+        assert!(logged[0].location.file().ends_with("proxy.rs"));
+    }
+
+    #[test]
     fn an_http_proxy_at_an_invalid_address_is_an_error() {
         // grpcio does not connect with these, but for a port past 65535, which it takes modulo
         // 65536 (99999 as 34463). The channel is an error rather than a connection that the user
@@ -432,6 +461,31 @@ mod tests {
                 "{uri}: {error}"
             );
             assert!(!error.contains(uri), "{error}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_proxy_address_is_not_the_error_of_a_host_that_is_not_proxied() {
+        // As grpcio, which resolves the address of the proxy only for a host that it proxies:
+        // a host of the no-proxy list connects directly, as a loopback host does here.
+        for uri in [
+            "http://:3128",
+            "http://p:notaport",
+            "http://p:80837",
+            "http://p:",
+            "http://bad host:3128",
+            "http://[::1",
+        ] {
+            for no_proxy in [("no_proxy", "spark.example"), ("no_grpc_proxy", ".example")] {
+                let proxy = env(&[("grpc_proxy", uri), no_proxy]).proxy_for("spark.example");
+                assert!(proxy.unwrap().is_none(), "{uri} {no_proxy:?}");
+            }
+            let proxy = env(&[("grpc_proxy", uri)]).proxy_for("localhost");
+            assert!(proxy.unwrap().is_none(), "{uri}");
+            let error = env(&[("grpc_proxy", uri), ("no_proxy", "other.example")])
+                .proxy_for("spark.example")
+                .unwrap_err();
+            assert!(error.starts_with("Invalid HTTP proxy address in grpc_proxy"));
         }
     }
 

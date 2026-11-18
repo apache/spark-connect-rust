@@ -2574,21 +2574,38 @@ kept as None: `create` and `getOrCreate` fail PySpark's assertion, unless a sess
 The client honors the HTTP proxy of the environment (`grpc_proxy`, `https_proxy`, `http_proxy`,
 `no_grpc_proxy`, `no_proxy`) with grpcio's rules, see [HTTP Proxies](configuration.md#http-proxies),
 with two differences: a loopback host is never proxied, where grpcio proxies `localhost` unless
-`no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
-does not connect, but for a port past 65535, which it takes modulo 65536 and connects to (a proxy
-of port 99999 is reached at 34463).
+`no_proxy` lists it, and a proxy address with an invalid host or port is the error of the creation
+of a session of a host that the proxy applies to, where grpcio makes the session and fails its
+requests, but for a port past 65535, which it takes modulo 65536 and connects to (a proxy of port
+99999 is reached at 34463): the error names the variable at once, rather than requests that fail
+later or a connection to a port that was not given. A host that `no_proxy` lists connects
+directly whatever that address, as in grpcio, which resolves it only for a host that it proxies.
+As grpcio, the client logs a proxy variable that is not a proxy, and a roots file that cannot be
+read, as errors on stderr (see [Errors on stderr](configuration.md#errors-on-stderr)).
 
 As in grpcio, a connection has 20 s, its connect deadline, to complete: one deadline from its
-start, which the TCP connection, the tunnel of a proxy and the TLS handshake share. One that does
-not complete fails with `UNAVAILABLE`, which the retry policy retries. Two differences remain.
-grpcio also waits at most 20 s for the server's HTTP/2 settings, while here a plaintext connection
-to a server that accepts it and never answers ends at the keepalive of the connection, 80 s by
-default (`grpc_keepalive_time_ms` and `grpc_keepalive_timeout_ms`), or at the deadline of the call
-without a keepalive. And for a host of several addresses, grpcio starts a connection to the next
-address 250 ms after the previous one while that one is not done, each with a deadline of its own,
-while here the TCP connections to the addresses of a family are tried in turn, each for an equal
-share of the 20 s, those to the other family from 300 ms on, and the TLS handshake is made on the
-first that connects.
+start, which the TCP connection, the tunnel of a proxy, the TLS handshake and the HTTP/2 settings
+that the server sends first share. One that does not complete fails with `UNAVAILABLE`, which the
+retry policy retries: of a plaintext server that accepts the connection and never answers, with
+grpcio's `connection attempt timed out before receiving SETTINGS frame`. Three differences remain.
+Once a connection has failed, grpcio fails the later calls of the channel at once, with its error,
+while it connects again in the background, until a connection succeeds; here each call, and each
+retry, waits for a connection of its own, as the transport has no state of the channel between its
+connections. So against a server that never answers, the first plan of a session without retries
+fails after 40 s, its lookup of the plan compression and its execution waiting 20 s each, where
+PySpark's fails after 20 s, and the release of the session at exit waits 20 s more, where
+PySpark's fails at once.
+The settings of the server of a TLS connection are not bounded: one whose handshake completes and
+whose server never sends them ends at the keepalive of the connection, 80 s by default
+(`grpc_keepalive_time_ms` and `grpc_keepalive_timeout_ms`), or at the deadline of the call without
+a keepalive, as they come inside the TLS session, which tonic reads above the connector that bounds
+them. And for a host of several addresses, grpcio starts a connection to the next address 250 ms
+after the previous one while that one is not done, each with a deadline of its own, while here,
+for a direct connection, the TCP connections to the addresses of a family are tried in turn, each
+for an equal share of the 20 s, those to the other family from 300 ms on, and the TLS handshake is
+made on the first that connects, as hyper-util's connector, tonic's own, which the client connects
+with, tries them; through a proxy, its addresses are tried in turn within the one 20 s, where
+grpcio starts them as those of a host.
 
 The user agent, `<user_agent> spark/4.3.0 os/<os> python/rust`, is sent as PySpark sends it: as
 the client type of the requests that PySpark builds with it, and not as a header. The `user-agent`
@@ -2604,7 +2621,10 @@ that PySpark builds without the user agent, of the artifacts and of `CloneSessio
 `urllib.parse.urlsplit` does, a tab, CR or LF anywhere in the connection string is removed.
 `SPARK_CONNECT_USER_AGENT` is read when a session is made of a connection string, and the sessions
 of `newSession` and `cloneSession` have the user agent of the session they are made of, where
-PySpark's requests read the variable each time.
+PySpark's requests read the variable each time: the core builds the requests of a session without
+Python, on the threads of its runtime too, which do not wait for the GIL, so it reads the variable
+of the environment of the process when the session is made, rather than `os.environ` for each
+request.
 
 A gRPC failure whose status carries no error of the server, such as of an unreachable server or of
 a proxy, is the `SparkConnectGrpcException` of its code whose message is the text of grpcio's
@@ -2617,8 +2637,10 @@ without an `ErrorInfo` is the message of the status. The details are the message
 the server sent, and the `debug_error_string` is the name of the code and the details, as in
 grpcio. Those of a failure that the client detects itself, such as a refused connection, are
 tonic's message (`tcp connect error`), where grpcio's are gRPC's C core's (`failed to connect to
-all addresses; ...`). The errors of `copyFromLocalToFs` and `cloneSession`, which PySpark leaves to
-grpc as its `RpcError`, are converted as those of the other calls.
+all addresses; ...`); of a connection whose server sends no settings, they are grpcio's last error,
+`connection attempt timed out before receiving SETTINGS frame`, without the address. The errors
+of `copyFromLocalToFs` and `cloneSession`, which PySpark leaves to grpc as its `RpcError`, are
+converted as those of the other calls.
 
 As PySpark's `Retrying`, a call whose retries of a failure that a policy retries are spent warns
 `[RETRIES_EXCEEDED] The maximum number of retries has been exceeded.` before it raises the
