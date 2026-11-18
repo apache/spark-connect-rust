@@ -53,18 +53,223 @@ FuncT = TypeVar('FuncT', bound=Callable[..., Any])
 def print_exec(stream: TextIO) -> None: ...
 
 class VersionUtils:
+    """Provides utility method to determine Spark versions with given input string."""
     @staticmethod
-    def majorMinorVersion(sparkVersion: str) -> Tuple[int, int]: ...
+    def majorMinorVersion(sparkVersion: str) -> Tuple[int, int]:
+        """Given a Spark version string, return the (major version number, minor version number).
+        E.g., for 2.0.1-SNAPSHOT, return (2, 0).
 
-def fail_on_stopiteration(f: Callable) -> Callable: ...
+        Examples
+        --------
+        >>> sparkVersion = "2.4.0"
+        >>> VersionUtils.majorMinorVersion(sparkVersion)
+        (2, 4)
+        >>> sparkVersion = "2.3.0-SNAPSHOT"
+        >>> VersionUtils.majorMinorVersion(sparkVersion)
+        (2, 3)
+        """
+
+def fail_on_stopiteration(f: Callable) -> Callable:
+    """Wraps the input function to fail on 'StopIteration' by raising a 'RuntimeError'
+    prevents silent loss of data when 'f' is used in a for loop in Spark code
+    """
 def walk_tb(tb: Optional[TracebackType]) -> Iterator[TracebackType]: ...
-def try_simplify_traceback(tb: TracebackType) -> Optional[TracebackType]: ...
+def try_simplify_traceback(tb: TracebackType) -> Optional[TracebackType]:
+    r"""Simplify the traceback. It removes the tracebacks in the current package, and only
+    shows the traceback that is related to the thirdparty and user-specified codes.
+
+    Returns
+    -------
+    TracebackType or None
+      Simplified traceback instance. It returns None if it fails to simplify.
+
+    Notes
+    -----
+    This keeps the tracebacks once it sees they are from a different file even
+    though the following tracebacks are from the current package.
+
+    Examples
+    --------
+    >>> import importlib
+    >>> import sys
+    >>> import traceback
+    >>> import tempfile
+    >>> with tempfile.TemporaryDirectory(prefix="try_simplify_traceback") as tmp_dir:
+    ...     with open("%s/dummy_module.py" % tmp_dir, "w") as f:
+    ...         _ = f.write(
+    ...             'def raise_stop_iteration():\n'
+    ...             '    raise StopIteration()\n\n'
+    ...             'def simple_wrapper(f):\n'
+    ...             '    def wrapper(*a, **k):\n'
+    ...             '        return f(*a, **k)\n'
+    ...             '    return wrapper\n')
+    ...         f.flush()
+    ...         spec = importlib.util.spec_from_file_location(
+    ...             "dummy_module", "%s/dummy_module.py" % tmp_dir)
+    ...         dummy_module = importlib.util.module_from_spec(spec)
+    ...         spec.loader.exec_module(dummy_module)
+    >>> def skip_doctest_traceback(tb):
+    ...     import pyspark
+    ...     root = os.path.dirname(pyspark.__file__)
+    ...     pairs = zip(walk_tb(tb), traceback.extract_tb(tb))
+    ...     for cur_tb, cur_frame in pairs:
+    ...         if cur_frame.filename.startswith(root):
+    ...             return cur_tb
+
+    Regular exceptions should show the file name of the current package as below.
+
+    >>> exc_info = None
+    >>> try:
+    ...     fail_on_stopiteration(dummy_module.raise_stop_iteration)()
+    ... except Exception as e:
+    ...     tb = sys.exc_info()[-1]
+    ...     e.__cause__ = None
+    ...     exc_info = "".join(
+    ...         traceback.format_exception(type(e), e, tb))
+    >>> print(exc_info)  # doctest: +NORMALIZE_WHITESPACE, +ELLIPSIS
+    Traceback (most recent call last):
+      File ...
+        ...
+      File "/.../pyspark/util.py", line ...
+        ...
+    pyspark.errors.exceptions.base.PySparkRuntimeError: ...
+    >>> "pyspark/util.py" in exc_info
+    True
+
+    If the traceback is simplified with this method, it hides the current package file name:
+
+    >>> exc_info = None
+    >>> try:
+    ...     fail_on_stopiteration(dummy_module.raise_stop_iteration)()
+    ... except Exception as e:
+    ...     tb = try_simplify_traceback(sys.exc_info()[-1])
+    ...     e.__cause__ = None
+    ...     exc_info = "".join(
+    ...         traceback.format_exception(
+    ...             type(e), e, try_simplify_traceback(skip_doctest_traceback(tb))))
+    >>> print(exc_info)  # doctest: +NORMALIZE_WHITESPACE, +ELLIPSIS
+    pyspark.errors.exceptions.base.PySparkRuntimeError: ...
+    >>> "pyspark/util.py" in exc_info
+    False
+
+    In the case below, the traceback contains the current package in the middle.
+    In this case, it just hides the top occurrence only.
+
+    >>> exc_info = None
+    >>> try:
+    ...     fail_on_stopiteration(dummy_module.simple_wrapper(
+    ...         fail_on_stopiteration(dummy_module.raise_stop_iteration)))()
+    ... except Exception as e:
+    ...     tb = sys.exc_info()[-1]
+    ...     e.__cause__ = None
+    ...     exc_info_a = "".join(
+    ...         traceback.format_exception(type(e), e, tb))
+    ...     exc_info_b = "".join(
+    ...         traceback.format_exception(
+    ...             type(e), e, try_simplify_traceback(skip_doctest_traceback(tb))))
+    >>> exc_info_a.count("pyspark/util.py")
+    2
+    >>> exc_info_b.count("pyspark/util.py")
+    1
+    """
 def _print_missing_jar(lib_name: str, pkg_name: str, jar_name: str, spark_version: str) -> None: ...
-def _parse_memory(s: str) -> int: ...
-def inheritable_thread_target(f: Union[Callable, 'SparkSession']) -> Callable: ...
-def handle_worker_exception(e: BaseException, outfile: IO, hide_traceback: Optional[bool]=None) -> None: ...
+def _parse_memory(s: str) -> int:
+    """Parse a memory string in the format supported by Java (e.g. 1g, 200m) and
+    return the value in MiB
+
+    Examples
+    --------
+    >>> _parse_memory("256m")
+    256
+    >>> _parse_memory("2g")
+    2048
+    """
+def inheritable_thread_target(f: Union[Callable, 'SparkSession']) -> Callable:
+    """Return thread target wrapper which is recommended to be used in PySpark when the
+    pinned thread mode is enabled. The wrapper function, before calling original
+    thread target, it inherits the inheritable properties specific
+    to JVM thread such as ``InheritableThreadLocal``, or thread local such as tags
+    with Spark Connect.
+
+    When the pinned thread mode is off, the target wrapper is a no-op.
+
+    .. versionadded:: 3.2.0
+
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
+    Parameters
+    ----------
+    f : function, or :class:`SparkSession`
+        the original thread target, or :class:`SparkSession` if Spark Connect is being used.
+        See the examples below.
+
+    Notes
+    -----
+    This API is experimental.
+
+    It is important to know that it captures the local properties or tags when you
+    decorate it whereas :class:`InheritableThread` captures when the thread is started.
+    Therefore, it is encouraged to decorate it when you want to capture the local
+    properties.
+
+    For example, the local properties or tags from the current Spark context or Spark
+    session is captured when you define a function here instead of the invocation:
+
+    >>> @inheritable_thread_target
+    ... def target_func():
+    ...     pass  # your codes.
+
+    If you have any updates on local properties or tags afterwards, it would not be
+    reflected to the Spark context in ``target_func()``.
+
+    The example below mimics the behavior of JVM threads as close as possible:
+
+    >>> Thread(target=inheritable_thread_target(target_func)).start()  # doctest: +SKIP
+
+    If you're using Spark Connect or if you want to inherit the tags properly,
+    you should explicitly provide Spark session as follows:
+
+    >>> @inheritable_thread_target(session)  # doctest: +SKIP
+    ... def target_func():
+    ...     pass  # your codes.
+
+    >>> Thread(target=inheritable_thread_target(session)(target_func)).start()  # doctest: +SKIP
+    """
+def handle_worker_exception(e: BaseException, outfile: IO, hide_traceback: Optional[bool]=None) -> None:
+    """Handles exception for Python worker which writes SpecialLengths.PYTHON_EXCEPTION_THROWN (-2)
+    and exception traceback info to outfile. JVM could then read from the outfile and perform
+    exception handling there.
+
+    Parameters
+    ----------
+    e : BaseException
+        Exception handled
+    outfile : IO
+        IO object to write the exception info
+    hide_traceback : bool, optional
+        Whether to hide the traceback in the output.
+        By default, hides the traceback if environment variable SPARK_HIDE_TRACEBACK is set.
+    """
 
 class InheritableThread(threading.Thread):
+    """Thread that is recommended to be used in PySpark when the pinned thread mode is
+    enabled. The wrapper function, before calling original thread target, it
+    inherits the inheritable properties specific to JVM thread such as
+    ``InheritableThreadLocal``, or thread local such as tags
+    with Spark Connect.
+
+    When the pinned thread mode is off, this works as :class:`threading.Thread`.
+
+    .. versionadded:: 3.1.0
+
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
+    Notes
+    -----
+    This API is experimental.
+    """
     _props: 'JavaObject'
     def __init__(self, target: Callable, *args: Any, session: Optional['SparkSession']=None, **kwargs: Any):
         from pyspark.sql import is_remote
@@ -137,6 +342,12 @@ class InheritableThread(threading.Thread):
         return super().start()
 
 class PythonEvalType:
+    """Evaluation type of python rdd.
+
+    These values are internal to PySpark.
+
+    These values should match values in org.apache.spark.api.python.PythonEvalType.
+    """
     NON_UDF: 'NonUDFType' = ...
     SQL_BATCHED_UDF: 'SQLBatchedUDFType' = ...
     SQL_ARROW_BATCHED_UDF: 'SQLArrowBatchedUDFType' = ...
@@ -167,20 +378,85 @@ class PythonEvalType:
     SQL_ARROW_TABLE_UDF: 'SQLArrowTableUDFType' = ...
     SQL_ARROW_UDTF: 'SQLArrowUDTFType' = ...
 
-def _create_local_socket(sock_info: 'JavaArray') -> Tuple['io.BufferedRWPair', 'socket.socket']: ...
+def _create_local_socket(sock_info: 'JavaArray') -> Tuple['io.BufferedRWPair', 'socket.socket']:
+    """Create a local socket that can be used to load deserialized data from the JVM
+
+    Parameters
+    ----------
+    sock_info : tuple
+        Tuple containing port number and authentication secret for a local socket.
+
+    Returns
+    -------
+    sockfile file descriptor of the local socket
+    """
 @contextmanager
-def _load_from_socket(sock_info: 'JavaArray', serializer: 'Serializer') -> Iterator[Any]: ...
+def _load_from_socket(sock_info: 'JavaArray', serializer: 'Serializer') -> Iterator[Any]:
+    """Connect to a local socket described by sock_info and use the given serializer to yield data
+
+    Parameters
+    ----------
+    sock_info : tuple
+        Tuple containing port number and authentication secret for a local socket.
+    serializer : class:`Serializer`
+        The PySpark serializer to use
+
+    Returns
+    -------
+    result of meth:`Serializer.load_stream`,
+    usually a generator that yields deserialized data
+    """
 def _local_iterator_from_socket(sock_info: 'JavaArray', serializer: 'Serializer') -> Iterator[Any]: ...
-def local_connect_and_auth(conn_info: Optional[Union[str, int]], auth_secret: Optional[str]) -> Tuple: ...
-def _do_server_auth(conn: 'io.IOBase', auth_secret: str) -> None: ...
+def local_connect_and_auth(conn_info: Optional[Union[str, int]], auth_secret: Optional[str]) -> Tuple:
+    """Connect to local host, authenticate with it, and return a (sockfile,sock) for that connection.
+    Handles IPV4 & IPV6, does some error handling.
+
+    Parameters
+    ----------
+    port : str or int, optional
+    auth_secret : str, optional
+
+    Returns
+    -------
+    tuple
+        with (sockfile, sock)
+    """
+def _do_server_auth(conn: 'io.IOBase', auth_secret: str) -> None:
+    """Performs the authentication protocol defined by the SocketAuthHelper class on the given
+    file-like object 'conn'.
+    """
 @contextlib.contextmanager
 def disable_gc() -> Generator[None, None, None]: ...
 
 _is_remote_only = None
 
-def is_remote_only() -> bool: ...
-def spark_connect_mode() -> str: ...
-def default_api_mode() -> str: ...
+def is_remote_only() -> bool:
+    """Returns if the current running environment is only for Spark Connect.
+    If users install pyspark-client alone, RDD API does not exist.
+
+    .. versionadded:: 4.0.0
+
+    Notes
+    -----
+    This will only return ``True`` if installed PySpark is only for Spark Connect.
+    Otherwise, it returns ``False``.
+
+    This API is unstable, and for developers.
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> from pyspark.sql import is_remote
+    >>> is_remote()
+    False
+    """
+def spark_connect_mode() -> str:
+    """Return the env var SPARK_CONNECT_MODE; otherwise "1" if `pyspark_connect` is available."""
+def default_api_mode() -> str:
+    """Return the default API mode."""
 
 class _FaulthandlerHelper:
     def __init__(self) -> None:
@@ -225,7 +501,11 @@ class _FaulthandlerHelper:
         if traceback_dump_interval_seconds is not None and int(traceback_dump_interval_seconds) > 0:
             self._periodic_traceback = True
             faulthandler.dump_traceback_later(int(traceback_dump_interval_seconds), repeat=True)
-    def with_faulthandler(self, func: Callable) -> Callable: ...
+    def with_faulthandler(self, func: Callable) -> Callable:
+        """Registers fault handler for the duration of function execution.
+        After function execution is over the faulthandler registration is cleaned as well,
+        including any files created for the integration.
+        """
     @contextmanager
     def enable_faulthandler(self, start_periodic_traceback: bool=True) -> Iterator[None]: ...
 

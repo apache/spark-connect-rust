@@ -536,8 +536,11 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   `docs/compatibility.md`). Their classes are typed as the drop-in's, subclasses of PySpark's
   classes of `pyspark.ml`, as at run time, where those of `pyspark-client` are its ML API on
   PyTorch.
-- **Docstrings** (tracked). The stubs keep no docstrings of PySpark's, so an editor shows the
-  signatures of the stubbed modules without their documentation.
+- **Docstrings of PySpark Connect** (intentional). The stubs keep the docstrings that PySpark's
+  objects have at run time, also those that the modules of PySpark Connect copy of the classic
+  ones, which pyright does not see in `pyspark-client`'s source: a hover over
+  `pyspark.sql.connect.functions.col` or Spark Connect's `SparkSession.builder` shows PySpark's
+  documentation with the drop-in, and none with `pyspark-client`.
 - **Modules of messages** (intentional). pyright warns that `pyspark.sql.connect.proto.base_pb2`
   and the other modules of messages, which the drop-in's protobuf runtime makes at run time, have
   a stub and no source (`reportMissingModuleSource`), as it does of

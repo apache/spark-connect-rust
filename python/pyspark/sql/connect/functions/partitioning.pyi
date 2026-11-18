@@ -22,8 +22,145 @@ from pyspark.sql.column import Column
 from pyspark.sql.connect.functions.builtin import lit as lit
 from pyspark.sql.connect._typing import ColumnOrName
 
-def bucket(numBuckets: Union[Column, int], col: 'ColumnOrName') -> Column: ...
-def years(col: 'ColumnOrName') -> Column: ...
-def months(col: 'ColumnOrName') -> Column: ...
-def days(col: 'ColumnOrName') -> Column: ...
-def hours(col: 'ColumnOrName') -> Column: ...
+def bucket(numBuckets: Union[Column, int], col: 'ColumnOrName') -> Column:
+    """Partition transform function: A transform for any type that partitions
+    by a hash of the input column.
+
+    .. versionadded:: 4.0.0
+
+    Examples
+    --------
+    >>> df.writeTo("catalog.db.table").partitionedBy(  # doctest: +SKIP
+    ...     partitioning.bucket(42, "ts")
+    ... ).createOrReplace()
+
+    Parameters
+    ----------
+    numBuckets : :class:`~pyspark.sql.Column` or int
+        the number of buckets
+    col : :class:`~pyspark.sql.Column` or str
+        target date or timestamp column to work on.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        data partitioned by given columns.
+
+    Notes
+    -----
+    This function can be used only in combination with
+    :py:meth:`~pyspark.sql.readwriter.DataFrameWriterV2.partitionedBy`
+    method of the `DataFrameWriterV2`.
+    """
+def years(col: 'ColumnOrName') -> Column:
+    """Partition transform function: A transform for timestamps and dates
+    to partition data into years.
+
+    .. versionadded:: 4.0.0
+
+    Parameters
+    ----------
+    col : :class:`~pyspark.sql.Column` or str
+        target date or timestamp column to work on.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        data partitioned by years.
+
+    Examples
+    --------
+    >>> df.writeTo("catalog.db.table").partitionedBy(  # doctest: +SKIP
+    ...     partitioning.years("ts")
+    ... ).createOrReplace()
+
+    Notes
+    -----
+    This function can be used only in combination with
+    :py:meth:`~pyspark.sql.readwriter.DataFrameWriterV2.partitionedBy`
+    method of the `DataFrameWriterV2`.
+    """
+def months(col: 'ColumnOrName') -> Column:
+    """Partition transform function: A transform for timestamps and dates
+    to partition data into months.
+
+    .. versionadded:: 4.0.0
+
+    Parameters
+    ----------
+    col : :class:`~pyspark.sql.Column` or str
+        target date or timestamp column to work on.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        data partitioned by months.
+
+    Examples
+    --------
+    >>> df.writeTo("catalog.db.table").partitionedBy(
+    ...     partitioning.months("ts")
+    ... ).createOrReplace()  # doctest: +SKIP
+
+    Notes
+    -----
+    This function can be used only in combination with
+    :py:meth:`~pyspark.sql.readwriter.DataFrameWriterV2.partitionedBy`
+    method of the `DataFrameWriterV2`.
+    """
+def days(col: 'ColumnOrName') -> Column:
+    """Partition transform function: A transform for timestamps and dates
+    to partition data into days.
+
+    .. versionadded:: 4.0.0
+
+    Parameters
+    ----------
+    col : :class:`~pyspark.sql.Column` or str
+        target date or timestamp column to work on.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        data partitioned by days.
+
+    Examples
+    --------
+    >>> df.writeTo("catalog.db.table").partitionedBy(  # doctest: +SKIP
+    ...     partitioning.days("ts")
+    ... ).createOrReplace()
+
+    Notes
+    -----
+    This function can be used only in combination with
+    :py:meth:`~pyspark.sql.readwriter.DataFrameWriterV2.partitionedBy`
+    method of the `DataFrameWriterV2`.
+    """
+def hours(col: 'ColumnOrName') -> Column:
+    """Partition transform function: A transform for timestamps
+    to partition data into hours.
+
+    .. versionadded:: 4.0.0
+
+    Parameters
+    ----------
+    col : :class:`~pyspark.sql.Column` or str
+        target date or timestamp column to work on.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        data partitioned by hours.
+
+    Examples
+    --------
+    >>> df.writeTo("catalog.db.table").partitionedBy(   # doctest: +SKIP
+    ...     partitioning.hours("ts")
+    ... ).createOrReplace()
+
+    Notes
+    -----
+    This function can be used only in combination with
+    :py:meth:`~pyspark.sql.readwriter.DataFrameWriterV2.partitionedBy`
+    method of the `DataFrameWriterV2`.
+    """

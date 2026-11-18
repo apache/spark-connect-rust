@@ -27,6 +27,11 @@ from pyspark.sql.metrics import ExecutionInfo
 __all__ = ['MergeIntoWriter']
 
 class MergeIntoWriter:
+    """`MergeIntoWriter` provides methods to define and execute merge actions based
+    on specified conditions.
+
+    .. versionadded:: 4.0.0
+    """
     def __init__(self, plan: 'LogicalPlan', session: 'SparkSession', table: str, condition: Column, callback: Optional[Callable[['ExecutionInfo'], None]]=None):
         self._client = session.client
         self._target_table = table
@@ -38,30 +43,90 @@ class MergeIntoWriter:
         self._matched_actions: list[proto.MergeAction] = list()
         self._not_matched_actions: list[proto.MergeAction] = list()
         self._not_matched_by_source_actions: list[proto.MergeAction] = list()
-    def whenMatched(self, condition: Optional[Column]=None) -> 'MergeIntoWriter.WhenMatched': ...
-    def whenNotMatched(self, condition: Optional[Column]=None) -> 'MergeIntoWriter.WhenNotMatched': ...
-    def whenNotMatchedBySource(self, condition: Optional[Column]=None) -> 'MergeIntoWriter.WhenNotMatchedBySource': ...
+    def whenMatched(self, condition: Optional[Column]=None) -> 'MergeIntoWriter.WhenMatched':
+        """Initialize a `WhenMatched` action with a condition.
+
+        This `WhenMatched` action will be executed when a source row matches a target table row
+        based on the merge condition and the specified `condition` is satisfied.
+
+        This `WhenMatched` can be followed by one of the following merge actions:
+          - `updateAll`: Update all the matched target table rows with source dataset rows.
+          - `update(Dict)`: Update all the matched target table rows while changing only
+            a subset of columns based on the provided assignment.
+          - `delete`: Delete all target rows that have a match in the source table.
+        """
+    def whenNotMatched(self, condition: Optional[Column]=None) -> 'MergeIntoWriter.WhenNotMatched':
+        """Initialize a `WhenNotMatched` action with a condition.
+
+        This `WhenNotMatched` action will be executed when a source row does not match any target
+        row based on the merge condition and the specified `condition` is satisfied.
+
+        This `WhenNotMatched` can be followed by one of the following merge actions:
+          - `insertAll`: Insert all rows from the source that are not already in the target table.
+          - `insert(Dict)`: Insert all rows from the source that are not already in the target
+            table, with the specified columns based on the provided assignment.
+        """
+    def whenNotMatchedBySource(self, condition: Optional[Column]=None) -> 'MergeIntoWriter.WhenNotMatchedBySource':
+        """Initialize a `WhenNotMatchedBySource` action with a condition.
+
+        This `WhenNotMatchedBySource` action will be executed when a target row does not match any
+        rows in the source table based on the merge condition and the specified `condition`
+        is satisfied.
+
+        This `WhenNotMatchedBySource` can be followed by one of the following merge actions:
+          - `updateAll`: Update all the not matched target table rows with source dataset rows.
+          - `update(Dict)`: Update all the not matched target table rows while changing only
+            the specified columns based on the provided assignment.
+          - `delete`: Delete all target rows that have no matches in the source table.
+        """
     def withSchemaEvolution(self) -> 'MergeIntoWriter':
+        """Enable automatic schema evolution for this merge operation."""
         self._schema_evolution_enabled = True
         return self
-    def merge(self) -> None: ...
+    def merge(self) -> None:
+        """Execute the merge operation."""
     class WhenMatched:
+        """A class for defining actions to be taken when matching rows in a DataFrame during
+        a merge operation.
+        """
         def __init__(self, writer: 'MergeIntoWriter', condition: Optional[Column]):
             self.writer = writer
             self._condition = condition
-        def updateAll(self) -> 'MergeIntoWriter': ...
-        def update(self, assignments: Dict[str, Column]) -> 'MergeIntoWriter': ...
-        def delete(self) -> 'MergeIntoWriter': ...
+        def updateAll(self) -> 'MergeIntoWriter':
+            """Specifies an action to update all matched rows in the DataFrame."""
+        def update(self, assignments: Dict[str, Column]) -> 'MergeIntoWriter':
+            """Specifies an action to update matched rows in the DataFrame with the provided column
+            assignments.
+            """
+        def delete(self) -> 'MergeIntoWriter':
+            """Specifies an action to delete matched rows from the DataFrame."""
     class WhenNotMatched:
+        """A class for defining actions to be taken when no matching rows are found in a DataFrame
+        during a merge operation.
+        """
         def __init__(self, writer: 'MergeIntoWriter', condition: Optional[Column]):
             self.writer = writer
             self._condition = condition
-        def insertAll(self) -> 'MergeIntoWriter': ...
-        def insert(self, assignments: Dict[str, Column]) -> 'MergeIntoWriter': ...
+        def insertAll(self) -> 'MergeIntoWriter':
+            """Specifies an action to insert all non-matched rows into the DataFrame."""
+        def insert(self, assignments: Dict[str, Column]) -> 'MergeIntoWriter':
+            """Specifies an action to insert non-matched rows into the DataFrame with the provided
+            column assignments.
+            """
     class WhenNotMatchedBySource:
+        """A class for defining actions to be performed when there is no match by source
+        during a merge operation in a MergeIntoWriter.
+        """
         def __init__(self, writer: 'MergeIntoWriter', condition: Optional[Column]):
             self.writer = writer
             self._condition = condition
-        def updateAll(self) -> 'MergeIntoWriter': ...
-        def update(self, assignments: Dict[str, Column]) -> 'MergeIntoWriter': ...
-        def delete(self) -> 'MergeIntoWriter': ...
+        def updateAll(self) -> 'MergeIntoWriter':
+            """Specifies an action to update all non-matched rows in the target DataFrame when
+            not matched by the source.
+            """
+        def update(self, assignments: Dict[str, Column]) -> 'MergeIntoWriter':
+            """Specifies an action to update non-matched rows in the target DataFrame with the provided
+            column assignments when not matched by the source.
+            """
+        def delete(self) -> 'MergeIntoWriter':
+            """Specifies an action to delete matched rows from the DataFrame."""

@@ -24,9 +24,235 @@ from pyspark.ml.evaluation import JavaEvaluator as JavaEvaluator
 
 __all__ = ['Evaluator', 'BinaryClassificationEvaluator', 'RegressionEvaluator', 'MulticlassClassificationEvaluator', 'MultilabelClassificationEvaluator', 'ClusteringEvaluator', 'RankingEvaluator']
 
-class BinaryClassificationEvaluator(_pysparks.BinaryClassificationEvaluator): ...
-class ClusteringEvaluator(_pysparks.ClusteringEvaluator): ...
-class MulticlassClassificationEvaluator(_pysparks.MulticlassClassificationEvaluator): ...
-class MultilabelClassificationEvaluator(_pysparks.MultilabelClassificationEvaluator): ...
-class RankingEvaluator(_pysparks.RankingEvaluator): ...
-class RegressionEvaluator(_pysparks.RegressionEvaluator): ...
+class BinaryClassificationEvaluator(_pysparks.BinaryClassificationEvaluator):
+    """Evaluator for binary classification, which expects input columns rawPrediction, label
+    and an optional weight column.
+    The rawPrediction column can be of type double (binary 0/1 prediction, or probability of label
+    1) or of type vector (length-2 vector of raw predictions, scores, or label probabilities).
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> scoreAndLabels = map(lambda x: (Vectors.dense([1.0 - x[0], x[0]]), x[1]),
+    ...    [(0.1, 0.0), (0.1, 1.0), (0.4, 0.0), (0.6, 0.0), (0.6, 1.0), (0.6, 1.0), (0.8, 1.0)])
+    >>> dataset = spark.createDataFrame(scoreAndLabels, ["raw", "label"])
+    ...
+    >>> evaluator = BinaryClassificationEvaluator()
+    >>> evaluator.setRawPredictionCol("raw")
+    BinaryClassificationEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.70...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "areaUnderPR"})
+    0.83...
+    >>> bce_path = temp_path + "/bce"
+    >>> evaluator.save(bce_path)
+    >>> evaluator2 = BinaryClassificationEvaluator.load(bce_path)
+    >>> str(evaluator2.getRawPredictionCol())
+    'raw'
+    >>> scoreAndLabelsAndWeight = map(lambda x: (Vectors.dense([1.0 - x[0], x[0]]), x[1], x[2]),
+    ...    [(0.1, 0.0, 1.0), (0.1, 1.0, 0.9), (0.4, 0.0, 0.7), (0.6, 0.0, 0.9),
+    ...     (0.6, 1.0, 1.0), (0.6, 1.0, 0.3), (0.8, 1.0, 1.0)])
+    >>> dataset = spark.createDataFrame(scoreAndLabelsAndWeight, ["raw", "label", "weight"])
+    ...
+    >>> evaluator = BinaryClassificationEvaluator(rawPredictionCol="raw", weightCol="weight")
+    >>> evaluator.evaluate(dataset)
+    0.70...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "areaUnderPR"})
+    0.82...
+    >>> evaluator.getNumBins()
+    1000
+    """
+class ClusteringEvaluator(_pysparks.ClusteringEvaluator):
+    """Evaluator for Clustering results, which expects two input
+    columns: prediction and features. The metric computes the Silhouette
+    measure using the squared Euclidean distance.
+
+    The Silhouette is a measure for the validation of the consistency
+    within clusters. It ranges between 1 and -1, where a value close to
+    1 means that the points in a cluster are close to the other points
+    in the same cluster and far from the points of the other clusters.
+
+    .. versionadded:: 2.3.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> featureAndPredictions = map(lambda x: (Vectors.dense(x[0]), x[1]),
+    ...     [([0.0, 0.5], 0.0), ([0.5, 0.0], 0.0), ([10.0, 11.0], 1.0),
+    ...     ([10.5, 11.5], 1.0), ([1.0, 1.0], 0.0), ([8.0, 6.0], 1.0)])
+    >>> dataset = spark.createDataFrame(featureAndPredictions, ["features", "prediction"])
+    ...
+    >>> evaluator = ClusteringEvaluator()
+    >>> evaluator.setPredictionCol("prediction")
+    ClusteringEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.9079...
+    >>> featureAndPredictionsWithWeight = map(lambda x: (Vectors.dense(x[0]), x[1], x[2]),
+    ...     [([0.0, 0.5], 0.0, 2.5), ([0.5, 0.0], 0.0, 2.5), ([10.0, 11.0], 1.0, 2.5),
+    ...     ([10.5, 11.5], 1.0, 2.5), ([1.0, 1.0], 0.0, 2.5), ([8.0, 6.0], 1.0, 2.5)])
+    >>> dataset = spark.createDataFrame(
+    ...     featureAndPredictionsWithWeight, ["features", "prediction", "weight"])
+    >>> evaluator = ClusteringEvaluator()
+    >>> evaluator.setPredictionCol("prediction")
+    ClusteringEvaluator...
+    >>> evaluator.setWeightCol("weight")
+    ClusteringEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.9079...
+    >>> ce_path = temp_path + "/ce"
+    >>> evaluator.save(ce_path)
+    >>> evaluator2 = ClusteringEvaluator.load(ce_path)
+    >>> str(evaluator2.getPredictionCol())
+    'prediction'
+    """
+class MulticlassClassificationEvaluator(_pysparks.MulticlassClassificationEvaluator):
+    """Evaluator for Multiclass Classification, which expects input
+    columns: prediction, label, weight (optional) and probabilityCol (only for logLoss).
+
+    .. versionadded:: 1.5.0
+
+    Examples
+    --------
+    >>> scoreAndLabels = [(0.0, 0.0), (0.0, 1.0), (0.0, 0.0),
+    ...     (1.0, 0.0), (1.0, 1.0), (1.0, 1.0), (1.0, 1.0), (2.0, 2.0), (2.0, 0.0)]
+    >>> dataset = spark.createDataFrame(scoreAndLabels, ["prediction", "label"])
+    >>> evaluator = MulticlassClassificationEvaluator()
+    >>> evaluator.setPredictionCol("prediction")
+    MulticlassClassificationEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.66...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "accuracy"})
+    0.66...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "truePositiveRateByLabel",
+    ...     evaluator.metricLabel: 1.0})
+    0.75...
+    >>> evaluator.setMetricName("hammingLoss")
+    MulticlassClassificationEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.33...
+    >>> mce_path = temp_path + "/mce"
+    >>> evaluator.save(mce_path)
+    >>> evaluator2 = MulticlassClassificationEvaluator.load(mce_path)
+    >>> str(evaluator2.getPredictionCol())
+    'prediction'
+    >>> scoreAndLabelsAndWeight = [(0.0, 0.0, 1.0), (0.0, 1.0, 1.0), (0.0, 0.0, 1.0),
+    ...     (1.0, 0.0, 1.0), (1.0, 1.0, 1.0), (1.0, 1.0, 1.0), (1.0, 1.0, 1.0),
+    ...     (2.0, 2.0, 1.0), (2.0, 0.0, 1.0)]
+    >>> dataset = spark.createDataFrame(scoreAndLabelsAndWeight, ["prediction", "label", "weight"])
+    >>> evaluator = MulticlassClassificationEvaluator(predictionCol="prediction",
+    ...     weightCol="weight")
+    >>> evaluator.evaluate(dataset)
+    0.66...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "accuracy"})
+    0.66...
+    >>> predictionAndLabelsWithProbabilities = [
+    ...      (1.0, 1.0, 1.0, [0.1, 0.8, 0.1]), (0.0, 2.0, 1.0, [0.9, 0.05, 0.05]),
+    ...      (0.0, 0.0, 1.0, [0.8, 0.2, 0.0]), (1.0, 1.0, 1.0, [0.3, 0.65, 0.05])]
+    >>> dataset = spark.createDataFrame(predictionAndLabelsWithProbabilities, ["prediction",
+    ...     "label", "weight", "probability"])
+    >>> evaluator = MulticlassClassificationEvaluator(predictionCol="prediction",
+    ...     probabilityCol="probability")
+    >>> evaluator.setMetricName("logLoss")
+    MulticlassClassificationEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.9682...
+    """
+class MultilabelClassificationEvaluator(_pysparks.MultilabelClassificationEvaluator):
+    """Evaluator for Multilabel Classification, which expects two input
+    columns: prediction and label.
+
+    .. versionadded:: 3.0.0
+
+    Notes
+    -----
+    Experimental
+
+    Examples
+    --------
+    >>> scoreAndLabels = [([0.0, 1.0], [0.0, 2.0]), ([0.0, 2.0], [0.0, 1.0]),
+    ...     ([], [0.0]), ([2.0], [2.0]), ([2.0, 0.0], [2.0, 0.0]),
+    ...     ([0.0, 1.0, 2.0], [0.0, 1.0]), ([1.0], [1.0, 2.0])]
+    >>> dataset = spark.createDataFrame(scoreAndLabels, ["prediction", "label"])
+    ...
+    >>> evaluator = MultilabelClassificationEvaluator()
+    >>> evaluator.setPredictionCol("prediction")
+    MultilabelClassificationEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.63...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "accuracy"})
+    0.54...
+    >>> mlce_path = temp_path + "/mlce"
+    >>> evaluator.save(mlce_path)
+    >>> evaluator2 = MultilabelClassificationEvaluator.load(mlce_path)
+    >>> str(evaluator2.getPredictionCol())
+    'prediction'
+    """
+class RankingEvaluator(_pysparks.RankingEvaluator):
+    """Evaluator for Ranking, which expects two input
+    columns: prediction and label.
+
+    .. versionadded:: 3.0.0
+
+    Notes
+    -----
+    Experimental
+
+    Examples
+    --------
+    >>> scoreAndLabels = [([1.0, 6.0, 2.0, 7.0, 8.0, 3.0, 9.0, 10.0, 4.0, 5.0],
+    ...     [1.0, 2.0, 3.0, 4.0, 5.0]),
+    ...     ([4.0, 1.0, 5.0, 6.0, 2.0, 7.0, 3.0, 8.0, 9.0, 10.0], [1.0, 2.0, 3.0]),
+    ...     ([1.0, 2.0, 3.0, 4.0, 5.0], [])]
+    >>> dataset = spark.createDataFrame(scoreAndLabels, ["prediction", "label"])
+    ...
+    >>> evaluator = RankingEvaluator()
+    >>> evaluator.setPredictionCol("prediction")
+    RankingEvaluator...
+    >>> evaluator.evaluate(dataset)
+    0.35...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "precisionAtK", evaluator.k: 2})
+    0.33...
+    >>> ranke_path = temp_path + "/ranke"
+    >>> evaluator.save(ranke_path)
+    >>> evaluator2 = RankingEvaluator.load(ranke_path)
+    >>> str(evaluator2.getPredictionCol())
+    'prediction'
+    """
+class RegressionEvaluator(_pysparks.RegressionEvaluator):
+    """Evaluator for Regression, which expects input columns prediction, label
+    and an optional weight column.
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> scoreAndLabels = [(-28.98343821, -27.0), (20.21491975, 21.5),
+    ...   (-25.98418959, -22.0), (30.69731842, 33.0), (74.69283752, 71.0)]
+    >>> dataset = spark.createDataFrame(scoreAndLabels, ["raw", "label"])
+    ...
+    >>> evaluator = RegressionEvaluator()
+    >>> evaluator.setPredictionCol("raw")
+    RegressionEvaluator...
+    >>> evaluator.evaluate(dataset)
+    2.842...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "r2"})
+    0.993...
+    >>> evaluator.evaluate(dataset, {evaluator.metricName: "mae"})
+    2.649...
+    >>> re_path = temp_path + "/re"
+    >>> evaluator.save(re_path)
+    >>> evaluator2 = RegressionEvaluator.load(re_path)
+    >>> str(evaluator2.getPredictionCol())
+    'raw'
+    >>> scoreAndLabelsAndWeight = [(-28.98343821, -27.0, 1.0), (20.21491975, 21.5, 0.8),
+    ...   (-25.98418959, -22.0, 1.0), (30.69731842, 33.0, 0.6), (74.69283752, 71.0, 0.2)]
+    >>> dataset = spark.createDataFrame(scoreAndLabelsAndWeight, ["raw", "label", "weight"])
+    ...
+    >>> evaluator = RegressionEvaluator(predictionCol="raw", weightCol="weight")
+    >>> evaluator.evaluate(dataset)
+    2.740...
+    >>> evaluator.getThroughOrigin()
+    False
+    """

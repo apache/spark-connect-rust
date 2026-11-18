@@ -23,17 +23,436 @@ from pyspark.ml.clustering import ClusteringSummary as ClusteringSummary
 
 __all__ = ['BisectingKMeans', 'BisectingKMeansModel', 'BisectingKMeansSummary', 'KMeans', 'KMeansModel', 'KMeansSummary', 'GaussianMixture', 'GaussianMixtureModel', 'GaussianMixtureSummary', 'LDA', 'LDAModel', 'LocalLDAModel', 'DistributedLDAModel', 'PowerIterationClustering']
 
-class LDA(_pysparks.LDA): ...
-class BisectingKMeans(_pysparks.BisectingKMeans): ...
-class BisectingKMeansModel(_pysparks.BisectingKMeansModel): ...
-class BisectingKMeansSummary(_pysparks.BisectingKMeansSummary): ...
-class LDAModel(_pysparks.LDAModel): ...
-class DistributedLDAModel(LDAModel, _pysparks.DistributedLDAModel): ...
-class GaussianMixture(_pysparks.GaussianMixture): ...
-class GaussianMixtureModel(_pysparks.GaussianMixtureModel): ...
-class GaussianMixtureSummary(_pysparks.GaussianMixtureSummary): ...
-class KMeans(_pysparks.KMeans): ...
-class KMeansModel(_pysparks.KMeansModel): ...
-class KMeansSummary(_pysparks.KMeansSummary): ...
-class LocalLDAModel(LDAModel, _pysparks.LocalLDAModel): ...
-class PowerIterationClustering(_pysparks.PowerIterationClustering): ...
+class LDA(_pysparks.LDA):
+    """Latent Dirichlet Allocation (LDA), a topic model designed for text documents.
+
+    Terminology:
+
+     - "term" = "word": an element of the vocabulary
+     - "token": instance of a term appearing in a document
+     - "topic": multinomial distribution over terms representing some concept
+     - "document": one piece of text, corresponding to one row in the input data
+
+    Original LDA paper (journal version):
+      Blei, Ng, and Jordan.  "Latent Dirichlet Allocation."  JMLR, 2003.
+
+    Input data (featuresCol):
+    LDA is given a collection of documents as input data, via the featuresCol parameter.
+    Each document is specified as a :py:class:`Vector` of length vocabSize, where each entry is the
+    count for the corresponding term (word) in the document.  Feature transformers such as
+    :py:class:`pyspark.ml.feature.Tokenizer` and :py:class:`pyspark.ml.feature.CountVectorizer`
+    can be useful for converting text to word count vectors.
+
+    .. versionadded:: 2.0.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors, SparseVector
+    >>> from pyspark.ml.clustering import LDA
+    >>> df = spark.createDataFrame([[1, Vectors.dense([0.0, 1.0])],
+    ...      [2, SparseVector(2, {0: 1.0})],], ["id", "features"])
+    >>> lda = LDA(k=2, seed=1, optimizer="em")
+    >>> lda.setMaxIter(10)
+    LDA...
+    >>> lda.getMaxIter()
+    10
+    >>> lda.clear(lda.maxIter)
+    >>> model = lda.fit(df)
+    >>> model.setSeed(1)
+    DistributedLDAModel...
+    >>> model.getTopicDistributionCol()
+    'topicDistribution'
+    >>> model.isDistributed()
+    True
+    >>> localModel = model.toLocal()
+    >>> localModel.isDistributed()
+    False
+    >>> model.vocabSize()
+    2
+    >>> model.describeTopics().show()
+    +-----+-----------+--------------------+
+    |topic|termIndices|         termWeights|
+    +-----+-----------+--------------------+
+    |    0|     [1, 0]|[0.50401530077160...|
+    |    1|     [0, 1]|[0.50401530077160...|
+    +-----+-----------+--------------------+
+    ...
+    >>> model.topicsMatrix()
+    DenseMatrix(2, 2, [0.496, 0.504, 0.504, 0.496], 0)
+    >>> lda_path = temp_path + "/lda"
+    >>> lda.save(lda_path)
+    >>> sameLDA = LDA.load(lda_path)
+    >>> distributed_model_path = temp_path + "/lda_distributed_model"
+    >>> model.save(distributed_model_path)
+    >>> sameModel = DistributedLDAModel.load(distributed_model_path)
+    >>> local_model_path = temp_path + "/lda_local_model"
+    >>> localModel.save(local_model_path)
+    >>> sameLocalModel = LocalLDAModel.load(local_model_path)
+    >>> model.transform(df).take(1) == sameLocalModel.transform(df).take(1)
+    True
+    """
+class BisectingKMeans(_pysparks.BisectingKMeans):
+    """A bisecting k-means algorithm based on the paper "A comparison of document clustering
+    techniques" by Steinbach, Karypis, and Kumar, with modification to fit Spark.
+    The algorithm starts from a single cluster that contains all points.
+    Iteratively it finds divisible clusters on the bottom level and bisects each of them using
+    k-means, until there are `k` leaf clusters in total or no leaf clusters are divisible.
+    The bisecting steps of clusters on the same level are grouped together to increase parallelism.
+    If bisecting all divisible clusters on the bottom level would result more than `k` leaf
+    clusters, larger clusters get higher priority.
+
+    .. versionadded:: 2.0.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> data = [(Vectors.dense([0.0, 0.0]), 2.0), (Vectors.dense([1.0, 1.0]), 2.0),
+    ...         (Vectors.dense([9.0, 8.0]), 2.0), (Vectors.dense([8.0, 9.0]), 2.0)]
+    >>> df = spark.createDataFrame(data, ["features", "weighCol"])
+    >>> bkm = BisectingKMeans(k=2, minDivisibleClusterSize=1.0)
+    >>> bkm.setMaxIter(10)
+    BisectingKMeans...
+    >>> bkm.getMaxIter()
+    10
+    >>> bkm.clear(bkm.maxIter)
+    >>> bkm.setSeed(1)
+    BisectingKMeans...
+    >>> bkm.setWeightCol("weighCol")
+    BisectingKMeans...
+    >>> bkm.getSeed()
+    1
+    >>> bkm.clear(bkm.seed)
+    >>> model = bkm.fit(df)
+    >>> model.getMaxIter()
+    20
+    >>> model.setPredictionCol("newPrediction")
+    BisectingKMeansModel...
+    >>> model.predict(df.head().features)
+    0
+    >>> centers = model.clusterCenters()
+    >>> len(centers)
+    2
+    >>> model.computeCost(df)
+    2.0
+    >>> model.hasSummary
+    True
+    >>> summary = model.summary
+    >>> summary.k
+    2
+    >>> summary.clusterSizes
+    [2, 2]
+    >>> summary.trainingCost
+    4.000...
+    >>> transformed = model.transform(df).select("features", "newPrediction")
+    >>> rows = transformed.collect()
+    >>> rows[0].newPrediction == rows[1].newPrediction
+    True
+    >>> rows[2].newPrediction == rows[3].newPrediction
+    True
+    >>> bkm_path = temp_path + "/bkm"
+    >>> bkm.save(bkm_path)
+    >>> bkm2 = BisectingKMeans.load(bkm_path)
+    >>> bkm2.getK()
+    2
+    >>> bkm2.getDistanceMeasure()
+    'euclidean'
+    >>> model_path = temp_path + "/bkm_model"
+    >>> model.save(model_path)
+    >>> model2 = BisectingKMeansModel.load(model_path)
+    >>> model2.hasSummary
+    False
+    >>> model.clusterCenters()[0] == model2.clusterCenters()[0]
+    array([ True,  True], dtype=bool)
+    >>> model.clusterCenters()[1] == model2.clusterCenters()[1]
+    array([ True,  True], dtype=bool)
+    >>> model.transform(df).take(1) == model2.transform(df).take(1)
+    True
+    """
+class BisectingKMeansModel(_pysparks.BisectingKMeansModel):
+    """Model fitted by BisectingKMeans.
+
+    .. versionadded:: 2.0.0
+    """
+class BisectingKMeansSummary(_pysparks.BisectingKMeansSummary):
+    """Bisecting KMeans clustering results for a given model.
+
+    .. versionadded:: 2.1.0
+    """
+class LDAModel(_pysparks.LDAModel):
+    """Latent Dirichlet Allocation (LDA) model.
+    This abstraction permits for different underlying representations,
+    including local and distributed data structures.
+
+    .. versionadded:: 2.0.0
+    """
+class DistributedLDAModel(LDAModel, _pysparks.DistributedLDAModel):
+    """Distributed model fitted by :py:class:`LDA`.
+    This type of model is currently only produced by Expectation-Maximization (EM).
+
+    This model stores the inferred topics, the full training dataset, and the topic distribution
+    for each training document.
+
+    .. versionadded:: 2.0.0
+    """
+class GaussianMixture(_pysparks.GaussianMixture):
+    """GaussianMixture clustering.
+    This class performs expectation maximization for multivariate Gaussian
+    Mixture Models (GMMs).  A GMM represents a composite distribution of
+    independent Gaussian distributions with associated "mixing" weights
+    specifying each's contribution to the composite.
+
+    Given a set of sample points, this class will maximize the log-likelihood
+    for a mixture of k Gaussians, iterating until the log-likelihood changes by
+    less than convergenceTol, or until it has reached the max number of iterations.
+    While this process is generally guaranteed to converge, it is not guaranteed
+    to find a global optimum.
+
+    .. versionadded:: 2.0.0
+
+    Notes
+    -----
+    For high-dimensional data (with many features), this algorithm may perform poorly.
+    This is due to high-dimensional data (a) making it difficult to cluster at all
+    (based on statistical/theoretical arguments) and (b) numerical issues with
+    Gaussian distributions.
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+
+    >>> data = [(Vectors.dense([-0.1, -0.05 ]),),
+    ...         (Vectors.dense([-0.01, -0.1]),),
+    ...         (Vectors.dense([0.9, 0.8]),),
+    ...         (Vectors.dense([0.75, 0.935]),),
+    ...         (Vectors.dense([-0.83, -0.68]),),
+    ...         (Vectors.dense([-0.91, -0.76]),)]
+    >>> df = spark.createDataFrame(data, ["features"])
+    >>> gm = GaussianMixture(k=3, tol=0.0001, seed=10)
+    >>> gm.getMaxIter()
+    100
+    >>> gm.setMaxIter(30)
+    GaussianMixture...
+    >>> gm.getMaxIter()
+    30
+    >>> model = gm.fit(df)
+    >>> model.getAggregationDepth()
+    2
+    >>> model.getFeaturesCol()
+    'features'
+    >>> model.setPredictionCol("newPrediction")
+    GaussianMixtureModel...
+    >>> model.predict(df.head().features)
+    2
+    >>> model.predictProbability(df.head().features)
+    DenseVector([0.0, 0.0, 1.0])
+    >>> model.hasSummary
+    True
+    >>> summary = model.summary
+    >>> summary.k
+    3
+    >>> summary.clusterSizes
+    [2, 2, 2]
+    >>> weights = model.weights
+    >>> len(weights)
+    3
+    >>> gaussians = model.gaussians
+    >>> len(gaussians)
+    3
+    >>> gaussians[0].mean
+    DenseVector([0.825, 0.8675])
+    >>> gaussians[0].cov
+    DenseMatrix(2, 2, [0.0056, -0.0051, -0.0051, 0.0046], False)
+    >>> gaussians[1].mean
+    DenseVector([-0.87, -0.72])
+    >>> gaussians[1].cov
+    DenseMatrix(2, 2, [0.0016, 0.0016, 0.0016, 0.0016], False)
+    >>> gaussians[2].mean
+    DenseVector([-0.055, -0.075])
+    >>> gaussians[2].cov
+    DenseMatrix(2, 2, [0.002, -0.0011, -0.0011, 0.0006], False)
+    >>> model.gaussiansDF.select("mean").head()
+    Row(mean=DenseVector([0.825, 0.8675]))
+    >>> model.gaussiansDF.select("cov").head()
+    Row(cov=DenseMatrix(2, 2, [0.0056, -0.0051, -0.0051, 0.0046], False))
+    >>> transformed = model.transform(df).select("features", "newPrediction")
+    >>> rows = transformed.collect()
+    >>> rows[4].newPrediction == rows[5].newPrediction
+    True
+    >>> rows[2].newPrediction == rows[3].newPrediction
+    True
+    >>> gmm_path = temp_path + "/gmm"
+    >>> gm.save(gmm_path)
+    >>> gm2 = GaussianMixture.load(gmm_path)
+    >>> gm2.getK()
+    3
+    >>> model_path = temp_path + "/gmm_model"
+    >>> model.save(model_path)
+    >>> model2 = GaussianMixtureModel.load(model_path)
+    >>> model2.hasSummary
+    False
+    >>> model2.weights == model.weights
+    True
+    >>> model2.gaussians[0].mean == model.gaussians[0].mean
+    True
+    >>> model2.gaussians[0].cov == model.gaussians[0].cov
+    True
+    >>> model2.gaussians[1].mean == model.gaussians[1].mean
+    True
+    >>> model2.gaussians[1].cov == model.gaussians[1].cov
+    True
+    >>> model2.gaussians[2].mean == model.gaussians[2].mean
+    True
+    >>> model2.gaussians[2].cov == model.gaussians[2].cov
+    True
+    >>> model2.gaussiansDF.select("mean").head()
+    Row(mean=DenseVector([0.825, 0.8675]))
+    >>> model2.gaussiansDF.select("cov").head()
+    Row(cov=DenseMatrix(2, 2, [0.0056, -0.0051, -0.0051, 0.0046], False))
+    >>> model.transform(df).take(1) == model2.transform(df).take(1)
+    True
+    >>> gm2.setWeightCol("weight")
+    GaussianMixture...
+    """
+class GaussianMixtureModel(_pysparks.GaussianMixtureModel):
+    """Model fitted by GaussianMixture.
+
+    .. versionadded:: 2.0.0
+    """
+class GaussianMixtureSummary(_pysparks.GaussianMixtureSummary):
+    """Gaussian mixture clustering results for a given model.
+
+    .. versionadded:: 2.1.0
+    """
+class KMeans(_pysparks.KMeans):
+    """K-means clustering with a k-means++ like initialization mode
+    (the k-means|| algorithm by Bahmani et al).
+
+    .. versionadded:: 1.5.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> data = [(Vectors.dense([0.0, 0.0]), 2.0), (Vectors.dense([1.0, 1.0]), 2.0),
+    ...         (Vectors.dense([9.0, 8.0]), 2.0), (Vectors.dense([8.0, 9.0]), 2.0)]
+    >>> df = spark.createDataFrame(data, ["features", "weighCol"])
+    >>> kmeans = KMeans(k=2)
+    >>> kmeans.setSeed(1)
+    KMeans...
+    >>> kmeans.setWeightCol("weighCol")
+    KMeans...
+    >>> kmeans.setMaxIter(10)
+    KMeans...
+    >>> kmeans.getMaxIter()
+    10
+    >>> kmeans.clear(kmeans.maxIter)
+    >>> kmeans.getSolver()
+    'auto'
+    >>> model = kmeans.fit(df)
+    >>> model.getMaxBlockSizeInMB()
+    0.0
+    >>> model.getDistanceMeasure()
+    'euclidean'
+    >>> model.setPredictionCol("newPrediction")
+    KMeansModel...
+    >>> model.predict(df.head().features)
+    0
+    >>> centers = model.clusterCenters()
+    >>> len(centers)
+    2
+    >>> transformed = model.transform(df).select("features", "newPrediction")
+    >>> rows = transformed.collect()
+    >>> rows[0].newPrediction == rows[1].newPrediction
+    True
+    >>> rows[2].newPrediction == rows[3].newPrediction
+    True
+    >>> model.hasSummary
+    True
+    >>> summary = model.summary
+    >>> summary.k
+    2
+    >>> summary.clusterSizes
+    [2, 2]
+    >>> summary.trainingCost
+    4.0
+    >>> kmeans_path = temp_path + "/kmeans"
+    >>> kmeans.save(kmeans_path)
+    >>> kmeans2 = KMeans.load(kmeans_path)
+    >>> kmeans2.getK()
+    2
+    >>> model_path = temp_path + "/kmeans_model"
+    >>> model.save(model_path)
+    >>> model2 = KMeansModel.load(model_path)
+    >>> model2.hasSummary
+    False
+    >>> model.clusterCenters()[0] == model2.clusterCenters()[0]
+    array([ True,  True], dtype=bool)
+    >>> model.clusterCenters()[1] == model2.clusterCenters()[1]
+    array([ True,  True], dtype=bool)
+    >>> model.transform(df).take(1) == model2.transform(df).take(1)
+    True
+    """
+class KMeansModel(_pysparks.KMeansModel):
+    """Model fitted by KMeans.
+
+    .. versionadded:: 1.5.0
+    """
+class KMeansSummary(_pysparks.KMeansSummary):
+    """Summary of KMeans.
+
+    .. versionadded:: 2.1.0
+    """
+class LocalLDAModel(LDAModel, _pysparks.LocalLDAModel):
+    """Local (non-distributed) model fitted by :py:class:`LDA`.
+    This model stores the inferred topics only; it does not store info about the training dataset.
+
+    .. versionadded:: 2.0.0
+    """
+class PowerIterationClustering(_pysparks.PowerIterationClustering):
+    """Power Iteration Clustering (PIC), a scalable graph clustering algorithm developed by
+    `Lin and Cohen <http://www.cs.cmu.edu/~frank/papers/icml2010-pic-final.pdf>`_. From the
+    abstract: PIC finds a very low-dimensional embedding of a dataset using truncated power
+    iteration on a normalized pair-wise similarity matrix of the data.
+
+    This class is not yet an Estimator/Transformer, use :py:func:`assignClusters` method
+    to run the PowerIterationClustering algorithm.
+
+    .. versionadded:: 2.4.0
+
+    Notes
+    -----
+    See `Wikipedia on Spectral clustering <http://en.wikipedia.org/wiki/Spectral_clustering>`_
+
+    Examples
+    --------
+    >>> data = [(1, 0, 0.5),
+    ...         (2, 0, 0.5), (2, 1, 0.7),
+    ...         (3, 0, 0.5), (3, 1, 0.7), (3, 2, 0.9),
+    ...         (4, 0, 0.5), (4, 1, 0.7), (4, 2, 0.9), (4, 3, 1.1),
+    ...         (5, 0, 0.5), (5, 1, 0.7), (5, 2, 0.9), (5, 3, 1.1), (5, 4, 1.3)]
+    >>> df = spark.createDataFrame(data).toDF("src", "dst", "weight").repartition(1)
+    >>> pic = PowerIterationClustering(k=2, weightCol="weight")
+    >>> pic.setMaxIter(40)
+    PowerIterationClustering...
+    >>> assignments = pic.assignClusters(df)
+    >>> assignments.sort(assignments.id).show(truncate=False)
+    +---+-------+
+    |id |cluster|
+    +---+-------+
+    |0  |0      |
+    |1  |0      |
+    |2  |0      |
+    |3  |0      |
+    |4  |0      |
+    |5  |1      |
+    +---+-------+
+    ...
+    >>> pic_path = temp_path + "/pic"
+    >>> pic.save(pic_path)
+    >>> pic2 = PowerIterationClustering.load(pic_path)
+    >>> pic2.getK()
+    2
+    >>> pic2.getMaxIter()
+    40
+    >>> pic2.assignClusters(df).take(6) == assignments.take(6)
+    True
+    """

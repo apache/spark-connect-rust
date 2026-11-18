@@ -1688,7 +1688,7 @@ The `__init__` of a native type of parameters, such as `ArrayType`, is a slot of
 `inspect.signature` is CPython's `(self, /, *args, **kwargs)`; that of the class shows the
 parameters, as PySpark's does.
 
-Type checkers and editors see PySpark's API, as with `pyspark-client`, without its docstrings. The
+Type checkers and editors see PySpark's API and its docstrings, as with `pyspark-client`. The
 package is marked typed as PySpark's is (`py.typed`), and the modules whose classes are native or
 whose names are made at import time, such as `pyspark.sql.functions`, `pyspark.sql.dataframe`,
 `pyspark.sql.types`, `pyspark.sql.connect.datasource`, the Avro and Protobuf functions of
@@ -1699,8 +1699,11 @@ generates. The modules of `pyspark.ml.connect` of the native ML classes have stu
 public classes, each a subclass of PySpark's class of its name of `pyspark.ml`, as at run time, of
 which type checkers see PySpark's API. So mypy and pyright type an application as they do with
 `pyspark-client`, which `python/tests/test_type_stubs_offline.py` checks with both, of each name
-of the stubbed modules and each member of their classes. The stubs keep no docstrings, so an
-editor shows the signatures of these names without PySpark's documentation. The differences:
+of the stubbed modules and each member of their classes. The stubs keep the docstring that each of
+PySpark's objects has at run time (`inspect.getdoc`), of what `pyspark.since` adds and of what the
+modules of PySpark Connect copy of the classic ones (`col.__doc__ = pysparkfuncs.col.__doc__`),
+which the test compares with those of `pyspark-client` (`tests/golden/stub_docstrings.json`). The
+differences:
 
 - The stubs declare only the names that the drop-in's modules have at run time. A name that a
   module of PySpark imports, which mypy takes for an attribute of the module by default, is
@@ -1730,6 +1733,10 @@ editor shows the signatures of these names without PySpark's documentation. The 
   names are its ML API on PyTorch, so a type checker types `LogisticRegression` of
   `pyspark.ml.connect.classification` as a subclass of that of `pyspark.ml.classification` with
   the drop-in, as at run time.
+- An editor shows the docstrings that the objects of PySpark Connect have at run time, which
+  pyright does not see in PySpark's source, as its modules copy them there at run time: a hover
+  over `col` of `pyspark.sql.connect.functions` or the `builder` of its `SparkSession` shows its
+  documentation with the drop-in, and none with `pyspark-client`.
 - The names that only the drop-in has, such as `Trigger` of `pyspark.sql.streaming.readwriter` and
   `FrameBound` of `pyspark.sql.window`, are typed with the drop-in and are errors with
   `pyspark-client`, as at run time.

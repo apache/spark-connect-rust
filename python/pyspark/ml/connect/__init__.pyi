@@ -18,6 +18,8 @@
 # pyspark.ml of Apache Spark v4.3.0:
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
+"""Spark Connect Python Client - ML module"""
+
 from typing import Optional
 from pyspark.ml._typing import ParamMap
 from pyspark.sql.dataframe import DataFrame

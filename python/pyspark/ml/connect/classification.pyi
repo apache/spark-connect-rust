@@ -30,35 +30,814 @@ from pyspark.ml.classification import OneVsRestModelWriter as OneVsRestModelWrit
 
 __all__ = ['LinearSVC', 'LinearSVCModel', 'LinearSVCSummary', 'LinearSVCTrainingSummary', 'LogisticRegression', 'LogisticRegressionModel', 'LogisticRegressionSummary', 'LogisticRegressionTrainingSummary', 'BinaryLogisticRegressionSummary', 'BinaryLogisticRegressionTrainingSummary', 'DecisionTreeClassifier', 'DecisionTreeClassificationModel', 'GBTClassifier', 'GBTClassificationModel', 'RandomForestClassifier', 'RandomForestClassificationModel', 'RandomForestClassificationSummary', 'RandomForestClassificationTrainingSummary', 'BinaryRandomForestClassificationSummary', 'BinaryRandomForestClassificationTrainingSummary', 'NaiveBayes', 'NaiveBayesModel', 'MultilayerPerceptronClassifier', 'MultilayerPerceptronClassificationModel', 'MultilayerPerceptronClassificationSummary', 'MultilayerPerceptronClassificationTrainingSummary', 'OneVsRest', 'OneVsRestModel', 'FMClassifier', 'FMClassificationModel', 'FMClassificationSummary', 'FMClassificationTrainingSummary']
 
-class LogisticRegressionSummary(_pysparks.LogisticRegressionSummary): ...
-class BinaryLogisticRegressionSummary(LogisticRegressionSummary, _pysparks.BinaryLogisticRegressionSummary): ...
-class LogisticRegressionTrainingSummary(LogisticRegressionSummary, _pysparks.LogisticRegressionTrainingSummary): ...
-class BinaryLogisticRegressionTrainingSummary(BinaryLogisticRegressionSummary, LogisticRegressionTrainingSummary, _pysparks.BinaryLogisticRegressionTrainingSummary): ...
-class RandomForestClassificationSummary(_pysparks.RandomForestClassificationSummary): ...
-class BinaryRandomForestClassificationSummary(RandomForestClassificationSummary, _pysparks.BinaryRandomForestClassificationSummary): ...
-class RandomForestClassificationTrainingSummary(RandomForestClassificationSummary, _pysparks.RandomForestClassificationTrainingSummary): ...
-class BinaryRandomForestClassificationTrainingSummary(BinaryRandomForestClassificationSummary, RandomForestClassificationTrainingSummary, _pysparks.BinaryRandomForestClassificationTrainingSummary): ...
-class DecisionTreeClassificationModel(_pysparks.DecisionTreeClassificationModel): ...
-class DecisionTreeClassifier(_pysparks.DecisionTreeClassifier): ...
-class FMClassificationModel(_pysparks.FMClassificationModel): ...
-class FMClassificationSummary(_pysparks.FMClassificationSummary): ...
-class FMClassificationTrainingSummary(FMClassificationSummary, _pysparks.FMClassificationTrainingSummary): ...
-class FMClassifier(_pysparks.FMClassifier): ...
-class GBTClassificationModel(_pysparks.GBTClassificationModel): ...
-class GBTClassifier(_pysparks.GBTClassifier): ...
-class LinearSVC(_pysparks.LinearSVC): ...
-class LinearSVCModel(_pysparks.LinearSVCModel): ...
-class LinearSVCSummary(_pysparks.LinearSVCSummary): ...
-class LinearSVCTrainingSummary(LinearSVCSummary, _pysparks.LinearSVCTrainingSummary): ...
-class LogisticRegression(_pysparks.LogisticRegression): ...
-class LogisticRegressionModel(_pysparks.LogisticRegressionModel): ...
-class MultilayerPerceptronClassificationModel(_pysparks.MultilayerPerceptronClassificationModel): ...
-class MultilayerPerceptronClassificationSummary(_pysparks.MultilayerPerceptronClassificationSummary): ...
-class MultilayerPerceptronClassificationTrainingSummary(MultilayerPerceptronClassificationSummary, _pysparks.MultilayerPerceptronClassificationTrainingSummary): ...
-class MultilayerPerceptronClassifier(_pysparks.MultilayerPerceptronClassifier): ...
-class NaiveBayes(_pysparks.NaiveBayes): ...
-class NaiveBayesModel(_pysparks.NaiveBayesModel): ...
-class OneVsRest(_pysparks.OneVsRest): ...
-class OneVsRestModel(_pysparks.OneVsRestModel): ...
-class RandomForestClassificationModel(_pysparks.RandomForestClassificationModel): ...
-class RandomForestClassifier(_pysparks.RandomForestClassifier): ...
+class LogisticRegressionSummary(_pysparks.LogisticRegressionSummary):
+    """Abstraction for Logistic Regression Results for a given model.
+
+    .. versionadded:: 2.0.0
+    """
+class BinaryLogisticRegressionSummary(LogisticRegressionSummary, _pysparks.BinaryLogisticRegressionSummary):
+    """Binary Logistic regression results for a given model.
+
+    .. versionadded:: 2.0.0
+    """
+class LogisticRegressionTrainingSummary(LogisticRegressionSummary, _pysparks.LogisticRegressionTrainingSummary):
+    """Abstraction for multinomial Logistic Regression Training results.
+
+    .. versionadded:: 2.0.0
+    """
+class BinaryLogisticRegressionTrainingSummary(BinaryLogisticRegressionSummary, LogisticRegressionTrainingSummary, _pysparks.BinaryLogisticRegressionTrainingSummary):
+    """Binary Logistic regression training results for a given model.
+
+    .. versionadded:: 2.0.0
+    """
+class RandomForestClassificationSummary(_pysparks.RandomForestClassificationSummary):
+    """Abstraction for RandomForestClassification Results for a given model.
+
+    .. versionadded:: 3.1.0
+    """
+class BinaryRandomForestClassificationSummary(RandomForestClassificationSummary, _pysparks.BinaryRandomForestClassificationSummary):
+    """BinaryRandomForestClassification results for a given model.
+
+    .. versionadded:: 3.1.0
+    """
+class RandomForestClassificationTrainingSummary(RandomForestClassificationSummary, _pysparks.RandomForestClassificationTrainingSummary):
+    """Abstraction for RandomForestClassificationTraining Training results.
+
+    .. versionadded:: 3.1.0
+    """
+class BinaryRandomForestClassificationTrainingSummary(BinaryRandomForestClassificationSummary, RandomForestClassificationTrainingSummary, _pysparks.BinaryRandomForestClassificationTrainingSummary):
+    """BinaryRandomForestClassification training results for a given model.
+
+    .. versionadded:: 3.1.0
+    """
+class DecisionTreeClassificationModel(_pysparks.DecisionTreeClassificationModel):
+    """Model fitted by DecisionTreeClassifier.
+
+    .. versionadded:: 1.4.0
+    """
+class DecisionTreeClassifier(_pysparks.DecisionTreeClassifier):
+    """`Decision tree <http://en.wikipedia.org/wiki/Decision_tree_learning>`_
+    learning algorithm for classification.
+    It supports both binary and multiclass labels, as well as both continuous and categorical
+    features.
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> from pyspark.ml.feature import StringIndexer
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> stringIndexer = StringIndexer(inputCol="label", outputCol="indexed")
+    >>> si_model = stringIndexer.fit(df)
+    >>> td = si_model.transform(df)
+    >>> dt = DecisionTreeClassifier(maxDepth=2, labelCol="indexed", leafCol="leafId")
+    >>> model = dt.fit(td)
+    >>> model.getLabelCol()
+    'indexed'
+    >>> model.setFeaturesCol("features")
+    DecisionTreeClassificationModel...
+    >>> model.numNodes
+    3
+    >>> model.depth
+    1
+    >>> model.featureImportances
+    SparseVector(1, {0: 1.0})
+    >>> model.numFeatures
+    1
+    >>> model.numClasses
+    2
+    >>> print(model.toDebugString)
+    DecisionTreeClassificationModel...depth=1, numNodes=3...
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> model.predict(test0.head().features)
+    0.0
+    >>> model.predictRaw(test0.head().features)
+    DenseVector([1.0, 0.0])
+    >>> model.predictProbability(test0.head().features)
+    DenseVector([1.0, 0.0])
+    >>> result = model.transform(test0).head()
+    >>> result.prediction
+    0.0
+    >>> result.probability
+    DenseVector([1.0, 0.0])
+    >>> result.rawPrediction
+    DenseVector([1.0, 0.0])
+    >>> result.leafId
+    0.0
+    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
+    >>> model.transform(test1).head().prediction
+    1.0
+    >>> dtc_path = temp_path + "/dtc"
+    >>> dt.save(dtc_path)
+    >>> dt2 = DecisionTreeClassifier.load(dtc_path)
+    >>> dt2.getMaxDepth()
+    2
+    >>> model_path = temp_path + "/dtc_model"
+    >>> model.save(model_path)
+    >>> model2 = DecisionTreeClassificationModel.load(model_path)
+    >>> model.featureImportances == model2.featureImportances
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    >>> df3 = spark.createDataFrame([
+    ...     (1.0, 0.2, Vectors.dense(1.0)),
+    ...     (1.0, 0.8, Vectors.dense(1.0)),
+    ...     (0.0, 1.0, Vectors.sparse(1, [], []))], ["label", "weight", "features"])
+    >>> si3 = StringIndexer(inputCol="label", outputCol="indexed")
+    >>> si_model3 = si3.fit(df3)
+    >>> td3 = si_model3.transform(df3)
+    >>> dt3 = DecisionTreeClassifier(maxDepth=2, weightCol="weight", labelCol="indexed")
+    >>> model3 = dt3.fit(td3)
+    >>> print(model3.toDebugString)
+    DecisionTreeClassificationModel...depth=1, numNodes=3...
+    """
+class FMClassificationModel(_pysparks.FMClassificationModel):
+    """Model fitted by :class:`FMClassifier`.
+
+    .. versionadded:: 3.0.0
+    """
+class FMClassificationSummary(_pysparks.FMClassificationSummary):
+    """Abstraction for FMClassifier Results for a given model.
+
+    .. versionadded:: 3.1.0
+    """
+class FMClassificationTrainingSummary(FMClassificationSummary, _pysparks.FMClassificationTrainingSummary):
+    """Abstraction for FMClassifier Training results.
+
+    .. versionadded:: 3.1.0
+    """
+class FMClassifier(_pysparks.FMClassifier):
+    """Factorization Machines learning algorithm for classification.
+
+    Solver supports:
+
+    * gd (normal mini-batch gradient descent)
+    * adamW (default)
+
+    .. versionadded:: 3.0.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> from pyspark.ml.classification import FMClassifier
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> fm = FMClassifier(factorSize=2)
+    >>> fm.setSeed(11)
+    FMClassifier...
+    >>> model = fm.fit(df)
+    >>> model.getMaxIter()
+    100
+    >>> test0 = spark.createDataFrame([
+    ...     (Vectors.dense(-1.0),),
+    ...     (Vectors.dense(0.5),),
+    ...     (Vectors.dense(1.0),),
+    ...     (Vectors.dense(2.0),)], ["features"])
+    >>> model.predictRaw(test0.head().features)
+    DenseVector([22.13..., -22.13...])
+    >>> model.predictProbability(test0.head().features)
+    DenseVector([1.0, 0.0])
+    >>> model.transform(test0).select("features", "probability").show(10, False)
+    +--------+------------------------------------------+
+    |features|probability                               |
+    +--------+------------------------------------------+
+    |[-1.0]  |[0.9999999997574736,2.425264676902229E-10]|
+    |[0.5]   |[0.47627851732981163,0.5237214826701884]  |
+    |[1.0]   |[5.491554426243495E-4,0.9994508445573757] |
+    |[2.0]   |[2.005766663870645E-10,0.9999999997994233]|
+    +--------+------------------------------------------+
+    ...
+    >>> model.intercept
+    -7.316665276826291
+    >>> model.linear
+    DenseVector([14.8232])
+    >>> model.factors
+    DenseMatrix(1, 2, [0.0163, -0.0051], 1)
+    >>> model_path = temp_path + "/fm_model"
+    >>> model.save(model_path)
+    >>> model2 = FMClassificationModel.load(model_path)
+    >>> model2.intercept
+    -7.316665276826291
+    >>> model2.linear
+    DenseVector([14.8232])
+    >>> model2.factors
+    DenseMatrix(1, 2, [0.0163, -0.0051], 1)
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    """
+class GBTClassificationModel(_pysparks.GBTClassificationModel):
+    """Model fitted by GBTClassifier.
+
+    .. versionadded:: 1.4.0
+    """
+class GBTClassifier(_pysparks.GBTClassifier):
+    """`Gradient-Boosted Trees (GBTs) <http://en.wikipedia.org/wiki/Gradient_boosting>`_
+    learning algorithm for classification.
+    It supports binary labels, as well as both continuous and categorical features.
+
+    .. versionadded:: 1.4.0
+
+    Notes
+    -----
+    Multiclass labels are not currently supported.
+
+    The implementation is based upon: J.H. Friedman. "Stochastic Gradient Boosting." 1999.
+
+    Gradient Boosting vs. TreeBoost:
+
+    - This implementation is for Stochastic Gradient Boosting, not for TreeBoost.
+    - Both algorithms learn tree ensembles by minimizing loss functions.
+    - TreeBoost (Friedman, 1999) additionally modifies the outputs at tree leaf nodes
+      based on the loss function, whereas the original gradient boosting method does not.
+    - We expect to implement TreeBoost in the future:
+      `SPARK-4240 <https://issues.apache.org/jira/browse/SPARK-4240>`_
+
+    Examples
+    --------
+    >>> from numpy import allclose
+    >>> from pyspark.ml.linalg import Vectors
+    >>> from pyspark.ml.feature import StringIndexer
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> stringIndexer = StringIndexer(inputCol="label", outputCol="indexed")
+    >>> si_model = stringIndexer.fit(df)
+    >>> td = si_model.transform(df)
+    >>> gbt = GBTClassifier(maxIter=5, maxDepth=2, labelCol="indexed", seed=42,
+    ...     leafCol="leafId")
+    >>> gbt.setMaxIter(5)
+    GBTClassifier...
+    >>> gbt.setMinWeightFractionPerNode(0.049)
+    GBTClassifier...
+    >>> gbt.getMaxIter()
+    5
+    >>> gbt.getFeatureSubsetStrategy()
+    'all'
+    >>> model = gbt.fit(td)
+    >>> model.getLabelCol()
+    'indexed'
+    >>> model.setFeaturesCol("features")
+    GBTClassificationModel...
+    >>> model.setThresholds([0.3, 0.7])
+    GBTClassificationModel...
+    >>> model.getThresholds()
+    [0.3, 0.7]
+    >>> model.featureImportances
+    SparseVector(1, {0: 1.0})
+    >>> allclose(model.treeWeights, [1.0, 0.1, 0.1, 0.1, 0.1])
+    True
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> model.predict(test0.head().features)
+    0.0
+    >>> model.predictRaw(test0.head().features)
+    DenseVector([1.1697, -1.1697])
+    >>> model.predictProbability(test0.head().features)
+    DenseVector([0.9121, 0.0879])
+    >>> result = model.transform(test0).head()
+    >>> result.prediction
+    0.0
+    >>> result.leafId
+    DenseVector([0.0, 0.0, 0.0, 0.0, 0.0])
+    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
+    >>> model.transform(test1).head().prediction
+    1.0
+    >>> model.totalNumNodes
+    15
+    >>> print(model.toDebugString)
+    GBTClassificationModel...numTrees=5...
+    >>> gbtc_path = temp_path + "gbtc"
+    >>> gbt.save(gbtc_path)
+    >>> gbt2 = GBTClassifier.load(gbtc_path)
+    >>> gbt2.getMaxDepth()
+    2
+    >>> model_path = temp_path + "gbtc_model"
+    >>> model.save(model_path)
+    >>> model2 = GBTClassificationModel.load(model_path)
+    >>> model.featureImportances == model2.featureImportances
+    True
+    >>> model.treeWeights == model2.treeWeights
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    >>> model.trees
+    [DecisionTreeRegressionModel...depth=..., DecisionTreeRegressionModel...]
+    >>> validation = spark.createDataFrame([(0.0, Vectors.dense(-1.0),)],
+    ...              ["indexed", "features"])
+    >>> model.evaluateEachIteration(validation)
+    [0.25..., 0.23..., 0.21..., 0.19..., 0.18...]
+    >>> model.numClasses
+    2
+    >>> gbt = gbt.setValidationIndicatorCol("validationIndicator")
+    >>> gbt.getValidationIndicatorCol()
+    'validationIndicator'
+    >>> gbt.getValidationTol()
+    0.01
+    """
+class LinearSVC(_pysparks.LinearSVC):
+    """This binary classifier optimizes the Hinge Loss using the OWLQN optimizer.
+    Only supports L2 regularization currently.
+
+    .. versionadded:: 2.2.0
+
+    Notes
+    -----
+    `Linear SVM Classifier <https://en.wikipedia.org/wiki/Support_vector_machine#Linear_SVM>`_
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = sc.parallelize([
+    ...     Row(label=1.0, features=Vectors.dense(1.0, 1.0, 1.0)),
+    ...     Row(label=0.0, features=Vectors.dense(1.0, 2.0, 3.0))]).toDF()
+    >>> svm = LinearSVC()
+    >>> svm.getMaxIter()
+    100
+    >>> svm.setMaxIter(5)
+    LinearSVC...
+    >>> svm.getMaxIter()
+    5
+    >>> svm.getRegParam()
+    0.0
+    >>> svm.setRegParam(0.01)
+    LinearSVC...
+    >>> svm.getRegParam()
+    0.01
+    >>> model = svm.fit(df)
+    >>> model.setPredictionCol("newPrediction")
+    LinearSVCModel...
+    >>> model.getPredictionCol()
+    'newPrediction'
+    >>> model.setThreshold(0.5)
+    LinearSVCModel...
+    >>> model.getThreshold()
+    0.5
+    >>> model.getMaxBlockSizeInMB()
+    0.0
+    >>> model.coefficients
+    DenseVector([0.0, -1.0319, -0.5159])
+    >>> model.intercept
+    2.579645978780695
+    >>> model.numClasses
+    2
+    >>> model.numFeatures
+    3
+    >>> test0 = sc.parallelize([Row(features=Vectors.dense(-1.0, -1.0, -1.0))]).toDF()
+    >>> model.predict(test0.head().features)
+    1.0
+    >>> model.predictRaw(test0.head().features)
+    DenseVector([-4.1274, 4.1274])
+    >>> result = model.transform(test0).head()
+    >>> result.newPrediction
+    1.0
+    >>> result.rawPrediction
+    DenseVector([-4.1274, 4.1274])
+    >>> svm_path = temp_path + "/svm"
+    >>> svm.save(svm_path)
+    >>> svm2 = LinearSVC.load(svm_path)
+    >>> svm2.getMaxIter()
+    5
+    >>> model_path = temp_path + "/svm_model"
+    >>> model.save(model_path)
+    >>> model2 = LinearSVCModel.load(model_path)
+    >>> bool(model.coefficients[0] == model2.coefficients[0])
+    True
+    >>> model.intercept == model2.intercept
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    """
+class LinearSVCModel(_pysparks.LinearSVCModel):
+    """Model fitted by LinearSVC.
+
+    .. versionadded:: 2.2.0
+    """
+class LinearSVCSummary(_pysparks.LinearSVCSummary):
+    """Abstraction for LinearSVC Results for a given model.
+
+    .. versionadded:: 3.1.0
+    """
+class LinearSVCTrainingSummary(LinearSVCSummary, _pysparks.LinearSVCTrainingSummary):
+    """Abstraction for LinearSVC Training results.
+
+    .. versionadded:: 3.1.0
+    """
+class LogisticRegression(_pysparks.LogisticRegression):
+    """Logistic regression.
+    This class supports multinomial logistic (softmax) and binomial logistic regression.
+
+    .. versionadded:: 1.3.0
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> from pyspark.ml.linalg import Vectors
+    >>> bdf = sc.parallelize([
+    ...     Row(label=1.0, weight=1.0, features=Vectors.dense(0.0, 5.0)),
+    ...     Row(label=0.0, weight=2.0, features=Vectors.dense(1.0, 2.0)),
+    ...     Row(label=1.0, weight=3.0, features=Vectors.dense(2.0, 1.0)),
+    ...     Row(label=0.0, weight=4.0, features=Vectors.dense(3.0, 3.0))]).toDF()
+    >>> blor = LogisticRegression(weightCol="weight")
+    >>> blor.getRegParam()
+    0.0
+    >>> blor.setRegParam(0.01)
+    LogisticRegression...
+    >>> blor.getRegParam()
+    0.01
+    >>> blor.setMaxIter(10)
+    LogisticRegression...
+    >>> blor.getMaxIter()
+    10
+    >>> blor.clear(blor.maxIter)
+    >>> blorModel = blor.fit(bdf)
+    >>> blorModel.setFeaturesCol("features")
+    LogisticRegressionModel...
+    >>> blorModel.setProbabilityCol("newProbability")
+    LogisticRegressionModel...
+    >>> blorModel.getProbabilityCol()
+    'newProbability'
+    >>> blorModel.getMaxBlockSizeInMB()
+    0.0
+    >>> blorModel.setThreshold(0.1)
+    LogisticRegressionModel...
+    >>> blorModel.getThreshold()
+    0.1
+    >>> blorModel.coefficients
+    DenseVector([-1.080..., -0.646...])
+    >>> blorModel.intercept
+    3.112...
+    >>> blorModel.evaluate(bdf).accuracy == blorModel.summary.accuracy
+    True
+    >>> data_path = "data/mllib/sample_multiclass_classification_data.txt"
+    >>> mdf = spark.read.format("libsvm").load(data_path)
+    >>> mlor = LogisticRegression(regParam=0.1, elasticNetParam=1.0, family="multinomial")
+    >>> mlorModel = mlor.fit(mdf)
+    >>> mlorModel.coefficientMatrix
+    SparseMatrix(3, 4, [0, 1, 2, 3], [3, 2, 1], [1.87..., -2.75..., -0.50...], 1)
+    >>> mlorModel.interceptVector
+    DenseVector([0.04..., -0.42..., 0.37...])
+    >>> test0 = sc.parallelize([Row(features=Vectors.dense(-1.0, 1.0))]).toDF()
+    >>> blorModel.predict(test0.head().features)
+    1.0
+    >>> blorModel.predictRaw(test0.head().features)
+    DenseVector([-3.54..., 3.54...])
+    >>> blorModel.predictProbability(test0.head().features)
+    DenseVector([0.028, 0.972])
+    >>> result = blorModel.transform(test0).head()
+    >>> result.prediction
+    1.0
+    >>> result.newProbability
+    DenseVector([0.02..., 0.97...])
+    >>> result.rawPrediction
+    DenseVector([-3.54..., 3.54...])
+    >>> test1 = sc.parallelize([Row(features=Vectors.sparse(2, [0], [1.0]))]).toDF()
+    >>> blorModel.transform(test1).head().prediction
+    1.0
+    >>> blor.setParams("vector")
+    Traceback (most recent call last):
+        ...
+    TypeError: Method setParams forces keyword arguments.
+    >>> lr_path = temp_path + "/lr"
+    >>> blor.save(lr_path)
+    >>> lr2 = LogisticRegression.load(lr_path)
+    >>> lr2.getRegParam()
+    0.01
+    >>> model_path = temp_path + "/lr_model"
+    >>> blorModel.save(model_path)
+    >>> model2 = LogisticRegressionModel.load(model_path)
+    >>> bool(blorModel.coefficients[0] == model2.coefficients[0])
+    True
+    >>> blorModel.intercept == model2.intercept
+    True
+    >>> model2
+    LogisticRegressionModel: uid=..., numClasses=2, numFeatures=2
+    >>> blorModel.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    """
+class LogisticRegressionModel(_pysparks.LogisticRegressionModel):
+    """Model fitted by LogisticRegression.
+
+    .. versionadded:: 1.3.0
+    """
+class MultilayerPerceptronClassificationModel(_pysparks.MultilayerPerceptronClassificationModel):
+    """Model fitted by MultilayerPerceptronClassifier.
+
+    .. versionadded:: 1.6.0
+    """
+class MultilayerPerceptronClassificationSummary(_pysparks.MultilayerPerceptronClassificationSummary):
+    """Abstraction for MultilayerPerceptronClassifier Results for a given model.
+
+    .. versionadded:: 3.1.0
+    """
+class MultilayerPerceptronClassificationTrainingSummary(MultilayerPerceptronClassificationSummary, _pysparks.MultilayerPerceptronClassificationTrainingSummary):
+    """Abstraction for MultilayerPerceptronClassifier Training results.
+
+    .. versionadded:: 3.1.0
+    """
+class MultilayerPerceptronClassifier(_pysparks.MultilayerPerceptronClassifier):
+    """Classifier trainer based on the Multilayer Perceptron.
+    Each layer has sigmoid activation function, output layer has softmax.
+    Number of inputs has to be equal to the size of feature vectors.
+    Number of outputs has to be equal to the total number of labels.
+
+    .. versionadded:: 1.6.0
+
+    Examples
+    --------
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     (0.0, Vectors.dense([0.0, 0.0])),
+    ...     (1.0, Vectors.dense([0.0, 1.0])),
+    ...     (1.0, Vectors.dense([1.0, 0.0])),
+    ...     (0.0, Vectors.dense([1.0, 1.0]))], ["label", "features"])
+    >>> mlp = MultilayerPerceptronClassifier(layers=[2, 2, 2], seed=123)
+    >>> mlp.setMaxIter(100)
+    MultilayerPerceptronClassifier...
+    >>> mlp.getMaxIter()
+    100
+    >>> mlp.getBlockSize()
+    128
+    >>> mlp.setBlockSize(1)
+    MultilayerPerceptronClassifier...
+    >>> mlp.getBlockSize()
+    1
+    >>> model = mlp.fit(df)
+    >>> model.setFeaturesCol("features")
+    MultilayerPerceptronClassificationModel...
+    >>> model.getMaxIter()
+    100
+    >>> model.getLayers()
+    [2, 2, 2]
+    >>> model.weights.size
+    12
+    >>> testDF = spark.createDataFrame([
+    ...     (Vectors.dense([1.0, 0.0]),),
+    ...     (Vectors.dense([0.0, 0.0]),)], ["features"])
+    >>> model.predict(testDF.head().features)
+    1.0
+    >>> model.predictRaw(testDF.head().features)
+    DenseVector([-16.208, 16.344])
+    >>> model.predictProbability(testDF.head().features)
+    DenseVector([0.0, 1.0])
+    >>> model.transform(testDF).select("features", "prediction").show()
+    +---------+----------+
+    | features|prediction|
+    +---------+----------+
+    |[1.0,0.0]|       1.0|
+    |[0.0,0.0]|       0.0|
+    +---------+----------+
+    ...
+    >>> mlp_path = temp_path + "/mlp"
+    >>> mlp.save(mlp_path)
+    >>> mlp2 = MultilayerPerceptronClassifier.load(mlp_path)
+    >>> mlp2.getBlockSize()
+    1
+    >>> model_path = temp_path + "/mlp_model"
+    >>> model.save(model_path)
+    >>> model2 = MultilayerPerceptronClassificationModel.load(model_path)
+    >>> model.getLayers() == model2.getLayers()
+    True
+    >>> model.weights == model2.weights
+    True
+    >>> model.transform(testDF).take(1) == model2.transform(testDF).take(1)
+    True
+    >>> mlp2 = mlp2.setInitialWeights(list(range(0, 12)))
+    >>> model3 = mlp2.fit(df)
+    >>> model3.weights != model2.weights
+    True
+    >>> model3.getLayers() == model.getLayers()
+    True
+    """
+class NaiveBayes(_pysparks.NaiveBayes):
+    """Naive Bayes Classifiers.
+    It supports both Multinomial and Bernoulli NB. `Multinomial NB     <http://nlp.stanford.edu/IR-book/html/htmledition/naive-bayes-text-classification-1.html>`_
+    can handle finitely supported discrete data. For example, by converting documents into
+    TF-IDF vectors, it can be used for document classification. By making every vector a
+    binary (0/1) data, it can also be used as `Bernoulli NB     <http://nlp.stanford.edu/IR-book/html/htmledition/the-bernoulli-model-1.html>`_.
+
+    The input feature values for Multinomial NB and Bernoulli NB must be nonnegative.
+    Since 3.0.0, it supports Complement NB which is an adaptation of the Multinomial NB.
+    Specifically, Complement NB uses statistics from the complement of each class to compute
+    the model's coefficients. The inventors of Complement NB show empirically that the parameter
+    estimates for CNB are more stable than those for Multinomial NB. Like Multinomial NB, the
+    input feature values for Complement NB must be nonnegative.
+    Since 3.0.0, it also supports `Gaussian NB     <https://en.wikipedia.org/wiki/Naive_Bayes_classifier#Gaussian_naive_Bayes>`_.
+    which can handle continuous data.
+
+    .. versionadded:: 1.5.0
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> from pyspark.ml.linalg import Vectors
+    >>> df = spark.createDataFrame([
+    ...     Row(label=0.0, weight=0.1, features=Vectors.dense([0.0, 0.0])),
+    ...     Row(label=0.0, weight=0.5, features=Vectors.dense([0.0, 1.0])),
+    ...     Row(label=1.0, weight=1.0, features=Vectors.dense([1.0, 0.0]))])
+    >>> nb = NaiveBayes(smoothing=1.0, modelType="multinomial", weightCol="weight")
+    >>> model = nb.fit(df)
+    >>> model.setFeaturesCol("features")
+    NaiveBayesModel...
+    >>> model.getSmoothing()
+    1.0
+    >>> model.pi
+    DenseVector([-0.81..., -0.58...])
+    >>> model.theta
+    DenseMatrix(2, 2, [-0.91..., -0.51..., -0.40..., -1.09...], 1)
+    >>> model.sigma
+    DenseMatrix(0, 0, [...], ...)
+    >>> test0 = sc.parallelize([Row(features=Vectors.dense([1.0, 0.0]))]).toDF()
+    >>> model.predict(test0.head().features)
+    1.0
+    >>> model.predictRaw(test0.head().features)
+    DenseVector([-1.72..., -0.99...])
+    >>> model.predictProbability(test0.head().features)
+    DenseVector([0.32..., 0.67...])
+    >>> result = model.transform(test0).head()
+    >>> result.prediction
+    1.0
+    >>> result.probability
+    DenseVector([0.32..., 0.67...])
+    >>> result.rawPrediction
+    DenseVector([-1.72..., -0.99...])
+    >>> test1 = sc.parallelize([Row(features=Vectors.sparse(2, [0], [1.0]))]).toDF()
+    >>> model.transform(test1).head().prediction
+    1.0
+    >>> nb_path = temp_path + "/nb"
+    >>> nb.save(nb_path)
+    >>> nb2 = NaiveBayes.load(nb_path)
+    >>> nb2.getSmoothing()
+    1.0
+    >>> model_path = temp_path + "/nb_model"
+    >>> model.save(model_path)
+    >>> model2 = NaiveBayesModel.load(model_path)
+    >>> model.pi == model2.pi
+    True
+    >>> model.theta == model2.theta
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    >>> nb = nb.setThresholds([0.01, 10.00])
+    >>> model3 = nb.fit(df)
+    >>> result = model3.transform(test0).head()
+    >>> result.prediction
+    0.0
+    >>> nb3 = NaiveBayes().setModelType("gaussian")
+    >>> model4 = nb3.fit(df)
+    >>> model4.getModelType()
+    'gaussian'
+    >>> model4.sigma
+    DenseMatrix(2, 2, [0.0, 0.25, 0.0, 0.0], 1)
+    >>> nb5 = NaiveBayes(smoothing=1.0, modelType="complement", weightCol="weight")
+    >>> model5 = nb5.fit(df)
+    >>> model5.getModelType()
+    'complement'
+    >>> model5.theta
+    DenseMatrix(2, 2, [...], 1)
+    >>> model5.sigma
+    DenseMatrix(0, 0, [...], ...)
+    """
+class NaiveBayesModel(_pysparks.NaiveBayesModel):
+    """Model fitted by NaiveBayes.
+
+    .. versionadded:: 1.5.0
+    """
+class OneVsRest(_pysparks.OneVsRest):
+    """Reduction of Multiclass Classification to Binary Classification.
+    Performs reduction using one against all strategy.
+    For a multiclass classification with k classes, train k models (one per class).
+    Each example is scored against all k models and the model with highest score
+    is picked to label the example.
+
+    .. versionadded:: 2.0.0
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> from pyspark.ml.linalg import Vectors
+    >>> data_path = "data/mllib/sample_multiclass_classification_data.txt"
+    >>> df = spark.read.format("libsvm").load(data_path)
+    >>> lr = LogisticRegression(regParam=0.01)
+    >>> ovr = OneVsRest(classifier=lr)
+    >>> ovr.getRawPredictionCol()
+    'rawPrediction'
+    >>> ovr.setPredictionCol("newPrediction")
+    OneVsRest...
+    >>> model = ovr.fit(df)
+    >>> model.models[0].coefficients
+    DenseVector([0.5..., -1.0..., 3.4..., 4.2...])
+    >>> model.models[1].coefficients
+    DenseVector([-2.1..., 3.1..., -2.6..., -2.3...])
+    >>> model.models[2].coefficients
+    DenseVector([0.3..., -3.4..., 1.0..., -1.1...])
+    >>> [x.intercept for x in model.models]
+    [-2.7..., -2.5..., -1.3...]
+    >>> test0 = sc.parallelize([Row(features=Vectors.dense(-1.0, 0.0, 1.0, 1.0))]).toDF()
+    >>> model.transform(test0).head().newPrediction
+    0.0
+    >>> test1 = sc.parallelize([Row(features=Vectors.sparse(4, [0], [1.0]))]).toDF()
+    >>> model.transform(test1).head().newPrediction
+    2.0
+    >>> test2 = sc.parallelize([Row(features=Vectors.dense(0.5, 0.4, 0.3, 0.2))]).toDF()
+    >>> model.transform(test2).head().newPrediction
+    0.0
+    >>> model_path = temp_path + "/ovr_model"
+    >>> model.save(model_path)
+    >>> model2 = OneVsRestModel.load(model_path)
+    >>> model2.transform(test0).head().newPrediction
+    0.0
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    >>> model.transform(test2).columns
+    ['features', 'rawPrediction', 'newPrediction']
+    """
+class OneVsRestModel(_pysparks.OneVsRestModel):
+    """Model fitted by OneVsRest.
+    This stores the models resulting from training k binary classifiers: one for each class.
+    Each example is scored against all k models, and the model with the highest score
+    is picked to label the example.
+
+    .. versionadded:: 2.0.0
+    """
+class RandomForestClassificationModel(_pysparks.RandomForestClassificationModel):
+    """Model fitted by RandomForestClassifier.
+
+    .. versionadded:: 1.4.0
+    """
+class RandomForestClassifier(_pysparks.RandomForestClassifier):
+    """`Random Forest <http://en.wikipedia.org/wiki/Random_forest>`_
+    learning algorithm for classification.
+    It supports both binary and multiclass labels, as well as both continuous and categorical
+    features.
+
+    .. versionadded:: 1.4.0
+
+    Examples
+    --------
+    >>> import numpy
+    >>> from numpy import allclose
+    >>> from pyspark.ml.linalg import Vectors
+    >>> from pyspark.ml.feature import StringIndexer
+    >>> df = spark.createDataFrame([
+    ...     (1.0, Vectors.dense(1.0)),
+    ...     (0.0, Vectors.sparse(1, [], []))], ["label", "features"])
+    >>> stringIndexer = StringIndexer(inputCol="label", outputCol="indexed")
+    >>> si_model = stringIndexer.fit(df)
+    >>> td = si_model.transform(df)
+    >>> rf = RandomForestClassifier(numTrees=3, maxDepth=2, labelCol="indexed", seed=42,
+    ...     leafCol="leafId")
+    >>> rf.getMinWeightFractionPerNode()
+    0.0
+    >>> model = rf.fit(td)
+    >>> model.getLabelCol()
+    'indexed'
+    >>> model.setFeaturesCol("features")
+    RandomForestClassificationModel...
+    >>> model.setRawPredictionCol("newRawPrediction")
+    RandomForestClassificationModel...
+    >>> model.getBootstrap()
+    True
+    >>> model.getRawPredictionCol()
+    'newRawPrediction'
+    >>> model.featureImportances
+    SparseVector(1, {0: 1.0})
+    >>> allclose(model.treeWeights, [1.0, 1.0, 1.0])
+    True
+    >>> test0 = spark.createDataFrame([(Vectors.dense(-1.0),)], ["features"])
+    >>> model.predict(test0.head().features)
+    0.0
+    >>> model.predictRaw(test0.head().features)
+    DenseVector([2.0, 0.0])
+    >>> model.predictProbability(test0.head().features)
+    DenseVector([1.0, 0.0])
+    >>> result = model.transform(test0).head()
+    >>> result.prediction
+    0.0
+    >>> int(numpy.argmax(result.probability))
+    0
+    >>> int(numpy.argmax(result.newRawPrediction))
+    0
+    >>> result.leafId
+    DenseVector([0.0, 0.0, 0.0])
+    >>> test1 = spark.createDataFrame([(Vectors.sparse(1, [0], [1.0]),)], ["features"])
+    >>> model.transform(test1).head().prediction
+    1.0
+    >>> model.trees
+    [DecisionTreeClassificationModel...depth=..., DecisionTreeClassificationModel...]
+    >>> rfc_path = temp_path + "/rfc"
+    >>> rf.save(rfc_path)
+    >>> rf2 = RandomForestClassifier.load(rfc_path)
+    >>> rf2.getNumTrees()
+    3
+    >>> model_path = temp_path + "/rfc_model"
+    >>> model.save(model_path)
+    >>> model2 = RandomForestClassificationModel.load(model_path)
+    >>> model.featureImportances == model2.featureImportances
+    True
+    >>> model.transform(test0).take(1) == model2.transform(test0).take(1)
+    True
+    """

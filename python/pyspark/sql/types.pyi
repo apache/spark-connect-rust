@@ -34,6 +34,7 @@ U = TypeVar('U')
 __all__ = ['DataType', 'NullType', 'CharType', 'StringType', 'VarcharType', 'BinaryType', 'BooleanType', 'DateType', 'TimeType', 'TimestampType', 'TimestampNTZType', 'DecimalType', 'DoubleType', 'Geography', 'Geometry', 'FloatType', 'ByteType', 'IntegerType', 'LongType', 'DayTimeIntervalType', 'YearMonthIntervalType', 'CalendarIntervalType', 'Row', 'ShortType', 'ArrayType', 'MapType', 'StructField', 'StructType', 'VariantType', 'VariantVal', 'GeographyType', 'GeometryType']
 
 class DataType:
+    """Base class for data types."""
     def __repr__(self) -> str: ...
     def __hash__(self) -> int: ...
     def __eq__(self, other: Any) -> bool: ...
@@ -43,34 +44,92 @@ class DataType:
     def simpleString(self) -> str: ...
     def jsonValue(self) -> Union[str, Dict[str, Any]]: ...
     def json(self) -> str: ...
-    def needConversion(self) -> bool: ...
-    def toInternal(self, obj: Any) -> Any: ...
-    def fromInternal(self, obj: Any) -> Any: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, obj: Any) -> Any:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: Any) -> Any:
+        """Converts an internal SQL object into a native Python object."""
     def _as_nullable(self) -> 'DataType': ...
     @classmethod
-    def fromDDL(cls, ddl: str) -> 'DataType': ...
+    def fromDDL(cls, ddl: str) -> 'DataType':
+        """Creates :class:`DataType` for a given DDL-formatted string.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        ddl : str
+            DDL-formatted string representation of types, e.g.
+            :class:`pyspark.sql.types.DataType.simpleString`, except that top level struct
+            type can omit the ``struct<>`` for the compatibility reason with
+            ``spark.createDataFrame`` and Python UDFs.
+
+        Returns
+        -------
+        :class:`DataType`
+
+        Examples
+        --------
+        Create a StructType by the corresponding DDL formatted string.
+
+        >>> from pyspark.sql.types import DataType
+        >>> DataType.fromDDL("b string, a int")
+        StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])
+
+        Create a single DataType by the corresponding DDL formatted string.
+
+        >>> DataType.fromDDL("decimal(10,10)")
+        DecimalType(10,10)
+
+        Create a StructType by the legacy string format.
+
+        >>> DataType.fromDDL("b: string, a: int")
+        StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])
+        """
     @classmethod
     def _data_type_build_formatted_string(cls, dataType: 'DataType', prefix: str, stringConcat: StringConcat, maxDepth: int) -> None: ...
     @classmethod
     def _get_jvm_type_name(cls, dataType: 'DataType') -> str: ...
 
 class DataTypeSingleton(type):
+    """Metaclass for DataType"""
     _instances: ClassVar[Dict[Type['DataTypeSingleton'], 'DataTypeSingleton']] = ...
     def __call__(cls: Type[T]) -> T: ...
 
 class NullType(DataType, metaclass=DataTypeSingleton):
+    """Null type.
+
+    The data type representing None, used for the types that cannot be inferred.
+    """
     @classmethod
     def typeName(cls) -> str: ...
 
-class AtomicType(DataType): ...
+class AtomicType(DataType):
+    """An internal type used to represent everything that is not
+    null, UDTs, arrays, structs, and maps.
+    """
 
-class NumericType(AtomicType): ...
+class NumericType(AtomicType):
+    """Numeric data types."""
 
-class IntegralType(NumericType, metaclass=DataTypeSingleton): ...
+class IntegralType(NumericType, metaclass=DataTypeSingleton):
+    """Integral data types."""
 
-class FractionalType(NumericType): ...
+class FractionalType(NumericType):
+    """Fractional data types."""
 
 class StringType(AtomicType):
+    """String data type.
+
+    Parameters
+    ----------
+    collation : str
+        name of the collation, default is UTF8_BINARY.
+    """
     providerSpark = 'spark'
     providerICU = 'icu'
     providers = [providerSpark, providerICU]
@@ -84,6 +143,13 @@ class StringType(AtomicType):
     def isUTF8BinaryCollation(self) -> bool: ...
 
 class CharType(AtomicType):
+    """Char data type
+
+    Parameters
+    ----------
+    length : int
+        the length limitation.
+    """
     def __init__(self, length: int):
         self.length = length
     def simpleString(self) -> str: ...
@@ -91,49 +157,109 @@ class CharType(AtomicType):
     def __repr__(self) -> str: ...
 
 class VarcharType(AtomicType):
+    """Varchar data type
+
+    Parameters
+    ----------
+    length : int
+        the length limitation.
+    """
     def __init__(self, length: int):
         self.length = length
     def simpleString(self) -> str: ...
     def jsonValue(self) -> str: ...
     def __repr__(self) -> str: ...
 
-class BinaryType(AtomicType, metaclass=DataTypeSingleton): ...
+class BinaryType(AtomicType, metaclass=DataTypeSingleton):
+    """Binary (byte array) data type."""
 
-class BooleanType(AtomicType, metaclass=DataTypeSingleton): ...
+class BooleanType(AtomicType, metaclass=DataTypeSingleton):
+    """Boolean data type."""
 
-class DatetimeType(AtomicType): ...
+class DatetimeType(AtomicType):
+    """Super class of all datetime data type."""
 
 class DateType(DatetimeType, metaclass=DataTypeSingleton):
+    """Date (datetime.date) data type."""
     EPOCH_ORDINAL = datetime.datetime(1970, 1, 1).toordinal()
-    def needConversion(self) -> bool: ...
-    def toInternal(self, d: datetime.date) -> int: ...
-    def fromInternal(self, v: int) -> datetime.date: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
 
-class AnyTimeType(DatetimeType): ...
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, d: datetime.date) -> int:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, v: int) -> datetime.date:
+        """Converts an internal SQL object into a native Python object."""
+
+class AnyTimeType(DatetimeType):
+    """A TIME type of any valid precision."""
 
 class TimeType(AnyTimeType):
+    """Time (datetime.time) data type.
+
+    .. versionadded:: 4.1.0
+    """
     def __init__(self, precision: int=6):
         self.precision = precision
-    def needConversion(self) -> bool: ...
-    def toInternal(self, t: datetime.time) -> int: ...
-    def fromInternal(self, nano: int) -> datetime.time: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, t: datetime.time) -> int:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, nano: int) -> datetime.time:
+        """Converts an internal SQL object into a native Python object."""
     def simpleString(self) -> str: ...
     def jsonValue(self) -> str: ...
     def __repr__(self) -> str: ...
 
 class TimestampType(DatetimeType, metaclass=DataTypeSingleton):
-    def needConversion(self) -> bool: ...
-    def toInternal(self, dt: datetime.datetime) -> int: ...
-    def fromInternal(self, ts: int) -> datetime.datetime: ...
+    """Timestamp (datetime.datetime) data type."""
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, dt: datetime.datetime) -> int:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, ts: int) -> datetime.datetime:
+        """Converts an internal SQL object into a native Python object."""
 
 class TimestampNTZType(DatetimeType, metaclass=DataTypeSingleton):
-    def needConversion(self) -> bool: ...
+    """Timestamp (datetime.datetime) data type without timezone information."""
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
     @classmethod
     def typeName(cls) -> str: ...
-    def toInternal(self, dt: datetime.datetime) -> int: ...
-    def fromInternal(self, ts: int) -> datetime.datetime: ...
+    def toInternal(self, dt: datetime.datetime) -> int:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, ts: int) -> datetime.datetime:
+        """Converts an internal SQL object into a native Python object."""
 
 class DecimalType(FractionalType):
+    """Decimal (decimal.Decimal) data type.
+
+    The DecimalType must have fixed precision (the maximum total number of digits)
+    and scale (the number of digits on the right of dot). For example, (5, 2) can
+    support the value from [-999.99 to 999.99].
+
+    The precision can be up to 38, the scale must be less or equal to precision.
+
+    When creating a DecimalType, the default precision and scale is (10, 0). When inferring
+    schema from decimal.Decimal objects, it will be DecimalType(38, 18).
+
+    Parameters
+    ----------
+    precision : int, optional
+        the maximum (i.e. total) number of digits (default: 10)
+    scale : int, optional
+        the number of digits on right side of dot. (default: 0)
+    """
     def __init__(self, precision: int=10, scale: int=0):
         self.precision = precision
         self.scale = scale
@@ -142,15 +268,24 @@ class DecimalType(FractionalType):
     def jsonValue(self) -> str: ...
     def __repr__(self) -> str: ...
 
-class DoubleType(FractionalType, metaclass=DataTypeSingleton): ...
+class DoubleType(FractionalType, metaclass=DataTypeSingleton):
+    """Double data type, representing double precision floats."""
 
-class FloatType(FractionalType, metaclass=DataTypeSingleton): ...
+class FloatType(FractionalType, metaclass=DataTypeSingleton):
+    """Float data type, representing single precision floats."""
 
 class SpatialType(AtomicType):
+    """Super class of all spatial data types: GeographyType and GeometryType."""
     MIXED_SRID = -1
     MIXED_CRS = 'SRID:ANY'
 
 class GeographyType(SpatialType):
+    """The data type representing GEOGRAPHY values which are spatial objects, as defined in the Open
+    Geospatial Consortium (OGC) Simple Feature Access specification
+    (https://portal.ogc.org/files/?artifact_id=25355), with a geographic coordinate system.
+
+    .. versionadded:: 4.1.0
+    """
     srid: int
     DEFAULT_CRS = 'OGC:CRS84'
     DEFAULT_ALG = 'SPHERICAL'
@@ -176,11 +311,28 @@ class GeographyType(SpatialType):
     def simpleString(self) -> str: ...
     def __repr__(self) -> str: ...
     def jsonValue(self) -> Union[str, Dict[str, Any]]: ...
-    def needConversion(self) -> bool: ...
-    def fromInternal(self, obj: Dict) -> Optional['Geography']: ...
-    def toInternal(self, geography: Any) -> Any: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def fromInternal(self, obj: Dict) -> Optional['Geography']:
+        """Converts an internal SQL object into a native Python object."""
+    def toInternal(self, geography: Any) -> Any:
+        """Converts a Python object into an internal SQL object."""
 
 class GeometryType(SpatialType):
+    """The data type representing GEOMETRY values which are spatial objects, as defined in the Open
+    Geospatial Consortium (OGC) Simple Feature Access specification
+    (https://portal.ogc.org/files/?artifact_id=25355), with a Cartesian coordinate system.
+
+    Parameters
+    ----------
+    srid : int or str
+        The Spatial Reference System Identifier (SRID) value for the GEOMETRY.
+
+    .. versionadded:: 4.1.0
+    """
     srid: int
     DEFAULT_CRS = 'OGC:CRS84'
     DEFAULT_SRID = 4326
@@ -205,25 +357,41 @@ class GeometryType(SpatialType):
     def simpleString(self) -> str: ...
     def __repr__(self) -> str: ...
     def jsonValue(self) -> Union[str, Dict[str, Any]]: ...
-    def needConversion(self) -> bool: ...
-    def fromInternal(self, obj: Dict) -> Optional['Geometry']: ...
-    def toInternal(self, geometry: Any) -> Any: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def fromInternal(self, obj: Dict) -> Optional['Geometry']:
+        """Converts an internal SQL object into a native Python object."""
+    def toInternal(self, geometry: Any) -> Any:
+        """Converts a Python object into an internal SQL object."""
 
 class ByteType(IntegralType):
+    """Byte data type, representing signed 8-bit integers."""
     def simpleString(self) -> str: ...
 
 class IntegerType(IntegralType):
+    """Int data type, representing signed 32-bit integers."""
     def simpleString(self) -> str: ...
 
 class LongType(IntegralType):
+    """Long data type, representing signed 64-bit integers.
+
+    If the values are beyond the range of [-9223372036854775808, 9223372036854775807],
+    please use :class:`DecimalType`.
+    """
     def simpleString(self) -> str: ...
 
 class ShortType(IntegralType):
+    """Short data type, representing signed 16-bit integers."""
     def simpleString(self) -> str: ...
 
-class AnsiIntervalType(AtomicType): ...
+class AnsiIntervalType(AtomicType):
+    """The interval type which conforms to the ANSI SQL standard."""
 
 class DayTimeIntervalType(AnsiIntervalType):
+    """DayTimeIntervalType (datetime.timedelta)."""
     DAY = 0
     HOUR = 1
     MINUTE = 2
@@ -250,11 +418,23 @@ class DayTimeIntervalType(AnsiIntervalType):
     simpleString = _str_repr
     jsonValue = _str_repr
     def __repr__(self) -> str: ...
-    def needConversion(self) -> bool: ...
-    def toInternal(self, dt: datetime.timedelta) -> Optional[int]: ...
-    def fromInternal(self, micros: int) -> Optional[datetime.timedelta]: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, dt: datetime.timedelta) -> Optional[int]:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, micros: int) -> Optional[datetime.timedelta]:
+        """Converts an internal SQL object into a native Python object."""
 
 class YearMonthIntervalType(AnsiIntervalType):
+    """YearMonthIntervalType, represents year-month intervals of the SQL standard
+
+    Notes
+    -----
+    This data type doesn't support collection: df.collect/take/head.
+    """
     YEAR = 0
     MONTH = 1
     _fields = {YEAR: 'year', MONTH: 'month'}
@@ -278,19 +458,62 @@ class YearMonthIntervalType(AnsiIntervalType):
     def _str_repr(self) -> str: ...
     simpleString = _str_repr
     jsonValue = _str_repr
-    def needConversion(self) -> bool: ...
-    def toInternal(self, obj: Any) -> Any: ...
-    def fromInternal(self, obj: Any) -> Any: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, obj: Any) -> Any:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: Any) -> Any:
+        """Converts an internal SQL object into a native Python object."""
     def __repr__(self) -> str: ...
 
 class CalendarIntervalType(DataType, metaclass=DataTypeSingleton):
+    """The data type representing calendar intervals.
+
+    The calendar interval is stored internally in three components:
+    - an integer value representing the number of `months` in this interval.
+    - an integer value representing the number of `days` in this interval.
+    - a long value representing the number of `microseconds` in this interval.
+    """
     @classmethod
     def typeName(cls) -> str: ...
-    def needConversion(self) -> bool: ...
-    def toInternal(self, obj: Any) -> Any: ...
-    def fromInternal(self, obj: Any) -> Any: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, obj: Any) -> Any:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: Any) -> Any:
+        """Converts an internal SQL object into a native Python object."""
 
 class ArrayType(DataType):
+    """Array data type.
+
+    Parameters
+    ----------
+    elementType : :class:`DataType`
+        :class:`DataType` of each element in the array.
+    containsNull : bool, optional
+        whether the array can contain null (None) values.
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import ArrayType, StringType, StructField, StructType
+
+    The below example demonstrates how to create class:`ArrayType`:
+
+    >>> arr = ArrayType(StringType())
+
+    The array can contain null (None) values by default:
+
+    >>> ArrayType(StringType()) == ArrayType(StringType(), True)
+    True
+    >>> ArrayType(StringType(), False) == ArrayType(StringType())
+    False
+    """
     def __init__(self, elementType: DataType, containsNull: bool=True):
         assert isinstance(elementType, DataType), "elementType %s should be an instance of %s" % (
             elementType,
@@ -300,17 +523,83 @@ class ArrayType(DataType):
         self.containsNull = containsNull
     def simpleString(self) -> str: ...
     def _as_nullable(self) -> 'ArrayType': ...
-    def toNullable(self) -> 'ArrayType': ...
+    def toNullable(self) -> 'ArrayType':
+        """Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`ArrayType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> ArrayType(IntegerType(), containsNull=False).toNullable()
+        ArrayType(IntegerType(), True)
+
+        Example 2: Nested nullability conversion
+
+        >>> ArrayType(
+        ...     StructType([
+        ...         StructField("b", IntegerType(), nullable=False),
+        ...         StructField("c", ArrayType(IntegerType(), containsNull=False))
+        ...     ]),
+        ...     containsNull=False
+        ... ).toNullable()
+        ArrayType(StructType([StructField('b', IntegerType(), True),
+        StructField('c', ArrayType(IntegerType(), True), True)]), True)
+        """
     def __repr__(self) -> str: ...
     def jsonValue(self) -> Dict[str, Any]: ...
     @classmethod
     def fromJson(cls, json: Dict[str, Any], fieldPath: str="", collationsMap: Optional[Dict[str, str]]=None) -> 'ArrayType': ...
-    def needConversion(self) -> bool: ...
-    def toInternal(self, obj: List[Optional[T]]) -> List[Optional[T]]: ...
-    def fromInternal(self, obj: List[Optional[T]]) -> List[Optional[T]]: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, obj: List[Optional[T]]) -> List[Optional[T]]:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: List[Optional[T]]) -> List[Optional[T]]:
+        """Converts an internal SQL object into a native Python object."""
     def _build_formatted_string(self, prefix: str, stringConcat: StringConcat, maxDepth: int=JVM_INT_MAX) -> None: ...
 
 class MapType(DataType):
+    """Map data type.
+
+    Parameters
+    ----------
+    keyType : :class:`DataType`
+        :class:`DataType` of the keys in the map.
+    valueType : :class:`DataType`
+        :class:`DataType` of the values in the map.
+    valueContainsNull : bool, optional
+        indicates whether values can contain null (None) values.
+
+    Notes
+    -----
+    Keys in a map data type are not allowed to be null (None).
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import IntegerType, FloatType, MapType, StringType
+
+    The below example demonstrates how to create class:`MapType`:
+
+    >>> map_type = MapType(StringType(), IntegerType())
+
+    The values of the map can contain null (``None``) values by default:
+
+    >>> (MapType(StringType(), IntegerType())
+    ...        == MapType(StringType(), IntegerType(), True))
+    True
+    >>> (MapType(StringType(), IntegerType(), False)
+    ...        == MapType(StringType(), FloatType()))
+    False
+    """
     def __init__(self, keyType: DataType, valueType: DataType, valueContainsNull: bool=True):
         assert isinstance(keyType, DataType), "keyType %s should be an instance of %s" % (
             keyType,
@@ -325,17 +614,75 @@ class MapType(DataType):
         self.valueContainsNull = valueContainsNull
     def simpleString(self) -> str: ...
     def _as_nullable(self) -> 'MapType': ...
-    def toNullable(self) -> 'MapType': ...
+    def toNullable(self) -> 'MapType':
+        """Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`MapType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> MapType(IntegerType(), StringType(), valueContainsNull=False).toNullable()
+        MapType(IntegerType(), StringType(), True)
+
+        Example 2: Nested nullability conversion
+
+        >>> MapType(
+        ...     StringType(),
+        ...     MapType(
+        ...         IntegerType(),
+        ...         ArrayType(IntegerType(), containsNull=False),
+        ...         valueContainsNull=False
+        ...     ),
+        ...     valueContainsNull=False
+        ... ).toNullable()
+        MapType(StringType(), MapType(IntegerType(), ArrayType(IntegerType(), True), True), True)
+        """
     def __repr__(self) -> str: ...
     def jsonValue(self) -> Dict[str, Any]: ...
     @classmethod
     def fromJson(cls, json: Dict[str, Any], fieldPath: str="", collationsMap: Optional[Dict[str, str]]=None) -> 'MapType': ...
-    def needConversion(self) -> bool: ...
-    def toInternal(self, obj: Dict[T, Optional[U]]) -> Dict[T, Optional[U]]: ...
-    def fromInternal(self, obj: Dict[T, Optional[U]]) -> Dict[T, Optional[U]]: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, obj: Dict[T, Optional[U]]) -> Dict[T, Optional[U]]:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: Dict[T, Optional[U]]) -> Dict[T, Optional[U]]:
+        """Converts an internal SQL object into a native Python object."""
     def _build_formatted_string(self, prefix: str, stringConcat: StringConcat, maxDepth: int=JVM_INT_MAX) -> None: ...
 
 class StructField(DataType):
+    """A field in :class:`StructType`.
+
+    Parameters
+    ----------
+    name : str
+        name of the field.
+    dataType : :class:`DataType`
+        :class:`DataType` of the field.
+    nullable : bool, optional
+        whether the field can be null (None) or not.
+    metadata : dict, optional
+        a dict from string to simple type that can be toInternald to JSON automatically
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import StringType, StructField
+    >>> (StructField("f1", StringType(), True)
+    ...      == StructField("f1", StringType(), True))
+    True
+    >>> (StructField("f1", StringType(), True)
+    ...      == StructField("f2", StringType(), True))
+    False
+    """
     def __init__(self, name: str, dataType: DataType, nullable: bool=True, metadata: Optional[Dict[str, Any]]=None):
         assert isinstance(dataType, DataType), "dataType %s should be an instance of %s" % (
             dataType,
@@ -356,13 +703,75 @@ class StructField(DataType):
     def getCollationMetadata(self) -> Dict[str, str]: ...
     def _isCollatedString(self, dt: DataType) -> bool: ...
     def schemaCollationValue(self, dt: DataType) -> str: ...
-    def needConversion(self) -> bool: ...
-    def toInternal(self, obj: T) -> T: ...
-    def fromInternal(self, obj: T) -> T: ...
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, obj: T) -> T:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: T) -> T:
+        """Converts an internal SQL object into a native Python object."""
     def typeName(self) -> str: ...  # type: ignore[override]
     def _build_formatted_string(self, prefix: str, stringConcat: StringConcat, maxDepth: int=JVM_INT_MAX) -> None: ...
 
 class StructType(DataType):
+    r"""Struct type, consisting of a list of :class:`StructField`.
+
+    This is the data type representing a :class:`Row`.
+
+    Iterating a :class:`StructType` will iterate over its :class:`StructField`\s.
+    A contained :class:`StructField` can be accessed by its name or position.
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import *
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct1["f1"]
+    StructField('f1', StringType(), True)
+    >>> struct1[0]
+    StructField('f1', StringType(), True)
+
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct2 = StructType([StructField("f1", StringType(), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", CharType(10), True)])
+    >>> struct2 = StructType([StructField("f1", CharType(10), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", VarcharType(10), True)])
+    >>> struct2 = StructType([StructField("f1", VarcharType(10), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct2 = StructType([StructField("f1", StringType(), True),
+    ...     StructField("f2", IntegerType(), False)])
+    >>> struct1 == struct2
+    False
+
+    The below example demonstrates how to create a DataFrame based on a struct created
+    using class:`StructType` and class:`StructField`:
+
+    >>> data = [("Alice", ["Java", "Scala"]), ("Bob", ["Python", "Scala"])]
+    >>> schema = StructType([
+    ...     StructField("name", StringType()),
+    ...     StructField("languagesSkills", ArrayType(StringType())),
+    ... ])
+    >>> df = spark.createDataFrame(data=data, schema=schema)
+    >>> df.printSchema()
+    root
+     |-- name: string (nullable = true)
+     |-- languagesSkills: array (nullable = true)
+     |    |-- element: string (containsNull = true)
+    >>> df.show()
+    +-----+---------------+
+    | name|languagesSkills|
+    +-----+---------------+
+    |Alice|  [Java, Scala]|
+    |  Bob|[Python, Scala]|
+    +-----+---------------+
+    """
     fields: List[StructField]
     def __init__(self, fields: Optional[List[StructField]]=None):
         if not fields:
@@ -378,48 +787,295 @@ class StructType(DataType):
         self._needConversion = [f.needConversion() for f in self]
         self._needSerializeAnyField = any(self._needConversion)
     @overload
-    def add(self, field: str, data_type: Union[str, DataType], nullable: bool=True, metadata: Optional[Dict[str, Any]]=None) -> 'StructType': ...
+    def add(self, field: str, data_type: Union[str, DataType], nullable: bool=True, metadata: Optional[Dict[str, Any]]=None) -> 'StructType':
+        """Construct a :class:`StructType` by adding new elements to it, to define the schema.
+        The method accepts either:
+
+            a) A single parameter which is a :class:`StructField` object.
+            b) Between 2 and 4 parameters as (name, data_type, nullable (optional),
+               metadata(optional). The data_type parameter may be either a String or a
+               :class:`DataType` object.
+
+        Parameters
+        ----------
+        field : str or :class:`StructField`
+            Either the name of the field or a :class:`StructField` object
+        data_type : :class:`DataType`, optional
+            If present, the DataType of the :class:`StructField` to create
+        nullable : bool, optional
+            Whether the field to add should be nullable (default True)
+        metadata : dict, optional
+            Any additional metadata (default None)
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+        >>> struct1 = StructType().add("f1", StringType(), True).add("f2", StringType(), True, None)
+        >>> struct2 = StructType([StructField("f1", StringType(), True),
+        ...     StructField("f2", StringType(), True, None)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add(StructField("f1", StringType(), True))
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add("f1", "string", True)
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        """
     @overload
-    def add(self, field: StructField) -> 'StructType': ...
-    def __iter__(self) -> Iterator[StructField]: ...
-    def __len__(self) -> int: ...
-    def __getitem__(self, key: Union[str, int]) -> StructField: ...
+    def add(self, field: StructField) -> 'StructType':
+        """Construct a :class:`StructType` by adding new elements to it, to define the schema.
+        The method accepts either:
+
+            a) A single parameter which is a :class:`StructField` object.
+            b) Between 2 and 4 parameters as (name, data_type, nullable (optional),
+               metadata(optional). The data_type parameter may be either a String or a
+               :class:`DataType` object.
+
+        Parameters
+        ----------
+        field : str or :class:`StructField`
+            Either the name of the field or a :class:`StructField` object
+        data_type : :class:`DataType`, optional
+            If present, the DataType of the :class:`StructField` to create
+        nullable : bool, optional
+            Whether the field to add should be nullable (default True)
+        metadata : dict, optional
+            Any additional metadata (default None)
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+        >>> struct1 = StructType().add("f1", StringType(), True).add("f2", StringType(), True, None)
+        >>> struct2 = StructType([StructField("f1", StringType(), True),
+        ...     StructField("f2", StringType(), True, None)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add(StructField("f1", StringType(), True))
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add("f1", "string", True)
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        """
+    def __iter__(self) -> Iterator[StructField]:
+        """Iterate the fields"""
+    def __len__(self) -> int:
+        """Return the number of fields."""
+    def __getitem__(self, key: Union[str, int]) -> StructField:
+        """Access fields by name or slice."""
     def simpleString(self) -> str: ...
     def _as_nullable(self) -> 'StructType': ...
-    def toNullable(self) -> 'StructType': ...
+    def toNullable(self) -> 'StructType':
+        """Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> StructType([StructField("a", IntegerType(), nullable=False)]).toNullable()
+        StructType([StructField('a', IntegerType(), True)])
+
+        Example 2: Nested nullability conversion
+
+        >>> StructType([
+        ...     StructField("a",
+        ...         StructType([
+        ...             StructField("b", IntegerType(), nullable=False),
+        ...             StructField("c", StructType([
+        ...                 StructField("d", IntegerType(), nullable=False)
+        ...             ]))
+        ...         ]),
+        ...         nullable=False)
+        ... ]).toNullable()
+        StructType([StructField('a', StructType([StructField('b', IntegerType(), True),
+        StructField('c', StructType([StructField('d', IntegerType(), True)]), True)]), True)])
+        """
     def __repr__(self) -> str: ...
     def jsonValue(self) -> Dict[str, Any]: ...
     @classmethod
-    def fromJson(cls, json: Dict[str, Any]) -> 'StructType': ...
-    def fieldNames(self) -> List[str]: ...
-    def needConversion(self) -> bool: ...
-    def toInternal(self, obj: Tuple) -> Tuple: ...
-    def fromInternal(self, obj: Tuple) -> 'Row': ...
+    def fromJson(cls, json: Dict[str, Any]) -> 'StructType':
+        """Constructs :class:`StructType` from a schema defined in JSON format.
+
+        Below is a JSON schema it must adhere to::
+
+            {
+              "title":"StructType",
+              "description":"Schema of StructType in json format",
+              "type":"object",
+              "properties":{
+                 "fields":{
+                    "description":"Array of struct fields",
+                    "type":"array",
+                    "items":{
+                        "type":"object",
+                        "properties":{
+                           "name":{
+                              "description":"Name of the field",
+                              "type":"string"
+                           },
+                           "type":{
+                              "description": "Type of the field. Can either be
+                                              another nested StructType or primitive type",
+                              "type":"object/string"
+                           },
+                           "nullable":{
+                              "description":"If nulls are allowed",
+                              "type":"boolean"
+                           },
+                           "metadata":{
+                              "description":"Additional metadata to supply",
+                              "type":"object"
+                           },
+                           "required":[
+                              "name",
+                              "type",
+                              "nullable",
+                              "metadata"
+                           ]
+                        }
+                   }
+                }
+             }
+           }
+
+        Parameters
+        ----------
+        json : dict or a dict-like object e.g. JSON object
+            This "dict" must have "fields" key that returns an array of fields
+            each of which must have specific keys (name, type, nullable, metadata).
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        >>> json_str = '''
+        ...  {
+        ...      "fields": [
+        ...          {
+        ...              "metadata": {},
+        ...              "name": "Person",
+        ...              "nullable": true,
+        ...              "type": {
+        ...                  "fields": [
+        ...                      {
+        ...                          "metadata": {},
+        ...                          "name": "name",
+        ...                          "nullable": false,
+        ...                          "type": "string"
+        ...                      },
+        ...                      {
+        ...                          "metadata": {},
+        ...                          "name": "surname",
+        ...                          "nullable": false,
+        ...                          "type": "string"
+        ...                      }
+        ...                  ],
+        ...                  "type": "struct"
+        ...              }
+        ...          }
+        ...      ],
+        ...      "type": "struct"
+        ...  }
+        ...  '''
+        >>> import json
+        >>> scheme = StructType.fromJson(json.loads(json_str))
+        >>> scheme.simpleString()
+        'struct<Person:struct<name:string,surname:string>>'
+        """
+    def fieldNames(self) -> List[str]:
+        """Returns all field names in a list.
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import StringType, StructField, StructType
+        >>> struct = StructType([StructField("f1", StringType(), True)])
+        >>> struct.fieldNames()
+        ['f1']
+        """
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def toInternal(self, obj: Tuple) -> Tuple:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: Tuple) -> 'Row':
+        """Converts an internal SQL object into a native Python object."""
     def _build_formatted_string(self, prefix: str, stringConcat: StringConcat, maxDepth: int=JVM_INT_MAX) -> None: ...
     def treeString(self, maxDepth: int=JVM_INT_MAX) -> str: ...
     def toDDL(self) -> str: ...
 
 class VariantType(AtomicType):
-    def needConversion(self) -> bool: ...
-    def fromInternal(self, obj: Dict) -> Optional['VariantVal']: ...
-    def toInternal(self, variant: Any) -> Any: ...
+    """Variant data type, representing semi-structured values.
+
+    .. versionadded:: 4.0.0
+    """
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
+    def fromInternal(self, obj: Dict) -> Optional['VariantVal']:
+        """Converts an internal SQL object into a native Python object."""
+    def toInternal(self, variant: Any) -> Any:
+        """Converts a Python object into an internal SQL object."""
 
 class UserDefinedType(DataType):
+    """User-defined type (UDT).
+
+    .. note:: WARN: Spark Internal Use Only
+    """
     @classmethod
     def typeName(cls) -> str: ...
     @classmethod
-    def sqlType(cls) -> DataType: ...
+    def sqlType(cls) -> DataType:
+        """Underlying SQL storage type for this UDT."""
     @classmethod
-    def module(cls) -> str: ...
+    def module(cls) -> str:
+        """The Python module of the UDT."""
     @classmethod
-    def scalaUDT(cls) -> str: ...
-    def needConversion(self) -> bool: ...
+    def scalaUDT(cls) -> str:
+        """The class name of the paired Scala UDT (could be '', if there
+        is no corresponding one).
+        """
+    def needConversion(self) -> bool:
+        """Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        """
     @classmethod
-    def _cachedSqlType(cls) -> DataType: ...
-    def toInternal(self, obj: Any) -> Any: ...
-    def fromInternal(self, obj: Any) -> Any: ...
-    def serialize(self, obj: Any) -> Any: ...
-    def deserialize(self, datum: Any) -> Any: ...
+    def _cachedSqlType(cls) -> DataType:
+        """Cache the sqlType() into class, because it's heavily used in `toInternal`."""
+    def toInternal(self, obj: Any) -> Any:
+        """Converts a Python object into an internal SQL object."""
+    def fromInternal(self, obj: Any) -> Any:
+        """Converts an internal SQL object into a native Python object."""
+    def serialize(self, obj: Any) -> Any:
+        """Converts a user-type object into a SQL datum."""
+    def deserialize(self, datum: Any) -> Any:
+        """Converts a SQL datum into a user-type object."""
     def simpleString(self) -> str: ...
     def json(self) -> str: ...
     def jsonValue(self) -> Dict[str, Any]: ...
@@ -427,39 +1083,154 @@ class UserDefinedType(DataType):
     def fromJson(cls, json: Dict[str, Any]) -> 'UserDefinedType': ...
 
 class VariantVal:
+    """A class to represent a Variant value in Python.
+
+    .. versionadded:: 4.0.0
+
+    Parameters
+    ----------
+    value : bytes
+        The bytes representing the value component of the Variant.
+    metadata : bytes
+        The bytes representing the metadata component of the Variant.
+
+    Methods
+    -------
+    toPython()
+        Convert the VariantVal to a Python data structure.
+
+    Examples
+    --------
+    >>> from pyspark.sql import functions as sf
+    >>> df = spark.createDataFrame([ {'json': '''{ "a" : 1 }'''} ])
+    >>> v = df.select(sf.parse_json(df.json).alias("var")).head().var
+    >>> v.toPython()
+    {'a': 1}
+    >>> v.toJson()
+    '{"a":1}'
+    """
     def __init__(self, value: bytes, metadata: bytes):
         self.value = value
         self.metadata = metadata
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
-    def toPython(self) -> Any: ...
-    def toJson(self, zone_id: str="UTC") -> str: ...
+    def toPython(self) -> Any:
+        """Convert the VariantVal to a Python data structure.
+
+        Returns
+        -------
+        Any
+            A Python object that represents the Variant.
+        """
+    def toJson(self, zone_id: str="UTC") -> str:
+        """Convert the VariantVal to a JSON string. The zone ID represents the time zone that the
+        timestamp should be printed in. It is defaulted to UTC. The list of valid zone IDs can be
+        found by importing the `zoneinfo` module and running :code:`zoneinfo.available_timezones()`.
+
+        Returns
+        -------
+        str
+            A JSON string that represents the Variant.
+        """
     @classmethod
-    def parseJson(cls, json_str: str) -> 'VariantVal': ...
+    def parseJson(cls, json_str: str) -> 'VariantVal':
+        """Parse a JSON string and construct a VariantVal.
+
+        Returns
+        -------
+        VariantVal
+            A VariantVal representing the parsed Variant value.
+        """
 
 class Geography:
+    """A class to represent a Geography value in Python.
+
+    .. versionadded:: 4.1.0
+
+    Parameters
+    ----------
+    wkb : bytes
+        The bytes representing the WKB of Geography.
+
+    srid : integer
+        The integer value representing SRID of Geography.
+
+    Methods
+    -------
+    getBytes()
+        Returns the WKB of Geography.
+
+    getSrid()
+        Returns the SRID of Geography.
+
+    Examples
+    --------
+    >>> g = Geography.fromWKB(bytes.fromhex('010100000000000000000031400000000000001c40'), 4326)
+    >>> g.getBytes().hex()
+    '010100000000000000000031400000000000001c40'
+    >>> g.getSrid()
+    4326
+    """
     def __init__(self, wkb: bytes, srid: int):
         self.wkb = wkb
         self.srid = srid
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
-    def getSrid(self) -> int: ...
-    def getBytes(self) -> bytes: ...
+    def getSrid(self) -> int:
+        """Returns the SRID of Geography."""
+    def getBytes(self) -> bytes:
+        """Returns the WKB of Geography."""
     def __eq__(self, other: Any) -> bool: ...
     @classmethod
-    def fromWKB(cls, wkb: bytes, srid: int) -> 'Geography': ...
+    def fromWKB(cls, wkb: bytes, srid: int) -> 'Geography':
+        """Construct Python Geography object from WKB.
+        :return: Python representation of the Geography type value.
+        """
 
 class Geometry:
+    """A class to represent a Geometry value in Python.
+
+    .. versionadded:: 4.1.0
+
+    Parameters
+    ----------
+    wkb : bytes
+        The bytes representing the WKB of Geometry.
+
+    srid : integer
+        The integer value representing SRID of Geometry.
+
+    Methods
+    -------
+    getBytes()
+        Returns the WKB of Geometry.
+
+    getSrid()
+        Returns the SRID of Geometry.
+
+    Examples
+    --------
+    >>> g = Geometry.fromWKB(bytes.fromhex('010100000000000000000031400000000000001c40'), 0)
+    >>> g.getBytes().hex()
+    '010100000000000000000031400000000000001c40'
+    >>> g.getSrid()
+    0
+    """
     def __init__(self, wkb: bytes, srid: int):
         self.wkb = wkb
         self.srid = srid
     def __str__(self) -> str: ...
     def __repr__(self) -> str: ...
-    def getSrid(self) -> int: ...
-    def getBytes(self) -> bytes: ...
+    def getSrid(self) -> int:
+        """Returns the SRID of Geometry."""
+    def getBytes(self) -> bytes:
+        """Returns the WKB of Geometry."""
     def __eq__(self, other: Any) -> bool: ...
     @classmethod
-    def fromWKB(cls, wkb: bytes, srid: int) -> 'Geometry': ...
+    def fromWKB(cls, wkb: bytes, srid: int) -> 'Geometry':
+        """Construct Python Geometry object from WKB.
+        :return: Python representation of the Geometry type value.
+        """
 
 _atomic_types: List[Type[DataType]]
 _complex_types: List[Type[Union[ArrayType, MapType, StructType]]]
@@ -482,8 +1253,101 @@ _GEOGRAPHY_ALG = re.compile('geography\\(\\s*(\\w+)\\s*\\)')
 _COLLATIONS_METADATA_KEY = '__COLLATIONS'
 
 def _drop_metadata(d: Union[DataType, StructField]) -> Union[DataType, StructField]: ...
-def _parse_datatype_string(s: str) -> DataType: ...
-def _parse_datatype_json_string(json_string: str) -> DataType: ...
+def _parse_datatype_string(s: str) -> DataType:
+    """Parses the given data type string to a :class:`DataType`. The data type string format equals
+    :class:`DataType.simpleString`, except that the top level struct type can omit
+    the ``struct<>``. Since Spark 2.3, this also supports a schema in a DDL-formatted
+    string and case-insensitive strings.
+
+    Examples
+    --------
+    >>> _parse_datatype_string("int ")
+    IntegerType()
+    >>> _parse_datatype_string("INT ")
+    IntegerType()
+    >>> _parse_datatype_string("a: byte, b: decimal(  16 , 8   ) ")
+    StructType([StructField('a', ByteType(), True), StructField('b', DecimalType(16,8), True)])
+    >>> _parse_datatype_string("a DOUBLE, b STRING")
+    StructType([StructField('a', DoubleType(), True), StructField('b', StringType(), True)])
+    >>> _parse_datatype_string("a DOUBLE, b CHAR( 50 )")
+    StructType([StructField('a', DoubleType(), True), StructField('b', CharType(50), True)])
+    >>> _parse_datatype_string("a DOUBLE, b VARCHAR( 50 )")
+    StructType([StructField('a', DoubleType(), True), StructField('b', VarcharType(50), True)])
+    >>> _parse_datatype_string("a: array< short>")
+    StructType([StructField('a', ArrayType(ShortType(), True), True)])
+    >>> _parse_datatype_string(" map<string , string > ")
+    MapType(StringType(), StringType(), True)
+
+    >>> # Error cases
+    >>> _parse_datatype_string("blabla") # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    ParseException:...
+    >>> _parse_datatype_string("a: int,") # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    ParseException:...
+    >>> _parse_datatype_string("array<int") # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    ParseException:...
+    >>> _parse_datatype_string("map<int, boolean>>") # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    ParseException:...
+    """
+def _parse_datatype_json_string(json_string: str) -> DataType:
+    """Parses the given data type JSON string.
+
+    Examples
+    --------
+    >>> import pickle
+    >>> def check_datatype(datatype):
+    ...     pickled = pickle.loads(pickle.dumps(datatype))
+    ...     assert datatype == pickled
+    ...     scala_datatype = spark._jsparkSession.parseDataType(datatype.json())
+    ...     python_datatype = _parse_datatype_json_string(scala_datatype.json())
+    ...     assert datatype == python_datatype
+    ...
+    >>> for cls in _all_mappable_types.values():
+    ...     check_datatype(cls())
+
+    >>> # Simple ArrayType.
+    >>> simple_arraytype = ArrayType(StringType(), True)
+    >>> check_datatype(simple_arraytype)
+
+    >>> # Simple MapType.
+    >>> simple_maptype = MapType(StringType(), LongType())
+    >>> check_datatype(simple_maptype)
+
+    >>> # Simple StructType.
+    >>> simple_structtype = StructType([
+    ...     StructField("a", DecimalType(), False),
+    ...     StructField("b", BooleanType(), True),
+    ...     StructField("c", LongType(), True),
+    ...     StructField("d", BinaryType(), False)])
+    >>> check_datatype(simple_structtype)
+
+    >>> # Complex StructType.
+    >>> complex_structtype = StructType([
+    ...     StructField("simpleArray", simple_arraytype, True),
+    ...     StructField("simpleMap", simple_maptype, True),
+    ...     StructField("simpleStruct", simple_structtype, True),
+    ...     StructField("boolean", BooleanType(), False),
+    ...     StructField("chars", CharType(10), False),
+    ...     StructField("words", VarcharType(10), False),
+    ...     StructField("withMeta", DoubleType(), False, {"name": "age"})])
+    >>> check_datatype(complex_structtype)
+
+    >>> # Complex ArrayType.
+    >>> complex_arraytype = ArrayType(complex_structtype, True)
+    >>> check_datatype(complex_arraytype)
+
+    >>> # Complex MapType.
+    >>> complex_maptype = MapType(complex_structtype,
+    ...                           complex_arraytype, False)
+    >>> check_datatype(complex_maptype)
+    """
 def _parse_datatype_json_value(json_value: Union[dict, str], fieldPath: str="", collationsMap: Optional[Dict[str, str]]=None) -> DataType: ...  # type: ignore[return]
 def _assert_valid_type_for_collation(fieldPath: str, fieldType: Any, collationMap: Dict[str, str]) -> None: ...
 def _assert_valid_collation_provider(provider: str) -> None: ...
@@ -492,15 +1356,21 @@ _type_mappings = {type(None): NullType, Geometry: GeometryType, Geography: Geogr
 _array_signed_int_typecode_ctype_mappings = {'b': ctypes.c_byte, 'h': ctypes.c_short, 'i': ctypes.c_int, 'l': ctypes.c_long}
 _array_unsigned_int_typecode_ctype_mappings = {'B': ctypes.c_ubyte, 'H': ctypes.c_ushort, 'I': ctypes.c_uint, 'L': ctypes.c_ulong}
 
-def _int_size_to_type(size: int) -> Optional[Union[Type[ByteType], Type[ShortType], Type[IntegerType], Type[LongType]]]: ...
+def _int_size_to_type(size: int) -> Optional[Union[Type[ByteType], Type[ShortType], Type[IntegerType], Type[LongType]]]:
+    """Return the Catalyst datatype from the size of integers."""
 
 _array_type_mappings: Dict[str, Type[DataType]]
 
-def _from_numpy_type(nt: 'np.dtype') -> Optional[DataType]: ...
-def _infer_type(obj: Any, infer_dict_as_struct: bool=False, infer_array_from_first_element: bool=False, infer_map_from_first_pair: bool=False, prefer_timestamp_ntz: bool=False) -> DataType: ...
-def _infer_schema(row: Any, names: Optional[List[str]]=None, infer_dict_as_struct: bool=False, infer_array_from_first_element: bool=False, infer_map_from_first_pair: bool=False, prefer_timestamp_ntz: bool=False) -> StructType: ...
-def _has_nulltype(dt: DataType) -> bool: ...
-def _has_type(dt: DataType, dts: Union[type, Tuple[type, ...]]) -> bool: ...
+def _from_numpy_type(nt: 'np.dtype') -> Optional[DataType]:
+    """Convert NumPy type to Spark data type."""
+def _infer_type(obj: Any, infer_dict_as_struct: bool=False, infer_array_from_first_element: bool=False, infer_map_from_first_pair: bool=False, prefer_timestamp_ntz: bool=False) -> DataType:
+    """Infer the DataType from obj"""
+def _infer_schema(row: Any, names: Optional[List[str]]=None, infer_dict_as_struct: bool=False, infer_array_from_first_element: bool=False, infer_map_from_first_pair: bool=False, prefer_timestamp_ntz: bool=False) -> StructType:
+    """Infer the schema from dict/namedtuple/object"""
+def _has_nulltype(dt: DataType) -> bool:
+    """Return whether there is a NullType in `dt` or not"""
+def _has_type(dt: DataType, dts: Union[type, Tuple[type, ...]]) -> bool:
+    """Return whether there are specified types"""
 @overload
 def _merge_type(a: StructType, b: StructType, name: Optional[str]=None) -> StructType: ...
 @overload
@@ -510,24 +1380,162 @@ def _merge_type(a: MapType, b: MapType, name: Optional[str]=None) -> MapType: ..
 @overload
 def _merge_type(a: DataType, b: DataType, name: Optional[str]=None) -> DataType: ...
 def _need_converter(dataType: DataType) -> bool: ...
-def _create_converter(dataType: DataType) -> Callable: ...
+def _create_converter(dataType: DataType) -> Callable:
+    """Create a converter to drop the names of fields in obj"""
 
 _acceptable_types = {BooleanType: (bool,), ByteType: (int,), ShortType: (int,), IntegerType: (int,), LongType: (int,), FloatType: (float,), DoubleType: (float,), DecimalType: (decimal.Decimal,), StringType: (str,), CharType: (str,), VarcharType: (str,), BinaryType: (bytearray, bytes), DateType: (datetime.date, datetime.datetime), TimeType: (datetime.time,), TimestampType: (datetime.datetime,), TimestampNTZType: (datetime.datetime,), DayTimeIntervalType: (datetime.timedelta,), ArrayType: (list, tuple, array), MapType: (dict,), StructType: (tuple, list, dict), GeometryType: (Geometry,), GeographyType: (Geography,), VariantType: (bool, int, float, decimal.Decimal, str, bytearray, bytes, datetime.date, datetime.datetime, datetime.timedelta, tuple, list, dict, array)}
 
-def _make_type_verifier(dataType: DataType, nullable: bool=True, name: Optional[str]=None) -> Callable: ...
+def _make_type_verifier(dataType: DataType, nullable: bool=True, name: Optional[str]=None) -> Callable:
+    """Make a verifier that checks the type of obj against dataType and raises a TypeError if they do
+    not match.
+
+    This verifier also checks the value of obj against datatype and raises a ValueError if it's not
+    within the allowed range, e.g. using 128 as ByteType will overflow. Note that, Python float is
+    not checked, so it will become infinity when cast to Java float, if it overflows.
+
+    Examples
+    --------
+    >>> _make_type_verifier(StructType([]))(None)
+    >>> _make_type_verifier(StringType())("")
+    >>> _make_type_verifier(LongType())(0)
+    >>> _make_type_verifier(LongType())(1 << 64) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkValueError:...
+    >>> _make_type_verifier(ArrayType(ShortType()))(list(range(3)))
+    >>> _make_type_verifier(ArrayType(StringType()))(set()) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkTypeError:...
+    >>> _make_type_verifier(MapType(StringType(), IntegerType()))({})
+    >>> _make_type_verifier(StructType([]))(())
+    >>> _make_type_verifier(StructType([]))([])
+    >>> _make_type_verifier(StructType([]))([1]) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkValueError:...
+    >>> # Check if numeric values are within the allowed range.
+    >>> _make_type_verifier(ByteType())(12)
+    >>> _make_type_verifier(ByteType())(1234) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkValueError:...
+    >>> _make_type_verifier(ByteType(), False)(None) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkValueError:...
+    >>> _make_type_verifier(
+    ...     ArrayType(ShortType(), False))([1, None]) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkValueError:...
+    >>> _make_type_verifier(  # doctest: +IGNORE_EXCEPTION_DETAIL
+    ...     MapType(StringType(), IntegerType())
+    ...     )({None: 1})
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkValueError:...
+    >>> schema = StructType().add("a", IntegerType()).add("b", StringType(), False)
+    >>> _make_type_verifier(schema)((1, None)) # doctest: +IGNORE_EXCEPTION_DETAIL
+    Traceback (most recent call last):
+        ...
+    pyspark.errors.exceptions.base.PySparkValueError:...
+    """
 def _create_row_inbound_converter(dataType: DataType) -> Callable: ...
 def _create_row(fields: Union['Row', List[str]], values: Union[Tuple[Any, ...], List[Any]]) -> 'Row': ...
 
 class Row(tuple):
+    """A row in :class:`DataFrame`.
+    The fields in it can be accessed:
+
+    * like attributes (``row.key``)
+    * like dictionary values (``row[key]``)
+
+    ``key in row`` will search through row keys.
+
+    Row can be used to create a row object by using named arguments.
+    It is not allowed to omit a named argument to represent that the value is
+    None or missing. This should be explicitly set to None in this case.
+
+    .. versionchanged:: 3.0.0
+        Rows created from named arguments no longer have
+        field names sorted alphabetically and will be ordered in the position as
+        entered.
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> row = Row(name="Alice", age=11)
+    >>> row
+    Row(name='Alice', age=11)
+    >>> row['name'], row['age']
+    ('Alice', 11)
+    >>> row.name, row.age
+    ('Alice', 11)
+    >>> 'name' in row
+    True
+    >>> 'wrong_key' in row
+    False
+
+    Row also can be used to create another Row like class, then it
+    could be used to create Row objects, such as
+
+    >>> Person = Row("name", "age")
+    >>> Person
+    <Row('name', 'age')>
+    >>> 'name' in Person
+    True
+    >>> 'wrong_key' in Person
+    False
+    >>> Person("Alice", 11)
+    Row(name='Alice', age=11)
+
+    This form can also be used to create rows as tuple values, i.e. with unnamed
+    fields.
+
+    >>> row1 = Row("Alice", 11)
+    >>> row2 = Row(name="Alice", age=11)
+    >>> row1 == row2
+    True
+    """
     @overload
     def __new__(cls, *args: str) -> 'Row': ...
     @overload
     def __new__(cls, **kwargs: Any) -> 'Row': ...
-    def asDict(self, recursive: bool=False) -> Dict[str, Any]: ...
+    def asDict(self, recursive: bool=False) -> Dict[str, Any]:
+        """Return as a dict
+
+        Parameters
+        ----------
+        recursive : bool, optional
+            turns the nested Rows to dict (default: False).
+
+        Notes
+        -----
+        If a row contains duplicate field names, e.g., the rows of a join
+        between two :class:`DataFrame` that both have the fields of same names,
+        one of the duplicate fields will be selected by ``asDict``. ``__getitem__``
+        will also return one of the duplicate fields, however returned value might
+        be different to ``asDict``.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> Row(name="Alice", age=11).asDict() == {'name': 'Alice', 'age': 11}
+        True
+        >>> row = Row(key=1, value=Row(name='a', age=2))
+        >>> row.asDict() == {'key': 1, 'value': Row(name='a', age=2)}
+        True
+        >>> row.asDict(True) == {'key': 1, 'value': {'name': 'a', 'age': 2}}
+        True
+        """
     def __contains__(self, item: Any) -> bool: ...
-    def __call__(self, *args: Any) -> 'Row': ...
+    def __call__(self, *args: Any) -> 'Row':
+        """create new Row object"""
     def __getitem__(self, item: Any) -> Any: ...
     def __getattr__(self, item: str) -> Any: ...
     def __setattr__(self, key: Any, value: Any) -> None: ...
-    def __reduce__(self) -> Union[str, Tuple[Any, ...]]: ...
-    def __repr__(self) -> str: ...
+    def __reduce__(self) -> Union[str, Tuple[Any, ...]]:
+        """Returns a tuple so Python knows how to pickle Row."""
+    def __repr__(self) -> str:
+        """Printable representation of Row used in Python REPL."""

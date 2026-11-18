@@ -22,6 +22,17 @@ from pyspark.sql.datasource import DataSource
 from pyspark.sql.connect.session import SparkSession
 
 class DataSourceRegistration:
+    """Wrapper for data source registration.
+
+    .. versionadded:: 4.0.0
+    """
     def __init__(self, sparkSession: 'SparkSession'):
         self.sparkSession = sparkSession
-    def register(self, dataSource: Type['DataSource']) -> None: ...
+    def register(self, dataSource: Type['DataSource']) -> None:
+        """Register a Python user-defined data source.
+
+        Parameters
+        ----------
+        dataSource : type
+            The data source class to be registered. It should be a subclass of DataSource.
+        """

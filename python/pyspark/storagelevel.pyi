@@ -22,6 +22,13 @@ __all__ = ['StorageLevel']
 from typing import Any, ClassVar
 
 class StorageLevel:
+    """Flags for controlling the storage of an RDD. Each StorageLevel records whether to use memory,
+    whether to drop the RDD to disk if it falls out of memory, whether to keep the data in memory
+    in a JAVA-specific serialized format, and whether to replicate the RDD partitions on multiple
+    nodes. Also contains static constants for some commonly used storage levels, MEMORY_ONLY.
+    Since the data is always serialized on the Python side, all the constants use the serialized
+    formats.
+    """
     NONE: ClassVar['StorageLevel']
     DISK_ONLY: ClassVar['StorageLevel']
     DISK_ONLY_2: ClassVar['StorageLevel']

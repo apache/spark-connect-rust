@@ -30,10 +30,13 @@ source: its classes, functions, overloads, properties, annotations, type aliases
 ``__all__`` and the imports that they need. So a type checker sees the API that it sees of the
 official ``pyspark-client``, where these modules are annotated Python. In detail:
 
-  * A body is ``...``; docstrings and statements without declarations are dropped. Default
-    values stay as PySpark writes them, which editors show.
+  * A body is ``...``, after the docstring that PySpark's object has at run time, as
+    ``inspect.getdoc`` gives it (``Docs``): of its source, of the ``__doc__`` that its module
+    assigns it (``col.__doc__ = pysparkfuncs.col.__doc__`` of PySpark Connect) and of
+    ``pyspark.since``. Statements without declarations are dropped. Default values stay as
+    PySpark writes them, which editors show.
   * A method that assigns an instance attribute that its class does not declare
-    (``self.fields = fields`` in ``StructType.__init__``) keeps its body, without its docstring:
+    (``self.fields = fields`` in ``StructType.__init__``) keeps its body, after its docstring:
     mypy and pyright infer the attribute from it as they do from PySpark's source, which declares
     it nowhere else. pyright does not narrow in a stub, so ``ATTRIBUTE_TYPES`` declares the few
     attributes that PySpark narrows before it assigns them, with the type that both infer from
@@ -112,6 +115,7 @@ import builtins
 import copy
 import difflib
 import functools
+import inspect
 import re
 import sys
 from dataclasses import dataclass, field
@@ -839,14 +843,23 @@ class Module:
 class StubTransformer:
     """The stub statements of one module of PySpark."""
 
-    def __init__(self, module: Module):
+    def __init__(self, module: Module, docs: Docs | None = None):
         self.module = module
+        # PySpark's docstrings of the objects of the module, which its declarations keep.
+        self.docs = docs
         self.import_sites: list[ImportSite] = []
         # The names that the body of the class being transformed declares, and its qualified
         # name: a method of it that assigns another instance attribute keeps its body.
         self.class_declared: set[str] | None = None
         self.class_path: list[str] = []
         self.attribute_types_used: set[str] = set()
+
+    def docstring(self, name: str) -> str | None:
+        """PySpark's docstring of the object `name` of the scope being transformed, as
+        ``inspect.getdoc`` gives it at run time."""
+        if self.docs is None:
+            return None
+        return self.docs.getdoc(self.module.name, ".".join([*self.class_path, name]))
 
     # Decorators
 
@@ -911,7 +924,9 @@ class StubTransformer:
             return [self.cls(stmt, where)]
         if isinstance(stmt, ast.Assign):
             if all(isinstance(t, ast.Name) for t in stmt.targets):
-                return [copy.deepcopy(stmt)]
+                kept = copy.deepcopy(stmt)
+                kept.docstring = self.attribute_docstring(stmt.targets[0].id)
+                return [kept]
             return []  # X.__doc__ = ..., x[k] = ...
         if isinstance(stmt, ast.AnnAssign):
             if not isinstance(stmt.target, ast.Name):
@@ -921,6 +936,7 @@ class StubTransformer:
                 return [kept]  # its names, as a type checker reads them
             # A class keeps that its field has a default (NamedTuple and dataclass fields).
             kept.value = ast.Constant(Ellipsis) if stmt.value and scope == "class" else None
+            kept.docstring = self.attribute_docstring(stmt.target.id)
             return [kept]
         if isinstance(stmt, ast.AugAssign):
             if isinstance(stmt.target, ast.Name) and stmt.target.id == "__all__":
@@ -954,10 +970,22 @@ class StubTransformer:
             return []
         raise GeneratorError(f"{where}: unexpected {type(stmt).__name__} statement")
 
+    def attribute_docstring(self, name: str) -> str | None:
+        """The docstring of the attribute `name`, of a ``__doc__`` that PySpark's module assigns
+        it (``builder.__doc__ = ...``): an attribute of another value has the docstring of its
+        class at run time, which type checkers do not show of it."""
+        qualified = ".".join([*self.class_path, name])
+        if self.docs is None or not self.docs.assigned(self.module.name, qualified):
+            return None
+        return self.docs.getdoc(self.module.name, qualified)
+
     def function(self, node, where: str):
         where = f"{where} {node.name}"
         decorators = [d for d in node.decorator_list if self.keep_decorator(d, where)]
         stub = copy.deepcopy(node)
+        # A setter or deleter of a property has the docstring of the property, of its getter.
+        accessor = any(_PROPERTY_ACCESSOR.match(_decorator_name(d) or "") for d in decorators)
+        stub.docstring = None if accessor else self.docstring(node.name)
         stub.body = [copy.deepcopy(_ELLIPSIS)]
         if self.class_declared is not None and any(
             name not in self.class_declared for name in assigned_attributes(node)
@@ -973,6 +1001,7 @@ class StubTransformer:
     def cls(self, node: ast.ClassDef, where: str):
         where = f"{where} {node.name}"
         decorators = [d for d in node.decorator_list if self.keep_decorator(d, where)]
+        docstring = self.docstring(node.name)
         declared = set().union(*(bound_names(s) for s in node.body))
         outer = self.class_declared
         self.class_declared = declared
@@ -989,6 +1018,7 @@ class StubTransformer:
         stub.body = attributes + body or [copy.deepcopy(_ELLIPSIS)]
         stub.decorator_list = copy.deepcopy(decorators)
         stub.signature_end = max(node.lineno, _first_line(node.body[0]) - 1)
+        stub.docstring = docstring
         return stub
 
     def attribute_types(self, node: ast.ClassDef, declared: set[str]) -> list[ast.stmt]:
@@ -1168,13 +1198,40 @@ def check_references(module: str, stmts: list[ast.stmt], refs: set[str], source:
 # ---------------------------------------------------------------------------------------
 
 
+# A line and its end: \r\n, \r or \n, but not a form feed, as ast.get_source_segment splits.
+_SOURCE_LINE = re.compile(r"[^\r\n]*(?:\r\n|\r|\n)|[^\r\n]+\Z")
+
+
+@functools.lru_cache(maxsize=8)
+def _source_lines(source: str) -> tuple[str, ...]:
+    """The lines of `source` with their ends, as ``ast.get_source_segment`` splits them, made once
+    of each source: the function splits the whole source at each call, which made most of the
+    time of a generation of the stubs."""
+    return tuple(_SOURCE_LINE.findall(source))
+
+
+def _source_segment(source: str, node: ast.AST) -> str | None:
+    """``ast.get_source_segment(source, node)``, of the lines of `source` made once."""
+    end_lineno = getattr(node, "end_lineno", None)
+    end_col_offset = getattr(node, "end_col_offset", None)
+    if end_lineno is None or end_col_offset is None:
+        return None
+    lines = _source_lines(source)
+    lineno, end_lineno, col_offset = node.lineno - 1, end_lineno - 1, node.col_offset
+    if lineno == end_lineno:
+        return lines[lineno].encode()[col_offset:end_col_offset].decode()
+    first = lines[lineno].encode()[col_offset:].decode()
+    last = lines[end_lineno].encode()[:end_col_offset].decode()
+    return "".join([first, *lines[lineno + 1 : end_lineno], last])
+
+
 def _verbatim_defaults(function, source: str):
     """`function` whose default values are their text in PySpark's `source`, which editors show
     as PySpark writes it ("any" rather than the 'any' of ``ast.unparse``)."""
     function = copy.deepcopy(function)
 
     def verbatim(node):
-        text = None if node is None else ast.get_source_segment(source, node)
+        text = None if node is None else _source_segment(source, node)
         return node if text is None or "\n" in text else ast.Name(id=text)
 
     function.args.defaults = [verbatim(d) for d in function.args.defaults]
@@ -1237,7 +1294,41 @@ def _with_type_ignores(lines: list[str], stmt: ast.stmt, source: str) -> list[st
     return [line + _type_ignore(source, *span) for line, span in zip(lines, spans)]
 
 
+def _is_control(c: str) -> bool:
+    return (c < " " and c != "\n") or c == "\x7f"
+
+
+def docstring_lines(doc: str, indent: str) -> list[str]:
+    """The lines of a string literal of the text `doc` of a docstring, at `indent`: its first line
+    on the line of the opening quotes, the others at `indent`, which ``inspect.cleandoc`` and
+    type checkers remove, of `doc` again. A raw literal when the text has a backslash, if it can
+    be one."""
+    controls = any(_is_control(c) for c in doc)
+    text = doc
+    if "\\" in text and not controls and '"""' not in text and not text.endswith(("\\", '"')):
+        prefix = "r"
+    else:
+        prefix = ""
+        text = text.replace("\\", "\\\\").replace('"""', '\\"""')
+        # A control character of PySpark's docstring, of an escape of its source (`b'\\x01'`).
+        text = "".join(f"\\x{ord(c):02x}" if _is_control(c) else c for c in text)
+        if text.endswith('"'):
+            text = text[:-1] + '\\"'
+    lines = text.split("\n")
+    if lines[0][:1].isspace():
+        # A first line that begins with a space, which `cleandoc` keeps of a docstring whose
+        # first line is empty: the text begins on the line after the quotes.
+        lines.insert(0, "")
+    if len(lines) == 1:
+        return [f'{indent}{prefix}"""{lines[0]}"""']
+    out = [f'{indent}{prefix}"""{lines[0]}']
+    out += [f"{indent}{line}" if line else "" for line in lines[1:]]
+    out.append(f'{indent}"""')
+    return out
+
+
 def _render(stmt: ast.stmt, source: str, indent: str = "") -> list[str]:
+    doc = getattr(stmt, "docstring", None)
     if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
         signature = copy.copy(stmt)
         signature.body = [copy.deepcopy(_ELLIPSIS)]
@@ -1245,11 +1336,15 @@ def _render(stmt: ast.stmt, source: str, indent: str = "") -> list[str]:
         head, _, tail = text.rpartition(":\n")
         if tail.strip() != "...":
             raise GeneratorError(f"cannot render {stmt.name}")
+        docs = [] if doc is None else docstring_lines(doc, indent + "    ")
         if not _is_ellipsis(stmt.body):
             # A method that keeps its body.
             lines = _with_type_ignores((head + ":").splitlines(), stmt, source)
             lines = [indent + line for line in lines]
-            return lines + _body_source(stmt, source, indent + "    ")
+            return lines + docs + _body_source(stmt, source, indent + "    ")
+        if docs:
+            lines = _with_type_ignores((head + ":").splitlines(), stmt, source)
+            return [indent + line for line in lines] + docs
         lines = _with_type_ignores((head + ": ...").splitlines(), stmt, source)
         return [indent + line for line in lines]
     if isinstance(stmt, ast.ClassDef):
@@ -1257,9 +1352,13 @@ def _render(stmt: ast.stmt, source: str, indent: str = "") -> list[str]:
         shell.body = [ast.Pass()]
         header = ast.unparse(shell).rpartition(":\n")[0] + ":"
         lines = [indent + line for line in _with_type_ignores(header.splitlines(), stmt, source)]
+        docs = [] if doc is None else docstring_lines(doc, indent + "    ")
         if len(stmt.body) == 1 and isinstance(stmt.body[0], ast.Expr):
+            if docs:
+                return lines + docs
             lines[-1] += " ..."
             return lines
+        lines += docs
         for member in stmt.body:
             lines += _render(member, source, indent + "    ")
         return lines
@@ -1275,12 +1374,18 @@ def _render(stmt: ast.stmt, source: str, indent: str = "") -> list[str]:
     lines = [indent + line for line in ast.unparse(stmt).splitlines()]
     if getattr(stmt, "lineno", None) is not None:  # not a declaration of the generator's own
         lines[-1] += _type_ignore(source, stmt.lineno, stmt.end_lineno)
+    if doc is not None:
+        # The docstring of an attribute, which type checkers read of the string that follows it.
+        lines += docstring_lines(doc, indent)
     return lines
 
 
-def render(stmts: list[ast.stmt], header: str, extra: Extra | None, source: str) -> str:
-    """The text of a stub of the statements `stmts` of PySpark's module of text `source`."""
-    lines: list[str] = []
+def render(
+    stmts: list[ast.stmt], header: str, extra: Extra | None, source: str, doc: str | None = None
+) -> str:
+    """The text of a stub of the statements `stmts` of PySpark's module of text `source`, and of
+    its docstring `doc`."""
+    lines: list[str] = [] if doc is None else [*docstring_lines(doc, ""), ""]
     previous = None
     for stmt in stmts:
         kind = type(stmt).__name__
@@ -1327,6 +1432,8 @@ class Stub:
     extra_stmts: list[ast.stmt]
     # The classes of PySpark's module that the drop-in's module replaces by native ones.
     replaced: frozenset[str] = frozenset()
+    # PySpark's docstring of the module.
+    doc: str | None = None
 
     def declared(self) -> set[str]:
         """The names that the stub defines or assigns, its own and those of its extra."""
@@ -1386,10 +1493,15 @@ def _drop(module: str, stmts: list[ast.stmt], sites: list[ImportSite]) -> list[a
     return [stmt for stmt in stmts if id(stmt) not in dropped_stmts]
 
 
-def transform(pyspark_src: Path, module: str, natives: tuple[str, list[str]] | None = None) -> Stub:
-    """The stub statements of PySpark's module `module`, and its extra: of the native classes
-    `natives`, (PySpark's module of their classes, their names), that the drop-in's module has
-    instead of PySpark's classes of those names, if any."""
+def transform(
+    pyspark_src: Path,
+    module: str,
+    natives: tuple[str, list[str]] | None = None,
+    docs: Docs | None = None,
+) -> Stub:
+    """The stub statements of PySpark's module `module`, of PySpark's docstrings `docs`, and its
+    extra: of the native classes `natives`, (PySpark's module of their classes, their names),
+    that the drop-in's module has instead of PySpark's classes of those names, if any."""
     relative = source_path(pyspark_src, module)
     text = (pyspark_src / relative).read_text()
     tree = ast.parse(text)
@@ -1400,7 +1512,7 @@ def transform(pyspark_src: Path, module: str, natives: tuple[str, list[str]] | N
             n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
         },
     )
-    transformer = StubTransformer(info)
+    transformer = StubTransformer(info, docs)
     stmts = transformer.body(tree.body, "module")
     unused = sorted(set(ATTRIBUTE_TYPES.get(module, {})) - transformer.attribute_types_used)
     if unused:
@@ -1412,7 +1524,7 @@ def transform(pyspark_src: Path, module: str, natives: tuple[str, list[str]] | N
     if natives is not None:
         if extra is not None:
             raise GeneratorError(f"{module}: EXTRAS of a module of native classes")
-        stmts, replaced, extra = _with_natives(pyspark_src, module, stmts, *natives)
+        stmts, replaced, extra = _with_natives(pyspark_src, module, stmts, *natives, docs=docs)
     extra_stmts: list[ast.stmt] = []
     if extra is not None:
         extra_stmts = ast.parse(extra.source).body
@@ -1430,10 +1542,13 @@ def transform(pyspark_src: Path, module: str, natives: tuple[str, list[str]] | N
         sites = [s for s in sites if s.name not in extra_names]
         if extra.all_names:
             _add_to_all(stmts, extra.all_names, module)
-    return Stub(module, relative, text, tree, stmts, sites, extra, extra_stmts, replaced)
+    doc = None if docs is None else docs.module_doc(module)
+    return Stub(module, relative, text, tree, stmts, sites, extra, extra_stmts, replaced, doc)
 
 
-def _with_natives(pyspark_src: Path, module: str, stmts: list[ast.stmt], official: str, names):
+def _with_natives(
+    pyspark_src: Path, module: str, stmts: list[ast.stmt], official: str, names, docs=None
+):
     """`stmts` of PySpark's module `module` with the native classes `names` of the drop-in's
     module, the public classes of PySpark's classes of the module `official`: the statements that
     bind them are left out, and ``__all__`` lists the names, as the drop-in sets it. Returns the
@@ -1455,7 +1570,7 @@ def _with_natives(pyspark_src: Path, module: str, stmts: list[ast.stmt], officia
     kept.insert(first, all_names)
     tree = ast.parse((pyspark_src / source_path(pyspark_src, official)).read_text())
     source = f"import {official} as {_PUBLISHED}\n" + "\n".join(
-        public_classes(official, tree, names)
+        public_classes(official, tree, names, docs)
     )
     comment = (
         f"The native classes that the drop-in sets in the module, over PySpark's classes of their\n"
@@ -1592,7 +1707,7 @@ def render_stub(stub: Stub, tag: str, runtime: frozenset[str] = frozenset()) -> 
         stub.module, kept + stub.extra_stmts, refs - extra_refs, source_bindings(stub.tree.body)
     )
     header = HEADER.format(source=stub.source.as_posix(), tag=tag)
-    text = render(kept, header, stub.extra, stub.text)
+    text = render(kept, header, stub.extra, stub.text, stub.doc)
     check_attributes(stub.module, stub.tree, text, stub.replaced)
     return text
 
@@ -1622,6 +1737,385 @@ def check_imports(texts: dict[str, str], dropin: DropIn) -> None:
     stale = sorted(set(UNRESOLVED_IMPORTS) - set(unresolved))
     if stale:
         raise GeneratorError(f"UNRESOLVED_IMPORTS that the drop-in has now: {stale}; drop them")
+
+
+# ---------------------------------------------------------------------------------------
+# Docstrings
+# ---------------------------------------------------------------------------------------
+
+# PySpark's decorators that keep the docstring of what they decorate (``functools.wraps`` and its
+# kin, or a decorator that returns it), by the qualified name of their definition or the names of
+# the decorators that a type checker applies: the docstring of a decorated object is its own.
+DOC_KEEPING_DECORATORS = (
+    KEPT_DECORATORS
+    | IDENTITY_DECORATORS
+    | {
+        "pyspark.sql.group.dfapi",
+        "pyspark.sql.group.df_varargs_api",
+        "pyspark.sql.utils.remote_only",
+        "pyspark.sql.utils.try_remote_session_classmethod",
+    }
+)
+# ``pyspark.since(version)``, which appends ``.. versionadded:: <version>`` to the docstring.
+_SINCE = "pyspark.since"
+# PySpark's ``classproperty``, of a getter of a class: the object of an attribute of it is what the
+# getter returns, a ``Builder`` of its annotation, whose docstring is that of its class.
+_CLASSPROPERTY = "pyspark.sql.session.classproperty"
+_INDENTS = re.compile(r"\n( +)")
+# The decorators of functools whose objects inspect.getdoc looks no base up of.
+_CACHES = frozenset(
+    {
+        "functools.cache",
+        "functools.lru_cache",
+        "functools.cached_property",
+        "cache",
+        "lru_cache",
+        "cached_property",
+    }
+)
+
+
+def _since(doc: str | None, version) -> str | None:
+    """`doc` as ``pyspark.since(version)`` makes it: ``deco`` of python/pyspark/__init__.py."""
+    if doc is None:
+        raise GeneratorError(f"since({version!r}) of an object of no docstring")
+    indents = _INDENTS.findall(doc)
+    indent = " " * (min(len(m) for m in indents) if indents else 0)
+    return f"{doc.rstrip()}\n\n{indent}.. versionadded:: {version}"
+
+
+@dataclass
+class _Source:
+    """PySpark's module of the docstrings: its definitions and ``__doc__`` assignments, by the
+    qualified name that they bind at its top level or in its classes, under any condition, the
+    last of each (the implementation of an overloaded function), and its imports."""
+
+    name: str
+    tree: ast.Module
+    imports: dict[str, str]
+    stars: list[str]
+    defs: dict[str, ast.stmt]
+    doc_assigns: dict[str, ast.expr]
+
+
+class Docs:
+    """The docstrings of PySpark's objects at run time, of its sources: ``__doc__`` as the source
+    of each object, its decorators and the assignments of its module make it, and the
+    ``inspect.getdoc`` of it, which looks the bases of a class up when the object has none."""
+
+    def __init__(self, pyspark_src: Path):
+        self.src = pyspark_src
+        self._sources: dict[str, _Source | None] = {}
+        self._raw: dict[tuple[str, str], str | None] = {}
+        self._mros: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        self._resolving: set[tuple[str, str]] = set()
+
+    # Sources
+
+    def source(self, module: str) -> _Source | None:
+        if module not in self._sources:
+            try:
+                path = self.src / source_path(self.src, module)
+            except GeneratorError:
+                self._sources[module] = None
+                return None
+            tree = ast.parse(path.read_text())
+            defs: dict[str, ast.stmt] = {}
+            doc_assigns: dict[str, ast.expr] = {}
+            stars: list[str] = []
+
+            def visit(body: list[ast.stmt], prefix: str) -> None:
+                for stmt in body:
+                    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                        name = f"{prefix}{stmt.name}"
+                        overload = any(
+                            _decorator_name(d) in ("overload", "typing.overload")
+                            for d in getattr(stmt, "decorator_list", [])
+                        )
+                        accessor = any(
+                            _PROPERTY_ACCESSOR.match(_decorator_name(d) or "")
+                            for d in getattr(stmt, "decorator_list", [])
+                        )
+                        if not overload and not accessor:
+                            defs[name] = stmt
+                        else:
+                            defs.setdefault(name, stmt)
+                        if isinstance(stmt, ast.ClassDef):
+                            visit(stmt.body, f"{name}.")
+                    elif isinstance(stmt, ast.Assign):
+                        for target in stmt.targets:
+                            dotted = _dotted(target)
+                            if dotted is None:
+                                continue
+                            if dotted == "__doc__" and prefix:
+                                # `__doc__ = ...` of a class body, the docstring of the class.
+                                doc_assigns[prefix[:-1]] = stmt.value
+                            elif dotted.endswith(".__doc__"):
+                                doc_assigns[prefix + dotted[: -len(".__doc__")]] = stmt.value
+                            elif "." not in dotted:
+                                defs[prefix + dotted] = stmt
+                    elif isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
+                        defs[prefix + stmt.target.id] = stmt
+                    elif isinstance(stmt, ast.ImportFrom) and not prefix:
+                        if any(a.name == "*" for a in stmt.names):
+                            stars.append(resolve_import(module, stmt))
+                    elif isinstance(stmt, ast.If) and _condition_kind(stmt.test) != "main":
+                        visit(stmt.body + stmt.orelse, prefix)
+                    elif isinstance(stmt, ast.Try):
+                        handlers = [s for h in stmt.handlers for s in h.body]
+                        visit(stmt.body + handlers + stmt.orelse + stmt.finalbody, prefix)
+
+            visit(tree.body, "")
+            self._sources[module] = _Source(
+                module, tree, _module_imports(module, tree), stars, defs, doc_assigns
+            )
+        return self._sources[module]
+
+    # Names
+
+    def resolve(self, module: str, dotted: str) -> tuple[str, str] | None:
+        """(module, qualified name) of the definition that the name `dotted` of the scope of the
+        module `module` is at run time, following its imports, star imports and aliases, and the
+        bases of a class for a member that it does not define."""
+        key = (module, dotted)
+        if key in self._resolving:
+            return None  # a cycle of imports or aliases
+        self._resolving.add(key)
+        try:
+            return self._resolve(module, dotted)
+        finally:
+            self._resolving.discard(key)
+
+    def _resolve(self, module: str, dotted: str) -> tuple[str, str] | None:
+        source = self.source(module)
+        if source is None:
+            return None
+        head, _, rest = dotted.partition(".")
+        if head in source.defs:
+            return self._member(module, head, rest)
+        if head in source.imports:
+            qualified = source.imports[head] + (f".{rest}" if rest else "")
+            return self.resolve_qualified(qualified)
+        for star in source.stars:
+            found = self.resolve(star, dotted)
+            if found is not None:
+                return found
+        return None
+
+    def resolve_qualified(self, qualified: str) -> tuple[str, str] | None:
+        """(module, qualified name) of the definition of the absolute name `qualified`."""
+        parts = qualified.split(".")
+        for i in range(len(parts) - 1, 0, -1):
+            module = ".".join(parts[:i])
+            if self.source(module) is not None:
+                return self.resolve(module, ".".join(parts[i:]))
+        return None
+
+    def _member(self, module: str, qualname: str, rest: str) -> tuple[str, str] | None:
+        """The definition of `rest` (dotted) of the object `qualname` of `module`."""
+        source = self.source(module)
+        node = source.defs[qualname]
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            # An alias (`random = rand`, `StreamingQueryManager = _StreamingQueryManager`).
+            target = _dotted(node.value)
+            if target is not None and target != qualname.rpartition(".")[2]:
+                scope = qualname.rpartition(".")[0]
+                found = self.resolve(module, f"{scope}.{target}" if scope else target)
+                if found is None and scope:
+                    found = self.resolve(module, target)
+                if found is not None:
+                    if not rest:
+                        return found
+                    return self.resolve_qualified(f"{found[0]}.{found[1]}.{rest}")
+        if not rest:
+            return module, qualname
+        part, _, more = rest.partition(".")
+        member = f"{qualname}.{part}"
+        if member in source.defs:
+            return self._member(module, member, more)
+        if isinstance(node, ast.ClassDef):
+            for base_module, base in self.bases(module, qualname):
+                found = self._member_of(base_module, base, rest)
+                if found is not None:
+                    return found
+        return None
+
+    def _member_of(self, module: str, qualname: str, rest: str) -> tuple[str, str] | None:
+        source = self.source(module)
+        if source is None or qualname not in source.defs:
+            return None
+        return self._member(module, qualname, rest)
+
+    def bases(self, module: str, qualname: str) -> list[tuple[str, str]]:
+        """The bases of the class `qualname` of `module` that PySpark's source defines, in order."""
+        node = self.source(module).defs[qualname]
+        scope = qualname.rpartition(".")[0]
+        out = []
+        for base in node.bases:
+            dotted = _dotted(base.value if isinstance(base, ast.Subscript) else base)
+            if dotted is None:
+                continue
+            found = None
+            if scope:
+                found = self.resolve(module, f"{scope}.{dotted}")
+            found = found or self.resolve(module, dotted)
+            if found is not None and isinstance(self.node(*found), ast.ClassDef):
+                out.append(found)
+        return out
+
+    def mro(self, module: str, qualname: str) -> list[tuple[str, str]]:
+        """The MRO of the class, of its classes in PySpark's source (C3, as Python makes it)."""
+        key = (module, qualname)
+        if key not in self._mros:
+            self._mros[key] = self._mro(module, qualname)
+        return self._mros[key]
+
+    def _mro(self, module: str, qualname: str) -> list[tuple[str, str]]:
+        seqs = [self.mro(*b) for b in self.bases(module, qualname)]
+        seqs.append(self.bases(module, qualname))
+        out = [(module, qualname)]
+        while True:
+            seqs = [s for s in seqs if s]
+            if not seqs:
+                return out
+            for seq in seqs:
+                head = seq[0]
+                if not any(head in s[1:] for s in seqs):
+                    break
+            else:
+                raise GeneratorError(f"{module}.{qualname}: no consistent MRO of its bases")
+            out.append(head)
+            seqs = [s[1:] if s[0] == head else s for s in seqs]
+
+    def node(self, module: str, qualname: str) -> ast.stmt | None:
+        source = self.source(module)
+        return None if source is None else source.defs.get(qualname)
+
+    # Docstrings
+
+    def raw(self, module: str, qualname: str) -> str | None:
+        """The ``__doc__`` of PySpark's object `qualname` of `module` at run time: its own, of
+        no base."""
+        key = (module, qualname)
+        if key not in self._raw:
+            self._raw[key] = None  # a cycle of assignments has none
+            self._raw[key] = self._raw_of(module, qualname)
+        return self._raw[key]
+
+    def _raw_of(self, module: str, qualname: str) -> str | None:
+        source = self.source(module)
+        node = source.defs.get(qualname)
+        # The `__doc__` that an assignment sets of a classmethod or a staticmethod is of the
+        # wrapper in the class's dictionary, not of the function that the class gives.
+        wrapped = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
+            _decorator_name(d) in ("classmethod", "staticmethod") for d in node.decorator_list
+        )
+        if qualname in source.doc_assigns and not wrapped:
+            return self._evaluate(module, qualname, source.doc_assigns[qualname])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            doc = ast.get_docstring(node, clean=False)
+            info = Module(name=module, imports=source.imports)
+            for decorator in reversed(node.decorator_list):
+                name = _decorator_name(decorator)
+                qualified = info.qualified(name) if name is not None else None
+                if qualified == _SINCE:
+                    doc = _since(doc, ast.literal_eval(decorator.args[0]))
+                elif qualified == _CLASSPROPERTY or name == "classproperty":
+                    # An attribute of the class is the object that the getter returns.
+                    returns = node.returns
+                    dotted = (
+                        returns.value if isinstance(returns, ast.Constant) else _dotted(returns)
+                    )
+                    scope = qualname.rpartition(".")[0]
+                    found = self.resolve(module, f"{scope}.{dotted}") or self.resolve(
+                        module, dotted
+                    )
+                    if found is None:
+                        raise GeneratorError(f"{module}.{qualname}: classproperty of {dotted}")
+                    doc = self.raw(*found)
+                elif not (
+                    name in DOC_KEEPING_DECORATORS
+                    or qualified in DOC_KEEPING_DECORATORS
+                    or _PROPERTY_ACCESSOR.match(name or "")
+                    or f"{module}.{name}" in DOC_KEEPING_DECORATORS
+                ):
+                    raise GeneratorError(
+                        f"{module}.{qualname}: the decorator {name} ({qualified}) of a docstring; "
+                        "add it to DOC_KEEPING_DECORATORS if it keeps the docstring"
+                    )
+            return doc
+        if isinstance(node, ast.ClassDef):
+            # The docstring that Python makes of a dataclass or a named tuple of none, of its
+            # fields, is not PySpark's, and type checkers do not show it either.
+            return ast.get_docstring(node, clean=False)
+        if isinstance(node, ast.Assign):
+            found = self._member(module, qualname, "")
+            if found is not None and found != (module, qualname):
+                return self.raw(*found)
+        return None
+
+    def _evaluate(self, module: str, qualname: str, value: ast.expr) -> str | None:
+        """The value of `value`, the right side of an assignment of a ``__doc__`` of `module`."""
+        if isinstance(value, ast.Constant) and (
+            value.value is None or isinstance(value.value, str)
+        ):
+            return value.value
+        if isinstance(value, ast.Attribute) and value.attr == "__doc__":
+            dotted = _dotted(value.value)
+            scope = qualname.rpartition(".")[0]
+            found = None
+            if dotted is not None:
+                if scope:
+                    found = self.resolve(module, f"{scope}.{dotted}")
+                found = found or self.resolve(module, dotted)
+            if found is None:
+                raise GeneratorError(
+                    f"{module}.{qualname}.__doc__: {ast.unparse(value)} unresolved"
+                )
+            return self.raw(*found)
+        raise GeneratorError(f"{module}.{qualname}.__doc__: {ast.unparse(value)} not a docstring")
+
+    def getdoc(self, module: str, qualname: str) -> str | None:
+        """``inspect.getdoc`` of PySpark's object `qualname` of `module`: its ``__doc__``, or that
+        of the same name of the first class of the MRO of its class that has one, cleaned."""
+        found = self.resolve(module, qualname) if qualname else None
+        if found is None:
+            return None
+        doc = self.raw(*found)
+        if doc is None:
+            def_module, def_qualname = found
+            node = self.node(def_module, def_qualname)
+            if isinstance(node, ast.ClassDef):
+                for base in self.mro(def_module, def_qualname)[1:]:
+                    doc = self.raw(*base)
+                    if doc is not None:
+                        break
+            elif (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and "." in def_qualname
+                # A cache of functools is a descriptor whose class inspect does not find.
+                and not (node.decorator_list and _decorator_name(node.decorator_list[0]) in _CACHES)
+            ):
+                owner, _, name = def_qualname.rpartition(".")
+                if isinstance(self.node(def_module, owner), ast.ClassDef):
+                    for base_module, base in self.mro(def_module, owner):
+                        member = self._member_of(base_module, base, name)
+                        if member is not None:
+                            doc = self.raw(*member)
+                            if doc is not None:
+                                break
+        return None if doc is None else inspect.cleandoc(doc)
+
+    def assigned(self, module: str, qualname: str) -> bool:
+        """Whether PySpark's module assigns the ``__doc__`` of `qualname`, such as of an attribute
+        (``builder.__doc__ = ...``), whose docstring is then its own."""
+        source = self.source(module)
+        return source is not None and qualname in source.doc_assigns
+
+    def module_doc(self, module: str) -> str | None:
+        source = self.source(module)
+        doc = None if source is None else ast.get_docstring(source.tree, clean=True)
+        return doc
 
 
 # ---------------------------------------------------------------------------------------
@@ -1690,7 +2184,7 @@ def _base_names(cls: ast.ClassDef) -> list[str]:
     return names
 
 
-def public_classes(official: str, tree: ast.Module, names) -> list[str]:
+def public_classes(official: str, tree: ast.Module, names, docs: Docs | None = None) -> list[str]:
     """The stub lines of the public classes of the native classes `names` of the classes of the
     same names of PySpark's module `official`, of source `tree`, as
     ``pyspark.ml._native_classes.publish`` makes them: each is a subclass of the public classes of
@@ -1721,7 +2215,10 @@ def public_classes(official: str, tree: ast.Module, names) -> list[str]:
         parents = [a for a in native if not any(a in ancestors(b) for b in native if b != a)]
         for parent in parents:
             declare(parent)
-        lines.append(f"class {name}({', '.join([*parents, f'{_PUBLISHED}.{name}'])}): ...")
+        header = f"class {name}({', '.join([*parents, f'{_PUBLISHED}.{name}'])}):"
+        # Of PySpark's docstring of its class, which the public class has (`_public_class`).
+        doc = None if docs is None else docs.getdoc(official, name)
+        lines.extend([header + " ..."] if doc is None else [header, *docstring_lines(doc, "    ")])
 
     for name in names:
         declare(name)
@@ -1766,7 +2263,9 @@ def _is_own_import(stmt: ast.stmt) -> bool:
     )
 
 
-def ml_connect_module(root: Path, pyspark_src: Path, module: str, tag: str) -> tuple[Path, str]:
+def ml_connect_module(
+    root: Path, pyspark_src: Path, module: str, tag: str, docs: Docs | None = None
+) -> tuple[Path, str]:
     """The path and the text of the stub of the drop-in's module `module` of ML_CONNECT_MODULES."""
     relative, tree = _dropin_source(root, module)
     natives: list[str] = []
@@ -1818,12 +2317,21 @@ def ml_connect_module(root: Path, pyspark_src: Path, module: str, tag: str) -> t
     body = [f"import {official} as {_PUBLISHED}", *lines, ""]
     if all_names is not None:
         body += [f"__all__ = {all_names!r}", ""]
-    body += public_classes(official, official_tree, natives)
+    body += public_classes(official, official_tree, natives, docs)
+    body = _with_module_doc(body, docs, module)
     header = HEADER_OF_DROPIN.format(source=relative.as_posix(), official=official, tag=tag)
     return relative.with_suffix(".pyi"), header + "\n" + "\n".join(body) + "\n"
 
 
-def ml_connect_package(root: Path, tag: str) -> tuple[Path, str, list[str]]:
+def _with_module_doc(body: list[str], docs: Docs | None, module: str) -> list[str]:
+    """`body` after PySpark's docstring of its module of the import path `module`, if it has one."""
+    doc = None if docs is None else docs.module_doc(module)
+    return body if doc is None else [*docstring_lines(doc, ""), "", *body]
+
+
+def ml_connect_package(
+    root: Path, tag: str, docs: Docs | None = None
+) -> tuple[Path, str, list[str]]:
     """The path and the text of the stub of the package ML_CONNECT_PACKAGE of the drop-in, and the
     names of the native stages of pyspark.ml.feature that it makes public in the module
     ML_CONNECT_FEATURE (its ``feature.__all__``)."""
@@ -1880,7 +2388,7 @@ def ml_connect_package(root: Path, tag: str) -> tuple[Path, str, list[str]]:
     ]
     if extended:
         all_names = all_names + [n for n in stages if n not in all_names]
-    body = [*imports, *lines, "", f"__all__ = {all_names!r}", ""]
+    body = _with_module_doc([*imports, *lines, "", f"__all__ = {all_names!r}", ""], docs, module)
     body += [d.rstrip("\n") for d in declarations]
     header = HEADER_OF_DROPIN.format(source=relative.as_posix(), official="pyspark.ml", tag=tag)
     return relative.with_suffix(".pyi"), header + "\n" + "\n".join(body) + "\n", stages
@@ -1903,15 +2411,16 @@ def generate(root: Path, pyspark_src: str, log=print) -> dict[Path, str]:
         raise GeneratorError(f"DROPPED_STAR_IMPORTS of modules without a stub: {unknown}")
     check_identity_decorators(src)
     tag = tracked_tag(root)
+    docs = Docs(src)
     natives: dict[str, tuple[str, list[str]]] = {}
     ml_stubs: dict[str, tuple[Path, str]] = {}
     if ML_CONNECT_PACKAGE is not None:
-        path, text, stages = ml_connect_package(root, tag)
+        path, text, stages = ml_connect_package(root, tag, docs)
         ml_stubs[ML_CONNECT_PACKAGE] = (path, text)
         natives[ML_CONNECT_FEATURE] = (ML_FEATURE, stages)
         for module in ML_CONNECT_MODULES:
-            ml_stubs[module] = ml_connect_module(root, src, module, tag)
-    stubs = {module: transform(src, module, natives.get(module)) for module in STUB_MODULES}
+            ml_stubs[module] = ml_connect_module(root, src, module, tag, docs)
+    stubs = {module: transform(src, module, natives.get(module), docs) for module in STUB_MODULES}
     dropin = DropIn(root, stubs)
     resolve_reexports(stubs, dropin)
     texts = {
