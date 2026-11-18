@@ -438,11 +438,15 @@ impl DataType {
                     format!("geography({})", srid)
                 }
             }
-            // pyspark.ml.linalg's UDTs name their simple strings, as PySpark's VectorUDT and
-            // MatrixUDT do.
+            // The UDTs of pyspark.ml.linalg and pyspark.mllib.linalg name their simple strings, as
+            // the VectorUDT and the MatrixUDT of both packages of PySpark do.
             DataType::Udt { python_class, .. } => match python_class.as_deref() {
-                Some("pyspark.ml.linalg.VectorUDT") => "vector".to_string(),
-                Some("pyspark.ml.linalg.MatrixUDT") => "matrix".to_string(),
+                Some("pyspark.ml.linalg.VectorUDT" | "pyspark.mllib.linalg.VectorUDT") => {
+                    "vector".to_string()
+                }
+                Some("pyspark.ml.linalg.MatrixUDT" | "pyspark.mllib.linalg.MatrixUDT") => {
+                    "matrix".to_string()
+                }
                 _ => "udt".to_string(),
             },
             DataType::Unparsed { data_type_string } => {

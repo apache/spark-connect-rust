@@ -1174,6 +1174,151 @@ def test_nested_types_of_the_same_json_render_by_their_objects_as_pysparks():
     assert tree.simpleString() == "struct<a:alpha,b:array<beta>,c:map<alpha,beta>>"
 
 
+class _NoModuleUDT(T.UserDefinedType):
+    """A UserDefinedType whose module() is not implemented, of a SQL type of no conversion."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.LongType()
+
+
+class _NoSqlTypeUDT(T.UserDefinedType):
+    """A UserDefinedType whose sqlType() is not implemented."""
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+
+def test_types_of_a_user_defined_type_of_no_json_keep_it_as_pysparks():
+    # As official PySpark's ArrayType, MapType, StructField and StructType, which keep the type
+    # objects that they are given as they are: of a UserDefinedType whose module() or sqlType()
+    # is not implemented, such as UserDefinedType() itself, they are made, also as a setter takes
+    # it, and their repr, simpleString, needConversion, ==, hash, copies, pickles, tree string,
+    # names, add and toNullable read the objects. Their json() and jsonValue() raise the error of
+    # the type's jsonValue(), and toInternal and fromInternal that of its own methods. The
+    # drop-in raised the error of its JSON when they were made. The values are official PySpark
+    # 4.3.0's.
+    from pyspark.errors import PySparkNotImplementedError
+
+    def raises(call, feature):
+        with pytest.raises(PySparkNotImplementedError) as e:
+            call()
+        assert e.value.getCondition() == "NOT_IMPLEMENTED"
+        assert e.value.getMessageParameters() == {"feature": feature}
+
+    for make, json_feature, to_feature, from_feature in [
+        (T.UserDefinedType, "module()", "sqlType()", "sqlType()"),
+        (_NoModuleUDT, "module()", "toInternal()", "fromInternal()"),
+        (_NoSqlTypeUDT, "sqlType()", "sqlType()", "sqlType()"),
+    ]:
+        name = make.__name__
+        cases = [
+            (lambda: T.ArrayType(make()), f"ArrayType({name}(), True)", "array<udt>"),
+            (lambda: T.ArrayType(make(), False), f"ArrayType({name}(), False)", "array<udt>"),
+            (
+                lambda: T.MapType(T.StringType(), make()),
+                f"MapType(StringType(), {name}(), True)",
+                "map<string,udt>",
+            ),
+            (
+                lambda: T.MapType(make(), T.StringType()),
+                f"MapType({name}(), StringType(), True)",
+                "map<udt,string>",
+            ),
+            (lambda: T.StructField("a", make()), f"StructField('a', {name}(), True)", "a:udt"),
+            (
+                lambda: T.StructType([T.StructField("a", make())]),
+                f"StructType([StructField('a', {name}(), True)])",
+                "struct<a:udt>",
+            ),
+            (
+                lambda: T.ArrayType(T.ArrayType(make())),
+                f"ArrayType(ArrayType({name}(), True), True)",
+                "array<array<udt>>",
+            ),
+        ]
+        for build, shown, simple in cases:
+            t = build()
+            assert (repr(t), str(t), t.simpleString()) == (shown, shown, simple)
+            assert t.needConversion() is True, shown
+            assert t == build() and not t != build() and hash(t) == hash(build()), shown
+            for copied in (copy.copy(t), copy.deepcopy(t), pickle.loads(pickle.dumps(t))):
+                assert type(copied) is type(t) and copied == t and repr(copied) == shown
+            raises(t.json, json_feature)
+            raises(t.jsonValue, json_feature)
+        raises(lambda: T.ArrayType(make()).toInternal([1]), to_feature)
+        raises(lambda: T.ArrayType(make()).fromInternal([1]), from_feature)
+        raises(lambda: T.StructType([T.StructField("a", make())]).toInternal((1,)), to_feature)
+        struct = T.StructType([T.StructField("a", make()), T.StructField("b", T.ArrayType(make()))])
+        assert struct.typeName() == "struct" and T.ArrayType(make()).typeName() == "array"
+        assert (struct.names, struct.fieldNames(), len(struct)) == (["a", "b"], ["a", "b"], 2)
+        assert struct["a"] is struct.fields[0] and struct.fields[0].dataType == make()
+        assert struct.treeString() == (
+            f"root\n |-- a: {name.lower()} (nullable = true)\n |-- b: array (nullable = true)\n"
+            f" |    |-- element: {name.lower()} (containsNull = true)\n"
+        )
+        added = T.StructType([T.StructField("x", T.IntegerType())]).add("b", make())
+        assert repr(added) == (
+            f"StructType([StructField('x', IntegerType(), True), StructField('b', {name}(), True)])"
+        )
+        assert (added.names, added._needConversion) == (["x", "b"], [False, True])
+        nullable = T.StructType([T.StructField("a", T.ArrayType(make(), False), False)])
+        assert repr(nullable.toNullable()) == (
+            f"StructType([StructField('a', ArrayType({name}(), True), True)])"
+        )
+        assert repr(T.MapType(T.StringType(), make(), False).toNullable()) == (
+            f"MapType(StringType(), {name}(), True)"
+        )
+        array, field = T.ArrayType(T.IntegerType()), T.StructField("a", T.IntegerType())
+        kv = T.MapType(T.StringType(), T.IntegerType())
+        array.elementType, field.dataType, kv.keyType = make(), make(), make()
+        assert (repr(array), repr(field), repr(kv)) == (
+            f"ArrayType({name}(), True)",
+            f"StructField('a', {name}(), True)",
+            f"MapType({name}(), IntegerType(), True)",
+        )
+        raises(array.json, json_feature)
+
+
+class _SubBooleanType(T.BooleanType):
+    """A Python subclass of a type, whose `typeName()`, `_subboolean`, PySpark's methods read."""
+
+
+def test_casts_show_the_simple_strings_of_their_type_objects_as_pysparks():
+    # As official PySpark's CastExpression.__repr__, of the `simpleString()` of the type object in
+    # upper case: of a user-defined type of its own simpleString(), also in an array, a map or a
+    # struct, and of a type of a Python subclass, where the drop-in showed `UDT` and the
+    # simpleString of the core type of the class. The plans are those of the types. A cast to a
+    # type that does not lower now, such as an array of UserDefinedType(), is made, and each
+    # request raises the error of its JSON. The strings are official PySpark 4.3.0's.
+    from pyspark.errors import PySparkNotImplementedError
+
+    scales = T.StructType([T.StructField("a", _ScaleUDT(2)), T.StructField("b", _ScaleUDT(10))])
+    for data_type, shown in [
+        (_ScaleUDT(2), "SCALE2"),
+        (scales, "STRUCT<A:SCALE2,B:SCALE10>"),
+        (T.ArrayType(_ScaleUDT(3)), "ARRAY<SCALE3>"),
+        (T.MapType(T.StringType(), _ScaleUDT(4)), "MAP<STRING,SCALE4>"),
+        (_SubBooleanType(), "_SUBBOOLEAN"),
+        (T.ArrayType(_SubBooleanType()), "ARRAY<_SUBBOOLEAN>"),
+        (T.DecimalType(10, 2), "DECIMAL(10,2)"),
+        (T.ArrayType(T.UserDefinedType()), "ARRAY<UDT>"),
+    ]:
+        for name, cast in (("CAST", F.col("id").cast), ("TRY_CAST", F.col("id").try_cast)):
+            column = cast(data_type)
+            assert repr(column) == f"Column<'{name}(id AS {shown})'>"
+            assert repr(column.alias("v")) == f"Column<'{name}(id AS {shown}) AS v'>"
+    with mock_connect_session() as (spark, service):
+        column = F.col("id").cast(T.ArrayType(T.UserDefinedType()))
+        for request in (lambda: spark.range(1).select(column).schema,
+                        spark.range(1).select(column).collect):
+            with pytest.raises(PySparkNotImplementedError) as e:
+                request()
+            assert e.value.getMessageParameters() == {"feature": "module()"}
+        assert service.analyze_requests == [] and service.execute_requests == []
+
+
 def test_python_subclasses_of_the_abstract_types_are_made_as_pysparks():
     # As PySpark's plain classes, whose `object.__new__` takes the arguments that the `__init__`
     # of a subclass takes, such as that of a UserDefinedType of parameters, and raises them

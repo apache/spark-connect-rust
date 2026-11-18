@@ -472,9 +472,7 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
     surrogate raises its `UnicodeEncodeError`, and so does `DataFrame.to` of such a struct of a
     type of no proto, at the call;
   - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends
-    the `json()` of the object, which the server may fail to parse;
-  - the `__repr__` of a cast to a type of a subclass shows the `simpleString` of the class's core
-    type.
+    the `json()` of the object, which the server may fail to parse.
 
   The class's own types compare without the attributes that a user set on them, where PySpark's
   comparison of the `__dict__`s holds them (see `docs/compatibility.md`); their copies and pickles
@@ -489,6 +487,12 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   int, where PySpark's runs (and its `pandas_udf` fails too). A float that is not finite (`inf`,
   `nan`) raises serde_json's `ValueError` when the field is made, where PySpark makes the field,
   whose every request the server refuses, so only its local uses differ (intentional).
+- **The `createDataFrame` of a type of a `UserDefinedType` of no JSON** (tracked; `createDataFrame`
+  lowers its schema first). An array, a map, a field or a struct of a `UserDefinedType` whose
+  `module()` or `sqlType()` is not implemented is made and read as PySpark's, and the uses that read
+  its JSON raise its error, but `createDataFrame` of local rows or of a pandas DataFrame of one
+  raises the `NOT_IMPLEMENTED` of its `jsonValue()`, where PySpark's converters raise that of its
+  `sqlType()` or `serialize` (see `docs/compatibility.md`).
 - **Shallow copy of a session builder** (tracked). `copy.copy(SparkSession.builder)` has
   options of its own, where PySpark's shares its `_options` dict and its hook factories
   with the builder that it copies, so that a `config` of either one is seen by both.

@@ -761,6 +761,76 @@ impl KeptType {
             None => Ok(snapshot.clone()),
         }
     }
+
+    /// The core type of the child as it is now, as [`KeptType::live`] reads it, or else the type
+    /// that stands for a child that does not lower now (see [`lenient_type`]).
+    fn live_or_stand_in(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<DataType> {
+        match self.kept(py) {
+            Some(object) => lenient_type(object.bind(py)),
+            None => Ok(snapshot.clone()),
+        }
+    }
+}
+
+/// The core type of the type object `obj`, as [`py_to_data_type`] lowers it, or else a type that
+/// stands for it, for a use that does not read its JSON. PySpark's `ArrayType`, `MapType`,
+/// `StructField` and `StructType` keep the type objects that they are given as they are, and read
+/// one only for a use that needs its JSON, such as `json()` or a plan, or its conversion, such
+/// as `toInternal`. So a `UserDefinedType` whose `module()` or `sqlType()` is not implemented
+/// stands as the null type, and an array, a map, a field or a struct that holds one stands as
+/// the types that it holds, each so. Such a use reads the object again, which raises its error
+/// then (see [`KeptType::live`]). An error of another object, or one that is not an `Exception`,
+/// such as a `KeyboardInterrupt`, is raised.
+fn lenient_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
+    let error = match py_to_data_type(obj) {
+        Ok(data_type) => return Ok(data_type),
+        Err(error) => error,
+    };
+    let py = obj.py();
+    if !is_exception(py, &error) || !obj.is_instance_of::<PyDataType>() {
+        return Err(error);
+    }
+    if let Ok(array) = obj.cast::<PyArrayType>() {
+        let array = array.borrow();
+        return Ok(DataType::Array {
+            element_type: Box::new(
+                array
+                    .element_object
+                    .live_or_stand_in(py, &array.element_type)?,
+            ),
+            contains_null: array.contains_null,
+        });
+    }
+    if let Ok(map) = obj.cast::<PyMapType>() {
+        let map = map.borrow();
+        return Ok(DataType::Map {
+            key_type: Box::new(map.key_object.live_or_stand_in(py, &map.key_type)?),
+            value_type: Box::new(map.value_object.live_or_stand_in(py, &map.value_type)?),
+            value_contains_null: map.value_contains_null,
+        });
+    }
+    if let Ok(st) = obj.cast::<PyStructType>() {
+        return st.borrow().stand_in_data_type(py);
+    }
+    Ok(DataType::Null)
+}
+
+/// Whether `error`, of the lowering of a type object, is an `Exception`, which a use that does
+/// not read the type's JSON leaves to a use that does (see [`lenient_type`]): not a
+/// `KeyboardInterrupt` nor a `SystemExit`.
+fn is_exception(py: Python<'_>, error: &PyErr) -> bool {
+    error.is_instance_of::<pyo3::exceptions::PyException>(py)
+}
+
+/// The core type of `obj`, given as a child of a type, such as by the setter of
+/// `ArrayType.elementType`: of a type object, as [`lenient_type`] takes it, which the type keeps
+/// (see `KeptType::of`), and of another value, as [`py_to_data_type`] takes it.
+fn kept_child_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
+    if obj.is_instance_of::<PyDataType>() {
+        lenient_type(obj)
+    } else {
+        py_to_data_type(obj)
+    }
 }
 
 /// Construct a `StructType` Python object (with its full base chain) from core fields.
@@ -787,7 +857,9 @@ fn struct_parts(py: Python<'_>, fields: Bound<'_, PyList>) -> PyResult<(DataType
     for item in fields.iter() {
         let object = as_struct_field(&item)?;
         names.append(object.borrow().field.name.as_str())?;
-        base_fields.push(object.borrow().current_field(py)?);
+        // As PySpark's `__init__`, which reads the names and the `needConversion` of the fields:
+        // a type that does not lower now is kept (see `lenient_type`).
+        base_fields.push(object.borrow().stand_in_field(py)?);
     }
     let need_conversion = need_conversion_of_fields(py, &fields)?;
     let parts = PyStructType {
@@ -961,6 +1033,24 @@ fn tree_type_name_text(
     }
 }
 
+/// The name that a tree string writes of the type at `path` below the type `root` that stands as
+/// the null type (see `lenient_type`): of a user-defined type, its `typeName()`, as PySpark's
+/// `_get_jvm_type_name` writes it, and else that of a type of a Python subclass (see
+/// [`subclass_tree_type_name`]), if `subclasses`; None for another type, such as a `NullType()`.
+fn stand_in_tree_type_name(
+    root: &Bound<'_, PyAny>,
+    path: &[TreeStep],
+    subclasses: bool,
+) -> PyResult<Option<String>> {
+    match tree_node(root, path)? {
+        Some(node) if is_udt(&node)? => {
+            Ok(Some(type_name_of(&node)?.str()?.to_cow()?.into_owned()))
+        }
+        _ if subclasses => subclass_tree_type_name(root, path),
+        _ => Ok(None),
+    }
+}
+
 /// The name that a tree string writes of the type at `path` below the type `root` when it is of a
 /// Python subclass (see `is_subclass_object`), as PySpark's `_get_jvm_type_name` writes it: the
 /// `simpleString()` of a decimal, a char, a varchar, an interval of fields or a time, and else the
@@ -1045,6 +1135,27 @@ fn field_base(field: PyStructField) -> pyo3::PyClassInitializer<PyStructField> {
 /// The Python object of the `StructField` `field`.
 fn field_object(py: Python<'_>, field: PyStructField) -> PyResult<Py<PyStructField>> {
     Py::new(py, field_base(field))
+}
+
+/// The `simpleString()` of the type object `obj`, of the core type `data_type`, where the core's
+/// simple string may not be PySpark's, which is of the object: of a user-defined type, whose
+/// `simpleString()` its class may have of its own, or that of its parameters, and of a type of a
+/// Python subclass, of its own methods, also held by an array, a map, a field or a struct, as
+/// PySpark's `CastExpression.__repr__` shows it. None for another type, and when the method
+/// raises, which a repr of the core's type then shows.
+pub(crate) fn shown_simple_string(
+    obj: &Bound<'_, PyAny>,
+    data_type: &DataType,
+) -> PyResult<Option<String>> {
+    let py = obj.py();
+    if !has_udt(data_type) && !is_subclass_object(obj) && !keeps_subclass_objects(py, obj)? {
+        return Ok(None);
+    }
+    match obj.call_method0(pyo3::intern!(py, "simpleString")) {
+        Ok(text) => Ok(text.extract().ok()),
+        Err(error) if is_exception(py, &error) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// The core type of `obj` for a proto that the client sends, as PySpark's
@@ -1938,7 +2049,21 @@ impl PyDataType {
             || slf.is_instance_of::<PyArrayType>()
             || slf.is_instance_of::<PyMapType>()
         {
-            return simple_string_with_udts(py, &py_to_data_type(slf.as_any())?);
+            return match py_to_data_type(slf.as_any()) {
+                Ok(data_type) => simple_string_with_udts(py, &data_type),
+                // Of a type that holds one that does not lower now, of the type objects that it
+                // holds, as PySpark's reads them (see `lenient_type`).
+                Err(error) if is_exception(py, &error) => {
+                    if let Ok(array) = slf.cast::<PyArrayType>() {
+                        return array.borrow().simple_string(py);
+                    }
+                    if let Ok(map) = slf.cast::<PyMapType>() {
+                        return map.borrow().simple_string(py);
+                    }
+                    slf.cast::<PyStructType>()?.borrow().simple_string(py)
+                }
+                Err(error) => Err(error),
+            };
         }
         let this = slf.borrow();
         let Some(inner) = &this.inner else {
@@ -2076,9 +2201,21 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
             return Ok(false);
         }
     }
-    // The metadata of the fields are compared as Python's `==` compares the dicts of PySpark.
-    let core = py_to_data_type(a)?;
-    if !core.eq_as_python(&py_to_data_type(b)?) {
+    // The metadata of the fields are compared as Python's `==` compares the dicts of PySpark. A
+    // type that holds one that does not lower now compares by its attributes, as PySpark's
+    // `__dict__` comparison does (see `lenient_type`).
+    let py = a.py();
+    let core = match py_to_data_type(a) {
+        Ok(core) => core,
+        Err(error) if is_exception(py, &error) => return attributes_eq(a, b),
+        Err(error) => return Err(error),
+    };
+    let other = match py_to_data_type(b) {
+        Ok(other) => other,
+        Err(error) if is_exception(py, &error) => return attributes_eq(a, b),
+        Err(error) => return Err(error),
+    };
+    if !core.eq_as_python(&other) {
         return Ok(false);
     }
     // The `hasPrecisionInfo` of a decimal is an attribute of PySpark's `__dict__` too.
@@ -2108,7 +2245,6 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
     // by those objects, as PySpark's `__dict__` holds them: `ArrayType(t)` is not equal to
     // `ArrayType(u)` of a `u` of another `__dict__` or class, of the same JSON. So do the types
     // of Python subclasses, of the core types of their classes, and the types that keep them.
-    let py = a.py();
     if (holds_objects(&core) || keeps_subclass_objects(py, a)? || keeps_subclass_objects(py, b)?)
         && !held_objects_eq(a, b, &core)?
     {
@@ -2118,6 +2254,40 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
     // PySpark's `__dict__` holds after the parameters.
     if is_subclass_object(a) || is_subclass_object(b) {
         let dict = pyo3::intern!(py, "__dict__");
+        return a.getattr(dict)?.eq(b.getattr(dict)?);
+    }
+    Ok(true)
+}
+
+/// As PySpark's `self.__dict__ == other.__dict__` of the type objects `a` and `b`, of one class
+/// (as `data_type_eq` checks), when one holds a type that does not lower now (see
+/// `lenient_type`): of the attributes that PySpark's `__init__` sets, in their order, which
+/// Python's `==` compares as the values of PySpark's `__dict__`, a type that they hold by its own
+/// `__eq__`, and then of the attributes that a user set on a type of a Python subclass.
+fn attributes_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let names: &[&str] = if a.is_instance_of::<PyArrayType>() {
+        &["elementType", "containsNull"]
+    } else if a.is_instance_of::<PyMapType>() {
+        &["keyType", "valueType", "valueContainsNull"]
+    } else if a.is_instance_of::<PyStructField>() {
+        &["name", "dataType", "nullable", "metadata"]
+    } else if a.is_instance_of::<PyStructType>() {
+        &[
+            "fields",
+            "names",
+            "_needConversion",
+            "_needSerializeAnyField",
+        ]
+    } else {
+        &[]
+    };
+    for name in names {
+        if !a.getattr(*name)?.eq(b.getattr(*name)?)? {
+            return Ok(false);
+        }
+    }
+    if is_subclass_object(a) || is_subclass_object(b) {
+        let dict = pyo3::intern!(a.py(), "__dict__");
         return a.getattr(dict)?.eq(b.getattr(dict)?);
     }
     Ok(true)
@@ -3518,7 +3688,7 @@ impl PyArrayType {
     }
     #[setter]
     fn set_elementType(&mut self, elementType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.element_type = py_to_data_type(elementType)?;
+        self.element_type = kept_child_type(elementType)?;
         self.element_object = KeptType::of(elementType);
         Ok(())
     }
@@ -3581,11 +3751,18 @@ impl PyArrayType {
             );
         }
         let this = slf.borrow();
+        // A type that holds one that does not lower now pickles of its objects (see
+        // `lenient_type`), as PySpark's does.
+        let element_type = match this.element_object.live(py, &this.element_type) {
+            Ok(element_type) => Some(element_type),
+            Err(error) if is_exception(py, &error) => None,
+            Err(error) => return Err(error),
+        };
+        let flagged = element_type.is_none() || has_other_flag(slf.py(), slf.as_any())?;
         let dt = DataType::Array {
-            element_type: Box::new(this.element_object.live(py, &this.element_type)?),
+            element_type: Box::new(element_type.unwrap_or(DataType::Null)),
             contains_null: this.contains_null,
         };
-        let flagged = has_other_flag(slf.py(), slf.as_any())?;
         let (f, args) = reduce_with_udts(slf.as_any(), &dt, flagged, || {
             let element_type = this.element_object.object(py, &this.element_type)?;
             (element_type, this.contains_null_object.clone_ref(py)).into_pyobject(py)
@@ -3727,13 +3904,13 @@ impl PyMapType {
     }
     #[setter]
     fn set_keyType(&mut self, keyType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.key_type = py_to_data_type(keyType)?;
+        self.key_type = kept_child_type(keyType)?;
         self.key_object = KeptType::of(keyType);
         Ok(())
     }
     #[setter]
     fn set_valueType(&mut self, valueType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.value_type = py_to_data_type(valueType)?;
+        self.value_type = kept_child_type(valueType)?;
         self.value_object = KeptType::of(valueType);
         Ok(())
     }
@@ -3808,12 +3985,24 @@ impl PyMapType {
             );
         }
         let this = slf.borrow();
+        // A type that holds one that does not lower now pickles of its objects (see
+        // `lenient_type`), as PySpark's does.
+        let types = this
+            .key_object
+            .live(py, &this.key_type)
+            .and_then(|key_type| Ok((key_type, this.value_object.live(py, &this.value_type)?)));
+        let types = match types {
+            Ok(types) => Some(types),
+            Err(error) if is_exception(py, &error) => None,
+            Err(error) => return Err(error),
+        };
+        let flagged = types.is_none() || has_other_flag(slf.py(), slf.as_any())?;
+        let (key_type, value_type) = types.unwrap_or((DataType::Null, DataType::Null));
         let dt = DataType::Map {
-            key_type: Box::new(this.key_object.live(py, &this.key_type)?),
-            value_type: Box::new(this.value_object.live(py, &this.value_type)?),
+            key_type: Box::new(key_type),
+            value_type: Box::new(value_type),
             value_contains_null: this.value_contains_null,
         };
-        let flagged = has_other_flag(slf.py(), slf.as_any())?;
         let (f, args) = reduce_with_udts(slf.as_any(), &dt, flagged, || {
             let key_type = this.key_object.object(py, &this.key_type)?;
             let value_type = this.value_object.object(py, &this.value_type)?;
@@ -4050,8 +4239,23 @@ impl PyStructField {
 
     /// The core field, with the metadata of the dict as it is now.
     pub(crate) fn current_field(&self, py: Python<'_>) -> PyResult<StructField> {
+        self.field_of_type(py, self.data_type_object.live(py, &self.field.data_type)?)
+    }
+
+    /// The core field, as [`PyStructField::current_field`] reads it, of the type that stands for
+    /// a type that does not lower now (see [`lenient_type`]), for a use that does not read its
+    /// JSON.
+    fn stand_in_field(&self, py: Python<'_>) -> PyResult<StructField> {
+        let data_type = self
+            .data_type_object
+            .live_or_stand_in(py, &self.field.data_type)?;
+        self.field_of_type(py, data_type)
+    }
+
+    /// The core field of the type `data_type`, with the metadata of the dict as it is now.
+    fn field_of_type(&self, py: Python<'_>, data_type: DataType) -> PyResult<StructField> {
         let mut field = self.field.clone();
-        field.data_type = self.data_type_object.live(py, &self.field.data_type)?;
+        field.data_type = data_type;
         let metadata = self.metadata.bind(py);
         field.metadata = if metadata.is_empty() {
             BTreeMap::new()
@@ -4308,7 +4512,7 @@ impl PyStructField {
     #[setter]
     #[pyo3(name = "dataType")]
     fn set_data_type(&mut self, dataType: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.field.data_type = py_to_data_type(dataType)?;
+        self.field.data_type = kept_child_type(dataType)?;
         self.data_type_object = KeptType::of(dataType);
         self.need_conversion_of_type = std::sync::OnceLock::new();
         Ok(())
@@ -4349,9 +4553,18 @@ impl PyStructField {
         if !other.is_instance(&slf.get_type())? {
             return Ok(false);
         }
-        // Of the metadata as Python's `==` compares the dict of PySpark's field.
-        let field = slf.borrow().current_field(py)?;
-        if !field.eq_as_python(&o.borrow().current_field(py)?) {
+        // Of the metadata as Python's `==` compares the dict of PySpark's field. A field of a type
+        // that does not lower now, or that holds one, compares by its attributes, as PySpark's
+        // `__dict__` comparison does (see `lenient_type`).
+        let current = |field: &Bound<'_, PyStructField>| field.borrow().current_field(py);
+        let (field, other_field) = match (current(slf), current(o)) {
+            (Ok(field), Ok(other_field)) => (field, other_field),
+            (Err(error), _) | (_, Err(error)) if is_exception(py, &error) => {
+                return attributes_eq(slf.as_any(), other);
+            }
+            (Err(error), _) | (_, Err(error)) => return Err(error),
+        };
+        if !field.eq_as_python(&other_field) {
             return Ok(false);
         }
         // The flags as they were given are compared as PySpark's `__dict__` does, and so are the
@@ -4460,6 +4673,19 @@ impl PyStructType {
             .collect()
     }
 
+    /// The core type of the struct, as [`PyStructType::current_fields`] reads it, of the types
+    /// that stand for the types that do not lower now (see [`lenient_type`]), for a use that does
+    /// not read its JSON.
+    fn stand_in_data_type(&self, py: Python<'_>) -> PyResult<DataType> {
+        let fields = self
+            .fields
+            .bind(py)
+            .iter()
+            .map(|item| as_struct_field(&item)?.borrow().stand_in_field(py))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(DataType::Struct { fields })
+    }
+
     /// The core type of the struct, as it is now.
     fn current_data_type(&self, py: Python<'_>) -> PyResult<DataType> {
         Ok(DataType::Struct {
@@ -4554,9 +4780,11 @@ impl PyStructType {
     ) -> PyResult<Bound<'py, PyAny>> {
         Ok(type_json_value(py, slf.as_any())?.0)
     }
+    /// As PySpark's, true, without reading the types of the fields (see
+    /// `need_conversion_of_object`).
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
+        need_conversion_of_object(slf.py(), slf.as_any())
     }
     #[pyo3(name = "fromInternal")]
     fn __obj_from_internal<'py>(
@@ -4606,8 +4834,15 @@ impl PyStructType {
             );
         }
         let this = slf.borrow();
-        let dt = this.current_data_type(py)?;
-        let flagged = has_other_flag(slf.py(), slf.as_any())?;
+        // A struct that holds a type that does not lower now pickles of its objects (see
+        // `lenient_type`), as PySpark's does.
+        let dt = match this.current_data_type(py) {
+            Ok(dt) => Some(dt),
+            Err(error) if is_exception(py, &error) => None,
+            Err(error) => return Err(error),
+        };
+        let flagged = dt.is_none() || has_other_flag(slf.py(), slf.as_any())?;
+        let dt = dt.unwrap_or(DataType::Struct { fields: Vec::new() });
         let (f, args) = reduce_with_udts(slf.as_any(), &dt, flagged, || {
             let objects = PyList::new(py, this.fields.bind(py).iter())?;
             (objects,).into_pyobject(py)
@@ -4743,7 +4978,7 @@ impl PyStructType {
         };
         // Only the types are read here, not the metadata: `add` is then linear in the fields
         // (a loop of adds with metadata would otherwise encode every field's metadata each time).
-        let new_field = as_struct_field(&object)?.borrow().current_field(py)?;
+        let new_field = as_struct_field(&object)?.borrow().stand_in_field(py)?;
         let need_conversion = {
             let me = slf.borrow();
             me.fields.bind(py).append(object)?;
@@ -4909,7 +5144,13 @@ impl PyStructType {
     fn __st_tree_string(slf: &Bound<'_, Self>, maxDepth: Py<PyAny>) -> PyResult<String> {
         let py = slf.py();
         let depth = normalize_tree_depth(maxDepth.bind(py))?;
-        let data_type = slf.borrow().current_data_type(py)?;
+        // As PySpark's, which reads the type objects, not their JSON: a type that does not lower
+        // now stands as the null type, and its name is its object's (see `lenient_type`).
+        let (data_type, stand_ins) = match slf.borrow().current_data_type(py) {
+            Ok(data_type) => (data_type, false),
+            Err(error) if is_exception(py, &error) => (slf.borrow().stand_in_data_type(py)?, true),
+            Err(error) => return Err(error),
+        };
         // As PySpark's, which takes the type name of each type it prints: a StructField as a type
         // has none (`StructField.typeName`).
         if nested_field_in(py, &data_type, depth)?.is_some() {
@@ -4946,6 +5187,9 @@ impl PyStructType {
             |path, data_type| match data_type {
                 DataType::Unparsed { data_type_string } => {
                     keep(tree_type_name_text(slf.as_any(), path, data_type_string))
+                }
+                DataType::Null if stand_ins => {
+                    keep(stand_in_tree_type_name(slf.as_any(), path, subclasses))
                 }
                 _ if subclasses => keep(subclass_tree_type_name(slf.as_any(), path)),
                 _ => None,
@@ -6852,15 +7096,94 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             let json = dt.json();
             match lowered_udts(py).get_item(&json)? {
                 Some(udt) => udt.unbind(),
-                None => py
-                    .import("pyspark.sql.types")?
-                    .getattr("_parse_datatype_json_string")?
-                    .call1((json,))?
-                    .unbind(),
+                None => udt_of_json(py, &json)?,
             }
         }
     };
     Ok(o)
+}
+
+/// A new user-defined type object of the JSON `json` of a user-defined type, as PySpark's
+/// `UserDefinedType.fromJson` makes it of a type of the server: `UDT()` of the class that its
+/// `pyClass` names, which raises for a class that it does not import, or whose `__init__` takes
+/// arguments.
+fn udt_of_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
+    Ok(py
+        .import("pyspark.sql.types")?
+        .getattr("_parse_datatype_json_string")?
+        .call1((json,))?
+        .unbind())
+}
+
+/// The type object of `dt`, a type that the server gave, such as the schema of a DataFrame or of
+/// its result, as PySpark's conversion of the types of the server makes it: each user-defined
+/// type a new object of its class (see [`udt_of_json`]), which the array, the map, the field or
+/// the struct that holds it keeps. [`data_type_to_py`] gives instead the object of its JSON that
+/// the client lowered last, for the types that the client makes of core types: one of a user
+/// would be shared by every schema of its JSON, of its attributes and identity, and a class whose
+/// `__init__` takes arguments would not raise. A type of no user-defined type is made as
+/// `data_type_to_py` makes it.
+pub(crate) fn schema_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
+    if !has_udt(dt) {
+        return data_type_to_py(py, dt);
+    }
+    // As `data_type_to_py`, with the SQL types of the JVM types of Python classes.
+    let filled = with_udt_sql_types(py, dt);
+    let dt = filled.as_ref().unwrap_or(dt);
+    Ok(match dt {
+        DataType::Udt { .. } => udt_of_json(py, &dt.json())?,
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => {
+            let element = schema_to_py(py, element_type)?;
+            let array = PyArrayType {
+                element_type: (**element_type).clone(),
+                contains_null: *contains_null,
+                element_object: KeptType::of(element.bind(py)),
+                contains_null_object: flag_of_bool(py, *contains_null),
+            };
+            Py::new(py, init_chain!(dt.clone(), array, [], value))?.into_any()
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            value_contains_null,
+        } => {
+            let key = schema_to_py(py, key_type)?;
+            let value = schema_to_py(py, value_type)?;
+            let map = PyMapType {
+                key_type: (**key_type).clone(),
+                value_type: (**value_type).clone(),
+                value_contains_null: *value_contains_null,
+                key_object: KeptType::of(key.bind(py)),
+                value_object: KeptType::of(value.bind(py)),
+                value_contains_null_object: flag_of_bool(py, *value_contains_null),
+            };
+            Py::new(py, init_chain!(dt.clone(), map, [], value))?.into_any()
+        }
+        DataType::Struct { fields } => {
+            let objects = PyList::empty(py);
+            for field in fields {
+                let mut object = PyStructField::from_field(py, field.clone())?;
+                if has_udt(&field.data_type) {
+                    let data_type = schema_to_py(py, &field.data_type)?;
+                    object.data_type_object = KeptType::of(data_type.bind(py));
+                }
+                objects.append(field_object(py, object)?)?;
+            }
+            // Of the core type that the server gave, which does not lower the objects again.
+            let need_conversion = need_conversion_of_fields(py, &objects)?;
+            let names = PyList::new(py, fields.iter().map(|field| field.name.as_str()))?;
+            let parts = PyStructType {
+                fields: objects.unbind(),
+                names: names.unbind(),
+                need_conversion,
+            };
+            Py::new(py, init_chain!(dt.clone(), parts, [], value))?.into_any()
+        }
+        _ => data_type_to_py(py, dt)?,
+    })
 }
 
 /// `dt` with the SQL type of each user-defined type of a Python class that lacks one, from the
@@ -6972,7 +7295,10 @@ fn nested_data_type(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<DataType> {
             data_type_class.str()?
         )));
     }
-    py_to_data_type(obj)
+    // As PySpark's constructor, which keeps the object as it is: one that does not lower now,
+    // such as a `UserDefinedType()` whose `module()` is not implemented, is kept for the uses
+    // that do not read its JSON.
+    lenient_type(obj)
 }
 
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
