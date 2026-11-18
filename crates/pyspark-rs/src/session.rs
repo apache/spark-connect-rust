@@ -13,6 +13,7 @@ use crate::dataframe::PyDataFrame;
 use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
+use crate::options::DefaultedOption;
 use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
 /// Python wrapper for a Spark session builder.
@@ -1269,15 +1270,23 @@ impl PySparkSession {
     /// of the flags that it matches, as PySpark's `SparkConnectClient.add_artifacts`, which gives
     /// its `ArtifactManager` one path at a time: a path is parsed, and a local file opened (see
     /// `check_local_artifact`), and then uploaded, before the next path is parsed. So the error of
-    /// a path is raised once the paths before it are uploaded, which the session keeps.
+    /// a path is raised once the paths before it are uploaded, which the session keeps. The flags,
+    /// `pyfile`, `archive` and `file`, are any objects, of which PySpark's `_parse_artifacts`
+    /// tests the truth (`if pyfile and ...`), as this does once there is a path.
     fn upload_artifacts(
         &self,
         py: Python<'_>,
         path: Vec<String>,
-        pyfile: bool,
-        archive: bool,
-        file: bool,
+        flags: &[Bound<'_, PyAny>; 3],
     ) -> PyResult<()> {
+        if path.is_empty() {
+            return Ok(());
+        }
+        let [pyfile, archive, file] = [
+            flags[0].is_truthy()?,
+            flags[1].is_truthy()?,
+            flags[2].is_truthy()?,
+        ];
         for p in &path {
             let (name, local) = match parse_artifact(p, pyfile, archive, file) {
                 Ok(parsed) => parsed,
@@ -3414,17 +3423,17 @@ impl PySparkSession {
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
     /// `SparkConnectClient.add_artifacts(*path, pyfile, archive, file)`: as `addArtifacts`, but of
     /// any of the flags, each path named by the first flag that it matches, as PySpark's client
-    /// does not check them.
+    /// does not check them: it only tests their truth.
     #[pyo3(signature = (*path, pyfile, archive, file))]
     fn _add_artifacts_of_flags(
         &self,
         py: Python<'_>,
         path: Vec<String>,
-        pyfile: bool,
-        archive: bool,
-        file: bool,
+        pyfile: Bound<'_, PyAny>,
+        archive: Bound<'_, PyAny>,
+        file: Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        self.upload_artifacts(py, path, pyfile, archive, file)
+        self.upload_artifacts(py, path, &[pyfile, archive, file])
     }
 
     /// The retry policy of the RPCs of the session, as the keyword arguments of PySpark's
@@ -3858,39 +3867,38 @@ impl PySparkSession {
     /// `addArtifacts(*path, pyfile=False, archive=False, file=False)`: each path is named by
     /// the flags and its extension, and the errors for a path that is not supported are
     /// PySpark's (see `spark_connect_core::artifact::parse_artifact`). A class file is refused,
-    /// as PySpark's ArtifactManager does not upload one.
-    #[pyo3(name = "addArtifacts", signature = (*path, pyfile=false, archive=false, file=false))]
+    /// as PySpark's ArtifactManager does not upload one. The flags are any objects, as PySpark's:
+    /// `sum([file, pyfile, archive]) > 1` refuses them first, and each path tests their truth.
+    #[pyo3(
+        name = "addArtifacts",
+        signature = (*path, pyfile=DefaultedOption::Omitted, archive=DefaultedOption::Omitted, file=DefaultedOption::Omitted),
+        text_signature = "($self, *path, pyfile=False, archive=False, file=False)"
+    )]
     fn add_artifacts(
         &self,
         py: Python<'_>,
         path: Vec<String>,
-        pyfile: bool,
-        archive: bool,
-        file: bool,
+        pyfile: DefaultedOption,
+        archive: DefaultedOption,
+        file: DefaultedOption,
     ) -> PyResult<()> {
-        if [pyfile, archive, file].iter().filter(|flag| **flag).count() > 1 {
-            return Err(crate::column::raise_pyspark(
-                py,
-                "PySparkValueError",
-                "INVALID_MULTIPLE_ARGUMENT_CONDITIONS",
-                &[
-                    ("arg_names", "'pyfile', 'archive' and/or 'file'"),
-                    ("condition", "True together"),
-                ],
-            ));
-        }
-        self.upload_artifacts(py, path, pyfile, archive, file)
+        let flags = session_artifact_flags(py, &pyfile, &archive, &file)?;
+        self.upload_artifacts(py, path, &flags)
     }
 
     /// `addArtifact` is `addArtifacts`, as in PySpark.
-    #[pyo3(name = "addArtifact", signature = (*path, pyfile=false, archive=false, file=false))]
+    #[pyo3(
+        name = "addArtifact",
+        signature = (*path, pyfile=DefaultedOption::Omitted, archive=DefaultedOption::Omitted, file=DefaultedOption::Omitted),
+        text_signature = "($self, *path, pyfile=False, archive=False, file=False)"
+    )]
     fn add_artifact(
         &self,
         py: Python<'_>,
         path: Vec<String>,
-        pyfile: bool,
-        archive: bool,
-        file: bool,
+        pyfile: DefaultedOption,
+        archive: DefaultedOption,
+        file: DefaultedOption,
     ) -> PyResult<()> {
         self.add_artifacts(py, path, pyfile, archive, file)
     }
@@ -3941,6 +3949,38 @@ fn unsupported_artifact_error(py: Python<'_>, unsupported: UnsupportedArtifact) 
             &[("arg_name", "artifact path"), ("disallowed_value", "#")],
         ),
     }
+}
+
+/// The flags `pyfile`, `archive` and `file` of `SparkSession.addArtifacts`, of `False` when they
+/// are omitted, as PySpark's checks them before anything else: `sum([file, pyfile, archive]) > 1`,
+/// as Python adds and compares them, raises `INVALID_MULTIPLE_ARGUMENT_CONDITIONS`, so a single
+/// flag of 2 does too, and `sum` raises its `TypeError` of a value that it does not add, such as
+/// None or a str.
+fn session_artifact_flags<'py>(
+    py: Python<'py>,
+    pyfile: &DefaultedOption,
+    archive: &DefaultedOption,
+    file: &DefaultedOption,
+) -> PyResult<[Bound<'py, PyAny>; 3]> {
+    let (pyfile, archive, file) = (
+        pyfile.or_bool(py, false),
+        archive.or_bool(py, false),
+        file.or_bool(py, false),
+    );
+    let added = PyList::new(py, [&file, &pyfile, &archive])?;
+    let total = py.import("builtins")?.getattr("sum")?.call1((added,))?;
+    if total.gt(1)? {
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "INVALID_MULTIPLE_ARGUMENT_CONDITIONS",
+            &[
+                ("arg_names", "'pyfile', 'archive' and/or 'file'"),
+                ("condition", "True together"),
+            ],
+        ));
+    }
+    Ok([pyfile, archive, file])
 }
 
 /// The client side of parsing a local artifact, as PySpark's `_parse_artifacts` does it: a

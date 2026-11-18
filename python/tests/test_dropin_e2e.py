@@ -1619,6 +1619,32 @@ def test_add_artifacts_upload_the_paths_before_one_that_fails_as_pyspark(session
     assert [row[0] for row in modules.select(imported("m")).collect()] == [first, second, None]
 
 
+def test_add_artifacts_take_flags_of_any_truth_as_pyspark(session, tmp_path):
+    # As PySpark's SparkSession.addArtifacts and SparkConnectClient.add_artifacts, whose flags are
+    # any objects, of their truth: a module added with pyfile=1 and a file added with file=1 reach
+    # the UDFs of the session.
+    import uuid
+
+    tag = uuid.uuid4().hex[:8]
+    module, note = f"flag_mod_{tag}", f"flag_note_{tag}.txt"
+    (tmp_path / f"{module}.py").write_text("NAME = 'from the module'\n")
+    (tmp_path / note).write_text("file content")
+    session.addArtifacts(str(tmp_path / f"{module}.py"), pyfile=1)
+    session.client.add_artifacts(str(tmp_path / note), pyfile=0, archive=0, file=1)
+
+    @F.udf("string")
+    def read(_):
+        import importlib
+        import os
+
+        imported = importlib.import_module(module)
+        # The directory of the session's files, which holds the module (see above).
+        root = os.path.dirname(imported.__file__)
+        return imported.NAME + "|" + open(os.path.join(root, note)).read()
+
+    assert session.range(1).select(read("id")).first()[0] == "from the module|file content"
+
+
 def test_foreach_foreach_partition_and_to_json_as_pyspark(session):
     # As PySpark Connect's: foreach calls f with each row, and foreachPartition with an
     # iterator of the rows of each partition, on the server; toJSON is a DataFrame of each row
