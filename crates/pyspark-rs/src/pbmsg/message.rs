@@ -1208,9 +1208,10 @@ impl PyMessage {
     /// with room for it.
     ///
     /// One interrupt budget counts a step for each message that the fields copy or build, and for
-    /// each value of a repeated field and each item of a map, of every level, so that a constructor
-    /// of many values (`Literal.Array(elements=[...])`, of a million messages) lets another thread
-    /// take the GIL, and a signal interrupt it, as the copies of the runtime do.
+    /// each value of a repeated field and each key of a map of messages, of every level, so that a
+    /// constructor of many values (`Literal.Array(elements=[...])`, of a million messages) lets
+    /// another thread take the GIL, and a signal interrupt it, as the copies of the runtime do. A
+    /// map of scalars takes its value in Python, as upb's does (see [`MapContainer::update_from`]).
     pub(crate) fn init_from_mapping(
         &mut self,
         py: Python<'_>,
@@ -1258,11 +1259,8 @@ impl PyMessage {
                 ))
             };
             if field.map.is_some() {
-                if !value.hasattr("items")? {
-                    return Err(not_iterable());
-                }
-                let container = self.map(py, index, None)?;
-                MapContainer::update_from(py, container.bind(py), &value, budget)?;
+                let container = self.map(py, index, None)?.into_bound(py);
+                MapContainer::update_from(py, &container, &value, &field.full_name, budget)?;
             } else if field.repeated && field.kind == Kind::Message {
                 let mut items = Vec::new();
                 for element in value.try_iter().map_err(|_| not_iterable())? {

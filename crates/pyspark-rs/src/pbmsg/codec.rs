@@ -12,7 +12,7 @@ use super::message::{new_instance, MessageClass, PyMessage, Slot};
 use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc};
 use super::scalar::Scalar;
 use super::text::upb_wire_key_order;
-use super::{grow, DecodeError};
+use super::{decode_error_of, grow, DecodeError};
 use crate::interrupt::ConversionBudget;
 
 fn write_varint(out: &mut Vec<u8>, mut value: u64) {
@@ -451,7 +451,9 @@ impl<'a> Reader<'a> {
 
 /// Merge the encoded message `data` into `message`, as protobuf's `MergeFromString` does. A
 /// failure is upb's `DecodeError` of the message type, also of a failure in a message that it
-/// holds: "Error parsing message with type 'spark.connect.Plan': Wire format was corrupt".
+/// holds: "Error parsing message with type 'spark.connect.Plan': Wire format was corrupt", of the
+/// runtime's class of it, which is protobuf's `google.protobuf.message.DecodeError` too where
+/// protobuf imports (see [`super::decode_error_of`]).
 pub(crate) fn merge(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> PyResult<()> {
     merge_with(py, message, data, Some(&ConversionBudget::full()))
 }
@@ -490,10 +492,13 @@ fn merge_with(
         }
         let what = err.value(py).to_string();
         let full_name = message.borrow().desc.full_name.clone();
-        DecodeError::new_err(format!(
-            "Error parsing message with type '{full_name}': {}",
-            upb_reason(&what)
-        ))
+        decode_error_of(
+            py,
+            format!(
+                "Error parsing message with type '{full_name}': {}",
+                upb_reason(&what)
+            ),
+        )
     })
 }
 

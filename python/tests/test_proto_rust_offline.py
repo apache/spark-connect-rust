@@ -42,6 +42,7 @@ import sys
 import textwrap
 import threading
 import time
+import types
 import warnings
 
 import pytest
@@ -459,6 +460,83 @@ def test_map_entries_of_fields_of_no_field_of_their_type_are_unknown_fields_as_u
         data = _field(4, entry)  # an entry of SQL.named_arguments, of Expression values
         expected = parsed(upb, "spark.connect.SQL", "named_arguments", data)
         assert parsed(ours, "spark.connect.SQL", "named_arguments", data) == expected, entry.hex()
+
+
+def test_parse_errors_are_protobufs_decode_errors_as_upbs(upb):
+    # As upb's: a parse that fails raises protobuf's google.protobuf.message.DecodeError, of upb's
+    # message and arguments, so that code that catches protobuf's DecodeError (or its Error)
+    # catches it. Its class is the runtime's DecodeError, a subclass of protobuf's and of the
+    # native ProtoDecodeError, which pickles and copies as itself; upb's is protobuf's class
+    # itself, which the runtime's does not catch. With protobuf's pure-Python implementation too,
+    # whose DecodeError is the same class.
+    from google.protobuf import message
+
+    literal, relation = "spark.connect.Expression.Literal", "spark.connect.Relation"
+    cases = [
+        (literal, b"\xff"),
+        (literal, _tag(1, 7)),
+        (literal, _tag(1, 4)),
+        (literal, _tag(0, 0) + _varint(1)),
+        (literal, _tag(2, 2) + _varint(5) + b"ab"),
+        (literal, _field(ours(literal).STRING_FIELD_NUMBER, b"\xff")),
+        (relation, _field(ours(relation).SQL_FIELD_NUMBER, b"\xff")),
+    ]
+    parses = {
+        "FromString": lambda cls, data: cls.FromString(data),
+        "ParseFromString": lambda cls, data: cls().ParseFromString(data),
+        "MergeFromString": lambda cls, data: cls().MergeFromString(data),
+        "__setstate__": lambda cls, data: cls().__setstate__({"serialized": data}),
+    }
+
+    def raised(cls, parse, data):
+        try:
+            parse(cls, data)
+        except message.DecodeError as error:
+            return error
+        raise AssertionError(data)
+
+    for full_name, data in cases:
+        for name, parse in parses.items():
+            mine, real = raised(ours(full_name), parse, data), raised(upb(full_name), parse, data)
+            assert type(real) is message.DecodeError and type(mine) is _rust.DecodeError
+            assert (str(mine), mine.args, repr(mine)) == (str(real), real.args, repr(real)), (
+                full_name,
+                data.hex(),
+                name,
+            )
+            assert isinstance(mine, message.Error) and isinstance(mine, _pyspark.ProtoDecodeError)
+            assert not isinstance(real, _rust.DecodeError)
+    assert issubclass(_rust.DecodeError, message.DecodeError)
+    error = raised(ours("spark.connect.Plan"), parses["FromString"], b"\xff")
+    copies = [pickle.loads(pickle.dumps(error, p)) for p in range(pickle.HIGHEST_PROTOCOL + 1)]
+    for copied in copies + [copy.copy(error), copy.deepcopy(error)]:
+        assert type(copied) is _rust.DecodeError and copied.args == error.args
+
+    script = textwrap.dedent(
+        """
+        import json
+        import pickle
+
+        from google.protobuf import message
+        from google.protobuf.internal import api_implementation
+        from pyspark.sql.connect.proto import _rust
+
+        try:
+            _rust._CLASSES["spark.connect.Plan"].FromString(b"\\xff")
+        except message.DecodeError as error:
+            loaded = pickle.loads(pickle.dumps(error))
+            out = [api_implementation.Type(), str(error), type(error) is _rust.DecodeError]
+            out.append(type(loaded) is _rust.DecodeError and isinstance(loaded, message.Error))
+        print(json.dumps(out))
+        """
+    )
+    root = pathlib.Path(__file__).resolve().parent.parent
+    env = dict(os.environ, PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python")
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, cwd=str(root), env=env
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert json.loads(result.stdout) == ["python", str(error), True, True]
 
 
 def test_messages_that_fail_to_parse_keep_what_they_read_as_upbs(upb):
@@ -1425,6 +1503,211 @@ def test_unset_children_set_in_their_parents_as_upbs(upb):
         assert relation.sql.query == "q!"
 
 
+class _KeysAndItems:
+    """An object of `keys()` and of its items, which is no mapping and has no `__iter__`:
+    `MutableMapping.update` takes its items of its keys, and its iteration, of `__getitem__`,
+    reads the item of 0 first."""
+
+    def __init__(self, items):
+        self.items = dict(items)
+
+    def keys(self):
+        return list(self.items)
+
+    def __getitem__(self, key):
+        return self.items[key]
+
+
+class _IterableOfKeys:
+    """An object that iterates its keys and gives its items, which is no mapping and has no
+    `keys()`: `MutableMapping.update` takes it for pairs."""
+
+    def __init__(self, items):
+        self.items = dict(items)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __getitem__(self, key):
+        return self.items[key]
+
+
+class _KeyTwice:
+    """An object that iterates the key "a" once for each of `values`, whose items are `values`, in
+    turn."""
+
+    def __init__(self, values):
+        self.values = list(values)
+        self.read = 0
+
+    def __iter__(self):
+        return iter(["a"] * len(self.values))
+
+    def __getitem__(self, key):
+        self.read += 1
+        return self.values[self.read - 1]
+
+
+class _ItemsOf(dict):
+    """A dict whose item of each key, as `[key]` reads it, is `item`, not the one it holds."""
+
+    def __init__(self, data, item):
+        super().__init__(data)
+        self.item = item
+
+    def __getitem__(self, key):
+        return self.item
+
+
+class _Counted:
+    """A pair that iterates `n` keys, counting those taken of it."""
+
+    def __init__(self, n):
+        self.n = n
+        self.taken = 0
+
+    def __iter__(self):
+        while self.taken < self.n:
+            self.taken += 1
+            yield f"k{self.taken}"
+
+
+def _map_field_cases():
+    """The values of map fields of a constructor, each made of the classes of `cls`: of a map of
+    scalars (Read.DataSource.options) and of maps of messages (MlParams.params, of Literals, and
+    SQL.named_arguments, of Expressions)."""
+
+    def literal(cls, **fields):
+        return cls("spark.connect.Expression.Literal")(**fields)
+
+    def expression(cls, **fields):
+        return cls("spark.connect.Expression")(**fields)
+
+    options = ("spark.connect.Read.DataSource", "options")
+    params = ("spark.connect.MlParams", "params")
+    named = ("spark.connect.SQL", "named_arguments")
+    origin = {"common": {"origin": {"python_origin": {"fragment": "f"}}}}
+    return [
+        # A map of scalars takes its value of the map's update, MutableMapping.update: the items
+        # of a mapping (read with [key]) or of an object of keys(), else pairs, as their
+        # iteration and unpacking give them, with Python's errors of another shape.
+        (options, lambda cls: {"a": "b", "c": "d"}),
+        (options, lambda cls: [("a", "b"), ("c", "d")]),
+        (options, lambda cls: iter([("a", "b")])),
+        (options, lambda cls: [["a", "b"]]),
+        (options, lambda cls: ["ab"]),
+        (options, lambda cls: {("a", "b")}),
+        (options, lambda cls: zip("ac", "bd")),
+        (options, lambda cls: [{"a": 1, "b": 2}]),
+        (options, lambda cls: [(b"a", b"b")]),
+        (options, lambda cls: [("a", "b"), ("a", "c")]),
+        (options, lambda cls: []),
+        (options, lambda cls: ""),
+        (options, lambda cls: types.MappingProxyType({"a": "b"})),
+        (options, lambda cls: _KeysAndItems({"a": "b"})),
+        (options, lambda cls: _ItemsOf({"a": "b"}, "c")),
+        (options, lambda cls: cls("spark.connect.Read.DataSource")(options={"a": "b"}).options),
+        (options, lambda cls: "ab"),
+        (options, lambda cls: ["abc"]),
+        (options, lambda cls: [("a",)]),
+        (options, lambda cls: [("a", "b", "c")]),
+        (options, lambda cls: [1]),
+        (options, lambda cls: [None]),
+        (options, lambda cls: [("a", "b"), 1]),
+        (options, lambda cls: 1),
+        (options, lambda cls: _IterableOfKeys({"a": "b"})),
+        (options, lambda cls: [("a", 1)]),
+        (options, lambda cls: [(1, "b")]),
+        (options, lambda cls: {"a": None}),
+        (options, lambda cls: [("a", b"\xff")]),
+        (options, lambda cls: [("\ud800", "b")]),
+        (options, lambda cls: cls("spark.connect.MlParams")(params={"a": {}}).params),
+        # upb gives a tuple to the update as its arguments (PyObject_CallMethod of "O"): the
+        # update of a mapping, of the pairs of one pair (which are not pairs), or of too many.
+        (options, lambda cls: ()),
+        (options, lambda cls: ({"a": "b"},)),
+        (options, lambda cls: ([("a", "b")],)),
+        (options, lambda cls: (("a", "b"),)),
+        (options, lambda cls: (("a", "b"), ("c", "d"))),
+        (options, lambda cls: (None,)),
+        # A map of messages takes the keys that its value iterates, of their items ([key]): of a
+        # mapping, but not of pairs, which the map refuses for keys after their items fail.
+        (params, lambda cls: {"a": literal(cls, integer=1), "b": literal(cls, string="x")}),
+        (params, lambda cls: {"a": {"integer": 1}, "b": {}}),
+        (params, lambda cls: types.MappingProxyType({"a": literal(cls, integer=1)})),
+        (params, lambda cls: _IterableOfKeys({"a": {"integer": 2}})),
+        (params, lambda cls: _ItemsOf({"a": {"integer": 1}}, literal(cls, string="item"))),
+        (params, lambda cls: cls("spark.connect.MlParams")(params={"a": {"integer": 3}}).params),
+        (params, lambda cls: {b"a": {"integer": 1}}),
+        (params, lambda cls: []),
+        (params, lambda cls: ""),
+        (params, lambda cls: [("a", literal(cls, integer=1))]),
+        (params, lambda cls: [("a", {"integer": 1})]),
+        (params, lambda cls: iter([("a", literal(cls, integer=1))])),
+        (params, lambda cls: {"a": literal(cls)}.items()),
+        (params, lambda cls: (("a", literal(cls)),)),
+        (params, lambda cls: "ab"),
+        (params, lambda cls: ["a"]),
+        (params, lambda cls: 1),
+        (params, lambda cls: _KeysAndItems({"a": literal(cls)})),
+        (params, lambda cls: {1: literal(cls)}),
+        (params, lambda cls: {"\ud800": literal(cls)}),
+        # A dict is the fields of the message of its key, and anything else is copied into it
+        # with CopyFrom, of its errors.
+        (params, lambda cls: {"a": 1}),
+        (params, lambda cls: {"a": None}),
+        (params, lambda cls: {"a": "x"}),
+        (params, lambda cls: {"a": literal(cls).SerializeToString()}),
+        (params, lambda cls: {"a": cls("spark.connect.Relation")()}),
+        (params, lambda cls: {"a": types.MappingProxyType({"integer": 1})}),
+        (params, lambda cls: {"a": _ItemsOf({"integer": 1}, 2)}),
+        (params, lambda cls: {"a": {"nope": 1}}),
+        (params, lambda cls: {"a": {"integer": "x"}}),
+        (params, lambda cls: {"a": {"integer": None}}),
+        (params, lambda cls: {"a": literal(cls, integer=1), "b": 5}),
+        (params, lambda cls: cls("spark.connect.Read.DataSource")(options={"a": "b"}).options),
+        # A key given twice: a dict sets its fields in the message of the key, and a message is
+        # copied over it.
+        (named, lambda cls: _KeyTwice([expression(cls, **origin), {"literal": {"integer": 1}}])),
+        (named, lambda cls: _KeyTwice([origin, expression(cls, literal={"integer": 1})])),
+        (named, lambda cls: _KeyTwice([origin, {"literal": {"integer": 1}}])),
+        (named, lambda cls: _KeyTwice([expression(cls, **origin), expression(cls, literal={})])),
+    ]
+
+
+def test_map_fields_of_constructors_take_mappings_and_pairs_as_upbs(upb):
+    # As upb's InitMapAttributes: a map of scalars takes its value as the map's update does, of
+    # pairs too, and a map of messages takes the items of the keys that its value iterates, a
+    # dict as the fields of the message of its key and anything else through CopyFrom. A nested
+    # message's map takes its value so too.
+    for (full_name, field), make in _map_field_cases():
+        real = make(upb)
+        label = (full_name, field, repr(real))
+        expected = _outcome(lambda: upb(full_name)(**{field: real}))
+        assert _outcome(lambda: ours(full_name)(**{field: make(ours)})) == expected, label
+        outer = {"spark.connect.Read.DataSource": "data_source", "spark.connect.SQL": "sql"}
+        if full_name in outer:
+            container = "spark.connect.Read" if field == "options" else "spark.connect.Relation"
+            nested = {outer[full_name]: {field: make(upb)}}
+            expected = _outcome(lambda: upb(container)(**nested))
+            nested = {outer[full_name]: {field: make(ours)}}
+            assert _outcome(lambda: ours(container)(**nested)) == expected, label
+    # The unpacking of a pair takes three of its items at most, as Python's does.
+    for cls in (ours, upb):
+        pair = _Counted(1000)
+        outcome = _outcome(lambda: cls("spark.connect.Read.DataSource")(options=[pair]))
+        assert (outcome, pair.taken) == (
+            ("raise", "ValueError", "too many values to unpack (expected 2)"),
+            3,
+        )
+    # A message value is copied, of its contents then.
+    for cls in (ours, upb):
+        literal = cls("spark.connect.Expression.Literal")(integer=1)
+        params = cls("spark.connect.MlParams")(params={"a": literal})
+        literal.integer = 2
+        assert params.params["a"] is not literal and params.params["a"].integer == 1
+
+
 def _nested_limits(levels):
     """The mapping of the fields of a Relation of `levels` limits."""
     fields = {}
@@ -1572,6 +1855,12 @@ def _large_operation(operation):
             parsed = literal_class
         corrupt = data + b"\xff"
         return lambda: parsed.FromString(corrupt), _rust.DecodeError, made
+    if operation == "map of scalars constructor":
+        # The constructor takes the pairs of a map of scalars through MutableMapping.update, in
+        # Python, as upb's does, which holds them while it runs.
+        pairs = [(f"k{i}", "v") for i in range(_LARGE)] + [("bad", 5)]
+        in_progress = _References(pairs, lambda extra: extra >= 1)
+        return lambda: ours("spark.connect.Read.DataSource")(options=pairs), TypeError, in_progress
     literal = literal_class.FromString(data)
     # The constructor, the extend and the update of many values (here of a value that fails last,
     # so that the messages that they made are released before they return, running no Python
@@ -1618,6 +1907,7 @@ def _large_operation(operation):
         "extend",
         "map parse",
         "map constructor",
+        "map of scalars constructor",
         "map update",
     ],
 )
@@ -1627,7 +1917,8 @@ def test_python_thread_runs_before_operations_on_large_messages_finish(operation
     # messages and the update of a map of many messages, values or entries, which take longer than
     # upb's, let another thread take the GIL every 1,024 of them, and a signal interrupt them, so
     # that the GIL is held as long as upb's at most, for a thousand messages; upb holds it until
-    # the operation ends (but in the update of a map, of MutableMapping's Python code). The other
+    # the operation ends (but in the update of a map and in the constructor of a map of scalars of
+    # pairs, of MutableMapping's Python code, which the runtime's constructor runs too). The other
     # thread reads the operation in progress from the references that it holds, or from the
     # entries of the map; a signal raises KeyboardInterrupt in it.
     from _local_data_conversion_probe import LocalDataConversionProbe
@@ -1773,8 +2064,8 @@ def test_messages_work_without_protobuf():
     # Where protobuf cannot be imported, pyspark.sql.connect.proto is of the runtime: messages
     # build, encode, parse, print, copy and pickle, and their containers are sequences and
     # mappings, as protobuf's are; the example plugin's take the package's, the pool of the files
-    # finds their descriptors and a Timestamp converts. With upb installed, the bytes and the text
-    # are upb's.
+    # finds their descriptors and a Timestamp converts. A parse that fails raises the runtime's
+    # DecodeError, which pickles. With upb installed, the bytes and the text are upb's.
     script = textwrap.dedent(
         """
         import collections.abc, copy, datetime, importlib.abc, json, pickle, sys
@@ -1814,8 +2105,10 @@ def test_messages_work_without_protobuf():
         nested = proto.Expression.Literal(string="nested")
         try:
             proto.Plan.FromString(b"\\xff")
-        except _rust.DecodeError as error:
+        except _pyspark.ProtoDecodeError as error:
             decode_error = str(error)
+            decode_error_class = type(error) is _rust.DecodeError
+            decode_error_pickle = type(pickle.loads(pickle.dumps(error))) is _rust.DecodeError
         out = {
             "bytes": [relation.SerializeToString().hex(), context.SerializeToString().hex()],
             "str": [str(relation), str(context)],
@@ -1827,6 +2120,8 @@ def test_messages_work_without_protobuf():
             "mapping": isinstance(relation.sql.named_arguments, collections.abc.MutableMapping),
             "enum": proto.MlOperator(type="OPERATOR_TYPE_MODEL").type,
             "decode error": decode_error,
+            "decode error class": decode_error_class and decode_error_pickle,
+            "decode error bases": [f"{c.__module__}.{c.__qualname__}" for c in _rust.DecodeError.__mro__],
         }
         print(json.dumps(out))
         """
@@ -1843,6 +2138,15 @@ def test_messages_work_without_protobuf():
     assert out["decode error"] == (
         "Error parsing message with type 'spark.connect.Plan': Wire format was corrupt"
     )
+    # Without protobuf, the runtime's DecodeError is of the native ProtoDecodeError only.
+    assert out["decode error class"]
+    assert out["decode error bases"] == [
+        "pyspark.sql.connect.proto._rust.DecodeError",
+        "pyspark.sql.connect.proto.DecodeError",
+        "builtins.Exception",
+        "builtins.BaseException",
+        "builtins.object",
+    ]
     upb = _upb_classes()
     if upb is not None:
         relation, context = _text_cases(upb)

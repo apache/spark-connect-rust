@@ -1277,7 +1277,7 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
 `unknown_fields.UnknownFieldSet` reads their unknown fields, which `text_format` prints with
 `print_unknown_fields=True` (see below). The differences:
 
-- its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`: its
+- its types are of `pyspark.sql.connect.proto`, not `google.protobuf`: its
   classes are of the metaclass `type`, not upb's `MessageMeta`, and can be subclassed, which upb
   refuses, and its map of scalars is a `MapContainer`, where upb's is a `ScalarMapContainer`, of
   which its map of messages, a `MessageMapContainer` as upb's, is a subclass;
@@ -1307,7 +1307,8 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   handler, every 1,024 steps of the operation (a message that it reads, makes or copies, an entry
   of a map, or a value of a repeated field that the constructor takes), where upb holds the GIL
   until they end (but in the `update` and `MergeFrom` of a map and the constructor of a map of
-  scalars, which run `MutableMapping.update` in Python), so another thread can use a message that
+  scalars, which run `MutableMapping.update` in Python, as the runtime's constructor runs it of a
+  value that is not a dict), so another thread can use a message that
   one of them reads meanwhile. `SerializeToString`, `==` of two messages of the runtime and the
   release of a message hold the GIL until they end, as upb's do: 0.07 s, 0.05 s and 0.07 s for a
   million messages, where upb's take 0.04 s, 0.14 s and 2 ms. The messages that the runtime makes,
@@ -1323,6 +1324,14 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   `pyspark.sql.connect.client.core` imports the package, so a pickle of PySpark's
   `PlanObservedMetrics`, such as one in the `attrs` of a pandas DataFrame of `toPandas`, which
   imports that module before it makes its messages, loads in a new process;
+- a parse that fails raises upb's message (`Error parsing message with type 'spark.connect.Plan':
+  Wire format was corrupt`) of the runtime's class, `pyspark.sql.connect.proto._rust.DecodeError`,
+  where upb raises `google.protobuf.message.DecodeError` itself. Where `protobuf` is installed (of
+  either implementation), the runtime's class is a subclass of `protobuf`'s, so `except
+  google.protobuf.message.DecodeError` catches it, as it catches upb's, but `type(error)` is not
+  `protobuf`'s class, and a traceback names the runtime's; without `protobuf`, it is a subclass of
+  `pyspark._pyspark.ProtoDecodeError` only. Its pickle names the runtime's class, so it loads
+  where the drop-in is installed, with or without `protobuf`;
 - `GetOptions()` of a descriptor gives `protobuf`'s `descriptor_pb2` options, as upb's does, so
   it needs `protobuf`.
 
