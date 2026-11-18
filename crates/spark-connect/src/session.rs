@@ -82,13 +82,39 @@ fn forget_thread_tags(
 #[derive(Clone, Default)]
 pub struct SharedTags(Arc<Mutex<Vec<Tag>>>);
 
+impl SharedTags {
+    /// A set of the tags `tags`, which no thread has yet (see [`SparkSession::share_thread_tags`]),
+    /// as the set that a binding keeps of the tags of PySpark's `thread_local`. Not a stable API.
+    #[doc(hidden)]
+    pub fn new(tags: Vec<Tag>) -> Self {
+        SharedTags(Arc::new(Mutex::new(tags)))
+    }
+
+    /// Replace the tags of this set with `tags`, which the requests of the threads that have it
+    /// carry from now on, as a change of the set of PySpark's `thread_local.tags`. Not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn replace(&self, tags: Vec<Tag>) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = tags;
+    }
+
+    /// The tags of this set. Not a stable API.
+    #[doc(hidden)]
+    pub fn tags(&self) -> Vec<Tag> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 /// An operation tag: its text, or the UTF-32 little-endian bytes of a str of Python that UTF-8
 /// cannot encode, such as one of a lone surrogate, which PySpark's client keeps as a tag, and
 /// with which each request that carries the tags fails (see
-/// [`SparkSession::add_unencodable_tag`]).
+/// [`SparkSession::add_unencodable_tag`]). Not a stable API.
+#[doc(hidden)]
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Tag {
+pub enum Tag {
+    /// A tag of its text.
     Text(String),
+    /// The UTF-32 little-endian bytes of a tag that UTF-8 cannot encode.
     Unencodable(Vec<u8>),
 }
 
@@ -1462,6 +1488,78 @@ impl SparkSession {
     ) {
         self.client
             .share_threadlocal_user_context_extensions(extensions);
+    }
+
+    /// The session ID that the requests of this session carry, as PySpark's `client._session_id`
+    /// (see [`SparkConnectClient::client_session_id`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn client_session_id(&self) -> String {
+        self.client.client_session_id()
+    }
+
+    /// Make the requests of this session carry `session_id`, as a set of PySpark's
+    /// `client._session_id` (see [`SparkConnectClient::set_client_session_id`]):
+    /// [`SparkSession::session_id`] stays the ID of the session. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_client_session_id(&self, session_id: String) {
+        self.client.set_client_session_id(session_id);
+    }
+
+    /// The channel builder of the connection of this session, as PySpark's `client._builder`
+    /// (see [`SparkConnectClient::channel_builder`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn channel_builder(&self) -> &ChannelBuilder {
+        self.client.channel_builder()
+    }
+
+    /// The user of the requests of this session, as PySpark's `client._user_id`: of the
+    /// connection string, else of the environment, if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn user_id(&self) -> Option<&str> {
+        self.client.user_id()
+    }
+
+    /// Open this session again, which `close()` closed, as PySpark's `client._closed = False`
+    /// lets the requests of its client be sent again. Not a stable API.
+    #[doc(hidden)]
+    pub fn reopen(&self) {
+        self.stopped.store(false, Ordering::SeqCst);
+        self.client.reopen();
+    }
+
+    /// The statuses of the operations of this session of `request`, a GetStatus request built
+    /// outside the core, as PySpark's `_get_operation_statuses` (see
+    /// [`SparkConnectClient::get_status_proto`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn get_status_proto(
+        &self,
+        request: proto::GetStatusRequest,
+    ) -> Result<proto::GetStatusResponse> {
+        block_on(self.client.get_status_proto(request))
+    }
+
+    /// Keep `refresher`, or none, for this session: what a binding keeps to bring the user
+    /// context extensions up to date before a call of a thread sends requests (see
+    /// [`SparkConnectClient::set_user_context_refresher`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn set_user_context_refresher(
+        &self,
+        refresher: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    ) {
+        self.client.set_user_context_refresher(refresher);
+    }
+
+    /// The refresher of [`SparkSession::set_user_context_refresher`], if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn user_context_refresher(&self) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
+        self.client.user_context_refresher()
+    }
+
+    /// Forget the user context extensions of the current thread, as PySpark's
+    /// `thread_local` once its `user_context_extensions` is deleted. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_threadlocal_user_context_extensions(&self) {
+        self.client.clear_threadlocal_user_context_extensions();
     }
 
     /// Return the Spark version of the connected server.
@@ -3761,6 +3859,46 @@ mod tests {
         };
         assert_eq!(cleared, vec!["d"]);
         assert_eq!(run(copy, "e"), vec!["a", "b", "e"]);
+    }
+
+    #[test]
+    fn a_set_of_tags_given_to_threads_is_theirs_and_its_changes_are_theirs() {
+        // As the set of PySpark's thread_local.tags, which a binding keeps and changes: a new set
+        // that a thread is given is its tags, whose changes are the tags of the threads that have
+        // it, of their text or of the bytes of a str that UTF-8 cannot encode, and a thread that is
+        // not given it keeps its own.
+        let spark = session();
+        spark.add_tag("own").unwrap();
+        let set = SharedTags::new(vec![Tag::Text("a".to_string())]);
+        spark.share_thread_tags(&set);
+        assert_eq!(spark.get_tags(), vec!["a"]);
+        let surrogate = vec![0x00, 0xd8, 0x00, 0x00];
+        set.replace(vec![
+            Tag::Text("b".to_string()),
+            Tag::Unencodable(surrogate.clone()),
+        ]);
+        assert_eq!(spark.get_tags(), vec!["b"]);
+        assert_eq!(spark.unencodable_tags(), vec![surrogate.clone()]);
+        assert!(spark.tags().is_err());
+        assert_eq!(set.tags().len(), 2);
+
+        let seen = {
+            let spark = spark.clone();
+            let set = set.clone();
+            std::thread::spawn(move || {
+                let before = spark.get_tags();
+                spark.share_thread_tags(&set);
+                set.replace(vec![Tag::Text("c".to_string())]);
+                (before, spark.get_tags())
+            })
+            .join()
+            .unwrap()
+        };
+        assert_eq!(seen, (Vec::<String>::new(), vec!["c".to_string()]));
+        assert_eq!(spark.get_tags(), vec!["c"]);
+        spark.clear_tags();
+        assert!(spark.get_tags().is_empty());
+        assert_eq!(set.tags(), vec![Tag::Text("c".to_string())]);
     }
 
     #[test]

@@ -22,14 +22,14 @@ Mirrors pyspark.sql.connect.udf and pyspark.sql.functions.udf/pandas_udf.
 
 import functools
 import sys
-import uuid
 import warnings
-from typing import Callable, Optional, Any, Union
+from typing import Callable, Optional, Any
 
 from pyspark.errors import PySparkNotImplementedError, PySparkRuntimeError, PySparkTypeError
 from pyspark.sql.pandas.types import to_arrow_type
 from pyspark.sql.types import DataType, StringType, StructType
-from pyspark.serializers import CloudPickleSerializer
+# As PySpark's module, of whose namespace it is (see the stubs).
+from pyspark.serializers import CloudPickleSerializer  # noqa: F401
 from pyspark.util import PythonEvalType
 
 __all__ = ["UDFRegistration"]
@@ -590,7 +590,9 @@ class UDFRegistration:
                         "SQL_GROUPED_AGG_PANDAS_ITER_UDF or SQL_GROUPED_AGG_ARROW_ITER_UDF"
                     },
                 )
-            self._register_udf(f.func, f.returnType, name, f.evalType, f.deterministic)
+            self.sparkSession._client.register_udf(
+                f.func, f.returnType, name, f.evalType, f.deterministic
+            )
             return f
         else:
             if returnType is None:
@@ -601,33 +603,8 @@ class UDFRegistration:
 
             # As PySpark's: the registration takes the return type as given, not the one that
             # the wrapper parsed, so a DDL string is parsed again for the command.
-            self._register_udf(py_udf.func, returnType, name)
+            self.sparkSession._client.register_udf(py_udf.func, returnType, name)
             return py_udf
-
-    def _register_udf(
-        self,
-        function: Callable[..., Any],
-        return_type: Union[DataType, str],
-        name: str,
-        eval_type: int = PythonEvalType.SQL_BATCHED_UDF,
-        deterministic: bool = True,
-    ) -> None:
-        # As PySpark's SparkConnectClient.register_udf: a function of no name is registered as
-        # `fun_` and a random hex, and the PythonUDF command is the pickled (function, return
-        # type), of a DDL string as the server of the session parses it, as its PythonUDF parses
-        # the str that it is given when it builds the command.
-        if name is None:
-            name = f"fun_{uuid.uuid4().hex}"
-        if isinstance(return_type, str):
-            return_type = self.sparkSession._parse_ddl(return_type)
-        self.sparkSession._registerPythonUdf(
-            name,
-            return_type,
-            eval_type,
-            CloudPickleSerializer().dumps((function, return_type)),
-            "%d.%d" % sys.version_info[:2],
-            deterministic,
-        )
 
     def registerJavaFunction(
         self,
@@ -648,10 +625,10 @@ class UDFRegistration:
             Return type: a DataType, or a DDL string, which the server parses, as PySpark
             sends it. Defaults to the class's own type.
         """
-        self.sparkSession._registerJavaFunction(name, javaClassName, returnType, False)
+        self.sparkSession._client.register_java(name, javaClassName, returnType)
 
     def registerJavaUDAF(self, name: str, javaClassName: str) -> None:
         """Register a Java user-defined aggregate function (UDAF) by class name.
         Mirrors ``UDFRegistration.registerJavaUDAF``.
         """
-        self.sparkSession._registerJavaFunction(name, javaClassName, None, True)
+        self.sparkSession._client.register_java(name, javaClassName, aggregate=True)

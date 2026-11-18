@@ -238,6 +238,21 @@ pub(crate) fn interruptible_caught<T: Send, E: Send + Into<Box<SparkError>>>(
     run_interruptible(py, session, f, true)
 }
 
+/// Bring the user context extensions of `session` up to date before a call sends its requests,
+/// on the calling thread, with the GIL: the function of `client` that the session keeps (see
+/// `PySparkSession::_set_user_context_refresh`), which serializes the `google.protobuf.Any`
+/// messages of its lists again, as PySpark serializes them when it builds each request, so that
+/// a change of a message in place is sent. Its error is raised, as PySpark raises that of the
+/// serialization from the call.
+pub(crate) fn refresh_user_context(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
+    if let Some(refresher) = session.user_context_refresher() {
+        if let Some(refresh) = refresher.downcast_ref::<Py<PyAny>>() {
+            refresh.call0(py)?;
+        }
+    }
+    Ok(())
+}
+
 /// The wait of [`interruptible_outcome`], of whose results a failed interrupt is the inner one
 /// when `catch_interrupt_failure`.
 fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
@@ -246,6 +261,7 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     f: impl FnOnce() -> Result<T, E> + Send,
     catch_interrupt_failure: bool,
 ) -> PyResult<Result<T, Box<SparkError>>> {
+    refresh_user_context(py, session)?;
     let watch = Arc::new(SignalWatch {
         session: session.clone(),
         interrupted: AtomicBool::new(false),

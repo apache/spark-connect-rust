@@ -318,8 +318,7 @@ pub(crate) fn set_retry_policy(session: &SparkSession, parameters: RetryParamete
 }
 
 /// The RPC deadlines of `deadlines`, the deadlines in seconds by the names of the fields of
-/// PySpark's `RpcDeadlines`, None for no deadline. A field that the transport has no RPC of, as
-/// `get_status`, is not read.
+/// PySpark's `RpcDeadlines`, None for no deadline.
 pub(crate) fn rpc_deadlines(deadlines: &Bound<'_, PyDict>) -> PyResult<RpcDeadlines> {
     let of = |name: &str| -> PyResult<Option<std::time::Duration>> {
         let seconds: Option<f64> = match deadlines.get_item(name)? {
@@ -344,6 +343,7 @@ pub(crate) fn rpc_deadlines(deadlines: &Bound<'_, PyDict>) -> PyResult<RpcDeadli
         artifact_status: of("artifact_status")?,
         fetch_error_details: of("fetch_error_details")?,
         clone_session: of("clone_session")?,
+        get_status: of("get_status")?,
     })
 }
 

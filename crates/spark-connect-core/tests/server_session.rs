@@ -647,6 +647,153 @@ async fn a_client_without_session_tracking_passes_the_ids_of_its_requests_throug
     }
 }
 
+/// The session ID of each request of `method` that the server received, in order.
+fn sessions_of<T: Message + Default>(
+    state: &State,
+    method: &str,
+    session_id: impl Fn(T) -> String,
+) -> Vec<String> {
+    state
+        .requests_of::<T>(method)
+        .into_iter()
+        .map(session_id)
+        .collect()
+}
+
+#[tokio::test]
+async fn a_client_without_session_tracking_passes_the_session_id_of_each_call_through() {
+    // Every call that the transport-injection stub forwards decoded keeps the session ID of the
+    // reference client's request, against which that client checks the response itself.
+    use spark_connect_proto::{AnalyzePlanRequest, FetchErrorDetailsRequest, InterruptRequest};
+
+    let fixture = Fixture::start().await;
+    let mut client = fixture.client().await;
+    client.set_session_tracking(false);
+    let reference = "the-reference-session".to_string();
+
+    client
+        .config(ConfigRequest {
+            session_id: reference.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    client
+        .interrupt(InterruptRequest {
+            session_id: reference.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    client
+        .analyze_plan(AnalyzePlanRequest {
+            session_id: reference.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    client
+        .fetch_error_details(FetchErrorDetailsRequest {
+            session_id: reference.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let mut stream = client
+        .execute_plan(ExecutePlanRequest {
+            session_id: reference.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    while stream.message().await.unwrap().is_some() {}
+
+    let state = &fixture.state;
+    let sessions = [
+        sessions_of(state, "Config", |r: ConfigRequest| r.session_id),
+        sessions_of(state, "Interrupt", |r: InterruptRequest| r.session_id),
+        sessions_of(state, "AnalyzePlan", |r: AnalyzePlanRequest| r.session_id),
+        sessions_of(state, "FetchErrorDetails", |r: FetchErrorDetailsRequest| {
+            r.session_id
+        }),
+        sessions_of(state, "ExecutePlan", |r: ExecutePlanRequest| r.session_id),
+    ];
+    for of_a_method in sessions {
+        assert_eq!(of_a_method, [reference.as_str()]);
+    }
+}
+
+#[tokio::test]
+async fn a_set_client_session_id_is_that_of_the_calls_and_not_of_the_artifacts_as_pyspark() {
+    // As a set of PySpark's `client._session_id`, which its requests read, while its
+    // ArtifactManager keeps the session ID of the client when it was built.
+    use spark_connect_proto::{
+        AnalyzePlanRequest, ArtifactStatusesRequest, FetchErrorDetailsRequest, InterruptRequest,
+    };
+
+    let fixture = Fixture::start().await;
+    let client = fixture.client().await;
+    let session_id = client.session_id().to_string();
+    client.set_client_session_id("the-client-session".to_string());
+
+    // The callers build their requests of the session's ID.
+    client.config(config_request(&client)).await.unwrap();
+    client
+        .interrupt(InterruptRequest {
+            session_id: session_id.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    client
+        .analyze_plan(AnalyzePlanRequest {
+            session_id: session_id.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    client
+        .fetch_error_details(FetchErrorDetailsRequest {
+            session_id: session_id.clone(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    // An execution that drops after its first response, which the client reattaches.
+    *fixture.state.drop_next_execute.lock().unwrap() = true;
+    run_execution(&client).await;
+    client.get_configs(&["k"]).await.unwrap();
+    client
+        .cache_artifacts(vec![b"blob".to_vec()])
+        .await
+        .unwrap();
+
+    let state = &fixture.state;
+    let calls = [
+        sessions_of(state, "Config", |r: ConfigRequest| r.session_id),
+        sessions_of(state, "Interrupt", |r: InterruptRequest| r.session_id),
+        sessions_of(state, "AnalyzePlan", |r: AnalyzePlanRequest| r.session_id),
+        sessions_of(state, "FetchErrorDetails", |r: FetchErrorDetailsRequest| {
+            r.session_id
+        }),
+        sessions_of(state, "ExecutePlan", |r: ExecutePlanRequest| r.session_id),
+        // As PySpark's, of the session ID of the request of the execution.
+        sessions_of(state, "ReattachExecute", |r: ReattachExecuteRequest| {
+            r.session_id
+        }),
+    ];
+    for of_a_method in calls {
+        assert!(!of_a_method.is_empty());
+        assert!(of_a_method.iter().all(|id| id == "the-client-session"));
+    }
+    assert_eq!(
+        sessions_of(state, "ArtifactStatus", |r: ArtifactStatusesRequest| {
+            r.session_id
+        }),
+        [session_id]
+    );
+}
+
 #[tokio::test]
 async fn executions_ask_the_server_to_chunk_arrow_batches() {
     use spark_connect_proto::execute_plan_request::request_option::RequestOption;

@@ -230,6 +230,29 @@ async fn a_small_file_is_one_batch_named_by_its_extension() {
 }
 
 #[tokio::test]
+async fn the_frames_keep_the_session_id_of_the_session_that_the_client_sets_another_of() {
+    // As PySpark's ArtifactManager, which keeps the session ID of the client when it was built: a
+    // set of `client._session_id` changes the session of the other requests, not of the uploads.
+    let fixture = Fixture::start([]).await;
+    let client = fixture.client().await;
+    client.set_client_session_id("another-session".to_string());
+    let dir = tempfile::tempdir().unwrap();
+    let class = file_with(&dir, "A.class", b"cafebabe");
+
+    client
+        .add_artifacts(&[class.as_str()], false, false, false)
+        .await
+        .unwrap();
+
+    let attempts = fixture.attempts();
+    assert_eq!(attempts.len(), 1);
+    assert!(!attempts[0].is_empty());
+    for frame in &attempts[0] {
+        assert_eq!(frame.session_id, client.session_id());
+    }
+}
+
+#[tokio::test]
 async fn a_transient_failure_retries_the_whole_upload_from_its_start() {
     // The first attempt receives two frames and then fails; the second receives the upload.
     let fixture = Fixture::start([Attempt::FailAfter(2), Attempt::Accept]).await;

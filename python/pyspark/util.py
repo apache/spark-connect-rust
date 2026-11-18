@@ -176,10 +176,11 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
     >>> Thread(target=inheritable_thread_target(session)(target_func)).start()  # doctest: +SKIP
     """
     # As PySpark's of Spark Connect, the only mode of this client: `f` is the session, whose
-    # tags and user context extensions, those of this thread when the function is decorated, the
-    # threads of the function inherit, with the session as their active one. As PySpark's, which
-    # gives each thread the one copy of the `thread_local` of the client, the threads share that
-    # copy of the tags and of the extensions.
+    # `thread_local` of its client, of this thread when the function is decorated, the threads of
+    # the function inherit, with the session as their active one. As PySpark's, which gives each
+    # thread the one copy of each attribute of the `thread_local`, the threads share that copy of
+    # the tags and of the user context extensions.
+    from pyspark.sql.connect.client import _thread_local_copies
     from pyspark.sql.connect.session import SparkSession
 
     session = f
@@ -188,8 +189,7 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
         assert isinstance(session, SparkSession), (
             "f is expected to be SparkSession for spark connect"
         )
-        tags = session._copy_thread_tags()
-        extensions = session._copy_thread_user_context_extensions()
+        session_client_thread_local_attrs = _thread_local_copies(session.client.thread_local)
 
         @functools.wraps(ff)
         def inner(*args: Any, **kwargs: Any) -> Any:
@@ -199,9 +199,13 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
             )
 
             SparkSession._set_default_and_active_session(session)
-            # Set the tags and the user context extensions of the session in the child thread.
-            session._share_thread_tags(tags)
-            session._share_thread_user_context_extensions(extensions)
+            # Set thread locals in child thread.
+            for attr, value in session_client_thread_local_attrs:
+                setattr(
+                    session.client.thread_local,
+                    attr,
+                    value,
+                )
             return ff(*args, **kwargs)
 
         return inner
@@ -242,18 +246,21 @@ class InheritableThread(threading.Thread):
         self._session = session
 
         def copy_local_properties(*a: Any, **k: Any) -> Any:
+            # Set tags in child thread.
             assert hasattr(self, "_tags")
             assert session is not None
-            session.clearTags()
-            for tag in self._tags:
-                session.addTag(tag)
+            thread_local = session.client.thread_local
+            thread_local.tags = self._tags
             return target(*a, **k)
 
         super().__init__(target=copy_local_properties, *args, **kwargs)  # type: ignore[misc]
 
     def start(self) -> None:
         assert hasattr(self, "_session")
-        self._tags = set(self._session.getTags())
+        thread_local = self._session.client.thread_local
+        if not hasattr(thread_local, "tags"):
+            thread_local.tags = set()
+        self._tags = set(thread_local.tags)
         return super().start()
 
 

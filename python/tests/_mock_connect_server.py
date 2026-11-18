@@ -387,6 +387,8 @@ def serve(connection):
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
+            # The GetStatusRequests of each GetStatus.
+            self.get_status_requests = []
             # The DDL of the JSON of each JsonToDDL.
             self.ddl_string = ""
             with self.listener_condition:
@@ -912,6 +914,21 @@ def serve(connection):
             new_id = fields.get(4, [self.cloned_session_id.encode()])[0]
             return message_field(1, fields[1][0]) + message_field(3, new_id)
 
+        def get_status(self, request, context):
+            # GetStatusRequest.session_id=1, operation_status=5, OperationStatusRequest
+            # .operation_ids=1; GetStatusResponse.session_id=1, operation_statuses=3,
+            # OperationStatus.operation_id=1, state=2. Each operation that the request names is
+            # OPERATION_STATE_UNKNOWN=1, as the server answers of an operation that it does not
+            # know.
+            if self.is_recorded(request, "get_status"):
+                self.get_status_requests.append(request)
+            fields = parse_message(request)
+            operation_status = parse_message(fields.get(5, [b""])[0])
+            return message_field(1, fields[1][0]) + b"".join(
+                message_field(3, message_field(1, operation_id) + varint_field(2, 1))
+                for operation_id in operation_status.get(1, [])
+            )
+
         def config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
@@ -1015,6 +1032,7 @@ def serve(connection):
             "Config": grpc.unary_unary_rpc_method_handler(service.config),
             "CloneSession": grpc.unary_unary_rpc_method_handler(service.clone_session),
             "Interrupt": grpc.unary_unary_rpc_method_handler(service.interrupt),
+            "GetStatus": grpc.unary_unary_rpc_method_handler(service.get_status),
             "AddArtifacts": grpc.stream_unary_rpc_method_handler(service.add_artifacts),
         }
         server.add_generic_rpc_handlers(

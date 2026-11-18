@@ -2088,7 +2088,8 @@ def test_malformed_arrow_chunks_raise_spark_connect_exception_as_pyspark(mock_co
 
 def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
     # As PySpark's: the tags of addTag are those of the current thread, of a set of getTags,
-    # which the operations that the thread starts carry; a new thread starts without tags.
+    # which the operations that the thread starts carry; a new thread starts without tags. The
+    # set of getTags is the live one, which the later tags change, as PySpark's.
     import threading
 
     spark, service = mock_connect
@@ -2101,9 +2102,11 @@ def test_tags_are_those_of_each_thread_as_pyspark(mock_connect):
     seen = {}
 
     def child():
-        seen["before"] = spark.getTags()
+        seen["before"] = set(spark.getTags())
+        live = spark.getTags()
         spark.addTag("child")
         seen["after"] = spark.getTags()
+        assert seen["after"] is live
         spark.range(1).collect()
         seen["sent"] = sent_tags()
 
@@ -4273,6 +4276,9 @@ def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
 
         def _user_context_extensions(self, is_global):
             return []
+
+        def _set_user_context_refresh(self, refresh):
+            pass
 
     client = SparkConnectClient._of_session(Session())
     relation = pb2.Relation()
@@ -7523,13 +7529,25 @@ def test_udf_defaults_and_registration():
         assert pandas_udf(lambda s: s, rt, functionType=ft).evalType == ft
     with pytest.raises(PySparkTypeError, match="INVALID_RETURN_TYPE_FOR_PANDAS_UDF"):
         pandas_udf(lambda s: s, T.IntegerType(), functionType=PandasUDFType.GROUPED_MAP)
-    # UDFRegistration.register wires to the session's _registerPythonUdf (so the name
-    # resolves in SQL) and returns the UDF.
+    # UDFRegistration.register registers through the client of the session, as PySpark's, whose
+    # register_udf wires to the session's _registerPythonUdf (so the name resolves in SQL), and
+    # returns the UDF.
+    from pyspark.sql.connect.client import SparkConnectClient
     from pyspark.sql.udf import UDFRegistration
 
     class _StubSession:
         def __init__(self):
             self.calls = []
+
+        @property
+        def _client(self):
+            return SparkConnectClient._of_session(self)
+
+        def _user_context_extensions(self, is_global):
+            return []
+
+        def _set_user_context_refresh(self, refresh):
+            pass
 
         def _registerPythonUdf(self, name, returnType, evalType, command, python_ver, deterministic):
             self.calls.append((name, evalType, isinstance(command, (bytes, bytearray))))
@@ -24995,6 +25013,9 @@ def test_client_analysis_requests_and_results_are_those_of_pyspark():
         def _user_context_extensions(self, is_global):
             return []
 
+        def _set_user_context_refresh(self, refresh):
+            pass
+
         def _analyze_plan(self, data):
             Session.sent = pb2.AnalyzePlanRequest.FromString(data)
             return Session.response.SerializeToString()
@@ -25458,7 +25479,8 @@ def test_client_raises_the_argument_errors_of_pyspark(mock_connect):
     # TypeError of hashlib for a blob that is not bytes-like, which its ArtifactManager hashes
     # before it sends anything (test_dropin_e2e.py caches bytes-like ones), and register_udf and
     # register_udtf raise the UNSUPPORTED_OPERATION of pyspark_types_to_proto_types for a return
-    # type that is neither a DataType nor a DDL string, before they pickle the function.
+    # type that is neither a DataType nor a DDL string, after the name and before they pickle the
+    # function (see test_client_registrations_convert_their_arguments_in_the_order_of_pyspark).
     from pyspark.errors import PySparkValueError
 
     spark, service = mock_connect
@@ -25491,6 +25513,116 @@ def test_client_raises_the_argument_errors_of_pyspark(mock_connect):
         client.register_udtf(Table, 5, "t")
     assert error.value.getMessageParameters() == {"operation": "data type 5"}
     assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+
+def test_client_registrations_convert_their_arguments_in_the_order_of_pyspark(mock_connect):
+    # As PySpark Connect's register_udf (CommonInlineUserDefinedFunction.to_plan_udf, then
+    # PythonUDF.to_plan): the name and `deterministic` are set in the fields of the command, the
+    # return type is converted, the eval type set, and the function pickled last, so each raises
+    # the error of its protobuf field or of its conversion in that order, and an int as
+    # `deterministic` is a bool. register_java sets the name, the class name, the return type and
+    # then `aggregate`, of no return type only; register_udtf reads the __name__ of the handler,
+    # sets the name and `deterministic`, converts the return type and sets the eval type before
+    # it pickles the handler. spark.udf.register and registerJavaFunction register through them.
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkPicklingError, PySparkValueError
+    from pyspark.sql.functions import udf
+    from pyspark.sql.types import IntegerType
+
+    spark, service = mock_connect
+    client = spark.client
+    lock = threading.Lock()
+
+    def unpicklable(x):
+        return lock
+
+    class Good:
+        def eval(self):
+            yield (1,)
+
+    class Bad:
+        def eval(self):
+            yield (lock,)
+
+    def raised(call, kind, message):
+        with pytest.raises(kind) as error:
+            call()
+        assert str(error.value).startswith(message), str(error.value)
+        return error.value
+
+    bad_name = "bad argument type for built-in operation"
+    not_an_int = "'str' object cannot be interpreted as an integer"
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    raised(lambda: client.register_udf(unpicklable, "int", name=5), TypeError, bad_name)
+    raised(lambda: client.register_udf(unpicklable, None, name=5), TypeError, bad_name)
+    raised(lambda: client.register_udf(unpicklable, "int", deterministic="x"), TypeError, not_an_int)
+    raised(lambda: client.register_udf(unpicklable, 5, deterministic="x"), TypeError, not_an_int)
+    raised(lambda: client.register_udf(unpicklable, IntegerType(), eval_type="x"), TypeError, not_an_int)
+    raised(
+        lambda: client.register_udf(unpicklable, IntegerType(), eval_type=True),
+        TypeError,
+        "Field spark.connect.PythonUDF.eval_type: Expected an int, got a boolean.",
+    )
+    raised(
+        lambda: client.register_udf(unpicklable, IntegerType(), eval_type=2**40),
+        ValueError,
+        "Value out of range: 1099511627776",
+    )
+    raised(
+        lambda: client.register_udf(unpicklable, IntegerType(), eval_type=100.0),
+        TypeError,
+        "'float' object cannot be interpreted as an integer",
+    )
+    raised(lambda: client.register_java(5, "x.Y", aggregate="x"), TypeError, bad_name)
+    raised(lambda: client.register_java("j", 5, return_type=5), TypeError, bad_name)
+    error = raised(lambda: client.register_java("j", "x.Y", return_type=5), PySparkValueError, "")
+    assert error.getCondition() == "UNSUPPORTED_OPERATION"
+    raised(lambda: client.register_java("j", "x.Y", aggregate="x"), TypeError, not_an_int)
+    raised(lambda: client.register_udtf(object(), "x int", 5), AttributeError, "'object' object")
+    raised(lambda: client.register_udtf(Bad, "x int", 5, deterministic="x"), TypeError, bad_name)
+    raised(lambda: client.register_udtf(Bad, "x int", "t", deterministic="x"), TypeError, not_an_int)
+    error = raised(lambda: client.register_udtf(Bad, 5, "t", eval_type=True), PySparkValueError, "")
+    assert error.getCondition() == "UNSUPPORTED_OPERATION"
+    raised(
+        lambda: client.register_udtf(Bad, "x int", "t", eval_type=True),
+        TypeError,
+        "Field spark.connect.PythonUDTF.eval_type: Expected an int, got a boolean.",
+    )
+    raised(
+        lambda: client.register_udtf(Good, "x int", "t", eval_type=2**40),
+        ValueError,
+        "Value out of range: 1099511627776",
+    )
+    error = raised(
+        lambda: client.register_udtf(Bad, "x int", "t", deterministic=1), PySparkPicklingError, ""
+    )
+    assert error.getCondition() == "UDTF_SERIALIZATION_ERROR"
+    raised(lambda: spark.udf.register(5, udf(unpicklable)), TypeError, bad_name)
+    raised(lambda: spark.udf.register("\udc80", udf(unpicklable)), UnicodeEncodeError, "'utf-8'")
+    raised(lambda: spark.udf.registerJavaFunction(5, "x.Y"), TypeError, bad_name)
+    raised(lambda: spark.udf.registerJavaUDAF("j", 5), TypeError, bad_name)
+    not_none = "'NoneType' object cannot be interpreted as an integer"
+    raised(lambda: client.register_udf(unpicklable, 5, deterministic=None), TypeError, not_none)
+    raised(lambda: client.register_udtf(Bad, 5, "t", deterministic=None), TypeError, not_none)
+    raised(lambda: client.register_java("j", "x.Y", aggregate=None), TypeError, not_none)
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+    def command():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.command
+
+    client.register_udf(lambda x: x, IntegerType(), name="d1", deterministic=1)
+    assert command().register_function.deterministic is True
+    client.register_udf(lambda x: x, IntegerType(), name="d0", deterministic=0)
+    assert command().register_function.deterministic is False
+    client.register_java("j1", "x.Y", aggregate=1)
+    assert command().register_function.java_udf.aggregate is True
+    client.register_java("j2", "x.Y", return_type="int", aggregate="ignored")
+    java = command().register_function.java_udf
+    assert java.aggregate is False and java.output_type.unparsed.data_type_string == "int"
+    client.register_udtf(Good, "x int", "t1", deterministic=1)
+    assert command().register_table_function.deterministic is True
 
 
 def test_client_registers_a_udtf_in_the_order_of_pyspark(mock_connect):
@@ -25606,6 +25738,345 @@ def test_client_registers_functions_and_artifacts_as_pyspark(mock_connect, tmp_p
     with pytest.raises(AssertionError, match="destination FS path must be an absolute path."):
         client.copy_from_local_to_fs(str(path), "s3://bucket/a.py")
     client.copy_from_local_to_fs(str(path), "/dest/a.py")
+
+
+def test_the_attributes_of_the_clients_of_a_session_are_its_own_as_pyspark(mock_connect):
+    # As PySpark Connect's session, of one client: the clients of a session that SparkSession.client
+    # gives share its attributes, also once the program dropped them, so an attribute set on one,
+    # the lock and the list of the global user context extensions are those of the next. A list
+    # read before an extension is added is the one that it is added to, and the one that the
+    # requests carry; a list that the attribute is no longer set to is not.
+    import gc
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+
+    def sent():
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        return [extension.type_url for extension in request.user_context.extensions]
+
+    def run():
+        spark.range(1).collect()
+        return sent()
+
+    client = spark.client
+    client.attribute = 1
+    lock = client.global_user_context_extensions_lock
+    assert isinstance(lock, type(threading.Lock()))
+    held = client.global_user_context_extensions
+    del client
+    gc.collect()
+    client = spark.client
+    assert client.attribute == 1 and client.global_user_context_extensions_lock is lock
+    assert client.global_user_context_extensions is held
+    first = client.add_global_user_context_extension(Any(type_url="type.googleapis.com/e1"))
+    held.append(("global_2", Any(type_url="type.googleapis.com/e2")))
+    assert [e.type_url for _, e in spark.client.global_user_context_extensions] == [
+        "type.googleapis.com/e1",
+        "type.googleapis.com/e2",
+    ]
+    assert run() == ["type.googleapis.com/e1", "type.googleapis.com/e2"]
+    # Rebinding the attribute detaches the list that was held, as in PySpark.
+    client.remove_user_context_extension(first)
+    assert client.global_user_context_extensions is not held
+    held.append(("global_3", Any(type_url="type.googleapis.com/e3")))
+    assert run() == ["type.googleapis.com/e2"]
+    # A change of an extension in place is sent, as PySpark serializes them for each request.
+    client.global_user_context_extensions[0][1].type_url = "type.googleapis.com/changed"
+    assert run() == ["type.googleapis.com/changed"]
+    client.clear_user_context_extensions()
+    assert run() == []
+    del client.attribute
+
+
+def test_the_thread_local_of_a_client_is_a_threading_local_of_live_tags_and_extensions_as_pyspark(
+    mock_connect,
+):
+    # As PySpark Connect's thread_local, a threading.local: its tags and user_context_extensions
+    # exist once a thread uses them, are the set and the list that the requests of the thread
+    # carry, also as they are changed or set, and are the thread's own, as are its other
+    # attributes. The tags of SparkSession.addTag are those of the client, and getTags gives their
+    # set. A thread of inheritable_thread_target shares the copies of the attributes of the thread
+    # that decorated its function. Deleting the attributes leaves the thread with none.
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+    from pyspark.util import inheritable_thread_target
+
+    spark, service = mock_connect
+    client = spark.client
+    local = client.thread_local
+
+    def run():
+        spark.range(1).collect()
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        return sorted(request.tags), [e.type_url for e in request.user_context.extensions]
+
+    assert isinstance(local, threading.local)
+    assert not hasattr(local, "tags") and not hasattr(local, "user_context_extensions")
+    first = Any(type_url="type.googleapis.com/t1")
+    client.add_threadlocal_user_context_extension(first)
+    extensions = local.user_context_extensions
+    assert extensions[0][1] is first and local.user_context_extensions is extensions
+    extensions.append(("threadlocal_x", Any(type_url="type.googleapis.com/t2")))
+    assert run() == ([], ["type.googleapis.com/t1", "type.googleapis.com/t2"])
+    local.user_context_extensions = [("threadlocal_y", Any(type_url="type.googleapis.com/t3"))]
+    assert run() == ([], ["type.googleapis.com/t3"])
+    local.user_context_extensions[0][1].type_url = "type.googleapis.com/t4"
+    assert run() == ([], ["type.googleapis.com/t4"])
+
+    spark.addTag("a")
+    tags = local.tags
+    assert tags is client.get_tags() is spark.getTags() and tags == {"a"}
+    assert repr(tags) == "{'a'}"
+    tags.add("b")
+    assert run() == (["a", "b"], ["type.googleapis.com/t4"])
+    local.tags = {"z"}
+    assert run() == (["z"], ["type.googleapis.com/t4"]) and spark.getTags() == {"z"}
+    # A tag that the field of the tags of a request cannot take is refused, and the set is kept.
+    with pytest.raises(TypeError, match="bad argument type for built-in operation"):
+        local.tags.add(("not", "a", "str"))
+    assert local.tags == {"z"} and run()[0] == ["z"]
+
+    seen = {}
+
+    def other():
+        seen["tags"] = hasattr(local, "tags")
+        seen["extensions"] = hasattr(local, "user_context_extensions")
+        local.other = 1
+        seen["run"] = run()
+
+    thread = threading.Thread(target=other)
+    thread.start()
+    thread.join()
+    assert seen == {"tags": False, "extensions": False, "run": ([], [])}
+    assert not hasattr(local, "other")
+    assert sorted(vars(local)) == ["tags", "user_context_extensions"]
+
+    @inheritable_thread_target(spark)
+    def inherited():
+        local.tags.add(threading.current_thread().name)
+        return sorted(spark.getTags()), run()
+
+    results = {}
+    threads = [
+        threading.Thread(target=lambda n=n: results.setdefault(n, inherited()), name=f"t{n}")
+        for n in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+        thread.join()
+    # The threads share the copy of the set of tags, as PySpark's, and not the parent's set.
+    assert results[1][0] == ["t0", "t1", "z"]
+    assert results[1][1] == (["t0", "t1", "z"], ["type.googleapis.com/t4"])
+    assert spark.getTags() == {"z"}
+
+    del local.tags
+    del local.user_context_extensions
+    assert not hasattr(local, "tags") and run() == ([], [])
+    spark.clearTags()
+    assert spark.getTags() == set() and run() == ([], [])
+
+
+def test_client_members_that_pysparks_tests_read_are_pysparks(mock_connect):
+    # As PySpark Connect's SparkConnectClient, whose tests and libraries read these members:
+    # _builder is the DefaultChannelBuilder of the connection; _session_id the session ID of the
+    # requests, which a set changes for them while the session's session_id stays; _user_id the
+    # user of the requests; _use_reattachable_execute whether the executions are reattachable,
+    # of enable_reattachable_execute and of a set; and _closed closes the session, and opens it
+    # again when it is set to False.
+    import uuid
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+
+    spark, service = mock_connect
+    client = spark.client
+    assert isinstance(client._builder, DefaultChannelBuilder)
+    assert client._builder.endpoint == service.remote[len("sc://"):]
+    assert client._builder.userAgent.startswith("_SPARK_CONNECT_PYTHON spark/")
+    assert client.host == client._builder.host
+    assert client._session_id == spark.session_id
+    assert client._user_id == os.environ.get("SPARK_USER", os.environ.get("USER"))
+    assert client._use_reattachable_execute is True
+    client._use_reattachable_execute = False
+    assert client._use_reattachable_execute is False
+    client.enable_reattachable_execute()
+    assert client._use_reattachable_execute is True
+
+    original = spark.session_id
+    changed = str(uuid.uuid4())
+    client._session_id = changed
+    spark.range(1).collect()
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert request.session_id == changed and spark.session_id == original
+    assert client._session_id == changed
+    with pytest.raises(TypeError, match="bad argument type for built-in operation"):
+        client._session_id = 5
+    client._session_id = original
+
+    assert client._closed is False
+    client._closed = True
+    with pytest.raises(SparkConnectException) as error:
+        spark.range(1).collect()
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert client._closed is True and client.is_closed and spark.is_stopped
+    client._closed = False
+    assert client._closed is False and not client.is_closed and not spark.is_stopped
+    spark.range(1).collect()
+
+
+def test_client_get_operation_statuses_sends_pysparks_get_status_request(mock_connect):
+    # As PySpark Connect's SparkConnectClient._get_operation_statuses (client/core.py:2183-2237):
+    # a GetStatusRequest of the session ID, of the client type and of the user of the client's
+    # requests, of an operation_status that is set even of no operation ID, which asks of all of
+    # them, of the operation IDs, and of the extensions of each level; the GetStatusResponse is
+    # what it gives.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    spark.range(1).collect()
+    execute = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    every = client._get_operation_statuses()
+    assert type(every).__name__ == "GetStatusResponse"
+    assert every.session_id == spark.session_id and len(every.operation_statuses) == 0
+    asked = client._get_operation_statuses(
+        ["op-1", "op-2"],
+        [Any(type_url="type.googleapis.com/operation")],
+        [Any(type_url="type.googleapis.com/request")],
+    )
+    unknown = pb2.GetStatusResponse.OperationStatus.OPERATION_STATE_UNKNOWN
+    assert [(status.operation_id, status.state) for status in asked.operation_statuses] == [
+        ("op-1", unknown),
+        ("op-2", unknown),
+    ]
+    first, second = (pb2.GetStatusRequest.FromString(r) for r in service.get_status_requests)
+    for request in (first, second):
+        assert request.session_id == spark.session_id
+        assert request.client_type == execute.client_type
+        assert request.user_context.user_id == execute.user_context.user_id == client._user_id
+        assert request.HasField("operation_status")
+    assert list(first.operation_status.operation_ids) == []
+    assert len(first.operation_status.extensions) == 0 and len(first.extensions) == 0
+    assert list(second.operation_status.operation_ids) == ["op-1", "op-2"]
+    assert [e.type_url for e in second.operation_status.extensions] == [
+        "type.googleapis.com/operation"
+    ]
+    assert [e.type_url for e in second.extensions] == ["type.googleapis.com/request"]
+
+
+def test_the_tags_and_extensions_of_a_thread_copy_and_pickle_as_pysparks_set_and_list(
+    mock_connect,
+):
+    # As PySpark Connect's thread_local.tags and user_context_extensions, a plain set and a plain
+    # list: their copies and deep copies are a set and a list of the same members, and their
+    # pickles a plain set and a plain list.
+    import copy
+    import pickle
+
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, _ = mock_connect
+    client = spark.client
+    local = client.thread_local
+    client.add_tag("a")
+    client.add_threadlocal_user_context_extension(Any(type_url="type.googleapis.com/t"))
+    for value, kind in ((local.tags, set), (local.user_context_extensions, list)):
+        for copied in (copy.copy(value), copy.deepcopy(value)):
+            assert type(copied) is kind and copied == value
+    pickled = pickle.loads(pickle.dumps(local.tags))
+    assert type(pickled) is set and pickled == {"a"}
+    local.user_context_extensions = []
+    pickled = pickle.loads(pickle.dumps(local.user_context_extensions))
+    assert type(pickled) is list and pickled == []
+
+
+def test_the_tags_and_extensions_of_a_thread_that_has_none_are_pysparks(mock_connect):
+    # As PySpark Connect's client in a thread whose thread_local has neither: the removal of a
+    # thread-local extension and the clear of the extensions leave the thread without a list of
+    # them, while the removal of a tag and get_tags give it an empty set of tags.
+    import threading
+
+    spark, _ = mock_connect
+    client = spark.client
+    seen = {}
+
+    def other():
+        local = client.thread_local
+        client.remove_user_context_extension("threadlocal_missing")
+        client.clear_user_context_extensions()
+        seen["extensions"] = hasattr(local, "user_context_extensions")
+        client.remove_tag("missing")
+        seen["removed"] = set(local.tags)
+        del local.tags
+        seen["got"] = set(client.get_tags())
+
+    thread = threading.Thread(target=other)
+    thread.start()
+    thread.join()
+    assert seen == {"extensions": False, "removed": set(), "got": set()}
+
+
+def test_the_other_attributes_of_a_thread_local_are_copied_and_deleted_as_pysparks(mock_connect):
+    # As PySpark Connect's thread_local, each attribute of which inheritable_thread_target copies
+    # with copy.deepcopy, when it decorates a function, to the threads that run the function, and
+    # an attribute of which a thread deletes is gone.
+    import threading
+
+    from pyspark.util import inheritable_thread_target
+
+    spark, _ = mock_connect
+    local = spark.client.thread_local
+    local.marker = ["parent"]
+
+    @inheritable_thread_target(spark)
+    def child():
+        return local.marker
+
+    seen = []
+    thread = threading.Thread(target=lambda: seen.append(child()))
+    thread.start()
+    thread.join()
+    assert seen == [["parent"]] and seen[0] is not local.marker
+    del local.marker
+    assert not hasattr(local, "marker")
+
+
+def test_the_thread_local_of_a_client_outlives_its_session_as_pysparks(mock_connect):
+    # As PySpark Connect's thread_local, a threading.local, and its global list of extensions,
+    # which a caller may keep: once the session is gone, the tags and the extensions that a thread
+    # sets and deletes, and a change of the list, are those of plain ones.
+    import gc
+    import weakref
+
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, _ = mock_connect
+    other = spark.newSession()
+    local = other.client.thread_local
+    extensions = other.client.global_user_context_extensions
+    local.tags = {"a"}
+    gone = weakref.ref(other)
+    other.stop()
+    del other
+    gc.collect()
+    assert gone() is None
+    local.tags = {"b"}
+    assert type(local.tags) is set and local.tags == {"b"}
+    del local.tags
+    assert not hasattr(local, "tags")
+    local.user_context_extensions = [("threadlocal_a", Any(type_url="type.googleapis.com/a"))]
+    assert type(local.user_context_extensions) is list
+    del local.user_context_extensions
+    extensions.append(("global_a", Any(type_url="type.googleapis.com/a")))
+    assert [extension_id for extension_id, _ in extensions] == ["global_a"]
 
 
 def test_client_tags_interrupts_and_sessions_are_those_of_its_session_as_pyspark(mock_connect):
@@ -30057,6 +30528,78 @@ def test_copy_from_local_to_fs_requires_an_absolute_destination(mock_connect, tm
     local.write_text("x")
     with pytest.raises(AssertionError, match="destination FS path must be an absolute path."):
         spark.copyFromLocalToFs(str(local), "relative/out.txt")
+
+
+def test_copy_from_local_to_fs_raises_pysparks_errors_of_a_destination(mock_connect, tmp_path):
+    # As PySpark Connect's copyFromLocalToFs, which parses the destination with urlparse before
+    # its client's copy_from_local_to_fs: of an object that is not a str, the AttributeError of
+    # urlparse, or of bytes, the TypeError of the Path of the destination. The client's, which
+    # parses nothing, raises the TypeError of the name of the artifact, the concatenation of a
+    # prefix and the destination, for a Path.
+    import pathlib
+    import re
+
+    spark, _ = mock_connect
+    local = tmp_path / "local.txt"
+    local.write_text("x")
+    destination = pathlib.Path("/dest/out.txt")
+    with pytest.raises(AttributeError, match="'PosixPath' object has no attribute 'decode'"):
+        spark.copyFromLocalToFs(str(local), destination)
+    with pytest.raises(AttributeError, match="'int' object has no attribute 'decode'"):
+        spark.copyFromLocalToFs(str(local), 5)
+    with pytest.raises(TypeError, match="argument should be a str"):
+        spark.copyFromLocalToFs(str(local), b"/dest/out.txt")
+    with pytest.raises(
+        TypeError, match=re.escape('can only concatenate str (not "PosixPath") to str')
+    ):
+        spark.client.copy_from_local_to_fs(str(local), destination)
+    with pytest.raises(TypeError, match="argument should be a str"):
+        spark.client.copy_from_local_to_fs(str(local), b"/dest/out.txt")
+
+
+def test_client_executions_read_their_observations_as_pyspark(mock_connect):
+    # As PySpark Connect's to_table and to_table_as_iterator, which look the names of observed
+    # metrics up in `observations` when they arrive: None and an empty list execute a plan whose
+    # results have none, an empty list one whose results have some, and None and an int raise
+    # the TypeError of `in` when they arrive. The Observations of other names are not set. (The
+    # e2e test covers to_pandas, whose configurations the mock server does not have.)
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    client = spark.client
+    observation = Observation("o")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    plan = pb2.Plan()
+    plan.root.CopyFrom(df._plan.plan(client))
+    service.execute_payload = batch
+    assert client.to_table(plan, None)[0].num_rows == 1
+    assert len(list(client.to_table_as_iterator(plan, None))) >= 1
+    service.execute_payload = batch + metrics("o", varint_field(7, 3), "c")
+    assert client.to_table(plan, [])[0].num_rows == 1
+    for observations, kind in ((None, "NoneType"), (5, "int")):
+        with pytest.raises(TypeError, match=f"argument of type '{kind}' is not iterable"):
+            client.to_table(plan, observations)
+    with pytest.raises(TypeError, match="argument of type 'NoneType' is not iterable"):
+        list(client.to_table_as_iterator(plan, None))
+    assert observation.get == {}
+    client.to_table(plan, df._plan.observations)
+    assert observation.get == {"c": 3}
+    # The observed metrics of the accumulators of the Python workers are not looked up, as
+    # PySpark's client reads the updates of its UDF profiler of them instead; those of another
+    # accumulator than the profiler's are ignored.
+    from pyspark.accumulators import specialAccumulatorSer
+
+    # ExecutePlanResponse.observed_metrics=6 -> ObservedMetrics name=1, values=2 (Expression
+    # .Literal binary=2).
+    update = message_field(2, message_field(2, specialAccumulatorSer.dumps((999, None))))
+    service.execute_payload = batch + message_field(
+        6, message_field(1, "__python_accumulator__") + update
+    )
+    assert client.to_table(plan, None)[0].num_rows == 1
+    assert len(list(client.to_table_as_iterator(plan, None))) >= 1
 
 
 def test_requests_of_a_stopped_session_raise_no_active_session_as_pyspark():

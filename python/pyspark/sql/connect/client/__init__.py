@@ -34,6 +34,7 @@ import math
 import os
 import platform
 import sys
+import threading
 import urllib.parse
 import uuid
 import warnings
@@ -82,8 +83,8 @@ class RpcDeadlines:
     stream to resume receiving results. Non-reattachable ExecutePlan has no deadline because a
     timeout there would kill the execution with no recovery path.
 
-    The Rust transport applies the deadline of each of its RPCs. It sends no GetStatus, the RPC of
-    ``get_status``.
+    The Rust transport applies the deadline of each of its RPCs, ``get_status`` that of the
+    GetStatus RPC of ``SparkConnectClient._get_operation_statuses``.
     """
 
     # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
@@ -715,6 +716,12 @@ class SparkConnectClient:
     # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
     __module__ = "pyspark.sql.connect.client.core"
 
+    # The session of the client is kept apart from its attributes, which are those of its session:
+    # the clients of a session share them (see `_client_state`), as PySpark's session has one
+    # client, of one `thread_local`, one list of global user context extensions, its lock, and the
+    # attributes that a caller sets.
+    __slots__ = ("_session", "__dict__", "__weakref__")
+
     # The thread of an ML cache RPC in flight, as SparkConnectClient's re-entrancy guard of a
     # RemoteModelRef finalizer that deletes a model.
     _ml_cache_rpc_thread: Optional[int] = None
@@ -793,34 +800,29 @@ class SparkConnectClient:
         return client
 
     def _init_of_session(self, session: Any, builder: Optional[ChannelBuilder]) -> None:
-        import threading
-
         self._session = session
-        # The channel builder of the connection of a client made of one, of its host and token,
-        # as PySpark's `_builder`; the client of a session reads them of the session.
-        self._builder = builder
-        # The state of the current thread of the session, as SparkConnectClient's thread_local.
-        self.thread_local = _ThreadLocalOfClient(session)
-        # The global user context extensions, as SparkConnectClient's list of them, of those that
-        # the session has: its changes, and a list that the attribute is set to, are the
-        # session's (see __setattr__).
-        extensions = _extensions_of(session._user_context_extensions(True))
-        extensions = _GlobalUserContextExtensions(session, extensions)
-        object.__setattr__(self, "global_user_context_extensions", extensions)
-        self.global_user_context_extensions_lock = threading.Lock()
+        # The attributes of the client are those of its session, which its other clients have
+        # too: its channel builder, its thread_local, its global user context extensions and their
+        # lock, and the attributes that a caller set.
+        object.__setattr__(self, "__dict__", _client_state(session, builder))
 
     def __setattr__(self, name: str, value: Any) -> None:
         # As PySpark's client, whose requests read its `global_user_context_extensions`, a list
         # that its methods and a caller may change or rebind: the session takes the extensions of
         # the list that the attribute is set to.
-        if name == "global_user_context_extensions" and "_session" in self.__dict__:
+        if name == "global_user_context_extensions" and hasattr(self, "_session"):
             value = _GlobalUserContextExtensions(self._session, value)
+            object.__setattr__(self, name, value)
             value._sync()
+            return
         object.__setattr__(self, name, value)
 
     def __copy__(self) -> "SparkConnectClient":
-        # As copy.copy of PySpark's client, a plain object: a client of the same attributes.
+        # As copy.copy of PySpark's client, a plain object: a client of the same session and of a
+        # copy of its attributes, whose rebinding of a list is its own. The requests of the
+        # session carry the extensions of the list of the session's own client.
         copied = object.__new__(type(self))
+        object.__setattr__(copied, "_session", self._session)
         copied.__dict__.update(self.__dict__)
         return copied
 
@@ -866,14 +868,72 @@ class SparkConnectClient:
     @property
     def _closed(self) -> bool:
         """Whether the client is closed, as SparkConnectClient's ``_closed``. Setting it to True
-        closes the session, which the session registry then no longer returns; a closed client
-        stays closed."""
+        closes the session, which the session registry then no longer returns, and setting it
+        to False opens it again, as PySpark's requests are sent again then."""
         return self._session.is_stopped
 
     @_closed.setter
     def _closed(self, value: bool) -> None:
         if value:
             self._session._close()
+        else:
+            self._session._reopen()
+
+    @property
+    def _session_id(self) -> str:
+        """The session ID that the requests of the client carry, as SparkConnectClient's
+        ``_session_id``: the session's, until it is set to another, which the requests carry from
+        then on, as PySpark's do; the server answers them of the session of that ID, and a
+        response of another server-side session than the one that the client observed closes
+        the client. The session's ``session_id`` stays, as PySpark's does, and so does that of
+        the requests of the artifacts, as PySpark's ArtifactManager keeps the ID that the client
+        was built with."""
+        return self._session._client_session_id()
+
+    @_session_id.setter
+    def _session_id(self, value: str) -> None:
+        self._session._set_client_session_id(value)
+
+    @property
+    def _user_id(self) -> Optional[str]:
+        """The user of the requests of the client, as SparkConnectClient's ``_user_id``: of the
+        connection string, else of ``user_id``, else of ``SPARK_USER`` or ``USER``."""
+        return self._session._user_id()
+
+    @property
+    def _use_reattachable_execute(self) -> bool:
+        """Whether the executions of the client are reattachable, as SparkConnectClient's
+        ``_use_reattachable_execute``, which ``enable_reattachable_execute`` and
+        ``disable_reattachable_execute`` set, and which a caller may set."""
+        return self._session._reattachable_execute()
+
+    @_use_reattachable_execute.setter
+    def _use_reattachable_execute(self, value: bool) -> None:
+        self._session._set_reattachable_execute(bool(value))
+
+    def _get_operation_statuses(
+        self,
+        operation_ids: Optional[list[str]] = None,
+        operation_extensions: Optional[list[Any]] = None,
+        request_extensions: Optional[list[Any]] = None,
+    ) -> "pb2.GetStatusResponse":
+        """The statuses of the operations of the session, as SparkConnectClient's: of those of
+        ``operation_ids``, or of all of them if None or empty, of the per-operation
+        ``operation_extensions`` and the request-level ``request_extensions`` (each a
+        ``google.protobuf.Any``) that the request carries, as the full ``GetStatusResponse``. The
+        Rust transport sets the IDs of the session, the client type and the user of the request,
+        as PySpark's does."""
+        import pyspark.sql.connect.proto as pb2
+
+        req = pb2.GetStatusRequest()
+        req.operation_status.SetInParent()
+        if operation_ids:
+            req.operation_status.operation_ids.extend(operation_ids)
+        if operation_extensions:
+            req.operation_status.extensions.extend(operation_extensions)
+        if request_extensions:
+            req.extensions.extend(request_extensions)
+        return pb2.GetStatusResponse.FromString(self._session._get_status(req.SerializeToString()))
 
     @property
     def is_closed(self) -> bool:
@@ -1091,13 +1151,14 @@ class SparkConnectClient:
     def _execute_plan(self, plan: "pb2.Plan", observations: Any, reported: bool) -> Any:
         """Start the execution of ``plan``, a ``spark.connect.Plan`` that the client sends as it
         is, as SparkConnectClient's request of a copy of it: its responses, whose observed metrics
-        set the Observations of ``observations`` by their names, and whose progress reaches the
-        progress handlers when ``reported``."""
-        return self._session._execute_plan(
-            plan.SerializeToString(), list(observations.items()), reported
-        )
+        set the Observations of ``observations``, a dict, by their names, and whose progress
+        reaches the progress handlers when ``reported``. Of an ``observations`` that is not a
+        dict, such as None or an empty list, none is set: PySpark's client reads it only when
+        observed metrics arrive (see ``_results``)."""
+        items = list(observations.items()) if isinstance(observations, Mapping) else []
+        return self._session._execute_plan(plan.SerializeToString(), items, reported)
 
-    def _results(self, responses: Any) -> Iterator[Any]:
+    def _results(self, responses: Any, observations: Any) -> Iterator[Any]:
         """The results of ``responses``, as SparkConnectClient's
         ``_execute_and_fetch_as_iterator`` yields them of each response: its plan metrics, its
         observed metrics, the schema of its result, the properties of the result of a command by
@@ -1110,7 +1171,13 @@ class SparkConnectClient:
         try:
             for data, metrics, observed_metrics in responses:
                 yield from metrics
-                yield from observed_metrics
+                for observed in observed_metrics:
+                    # As PySpark's client, which looks the name of the observed metrics up in
+                    # `observations` when they arrive: the TypeError of `in` of an object that is
+                    # not a container, such as None.
+                    if observed.name != "__python_accumulator__":
+                        _ = observed.name in observations
+                    yield observed
                 b = pb2.ExecutePlanResponse.FromString(data)
                 if b.HasField("schema"):
                     dt = types.proto_schema_to_pyspark_data_type(b.schema)
@@ -1180,7 +1247,7 @@ class SparkConnectClient:
         properties: dict[str, Any] = {}
 
         responses = self._execute_plan(plan, observations, True)
-        for response in self._results(responses):
+        for response in self._results(responses, observations):
             if isinstance(response, StructType):
                 schema = response
             elif isinstance(response, pa.RecordBatch):
@@ -1238,7 +1305,7 @@ class SparkConnectClient:
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
         sent = _plan_of(plan)
-        for response in self._results(self._execute_plan(sent, observations, True)):
+        for response in self._results(self._execute_plan(sent, observations, True), observations):
             if isinstance(response, StructType):
                 yield response
             elif isinstance(response, pa.RecordBatch):
@@ -1336,7 +1403,8 @@ class SparkConnectClient:
                 f"Execute command as iterator for command {self._proto_to_string(command, True)}"
             )
         plan = _plan_of_command(command)
-        for response in self._results(self._execute_plan(plan, observations or {}, False)):
+        observations = observations or {}
+        for response in self._results(self._execute_plan(plan, observations, False), observations):
             if isinstance(response, dict):
                 yield response
             else:
@@ -1349,8 +1417,13 @@ class SparkConnectClient:
 
     def add_threadlocal_user_context_extension(self, extension: Any) -> str:
         """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests that
-        the current thread sends, as SparkConnectClient's: its ID."""
-        return self._session._add_user_context_extension(extension.SerializeToString(), False)
+        the current thread sends, as SparkConnectClient's: to the list of
+        ``thread_local.user_context_extensions``, of its ID."""
+        if not hasattr(self.thread_local, "user_context_extensions"):
+            self.thread_local.user_context_extensions = list()
+        extension_id = "threadlocal_" + str(uuid.uuid4())
+        self.thread_local.user_context_extensions.append((extension_id, extension))
+        return extension_id
 
     def add_global_user_context_extension(self, extension: Any) -> str:
         """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests of
@@ -1362,10 +1435,15 @@ class SparkConnectClient:
         return extension_id
 
     def remove_user_context_extension(self, extension_id: str) -> None:
-        """Remove the user context extension of ``extension_id``, as SparkConnectClient's: a
-        global one rebinds ``global_user_context_extensions`` to a list without it."""
+        """Remove the user context extension of ``extension_id``, as SparkConnectClient's: of the
+        current thread, which rebinds ``thread_local.user_context_extensions`` to a list without
+        it, or a global one, which rebinds ``global_user_context_extensions``."""
         if extension_id.find("threadlocal_") == 0:
-            self._session._remove_user_context_extension(extension_id)
+            if not hasattr(self.thread_local, "user_context_extensions"):
+                return
+            self.thread_local.user_context_extensions = list(
+                filter(lambda ex: ex[0] != extension_id, self.thread_local.user_context_extensions)
+            )
         elif extension_id.find("global_") == 0:
             with self.global_user_context_extensions_lock:
                 self.global_user_context_extensions = list(
@@ -1374,30 +1452,66 @@ class SparkConnectClient:
 
     def clear_user_context_extensions(self) -> None:
         """Remove the user context extensions of the current thread and the global ones, as
-        SparkConnectClient's: ``global_user_context_extensions`` is a new, empty list."""
-        self._session._clear_user_context_extensions()
+        SparkConnectClient's: each is a new, empty list, that of the thread if it has one."""
+        if hasattr(self.thread_local, "user_context_extensions"):
+            self.thread_local.user_context_extensions = list()
         with self.global_user_context_extensions_lock:
             self.global_user_context_extensions = list()
 
     def add_tag(self, tag: str) -> None:
         """Add ``tag`` to the tags of the current thread, which the executions that it starts
-        carry, as SparkConnectClient's: ``CANNOT_BE_NONE`` for None, ``VALUE_ALLOWED`` for a tag
-        of a comma and ``VALUE_NOT_NON_EMPTY_STR`` for an empty one."""
-        self._session.addTag(tag)
+        carry, as SparkConnectClient's: to the set of ``thread_local.tags``, of the errors of
+        ``_throw_if_invalid_tag``."""
+        self._throw_if_invalid_tag(tag)
+        if not hasattr(self.thread_local, "tags"):
+            self.thread_local.tags = set()
+        self.thread_local.tags.add(tag)
 
     def remove_tag(self, tag: str) -> None:
         """Remove ``tag`` from the tags of the current thread, as SparkConnectClient's: of the
         errors of ``add_tag``, and nothing for a tag that the thread does not have."""
-        self._session.removeTag(tag)
+        self._throw_if_invalid_tag(tag)
+        if not hasattr(self.thread_local, "tags"):
+            self.thread_local.tags = set()
+        # Use discard, not remove: removing an absent tag is a documented no-op
+        # (see SparkSession.removeTag), matching the Classic behavior.
+        self.thread_local.tags.discard(tag)
 
     def get_tags(self) -> set[str]:
-        """The tags of the current thread, as SparkConnectClient's: a copy of them, which the
-        Rust transport keeps, where PySpark's client gives the set that it keeps."""
-        return self._session.getTags()
+        """The tags of the current thread, as SparkConnectClient's: the set of
+        ``thread_local.tags``, which the later changes of the tags change too."""
+        if not hasattr(self.thread_local, "tags"):
+            self.thread_local.tags = set()
+        return self.thread_local.tags
 
     def clear_tags(self) -> None:
-        """Remove the tags of the current thread, as SparkConnectClient's."""
-        self._session.clearTags()
+        """Remove the tags of the current thread, as SparkConnectClient's: ``thread_local.tags``
+        is a new, empty set."""
+        self.thread_local.tags = set()
+
+    def _throw_if_invalid_tag(self, tag: str) -> None:
+        """
+        Validate if a tag for ExecutePlanRequest.tags is valid. Throw ``ValueError`` if
+        not.
+        """
+        spark_job_tags_sep = ","
+        if tag is None:
+            raise PySparkValueError(
+                errorClass="CANNOT_BE_NONE", messageParameters={"arg_name": "Spark Connect tag"}
+            )
+        if spark_job_tags_sep in tag:
+            raise PySparkValueError(
+                errorClass="VALUE_ALLOWED",
+                messageParameters={
+                    "arg_name": "Spark Connect tag",
+                    "disallowed_value": spark_job_tags_sep,
+                },
+            )
+        if len(tag) == 0:
+            raise PySparkValueError(
+                errorClass="VALUE_NOT_NON_EMPTY_STR",
+                messageParameters={"arg_name": "Spark Connect tag", "arg_value": tag},
+            )
 
     def interrupt_all(self) -> Optional[list[str]]:
         """Interrupt the executions of the session, as SparkConnectClient's: the IDs of the
@@ -1429,24 +1543,38 @@ class SparkConnectClient:
         """Register the Python function ``function`` as a temporary function of the session of
         the name ``name``, else of a name that the client generates, as SparkConnectClient's
         ``register_udf``: the name. A DDL ``return_type`` is parsed by the server, and the
-        function is pickled with the type, as PySpark's ``PythonUDF`` does."""
+        function is pickled with the type, as PySpark's ``PythonUDF`` does. As PySpark's, the
+        name and ``deterministic`` are set in the fields of the command first, then the return
+        type is parsed and converted, then ``eval_type`` is set, and the function is pickled
+        last, so each raises the error of its protobuf field or of its conversion in that
+        order."""
+        import pyspark.sql.connect.proto as pb2
+        from pyspark.serializers import CloudPickleSerializer
+
         if name is None:
             name = f"fun_{uuid.uuid4().hex}"
+        # As PySpark's CommonInlineUserDefinedFunction.to_plan_udf, which sets these first.
+        fun = pb2.CommonInlineUserDefinedFunction()
+        fun.function_name = name
+        fun.deterministic = deterministic
+        # And then its PythonUDF.to_plan: the parse of a DDL string, the proto of the return type,
+        # the eval type, and the pickle.
         output_type = return_type
         if isinstance(return_type, str):
             output_type = self._session._parse_ddl(return_type)
             assert isinstance(output_type, DataType)
         else:
             _check_data_type(return_type)
-        from pyspark.serializers import CloudPickleSerializer
-
+        udf = pb2.PythonUDF()
+        udf.eval_type = eval_type
+        command = CloudPickleSerializer().dumps((function, output_type))
         self._session._registerPythonUdf(
-            name,
+            fun.function_name,
             output_type,
-            eval_type,
-            CloudPickleSerializer().dumps((function, output_type)),
+            udf.eval_type,
+            command,
             f"{sys.version_info.major}.{sys.version_info.minor}",
-            deterministic,
+            fun.deterministic,
         )
         return name
 
@@ -1460,24 +1588,30 @@ class SparkConnectClient:
     ) -> str:
         """Register the user-defined table function class ``function`` as the temporary
         function ``name`` of the session, as SparkConnectClient's ``register_udtf``: the name. A
-        DDL ``return_type`` is left to the server to parse. As PySpark's, the name and then the
-        return type are converted before the handler is pickled, so a handler that does not
-        pickle raises ``UDTF_SERIALIZATION_ERROR`` only of a valid name and return type."""
+        DDL ``return_type`` is left to the server to parse. As PySpark's, the ``__name__`` of the
+        handler class is read, the name and ``deterministic`` are set in the fields of the
+        command, the return type is converted and ``eval_type`` set before the handler is
+        pickled, so a handler that does not pickle raises ``UDTF_SERIALIZATION_ERROR`` only of
+        valid arguments."""
+        import pyspark.sql.connect.proto as pb2
         from pyspark.sql.connect.utils import get_python_ver
         from pyspark.sql.udtf import _pickled_handler
 
         # As PySpark's PythonUDTF, which reads the name of the handler class when it is made.
         _ = function.__name__
-        # As PySpark's register_udtf, which sets the name in its command and converts the return
-        # type (PythonUDTF.to_plan) before it pickles the handler: `_registerPythonUdtf` calls the
-        # pickling after them.
+        # As PySpark's CommonInlineUserDefinedTableFunction.udtf_plan, which sets these first, and
+        # then converts the return type and sets the eval type (PythonUDTF.to_plan) before it
+        # pickles the handler: `_registerPythonUdtf` converts them, and then calls the pickling.
+        fun = pb2.CommonInlineUserDefinedTableFunction()
+        fun.function_name = name
+        fun.deterministic = deterministic
         self._session._registerPythonUdtf(
-            name,
+            fun.function_name,
             return_type,
             eval_type,
             functools.partial(_pickled_handler, function),
             get_python_ver(),
-            deterministic,
+            fun.deterministic,
         )
         return name
 
@@ -1497,9 +1631,21 @@ class SparkConnectClient:
         ``name`` of the session, as SparkConnectClient's ``register_java``: an aggregate one for
         ``aggregate``, of the class's own type, and of a ``return_type``, a DataType or a DDL
         string that the server parses, a function that is not an aggregate one, as PySpark's
-        ``JavaUDF`` of an output type is."""
+        ``JavaUDF`` of an output type is. As PySpark's, the name, the class name, the return
+        type and then ``aggregate``, unless there is a return type, are set in the fields of the
+        command in that order, so each raises the error of its protobuf field in that order."""
+        import pyspark.sql.connect.proto as pb2
+
+        # As PySpark's CommonInlineUserDefinedFunction.to_plan_judf and JavaUDF.to_plan.
+        fun = pb2.CommonInlineUserDefinedFunction()
+        fun.function_name = name
+        java = pb2.JavaUDF()
+        java.class_name = javaClassName
+        if return_type is not None and not isinstance(return_type, str):
+            _check_data_type(return_type)
+        java.aggregate = aggregate if return_type is None else False
         self._session._registerJavaFunction(
-            name, javaClassName, return_type, aggregate if return_type is None else False
+            fun.function_name, java.class_name, return_type, java.aggregate
         )
 
     def add_artifacts(self, *paths: str, pyfile: bool, archive: bool, file: bool) -> None:
@@ -1512,11 +1658,15 @@ class SparkConnectClient:
     def copy_from_local_to_fs(self, local_path: str, dest_path: str) -> None:
         """Copy the local file ``local_path`` to the absolute path ``dest_path`` of the file
         system of the server, as SparkConnectClient's ``copy_from_local_to_fs``: of the
-        assertions of its ArtifactManager, without the check of a scheme of
+        assertions and the errors of its ArtifactManager, without the check of a scheme of
         ``SparkSession.copyFromLocalToFs``."""
-        assert Path(local_path).absolute().is_file(), "local path must be a file path."
+        abs_path = Path(local_path).absolute()
+        assert abs_path.is_file(), "local path must be a file path."
         assert Path(dest_path).is_absolute(), "destination FS path must be an absolute path."
-        self._session.copyFromLocalToFs(local_path, dest_path)
+        # As the name of the artifact of PySpark's ArtifactManager, which raises the TypeError of
+        # the concatenation for a destination that is not a str.
+        _ = "forward_to_fs" + dest_path
+        self._session._copy_from_local_to_fs(str(abs_path), dest_path)
 
     def cache_artifact(self, blob: bytes) -> str:
         """Cache ``blob``, a bytes-like object, as an artifact of the session, as
@@ -1744,17 +1894,23 @@ class _GlobalUserContextExtensions(list):
     """The global user context extensions of a client, as the list of PySpark's
     ``SparkConnectClient.global_user_context_extensions``, of their IDs and their
     ``google.protobuf.Any``: a list whose changes the session of the client takes, so that the
-    requests of all its threads carry them, as PySpark's requests read the list. Its copies and its
-    pickles are plain lists."""
+    requests of all its threads carry them, as PySpark's requests read the list, while it is the
+    list of the clients of the session. Its copies and its pickles are plain lists."""
 
     def __init__(self, session: Any, extensions: Iterable[Any] = ()) -> None:
         super().__init__(extensions)
-        self._session = session
+        self._session_ref = weakref.ref(session)
 
     def _sync(self) -> None:
-        self._session._set_global_user_context_extensions(
-            [(extension_id, extension.SerializeToString()) for extension_id, extension in self]
-        )
+        session = self._session_ref()
+        if session is None:
+            return
+        state = _CLIENT_STATES.get(session)
+        # A list that the attribute of the session's clients is no longer set to is not the one
+        # that the requests read, as in PySpark, and neither is a copy's.
+        if state is None or state.get("global_user_context_extensions") is not self:
+            return
+        session._set_global_user_context_extensions(_serialized_extensions(self))
 
     def __reduce_ex__(self, protocol: Any) -> Any:
         return (list, (list(self),))
@@ -1766,35 +1922,164 @@ class _GlobalUserContextExtensions(list):
         return copy.deepcopy(list(self), memo)
 
 
-def _synced(name: str) -> Any:
-    # A method of a list that changes it, after which the session takes the extensions.
-    method = getattr(list, name)
+class _ThreadExtensions(list):
+    """The user context extensions of the threads that have it, as the list of PySpark's
+    ``thread_local.user_context_extensions``, of their IDs and their ``google.protobuf.Any``: the
+    list of a thread, which the requests of the thread carry, as PySpark's read it, and of the
+    threads that are given it, as those of ``inheritable_thread_target``. Its changes are those of
+    the list of the Rust transport that it holds, which the threads that have it share. Its copies
+    and its pickles are plain lists."""
 
-    def synced(self: _GlobalUserContextExtensions, *args: Any, **kwargs: Any) -> Any:
+    def __init__(self, session: Any, extensions: Iterable[Any]) -> None:
+        super().__init__(extensions)
+        self._session_ref = weakref.ref(session)
+        self._handle = session._new_user_context_extensions(_serialized_extensions(self))
+
+    @classmethod
+    def _of(cls, thread_local: Any, extensions: Any) -> Any:
+        # The list of the current thread once `thread_local.user_context_extensions` is set to
+        # `extensions`: a list of the session, which the thread shares, or a new one of its
+        # extensions, which the thread has alone.
+        session = thread_local._session_ref()
+        if session is None:
+            return extensions
+        if not (isinstance(extensions, cls) and extensions._session_ref() is session):
+            extensions = cls(session, extensions)
+        session._share_thread_user_context_extensions(extensions._handle)
+        return extensions
+
+    def _sync(self) -> None:
+        self._handle._replace(_serialized_extensions(self))
+
+    def _copy(self) -> "_ThreadExtensions":
+        # A list of deep copies of the extensions, which no thread has yet.
+        session = self._session_ref()
+        assert session is not None
+        return type(self)(session, copy.deepcopy(list(self)))
+
+    def __reduce_ex__(self, protocol: Any) -> Any:
+        return (list, (list(self),))
+
+    def __copy__(self) -> list[Any]:
+        return list(self)
+
+    def __deepcopy__(self, memo: Any) -> list[Any]:
+        return copy.deepcopy(list(self), memo)
+
+
+class _ThreadTags(set):
+    """The operation tags of the threads that have it, as the set of PySpark's
+    ``thread_local.tags``: the set of a thread, which its executions carry, as PySpark's read it,
+    and of the threads that are given it, as those of ``inheritable_thread_target``. Its changes
+    are those of the set of the Rust transport that it holds, which the threads that have it
+    share: a str that UTF-8 cannot encode fails each request, as in PySpark, and an object that is
+    neither a str nor bytes raises the ``TypeError`` of the protobuf field of the tags, which
+    PySpark raises when it builds a request, when it is added. Its copies and its pickles are plain
+    sets."""
+
+    def __init__(self, session: Any, tags: Iterable[Any]) -> None:
+        super().__init__(tags)
+        self._session_ref = weakref.ref(session)
+        self._handle = session._new_tags(list(self))
+
+    @classmethod
+    def _of(cls, thread_local: Any, tags: Any) -> Any:
+        # The set of the current thread once `thread_local.tags` is set to `tags`: a set of the
+        # session, which the thread shares, or a new one of its tags, which the thread has alone.
+        session = thread_local._session_ref()
+        if session is None:
+            return tags
+        if not (isinstance(tags, cls) and tags._session_ref() is session):
+            tags = cls(session, tags)
+        session._share_thread_tags(tags._handle)
+        return tags
+
+    def _sync(self) -> None:
+        self._handle._replace(list(self))
+
+    def _copy(self) -> "_ThreadTags":
+        # A set of the same tags, which no thread has yet.
+        session = self._session_ref()
+        assert session is not None
+        return type(self)(session, copy.deepcopy(set(self)))
+
+    def __repr__(self) -> str:
+        # As the repr of PySpark's plain set.
+        return repr(set(self))
+
+    def __reduce_ex__(self, protocol: Any) -> Any:
+        return (set, (list(self),))
+
+    def __copy__(self) -> set[Any]:
+        return set(self)
+
+    def __deepcopy__(self, memo: Any) -> set[Any]:
+        return copy.deepcopy(set(self), memo)
+
+
+def _serialized_extensions(extensions: Iterable[Any]) -> list[tuple[Any, bytes]]:
+    # The IDs and the bytes of the google.protobuf.Any of `extensions`, as the Rust transport takes
+    # them for the user context of its requests.
+    return [(extension_id, extension.SerializeToString()) for extension_id, extension in extensions]
+
+
+def _synced(base: type, name: str) -> Any:
+    # A method of `base`, a list or a set, that changes it, after which the Rust transport takes
+    # the extensions or the tags: a change that it does not take, of an object that it cannot
+    # send, is undone, and its error raised.
+    method = getattr(base, name)
+
+    def synced(self: Any, *args: Any, **kwargs: Any) -> Any:
+        before = base(self)
         result = method(self, *args, **kwargs)
-        self._sync()
+        try:
+            self._sync()
+        except BaseException:
+            base.clear(self)
+            if base is list:
+                base.extend(self, before)
+            else:
+                base.update(self, before)
+            raise
         return result
 
     synced.__name__ = synced.__qualname__ = name
     return synced
 
 
+for _list in (_GlobalUserContextExtensions, _ThreadExtensions):
+    for _name in (
+        "append",
+        "extend",
+        "insert",
+        "remove",
+        "pop",
+        "clear",
+        "sort",
+        "reverse",
+        "__setitem__",
+        "__delitem__",
+        "__iadd__",
+        "__imul__",
+    ):
+        setattr(_list, _name, _synced(list, _name))
 for _name in (
-    "append",
-    "extend",
-    "insert",
+    "add",
+    "discard",
     "remove",
     "pop",
     "clear",
-    "sort",
-    "reverse",
-    "__setitem__",
-    "__delitem__",
-    "__iadd__",
-    "__imul__",
+    "update",
+    "difference_update",
+    "intersection_update",
+    "symmetric_difference_update",
+    "__ior__",
+    "__iand__",
+    "__isub__",
+    "__ixor__",
 ):
-    setattr(_GlobalUserContextExtensions, _name, _synced(_name))
-del _name
+    setattr(_ThreadTags, _name, _synced(set, _name))
+del _list, _name
 
 
 def _extensions_of(extensions: Any) -> list[Any]:
@@ -1805,21 +2090,108 @@ def _extensions_of(extensions: Any) -> list[Any]:
     return [(extension_id, ProtoAny.FromString(data)) for extension_id, data in extensions]
 
 
-class _ThreadLocalOfClient:
-    """The state of the current thread of the session of a client, as SparkConnectClient's
-    ``thread_local``: its user context extensions and its tags, which the Rust transport keeps
-    for each thread."""
+class _ThreadLocalOfClient(threading.local):
+    """The state of each thread of the session of a client, as SparkConnectClient's
+    ``thread_local``, a ``threading.local``: the attributes that a thread sets are its own, and
+    PySpark's ``tags`` and ``user_context_extensions`` exist once a thread uses them. The set of
+    the tags and the list of the extensions that a thread sets are those that its requests carry
+    (see ``_ThreadTags`` and ``_ThreadExtensions``), and so are those of the threads that are given
+    them, as by ``inheritable_thread_target``. Deleting them leaves the thread with none."""
 
-    def __init__(self, session: Any) -> None:
-        self._session = session
+    # The session of the clients, held weakly, which all threads see.
+    __slots__ = ("_session_ref",)
 
-    @property
-    def user_context_extensions(self) -> list[Any]:
-        return _extensions_of(self._session._user_context_extensions(False))
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "tags":
+            value = _ThreadTags._of(self, value)
+        elif name == "user_context_extensions":
+            value = _ThreadExtensions._of(self, value)
+        super().__setattr__(name, value)
 
-    @property
-    def tags(self) -> Any:
-        return set(self._session.getTags())
+    def __delattr__(self, name: str) -> None:
+        super().__delattr__(name)
+        session = self._session_ref()
+        if session is None:
+            return
+        if name == "tags":
+            session._clear_thread_tags()
+        elif name == "user_context_extensions":
+            session._clear_thread_user_context_extensions()
+
+
+def _thread_local_copies(thread_local: Any) -> list[tuple[str, Any]]:
+    """The attributes of the current thread of ``thread_local``, a client's, as PySpark's
+    ``inheritable_thread_target`` copies them for the threads of a function, of ``copy.deepcopy``
+    of each: the copies of the set of the tags and of the list of the extensions are a set and a
+    list that the threads that are given them share, as the threads share PySpark's copies."""
+    copies = []
+    for attr, value in thread_local.__dict__.items():
+        if isinstance(value, (_ThreadTags, _ThreadExtensions)):
+            value = value._copy()
+        else:
+            value = copy.deepcopy(value)
+        copies.append((attr, value))
+    return copies
+
+
+# The attributes of the clients of each session, which they share, as PySpark's session has one
+# client (see `SparkConnectClient.__slots__`): held weakly by their session, which they hold
+# weakly too.
+_CLIENT_STATES: "weakref.WeakKeyDictionary[Any, dict[str, Any]]" = weakref.WeakKeyDictionary()
+_CLIENT_STATES_LOCK = threading.Lock()
+
+
+def _client_state(session: Any, builder: Optional[ChannelBuilder]) -> dict[str, Any]:
+    """The attributes of the clients of ``session``, made with the first of them: its channel
+    builder ``builder``, as PySpark's ``_builder``, else a ``DefaultChannelBuilder`` of the
+    connection of the session, of the host and the token of the client; its ``thread_local``; its
+    ``global_user_context_extensions``, those that the session has, whose changes, and a list that
+    the attribute is set to, are the session's (see ``SparkConnectClient.__setattr__``); and their
+    lock."""
+    with _CLIENT_STATES_LOCK:
+        state = _CLIENT_STATES.get(session)
+        if state is None:
+            connection_string = getattr(session, "_connection_string", None)
+            if builder is None and connection_string is not None:
+                # As PySpark's client of a session, of the channel builder of its connection.
+                builder = DefaultChannelBuilder(connection_string())
+            thread_local = _ThreadLocalOfClient()
+            thread_local._session_ref = weakref.ref(session)
+            extensions = _extensions_of(session._user_context_extensions(True))
+            state = {
+                "_builder": builder,
+                "thread_local": thread_local,
+                "global_user_context_extensions": _GlobalUserContextExtensions(
+                    session, extensions
+                ),
+                "global_user_context_extensions_lock": threading.Lock(),
+            }
+            _CLIENT_STATES[session] = state
+            # As PySpark's requests, which serialize the extensions when they are built: the calls
+            # of the session serialize them again before they send requests.
+            session._set_user_context_refresh(
+                functools.partial(_refresh_user_context_extensions, weakref.ref(session))
+            )
+    return state
+
+
+def _refresh_user_context_extensions(session_ref: Any) -> None:
+    """Serialize the user context extensions of the session of ``session_ref`` again for the
+    Rust transport, of its clients' global list and of the list of the current thread, before a
+    call of the session sends requests, as PySpark serializes them when it builds each request:
+    so a ``google.protobuf.Any`` of the lists that was changed in place is sent as it is now."""
+    session = session_ref()
+    if session is None:
+        return
+    state = _CLIENT_STATES.get(session)
+    if state is None:
+        return
+    extensions = state.get("global_user_context_extensions")
+    if isinstance(extensions, _GlobalUserContextExtensions) and extensions:
+        extensions._sync()
+    own = getattr(state.get("thread_local"), "user_context_extensions", None)
+    if isinstance(own, _ThreadExtensions) and own:
+        own._sync()
 
 
 # The client of each session, by its ID, while it is in use.
