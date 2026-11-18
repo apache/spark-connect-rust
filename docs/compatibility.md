@@ -1253,14 +1253,34 @@ session has the default policy, as PySpark's `newSession` and `clone` do. With
 `disable_reattachable_execute`, an execution has no reattach option and no deadline, is never
 released, and is sent again when it fails in a way that its policy retries, as PySpark's.
 
-The relation of a DataFrame's plan (`df._plan.plan(client)`) stands for the relation of the
-DataFrame, which the transport sends in its place while the DataFrame is alive: keep the DataFrame
-while a plan of it is sent. `get_tags` returns a copy of the tags of the thread, where PySpark
-returns the set that its client keeps, which the later changes of the tags change too. The
-official tests of the client (`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and
-the reattachable iterator of PySpark's client, which the drop-in does not have; those of its
-retries (`test_connect_retry.py`) and of `pyspark.errors.exceptions.connect.convert_exception`
-(`test_connect_errors_conversion.py`) pass.
+The relation of a DataFrame's plan (`df._plan.plan(client)`) is a placeholder of the relation of
+the DataFrame, which the core replaces by that relation when it sends a plan that holds it, while
+the DataFrame is alive: keep the DataFrame while a plan of it is sent. The core replaces it only
+where it looks for it:
+
+- as the root relation of a plan, of an execution, of an analysis (`schema`, `explain_string`,
+  `same_semantics`, `semantic_hash`) or of `DataFrame(plan, session)`, and as the relation of the
+  analyses of a relation (`persist`, `unpersist`, `get_storage_level`);
+- under it, as the input of the relations of `pyspark.ml` (an `MlRelation`'s input, its model
+  summary dataset and its fetched arguments, and a `WithRelations`'s root and references), and as
+  the dataset of the ML commands (`Fit`, `Evaluate`, `CreateSummary`) and the arguments of a
+  `Fetch`;
+- anywhere in the message of the extension of a relation or of a command, a plugin's message such
+  as Delta Lake's `MergeIntoTable` (see the Delta Lake paragraph above).
+
+Elsewhere it is sent as it is, and the server rejects the plan with
+`CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation: as the input of
+another relation built in Python over it, such as a `Limit`, a `Join` or a `SubqueryAlias`, also in
+a `WithRelations`; as the relation of a command that is neither an ML command nor an extension,
+such as a `WriteOperation`, a `CreateDataFrameView` or a `CheckpointCommand`; and in the extension
+of an expression.
+
+`get_tags` returns a copy of the tags of the thread, where PySpark returns the set that its client
+keeps, which the later changes of the tags change too. The official tests of the client
+(`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable iterator of
+PySpark's client, which the drop-in does not have; those of its retries (`test_connect_retry.py`)
+and of `pyspark.errors.exceptions.connect.convert_exception` (`test_connect_errors_conversion.py`)
+pass.
 
 ## Spark Declarative Pipelines CLI
 
@@ -1615,8 +1635,9 @@ SparkSession, its `conf`, `catalog`, `read`, `readStream`, `streams`, `udf`, `ud
 `dataSource`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
 `mergeInto` and its clauses, `na`, `stat`, `groupBy`, `cogroup`, `asTable` and the WindowSpec of
 its windows, and an `Observation`. So are `SparkSession.Hook`, nested in the session class, and
-the classes of `pyspark.sql.connect.client` (its channel builders, `PlanObservedMetrics` and
-`SparkConnectClient`), which are of `pyspark.sql.connect.client.core`.
+the classes of `pyspark.sql.connect.client` (its channel builders, `PlanObservedMetrics`,
+`SparkConnectClient`, `RpcDeadlines`, `AnalyzeResult` and `ConfigResult`), which are of
+`pyspark.sql.connect.client.core`.
 The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` and
 `partitioning`), and so are those of `pyspark.sql.connect.avro.functions` and
 `pyspark.sql.connect.protobuf.functions`: they are not those of `pyspark.sql.functions`,

@@ -3836,14 +3836,15 @@ def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
     from pyspark.sql.connect.client import core
 
     for name in ["ChannelBuilder", "DefaultChannelBuilder", "PlanObservedMetrics",
-                 "SparkConnectClient"]:
+                 "SparkConnectClient", "RpcDeadlines", "AnalyzeResult", "ConfigResult"]:
         cls = getattr(client, name)
         assert (cls.__module__, cls.__qualname__) == ("pyspark.sql.connect.client.core", name)
         assert getattr(core, name) is cls
         assert pickle.loads(pickle.dumps(cls)) is cls
     assert repr(client.DefaultChannelBuilder("sc://localhost")).startswith(
         "<pyspark.sql.connect.client.core.DefaultChannelBuilder object at 0x")
-    assert core.__all__ == ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
+    assert core.__all__ == [
+        "ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
 
 
 def test_session_constructor_and_its_flags_as_pyspark_connect():

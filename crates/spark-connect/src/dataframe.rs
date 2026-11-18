@@ -3251,7 +3251,7 @@ impl PlanExecution {
             session_id: session.client().session_id().to_string(),
             user_context: Some(proto::UserContext::default()),
             operation_id: Some(operation_id.clone()),
-            tags: session.tags(),
+            tags: session.tags()?,
             plan: Some(plan),
             ..Default::default()
         };

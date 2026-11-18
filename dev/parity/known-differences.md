@@ -303,11 +303,21 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 - **`SparkConnectClient.get_tags`** (intentional). A copy of the tags of the thread, where
   PySpark returns the set that its client keeps, which its later changes change too, as
   `SparkSession.getTags` does.
-- **Plans of a DataFrame's relation** (intentional; DESIGN). `df._plan.plan(client)` is a
-  placeholder of the DataFrame's relation, which the transport replaces by the relation while
-  the DataFrame is alive. A plan of it that `client.to_table`, `client.schema` or another
-  method of the client sends after the DataFrame is freed fails with "a placeholder of a
-  DataFrame that no longer exists".
+- **Plans of a DataFrame's relation** (intentional; DESIGN, and tracked where the placeholder is
+  not replaced). `df._plan.plan(client)` is a placeholder of the DataFrame's relation, which the
+  core replaces by the relation while the DataFrame is alive, where `plan::resolve_relation`,
+  `resolve_command` and `resolve_analysis` look for it: as the root relation of a plan or of an
+  analysis, under it as the input of the relations of `pyspark.ml` (`MlRelation`,
+  `WithRelations`), as the dataset and the fetched arguments of the ML commands, and anywhere in
+  the message of the extension of a relation or of a command (a plugin's, as Delta Lake's
+  `merge`). Elsewhere it is sent as it is, and the server rejects the plan with
+  `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation: as the input
+  of another relation built in Python over it (a `Limit`, `Join` or `SubqueryAlias`, also in a
+  `WithRelations`), as the relation of a command that is neither an ML command nor an extension
+  (a `WriteOperation`, `CreateDataFrameView` or `CheckpointCommand`), and in an expression's
+  extension. A plan of it that `client.to_table`, `client.schema` or another method of the client
+  sends after the DataFrame is freed fails with "a placeholder of a DataFrame that no longer
+  exists".
 - **Default port** (intentional). `DefaultChannelBuilder.default_port()` is 15002. PySpark
   takes the port of a local JVM server in its testing mode; the drop-in has no JVM.
 - **Missing URL error** (intentional). The one builder of the drop-in serves

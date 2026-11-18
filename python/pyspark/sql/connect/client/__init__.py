@@ -86,6 +86,9 @@ class RpcDeadlines:
     ``get_status``.
     """
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     reattachable_execute_plan: Optional[float] = 10 * 60  # 10 min
     reattach_execute: Optional[float] = 10 * 60  # 10 min
     analyze_plan: Optional[float] = 60 * 60  # 1 hour
@@ -482,6 +485,9 @@ class AnalyzeResult:
     """The result of an analysis of SparkConnectClient's ``_analyze``, as PySpark Connect's: the
     one field of the result of the analysis, and None for the others."""
 
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
+
     def __init__(
         self,
         schema: Optional[DataType],
@@ -578,6 +584,9 @@ class AnalyzeResult:
 class ConfigResult:
     """The result of SparkConnectClient's ``config``, as PySpark Connect's: the pairs of a key and
     its value, None for a key without one, and the warnings of the server."""
+
+    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
+    __module__ = "pyspark.sql.connect.client.core"
 
     def __init__(self, pairs: list[tuple[str, Optional[str]]], warnings: list[str]):
         self.pairs = pairs
