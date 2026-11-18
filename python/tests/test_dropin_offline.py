@@ -12770,6 +12770,51 @@ def test_cycles_through_instance_dicts_are_collected_as_pyspark(mock_connect):
         assert freed() is None
 
 
+def test_cycles_through_the_types_that_a_type_holds_are_collected_as_pyspark():
+    # As PySpark's ArrayType, MapType, StructField and StructType, plain Python classes whose
+    # __dict__ holds the types that they are made of, the metadata dict of a field and the fields
+    # of a struct: a reference cycle through them is collected. The drop-in's held them in Rust,
+    # which the garbage collector did not see, so such a cycle was never collected. A child that
+    # is not a singleton holds the cycle, as PySpark's LongType() is one, which keeps it in both.
+    import gc
+    import weakref
+
+    class Job:
+        pass
+
+    def tagged(data_type, job):
+        data_type.job = job
+        return data_type
+
+    def metadata_later(job):
+        metadata = {"k": 1}
+        field = T.StructField("a", T.LongType(), True, metadata)
+        metadata["job"] = job
+        return field
+
+    def metadata_set(job):
+        field = T.StructField("a", T.LongType(), True, {"k": 1})
+        field.metadata["job"] = job
+        return field
+
+    for make in [
+        lambda job: T.ArrayType(tagged(T.DecimalType(10, 2), job)),
+        lambda job: T.MapType(T.StringType(), tagged(T.ArrayType(T.LongType()), job)),
+        lambda job: T.MapType(tagged(T.ArrayType(T.LongType()), job), T.LongType()),
+        lambda job: T.StructField("a", tagged(T.DecimalType(10, 2), job)),
+        lambda job: T.StructType([tagged(T.StructField("a", T.LongType()), job)]),
+        lambda job: T.StructType().add(tagged(T.StructField("a", T.LongType()), job)),
+        metadata_later,
+        metadata_set,
+    ]:
+        job = Job()
+        job.held = make(job)
+        freed = weakref.ref(job)
+        del job
+        gc.collect()
+        assert freed() is None, make
+
+
 def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_connect):
     # As PySpark's plans and expressions, of Python objects, which hold the function of a UDF
     # until a request pickles it: a reference cycle through the function and the DataFrame or the
@@ -22137,8 +22182,9 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     # the allocations before each object shifted by one, meets each kind of object there: also the
     # grouped data, the cogroups, the table arguments, the window specifications, the null and
     # statistics functions, the merge clauses, the stream writers, the data source registrations
-    # and the session builders, and their copies, the rows of toLocalIterator, and the expressions
-    # of Columns and table arguments, and their copies.
+    # and the session builders, and their copies, the rows of toLocalIterator, the expressions
+    # of Columns and table arguments, and their copies, and the array, map, field and struct
+    # types, which a schema of the server makes too.
     import copy
     import gc
 
@@ -22159,6 +22205,9 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     builder = ConnectSession.builder._registerHook(lambda session: None).channelBuilder(
         DefaultChannelBuilder("sc://localhost"))
     column = F.col("id") + 1
+    array, kv = T.ArrayType(T.DecimalType(10, 2)), T.MapType(T.StringType(), T.LongType())
+    field = T.StructField("a", T.DecimalType(10, 2))
+    struct = T.StructType([field])
     makers = [
         lambda: df.write, lambda: copy.copy(writer), lambda: df.writeTo("t"),
         lambda: copy.copy(writer_v2), lambda: df.mergeInto("t", F.lit(True)),
@@ -22178,6 +22227,11 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
         lambda: copy.copy(builder), lambda: df.toLocalIterator(),
         lambda: F.col("id")._expr, lambda: copy.copy(column._expr),
         lambda: copy.deepcopy(column._expr), lambda: table._subquery_expr,
+        lambda: T.ArrayType(T.DecimalType(10, 2)),
+        lambda: copy.deepcopy(array), lambda: T.MapType(T.StringType(), T.LongType()),
+        lambda: copy.deepcopy(kv), lambda: T.StructField("a", T.DecimalType(10, 2)),
+        lambda: copy.deepcopy(field), lambda: T.StructType([T.StructField("a", T.LongType())]),
+        lambda: copy.deepcopy(struct), lambda: struct.toNullable(), lambda: df.schema,
     ]
     thresholds = gc.get_threshold()
     gc.collect()

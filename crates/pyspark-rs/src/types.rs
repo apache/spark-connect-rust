@@ -762,6 +762,25 @@ impl KeptType {
         }
     }
 
+    /// Report the object of the child, if one is kept, to Python's garbage collector, as PySpark's
+    /// type holds it in its `__dict__`. A child that another thread reads at the time is not
+    /// reported, which keeps it alive as a reference that the collector does not know of.
+    fn traverse(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Ok(kept) = self.0.try_lock() {
+            if let Some(object) = kept.as_ref() {
+                visit.call(object)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Drop the object of the child, to break a reference cycle through it that the garbage
+    /// collector found unreachable: after the lock is released, as its drop may run Python code.
+    fn clear(&self) {
+        let taken = self.0.lock().unwrap_or_else(|e| e.into_inner()).take();
+        drop(taken);
+    }
+
     /// The core type of the child as it is now, as [`KeptType::live`] reads it, or else the type
     /// that stands for a child that does not lower now (see [`lenient_type`]).
     fn live_or_stand_in(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<DataType> {
@@ -866,6 +885,7 @@ fn struct_parts(py: Python<'_>, fields: Bound<'_, PyList>) -> PyResult<(DataType
         fields: fields.unbind(),
         names: names.unbind(),
         need_conversion,
+        gc_ready: crate::gc::GcReady::new(),
     };
     Ok((
         DataType::Struct {
@@ -3666,6 +3686,9 @@ pub struct PyArrayType {
     element_object: KeptType,
     /// The `containsNull` as it was given (mirrors PySpark, which keeps any value).
     contains_null_object: Py<PyAny>,
+    /// Set once the value is written, as `__traverse__` reads `contains_null_object`, which is
+    /// not valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 #[pymethods]
@@ -3796,6 +3819,7 @@ impl PyArrayType {
                 contains_null: true,
                 element_object: KeptType::default(),
                 contains_null_object: flag_of_bool(py, true),
+                gc_ready: crate::gc::GcReady::new(),
             },
             [],
             value
@@ -3828,6 +3852,25 @@ impl PyArrayType {
     fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
+    /// As PySpark's type, a Python object of a `__dict__` of its `elementType` and `containsNull`,
+    /// which Python's garbage collector sees: a reference cycle through them is collected, as
+    /// PySpark collects it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        self.element_object.traverse(&visit)?;
+        visit.call(&self.contains_null_object)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the type drops the
+    /// object of its element type.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.element_object.clear();
+        }
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: ArrayType(<elementType repr>, <containsNull>).
         let el = self.element_object.object(py, &self.element_type)?;
@@ -3883,6 +3926,9 @@ pub struct PyMapType {
     value_object: KeptType,
     /// The `valueContainsNull` as it was given (mirrors PySpark, which keeps any value).
     value_contains_null_object: Py<PyAny>,
+    /// Set once the value is written, as `__traverse__` reads the flag, which is not valid while
+    /// the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 #[pymethods]
@@ -4046,6 +4092,7 @@ impl PyMapType {
                 key_object: KeptType::default(),
                 value_object: KeptType::default(),
                 value_contains_null_object: flag_of_bool(py, true),
+                gc_ready: crate::gc::GcReady::new(),
             },
             [],
             value
@@ -4083,6 +4130,27 @@ impl PyMapType {
     fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
+    /// As PySpark's type, a Python object of a `__dict__` of its `keyType`, `valueType` and
+    /// `valueContainsNull`, which Python's garbage collector sees: a reference cycle through them
+    /// is collected, as PySpark collects it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        self.key_object.traverse(&visit)?;
+        self.value_object.traverse(&visit)?;
+        visit.call(&self.value_contains_null_object)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the type drops the
+    /// objects of its key and value types.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.key_object.clear();
+            self.value_object.clear();
+        }
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: MapType(<keyType repr>, <valueType repr>, <valueContainsNull>).
         let k: String = self
@@ -4158,6 +4226,9 @@ pub struct PyStructField {
     /// not change with its parameters, which may be set, so `add` need not read it again for each
     /// field. Reset by a set `dataType`.
     need_conversion_of_type: std::sync::OnceLock<bool>,
+    /// Set once the value is written, as `__traverse__` reads the flag and the metadata, which
+    /// are not valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyStructField {
@@ -4171,6 +4242,7 @@ impl PyStructField {
             metadata,
             data_type_object: KeptType::default(),
             need_conversion_of_type: std::sync::OnceLock::new(),
+            gc_ready: crate::gc::GcReady::new(),
         })
     }
 
@@ -4195,6 +4267,7 @@ impl PyStructField {
             metadata,
             data_type_object,
             need_conversion_of_type: std::sync::OnceLock::new(),
+            gc_ready: crate::gc::GcReady::new(),
         })
     }
 
@@ -4532,6 +4605,30 @@ impl PyStructField {
         self.metadata = metadata.clone().unbind();
         Ok(())
     }
+    /// As PySpark's field, a Python object of a `__dict__` of its `name`, `dataType`, `nullable`
+    /// and `metadata`, which Python's garbage collector sees: a reference cycle through them, the
+    /// metadata dict too, is collected, as PySpark collects it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        self.data_type_object.traverse(&visit)?;
+        if let Some(name) = &self.name_object {
+            visit.call(name)?;
+        }
+        visit.call(&self.nullable)?;
+        visit.call(&self.metadata)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the field drops the
+    /// object of its type and the name that is not a str.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.data_type_object.clear();
+            self.name_object = None;
+        }
+    }
+
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         // Mirror pyspark: StructField('name', <DataType repr>, nullable).
         let dt = self.data_type_object.object(py, &self.field.data_type)?;
@@ -4660,6 +4757,9 @@ pub struct PyStructType {
     /// The `needConversion` of each field, as PySpark's `_needConversion`. Like PySpark's, it is
     /// computed by `__init__` and `add`, so an edit of a field's type does not change it.
     need_conversion: Vec<bool>,
+    /// Set once the value is written, as `__traverse__` reads `fields` and `names`, which are not
+    /// valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyStructType {
@@ -5220,6 +5320,18 @@ impl PyStructType {
         Ok(shim_from_json(py, "_struct_type_from_json")?
             .call1((json,))?
             .unbind())
+    }
+
+    /// As PySpark's struct, a Python object of a `__dict__` of its `fields` and `names` lists,
+    /// which Python's garbage collector sees: a reference cycle through them is collected, as
+    /// PySpark collects it. The lists are the struct's own, which a collection of the cycle
+    /// clears.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.fields)?;
+        visit.call(&self.names)
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -6938,6 +7050,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                     contains_null,
                     element_object: KeptType::default(),
                     contains_null_object: flag_of_bool(py, contains_null),
+                    gc_ready: crate::gc::GcReady::new(),
                 },
                 [],
                 value
@@ -6966,6 +7079,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
                     key_object: KeptType::default(),
                     value_object: KeptType::default(),
                     value_contains_null_object: flag_of_bool(py, value_contains_null),
+                    gc_ready: crate::gc::GcReady::new(),
                 },
                 [],
                 value
@@ -7142,6 +7256,7 @@ pub(crate) fn schema_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>>
                 contains_null: *contains_null,
                 element_object: KeptType::of(element.bind(py)),
                 contains_null_object: flag_of_bool(py, *contains_null),
+                gc_ready: crate::gc::GcReady::new(),
             };
             Py::new(py, init_chain!(dt.clone(), array, [], value))?.into_any()
         }
@@ -7159,6 +7274,7 @@ pub(crate) fn schema_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>>
                 key_object: KeptType::of(key.bind(py)),
                 value_object: KeptType::of(value.bind(py)),
                 value_contains_null_object: flag_of_bool(py, *value_contains_null),
+                gc_ready: crate::gc::GcReady::new(),
             };
             Py::new(py, init_chain!(dt.clone(), map, [], value))?.into_any()
         }
@@ -7179,6 +7295,7 @@ pub(crate) fn schema_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>>
                 fields: objects.unbind(),
                 names: names.unbind(),
                 need_conversion,
+                gc_ready: crate::gc::GcReady::new(),
             };
             Py::new(py, init_chain!(dt.clone(), parts, [], value))?.into_any()
         }
