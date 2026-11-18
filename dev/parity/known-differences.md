@@ -11,26 +11,32 @@ difference is intentional or tracked for a fix.
   fewer fields than columns it silently drops the extra columns, and with more fields it
   raises PyArrow's `ArrowInvalid`. This client raises `AXIS_LENGTH_MISMATCH` for both
   rather than drop data.
-- **NumPy ndarray input** (tracked by SPARK-60772). Not accepted yet.
-- **Customized pandas Row columns without PyArrow** (intentional optional-dependency
-  fallback). When PyArrow is unavailable, the native row fallback retains its previous
-  named-Row struct inference; it does not use Arrow's array inference or mixed-element
-  rejection. Official PySpark requires PyArrow for pandas input. With PyArrow available,
-  inferred customized pandas columns containing Rows use its whole-column inference.
-  This fallback covers unavailable modules detected by `pyarrow_available`, not an
-  installed PyArrow module that fails during import.
+- **pandas DataFrames without PyArrow** (intentional optional-dependency fallback). As in
+  PySpark, every pandas DataFrame, of any class (a subclass such as GeoPandas' `GeoDataFrame`)
+  and of any arrays (a third-party extension array such as BigQuery's `db_dtypes`), converts
+  with PySpark's conversion of each column to Arrow, in the session time zone, which PySpark
+  requires PyArrow for. When PyArrow is unavailable, as `pyarrow_available` detects it, the
+  native row path converts the frame instead, of its rows of Python values (the frame's
+  `astype(object)`, `where` and `notna`). As PySpark, it takes a naive `datetime64` column of a
+  timestamp field, or of no schema, in the session time zone, and as wall clocks of a
+  `timestamp_ntz` field, whatever the zone of the host. Otherwise it types Python values as
+  local rows are typed, where PySpark's conversion takes Arrow's types: a named Row is a struct,
+  not an array, a dict a map, not a struct, nested Decimals take precision 38 (see below), an
+  object column of naive datetimes is a timestamp, not a timestamp_ntz, nanoseconds are
+  truncated without the error of a safe cast, and its errors are its own. This fallback covers
+  unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
+  fails during import. The row path also converts a frame, with PyArrow, when the type names
+  that the conversion and the importer resolve are rebound, or the classes of the struct of
+  the schema customized (`accepts_pandas_schema`).
 - **Nested pandas Decimal inference and failures** (intentional; related change:
   SPARK-60696).
 
-  - **Inferred precision and scale.** On the native row fallback, inferred nested Decimal
-    fields in non-Row columns keep precision 38 and the greatest observed scale; PySpark
-    infers the smallest precision that covers the values. When PyArrow is available,
-    columns containing Rows follow Arrow's array inference, smallest covering Decimal
-    precision and incompatible-value errors instead. Without PyArrow, those columns retain
-    native struct inference and this precision difference. Increasing scale on the native
-    path can make a large value exceed precision 38 even when the first value's scale
-    could encode every value by discarding only trailing zeros. For example, with
-    `[Decimal("9" * 37 + ".0")]` followed by `[Decimal("1.0000000")]`, the first value
+  - **Inferred precision and scale.** On the native row path, without PyArrow, inferred nested
+    Decimal fields keep precision 38 and the greatest observed scale; PySpark infers the
+    smallest precision that covers the values, as this client does with PyArrow. Increasing
+    scale on the native path can make a large value exceed precision 38 even when the first
+    value's scale could encode every value by discarding only trailing zeros. For example,
+    with `[Decimal("9" * 37 + ".0")]` followed by `[Decimal("1.0000000")]`, the first value
     would need 44 digits at scale 7, beyond precision 38; the previous native fallback
     accepted both at scale 1. PySpark Connect 4.3.0 constructs a DataFrame for this
     example, but requesting its schema or collecting results raises `ArithmeticException`
@@ -41,50 +47,17 @@ difference is intentional or tracked for a fix.
   - **Scale beyond 38.** A later value that increases the scale beyond 38 raises
     `ValueError` before upload. This can reject later zero or trailing-zero values that
     the previous native fallback accepted at the first value's scale. This scale handling
-    applies to the non-Row columns and no-PyArrow fallback described above.
+    applies to the row path without PyArrow described above.
 
   - **Explicit schema.** With an explicit schema, a nested Decimal that does not fit
-    raises `PySparkRuntimeError` only on the native row fallback, for frames rejected by
-    `accepts_pandas_table`. Ordinary frames use PySpark's Arrow conversion and raise its
-    errors. Both paths reject an explicit-schema value that does not fit before a
-    relation is sent.
+    raises `PySparkRuntimeError` only on the native row path, without PyArrow. With it,
+    frames use PySpark's Arrow conversion and raise its errors. Both paths reject an
+    explicit-schema value that does not fit before a relation is sent.
 - **Multiple invalid pandas columns with an explicit Decimal field** (intentional,
-  SPARK-60696). On native row fallback, Decimal exactness is checked before the encoder
-  converts other fields. If an earlier non-Decimal column and a later Decimal column are
-  both invalid, this client reports the Decimal column first; PySpark reports the first
-  invalid column in schema order. Both reject the input before a relation is sent.
-- **Hook timing in customized pandas frames containing Rows** (intentional). With PyArrow
-  available, Row columns are prepared with Arrow before native scalar conversion.
-  Detection covers direct Row cells and nesting through list, tuple and dict instances,
-  including subclasses. Other cell containers are not traversed by this adaptation.
-  Discovery walks those containers with an explicit frame stack in base-iterator order.
-  Shared acyclic containers are visited at each occurrence. A cycle on the active path
-  raises `ValueError` with `cyclic container in inferred pandas Row discovery`, including
-  in Row-free cells. Ordinary discovery errors retain their column index for deferred
-  error handling and cause the frame to read Arrow settings even if discovery found no
-  Row. Native and Arrow conversions retain their existing nesting limits.
-  Replacing a nested dict value containing a Row hashes its original key and may compare
-  keys during lookup. Custom key hooks can therefore run during discovery; callback
-  counts follow normal Python dict behavior, including collisions.
-  Adapted frames are sent through the Arrow importer, with its size and chunk limits; frames
-  whose discovery finds neither Rows nor an error retain native conversion. Both take the
-  settings that `createDataFrame` reads in one request before it converts any column, as
-  official PySpark does, so that `spark.sql.session.localRelationCacheThreshold` selects
-  inline data or cached-artifact upload at any size, and a failure of that read is raised
-  before any column.
-
-  Other columns run native scalar conversion (`py_to_value`) at most once per cell.
-  Decimal typing can read original objects again: column typing calls `as_tuple()` on
-  values other than exact C Decimals, and Arrow rereads columns mixing Decimals with other
-  values. After an ordinary native scalar-conversion exception, later cells in that column
-  are not converted. Ordinary failures are retained and checked in column order alongside
-  inference and encoding, so the earliest invalid column wins. The deferred error
-  handling retains only Python `Exception` instances; other propagated exceptions, such
-  as `KeyboardInterrupt` from a Decimal hook, return immediately. On failing input,
-  callbacks in later columns may already have run, and callbacks in a Row column may
-  precede those in an earlier native column. Official PySpark converts complete columns
-  from left to right. The fallback's frame normalization hooks are preserved; callback
-  timing differs from official PySpark.
+  SPARK-60696). On the native row path, without PyArrow, Decimal exactness is checked before
+  the encoder converts other fields. If an earlier non-Decimal column and a later Decimal
+  column are both invalid, this client reports the Decimal column first; PySpark reports the
+  first invalid column in schema order. Both reject the input before a relation is sent.
 - **Decimal context hooks during local-row conversion** (intentional, SPARK-60704).
   Quantum and context objects are shared by Decimal type within one conversion and built
   when its first non-null, non-NaN value is converted. PySpark constructs a context for
@@ -99,19 +72,27 @@ difference is intentional or tracked for a fix.
   resolution, its class takes precedence even when the public `decimal.Decimal` is the
   pure-Python class. Values of that pure-Python class are then not recognized as
   Decimals: local-row Decimal conversion raises `AssertionError` and inference raises
-  `CANNOT_INFER_TYPE_FOR_FIELD`, while the native row fallback of pandas input (frames
-  that the Arrow path does not take) without a schema or with names only reads them as
-  doubles through `__float__`, potentially losing precision. Pandas frames on the Arrow
-  path convert them as PySpark does. Quantization also uses a quantum of the selected C
-  class, even when the public alias is rebound. The context factory and rounding mode
-  still come from the public `decimal` module at first use; mixing its pure-Python
-  context with explicit C Decimal values is unsupported. The text shortcut assumes
+  `CANNOT_INFER_TYPE_FOR_FIELD`, while the native row path of pandas input, without PyArrow,
+  without a schema or with names only reads them as doubles through `__float__`, potentially
+  losing precision. Pandas frames on the Arrow path convert them as PySpark does.
+  Quantization also uses a quantum of the selected C class, even when the public alias is
+  rebound. The context factory and rounding mode still come from the public `decimal`
+  module at first use; mixing its pure-Python context with explicit C Decimal values is
+  unsupported. The text shortcut assumes
   `_decimal.Decimal` is immutable, as on CPython; mutable implementations of that class
   on other interpreters are not covered. This can differ from PySpark when an
   application rebinds the public class alias during the process.
 
 ## `DataFrame`
 
+- **A session time zone that the server takes and Python's zone databases do not** (intentional;
+  the values are those of any other zone), such as `Z`, `PST`, `GMT+08:00` or `UTC+01:00`.
+  PySpark's `collect`, `toLocalIterator` and `first` of a timestamp localize the values in the
+  session time zone, looked up by its name in Python, so they raise pytz's
+  `UnknownTimeZoneError`, or, without pytz, PyArrow's `ArrowInvalid` ("The zoneinfo module or
+  pytz package must be installed."). This client's conversion of the rows reads no zone of the
+  session: it returns the instant in the local time zone of the client, as both clients do of a
+  zone that Python knows. `toArrow` and `toPandas` give the same values in both.
 - **The `__repr__` of a Column of a str that UTF-8 cannot encode** (intentional; the expressions
   of the core hold UTF-8). Such a str, of a name, a SQL string or a literal, fails the plans of the
   Column when they are built, as in PySpark, and its lone surrogates show escaped in the `__repr__`

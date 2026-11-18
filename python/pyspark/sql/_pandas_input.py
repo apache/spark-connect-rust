@@ -16,7 +16,16 @@
 #
 
 
-"""Conservative columnar pandas input; unsupported conversions use the row path."""
+"""The conversions of the pandas DataFrames of createDataFrame.
+
+As PySpark's createDataFrame, every pandas DataFrame, of any class, labels and arrays, converts
+with PySpark's conversion of each column to Arrow (`prepare_pandas_table` and
+`prepare_inferred_pandas_table`). The fast paths of this module take only plain frames of common
+columns, of which they make the tables that the conversion makes, faster; they decline the others,
+which take the conversion. The native row path of the session converts a frame only where the
+conversion does not run: without PyArrow, and when the type names that it resolves are rebound,
+or the classes of a struct schema customized (see `accepts_pandas_schema`).
+"""
 
 
 _ARROW_STRING_HOOKS = ("__arrow_array__", "__array__", "__getitem__", "isna",
@@ -136,7 +145,7 @@ def _arrow_string_class_is_canonical(cls):
 def _has_canonical_arrow_string_array(array):
     """Authenticate a column at this point without caching mutable hooks.
 
-    Callers may already have read frame.dtypes, as the native row path does.
+    Callers may already have read frame.dtypes.
     """
     # Column lookup can run customized pandas accessors between these checks.
     # An earlier column authenticates neither the next instance nor its class.
@@ -151,7 +160,7 @@ def _has_canonical_arrow_string_array(array):
 def _has_canonical_range_columns(columns, range_module):
     """Accept the default RangeIndex of column labels, which iterates its own int range.
 
-    As for an Index, subclasses and instance overrides keep the row path.
+    As for an Index, subclasses and instance overrides decline the fast paths.
     """
     RangeIndex = range_module.RangeIndex
     if (RangeIndex.__getattribute__ is not object.__getattribute__
@@ -363,7 +372,8 @@ def _has_canonical_label_array(backing, pa):
 
 
 def _has_canonical_columns(columns):
-    """Decline label containers whose row-path iteration can run custom hooks."""
+    """Decline label containers whose iteration can run custom hooks: the fast paths read the
+    labels, and run no user code, and a frame that they decline takes PySpark's conversion."""
     import sys
 
     import numpy as np
@@ -417,8 +427,8 @@ def _has_canonical_columns(columns):
             or "__iter__" in vars(columns)):
         return False
 
-    # The native row path iterates columns before normalizing any cells.
-    # Decline overrides without invoking them, so fallback preserves that order.
+    # Decline overrides without invoking them: PySpark's conversion, which the frame takes
+    # then, runs them in its own order.
     if (Index.__iter__ is not base_module.IndexOpsMixin.__iter__
             or not _defined_in(Index.__iter__, "__iter__", base_module)):
         return False
@@ -540,7 +550,7 @@ def prepare_int64_table(frame, schema):
 
     In particular, never coerce a mixed pandas frame to a common NumPy dtype:
     doing so can round integers above 2**53. Other dtypes and schema conversions
-    deliberately retain the existing row path until their semantics are covered.
+    are left to PySpark's conversion.
     ``verifySchema`` is ignored for pandas Arrow input, as in Spark Connect.
     """
     import sys
@@ -555,7 +565,7 @@ def prepare_int64_table(frame, schema):
         from pandas.core.series import Series
     except ImportError:
         # Older supported pandas versions call the NumPy wrapper PandasArray.
-        # Keep their existing row conversion when these concrete types are absent.
+        # Leave them to PySpark's conversion when these concrete types are absent.
         return None
 
     from pyspark._pyspark import (
@@ -691,8 +701,8 @@ def timestamp_columns(frame, schema):
     """Select only explicit, microsecond-aligned datetime64 timestamp columns.
 
     Inference (including TimestampNTZ preferences), object/mixed columns, other
-    units and submicrosecond truncation retain the row path. Check the integer
-    buffers separately so NaT's sentinel never participates in alignment tests.
+    units and submicrosecond truncation are left to PySpark's conversion. Check the
+    integer buffers separately so NaT's sentinel never participates in alignment tests.
     """
     import sys
     from types import FunctionType, GetSetDescriptorType, WrapperDescriptorType
@@ -733,8 +743,8 @@ def timestamp_columns(frame, schema):
             or type(schema) is not NativeStructType or not len(frame)
             or any(name in vars(frame) for name in ("astype", "notna", "where"))):
         return None
-    # The row path calls these normalization methods before reading cells: a frame that
-    # customizes them keeps that path, with their transformations and errors.
+    # A frame that customizes these methods of pandas is left to PySpark's conversion, which
+    # reads its columns as PySpark does.
     for name, module, qualname in (
         ("astype", generic_module, "NDFrame.astype"),
         ("notna", frame_module, "DataFrame.notna"),
@@ -750,8 +760,8 @@ def timestamp_columns(frame, schema):
         return None
     if not _has_canonical_columns(frame.columns):
         return None
-    # Native row conversion reads the native schema directly. The Arrow importer
-    # also consults Python descriptors and public or captured converter aliases.
+    # The Arrow importer consults Python descriptors and public or captured converter
+    # aliases, which must hold the native classes.
     if sys.modules.get("pyspark.sql.types") is not sql_types:
         return None
     importer = sys.modules.get("pyspark.sql._arrow_input")
@@ -859,14 +869,20 @@ def prepare_timestamp_table(columns, schema, timezone):
 
     Aware columns carry their own timezone. Naive columns are deliberately
     restricted to literal ``TZ=UTC`` and session ``UTC``, with a UTC runtime
-    zone: the existing row path uses the host zone, unlike Python Connect's
-    session-zone conversion (and DST fold policy).
+    zone, of which their values are the instants as they are; in another zone,
+    PySpark's conversion localizes them in the session zone, with its DST fold policy.
+    As that conversion of the column of a timestamp field, each column checks the version
+    of pandas (`require_minimum_pandas_version`), which warns of pandas 3.
     """
     import pyarrow as pa
+
+    from pyspark.sql.pandas.utils import require_minimum_pandas_version
 
     if not timestamp_columns_are_aware(columns):
         if timezone != "UTC" or not _timestamp_host_is_utc():
             return None
+    for _ in columns:
+        require_minimum_pandas_version()
     return pa.Table.from_arrays(
         [pa.array(column, type=pa.timestamp("us", tz="UTC"), from_pandas=True)
          for column in columns],
@@ -888,15 +904,16 @@ def prepare_float64_table(frame, schema):
     from pyspark import _pyspark as native
     from pyspark.sql import types as sql_types
 
-    # First-use Arrow imports outweigh the conversion saving for smaller frames.
-    # Keep those on the existing row path.
+    # First-use Arrow imports outweigh the conversion saving for smaller frames,
+    # which are left to PySpark's conversion.
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
             or type(schema) is not native.StructType or len(frame) < 100000
             or any(name in vars(frame) for name in ("astype", "notna"))):
         return None
     if not _has_canonical_columns(frame.columns):
         return None
-    # Class or instance conversion hooks must retain the row path's calls.
+    # A frame whose conversion hooks are customized, of its class or instance, is left to
+    # PySpark's conversion.
     for name, module in (("astype", generic_module), ("notna", frame_module),
                          ("where", generic_module)):
         method = getattr(DataFrame, name)
@@ -928,12 +945,13 @@ def prepare_float64_table(frame, schema):
     if any(type(column) is not Series or type(column.array) is not NumpyExtensionArray
            for column in columns):
         return None
-    # NumPy subclasses can customize the row path's astype conversion even
-    # inside pandas' concrete NumPy wrapper. Keep their hooks, accepting the
-    # row path's cost for subclasses such as np.memmap.
+    # NumPy subclasses can customize their conversion even inside pandas' concrete
+    # NumPy wrapper: they are left to PySpark's conversion, which converts them as
+    # PySpark does, at its cost for subclasses such as np.memmap.
     if any(type(column.array._ndarray) is not np.ndarray for column in columns):
         return None
-    # Native row conversion reads Rust fields, bypassing mutable Python accessors.
+    # The serialization reads Rust fields, bypassing mutable Python accessors, which must
+    # keep their behavior.
     for name in ("DoubleType", "StructField", "StructType"):
         cls = getattr(native, name)
         if (vars(sql_types).get(name) is not cls
@@ -957,8 +975,8 @@ def prepare_float64_table(frame, schema):
     ) or len(set(schema.names)) != width:
         return None
 
-    # Use the same pandas missing-value semantics as the row path, including the
-    # legacy use_inf_as_na option. Infinities and signed zero otherwise stay intact.
+    # Use pandas' missing-value semantics, as PySpark's conversion does (`isnull`), including
+    # the legacy use_inf_as_na option. Infinities and signed zero otherwise stay intact.
     valid = frame.notna()
     if any(not field.nullable and not valid.iloc[:, i].all()
            for i, field in enumerate(fields)):
@@ -978,7 +996,8 @@ def prepare_float64_table(frame, schema):
 
 
 def prepare_float64_input(frame, schema):
-    """Serialize supported double columns with the existing row transport policy."""
+    """Serialize supported double columns as an inline Arrow IPC stream, which the session sends
+    inline below the cache threshold."""
     table = prepare_float64_table(frame, schema)
     if table is None:
         return None
@@ -997,7 +1016,7 @@ def prepare_string_input(frame, schema):
 
     Inspect every object before Arrow conversion: str subclasses can override
     conversion hooks, and pandas treats several other objects as missing values.
-    Those cases must keep the existing row conversion and its error ordering.
+    Those cases are left to PySpark's conversion, with its values and errors.
     """
     from types import GetSetDescriptorType, MethodDescriptorType, WrapperDescriptorType
 
@@ -1012,13 +1031,13 @@ def prepare_string_input(frame, schema):
     from pyspark._pyspark import StructType as NativeStructType
     from pyspark.sql import types as sql_types
 
-    # Keep small frames on the established row path.
+    # Small frames are left to PySpark's conversion, and so are frames whose normalization
+    # methods are customized: the cells must be the frame's own.
     if (pd.DataFrame is not DataFrame or type(frame) is not DataFrame
             or type(schema) is not NativeStructType
             or len(frame) < 10000
             or any(name in vars(frame) for name in ("astype", "notna", "where"))):
         return None
-    # Preserve the direct normalization hooks used by the existing row path.
     for name, module in (("astype", generic_module), ("notna", frame_module),
                          ("where", generic_module)):
         method = getattr(DataFrame, name)
@@ -1027,8 +1046,8 @@ def prepare_string_input(frame, schema):
     if (DataFrame.astype is not generic_module.NDFrame.astype
             or DataFrame.where is not generic_module.NDFrame.where):
         return None
-    # The row path reads native fields directly. Class attributes are mutable,
-    # so customized Python schema access must not select a different Arrow path.
+    # The encoding reads native fields directly. Class attributes are mutable, so
+    # customized Python schema access is left to the general conversion.
     for name, cls in (("StringType", StringType), ("StructField", StructField),
                       ("StructType", NativeStructType)):
         if (getattr(sql_types, name, None) is not cls
@@ -1098,9 +1117,10 @@ def _arrow_string_table(frame, schema, dtypes):
     """The columns of a frame kept in pandas' Arrow string storage (string[pyarrow], and the
     str dtype of pandas 3), as an Arrow table of the schema, or None.
 
-    For the row path, pandas converts such a column from that storage, with its missing
-    values as None, so the storage holds the same values. Only pandas' own array classes are
-    trusted with their original conversion hooks: customization could convert differently.
+    PySpark's conversion takes such a column from that storage (`__arrow_array__`), with its
+    missing values as nulls, so the storage holds the same values. Only pandas' own array
+    classes are trusted with their original conversion hooks: customization could convert
+    differently, which the general conversion does as PySpark's.
     The caller's guards of prepare_string_input (frame, schema, names, size) have passed.
     """
     from pandas.core.arrays import string_ as string_module
@@ -1137,7 +1157,7 @@ def _arrow_string_table(frame, schema, dtypes):
         if values.type not in (pa.string(), pa.large_string()):
             return None
         try:
-            # Malformed offsets or UTF-8 keep the row path and its error.
+            # Malformed offsets or UTF-8 are left to the general conversion and its error.
             values.validate(full=True)
             # Check normal-string capacity before an upload. The importer
             # may widen back to large_string when useLargeVarTypes is enabled.
@@ -1158,7 +1178,7 @@ def prepare_date_table(frame, schema):
 
     Inspect every object before Arrow conversion: date subclasses can override
     conversion hooks, and pandas treats several other objects as missing values.
-    Those cases must keep the existing row conversion and its error ordering.
+    Those cases are left to PySpark's conversion, with its values and errors.
     """
     import sys
     from datetime import date
@@ -1200,8 +1220,8 @@ def prepare_date_table(frame, schema):
         return None
     if not _has_canonical_columns(frame.columns):
         return None
-    # The row path calls these normalization methods. Custom class or instance
-    # hooks must retain those calls and the values they produce on that path.
+    # A frame whose normalization methods are customized, of its class or instance, is left
+    # to PySpark's conversion.
     for name, module, qualname in (
         ("astype", generic_module, "NDFrame.astype"),
         ("notna", frame_module, "DataFrame.notna"),
@@ -1249,8 +1269,8 @@ def prepare_date_table(frame, schema):
     ):
         if any(namespace.get(name) is not cls for namespace in namespaces):
             return None
-    # The row path reads native fields directly. Class attributes are mutable,
-    # so customized Python schema access must not select a different Arrow path.
+    # The table reads native fields directly. Class attributes are mutable, so
+    # customized Python schema access is left to the general conversion.
     for name, cls in (("DateType", DateType), ("StructField", StructField),
                       ("StructType", NativeStructType)):
         if (getattr(sql_types, name, None) is not cls
@@ -1303,8 +1323,8 @@ def prepare_date_table(frame, schema):
                 or type(array.dtype) is not type(np.dtype("object"))
                 or array.dtype != np.dtype("object") or len(array) != len(frame)):
             return None
-        # Arrow rejects nulls in non-nullable fields; let the row path retain
-        # its existing behavior for that input instead.
+        # A null in a non-nullable field is left to the general conversion, which raises
+        # PySpark's error for it.
         if not all(type(value) is date or (value is None and field.nullable)
                    for value in array):
             return None
@@ -1403,87 +1423,21 @@ def _canonical_struct(schema):
     )
 
 
-def accepts_pandas_table(frame, schema):
-    """Whether `prepare_pandas_table` may convert this frame under this schema.
+def accepts_pandas_schema(schema=None):
+    """Whether PySpark's conversion converts a pandas frame under this schema: a DDL string or a
+    struct type, which `prepare_pandas_table` takes, or None, of no schema or of names, which
+    `prepare_inferred_pandas_table` takes.
 
-    Customized frames, column labels that are not plain (see `_has_canonical_columns`),
-    schema classes and rebound type names keep the row path, which reads them in its own
-    order. Conversion-hook authentication covers Arrow string storage, including inherited
-    hooks. Other pandas arrays retain the existing module-origin checks; rebinding their
-    canonical classes' hooks is not covered here.
-    The conversion and importer resolve type names by lookup, so each namespace must hold
-    the native classes. The schema is the caller's object or a DDL string, which is parsed.
+    As PySpark's createDataFrame, it converts every pandas DataFrame, of any class, labels and
+    arrays: only the schema and the type names are checked. The conversion and the importer
+    resolve the type classes by their names, so each namespace must still hold the native
+    classes (`_converter_namespaces_intact`), and they read a struct through its classes, which
+    must keep their own behavior (`_canonical_struct`); otherwise the row path, which reads the
+    native types, converts the frame.
     """
-    return accepts_pandas_frame(frame) and (type(schema) is str or _canonical_struct(schema))
-
-
-def accepts_pandas_index_table(schema):
-    """Whether `prepare_pandas_table` may convert a frame of no columns under this schema, a
-    struct of no fields.
-
-    Such a frame is the table of its index, which PySpark's conversion takes of any frame, and
-    the row path has no cells of it to read, so the class of the frame does not matter. The
-    schema and the namespaces are checked as in `accepts_pandas_table`.
-    """
-    return (type(schema) is str or _canonical_struct(schema)) and _converter_namespaces_intact()
-
-
-def accepts_pandas_frame(frame):
-    """Check frame eligibility for explicit or inferred Arrow schema conversion."""
-    import sys
-
-    import pandas as pd
-    from pandas.core.frame import DataFrame
-
-    if pd.DataFrame is not DataFrame or type(frame) is not DataFrame:
+    if schema is not None and type(schema) is not str and not _canonical_struct(schema):
         return False
-    if not _has_canonical_columns(frame.columns):
-        return False
-    # Custom extension-array/dtype classes outside pandas and NumPy keep the row path.
-    # Canonical non-string array classes retain the inherited module-origin policy.
-    # Arrow string storage already loads its defining module; do not import optional
-    # Arrow dependencies merely to inspect unrelated pandas columns.
-    # The generic routes assume this sys.modules entry still defines live arrays;
-    # removing or replacing that module while keeping old instances is not covered.
-    string_arrow = sys.modules.get("pandas.core.arrays.string_arrow")
-    arrow_strings = () if string_arrow is None else tuple(
-        vars(string_arrow).get(name)
-        for name in ("ArrowStringArray", "ArrowStringArrayNumpySemantics")
-    )
-    # Direct type checks bypass __subclasscheck__ and __mro__ metaclass callbacks.
-    # Use the real type: isinstance can also consult a custom __class__ property.
-    # Non-class aliases cannot own array storage.
-    arrow_strings = tuple(cls for cls in arrow_strings
-                          if type.__subclasscheck__(type, type(cls)))
-    for i in range(len(frame.columns)):
-        column = frame.iloc[:, i]
-        array = column.array
-        # A canonical class can still have customized hooks. Generic explicit and inferred
-        # schema routes must preserve the specialized routes' row fallback.
-        if (any(type.__subclasscheck__(cls, type(array)) for cls in arrow_strings)
-                and not _has_canonical_arrow_string_array(array)):
-            return False
-        if not all(type(value).__module__.split(".")[0] in ("pandas", "numpy")
-                   for value in (array, column.dtype)):
-            return False
-    # The native row path normalizes cells through these methods, which a customized class
-    # or instance keeps on the row path.
-    from pandas.core import frame as frame_module
-    from pandas.core import generic as generic_module
-
-    if any(name in vars(frame) for name in ("astype", "notna", "where")):
-        return False
-    for name, module, qualname in (
-        ("astype", generic_module, "NDFrame.astype"),
-        ("notna", frame_module, "DataFrame.notna"),
-        ("where", generic_module, "NDFrame.where"),
-    ):
-        method = getattr(DataFrame, name)
-        if not _defined_in(method, name, module) or method.__qualname__ != qualname:
-            return False
-    if not _converter_namespaces_intact():
-        return False
-    return True
+    return _converter_namespaces_intact()
 
 
 def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types):
@@ -1495,9 +1449,8 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
     and overflow messages. A frame of no columns, under a struct of no fields, is the table of
     `pa.RecordBatch.from_pandas`, which keeps its number of rows, with a column of each level
     of its index unless it is a RangeIndex, and is not renamed; the caller checks its number
-    of columns, as PySpark does. The caller checks the frame with `accepts_pandas_table`, or,
-    of no columns, with `accepts_pandas_index_table`, and the column count against the schema
-    first.
+    of columns, as PySpark does. The caller checks the schema with `accepts_pandas_schema`, and
+    the number of columns of the frame against the fields first.
     """
     import pyarrow as pa
 
@@ -1556,8 +1509,9 @@ def arrow_decimal_column(values, dtype, name):
 
 
 def pyarrow_available():
-    """Whether pyarrow can be imported, checked without importing it. Without it, a frame
-    without a schema keeps the row path, which does not need it."""
+    """Whether pyarrow can be imported, checked without importing it. Without it, the row path
+    converts every pandas frame: it does not need PyArrow, which PySpark's conversion and the
+    fast paths of plain frames do."""
     import importlib.util
 
     try:
@@ -1566,204 +1520,25 @@ def pyarrow_available():
         return False
 
 
-def inferred_pandas_row_columns(rows, width, candidates=None):
-    """Return inferred columns containing Rows, with their values viewed as sequences.
+def localized_timestamp_cells(frame, index, timezone):
+    """The cells of the naive datetime64 column `index` of a frame that the row path converts,
+    as the UTC Timestamps of their instants, and None of NaT.
 
-    Walk only the columns of the indices ``candidates``, in increasing order, when
-    given: the caller passes those whose pandas dtype can hold Python objects.
-
-    Present tuple-backed Rows positionally. Keep field metadata out of this
-    conversion, as Arrow does when it infers a column containing tuple Rows.
-    Find Rows directly in cells or nested in list, tuple and dict instances, including
-    subclasses. Other cell containers are not traversed by this adaptation.
-    Walk iteratively and reject cycles among these containers with ValueError. Ordinary
-    discovery errors retain their column index, even if that column contains no Row.
-    Frames have already run the row path's normalization hooks. Inspect only the plain
-    rows produced by pandas; customized row containers keep their existing conversion.
+    PySpark's conversion takes the values of such a column as times of the session time zone,
+    `timezone`, of a timestamp field or of no schema (`_check_series_convert_timestamps_internal`,
+    of the standard time of an ambiguous time, and of the errors of pandas for a time that the
+    zone skips and for a zone that it does not know), whatever the zone of the host, and as wall
+    clocks of a timestamp_ntz field, of no `timezone`.
     """
-    from pyspark._pyspark import Row
+    from pyspark.sql.pandas.types import _check_series_convert_timestamps_internal
 
-    unchanged = object()
-
-    class Frame:
-        """One active container; non-Row output is copied only after a changed child."""
-
-        __slots__ = ("original", "kind", "iterator", "items", "index", "pending",
-                     "key", "pending_value", "next_is_value", "visiting_key", "key_has_row")
-
-        def __init__(self, original, kind, iterator):
-            self.original = original
-            self.kind = kind
-            self.iterator = iterator
-            self.items = [] if kind == "row" else None
-            self.index = -1
-            self.pending = None
-            self.key = None
-            self.pending_value = None
-            self.next_is_value = False
-            self.visiting_key = False
-            self.key_has_row = False
-
-        def next_child(self):
-            if self.kind == "dict":
-                if self.next_is_value:
-                    self.next_is_value = False
-                    self.visiting_key = False
-                    return self.pending_value
-                self.key, self.pending_value = next(self.iterator)
-                self.next_is_value = True
-                self.visiting_key = True
-                return self.key
-            self.pending = next(self.iterator)
-            self.index += 1
-            return self.pending
-
-        def accept(self, converted):
-            if self.kind == "row":
-                self.items.append(self.pending if converted is unchanged else converted)
-            elif self.kind == "dict":
-                if self.visiting_key:
-                    self.key_has_row = converted is not unchanged
-                elif self.key_has_row or converted is not unchanged:
-                    if self.items is None:
-                        self.items = dict.copy(self.original)
-                    # Keep invalid Row keys intact for Arrow's rejection/cause wording.
-                    if converted is not unchanged:
-                        # Replacement hashes the original key and may compare keys;
-                        # callback counts follow normal Python dict behavior.
-                        self.items[self.key] = converted
-            elif converted is not unchanged:
-                if self.items is None:
-                    # This single shallow copy does not repeat discovery or scalar hooks.
-                    self.items = (list.copy(self.original) if self.kind == "list"
-                                  else list(tuple.__iter__(self.original)))
-                self.items[self.index] = converted
-
-        def finish(self):
-            if self.items is None:
-                return unchanged
-            return tuple(self.items) if self.kind == "row" or self.kind == "tuple" else self.items
-
-    def frame_for(value):
-        cls = type(value)
-        # Exact builtin scalars cannot contain Rows. Keep checking every cell:
-        # a later value in the same column may contain a Row at any nesting depth.
-        # Identity checks avoid invoking a custom metaclass's equality or hash hooks.
-        if (value is None or cls is bool or cls is int or cls is float
-                or cls is complex or cls is str or cls is bytes or cls is bytearray):
-            return None
-        if type.__subclasscheck__(Row, cls):
-            return Frame(value, "row", tuple.__iter__(value))
-        if type.__subclasscheck__(list, cls):
-            return Frame(value, "list", list.__iter__(value))
-        if type.__subclasscheck__(tuple, cls):
-            return Frame(value, "tuple", tuple.__iter__(value))
-        if type.__subclasscheck__(dict, cls):
-            return Frame(value, "dict", iter(dict.items(value)))
-        return None
-
-    def scalar(value):
-        cls = type(value)
-        return (value is None or cls is bool or cls is int or cls is float
-                or cls is complex or cls is str or cls is bytes or cls is bytearray)
-
-    def flat(value):
-        # Exact builtin scalars, and exact lists, tuples and dicts of them, the most
-        # common cells, cannot hold a Row: skip their walk. Read them with the same
-        # builtin iterators as the walk, so that no other hook of a cell runs.
-        cls = type(value)
-        if cls is list:
-            return all(map(scalar, list.__iter__(value)))
-        if cls is tuple:
-            return all(map(scalar, tuple.__iter__(value)))
-        if cls is dict:
-            return all(scalar(key) and scalar(item) for key, item in dict.items(value))
-        return scalar(value)
-
-    def positional(value):
-        if flat(value):
-            return unchanged
-        first = frame_for(value)
-        if first is None:
-            return unchanged
-        stack = [first]
-        # Active IDs detect back edges, not shared acyclic subtrees. Frames retain
-        # their original objects so these IDs cannot be reused during traversal.
-        active = {id(value)}
-        while stack:
-            frame = stack[-1]
-            try:
-                child = frame.next_child()
-            except StopIteration:
-                converted = frame.finish()
-                active.remove(id(frame.original))
-                stack.pop()
-                if not stack:
-                    return converted
-                stack[-1].accept(converted)
-                continue
-            if id(child) in active:
-                raise ValueError("cyclic container in inferred pandas Row discovery")
-            nested = frame_for(child)
-            if nested is None:
-                frame.accept(unchanged)
-            else:
-                active.add(id(child))
-                stack.append(nested)
-
-    if any(type(row) is not list or len(row) != width for row in list.__iter__(rows)):
-        return []
-    # Identities of the exact builtin scalar types. A column whose cells have only these
-    # types holds no Row, so its cells are not walked. Compare identities, not types:
-    # hashing a type could run a metaclass hook.
-    scalar_ids = frozenset(map(id, (type(None), bool, int, float, complex, str, bytes,
-                                    bytearray)))
-    columns = []
-    for index in range(width) if candidates is None else candidates:
-        cells = [row[index] for row in list.__iter__(rows)]
-        if set(map(id, map(type, cells))) <= scalar_ids:
-            continue
-        values = None
-        try:
-            for row_index, cell in enumerate(cells):
-                converted = positional(cell)
-                if converted is not unchanged:
-                    if values is None:
-                        values = list(cells)
-                    values[row_index] = converted
-        except Exception as error:
-            # Retain the column index so an earlier native failure still wins.
-            columns.append((index, error))
-            continue
-        if values is not None:
-            columns.append((index, values))
-    return columns
-
-
-def prepare_inferred_pandas_row_column(values, name, timezone, safecheck,
-                                       prefers_large_types, infer_dict_as_map,
-                                       prefer_timestamp_ntz):
-    """Infer an adapted Row column with the same whole-column Arrow conversion as pandas.
-
-    Other columns keep native conversion, including their string and Decimal hooks.
-    Use the existing pandas helper for recursive inference, mixed-value errors and the
-    inferPandasDictAsMap option rather than guessing an element type from the first Row.
-    Return the inferred Spark type and the original one-column Arrow table.
-    """
-    from pandas.core.frame import DataFrame
-
-    from pyspark.sql.pandas.types import from_arrow_type
-
-    frame = DataFrame({name: values}, dtype=object)
-    table, _ = prepare_inferred_pandas_table(
-        frame, timezone, safecheck, prefers_large_types, infer_dict_as_map,
-        prefer_timestamp_ntz,
-    )
-    # Infer from the resulting Arrow timezone, as the server does: a timestamp
-    # without a timezone is NTZ. Dict-as-map coercion has already applied the
-    # session preference to the Arrow type. Keep the arrays to avoid re-encoding
-    # naive wall clocks, large variable-width types or nested nullability.
-    return from_arrow_type(table.column(0).type), table
+    column = frame.iloc[:, index]
+    if timezone is None:
+        # The wall clocks, as the instants of the same clocks of UTC.
+        localized = column.dt.tz_localize("UTC")
+    else:
+        localized = _check_series_convert_timestamps_internal(column, timezone)
+    return localized.astype(object).where(localized.notna(), None).tolist()
 
 
 def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_types,
@@ -1775,8 +1550,8 @@ def prepare_inferred_pandas_table(frame, timezone, safecheck, prefers_large_type
     intervals, for the server to infer the types of the table. With `inferPandasDictAsMap`
     (`infer_dict_as_map`), the frame converts under the struct of the types that Arrow infers,
     where a column of dicts is a map, and the table takes the names and the Arrow types of the
-    struct. Returns the table and the names of that struct, or None. The caller checks the
-    frame with `accepts_pandas_frame`.
+    struct. Returns the table and the names of that struct, or None. The caller checks
+    `accepts_pandas_schema` first.
     """
     import pandas as pd
     import pyarrow as pa

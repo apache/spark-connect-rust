@@ -1223,12 +1223,6 @@ pub struct PySparkSession {
     gc_ready: crate::gc::GcReady,
 }
 
-struct PandasArrowColumn {
-    data_type: DataType,
-    arrays: Vec<arrow::array::ArrayRef>,
-    field: arrow::datatypes::Field,
-}
-
 struct PandasDecimalContext<'a> {
     dtype: &'a str,
     label: &'a str,
@@ -1267,48 +1261,6 @@ impl PandasArrowSettings {
                 timestamp_ntz,
             ))?
             .extract()
-    }
-
-    fn prepare_row_column<'py>(
-        &self,
-        helper: &Bound<'py, PyAny>,
-        values: &Bound<'py, PyAny>,
-        name: &str,
-    ) -> PyResult<(DataType, Bound<'py, PyAny>)> {
-        let (timezone, large, timestamp_ntz) = self.helper_options();
-        let result = helper
-            .getattr("prepare_inferred_pandas_row_column")?
-            .call1((
-                values,
-                name,
-                timezone,
-                self.safecheck,
-                large,
-                self.infer_dict_as_map,
-                timestamp_ntz,
-            ))?;
-        let (spark_type, table): (Bound<'py, PyAny>, Bound<'py, PyAny>) = result.extract()?;
-        Ok((crate::types::py_to_data_type(&spark_type)?, table))
-    }
-}
-
-struct PandasRowColumns {
-    columns: Vec<Option<PandasArrowColumn>>,
-    selected: Vec<bool>,
-    errors: Vec<Option<PyErr>>,
-    settings: Option<PandasArrowSettings>,
-    row_count: usize,
-}
-
-impl PandasRowColumns {
-    fn empty(width: usize, row_count: usize) -> Self {
-        Self {
-            columns: (0..width).map(|_| None).collect(),
-            selected: vec![false; width],
-            errors: (0..width).map(|_| None).collect(),
-            settings: None,
-            row_count,
-        }
     }
 }
 
@@ -1576,13 +1528,14 @@ impl PySparkSession {
         }))
     }
 
-    /// A DataFrame of a non-empty pandas DataFrame under an explicit struct schema of the
-    /// same width, converted as PySpark does (`prepare_pandas_table`): each column by its Arrow
+    /// A DataFrame of a non-empty pandas DataFrame, of any class, under an explicit struct
+    /// schema, converted as PySpark does (`prepare_pandas_table`): each column by its Arrow
     /// conversion (session time zone, safe casts), then the table cast to the schema, which the
-    /// importer sends as Arrow. None when the width differs, which the row path reports with
+    /// importer sends as Arrow. A frame of another width than the struct raises
     /// `AXIS_LENGTH_MISMATCH` rather than drop columns, as PySpark's conversion does
-    /// (`dev/parity/known-differences.md`), and for a frame that the row path converts: an
-    /// empty one, or a customized one.
+    /// (`dev/parity/known-differences.md`). None for a frame that the row path converts: an empty
+    /// one, and one of a schema whose classes, or the type names that the conversion resolves,
+    /// are customized (`accepts_pandas_schema`).
     fn create_from_pandas_arrow(
         &self,
         py: Python<'_>,
@@ -1591,23 +1544,22 @@ impl PySparkSession {
         fields: &[StructField],
         options: Option<&spark_connect::ArrowInputOptions>,
     ) -> PyResult<Option<PyDataFrame>> {
-        if data.len()? == 0 || data.getattr("columns")?.len()? != fields.len() {
+        if data.len()? == 0 {
             return Ok(None);
         }
-        // The frame and the caller's schema object, whose customized classes keep the row path,
-        // but a frame of no columns under a struct of no fields, which is the table of its index
-        // whatever its class.
+        // PySpark's conversion zips the columns with the fields: it drops the columns past them,
+        // and fails the rename of fewer. A frame of no columns under a struct of no fields is the
+        // table of its index, whose columns are checked below, as PySpark checks them.
+        let width = data.getattr("columns")?.len()?;
+        if width != fields.len() {
+            return Err(crate::infer::axis_length_mismatch(py, fields.len(), width));
+        }
         let helper = py.import("pyspark.sql._pandas_input")?;
-        let accepted = if fields.is_empty() {
-            helper
-                .getattr("accepts_pandas_index_table")?
-                .call1((schema,))?
-        } else {
-            helper
-                .getattr("accepts_pandas_table")?
-                .call1((data, schema))?
-        };
-        if !accepted.is_truthy()? {
+        if !helper
+            .getattr("accepts_pandas_schema")?
+            .call1((schema,))?
+            .is_truthy()?
+        {
             return Ok(None);
         }
         // Of the settings that createDataFrame read in one request, as PySpark reads them.
@@ -1677,10 +1629,9 @@ impl PySparkSession {
     /// types of the Arrow data. The columns are named with `toDF`: by their labels, as strings,
     /// or by the names, and `_n` for the n-th column past them.
     ///
-    /// None for a frame that the row path converts: an empty one, a customized one
-    /// (`accepts_pandas_frame`), and any without pyarrow, which the row path does not need.
-    /// Without pyarrow, that path retains native Row struct inference; with it,
-    /// customized Row columns can use Arrow after the frame's normalization hooks.
+    /// None for a frame that the row path converts: an empty one, and one whose type names that
+    /// the conversion resolves are rebound (`accepts_pandas_schema`). Any other frame, of any
+    /// class, labels and arrays, takes this conversion, as PySpark's.
     fn create_from_pandas_inferred(
         &self,
         py: Python<'_>,
@@ -1697,11 +1648,10 @@ impl PySparkSession {
             return Ok(None);
         }
         let helper = py.import("pyspark.sql._pandas_input")?;
-        if !helper.getattr("pyarrow_available")?.call0()?.is_truthy()?
-            || !helper
-                .getattr("accepts_pandas_frame")?
-                .call1((data,))?
-                .is_truthy()?
+        if !helper
+            .getattr("accepts_pandas_schema")?
+            .call0()?
+            .is_truthy()?
         {
             return Ok(None);
         }
@@ -1853,11 +1803,13 @@ impl PySparkSession {
         Ok(PyDataFrame::new(df))
     }
 
-    /// A DataFrame of a pandas DataFrame: its rows as lists with NaN and NaT as None, typed
-    /// by the first non-null value of each column, and its column labels, as strings, or the
-    /// given names, applied with `toDF`.
-    /// With PyArrow, schema-free columns containing Rows use whole-column Arrow inference
-    /// and encoding, and the frame is sent through the Arrow importer.
+    /// A DataFrame of a pandas DataFrame on the row path, which converts it where PySpark's
+    /// conversion does not: without PyArrow, which the path does not need; when the type names
+    /// that the conversion resolves are rebound, or the classes of a struct schema customized
+    /// (`accepts_pandas_schema`); and of an empty frame, of which PySpark converts no data, or of
+    /// an atomic schema, of which it has no Arrow type. Its rows are lists with NaN and NaT as
+    /// None, typed by the first non-null value of each column, and its column labels, as
+    /// strings, or the given names, applied with `toDF`.
     fn create_from_pandas(
         &self,
         py: Python<'_>,
@@ -1865,36 +1817,12 @@ impl PySparkSession {
         spec: Spec,
         options: Option<spark_connect::ArrowInputOptions>,
     ) -> PyResult<PyDataFrame> {
-        // Without a struct schema, PySpark infers the Arrow type of each column, which has
-        // no int64 for a Python int beyond the 64-bit range.
-        let inferred = !matches!(spec, Spec::Struct(_));
-        let infer_dict_as_map_allowed = matches!(spec, Spec::None);
-        let mut columns = Vec::new();
-        for label in data.getattr("columns")?.try_iter()? {
-            columns.push(label?.str()?.extract::<String>()?);
-        }
-        // The dtype of each column, which types a column without values, as Arrow does.
-        let mut dtypes = Vec::new();
-        for dtype in data.getattr("dtypes")?.try_iter()? {
-            dtypes.push(dtype?.str()?.extract::<String>()?);
-        }
-        // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
-        let notna = data.call_method0("notna")?;
-        let obj = data.call_method1("astype", ("object",))?;
-        let replaced = obj.call_method1("where", (notna, py.None()))?;
-        let values = replaced.getattr("values")?.call_method0("tolist")?;
-        let data = values.cast_into::<PyList>()?;
-        let empty = data.is_empty();
-        let cannot_infer_empty = || {
-            crate::column::raise_pyspark(py, "PySparkValueError", "CANNOT_INFER_EMPTY_SCHEMA", &[])
-        };
-        // The given fields, and the names that toDF applies, which empty data does not get.
-        // The labels, which errors of a column name, as PySpark names its pandas.Series.
-        let labels = columns.clone();
-        let (given, names) = match spec {
-            Spec::Atomic(atomic) if !empty => {
+        // As PySpark, which has no Arrow type of an atomic schema of a frame of rows, and reads
+        // none of them.
+        if let Spec::Atomic(atomic) = &spec {
+            if data.len()? > 0 {
                 // pyspark reports str() of the parsed type, which is its repr.
-                let data_type = crate::types::data_type_to_py(py, &atomic)?
+                let data_type = crate::types::data_type_to_py(py, atomic)?
                     .bind(py)
                     .repr()?
                     .extract::<String>()?;
@@ -1905,6 +1833,67 @@ impl PySparkSession {
                     &[("data_type", &data_type)],
                 ));
             }
+        }
+        // Without a struct schema, PySpark infers the Arrow type of each column, which has
+        // no int64 for a Python int beyond the 64-bit range.
+        let inferred = !matches!(spec, Spec::Struct(_));
+        let mut columns = Vec::new();
+        for label in data.getattr("columns")?.try_iter()? {
+            columns.push(label?.str()?.extract::<String>()?);
+        }
+        // The dtype of each column, which types a column without values, as Arrow does.
+        let mut dtypes = Vec::new();
+        for dtype in data.getattr("dtypes")?.try_iter()? {
+            dtypes.push(dtype?.str()?.extract::<String>()?);
+        }
+        let frame = data;
+        // df.astype(object).where(df.notna(), None).values.tolist() -> rows with None for NA.
+        let notna = data.call_method0("notna")?;
+        let obj = data.call_method1("astype", ("object",))?;
+        let replaced = obj.call_method1("where", (notna, py.None()))?;
+        let values = replaced.getattr("values")?.call_method0("tolist")?;
+        let data = values.cast_into::<PyList>()?;
+        let empty = data.is_empty();
+        // Each row and each cell is a step of the budget of the conversion, as in
+        // `create_from_local`.
+        let budget = crate::interrupt::ConversionBudget::default();
+        // As PySpark's conversion takes them, a naive datetime64 column of a timestamp field, or
+        // of no schema, holds times of the session time zone, and one of a timestamp_ntz field
+        // wall clocks, whatever the zone of the host, in which `py_to_value` takes a naive
+        // datetime: their cells are the UTC Timestamps of those instants instead
+        // (`localized_timestamp_cells`).
+        if let Some(timezone) = options.as_ref().and_then(|options| options.timezone()) {
+            if !empty {
+                let helper = py.import("pyspark.sql._pandas_input")?;
+                for (i, dtype) in dtypes.iter().enumerate() {
+                    if !dtype.starts_with("datetime64[") || dtype.contains(',') {
+                        continue;
+                    }
+                    let zone = match &spec {
+                        Spec::Struct(fields) => match fields.get(i).map(|field| &field.data_type) {
+                            Some(DataType::Timestamp) => Some(timezone),
+                            Some(DataType::TimestampNtz) => None,
+                            _ => continue,
+                        },
+                        _ => Some(timezone),
+                    };
+                    let cells = helper
+                        .getattr("localized_timestamp_cells")?
+                        .call1((frame, i, zone))?;
+                    for (row, cell) in data.iter().zip(cells.try_iter()?) {
+                        budget.step(py)?;
+                        row.set_item(i, cell?)?;
+                    }
+                }
+            }
+        }
+        let cannot_infer_empty = || {
+            crate::column::raise_pyspark(py, "PySparkValueError", "CANNOT_INFER_EMPTY_SCHEMA", &[])
+        };
+        // The given fields, and the names that toDF applies, which empty data does not get.
+        // The labels, which errors of a column name, as PySpark names its pandas.Series.
+        let labels = columns.clone();
+        let (given, names) = match spec {
             Spec::Atomic(atomic) => (Some(vec![crate::infer::value_field(atomic)]), None),
             Spec::Struct(fields) => {
                 let names = fields.iter().map(|f| f.name.clone()).collect();
@@ -1926,89 +1915,24 @@ impl PySparkSession {
             (None, Some(names)) => names.clone().into(),
             (None, None) => Vec::new().into(),
         };
-        // Arrow treats Rows in an inferred pandas column as sequences, without reading
-        // their field names. Adapt only those columns after the frame's normalization
-        // hooks; explicit schemas and the other native column converters stay unchanged.
-        let PandasRowColumns {
-            columns: mut row_columns,
-            selected: selected_row_columns,
-            errors: mut column_errors,
-            settings: row_settings,
-            row_count,
-        } = if given.is_none() {
-            self.prepare_pandas_row_columns(
-                py,
-                &data,
-                &row_names,
-                &labels,
-                &dtypes,
-                infer_dict_as_map_allowed,
-                options.as_ref(),
-            )?
-        } else {
-            PandasRowColumns::empty(row_names.len(), data.len())
-        };
-        let has_row_columns = selected_row_columns.iter().any(|selected| *selected);
-        let mut rows: Vec<Row> = Vec::with_capacity(row_count);
-        // Each row and each cell is a step of the budget of the conversion, as in
-        // `create_from_local`.
-        let budget = crate::interrupt::ConversionBudget::default();
+        let mut rows: Vec<Row> = Vec::with_capacity(data.len());
         for row in data.iter() {
             budget.step(py)?;
-            if has_row_columns && rows.len() >= row_count {
-                return Err(pyo3::exceptions::PyValueError::new_err(
-                    "normalized pandas row count changed during conversion",
-                ));
-            }
             let values = row
                 .try_iter()?
-                .enumerate()
-                .map(|(column_index, v)| {
+                .map(|v| {
                     let v = v?;
                     budget.step(py)?;
-                    if has_row_columns && column_index >= row_names.len() {
-                        // Row detection validated plain list widths before column conversion.
-                        // A hook can change a list before traversal discovers its final width.
-                        return Err(pyo3::exceptions::PyValueError::new_err(
-                            "normalized pandas row width changed during conversion",
-                        ));
-                    }
-                    if selected_row_columns.get(column_index) == Some(&true) {
-                        return Ok(Value::Null);
-                    }
-                    if column_errors.get(column_index).is_some_and(Option::is_some) {
-                        // Do not run later scalar hooks in an already failing column.
-                        return Ok(Value::Null);
-                    }
-                    let converted = (|| {
-                        if inferred {
-                            if let Ok(i) = v.cast_exact::<pyo3::types::PyInt>() {
-                                if i.extract::<i64>().is_err() {
-                                    return Err(pyo3::exceptions::PyOverflowError::new_err(
-                                        "Python int too large to convert to C long",
-                                    ));
-                                }
+                    if inferred {
+                        if let Ok(i) = v.cast_exact::<pyo3::types::PyInt>() {
+                            if i.extract::<i64>().is_err() {
+                                return Err(pyo3::exceptions::PyOverflowError::new_err(
+                                    "Python int too large to convert to C long",
+                                ));
                             }
                         }
-                        py_to_value(&v)
-                    })();
-                    match converted {
-                        Err(error)
-                            if has_row_columns
-                                && error.is_instance_of::<pyo3::exceptions::PyException>(py) =>
-                        {
-                            // Run native scalar conversion at most once per cell, then
-                            // report errors in column order alongside Arrow failures.
-                            // Decimal typing can still reread the original Python values.
-                            if let Some(slot) = column_errors.get_mut(column_index) {
-                                *slot = Some(error);
-                                Ok(Value::Null)
-                            } else {
-                                Err(error)
-                            }
-                        }
-                        other => other,
                     }
+                    py_to_value(&v)
                 })
                 .collect::<PyResult<Vec<_>>>()?;
             if values.len() != row_names.len() {
@@ -2021,60 +1945,18 @@ impl PySparkSession {
             }
             rows.push(StructValue::new(row_names.clone(), values).into());
         }
-        if has_row_columns && rows.len() != row_count {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "normalized pandas row count changed during conversion",
-            ));
-        }
-        let converted_row_count = rows.len();
-        // Move the validated rows into columns once. Encoding each native column at
-        // its field position preserves error priority over failures in later Row columns.
-        let mut native_columns = if has_row_columns {
-            let mut columns: Vec<Vec<Value>> = (0..row_names.len())
-                .map(|_| Vec::with_capacity(converted_row_count))
-                .collect();
-            for row in std::mem::take(&mut rows) {
-                for (column, value) in columns.iter_mut().zip(row.into_values()) {
-                    column.push(value);
-                }
-            }
-            Some(columns)
-        } else {
-            None
-        };
         // A given struct wins; otherwise each field takes the type of its first non-null
         // value (empty input has a struct schema, checked above), but for these, which are
         // typed as Arrow types a pandas column, as PySpark does: a column of Decimals takes
         // the precision and scale of all its values, and a column without values the type of
-        // its dtype. With PyArrow, Row columns already carry whole-column Arrow types.
-        let mut arrow_columns = Vec::new();
-        let mut arrow_fields = Vec::new();
+        // its dtype.
         let fields = match given {
             Some(fields) => fields,
             None => {
                 let mut fields: Vec<StructField> = Vec::with_capacity(row_names.len());
                 for (i, name) in row_names.iter().enumerate() {
-                    if let Some(error) = column_errors[i].take() {
-                        return Err(error);
-                    }
-                    if let Some(PandasArrowColumn {
-                        data_type,
-                        arrays,
-                        field: arrow_field,
-                    }) = row_columns[i].take()
-                    {
-                        fields.push(StructField {
-                            name: name.clone(),
-                            data_type,
-                            nullable: arrow_field.is_nullable(),
-                            metadata: Default::default(),
-                        });
-                        arrow_columns.push(arrays);
-                        arrow_fields.push(arrow_field.with_name(name.clone()));
-                        continue;
-                    }
                     // As PySpark, whose Arrow conversion of the column fails for a null map key.
-                    let cells = || pandas_column_values(&rows, native_columns.as_deref(), i);
+                    let cells = || rows.iter().filter_map(move |row| row.get(i));
                     if cells().any(has_null_map_key) {
                         return Err(PyErr::from_value(
                             py.import("pyspark.errors")?
@@ -2122,157 +2004,54 @@ impl PySparkSession {
                             ))?;
                         let (precision, scale, values): (i32, i32, Vec<Bound<'_, PyAny>>) =
                             typed.extract()?;
-                        if native_columns.is_some() && values.len() != converted_row_count {
-                            return Err(pyo3::exceptions::PyValueError::new_err(
-                                "normalized pandas column has an unexpected row count",
-                            ));
-                        }
                         let values = values
                             .iter()
                             .map(|v| py_to_value(v))
                             .collect::<PyResult<Vec<Value>>>()?;
-                        if let Some(columns) = native_columns.as_mut() {
-                            columns[i] = values;
-                        } else {
-                            rows = std::mem::take(&mut rows)
-                                .into_iter()
-                                .zip(values)
-                                .map(|(row, value)| {
-                                    let mut cells = row.into_values();
-                                    cells[i] = value;
-                                    StructValue::new(row_names.clone(), cells).into()
-                                })
-                                .collect();
-                        }
+                        rows = std::mem::take(&mut rows)
+                            .into_iter()
+                            .zip(values)
+                            .map(|(row, value)| {
+                                let mut cells = row.into_values();
+                                cells[i] = value;
+                                StructValue::new(row_names.clone(), cells).into()
+                            })
+                            .collect();
                         DataType::Decimal { precision, scale }
                     };
-                    let field = StructField {
+                    fields.push(StructField {
                         name: name.clone(),
                         data_type,
                         nullable: true,
                         metadata: Default::default(),
-                    };
-                    if let Some(columns) = native_columns.as_mut() {
-                        self.check_pandas_decimal_column(
-                            py,
-                            columns[i].iter(),
-                            &field,
-                            PandasDecimalContext {
-                                dtype: dtypes.get(i).map_or("object", String::as_str),
-                                label: labels.get(i).unwrap_or(name),
-                                // Of the one read of the settings, as PySpark's.
-                                safecheck: options
-                                    .as_ref()
-                                    .map(|options| options.safecheck())
-                                    .or(row_settings.as_ref().map(|settings| settings.safecheck)),
-                            },
-                        )?;
-                        let column_names: std::sync::Arc<[String]> = vec![name.clone()].into();
-                        let column_rows: Vec<Row> = std::mem::take(&mut columns[i])
-                            .into_iter()
-                            .map(|value| StructValue::new(column_names.clone(), vec![value]).into())
-                            .collect();
-                        let column_schema = DataType::Struct {
-                            fields: vec![field.clone()],
-                        };
-                        let batch = py
-                            .detach(|| {
-                                spark_connect::session::rows_to_arrow_batch(
-                                    &column_rows,
-                                    &column_schema,
-                                )
-                                .map_err(Box::new)
-                            })
-                            .to_pyerr()?;
-                        arrow_columns.push(vec![batch.column(0).clone()]);
-                        arrow_fields.push(batch.schema().field(0).clone());
-                    }
-                    fields.push(field);
+                    });
                 }
                 fields
             }
         };
-        if !has_row_columns {
-            for (i, field) in fields.iter().enumerate() {
-                self.check_pandas_decimal_column(
-                    py,
-                    rows.iter().filter_map(|row| row.get(i)),
-                    field,
-                    PandasDecimalContext {
-                        dtype: dtypes.get(i).map_or("object", String::as_str),
-                        label: labels.get(i).unwrap_or(&field.name),
-                        // Of the one read of the settings, as PySpark's.
-                        safecheck: options.as_ref().map(|options| options.safecheck()),
-                    },
-                )?;
-            }
+        for (i, field) in fields.iter().enumerate() {
+            self.check_pandas_decimal_column(
+                py,
+                rows.iter().filter_map(|row| row.get(i)),
+                field,
+                PandasDecimalContext {
+                    dtype: dtypes.get(i).map_or("object", String::as_str),
+                    label: labels.get(i).unwrap_or(&field.name),
+                    // Of the one read of the settings, as PySpark's.
+                    safecheck: options.as_ref().map(|options| options.safecheck()),
+                },
+            )?;
         }
         let schema = DataType::Struct { fields };
-        let df = if has_row_columns {
-            // Columns may have different chunk boundaries. Slice their buffers at
-            // shared boundaries without copying or narrowing variable-width arrays.
-            let arrow_schema = std::sync::Arc::new(arrow::datatypes::Schema::new(arrow_fields));
-            let mut chunks = vec![0usize; arrow_columns.len()];
-            let mut offsets = vec![0usize; arrow_columns.len()];
-            // Use the validated Rust row count, not a list that scalar hooks may change.
-            let mut remaining = converted_row_count;
-            let mut batches = Vec::new();
-            while remaining > 0 {
-                let mut length = remaining;
-                for (i, column) in arrow_columns.iter().enumerate() {
-                    while column
-                        .get(chunks[i])
-                        .is_some_and(|array| offsets[i] == array.len())
-                    {
-                        chunks[i] += 1;
-                        offsets[i] = 0;
-                    }
-                    let array = column.get(chunks[i]).ok_or_else(|| {
-                        pyo3::exceptions::PyValueError::new_err(
-                            "normalized pandas column has an unexpected row count",
-                        )
-                    })?;
-                    length = length.min(array.len() - offsets[i]);
-                }
-                let arrays = arrow_columns
-                    .iter()
-                    .enumerate()
-                    .map(|(i, column)| column[chunks[i]].slice(offsets[i], length))
-                    .collect();
-                batches.push(
-                    arrow::record_batch::RecordBatch::try_new(arrow_schema.clone(), arrays)
-                        .map_err(|error| {
-                            pyo3::exceptions::PyValueError::new_err(error.to_string())
-                        })?,
-                );
-                for offset in &mut offsets {
-                    *offset += length;
-                }
-                remaining -= length;
+        let df = interruptible(py, &self.session, || {
+            match options.as_ref() {
+                Some(options) => self
+                    .session
+                    .create_dataframe_with_options(rows, schema, options),
+                None => self.session.create_dataframe(rows, schema),
             }
-            let settings = row_settings.ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("missing pandas Row Arrow options")
-            })?;
-            interruptible(py, &self.session, || {
-                self.session
-                    .create_dataframe_from_arrow_with_options(
-                        batches,
-                        Some(schema),
-                        &settings.options,
-                    )
-                    .map_err(Box::new)
-            })?
-        } else {
-            interruptible(py, &self.session, || {
-                match options.as_ref() {
-                    Some(options) => self
-                        .session
-                        .create_dataframe_with_options(rows, schema, options),
-                    None => self.session.create_dataframe(rows, schema),
-                }
-                .map_err(Box::new)
-            })?
-        };
+            .map_err(Box::new)
+        })?;
         Ok(PyDataFrame::new(match names {
             Some(names) if !names.is_empty() => {
                 df.to_df(names.iter().map(String::as_str).collect::<Vec<_>>())
@@ -2298,100 +2077,6 @@ impl PySparkSession {
             infer_dict_as_map: allow_dict_as_map && options.infer_pandas_dict_as_map(),
             options,
         })
-    }
-
-    /// Prepare only selected Row columns, retaining ordinary failures by column index.
-    /// Non-Exception control flow propagates immediately, as it does in Python helpers.
-    fn prepare_pandas_row_columns(
-        &self,
-        py: Python<'_>,
-        data: &Bound<'_, PyList>,
-        row_names: &[String],
-        labels: &[String],
-        dtypes: &[String],
-        allow_dict_as_map: bool,
-        options: Option<&spark_connect::ArrowInputOptions>,
-    ) -> PyResult<PandasRowColumns> {
-        let mut prepared = PandasRowColumns::empty(row_names.len(), data.len());
-        // Only a column of Python objects can hold a Row: walk the cells of those alone,
-        // so that frames of numeric, boolean, string or datetime columns pay nothing.
-        let candidates: Vec<usize> = (0..row_names.len())
-            .filter(|&i| {
-                matches!(
-                    pandas_dtype_type(dtypes.get(i).map_or("object", String::as_str)),
-                    DataType::Null
-                )
-            })
-            .collect();
-        if candidates.is_empty() {
-            return Ok(prepared);
-        }
-        let helper = py.import("pyspark.sql._pandas_input")?;
-        if !helper.getattr("pyarrow_available")?.call0()?.is_truthy()? {
-            return Ok(prepared);
-        }
-        let columns: Vec<(usize, Bound<'_, PyAny>)> = helper
-            .getattr("inferred_pandas_row_columns")?
-            .call1((data, row_names.len(), candidates))?
-            .extract()?;
-        let Some((first_index, _)) = columns.first() else {
-            return Ok(prepared);
-        };
-        for (index, _) in &columns {
-            let selected = prepared.selected.get_mut(*index).ok_or_else(|| {
-                pyo3::exceptions::PyValueError::new_err(
-                    "inferred pandas Row column has an unexpected index",
-                )
-            })?;
-            *selected = true;
-        }
-        let settings = match self.pandas_arrow_settings(py, allow_dict_as_map, options) {
-            Ok(settings) => settings,
-            Err(error) if error.is_instance_of::<pyo3::exceptions::PyException>(py) => {
-                prepared.errors[*first_index] = Some(error);
-                return Ok(prepared);
-            }
-            Err(error) => return Err(error),
-        };
-        for (index, values) in columns {
-            let column = (|| -> PyResult<PandasArrowColumn> {
-                if values.is_instance_of::<pyo3::exceptions::PyBaseException>() {
-                    return Err(PyErr::from_value(values));
-                }
-                let (data_type, table) = settings.prepare_row_column(
-                    &helper,
-                    &values,
-                    labels.get(index).unwrap_or(&row_names[index]),
-                )?;
-                let batches = crate::pyarrow_import::table_batches(&table)?;
-                if batches.iter().any(|batch| batch.num_columns() != 1)
-                    || batches.iter().map(|batch| batch.num_rows()).sum::<usize>()
-                        != prepared.row_count
-                {
-                    return Err(pyo3::exceptions::PyValueError::new_err(
-                        "inferred pandas Row column has an unexpected shape",
-                    ));
-                }
-                let field = batches[0].schema().field(0).clone();
-                Ok(PandasArrowColumn {
-                    data_type,
-                    arrays: batches
-                        .iter()
-                        .map(|batch| batch.column(0).clone())
-                        .collect(),
-                    field,
-                })
-            })();
-            match column {
-                Ok(column) => prepared.columns[index] = Some(column),
-                Err(error) if error.is_instance_of::<pyo3::exceptions::PyException>(py) => {
-                    prepared.errors[index] = Some(error);
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        prepared.settings = Some(settings);
-        Ok(prepared)
     }
 
     /// Keep a Decimal column exact, without invoking its original Python objects again.
@@ -2772,9 +2457,19 @@ impl PySparkSession {
             } else {
                 None
             };
-            // Guarded integer columns share the existing Arrow importer. Schema
-            // validation above and unsupported pandas conversions keep master's
-            // normal ordering and row fallback.
+            // PySpark converts every pandas DataFrame with PyArrow, as the fast paths of plain
+            // frames below do: without it, the row path converts the frame.
+            if !py
+                .import("pyspark.sql._pandas_input")?
+                .getattr("pyarrow_available")?
+                .call0()?
+                .is_truthy()?
+            {
+                return self.create_from_pandas(py, data, spec, options);
+            }
+            // Guarded integer columns share the existing Arrow importer. Schema validation above
+            // keeps its ordering, and the frames that the fast paths decline take PySpark's
+            // conversion below.
             let table = py
                 .import("pyspark.sql._pandas_input")?
                 .getattr("prepare_int64_table")?
@@ -2976,8 +2671,9 @@ impl PySparkSession {
                     _ => frame,
                 });
             }
-            // An explicit struct schema converts with PySpark's Arrow conversion, which
-            // reports the same values and errors. Other schemas keep the row path.
+            // As PySpark, every other frame, of any class, labels and arrays, converts with its
+            // conversion of each column to Arrow: of the struct of an explicit schema, or of the
+            // types that Arrow infers. The row path takes the rest (`create_from_pandas`).
             if let (Spec::Struct(fields), Some(schema)) = (&spec, schema) {
                 if let Some(frame) =
                     self.create_from_pandas_arrow(py, data, schema, fields, options.as_ref())?
@@ -4291,20 +3987,6 @@ fn pandas_dtype_type(dtype: &str) -> DataType {
         },
         _ => DataType::Null,
     }
-}
-
-/// Read one pandas column from either retained rows or the transposed Row-frame values.
-/// The row vector is empty when columns are present; these views never overlap.
-fn pandas_column_values<'a>(
-    rows: &'a [Row],
-    columns: Option<&'a [Vec<Value>]>,
-    index: usize,
-) -> impl Iterator<Item = &'a Value> {
-    rows.iter().filter_map(move |row| row.get(index)).chain(
-        columns
-            .into_iter()
-            .flat_map(move |columns| columns[index].iter()),
-    )
 }
 
 /// The decimal type of column `i` of pandas rows, as Arrow infers it from all its Decimals:

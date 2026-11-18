@@ -3306,6 +3306,37 @@ def test_create_dataframe_of_pandas_infers_the_types_of_arrow_as_pyspark(session
     rows = session.createDataFrame(naive).selectExpr("CAST(t AS STRING) AS s").collect()
     assert rows == [Row(s="2020-07-01 12:00:00")]
 
+@pytest.mark.parametrize("kind", ["subclass", "third-party array"])
+def test_create_dataframe_of_customized_pandas_takes_the_session_time_zone_as_pyspark(
+    session, kind
+):
+    # As PySpark Connect's, which converts every pandas DataFrame, of any class (a GeoPandas
+    # frame) and any arrays (a third-party extension array, as of db_dtypes), with its Arrow
+    # conversion: a naive datetime is a time of the session time zone, whatever the zone of the
+    # client. Official, of the session zone America/Los_Angeles: these instants.
+    import numpy as np
+    import pandas as pd
+
+    times = pd.to_datetime(["2021-06-01 12:00:00"])
+    if kind == "subclass":
+        frame = type("CustomizedFrame", (pd.DataFrame,), {})({"t": times, "id": [1]})
+    else:
+        array_class = type("ThirdPartyIntegerArray", (pd.arrays.IntegerArray,),
+                           {"__module__": __name__})
+        values = array_class(np.array([1], dtype="int64"), np.array([False]))
+        frame = pd.DataFrame({"t": times, "id": pd.Series(values)})
+    previous = session.conf.get("spark.sql.session.timeZone")
+    session.conf.set("spark.sql.session.timeZone", "America/Los_Angeles")
+    try:
+        for schema in (None, "t timestamp, id long"):
+            df = session.createDataFrame(frame, schema)
+            assert df.schema.simpleString() == "struct<t:timestamp,id:bigint>"
+            rows = df.selectExpr("CAST(unix_micros(t) AS STRING) AS us", "id").collect()
+            assert rows == [Row(us="1622574000000000", id=1)]
+    finally:
+        session.conf.set("spark.sql.session.timeZone", previous)
+
+
 def test_create_dataframe_types_pandas_columns_as_pyspark(session):
     from decimal import Decimal
 
