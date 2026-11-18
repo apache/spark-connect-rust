@@ -233,7 +233,8 @@ miss, and one whose type PySpark narrows before it assigns it goes into `ATTRIBU
 attribute that mypy does not type, and on a name that a stub declares and the drop-in does not
 have at run time: give the drop-in the name if it is PySpark's API, list it in `DROPPED` of the
 generator if it is PySpark's plumbing that no annotation needs, or in `TYPE_ONLY` of the test,
-with the reason, if PySpark's annotations need it. It also runs mypy on a user's application.
+with the reason, if PySpark's annotations need it. It also runs mypy, and pyright where it is
+installed (as `coverage.yml` installs it), on a user's application.
 
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).
