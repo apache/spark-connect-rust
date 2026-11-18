@@ -141,8 +141,9 @@ exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are n
 their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where
 `protobuf` is installed, the runtime also adds the files of the protos to protobuf's default pool,
 so that a plugin's generated modules that import them build, and wraps protobuf's builder, so that
-those modules get the runtime's classes, whose fields take ours as they are: their files are added
-to the runtime's pool at run time (`pbmsg::pool::register`; see `docs/compatibility.md`).
+those modules (of protoc 3.20 and later, which build their classes with it) get the runtime's
+classes, whose fields take ours as they are: their files are added to the runtime's pool at run
+time (`pbmsg::pool::register`; see `docs/compatibility.md`).
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
 that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the shallow
 placeholder that `DataFrame._plan.plan(session)` gives of the relation of a DataFrame, which the

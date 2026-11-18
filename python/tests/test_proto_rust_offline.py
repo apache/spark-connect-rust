@@ -2770,7 +2770,9 @@ def test_messages_of_plugins_take_the_messages_of_the_package_as_upbs(plugin):
 def test_generated_modules_of_plugins_build_with_protobufs_pure_python_implementation(plugin):
     # With protobuf's pure-Python implementation, whose generated code sets the serialized ranges
     # and options of the module's descriptors (_DELETEFROMTABLE._serialized_start), which stay
-    # protobuf's, the module of the plugin has the classes of the runtime too, of upb's messages.
+    # protobuf's, the module of the plugin has the classes of the runtime too, of upb's messages,
+    # and a message of the runtime equals protobuf's message of the type of the same contents (a
+    # message of protobuf's class of base.proto's Table), on either side, and no other one.
     _, base_pb2, upb = plugin
     script = textwrap.dedent(
         """
@@ -2784,12 +2786,19 @@ def test_generated_modules_of_plugins_build_with_protobufs_pure_python_implement
         from tests.test_proto_rust_offline import _plugin_cases
 
         cases = _plugin_cases(_rust._CLASSES.__getitem__, base_pb2.Table)
+        table = cases[4].table
         print(json.dumps({
             "implementation": api_implementation.Type(),
             "runtime": issubclass(plugin_pb2.DeleteFromTable, _pyspark.ProtoMessage),
             "protobuf": not issubclass(base_pb2.Table, _pyspark.ProtoMessage),
             "start": plugin_pb2._DELETEFROMTABLE._serialized_start,
             "bytes": [case.SerializeToString().hex() for case in cases],
+            "equal": [
+                table == base_pb2.Table(path="/p", options={"k": "v"}),
+                base_pb2.Table(path="/p", options={"k": "v"}) == table,
+                table != base_pb2.Table(path="/p"),
+                table == base_pb2.Table,
+            ],
         }))
         """
     )
@@ -2809,11 +2818,13 @@ def test_generated_modules_of_plugins_build_with_protobufs_pure_python_implement
     assert out["start"] > 0
     real = _plugin_cases(upb, upb("thirdparty.Table"))
     assert out["bytes"] == [r.SerializeToString(deterministic=True).hex() for r in real]
+    assert out["equal"] == [True, True, True, False]
 
 
 def _add_plugin_file(name, dependencies, fields, syntax="proto3"):
     """The file ``name`` of protobuf's default pool, as a generated module adds it, of one message
-    ``M`` of ``fields``, each its name and its message type, of the package of the file's stem."""
+    ``M`` of ``fields``, each its name and its message type, of the package of the file's stem. A
+    file of the syntax ``editions`` is of the edition 2023."""
     from google.protobuf import descriptor_pb2, descriptor_pool
 
     pool = descriptor_pool.Default()
@@ -2825,6 +2836,8 @@ def _add_plugin_file(name, dependencies, fields, syntax="proto3"):
     file = descriptor_pb2.FileDescriptorProto(
         name=name, package=package, dependency=dependencies, syntax=syntax
     )
+    if syntax == "editions":
+        file.edition = descriptor_pb2.EDITION_2023
     message = file.message_type.add(name="M")
     for number, (field, type_name) in enumerate(fields, 1):
         message.field.add(
@@ -3052,6 +3065,169 @@ def test_protobufs_own_classes_of_a_plugins_file_take_the_messages_through_bytes
     back = proto.Relation()
     back.CopyFrom(unpacked.input)
     assert back == relation and back.SerializeToString() == plugin.input.SerializeToString()
+
+
+def test_messages_of_a_type_of_protobufs_classes_and_of_the_runtimes_compare_as_upbs(plugin):
+    # upb has one class of a type of protobuf's default pool, so its messages of the type compare
+    # by their contents. The runtime has a class of the type besides protobuf's, which protobuf's
+    # own lookups give (message_factory, symbol_database, the pickles of upb's nested messages) and
+    # which the module of a plugin's file that imports no proto of Spark Connect keeps (base.proto,
+    # as Delta Lake's): a message of the runtime equals protobuf's message of the type of the same
+    # contents, on either side of == and !=, and so in a container and a map, as upb's messages of
+    # one class do, and equals no message of another pool (of another class for upb too), class or
+    # other object.
+    from google.protobuf import descriptor_pool, message_factory
+
+    plugin_pb2, base_pb2, upb = plugin
+    pool = descriptor_pool.Default()
+
+    def protobufs(full_name):
+        return message_factory.GetMessageClass(pool.FindMessageTypeByName(full_name))
+
+    scan = plugin_pb2.Scan(table=base_pb2.Table(path="/p", options={"k": "v"}))
+    table = base_pb2.Table(path="/p", options={"k": "v"})
+    other = base_pb2.Table(path="/q")
+    assert type(scan.table) is not base_pb2.Table
+    assert scan.table == table and table == scan.table
+    assert not (scan.table != table) and not (table != scan.table)
+    assert scan.table != other and other != scan.table and not (scan.table == other)
+    real_scan = upb("thirdparty.Scan")(table={"path": "/p", "options": {"k": "v"}})
+    real_table = upb("thirdparty.Table")(path="/p", options={"k": "v"})
+    assert real_scan.table == real_table and real_scan.table != upb("thirdparty.Table")(path="/q")
+
+    relation = proto.Relation(sql=proto.SQL(query="select 1"))
+    of_protobuf = protobufs("spark.connect.Relation")(sql={"query": "select 1"})
+    assert relation == of_protobuf and of_protobuf == relation and not (relation != of_protobuf)
+    delete = plugin_pb2.DeleteFromTable(target=relation)
+    made = protobufs("thirdparty.DeleteFromTable").FromString(delete.SerializeToString())
+    assert delete == made and made == delete
+
+    merge = plugin_pb2.MergeIntoTable(defaults={"d": {"expression_string": {"expression": "1"}}})
+    merge.matched_actions.add().update_action.SetInParent()
+    merge.matched_actions.add().delete_action.SetInParent()
+    action = protobufs("thirdparty.MergeIntoTable.Action")()
+    action.delete_action.SetInParent()
+    expression = protobufs("spark.connect.Expression")(expression_string={"expression": "1"})
+    assert action in merge.matched_actions and merge.matched_actions[1] == action
+    assert merge.matched_actions == [merge.matched_actions[0], action]
+    assert merge.defaults["d"] == expression and merge.defaults == {"d": expression}
+    merge.matched_actions.remove(action)
+    assert len(merge.matched_actions) == 1 and action not in merge.matched_actions
+    real_merge = upb("thirdparty.MergeIntoTable")(
+        defaults={"d": {"expression_string": {"expression": "1"}}},
+        matched_actions=[{"update_action": {}}],
+    )
+    assert merge.SerializeToString() == real_merge.SerializeToString(deterministic=True)
+
+    # A message of the type of another pool, which upb's == of its other class gives
+    # NotImplemented of, is not equal, nor is a class, a dict or another object.
+    assert table != real_table and not (table == real_table)
+    assert scan.table != real_table and real_table != scan.table and not (scan.table == real_table)
+    for value in (base_pb2.Table, type(scan.table), {"path": "/p"}, None, "/p"):
+        assert not (scan.table == value) and scan.table != value
+
+    # A message of protobuf's of the type of a field named keys (Expression.Literal.Map), which is
+    # not a mapping, initializes a field as it does upb's.
+    literal_map = protobufs("spark.connect.Expression.Literal.Map")(
+        keys=[{"integer": 1}], values=[{"integer": 2}]
+    )
+    literal = proto.Expression.Literal(map=literal_map)
+    real_literal = upb("spark.connect.Expression.Literal")(
+        map={"keys": [{"integer": 1}], "values": [{"integer": 2}]}
+    )
+    assert literal.SerializeToString() == real_literal.SerializeToString()
+    assert literal.map == literal_map and literal_map == literal.map
+
+
+def test_modules_that_keep_protobufs_classes_take_the_runtimes_messages_through_bytes(upb):
+    # A module of a plugin's file that keeps protobuf's classes (a proto3 file that imports a
+    # well-known type other than Any and Timestamp, a proto2 file or one of editions) and imports
+    # a file whose module has the runtime's classes (a proto3 file that imports the protos of
+    # Spark Connect) takes the messages of that module only through their bytes or dicts, as it
+    # takes those of pyspark.sql.connect.proto: its fields of their type are protobuf's, where
+    # upb's take the messages of its one class of the type as they are. Its messages and those of
+    # the runtime of the same contents compare equal, as upb's of one class do.
+    from google.protobuf import descriptor_pb2, duration_pb2
+    from google.protobuf import message as protobuf_message
+
+    held = _add_plugin_file(
+        "tests/importers/runtime_held.proto",
+        ["spark/connect/relations.proto"],
+        [("input", ".spark.connect.Relation")],
+    )
+    dependency = [("held", ".tests.runtime_held.M")]
+    kept = [
+        _add_plugin_file(
+            "tests/importers/with_duration.proto",
+            [held.name, duration_pb2.DESCRIPTOR.name],
+            dependency + [("timeout", ".google.protobuf.Duration")],
+        ),
+        _add_plugin_file("tests/importers/of_proto2.proto", [held.name], dependency, "proto2"),
+    ]
+    if hasattr(descriptor_pb2, "EDITION_2023"):
+        kept.append(
+            _add_plugin_file(
+                "tests/importers/of_editions.proto", [held.name], dependency, "editions"
+            )
+        )
+    runtime_class = _build_generated_module(held)["M"]
+    assert issubclass(runtime_class, _pyspark.ProtoMessage)
+    real = _upb_classes_of(
+        [(duration_pb2.DESCRIPTOR.serialized_pb, duration_pb2.__name__)]
+        + [(file.serialized_pb, file.name[: -len(".proto")].replace("/", ".") + "_pb2")
+           for file in [held] + kept]
+    )
+    message = runtime_class(input={"sql": {"query": "select 1"}})
+    for file in kept:
+        kept_class = _build_generated_module(file)["M"]
+        assert issubclass(kept_class, protobuf_message.Message), file.name
+        assert not issubclass(kept_class, _pyspark.ProtoMessage), file.name
+        with pytest.raises(TypeError):
+            kept_class(held=message)
+        with pytest.raises(TypeError):
+            kept_class().held.CopyFrom(message)
+        with pytest.raises(TypeError):
+            kept_class().held.MergeFrom(message)
+        through_bytes = kept_class()
+        through_bytes.held.ParseFromString(message.SerializeToString())
+        through_dict = kept_class(held={"input": {"sql": {"query": "select 1"}}})
+        assert through_bytes == through_dict
+        assert through_bytes.held == message and message == through_dict.held
+        # upb's take the messages of the class of the type of the file that they import as they are.
+        real_kept = real[kept_class.DESCRIPTOR.full_name]
+        real_message = real["tests.runtime_held.M"](input={"sql": {"query": "select 1"}})
+        assert real_kept(held=real_message).SerializeToString() == through_dict.SerializeToString()
+
+
+def test_modules_of_protoc_before_3_20_keep_protobufs_classes(upb):
+    # A module of protoc before 3.20 (plugin_protos/old_style_pb2.py, of protoc 3.19's form) makes
+    # its classes with protobuf's reflection.GeneratedProtocolMessageType, not with protobuf's
+    # builder, which the drop-in wraps, so its classes stay protobuf's, of a file that imports the
+    # protos of Spark Connect too: they take the messages of pyspark.sql.connect.proto only through
+    # their bytes or dicts, where upb's take PySpark's as they are, and their messages and those of
+    # the runtime of the same contents compare equal.
+    from google.protobuf import message as protobuf_message
+    from plugin_protos import old_style_pb2
+
+    old_style = old_style_pb2.OldStyleRelation
+    assert issubclass(old_style, protobuf_message.Message)
+    assert not issubclass(old_style, _pyspark.ProtoMessage)
+    with pytest.raises(KeyError):
+        _pyspark._proto_message_descriptor("thirdparty.old.OldStyleRelation")
+    relation = proto.Relation(sql=proto.SQL(query="select 1"))
+    with pytest.raises(TypeError):
+        old_style(input=relation)
+    with pytest.raises(TypeError):
+        old_style().input.CopyFrom(relation)
+    through_bytes = old_style(name="n")
+    through_bytes.input.ParseFromString(relation.SerializeToString())
+    through_dict = old_style(input={"sql": {"query": "select 1"}}, name="n")
+    assert through_bytes == through_dict and through_dict.input == relation
+    # As upb's of a pool of their own, as the official client's of its upb classes of the protos.
+    real = _upb_classes_of([(old_style_pb2.DESCRIPTOR.serialized_pb, old_style_pb2.__name__)])
+    real_relation = real["spark.connect.Relation"](sql={"query": "select 1"})
+    real_old_style = real["thirdparty.old.OldStyleRelation"](input=real_relation, name="n")
+    assert real_old_style.SerializeToString() == through_dict.SerializeToString()
 
 
 def test_example_plugins_are_messages_of_the_runtime(upb):
