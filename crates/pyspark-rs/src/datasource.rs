@@ -72,8 +72,10 @@ impl PyDataSourceRegistration {
     #[allow(non_snake_case)]
     fn register(&self, py: Python<'_>, dataSource: &Bound<'_, PyAny>) -> PyResult<()> {
         // The name of the classmethod `name()`, as PySpark Connect's: the AttributeError of a
-        // class without one.
-        let name: String = dataSource.call_method0("name")?.extract()?;
+        // class without one. Its `CommonInlineUserDefinedDataSource` sets the name in the string
+        // field of its command, as protobuf converts it, before it pickles the class: bytes of
+        // UTF-8 too, and protobuf's error of another value, such as an int or None.
+        let name = crate::str_argument(&dataSource.call_method0("name")?)?;
 
         // Cloudpickle the class
         let command = py_cloudpickle(py, dataSource)?;

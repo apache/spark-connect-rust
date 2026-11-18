@@ -745,6 +745,44 @@ pub(crate) fn py_to_proto_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType
     Ok(data_type)
 }
 
+/// The core type of `value`, the return type of a UDTF, as PySpark's `PythonUDTF.to_plan` converts
+/// it with `pyspark_types_to_proto_types`, of the `UnparsedDataType` that it makes of a str: a str
+/// is a DDL string that the server parses, which protobuf's string field takes as UTF-8, so one
+/// that UTF-8 cannot encode raises its `UnicodeEncodeError`; and a DataType is converted as
+/// [`py_to_proto_data_type`] converts it. None for another value, such as an int, of which
+/// PySpark raises [`not_a_type_error`].
+pub(crate) fn udtf_return_type(value: &Bound<'_, PyAny>) -> PyResult<Option<DataType>> {
+    if value.is_instance_of::<pyo3::types::PyString>() {
+        return Ok(Some(DataType::Unparsed {
+            data_type_string: crate::str_argument(value)?,
+        }));
+    }
+    if value.is_instance_of::<PyDataType>() {
+        return py_to_proto_data_type(value).map(Some);
+    }
+    Ok(None)
+}
+
+/// The error of PySpark's `pyspark_types_to_proto_types` of `value`, which is not a DataType: the
+/// `UNSUPPORTED_OPERATION` of `data type {value}`, of the str of the value as it is, a lone
+/// surrogate too, or the error of that str.
+pub(crate) fn not_a_type_error(value: &Bound<'_, PyAny>) -> PyErr {
+    let py = value.py();
+    let operation = match value
+        .str()
+        .and_then(|text| pyo3::types::PyString::new(py, "data type ").add(text))
+    {
+        Ok(operation) => operation,
+        Err(err) => return err,
+    };
+    crate::errors::raise_pyspark_of(
+        py,
+        "PySparkValueError",
+        "UNSUPPORTED_OPERATION",
+        &[("operation", &operation)],
+    )
+}
+
 /// The repr of the first type of the type object `obj` of `data_type`, `obj` itself or one
 /// nested in it, which PySpark's conversion of a plan's type (`pyspark_types_to_proto_types`)
 /// does not take: a `StructField` as a type, or a type of its class only; None if there is none.
@@ -760,23 +798,6 @@ pub(crate) fn unsendable_field_repr(
     nested
         .map(|field| field.repr().and_then(|text| text.extract::<String>()))
         .transpose()
-}
-
-/// The `UNSUPPORTED_OPERATION` that PySpark's `pyspark_types_to_proto_types` raises of the type
-/// object `obj` of `data_type`, of the first type in it that it has no proto of (see
-/// [`unsendable_field_repr`]), as the error of a plan that a request raises when it builds the
-/// plan ([`crate::plan_args::PlanArgs::record`]); None if it has a proto of each.
-pub(crate) fn unsendable_type_error(
-    obj: &Bound<'_, PyAny>,
-    data_type: &DataType,
-) -> PyResult<Option<spark_connect_core::error::SparkError>> {
-    Ok(unsendable_field_repr(obj, data_type)?.map(|shown| {
-        spark_connect_core::error::SparkError::classed(
-            spark_connect_core::error::SparkErrorKind::ValueError,
-            "UNSUPPORTED_OPERATION",
-            &[("operation", &format!("data type {shown}"))],
-        )
-    }))
 }
 
 /// The first `StructField` that is a type of `data_type`, in the depth-first order of its fields,
@@ -5879,10 +5900,12 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
         });
     }
     // `UnparsedDataType` of `pyspark.sql.connect.types`, a pure-Python subclass of the base, is
-    // a DDL string that the server parses.
+    // a DDL string that the server parses, which PySpark sets in the string field of the proto of
+    // the type as protobuf converts it: bytes of UTF-8 too, and protobuf's `TypeError` of another
+    // value.
     if is_unparsed(obj)? {
         return Ok(DataType::Unparsed {
-            data_type_string: obj.getattr("data_type_string")?.extract()?,
+            data_type_string: crate::str_argument(&obj.getattr("data_type_string")?)?,
         });
     }
     // The bare base `DataType` is matched LAST: concrete subclasses (which all share the

@@ -1837,6 +1837,43 @@ def test_registered_udtfs_are_called_from_sql_as_pyspark(session):
     assert session.sql("SELECT * FROM doubled_udtf(21L)").collect() == [Row(y=42)]
 
 
+def test_data_sources_are_registered_of_names_as_protobuf_converts_them_as_pyspark(session):
+    # As PySpark's register_data_source, which sets the name() of the class in the string field
+    # of its command as protobuf converts it: a str subclass is the name as it is, and of bytes of
+    # UTF-8 the server registers the data source of the decoded name, whose read its Python
+    # worker fails, as the name() of the class is not that name.
+    from pyspark.sql.datasource import DataSource, DataSourceReader
+
+    class Reader(DataSourceReader):
+        def read(self, partition):
+            yield (1,)
+
+    def source(source_name):
+        class Source(DataSource):
+            @classmethod
+            def name(cls):
+                return source_name
+
+            def schema(self):
+                return "a int"
+
+            def reader(self, schema):
+                return Reader()
+
+        return Source
+
+    session.dataSource.register(source(type("Name", (str,), {})("e2e_str_subclass_source")))
+    assert session.read.format("e2e_str_subclass_source").load().collect() == [Row(a=1)]
+    session.dataSource.register(source(b"e2e_bytes_source"))
+    with pytest.raises(AnalysisException) as error:
+        session.read.format("e2e_bytes_source").load().collect()
+    assert error.value.getCondition() == "PYTHON_DATA_SOURCE_ERROR"
+    assert (
+        "Expected provider with name b'e2e_bytes_source', but got 'e2e_bytes_source'."
+        in str(error.value)
+    )
+
+
 def test_writes_the_catalog_and_streaming_queries_release_the_gil_as_pyspark(session, tmp_path):
     # As PySpark's requests to the server, which release the GIL while they wait: another
     # Python thread runs during them.

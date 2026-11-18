@@ -61,6 +61,21 @@ impl PyTableArg {
         crate::column::expression_message(py, &self.inner.to_column())
     }
 
+    /// The subquery expression of the table argument, as PySpark Connect's
+    /// `TableArg._subquery_expr`: an expression of `pyspark.sql.connect.expressions`, as
+    /// `Column._expr` is, whose `to_plan` is that of the table argument, and whose `repr` is that
+    /// of PySpark's `SubqueryExpression`, of the plan ID of its plan.
+    #[getter]
+    fn _subquery_expr(&self) -> crate::column::PyColumnExpression {
+        crate::column::PyColumnExpression::new(self.inner.to_column())
+    }
+
+    /// Whether the table argument is partitioned, by `partitionBy` or `withSinglePartition`, as
+    /// PySpark Connect's `TableArg._is_partitioned`.
+    fn _is_partitioned(&self) -> bool {
+        self.inner.is_partitioned()
+    }
+
     /// Mark the table argument as requiring a single partition.
     #[allow(non_snake_case)]
     fn withSinglePartition(&self) -> PyResult<PyTableArg> {

@@ -124,10 +124,18 @@ fn is_literal_operand(value: &Bound<'_, PyAny>, with_timedelta: bool) -> PyResul
 /// The expression of a Column, as PySpark Connect's `Column._expr`: its `str` and `repr` are
 /// its rendering, as `Column<'...'>` shows it, and its `to_plan` its `spark.connect.Expression`.
 /// The expressions of PySpark Connect are those of `pyspark.sql.connect.expressions`, of which
-/// the Rust core builds the expressions of a Column.
+/// the Rust core builds the expressions of a Column. So is the `_subquery_expr` of a table
+/// argument.
 #[pyclass(name = "_ColumnExpression", module = "pyspark.sql.connect.expressions")]
 pub struct PyColumnExpression {
     column: Column,
+}
+
+impl PyColumnExpression {
+    /// The expression of `column`.
+    pub(crate) fn new(column: Column) -> Self {
+        PyColumnExpression { column }
+    }
 }
 
 #[pymethods]
