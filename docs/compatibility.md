@@ -1846,7 +1846,10 @@ order of each call site.
 At interpreter exit, a session that is not stopped has its ML cache cleaned by one
 `clean_cache` request, as PySpark's client does. Its errors are ignored, but when the server
 is gone the exit waits on that request's retries, as PySpark's does, so the exit can take as
-long as those retries. A stopped session sends nothing at exit.
+long as those retries. A signal ends that wait, as it ends PySpark's, whose cleanup catches
+`Exception` only: the `KeyboardInterrupt` of Ctrl-C is raised out of the exit hook, which
+`atexit` reports before it runs the next one, and the session is then neither released nor
+closed. A stopped session sends nothing at exit.
 Nor does a session that the program dropped, of which no object is left: neither the session
 nor a DataFrame, reader, writer, catalog, stream or ML object of it. PySpark's session object
 closes its client when it is freed, and the exit sends nothing for a closed client. The drop-in
