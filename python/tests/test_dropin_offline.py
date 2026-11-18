@@ -12163,9 +12163,9 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
     # Column that holds it, as through a bound method of an object that keeps it, is collected,
     # of a UDF, a map function and a UDTF. So it is through the objects that hold such a Column or
     # the plan of such a DataFrame, as PySpark's do: grouped data and their cogroups, a table
-    # argument, a window specification, the writers, the null and statistics functions, and a
-    # merge builder and its clauses. A function that live Columns and DataFrames share is kept,
-    # and pickles at their requests.
+    # argument, a window specification, the writers, the null and statistics functions, a merge
+    # builder and its clauses, and the generator of toLocalIterator. A function that live Columns
+    # and DataFrames share is kept, and pickles at their requests.
     import copy
     import gc
     import weakref
@@ -12215,6 +12215,7 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
         lambda job: udf_frame(job).writeTo("t"),
         lambda job: df.writeTo("t").partitionedBy(udf_column(job)),
         lambda job: udf_frame(job).writeStream,
+        lambda job: udf_frame(job).toLocalIterator(),
         lambda job: udf_frame(job).na,
         lambda job: udf_frame(job).stat,
         lambda job: udf_frame(job).mergeInto("t", F.lit(True)),
@@ -12247,6 +12248,7 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
         lambda frame: frame.na,
         lambda frame: frame.stat,
         lambda frame: frame.mergeInto("t", F.lit(True)).whenMatched(),
+        lambda frame: frame.toLocalIterator(),
         lambda frame: frame.asTable(),
     ]
     for of_frame in objects:
@@ -12284,9 +12286,10 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
 def test_cycles_through_the_dataframes_of_their_objects_are_collected_as_pyspark(mock_connect):
     # As PySpark's grouped data, cogroups, null and statistics functions, which hold their
     # DataFrame, and its writers and merge builder, whose callback holds it: a DataFrame that
-    # keeps one of these, or a table argument or a stream writer of it, is freed, by the garbage
-    # collector at the latest, as PySpark frees it. So is a DataFrame that keeps the cogroups of
-    # its grouped data with those of another DataFrame.
+    # keeps one of these, or a table argument, a stream writer or the generator of
+    # toLocalIterator of it, is freed, by the garbage collector at the latest, as PySpark frees
+    # it. So is a DataFrame that keeps the cogroups of its grouped data with those of another
+    # DataFrame.
     import gc
     import weakref
 
@@ -12303,6 +12306,7 @@ def test_cycles_through_the_dataframes_of_their_objects_are_collected_as_pyspark
         lambda df: df.na,
         lambda df: df.stat,
         lambda df: df.asTable(),
+        lambda df: df.toLocalIterator(),
         lambda df: df.mergeInto("t", F.lit(True)),
         lambda df: df.mergeInto("t", F.lit(True)).whenNotMatchedBySource(),
     ]
@@ -12313,9 +12317,10 @@ def test_cycles_through_the_dataframes_of_their_objects_are_collected_as_pyspark
         del df
         gc.collect()
         assert freed() is None
-    # As PySpark's merge builder, whose callback holds the DataFrame, and its clauses: they keep
-    # the DataFrame alive.
-    for make in makers[-2:]:
+    # As PySpark's merge builder, whose callback holds the DataFrame, its clauses, and the
+    # generator of toLocalIterator, which holds its DataFrame until it ends: they keep the
+    # DataFrame alive.
+    for make in makers[-3:]:
         df = spark.range(3)
         kept = make(df)
         freed = weakref.ref(df)
@@ -12323,6 +12328,58 @@ def test_cycles_through_the_dataframes_of_their_objects_are_collected_as_pyspark
         gc.collect()
         assert freed() is not None
         del kept
+    # The generator releases its DataFrame when it ends, as PySpark's.
+    df = spark.range(3)
+    rows = df.toLocalIterator()
+    freed = weakref.ref(df)
+    del df
+    rows.close()
+    gc.collect()
+    assert freed() is None
+
+
+def test_cycles_through_the_sessions_and_builders_of_their_objects_are_collected_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's DataSourceRegistration, a plain object that holds its session, and its session
+    # builder, which holds its channel builder and its hook factories: a session that keeps its
+    # dataSource, or a copy or a new registration of it, is freed by the garbage collector, and so
+    # is a channel builder or a hook factory that keeps its builder.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, service = mock_connect
+    for keep in (lambda session: session.dataSource,
+                 lambda session: copy.copy(session.dataSource),
+                 lambda session: type(session.dataSource)(session)):
+        session = spark.newSession()
+        session.kept = keep(session)
+        freed = weakref.ref(session)
+        del session
+        gc.collect()
+        assert freed() is None
+
+    class Job:
+        pass
+
+    def channel_builder(job):
+        channel = DefaultChannelBuilder(service.remote)
+        channel.job = job
+        return ConnectSession.builder.channelBuilder(channel)
+
+    for make in (channel_builder,
+                 lambda job: ConnectSession.builder._registerHook(lambda session: job),
+                 lambda job: ConnectSession.Builder()._registerHook(lambda session: job)):
+        job = Job()
+        job.held = make(job)
+        freed = weakref.ref(job)
+        del job
+        gc.collect()
+        assert freed() is None
 
 
 def test_stream_writers_keep_the_pickles_of_their_functions_as_pyspark(mock_connect):
@@ -21184,12 +21241,15 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     # collection at every second allocation (threshold 1), with the free list of dicts emptied and
     # the allocations before each object shifted by one, meets each kind of object there: also the
     # grouped data, the cogroups, the table arguments, the window specifications, the null and
-    # statistics functions, the merge clauses and the stream writers, and their copies.
+    # statistics functions, the merge clauses, the stream writers, the data source registrations
+    # and the session builders, and their copies, and the rows of toLocalIterator.
     import copy
     import gc
 
     from pyspark.sql import Window
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
     from pyspark.sql.observation import Observation
 
     spark, _ = mock_connect
@@ -21199,6 +21259,9 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     group, table, window = df.groupBy("id"), df.asTable(), Window.partitionBy("id")
     cogroup, merge = group.cogroup(group), df.mergeInto("t", F.lit(True))
     na, stat, clause, stream_writer = df.na, df.stat, merge.whenMatched(), df.writeStream
+    data_source = spark.dataSource
+    builder = ConnectSession.builder._registerHook(lambda session: None).channelBuilder(
+        DefaultChannelBuilder("sc://localhost"))
     makers = [
         lambda: df.write, lambda: copy.copy(writer), lambda: df.writeTo("t"),
         lambda: copy.copy(writer_v2), lambda: df.mergeInto("t", F.lit(True)),
@@ -21212,7 +21275,10 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
         lambda: df.stat, lambda: copy.copy(stat), lambda: merge.whenMatched(),
         lambda: merge.whenNotMatched(F.col("id") > 0), lambda: merge.whenNotMatchedBySource(),
         lambda: copy.copy(clause), lambda: copy.copy(merge), lambda: df.writeStream,
-        lambda: copy.copy(stream_writer),
+        lambda: copy.copy(stream_writer), lambda: spark.dataSource,
+        lambda: copy.copy(data_source), lambda: type(data_source)(spark),
+        lambda: ConnectSession.builder, lambda: ConnectSession.Builder(),
+        lambda: copy.copy(builder), lambda: df.toLocalIterator(),
     ]
     thresholds = gc.get_threshold()
     gc.collect()

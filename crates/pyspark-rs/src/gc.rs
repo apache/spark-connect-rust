@@ -32,6 +32,14 @@ impl GcReady {
     }
 }
 
+/// The flag of a clone of a written value, which is written too: for a class whose value is
+/// cloned, such as the session builder, of which PyO3 extracts a clone.
+impl Clone for GcReady {
+    fn clone(&self) -> Self {
+        GcReady::new()
+    }
+}
+
 /// The holders of the value of an object, of which its `__traverse__` reports what the value
 /// alone holds to Python's garbage collector: the object itself, and the objects that keep the
 /// object alive and hold a clone of its value, each with a [`Share`] of these holders.
