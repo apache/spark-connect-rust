@@ -5962,9 +5962,11 @@ def test_a_too_long_user_agent_raises_at_each_request_as_pyspark(mock_connect, m
     # As PySpark's `userAgent`, which its requests read when they are built: the session of a
     # user agent of more than 2048 characters after the URL escaping is made, and each request
     # that carries the user agent raises a SparkConnectException of the message of the reference
-    # client and is not sent. stop() logs that error, of the release of the session.
+    # client and is not sent. stop() logs that error, of the release of the session, to the
+    # logger of Spark Connect, as PySpark's `except Exception as e` of its f-string of `${e}`.
     from pyspark.errors.exceptions.connect import SparkConnectException
     from pyspark.sql import SparkSession
+    from pyspark.sql.connect.logging import logger
 
     _, service = mock_connect
     monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
@@ -5984,13 +5986,13 @@ def test_a_too_long_user_agent_raises_at_each_request_as_pyspark(mock_connect, m
         assert type(error.value) is SparkConnectException
         assert str(error.value) == message
         assert error.value.getCondition() is None
-    with caplog.at_level("WARNING", logger="pyspark"):
+    # The logger is disabled unless SPARK_CONNECT_LOG_LEVEL is set.
+    monkeypatch.setattr(logger, "disabled", False)
+    with caplog.at_level("WARNING", logger=logger.name):
         assert spark.stop() is None
     assert spark.is_stopped
-    messages = [record.message for record in caplog.records if record.name == "pyspark"]
-    assert len(messages) == 1
-    assert messages[0].startswith("session.stop(): Session could not be released. Error: ")
-    assert message in messages[0]
+    messages = [record.message for record in caplog.records if record.name.startswith("pyspark")]
+    assert messages == [f"session.stop(): Session could not be released. Error: ${message}"]
     session_id = spark.session_id.encode()
     assert not any(session_id in request for _, request in service.recorded_order)
 
@@ -24196,6 +24198,84 @@ def test_client_config_sends_the_operation_it_is_given_as_pyspark(mock_connect):
         client.config(pb2.ConfigRequest())
 
 
+def test_spent_retries_warn_where_pyspark_warns(caplog):
+    # As PySpark's `Retrying._wait`, which warns `[RETRIES_EXCEEDED]` once the retries of a
+    # failure that a policy retries are spent, before it raises the failure: a UserWarning of the
+    # location of its `warnings.warn` in pyspark.sql.connect.client.retries, of each call whose
+    # retries are spent, of the lookup of the plan compression of the first plan of a session too,
+    # whose failure is caught, and of the release of `stop()`. A filter of "error" raises it in
+    # place of the failure, with the operation ID of an execution; policies of which none retries
+    # the failure, as no DefaultPolicy, warn of nothing.
+    pytest.importorskip("grpc_status")
+    import warnings
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client import _warn_retries_exceeded, retries
+    from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
+
+    message = "[RETRIES_EXCEEDED] The maximum number of retries has been exceeded."
+    with open(retries.__file__) as source:
+        lines = [
+            number
+            for number, line in enumerate(source, start=1)
+            if line.strip() == f'warnings.warn("{message}")'
+        ]
+    # Of a RetryException past its elapsed time, then of a policy.
+    retry_exception, policy = lines
+
+    def warned(call):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with pytest.raises(SparkConnectGrpcException):
+                call()
+        return [(w.category, str(w.message), w.filename, w.lineno) for w in caught]
+
+    spent = (UserWarning, message, retries.__file__, policy)
+    spark = SparkSession.builder.remote("sc://localhost:1").create()
+    quick = {"initial_backoff": 1, "max_backoff": 1, "jitter": 0}
+    spark.client.set_retry_policies([DefaultPolicy(max_retries=1, **quick)])
+    assert warned(lambda: spark.range(1).count()) == [spent, spent]
+    assert warned(lambda: spark.conf.get("spark.x")) == [spent]
+    assert warned(lambda: spark.range(1).schema) == [spent]
+    assert warned(spark.interruptAll) == [spent]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        _warn_retries_exceeded(True)
+    assert [w.lineno for w in caught] == [retry_exception]
+    # The filters of the module take it, and the action "default" shows it once, of its location.
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.filterwarnings("ignore", module="pyspark.sql.connect.client.retries")
+        with pytest.raises(SparkConnectGrpcException):
+            spark.interruptAll()
+        warnings.resetwarnings()
+        warnings.simplefilter("default")
+        for _ in range(2):
+            with pytest.raises(SparkConnectGrpcException):
+                spark.interruptAll()
+    assert len(caught) == 1
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with pytest.raises(UserWarning) as error:
+            spark.sql("select 1")
+        assert type(error.value) is UserWarning and str(error.value) == message
+        assert error.value._operation_id
+        with pytest.raises(UserWarning) as error:
+            spark.conf.get("spark.x")
+        assert not hasattr(error.value, "_operation_id")
+    for policies in ([], [RetryPolicy(max_retries=5)]):
+        spark.client.set_retry_policies(policies)
+        assert warned(spark.interruptAll) == []
+    # A DefaultPolicy of no retries retries the failure, whose retries are spent at once.
+    spark.client.set_retry_policies([DefaultPolicy(max_retries=0)])
+    assert warned(spark.interruptAll) == [spent]
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        spark.stop()
+    assert [(w.category, w.lineno) for w in caught] == [(UserWarning, policy)]
+    # Of the release, whose failure stop() logs to the logger of Spark Connect, disabled.
+    assert [record for record in caplog.records if record.name.startswith("pyspark")] == []
+
+
 def test_client_retry_policies_retry_the_rpcs_of_the_transport_as_pyspark(mock_connect):
     # As PySpark Connect's set_retry_policies: a failure is retried by the first policy that
     # can retry it, a DefaultPolicy, with its backoff, until its retries are spent; a
@@ -26876,6 +26956,42 @@ def test_grpc_errors_without_details_are_spark_connect_grpc_exceptions(mock_conn
     assert error.value.getGrpcStatusCode() == getattr(StatusCode, code)
     assert error.value.getCondition() is None
     assert error.value.operation_id == _request_operation_id(service.execute_requests[-1])
+
+
+def test_the_message_of_a_grpc_error_without_details_is_the_text_of_grpcio_as_pyspark(mock_connect):
+    # As PySpark's `_handle_rpc_error`, whose SparkConnectGrpcException of a status of no details
+    # is of `str()` of grpcio's RpcError: of the class of grpcio's error of the call, of a stream
+    # of responses and of one, the code, the details, and the `debug_error_string` of the code and
+    # the details, as grpcio 1.85.1 gives them of a status of the server. That of a status of
+    # details without an ErrorInfo is the message of the status. The cases agree with official
+    # PySpark 4.3.0.
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    def text(cls, code, details):
+        return (
+            f"<{cls} of RPC that terminated with:\n\tstatus = StatusCode.{code}\n"
+            f'\tdetails = "{details}"\n\tdebug_error_string = "{code}:{details}"\n>'
+        )
+
+    spark, service = mock_connect
+    service.execute_failure = ("PERMISSION_DENIED", 'denied by "the" proxy')
+    with pytest.raises(SparkConnectGrpcException) as error:
+        spark.range(1).collect()
+    expected = text("_MultiThreadedRendezvous", "PERMISSION_DENIED", 'denied by "the" proxy')
+    assert str(error.value) == expected
+    service.execute_failure = None
+    service.failure = "rpc"  # INVALID_ARGUMENT "schema unavailable", of AnalyzePlan.
+    with pytest.raises(SparkConnectGrpcException) as error:
+        spark.range(1).schema
+    assert str(error.value) == text("_InactiveRpcError", "INVALID_ARGUMENT", "schema unavailable")
+    service.failure = None
+    # The RetryInfo of a status, of no retries, whose spent retries warn.
+    spark._set_retry_policy(**{**spark._retry_policy(), "max_retries": 0})
+    service.retry_info_failures = [("UNAVAILABLE", 1)]
+    with pytest.warns(UserWarning, match=r"\[RETRIES_EXCEEDED\]"):
+        with pytest.raises(SparkConnectGrpcException) as error:
+            spark.range(1).collect()
+    assert str(error.value) == "retry later"
 
 
 def test_a_failure_with_retry_info_is_retried_after_the_delay_of_the_server(mock_connect):
@@ -31775,6 +31891,42 @@ def test_plans_at_the_server_threshold_are_sent_as_they_are(mock_connect):
     over_threshold = _collect_in_new_session(
         service, _plan_confs(str(size - 1)), _long_literal_frame)
     assert 1 not in over_threshold and 3 in over_threshold
+
+
+def test_registrations_are_sent_as_they_are_without_the_lookup_as_pyspark(mock_connect):
+    # As PySpark's `register_udf`, `register_udtf`, `register_data_source` and `register_java` of
+    # `_execute`, which set their command in the plan of their request as it is: the
+    # registrations of a session make no lookup of its plan compression, and one over the
+    # threshold is sent uncompressed. The plan after them makes the lookup.
+    from pyspark.sql import functions as F
+    from pyspark.sql.datasource import DataSource
+
+    spark, service = mock_connect
+    service.confs = _plan_confs("1024")
+    payload = "x" * 4096
+
+    class Echo:
+        def eval(self, n):
+            yield (n + len(payload),)
+
+    class Large(DataSource):
+        @classmethod
+        def name(cls):
+            return "large" + payload
+
+    spark.udf.register("large_udf", lambda v: v + len(payload), T.IntegerType())
+    spark.udtf.register("large_udtf", F.udtf(Echo, returnType="a int", useArrow=False))
+    spark.dataSource.register(Large)
+    spark.udf.registerJavaFunction("large_java" + payload, "org.example.Large", T.IntegerType())
+    assert service.plan_compression_lookups == 0
+    assert len(service.execute_requests) == 4
+    for request in service.execute_requests:
+        # Plan.command=2, of no compressed_operation=3.
+        plan = _sent_plan([request])
+        assert list(plan) == [2] and len(plan[2][0]) > 4096
+    _long_literal_frame(spark).collect()
+    assert service.plan_compression_lookups == 1
+    assert 3 in _sent_plan(service.execute_requests)
 
 
 def test_plan_compression_is_read_once_per_session(mock_connect):

@@ -2958,9 +2958,10 @@ impl PySparkSession {
     }
 
     /// Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
-    /// to release the session on the server is logged, not raised. Also clears the
-    /// active session and the cached `SQLContext` if they belong to this session. Listener
-    /// callbacks are not joined; the current event's listener snapshot may finish afterward.
+    /// to release the session on the server is logged by the logger of Spark Connect, not
+    /// raised. Also clears the active session and the cached `SQLContext` if they belong to
+    /// this session. Listener callbacks are not joined; the current event's listener snapshot
+    /// may finish afterward.
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         let released = if self
             .release_session_on_close
@@ -2985,16 +2986,20 @@ impl PySparkSession {
         };
         crate::progress::forget_session(&self.session);
         crate::profiler::forget_session(&self.session);
-        if let Err(e) = released {
-            let logger = py
-                .import("logging")?
-                .call_method1("getLogger", ("pyspark",))?;
-            logger.call_method1(
-                "warning",
-                (format!(
-                    "session.stop(): Session could not be released. Error: {e}"
-                ),),
-            )?;
+        if let Err(error) = released {
+            // As PySpark's stop, whose `except Exception as e` logs the exception of the release
+            // through the logger of Spark Connect, which is disabled unless
+            // SPARK_CONNECT_LOG_LEVEL is set, with the `$` of its f-string.
+            let error = crate::errors::spark_error_to_py_exception(*error);
+            py.import("pyspark.sql.connect.logging")?
+                .getattr("logger")?
+                .call_method1(
+                    "warning",
+                    (format!(
+                        "session.stop(): Session could not be released. Error: ${}",
+                        error.value(py)
+                    ),),
+                )?;
         }
         // As PySpark's, a stopped session is no longer the default session, or the active
         // session of this thread.
@@ -3445,17 +3450,19 @@ impl PySparkSession {
     }
 
     /// The retry policy of the RPCs of the session, as the keyword arguments of PySpark's
-    /// `RetryPolicy`, and the `max_retry_exception_elapsed_time` of its client, in seconds, or None
-    /// without a bound.
+    /// `RetryPolicy`, the `max_retry_exception_elapsed_time` of its client, in seconds, or None
+    /// without a bound, and whether the failures are retried.
     fn _retry_policy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         crate::client::retry_policy(py, &self.session)
     }
 
     /// Set the retry policy of the RPCs of the session, for the calls that start from now on, as
     /// PySpark's `SparkConnectClient.set_retry_policies` sets the policies of its client: of the
-    /// parameters of PySpark's `RetryPolicy`, the backoffs and the delays in milliseconds, and of
-    /// the bound of the retries of a `RetryException`, in seconds, or None without a bound.
-    #[pyo3(signature = (*, max_retries, initial_backoff, max_backoff, backoff_multiplier, jitter, min_jitter_threshold, recognize_server_retry_delay, max_server_retry_delay, max_retry_exception_elapsed_time))]
+    /// parameters of PySpark's `RetryPolicy`, the backoffs and the delays in milliseconds, of the
+    /// bound of the retries of a `RetryException`, in seconds, or None without a bound, and of
+    /// whether the failures are retried, which they are not of policies none of which is a
+    /// `DefaultPolicy`.
+    #[pyo3(signature = (*, max_retries, initial_backoff, max_backoff, backoff_multiplier, jitter, min_jitter_threshold, recognize_server_retry_delay, max_server_retry_delay, max_retry_exception_elapsed_time, retries_failures))]
     #[allow(clippy::too_many_arguments)]
     fn _set_retry_policy(
         &self,
@@ -3468,6 +3475,7 @@ impl PySparkSession {
         recognize_server_retry_delay: bool,
         max_server_retry_delay: Option<u64>,
         max_retry_exception_elapsed_time: Option<f64>,
+        retries_failures: bool,
     ) {
         crate::client::set_retry_policy(
             &self.session,
@@ -3481,6 +3489,7 @@ impl PySparkSession {
                 recognize_server_retry_delay,
                 max_server_retry_delay,
                 max_retry_exception_elapsed_time,
+                retries_failures,
             },
         );
     }

@@ -260,7 +260,30 @@ interval back from its text. `LocalRowIterator::next_decoded` takes the next row
 that the iterator holds without fetching another, and `LocalRowIterator::has_received_batch`
 tells whether a record batch of the result has arrived, also one without rows.
 `SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
-before a plan is sent, as PySpark's client reads them when it builds its first plan.
+before a plan is sent, as PySpark's client reads them when it builds its first plan: before the
+request of a relation (`to_proto`), which then observes the server-side session ID of the response
+of the read, and after the request of a command (`execute_command`), so the first command of a
+session observes none. `SparkConnectClient::execute_plan_reattachable_uncompressed` sends a plan
+as it is, neither compressed nor after that read, as PySpark's registrations of functions, table
+functions, data sources and Java functions set their command in the plan of their request, which
+the registrations of the core do.
+
+`RetryPolicy` adds a `retries_failures` field, true by default: a policy of false retries no
+failure, as the retry policies of PySpark's client of no `DefaultPolicy` retry none, and
+`RetryPolicy::no_retries` is such a policy. A struct expression of `RetryPolicy` that names every
+field adds it, or takes the others of `..RetryPolicy::default()`. The core tells the listener of
+`retries::set_listener` (a `RetriesListener`, not a stable API) when the retries of a failure that
+a policy retries are spent, where PySpark's `Retrying` warns `[RETRIES_EXCEEDED]`, and its error is
+the error of the call. The listener is one of the process, for the calls of every client: the
+Python binding sets it, to warn from the thread of the call. `SparkError` adds a hidden
+`pyspark_message`, the message of PySpark's exception of a gRPC failure whose status carries no
+error of the server, which the Python binding raises: the text of grpcio's error of the call, as
+PySpark's `_handle_rpc_error` raises it. The message of the error of the Rust API is still the
+description of the code in brackets and the message of the status. A struct expression of
+`SparkError` that names every field adds it, or takes the others of an error of its constructors,
+such as `..SparkError::connect_msg(message)`. `SparkError::from_grpc_status_of` converts the status
+of a call of a stream of responses (`GrpcCall::ServerStreaming`, of grpcio's
+`_MultiThreadedRendezvous`).
 
 `PythonUDFPayload` and `LogicalPlan::CommonInlineUdtf` add a `pickler` field, which is not a
 stable API: the pickling of the command of a UDF or UDTF of the Python client, which a request
@@ -2295,6 +2318,38 @@ is not sent: `SparkConnectException`, or the `UnicodeEncodeError` of `urllib.par
 session is made all the same, its `stop()` logs the error as that of its release, and the requests
 that PySpark builds without the user agent, of the artifacts and of `CloneSession`, are sent. As
 `urllib.parse.urlsplit` does, a tab, CR or LF anywhere in the connection string is removed.
+`SPARK_CONNECT_USER_AGENT` is read when a session is made of a connection string, and the sessions
+of `newSession` and `cloneSession` have the user agent of the session they are made of, where
+PySpark's requests read the variable each time.
+
+A gRPC failure whose status carries no error of the server, such as of an unreachable server or of
+a proxy, is the `SparkConnectGrpcException` of its code whose message is the text of grpcio's
+error of the call, as PySpark's `_handle_rpc_error` raises it: `<_InactiveRpcError of RPC that
+terminated with:`, or `<_MultiThreadedRendezvous` for `ExecutePlan` and `ReattachExecute`, and the
+lines of its code (`status = StatusCode.UNAVAILABLE`), its details and its `debug_error_string`,
+as grpcio 1.85 gives them. The message of a call past its deadline begins with that text, as
+PySpark's `f"{error}: RPC deadline exceeded. ..."`, and that of a status of a `google.rpc.Status`
+without an `ErrorInfo` is the message of the status. The details are the message of a status that
+the server sent, and the `debug_error_string` is the name of the code and the details, as in
+grpcio. Those of a failure that the client detects itself, such as a refused connection, are
+tonic's message (`tcp connect error`), where grpcio's are gRPC's C core's (`failed to connect to
+all addresses; ...`). The errors of `copyFromLocalToFs` and `cloneSession`, which PySpark leaves to
+grpc as its `RpcError`, are converted as those of the other calls.
+
+As PySpark's `Retrying`, a call whose retries of a failure that a policy retries are spent warns
+`[RETRIES_EXCEEDED] The maximum number of retries has been exceeded.` before it raises the
+failure: a `UserWarning` of the location of PySpark's `warnings.warn` in
+`pyspark.sql.connect.client.retries`, and of that module, which its filters and the actions of a
+location take as PySpark's, and which a filter of `"error"` raises in place of the failure. So do
+the lookup of the plan compression of the first plan of a session, whose failure is caught, the
+read of the conf of the server's stack trace as an error of the server is raised, which is retried
+as PySpark's, and the release of the session of `stop()`. Policies none of which is a
+`DefaultPolicy` retry nothing, and do not warn. The requests that the client sends in the
+background, which no caller waits for, do not warn, where PySpark's warn from the threads that send
+them (see `dev/parity/known-differences.md`). `stop()` logs the failure of the release of its
+session to the logger of Spark Connect (`pyspark.sql.connect.logging`), which is disabled unless
+`SPARK_CONNECT_LOG_LEVEL` is set, as PySpark's: `session.stop(): Session could not be released.
+Error: $<error>`.
 
 For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
 [TLS Root Certificates](configuration.md#tls-root-certificates).

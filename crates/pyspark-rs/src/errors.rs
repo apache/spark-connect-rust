@@ -350,6 +350,12 @@ fn unicode_encode_error(utf32le: &[u8], err: &SparkError) -> PyErr {
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if let Some(exception) = callback_exception(&err) {
+        // As PySpark's `_handle_error`, which stamps the operation ID of an execution on any
+        // exception of it, such as that of the warning of its spent retries of a filter of
+        // "error".
+        Python::attach(|py| {
+            stamp_operation_id(exception.value(py).as_any(), err.operation_id.as_deref())
+        });
         return exception;
     }
     if err.kind == SparkErrorKind::RecursionError {
@@ -382,7 +388,9 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if let Some(value) = err.unencodable_value() {
         return unicode_encode_error(&value, &err);
     }
-    let msg = err.message();
+    // PySpark's message, where the core's differs: grpcio's text of a gRPC failure without an
+    // error of the server.
+    let msg = err.pyspark_message.clone().unwrap_or_else(|| err.message());
     let operation_id = err.operation_id.clone();
     let class_name = kind_to_pyspark_class_name(err.kind);
 

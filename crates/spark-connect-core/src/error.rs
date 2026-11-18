@@ -213,6 +213,13 @@ pub struct SparkError {
     /// For an error that the server raised, what it sent about it besides the fields above.
     /// Boxed, so that it does not make every `Result` larger.
     pub server: Option<Box<ServerErrorInfo>>,
+    /// The message of PySpark's exception of this error, where it is not
+    /// [`SparkError::message`]: for a gRPC failure without an error of the server, the text of
+    /// grpcio's error of the call or the message of its `google.rpc.Status`, as PySpark's
+    /// `_handle_rpc_error` raises it (see [`SparkError::from_grpc_status_of`]). The Python
+    /// binding raises it; the message of the Rust API is `[code] details`.
+    #[doc(hidden)]
+    pub pyspark_message: Option<String>,
 }
 
 /// The PySpark exception hierarchy leaf we map to.
@@ -347,6 +354,7 @@ impl SparkError {
             grpc_details: None,
             operation_id: None,
             server: None,
+            pyspark_message: None,
         }
     }
 
@@ -378,6 +386,7 @@ impl SparkError {
             grpc_details: None,
             operation_id: None,
             server: None,
+            pyspark_message: None,
         }
     }
 
@@ -421,6 +430,7 @@ impl SparkError {
             grpc_details: None,
             operation_id: None,
             server: None,
+            pyspark_message: None,
         }
     }
 
@@ -497,6 +507,7 @@ impl SparkError {
             grpc_details: None,
             operation_id: None,
             server: None,
+            pyspark_message: None,
         }
     }
 
@@ -537,7 +548,13 @@ impl SparkError {
         }
     }
 
-    /// Convert a gRPC Status to a SparkError.
+    /// Convert the gRPC Status of a failed call of one response to a SparkError: see
+    /// [`SparkError::from_grpc_status_of`].
+    pub fn from_grpc_status(status: Status) -> Self {
+        Self::from_grpc_status_of(status, GrpcCall::Unary)
+    }
+
+    /// Convert the gRPC Status of a failed call of the kind `call` to a SparkError.
     ///
     /// A status with an `ErrorInfo` is an error that the server raised. As
     /// `pyspark.errors.exceptions.connect.convert_exception` does, its exception classes,
@@ -545,26 +562,48 @@ impl SparkError {
     /// `ErrorInfo`, and its kind from the classes. [`SparkError::with_details`] completes it
     /// with what `FetchErrorDetails` returns. The code is the one grpc-python reports (see
     /// [`crate::retries::grpc_python_code`]), so that a dropped connection is `UNAVAILABLE`.
-    pub fn from_grpc_status(status: Status) -> Self {
+    ///
+    /// Any other status is the error of the message `[code] details`. Its hidden
+    /// `pyspark_message`, which the Python binding raises, is the message as
+    /// `SparkConnectClient._handle_rpc_error` gives it: the message of its `google.rpc.Status`,
+    /// if it has one, else the text of grpcio's error of the call, `str()` of its `RpcError`, of
+    /// the class of `call`.
+    pub fn from_grpc_status_of(status: Status, call: GrpcCall) -> Self {
         let message = status.message().to_string();
         let code = crate::retries::grpc_python_code(&status);
         let details = status.details().to_vec();
-        let mut err = if code == tonic::Code::DeadlineExceeded {
+        let (mut err, pyspark_message) = if code == tonic::Code::DeadlineExceeded {
             // As `SparkConnectClient._handle_rpc_error`, which raises this for a call past its
             // per-RPC deadline before it reads the error of the status.
-            Self::connect_msg(format!(
-                "[{}] {}: RPC deadline exceeded. The client applies per-RPC timeouts to \
-                 prevent silent hangs on broken connections. Deadlines can be configured via \
-                 the rpc_deadlines parameter of SparkConnectClient. To disable all deadlines: \
-                 SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled()).",
-                code, message
-            ))
+            let deadline_exceeded = |error: String| {
+                format!(
+                    "{error}: RPC deadline exceeded. The client applies per-RPC timeouts to \
+                     prevent silent hangs on broken connections. Deadlines can be configured via \
+                     the rpc_deadlines parameter of SparkConnectClient. To disable all \
+                     deadlines: SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled())."
+                )
+            };
+            (
+                Self::connect_msg(deadline_exceeded(format!("[{code}] {message}"))),
+                Some(deadline_exceeded(grpc_call_text(call, code, &message))),
+            )
         } else {
             match parse_error_info(&details) {
-                Some(info) => Self::from_error_info(info, message),
-                None => Self::connect_msg(format!("[{}] {}", code, message)),
+                Some(info) => (Self::from_error_info(info, message), None),
+                None => {
+                    // The `grpc-status-details-bin` of the status is the `google.rpc.Status` of
+                    // `rpc_status.from_call`, whose message is that of the call.
+                    let pyspark_message = if details.is_empty() {
+                        grpc_call_text(call, code, &message)
+                    } else {
+                        message.clone()
+                    };
+                    let err = Self::connect_msg(format!("[{code}] {message}"));
+                    (err, Some(pyspark_message))
+                }
             }
         };
+        err.pyspark_message = pyspark_message;
         // Preserve the raw status so the PyO3 layer can rebuild the exact pyspark exception.
         err.grpc_code = Some(code as i32);
         if !details.is_empty() {
@@ -606,6 +645,7 @@ impl SparkError {
                 parameter_order,
                 ..Default::default()
             })),
+            pyspark_message: None,
         };
         err.kind = err.server_kind();
         err
@@ -640,6 +680,7 @@ impl SparkError {
                 classes: root.error_type_hierarchy.clone(),
                 ..Default::default()
             })),
+            pyspark_message: None,
         };
         err.kind = err.server_kind();
         let details = spark_connect_proto::FetchErrorDetailsResponse {
@@ -817,6 +858,66 @@ pub type Result<T> = std::result::Result<T, SparkError>;
 // ============================================================================
 // gRPC error detail parsing
 // ============================================================================
+
+/// The kind of a gRPC call, which names the class of grpcio's error of its failure, as PySpark
+/// raises it: `_InactiveRpcError` for a call of one response, `_MultiThreadedRendezvous` for a
+/// call of a stream of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcCall {
+    /// A call of one response, such as `Config`, `AnalyzePlan`, or `AddArtifacts` of a stream of
+    /// requests.
+    Unary,
+    /// A call of a stream of responses: `ExecutePlan` and `ReattachExecute`.
+    ServerStreaming,
+}
+
+/// The name of `code` in grpcio's `StatusCode` and in gRPC's C core.
+fn status_code_name(code: tonic::Code) -> &'static str {
+    use tonic::Code;
+    match code {
+        Code::Ok => "OK",
+        Code::Cancelled => "CANCELLED",
+        Code::Unknown => "UNKNOWN",
+        Code::InvalidArgument => "INVALID_ARGUMENT",
+        Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
+        Code::NotFound => "NOT_FOUND",
+        Code::AlreadyExists => "ALREADY_EXISTS",
+        Code::PermissionDenied => "PERMISSION_DENIED",
+        Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
+        Code::FailedPrecondition => "FAILED_PRECONDITION",
+        Code::Aborted => "ABORTED",
+        Code::OutOfRange => "OUT_OF_RANGE",
+        Code::Unimplemented => "UNIMPLEMENTED",
+        Code::Internal => "INTERNAL",
+        Code::Unavailable => "UNAVAILABLE",
+        Code::DataLoss => "DATA_LOSS",
+        Code::Unauthenticated => "UNAUTHENTICATED",
+    }
+}
+
+/// The text of grpcio's error of a failed call of the kind `call`, `str()` of its `RpcError`,
+/// which PySpark's errors of a status without a `google.rpc.Status` show: the class of the error,
+/// the code, the details, which are the message of the status, and the `debug_error_string` of
+/// gRPC's C core, which is the name of the code and the details, as grpcio 1.85 gives it. The
+/// details of a failure that the client detects itself, such as a connection that is refused,
+/// are tonic's message, where grpcio's are those of gRPC's C core, such as `failed to connect to
+/// all addresses; last error: ...`.
+fn grpc_call_text(call: GrpcCall, code: tonic::Code, details: &str) -> String {
+    let class = match call {
+        GrpcCall::Unary => "_InactiveRpcError",
+        GrpcCall::ServerStreaming => "_MultiThreadedRendezvous",
+    };
+    let name = status_code_name(code);
+    let debug_error_string = if details.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}:{details}")
+    };
+    format!(
+        "<{class} of RPC that terminated with:\n\tstatus = StatusCode.{name}\n\tdetails = \
+         \"{details}\"\n\tdebug_error_string = \"{debug_error_string}\"\n>"
+    )
+}
 
 /// The `google.rpc.ErrorInfo` of a gRPC status, from its `grpc-status-details-bin`: the
 /// protobuf-encoded `google.rpc.Status` whose details hold Any-packed messages.
@@ -1703,11 +1804,63 @@ mod tests {
         assert_eq!(err.kind, SparkErrorKind::Connect);
         assert_eq!(err.grpc_code(), Some(tonic::Code::Unavailable as i32));
         let message = err.message();
-        assert!(message.ends_with("connection refused"), "{message}");
+        assert_eq!(
+            message,
+            "[The service is currently unavailable] connection refused"
+        );
         // Details are only for a server error.
         let unchanged = err.with_details(None, true);
         assert!(unchanged.server.is_none());
         assert_eq!(unchanged.message(), message);
+    }
+
+    #[test]
+    fn a_status_without_an_error_info_is_the_text_of_the_error_of_grpcio_as_pyspark() {
+        // PySpark's message is that of `_handle_rpc_error`, of the `str()` of grpcio's RpcError:
+        // of the class of the kind of the call, and of the `debug_error_string` of the code and
+        // the details, which is the code alone of no details, as grpcio 1.85.1 gives them for a
+        // status of the server. The message of the Rust API is the code and the details.
+        let message = |status: Status, call| {
+            let err = SparkError::from_grpc_status_of(status.clone(), call);
+            assert_eq!(
+                err.message(),
+                format!("[{}] {}", status.code(), status.message())
+            );
+            err.pyspark_message.unwrap()
+        };
+        assert_eq!(
+            message(
+                Status::permission_denied(r#"denied by "the" proxy"#),
+                GrpcCall::Unary
+            ),
+            "<_InactiveRpcError of RPC that terminated with:\n\
+             \tstatus = StatusCode.PERMISSION_DENIED\n\
+             \tdetails = \"denied by \"the\" proxy\"\n\
+             \tdebug_error_string = \"PERMISSION_DENIED:denied by \"the\" proxy\"\n>"
+        );
+        assert_eq!(
+            message(Status::internal(""), GrpcCall::ServerStreaming),
+            "<_MultiThreadedRendezvous of RPC that terminated with:\n\
+             \tstatus = StatusCode.INTERNAL\n\tdetails = \"\"\n\
+             \tdebug_error_string = \"INTERNAL\"\n>"
+        );
+        assert_eq!(
+            message(Status::unknown("line one\nline two é"), GrpcCall::Unary),
+            "<_InactiveRpcError of RPC that terminated with:\n\
+             \tstatus = StatusCode.UNKNOWN\n\tdetails = \"line one\nline two é\"\n\
+             \tdebug_error_string = \"UNKNOWN:line one\nline two é\"\n>"
+        );
+        // Of a `google.rpc.Status` without an `ErrorInfo`, here of the code 14 alone, the message
+        // of the status, which `rpc_status.from_call` checks is that of the call.
+        let without_info = Status::with_details(
+            tonic::Code::Unavailable,
+            "retry later",
+            bytes::Bytes::from_static(&[8, 14]),
+        );
+        assert_eq!(
+            message(without_info, GrpcCall::ServerStreaming),
+            "retry later"
+        );
     }
 
     #[test]
@@ -1935,6 +2088,19 @@ mod tests {
         assert!(err
             .message
             .ends_with("SparkConnectClient(url, rpc_deadlines=RpcDeadlines.disabled())."));
+        // PySpark's is of the text of grpcio's error of the call, `f"{error}: RPC deadline
+        // exceeded..."`, as grpcio 1.85.1 gives it for a call past its deadline.
+        let pyspark_message = err.pyspark_message.unwrap();
+        assert_eq!(
+            pyspark_message,
+            err.message.replacen(
+                "[Deadline expired before operation could complete] Deadline Exceeded",
+                "<_InactiveRpcError of RPC that terminated with:\n\
+                 \tstatus = StatusCode.DEADLINE_EXCEEDED\n\tdetails = \"Deadline Exceeded\"\n\
+                 \tdebug_error_string = \"DEADLINE_EXCEEDED:Deadline Exceeded\"\n>",
+                1
+            )
+        );
     }
 
     #[test]

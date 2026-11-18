@@ -28,7 +28,8 @@ use pyo3::types::{PyBytes, PyDict, PyList};
 use spark_connect::dataframe::PlanExecution;
 use spark_connect::session::{ExecutionInfo, SparkSession};
 use spark_connect_core::client::{ResultChunking, RpcDeadlines};
-use spark_connect_core::retries::RetryPolicy;
+use spark_connect_core::error::SparkError;
+use spark_connect_core::retries::{RetriesExceeded, RetriesListener, RetryPolicy};
 use spark_connect_proto as proto;
 
 use crate::interrupt::interruptible;
@@ -171,8 +172,10 @@ impl PyExecutePlanResponses {
     }
 }
 
-/// The retry policy of `session`, as the keyword arguments of PySpark's `RetryPolicy` and the
-/// `max_retry_exception_elapsed_time` of its client, in seconds, or None without a bound.
+/// The retry policy of `session`, as the keyword arguments of PySpark's `RetryPolicy`, the
+/// `max_retry_exception_elapsed_time` of its client, in seconds, or None without a bound, and
+/// `retries_failures`, whether a policy of the client retries the failures (see
+/// [`RetryPolicy::retries_failures`]).
 pub(crate) fn retry_policy<'py>(
     py: Python<'py>,
     session: &SparkSession,
@@ -196,6 +199,7 @@ pub(crate) fn retry_policy<'py>(
             .max_retry_exception_elapsed_time_ms
             .map(|ms| ms as f64 / 1000.0),
     )?;
+    kwargs.set_item("retries_failures", policy.retries_failures)?;
     Ok(kwargs)
 }
 
@@ -213,6 +217,48 @@ pub(crate) struct RetryParameters {
     pub(crate) max_server_retry_delay: Option<u64>,
     /// The bound of the retries of a `RetryException`, in seconds, or None without one.
     pub(crate) max_retry_exception_elapsed_time: Option<f64>,
+    /// Whether the failures are retried, false when no policy of PySpark's client is a
+    /// `DefaultPolicy`.
+    pub(crate) retries_failures: bool,
+}
+
+/// What the client does when the retries of a call of the transport are spent, where PySpark's
+/// `Retrying._wait` warns `[RETRIES_EXCEEDED]`: it warns as PySpark does, with
+/// `_warn_retries_exceeded` of `pyspark.sql.connect.client`, on the thread of the call, and the
+/// exception of the warning, of a filter of `"error"`, is the error of the call in place of its
+/// failure, as PySpark raises it out of `_wait`.
+struct RetriesWarning;
+
+impl RetriesListener for RetriesWarning {
+    fn retries_exceeded(&self, exceeded: RetriesExceeded) -> spark_connect_core::error::Result<()> {
+        // Only on a thread of Python, as that of a call of the client is: a thread of the runtime,
+        // which runs what no caller waits for, has no thread state of Python, and does not wait
+        // for the GIL.
+        // SAFETY: reads the thread state that the interpreter keeps for this thread, without the
+        // GIL, which it does not need.
+        if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+            return Ok(());
+        }
+        Python::attach(|py| {
+            py.import("pyspark.sql.connect.client")?.call_method1(
+                "_warn_retries_exceeded",
+                (exceeded == RetriesExceeded::RetryException,),
+            )?;
+            Ok(())
+        })
+        .map_err(crate::errors::callback_error)
+    }
+
+    fn caught(&self, error: SparkError) {
+        // As PySpark's `except Exception`, which drops the exception of the warning.
+        drop(crate::errors::callback_exception(&error));
+    }
+}
+
+/// Make the client warn as PySpark's when the retries of a call are spent (see
+/// [`RetriesWarning`]).
+pub(crate) fn warn_of_spent_retries() {
+    spark_connect_core::retries::set_listener(Some(std::sync::Arc::new(RetriesWarning)));
 }
 
 /// Set the retry policy of `session` to `parameters`, from the calls that start from now on.
@@ -229,6 +275,7 @@ pub(crate) fn set_retry_policy(session: &SparkSession, parameters: RetryParamete
         max_retry_exception_elapsed_time_ms: parameters
             .max_retry_exception_elapsed_time
             .map(|seconds| (seconds.max(0.0) * 1000.0) as u64),
+        retries_failures: parameters.retries_failures,
     });
 }
 
