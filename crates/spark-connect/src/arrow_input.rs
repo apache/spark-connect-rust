@@ -358,17 +358,83 @@ fn normalize_map_names(batches: &[RecordBatch]) -> Result<Cow<'_, [RecordBatch]>
         .map(Cow::Owned)
 }
 
+/// The size of the Arrow data of `batch`, as pyarrow's `nbytes` counts it: PySpark's
+/// `createDataFrame` compares `_table.nbytes` with `spark.sql.session.localRelationCacheThreshold`,
+/// and its chunks add up the `nbytes` of the columns of each batch (see [`referenced_size`]).
 pub(crate) fn batch_data_size(batch: &RecordBatch) -> usize {
     batch
         .columns()
         .iter()
         .map(|array| {
-            array
-                .to_data()
-                .get_slice_memory_size()
-                .unwrap_or_else(|_| array.get_buffer_memory_size())
+            let data = array.to_data();
+            referenced_size(&data).unwrap_or_else(|| {
+                data.get_slice_memory_size()
+                    .unwrap_or_else(|_| array.get_buffer_memory_size())
+            })
         })
         .sum()
+}
+
+/// pyarrow's `nbytes` of `data`, Arrow C++'s `ReferencedBufferSize`, the bytes of the buffer
+/// ranges that the array references: the bytes that cover its bits of a validity bitmap, if it
+/// has one; its fixed-width values, or the bytes that cover its bits of booleans; of a string,
+/// binary, list or map array, `len` offsets, not the `len + 1` of the buffer, and the range of
+/// the values or of the child that they reference; and the children of a struct. `None` for
+/// another layout, or for buffers shorter than the array.
+fn referenced_size(data: &ArrayData) -> Option<usize> {
+    let len = data.len();
+    let covering_bytes = |offset: usize, len: usize| (offset + len).div_ceil(8) - offset / 8;
+    let validity = data
+        .nulls()
+        .map_or(0, |nulls| covering_bytes(nulls.offset(), nulls.len()));
+    // The range that the `len` offsets of `offsets`, from the slice's, reference.
+    fn range<T: Copy + TryInto<usize>>(offsets: &[T], len: usize) -> Option<(usize, usize)> {
+        let start = (*offsets.first()?).try_into().ok()?;
+        let end = (*offsets.get(len)?).try_into().ok()?;
+        Some((start, end.checked_sub(start)?))
+    }
+    let child_range = |offset: usize, length: usize| {
+        let child = data.child_data().first()?;
+        (offset + length <= child.len()).then(|| child.slice(offset, length))
+    };
+    let values = match data.data_type() {
+        _ if len == 0 => 0,
+        ArrowType::Null => 0,
+        ArrowType::Boolean => covering_bytes(data.offset(), len),
+        ArrowType::Utf8 | ArrowType::Binary => 4 * len + range(data.buffer::<i32>(0), len)?.1,
+        ArrowType::LargeUtf8 | ArrowType::LargeBinary => {
+            8 * len + range(data.buffer::<i64>(0), len)?.1
+        }
+        ArrowType::List(_) | ArrowType::Map(_, _) => {
+            let (start, length) = range(data.buffer::<i32>(0), len)?;
+            4 * len + referenced_size(&child_range(start, length)?)?
+        }
+        ArrowType::LargeList(_) => {
+            let (start, length) = range(data.buffer::<i64>(0), len)?;
+            8 * len + referenced_size(&child_range(start, length)?)?
+        }
+        ArrowType::FixedSizeList(_, size) => {
+            let size = usize::try_from(*size).ok()?;
+            referenced_size(&child_range(data.offset() * size, len * size)?)?
+        }
+        // The children of a slice of a struct are sliced with it.
+        ArrowType::Struct(_) => data
+            .child_data()
+            .iter()
+            .map(|child| {
+                if child.len() == len {
+                    referenced_size(child)
+                } else {
+                    (data.offset() + len <= child.len())
+                        .then(|| child.slice(data.offset(), len))
+                        .and_then(|child| referenced_size(&child))
+                }
+            })
+            .sum::<Option<usize>>()?,
+        ArrowType::FixedSizeBinary(width) => usize::try_from(*width).ok()? * len,
+        data_type => data_type.primitive_width()? * len,
+    };
+    Some(validity + values)
 }
 
 /// The relation of `batches` of no rows of `schema`, as PySpark's createDataFrame sends empty data
@@ -529,6 +595,184 @@ mod tests {
     use std::io::Cursor;
     use std::ops::Range;
     use std::sync::Arc;
+
+    #[test]
+    fn data_sizes_are_the_nbytes_of_pyarrow() {
+        // The expected sizes are pyarrow 26's `nbytes` of arrays of the same layouts: `len`
+        // offsets per string, binary, list and map array, the referenced range of their values,
+        // and the bytes that cover the bits of a slice's booleans and validity.
+        use arrow::array::{
+            BinaryArray, BooleanArray, Date32Array, Decimal128Array, FixedSizeBinaryArray,
+            Int16Array, LargeBinaryArray, LargeStringArray, NullArray, StringArray, StringBuilder,
+            TimestampMicrosecondArray,
+        };
+        use arrow::datatypes::Int16Type;
+        let nbytes = |array: ArrayRef| referenced_size(&array.to_data()).unwrap();
+        let abcd = |n: usize| -> ArrayRef { Arc::new(StringArray::from(vec!["abcd"; n])) };
+        let mut nullable = vec![Some("abcd"); 999];
+        nullable.push(None);
+        let letters = [
+            "a", "bb", "ccc", "dddd", "eeeee", "ffffff", "g", "hh", "iii",
+        ];
+        let alternating = (0..20).map(|i| (i % 2 == 0).then_some("ab"));
+        let map = {
+            let mut builder = MapBuilder::new(None, StringBuilder::new(), Int32Array::builder(3));
+            builder.keys().append_value("a");
+            builder.values().append_value(1);
+            builder.append(true).unwrap();
+            for (key, value) in [("b", 2), ("c", 3)] {
+                builder.keys().append_value(key);
+                builder.values().append_value(value);
+            }
+            builder.append(true).unwrap();
+            Arc::new(builder.finish()) as ArrayRef
+        };
+        let lists = || {
+            Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+                Some(vec![Some(1), Some(2)]),
+                Some(vec![Some(3)]),
+                Some(vec![Some(4), Some(5), Some(6)]),
+            ])) as ArrayRef
+        };
+        let pairs = || {
+            Arc::new(FixedSizeListArray::from_iter_primitive::<Int16Type, _, _>(
+                vec![
+                    Some(vec![Some(1), Some(2)]),
+                    Some(vec![Some(3), Some(4)]),
+                    Some(vec![Some(5), Some(6)]),
+                ],
+                2,
+            )) as ArrayRef
+        };
+        let string_lists = {
+            let values: ArrayRef = Arc::new(StringArray::from(vec!["a", "bb", "ccc"]));
+            let field = Arc::new(Field::new("item", ArrowType::Utf8, true));
+            let offsets = OffsetBuffer::new(vec![0, 2, 3].into());
+            Arc::new(ListArray::new(field, offsets, values, None)) as ArrayRef
+        };
+        let structs = Arc::new(StructArray::from(vec![
+            (
+                Arc::new(Field::new("a", ArrowType::Int32, true)),
+                Arc::new(Int32Array::from(vec![1, 2, 3])) as ArrayRef,
+            ),
+            (
+                Arc::new(Field::new("b", ArrowType::Utf8, true)),
+                Arc::new(StringArray::from(vec!["x", "yy", "zzz"])) as ArrayRef,
+            ),
+        ])) as ArrayRef;
+        let cases: Vec<(&str, ArrayRef, usize)> = vec![
+            ("string_1000", abcd(1000), 8000),
+            (
+                "string_999_null",
+                Arc::new(StringArray::from(nullable)),
+                8121,
+            ),
+            (
+                "large_string_1000",
+                Arc::new(LargeStringArray::from(vec!["abcd"; 1000])),
+                12000,
+            ),
+            (
+                "binary_10",
+                Arc::new(BinaryArray::from(vec![b"xy".as_ref(); 10])),
+                60,
+            ),
+            (
+                "large_binary_10",
+                Arc::new(LargeBinaryArray::from(vec![b"xy".as_ref(); 10])),
+                100,
+            ),
+            (
+                "int64_1000",
+                Arc::new(Int64Array::from_iter_values(0..1000)),
+                8000,
+            ),
+            (
+                "int64_999_null",
+                Arc::new(Int64Array::from_iter(
+                    (0..1000).map(|i| (i < 999).then_some(i)),
+                )),
+                8125,
+            ),
+            (
+                "bool_10",
+                Arc::new(BooleanArray::from([true, false].repeat(5))),
+                2,
+            ),
+            (
+                "bool_10_null",
+                Arc::new(BooleanArray::from([Some(true), None].repeat(5))),
+                4,
+            ),
+            (
+                "list_int32",
+                Arc::new(ListArray::from_iter_primitive::<Int32Type, _, _>(vec![
+                    Some(vec![Some(1), Some(2)]),
+                    Some(vec![Some(3)]),
+                    None,
+                    Some(vec![]),
+                ])),
+                29,
+            ),
+            ("list_int32_slice_1_2", lists().slice(1, 2), 24),
+            ("map_str_int32", map, 35),
+            (
+                "decimal_3",
+                Arc::new(
+                    Decimal128Array::from(vec![150; 3])
+                        .with_precision_and_scale(10, 2)
+                        .unwrap(),
+                ),
+                48,
+            ),
+            ("date32_3", Arc::new(Date32Array::from(vec![18262; 3])), 12),
+            (
+                "timestamp_us_3",
+                Arc::new(TimestampMicrosecondArray::from(vec![0, 1, 2]).with_timezone("UTC")),
+                24,
+            ),
+            (
+                "fsb3_2",
+                Arc::new(
+                    FixedSizeBinaryArray::try_from_iter([b"abc", b"def"].into_iter()).unwrap(),
+                ),
+                6,
+            ),
+            ("null_5", Arc::new(NullArray::new(5)), 0),
+            (
+                "bool_slice_3_10",
+                Arc::new(BooleanArray::from(vec![true; 20]).slice(3, 10)) as ArrayRef,
+                2,
+            ),
+            (
+                "string_null_slice_3_10",
+                Arc::new(StringArray::from_iter(alternating).slice(3, 10)) as ArrayRef,
+                52,
+            ),
+            (
+                "string_slice_3_5",
+                Arc::new(StringArray::from(letters.to_vec()).slice(3, 5)) as ArrayRef,
+                38,
+            ),
+            ("list_string", string_lists, 26),
+            ("struct_int_str_nonull", structs, 30),
+            ("fixed_size_list_2", pairs(), 12),
+            ("fixed_size_list_2_slice_1_2", pairs().slice(1, 2), 8),
+            (
+                "int16_empty",
+                Arc::new(Int16Array::from(Vec::<i16>::new())),
+                0,
+            ),
+            ("string_empty", abcd(0), 0),
+        ];
+        for (name, array, expected) in cases {
+            assert_eq!(nbytes(array), expected, "{name}");
+        }
+        // The size of a batch is that of its columns, as PySpark's `sum(arr.nbytes ...)`.
+        let longs: ArrayRef = Arc::new(Int64Array::from_iter_values(0..1000));
+        let batch = RecordBatch::try_from_iter([("s", abcd(1000)), ("l", longs)]).unwrap();
+        assert_eq!(batch_data_size(&batch), 16000);
+    }
 
     fn batch(values: Range<i64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![Field::new("id", ArrowType::Int64, true)]));
