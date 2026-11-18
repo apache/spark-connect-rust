@@ -2351,6 +2351,71 @@ def test_files_that_the_runtime_does_not_hold_keep_protobufs_classes(upb):
     assert not issubclass(upb("spark.connect.Relation"), _pyspark.ProtoMessage)
 
 
+def test_classes_of_a_file_built_before_the_hook_are_of_its_generated_module(upb):
+    # A file that a plugin's file imports and whose generated module protobuf's builder built
+    # before the hook was installed, as Delta Lake's delta/connect/proto/__init__.py imports
+    # base_pb2 (of delta/connect/base.proto) before the modules that import the protos of Spark
+    # Connect: the runtime's classes of its messages are of that module, as protobuf's are
+    # (delta.connect.proto.base_pb2), not of protoc's name of the file's path.
+    import types
+
+    from google.protobuf.internal import builder
+
+    early = _add_plugin_file("tests/before/early.proto", [], [])
+    late = _add_plugin_file(
+        "tests/before/late.proto",
+        ["spark/connect/relations.proto", early.name],
+        [("input", ".spark.connect.Relation"), ("early", ".tests.early.M")],
+    )
+    module = types.ModuleType("tests_before.generated.early_pb2")
+    namespace = vars(module)
+    namespace["DESCRIPTOR"] = early
+    builder.BuildMessageAndEnumDescriptors(early, namespace)
+    # As the module of the file, which protobuf's own builder built before the hook.
+    builder.BuildTopDescriptorsAndMessages._protobuf_build(early, module.__name__, namespace)
+    assert namespace["M"].__module__ == module.__name__
+    sys.modules[module.__name__] = module
+    try:
+        built = _build_generated_module(late)
+    finally:
+        del sys.modules[module.__name__]
+    assert issubclass(built["M"], _pyspark.ProtoMessage)
+    assert not issubclass(namespace["M"], _pyspark.ProtoMessage)
+    held = type(built["M"]().early)
+    assert held is ours("tests.early.M")
+    assert (held.__module__, held.__qualname__) == (module.__name__, "M")
+
+
+def test_a_protobuf_whose_builder_lacks_the_hooked_function_imports_the_package(upb):
+    # The hook wraps a function of protobuf's internal builder. Where a protobuf's builder lacks
+    # it, as where there is no builder (protobuf before 3.20), the package imports without the
+    # hook, of the classes of the runtime.
+    script = textwrap.dedent(
+        """
+        from google.protobuf.internal import builder
+
+        del builder.BuildTopDescriptorsAndMessages
+        from pyspark import _pyspark
+        import pyspark.sql.connect.proto as proto
+
+        assert issubclass(proto.Relation, _pyspark.ProtoMessage)
+        assert proto.Relation(sql={"query": "q"}).sql.query == "q"
+        assert not hasattr(builder, "BuildTopDescriptorsAndMessages")
+        print("imported")
+        """
+    )
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(root),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["imported"]
+
+
 def test_protobufs_own_classes_of_a_plugins_file_take_the_messages_through_bytes(upb):
     # The files of the protos are in protobuf's default pool, as the generated modules add them,
     # so that a file of a plugin that imports them builds, as the module that protoc generates of
