@@ -71,6 +71,8 @@ pub use readwriter::{
 pub use resource::{
     ExecutorResourceRequests, ResourceProfile, ResourceProfileBuilder, TaskResourceRequests,
 };
+#[doc(hidden)]
+pub use session::WeakSparkSession;
 pub use session::{SparkSession, SparkSessionBuilder};
 pub use spark_connect_core::client::ExecutePlanHook;
 /// Re-exported so fallible APIs (e.g. the `#[spark_wasm_udf]`-generated UDF

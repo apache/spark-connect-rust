@@ -3,7 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use spark_connect::row::{Row, StructValue, Value};
-use spark_connect::session::SparkSession;
+use spark_connect::session::{SparkSession, WeakSparkSession};
 use spark_connect::types::{DataType, StructField};
 use spark_connect::udf::{CommonInlineUserDefinedFunctionExpression, PythonUDFPayload};
 use spark_connect_core::artifact::{parse_artifact, UnsupportedArtifact};
@@ -841,30 +841,63 @@ pub(crate) fn session_object(
     Ok(object)
 }
 
-/// The sessions whose exit hook is registered, as the core sessions of their hooks.
-fn exit_hooked_sessions() -> &'static std::sync::Mutex<Vec<SparkSession>> {
-    static HOOKED: std::sync::OnceLock<std::sync::Mutex<Vec<SparkSession>>> =
+/// The sessions whose exit hook is registered, held weakly, as their hooks hold them.
+fn exit_hooked_sessions() -> &'static std::sync::Mutex<Vec<WeakSparkSession>> {
+    static HOOKED: std::sync::OnceLock<std::sync::Mutex<Vec<WeakSparkSession>>> =
         std::sync::OnceLock::new();
     HOOKED.get_or_init(|| std::sync::Mutex::new(Vec::new()))
 }
 
-/// The exit hook of a session, as PySpark's SparkConnectClient keeps for its exit: it holds the
-/// core session, not the Python session object, so that the object is freed when it is dropped
-/// while the hook still sends at exit.
+/// The sessions of the clients that no session object owns, which live until the interpreter
+/// exits, as PySpark's `atexit` keeps such a client (see `PySparkSession::_keep_until_exit`).
+fn sessions_kept_until_exit() -> &'static std::sync::Mutex<Vec<SparkSession>> {
+    static KEPT: std::sync::OnceLock<std::sync::Mutex<Vec<SparkSession>>> =
+        std::sync::OnceLock::new();
+    KEPT.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+/// The sessions of `hooked`, the locked registry, that are still alive, of which it forgets those
+/// that were dropped. The caller drops the returned handles once it has unlocked the registry:
+/// the drop of the last handle of a session, which another thread may leave to it, frees the
+/// Python objects that the session holds, and so can run Python code.
+fn live_sessions(hooked: &mut Vec<WeakSparkSession>) -> Vec<SparkSession> {
+    let mut live = Vec::with_capacity(hooked.len());
+    hooked.retain(|session| match session.upgrade() {
+        Some(session) => {
+            live.push(session);
+            true
+        }
+        None => false,
+    });
+    live
+}
+
+/// The exit hook of a session, as PySpark's SparkConnectClient registers its `_on_exit`. It holds
+/// the core session weakly, so that it does not keep the session alive: PySpark's
+/// `SparkSession.__del__` closes the client of a session object that is freed, and the
+/// `_on_exit` of a closed client sends nothing. The objects of the session, its Python objects,
+/// DataFrames, readers, writers, catalogs, streams and ML objects, hold the core session, as
+/// PySpark's hold the session object, and so do its `conf` and its `client`: once the program
+/// holds none of them, the session is dropped with its client, and its hook sends nothing. A
+/// client that no session object owns keeps its session until the exit (see `_keep_until_exit`).
 #[pyclass(name = "_ExitHook", module = "pyspark.sql.connect.session", frozen)]
 pub struct PyExitHook {
-    session: SparkSession,
+    session: WeakSparkSession,
     release_session_on_exit: bool,
 }
 
 #[pymethods]
 impl PyExitHook {
-    /// The exit of the interpreter, as SparkConnectClient's `_on_exit`: a stopped session is
-    /// not touched; otherwise its ML cache is cleaned, and it is released and closed if the
-    /// variable asked for it when the session was made. The errors of the requests are ignored,
-    /// and the exit waits on the retries of a request whose server is gone, as PySpark's does.
+    /// The exit of the interpreter, as SparkConnectClient's `_on_exit`: a session that was
+    /// dropped or stopped is not touched; otherwise its ML cache is cleaned, and it is released
+    /// and closed if the variable asked for it when the session was made. The errors of the
+    /// requests are ignored, and the exit waits on the retries of a request whose server is gone,
+    /// as PySpark's does.
     fn _on_exit(&self, py: Python<'_>) {
-        if self.session.is_stopped() {
+        let Some(session) = self.session.upgrade() else {
+            return;
+        };
+        if session.is_stopped() {
             return;
         }
         py.detach(|| {
@@ -877,26 +910,27 @@ impl PyExitHook {
                     )),
                 },
             ));
-            let _ = self.session.execute_command_proto(command);
+            let _ = session.execute_command_proto(command);
             if self.release_session_on_exit {
-                let _ = self.session.release_session();
-                self.session.close();
+                let _ = session.release_session();
+                session.close();
             }
         });
     }
 }
 
-/// Close each session whose exit hook is registered, without a release, so that their exit
-/// hooks return at once: for the test suites, whose sessions are left open to servers that are
-/// gone, and whose exit would otherwise wait on the retries of their clean_cache. Not a stable
-/// API.
+/// Close each session whose exit hook is registered and that is still alive, without a release,
+/// so that their exit hooks return at once: for the test suites, whose sessions are left open to
+/// servers that are gone, and whose exit would otherwise wait on the retries of their
+/// clean_cache. Not a stable API.
 #[doc(hidden)]
 #[pyfunction]
 pub fn _close_sessions_at_exit(py: Python<'_>) {
-    let sessions: Vec<SparkSession> = exit_hooked_sessions()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .clone();
+    let sessions = live_sessions(
+        &mut exit_hooked_sessions()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()),
+    );
     py.detach(|| {
         for session in &sessions {
             session.close();
@@ -938,22 +972,26 @@ pub(crate) fn register_release_refusal(m: &Bound<'_, PyModule>) -> PyResult<()> 
 /// its `_on_exit` when it is made. The variable SPARK_CONNECT_RELEASE_SESSION_ON_EXIT is read
 /// now, as PySpark reads it: "true" or "1", in any case, release the session at exit.
 fn register_exit_hook(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
+    // Dropped once the registry is unlocked (see `live_sessions`).
+    let live;
     {
         let mut hooked = exit_hooked_sessions()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        if hooked.iter().any(|other| other.is_same_session(session)) {
+        live = live_sessions(&mut hooked);
+        if live.iter().any(|other| other.is_same_session(session)) {
             return Ok(());
         }
-        hooked.push(session.clone());
+        hooked.push(session.downgrade());
     }
+    drop(live);
     let release_session_on_exit = std::env::var("SPARK_CONNECT_RELEASE_SESSION_ON_EXIT")
         .map(|value| matches!(value.to_lowercase().as_str(), "true" | "1"))
         .unwrap_or(false);
     let hook = Py::new(
         py,
         PyExitHook {
-            session: session.clone(),
+            session: session.downgrade(),
             release_session_on_exit,
         },
     )?;
@@ -3516,6 +3554,24 @@ impl PySparkSession {
     /// Do not join listener callbacks; the current event's listener snapshot may finish afterward.
     fn _close(&self, py: Python<'_>) {
         py.detach(|| self.session.close());
+    }
+
+    /// Keep the session alive until the interpreter exits, for a client that no session object
+    /// owns: one of `SparkConnectClient(...)`, of its `newSession` or of its `clone`. The `atexit`
+    /// registration of PySpark's `SparkConnectClient` keeps the client until the exit, and only
+    /// the `__del__` of a session object closes it, so the `_on_exit` of such a client cleans its
+    /// ML cache at exit, unless it is closed, even once the program dropped the client; the exit
+    /// hook of the session then does so too (see `PyExitHook`). Not a stable API.
+    fn _keep_until_exit(&self) {
+        let mut kept = sessions_kept_until_exit()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !kept
+            .iter()
+            .any(|other| other.is_same_session(&self.session))
+        {
+            kept.push(self.session.clone());
+        }
     }
 
     /// The client of the session, as PySpark Connect's `SparkSession._client`, which the

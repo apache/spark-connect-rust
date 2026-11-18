@@ -712,6 +712,9 @@ class SparkConnectClient:
             self.disable_reattachable_execute()
         if policies is not None or max_retry_exception_elapsed_time is not None:
             self._set_retry_policies(policies, max_retry_exception_elapsed_time)
+        # As PySpark's client, which registers its exit hook once it is made: the registration
+        # keeps it until the exit, and no session object owns it, whose __del__ would close it.
+        session._keep_until_exit()
 
     @classmethod
     def _of_session(
@@ -1485,7 +1488,10 @@ class SparkConnectClient:
         if self._builder is not None:
             builder = copy.deepcopy(self._builder)
             builder._params.pop(ChannelBuilder.PARAM_SESSION_ID, None)
-        return SparkConnectClient._of_session(self._session.newSession(), builder)
+        session = self._session.newSession()
+        # A client that no session object owns, as PySpark's, lives until the exit.
+        session._keep_until_exit()
+        return SparkConnectClient._of_session(session, builder)
 
     def clone(self, new_session_id: Optional[str] = None) -> "SparkConnectClient":
         """A client of a clone of this session on the server, of the ID ``new_session_id``, a
@@ -1494,6 +1500,8 @@ class SparkConnectClient:
         the deadlines and the reattachable executions of this client, and of the default retry
         policy."""
         session = self._session.cloneSession(new_session_id)
+        # A client that no session object owns, as PySpark's, lives until the exit.
+        session._keep_until_exit()
         builder = None
         if self._builder is not None:
             builder = copy.deepcopy(self._builder)
