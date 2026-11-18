@@ -186,18 +186,20 @@ fn post_started_event(
     .map_err(|error| *error)
 }
 
-/// The path of `DataStreamReader.load`, as PySpark checks it: a non-empty str, else
-/// `VALUE_NOT_NON_EMPTY_STR` of its `str()`. A str that UTF-8 cannot encode is not empty, and
-/// is kept with the error of the plan that PySpark builds from it, which is returned with an empty
-/// path.
+/// The path of `DataStreamReader.load`, as PySpark checks it: a str that is not empty once
+/// `strip()` takes off Python's whitespace, else `VALUE_NOT_NON_EMPTY_STR` of its `str()`. A str
+/// that UTF-8 cannot encode is not empty, and is kept with the error of the plan that PySpark
+/// builds from it, which is returned with the text of the str where its lone surrogates are
+/// replaced: the plan fails with the error, so that text is never sent, and it is not empty, as
+/// the core reader requires.
 fn load_path(path: &Bound<'_, PyAny>) -> PyResult<(String, Option<SparkError>)> {
     if let Ok(text) = path.cast::<pyo3::types::PyString>() {
         match text.extract::<String>() {
-            Ok(text) if !text.trim().is_empty() => return Ok((text, None)),
+            Ok(text) if !spark_connect::streaming::is_blank_path(&text) => return Ok((text, None)),
             Ok(_) => {}
             Err(_) => {
                 let error = SparkError::unencodable_str(&utf32le_of(path)?);
-                return Ok((String::new(), Some(error)));
+                return Ok((text.to_string_lossy().into_owned(), Some(error)));
             }
         }
     }

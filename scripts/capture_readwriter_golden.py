@@ -2,7 +2,10 @@
 """Capture golden Spark Connect protobuf plans for read/write operations.
 
 This script captures the unresolved protos for DataFrameReader and
-DataFrameWriter operations from the reference PySpark Connect client.
+DataFrameWriter operations from the reference PySpark Connect client: the
+relation of each read, and the command of each write, as the request of the
+write carries it, which a hook of the session takes and stops before it is
+sent.
 
 Usage:
     python3 scripts/capture_readwriter_golden.py --remote sc://localhost:15002 \
@@ -18,7 +21,7 @@ import base64
 import json
 from pathlib import Path
 
-from pyspark.sql import SparkSession
+from pyspark.sql.connect.session import SparkSession
 
 
 def normalize(msg) -> None:
@@ -62,6 +65,58 @@ def cap_plan(spark, name, df):
     )
 
 
+# The plans of the requests that the hook of the session stopped, in order.
+_STOPPED_PLANS = []
+
+
+class _Stopped(Exception):
+    """Raised by the hook of the session, so that a write is not sent."""
+
+
+class _WriteRecorder:
+    """A hook of the session that keeps the plan of the request of a write and stops it."""
+
+    def __init__(self, session) -> None:
+        pass
+
+    def on_execute_plan(self, request):
+        _STOPPED_PLANS.append(request.plan)
+        raise _Stopped()
+
+
+def cap_write(name, write):
+    """The command of the request that ``write``, a call of a DataFrameWriter, sends."""
+    _STOPPED_PLANS.clear()
+    try:
+        write()
+    except _Stopped:
+        pass
+    (plan,) = _STOPPED_PLANS
+    normalize(plan)
+    return dict(
+        name=name,
+        kind="command",
+        b64=base64.b64encode(plan.SerializeToString()).decode(),
+        text=str(plan),
+    )
+
+
+def write_cases(spark):
+    """Generate write operation test cases, as the calls that send them."""
+    df = spark.range(3)
+    yield "write_jdbc", lambda: df.write.jdbc("jdbc:h2:mem:db", "people")
+    # The mode and the properties, of which `url` and `dbtable` are set over the same keys.
+    yield (
+        "write_jdbc_with_mode_and_properties",
+        lambda: df.write.jdbc(
+            "jdbc:h2:mem:db",
+            "people",
+            mode="overwrite",
+            properties={"user": "sa", "dbtable": "other", "url": "jdbc:other"},
+        ),
+    )
+
+
 def read_write_cases(spark):
     """Generate read and write operation test cases."""
     # Create a simple test data path (would be used in real scenario)
@@ -94,11 +149,12 @@ def main() -> None:
     ap.add_argument("--out", default="tests/golden")
     args = ap.parse_args()
 
-    spark = SparkSession.builder.remote(args.remote).getOrCreate()
+    spark = SparkSession.builder.remote(args.remote)._registerHook(_WriteRecorder).getOrCreate()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
     plans = [cap_plan(spark, n, df) for n, df in read_write_cases(spark)]
+    plans += [cap_write(n, write) for n, write in write_cases(spark)]
 
     (out / "readwriter.jsonl").write_text("\n".join(json.dumps(p) for p in plans) + "\n")
     print(f"wrote {len(plans)} read/write plans -> {out / 'readwriter.jsonl'}")

@@ -59,6 +59,73 @@ fn stream_reads_send_pysparks_schema_and_options() {
     );
     let csv = stream_data_source(&spark.read_stream().schema("a INT").csv("data/s"));
     assert_eq!(csv.schema.as_deref(), Some("a INT"));
+    // As PySpark's `xml(path, rowTag="r")`, which is `load(path=path, format="xml")` after its
+    // options: `format: "xml" schema: "" options { rowTag: "r" } paths: "data/s"`, streaming.
+    let xml = stream_data_source(&spark.read_stream().option("rowTag", "r").xml("data/s"));
+    assert_eq!(
+        (xml.format.as_deref(), xml.schema.as_deref()),
+        (Some("xml"), Some(""))
+    );
+    let row_tag = HashMap::from([("rowTag".to_string(), "r".to_string())]);
+    assert_eq!(
+        (xml.options, xml.paths),
+        (row_tag, vec!["data/s".to_string()])
+    );
+    let xml = stream_data_source(&spark.read_stream().schema("a INT").xml("data/s"));
+    assert_eq!(xml.schema.as_deref(), Some("a INT"));
+}
+
+/// As PySpark's `DataStreamReader.load`, which raises `VALUE_NOT_NON_EMPTY_STR` of a path that
+/// is empty once `strip()` takes Python's whitespace off, U+001C to U+001F too, before any
+/// request, and so do its format methods, which are `load(path=path, format=...)`: each request of
+/// the DataFrame fails with it, after the error of a name that the reader refused, which PySpark
+/// raises at `name`.
+#[test]
+fn stream_reads_of_an_empty_path_fail_as_pyspark() {
+    let spark = SparkSession::builder()
+        .remote("sc://127.0.0.1:1")
+        .get_or_create()
+        .unwrap();
+    let reader = || spark.read_stream().format("rate");
+    for path in ["", "  ", "\t\n", "\u{1c}", " \u{1f}\u{3000}"] {
+        for df in [
+            reader().load(Some(path)),
+            reader().json(path),
+            reader().parquet(path),
+            reader().csv(path),
+            reader().orc(path),
+            reader().text(path),
+            reader().xml(path),
+        ] {
+            let error = df.to_relation().unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::ValueError);
+            assert_eq!(
+                error.message(),
+                format!(
+                    "[VALUE_NOT_NON_EMPTY_STR] Value for `path` must be a non-empty string, got \
+                     '{path}'."
+                )
+            );
+        }
+        let error = reader()
+            .name("bad name")
+            .load(Some(path))
+            .to_relation()
+            .unwrap_err();
+        assert_eq!(
+            error.get_condition().as_deref(),
+            Some("INVALID_STREAMING_SOURCE_NAME")
+        );
+    }
+    for path in [" a ", "\u{200b}", "."] {
+        let source = stream_data_source(&reader().load(Some(path)));
+        assert_eq!(source.paths, vec![path.to_string()]);
+        assert_eq!(
+            stream_data_source(&reader().json(path)).paths,
+            vec![path.to_string()]
+        );
+    }
+    assert!(stream_data_source(&reader().load(None)).paths.is_empty());
 }
 
 /// Verify a basic streaming read plan builds correctly.

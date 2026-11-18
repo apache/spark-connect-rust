@@ -29235,11 +29235,17 @@ def test_stream_reader_checks_its_arguments_as_pyspark(offline_spark):
         assert e.value.getCondition() == "INVALID_STREAMING_SOURCE_NAME"
         assert e.value.getMessageParameters() == {"source_name": name}
     assert reader.name("abc\n") is reader
-    for path in ("", "  ", 1, ["p"]):
+    # Of `len(path.strip()) == 0`, whose whitespace is that of `str.isspace`, U+001C to U+001F
+    # among it.
+    for path in ("", "  ", "\x1c", " \x1f\t　", 1, ["p"]):
         with pytest.raises(PySparkValueError) as e:
             reader.load(path)
         assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
         assert e.value.getMessageParameters() == {"arg_name": "path", "arg_value": str(path)}
+        if isinstance(path, str):
+            with pytest.raises(PySparkValueError) as e:
+                reader.json(path)
+            assert e.value.getCondition() == "VALUE_NOT_NON_EMPTY_STR"
     for read in (reader.json, reader.csv, reader.parquet, reader.orc, reader.text, reader.xml):
         with pytest.raises(PySparkTypeError) as e:
             read(1)

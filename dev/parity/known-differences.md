@@ -135,6 +135,14 @@ difference is intentional or tracked for a fix.
   client does not return invalid Arrow data: both raise a `PySparkRuntimeError` of the
   Arrow decode. `collect` raises PySpark's `UnicodeDecodeError` for the bytes of the first
   invalid string (the Rust API's `collect` returns `SparkErrorKind::UnicodeDecode`).
+- **A plan of 747 to about 990 levels** (intentional; the stack guard of the client). A plan
+  deeper than `MAX_PLAN_DEPTH`, 746 levels with the plans of its subqueries, raises the client's
+  `RecursionError` ("a plan may be at most 746 levels") before any request. PySpark's
+  serializer, with upb, sends such a plan, of up to about 990 levels (a few more or fewer by the
+  kind of its relations and the call that sends it), and raises its own `RecursionError` beyond;
+  the server fails the plans that PySpark sends with gRPC `UNKNOWN` ("Application error processing
+  RPC"), as it fails any plan of about 510 levels or more. Both clients fail; only the error
+  differs.
 
 - **What a plan build does for a pickle or a deep copy** (intentional; DESIGN). A pickled
   DataFrame or Column, and a deep copy of a DataFrame whose plan holds no function of a UDF or

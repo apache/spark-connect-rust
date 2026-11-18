@@ -569,15 +569,17 @@ fn build(name: &str) -> Option<proto::Relation> {
             plan::na_fill(wc, spark_connect::row::Value::Long(0), vec![])
         }
         "replace" => {
-            let range = plan::range(0, 10, 1);
-            plan::na_replace(
-                range,
-                vec![(
-                    serde_json::json!(0.0).to_string(),
-                    serde_json::json!(100.0).to_string(),
+            // PySpark's `replace(0, 100)` sends its ints as doubles: the replacements of
+            // numbers are literals, as `DataFrame::replace_literals` sends them.
+            use spark_connect::expression::LiteralExpression;
+            plan::LogicalPlan::NAReplace {
+                input: std::sync::Arc::new(plan::range(0, 10, 1)),
+                replacements: vec![(
+                    LiteralExpression::double(0.0),
+                    LiteralExpression::double(100.0),
                 )],
-                vec![],
-            )
+                columns: vec![],
+            }
         }
         "describe" => {
             let range = plan::range(0, 10, 1);

@@ -2231,7 +2231,7 @@ impl UnresolvedNamedLambdaVariable {
 /// Python's `repr` of a float, as PySpark's reprs show one: the shortest digits that
 /// round-trip, in fixed notation for a decimal exponent from -4 to 15, otherwise in
 /// scientific notation with a signed exponent of at least two digits.
-fn python_float_repr(x: f64) -> String {
+pub(crate) fn python_float_repr(x: f64) -> String {
     if x.is_nan() {
         return "nan".to_string();
     }

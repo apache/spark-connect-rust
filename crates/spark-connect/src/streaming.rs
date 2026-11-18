@@ -146,7 +146,11 @@ impl DataStreamReader {
     }
 
     /// Load streaming data from the specified path(s). The schema is sent also when it is empty,
-    /// as PySpark's reader sends its `""` of no schema, which the server reads as none.
+    /// as PySpark's reader sends its `""` of no schema, which the server reads as none. As
+    /// PySpark's `load`, which raises `VALUE_NOT_NON_EMPTY_STR` of a path that is empty once
+    /// Python's `strip` takes its whitespace off, before any request
+    /// (streaming/readwriter.py:142-146), the requests of the DataFrame of such a path fail with
+    /// it, after the error of a name that the reader refused, which PySpark raises first.
     pub fn load(self, path: Option<&str>) -> DataFrame {
         let paths = path.map(|p| vec![p.to_string()]);
         let plan = LogicalPlan::Read {
@@ -160,7 +164,14 @@ impl DataStreamReader {
             },
             is_streaming: true,
         };
-        self.dataframe_of(plan)
+        let dataframe = self.dataframe_of(plan);
+        match path {
+            Some(path) if is_blank_path(path) => dataframe.unbuildable(SparkError::value(
+                "VALUE_NOT_NON_EMPTY_STR",
+                &[("arg_name", "path"), ("arg_value", path)],
+            )),
+            _ => dataframe,
+        }
     }
 
     /// Read a named streaming table.
@@ -187,99 +198,55 @@ impl DataStreamReader {
         crate::readwriter::changes_of_schema(self.dataframe_of(plan), &self.schema)
     }
 
-    /// Read streaming JSON data from a path.
-    pub fn json(mut self, path: &str) -> DataFrame {
-        self.format = Some("json".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: Some(self.schema.clone()),
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
-            },
-            is_streaming: true,
-        };
-        self.dataframe_of(plan)
+    /// Read streaming JSON data from a path, as PySpark's `json(path)`, which is
+    /// `load(path=path, format="json")`, of its errors.
+    pub fn json(self, path: &str) -> DataFrame {
+        self.format("json").load(Some(path))
     }
 
-    /// Read streaming Parquet data from a path.
-    pub fn parquet(mut self, path: &str) -> DataFrame {
-        self.format = Some("parquet".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: Some(self.schema.clone()),
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
-            },
-            is_streaming: true,
-        };
-        self.dataframe_of(plan)
+    /// Read streaming Parquet data from a path, as PySpark's `parquet(path)`, which is
+    /// `load(path=path, format="parquet")`, of its errors.
+    pub fn parquet(self, path: &str) -> DataFrame {
+        self.format("parquet").load(Some(path))
     }
 
-    /// Read streaming CSV data from a path.
-    pub fn csv(mut self, path: &str) -> DataFrame {
-        self.format = Some("csv".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: Some(self.schema.clone()),
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
-            },
-            is_streaming: true,
-        };
-        self.dataframe_of(plan)
+    /// Read streaming CSV data from a path, as PySpark's `csv(path)`, which is
+    /// `load(path=path, format="csv")`, of its errors.
+    pub fn csv(self, path: &str) -> DataFrame {
+        self.format("csv").load(Some(path))
     }
 
-    /// Read streaming ORC data from a path.
-    pub fn orc(mut self, path: &str) -> DataFrame {
-        self.format = Some("orc".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: Some(self.schema.clone()),
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
-            },
-            is_streaming: true,
-        };
-        self.dataframe_of(plan)
+    /// Read streaming ORC data from a path, as PySpark's `orc(path)`, which is
+    /// `load(path=path, format="orc")`, of its errors.
+    pub fn orc(self, path: &str) -> DataFrame {
+        self.format("orc").load(Some(path))
+    }
+
+    /// Read streaming XML data from a path, as PySpark's `xml(path)`, which is
+    /// `load(path=path, format="xml")`, of its errors. Its options, such as `rowTag`, are those
+    /// of [`DataStreamReader::option`].
+    pub fn xml(self, path: &str) -> DataFrame {
+        self.format("xml").load(Some(path))
     }
 
     /// Read streaming text data from a path, as PySpark's `text(path)`: of its `wholetext=False`,
-    /// which sets the option `wholetext` to `False`, also over an earlier one. The stream reader
-    /// of PySpark writes an option as Python's `str` of it, where the batch reader writes `false`.
-    pub fn text(mut self, path: &str) -> DataFrame {
-        self.format = Some("text".to_string());
-        self.options
-            .insert("wholetext".to_string(), "False".to_string());
-        let paths = vec![path.to_string()];
-        let plan = LogicalPlan::Read {
-            read_type: ReadType::DataSource {
-                format: self.format.clone(),
-                schema: Some(self.schema.clone()),
-                options: self.options.clone(),
-                paths,
-                predicates: vec![],
-                source_name: self.source_name.clone(),
-            },
-            is_streaming: true,
-        };
-        self.dataframe_of(plan)
+    /// which sets the option `wholetext` to `False`, also over an earlier one, and then
+    /// `load(path=path, format="text")`, of its errors. The stream reader of PySpark writes an
+    /// option as Python's `str` of it, where the batch reader writes `false`.
+    pub fn text(self, path: &str) -> DataFrame {
+        self.option("wholetext", "False")
+            .format("text")
+            .load(Some(path))
     }
+}
+
+/// Whether `path` is empty for PySpark's `DataStreamReader.load`, as `len(path.strip()) == 0`:
+/// of the whitespace of Python's `str.isspace`, which is Unicode's and the separators U+001C to
+/// U+001F. Not a stable API.
+#[doc(hidden)]
+pub fn is_blank_path(path: &str) -> bool {
+    path.chars()
+        .all(|c| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
 }
 
 /// The `timeout_ms` of the `timeout` of `awaitTermination` and `awaitAnyTermination`, in seconds,

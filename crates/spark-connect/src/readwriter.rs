@@ -672,6 +672,19 @@ impl DataFrameWriter {
         self.format = Some("xml".to_string());
         self.save(Some(path))
     }
+
+    /// Write to the table `table` of the JDBC database at `url`. Mirrors
+    /// `DataFrameWriter.jdbc(url, table, mode, properties)`, which is
+    /// `format("jdbc").mode(mode).options(**properties).options(url=url, dbtable=table).save()`
+    /// (connect/readwriter.py:947-957): the save mode and the connection properties, such as
+    /// `user` and `password`, are those set before with [`DataFrameWriter::mode`] and
+    /// [`DataFrameWriter::options`], and the options `url` and `dbtable` are set over them.
+    pub fn jdbc(self, url: &str, table: &str) -> Result<()> {
+        self.format("jdbc")
+            .option("url", url)
+            .option("dbtable", table)
+            .save(None)
+    }
 }
 
 /// DataFrameWriterV2 for the v2 write API (`DataFrame.writeTo`).
@@ -853,7 +866,7 @@ impl DataFrameWriterV2 {
         self
     }
 
-    /// Partition the output table by the given columns.
+    /// Partition the output table by the given columns. Mirrors `DataFrameWriterV2.partitionedBy`.
     pub fn partition_by<C: Into<Column>>(mut self, columns: impl IntoIterator<Item = C>) -> Self {
         self.partition_cols = columns.into_iter().map(Into::into).collect();
         self
