@@ -212,7 +212,8 @@ pub(super) trait ParamsHolder: PyClass<Frozen = False> {
     /// params (see [`native_params`]): of a validator or a OneVsRest, whose constructor sets its
     /// defaults in the order of PySpark's, and whose set params are in the order of their setting
     /// (of the metadata of a load). None of the others, whose maps of a fit, a load or a copy are of
-    /// the names, as `_resetUid` and `Params.copy` rebuild them of `params`.
+    /// the names, as `_resetUid` and `Params.copy` rebuild them of `params` (of a fit, the
+    /// defaults of the model's class first, which `_copyValues` adds the estimator's after).
     fn map_order(&self) -> Option<(Vec<&'static str>, Vec<&'static str>)> {
         None
     }
@@ -1028,7 +1029,14 @@ pub(super) fn shallow_copy<'py, T: NativeInstance>(
 /// The values of the params of `slf` by name: its set values, and its defaults (its own, else the
 /// class's), of which the public class makes PySpark's `_paramMap` and `_defaultParamMap` of an
 /// object that this client makes (a fit, a load). They are in the order of the object's maps
-/// (`ParamsHolder::map_order`), else of the class's params, which is of their names.
+/// (`ParamsHolder::map_order`); else the set values are of the names of the params, and the
+/// defaults of the names of those that the class's constructor sets, and then of the names of the
+/// others, as PySpark's `try_remote_fit` makes the maps of a model: its `_resetUid` rebuilds the
+/// defaults of the model's constructor of the names of the params, and its `_copyValues` adds the
+/// estimator's defaults that the model's class does not set after them (an ALSModel's
+/// `blockSize` and `predictionCol`, and then ALS's `coldStartStrategy`, `itemCol` and `userCol`),
+/// and sets the estimator's params of their names. The defaults of a load are those of its class's
+/// constructor, of their names, as `_resetUid` rebuilds them.
 pub(super) fn native_params<'py, T: ParamsHolder>(
     slf: &Bound<'py, T>,
 ) -> PyResult<(Bound<'py, PyDict>, Bound<'py, PyDict>)> {
@@ -1055,7 +1063,15 @@ pub(super) fn native_params<'py, T: ParamsHolder>(
             set.set_item(&meta.name, value)?;
         }
     }
-    for meta in ordered(order.as_ref().map(|(defaults, _)| defaults)) {
+    let default_order = match order.as_ref() {
+        Some((names, _)) => ordered(Some(names)),
+        None => {
+            let (constructor, others): (Vec<&ParamMeta>, Vec<&ParamMeta>) =
+                params.iter().partition(|meta| meta.default.is_some());
+            constructor.into_iter().chain(others).collect()
+        }
+    };
+    for meta in default_order {
         if let Some(value) = default_value(slf, meta)? {
             defaults.set_item(&meta.name, value)?;
         }

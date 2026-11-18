@@ -39,6 +39,15 @@ pub(crate) fn grow<T>(f: impl FnOnce() -> T) -> T {
 /// messages and enums.
 type FileSummary = (String, String, Vec<String>, Vec<String>);
 
+/// The value of a bool field of the Python value `value`, as the messages take it (see
+/// `scalar`): a bool, a bool of numpy, or an int that a C long holds, true but of 0, with upb's
+/// TypeError of another value (`'str' object cannot be interpreted as an integer`). The field's
+/// name, which only the errors of an integer field name, is not needed.
+pub(crate) fn bool_value(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let value = scalar::Scalar::from_py(pool::Kind::Bool, "", "", value)?;
+    Ok(value == scalar::Scalar::Bool(true))
+}
+
 fn summary_of(file: &pool::FileDesc) -> FileSummary {
     (
         file.name.clone(),

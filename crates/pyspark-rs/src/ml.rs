@@ -2100,11 +2100,8 @@ native_pymethods! {
     /// The writer of the estimator, as `OneVsRest.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `OneVsRestWriter` does).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            classification_api::save_one_vs_rest,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(classification_api::save_one_vs_rest))
+            .object_of(slf.as_any())
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -2118,7 +2115,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(classification_api::load_one_vs_rest);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.

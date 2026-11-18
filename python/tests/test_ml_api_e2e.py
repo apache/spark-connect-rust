@@ -241,3 +241,43 @@ def test_a_writer_reads_the_params_of_its_object_at_its_save(session):
     stage.setThreshold(0.9)
     writer.save(path + "/pipeline")
     assert Pipeline.load(path + "/pipeline").getStages()[0].getThreshold() == 0.9
+
+
+def test_a_writer_and_a_reader_save_and_load_of_their_attributes_as_pysparks(session):
+    # As PySpark's `RemoteMLWriter.save` and `RemoteMLReader.load`, which read the writer's
+    # `_instance`, `shouldOverwrite` and `optionMap` and the reader's `_clazz` at the call, of a
+    # copy and a pickle of them too: a `Write` takes an int as its bool of the overwrite, and a save
+    # of PySpark's Python format sends the value as it is to the ML helper's `handleOverwrite`,
+    # whose `(String, int)` the server does not have.
+    import copy
+    import pickle
+
+    def cls(module, name):
+        return native_class(f"pyspark.ml.connect.{module}", name, f"pyspark.ml.{module}")
+
+    LR = cls("classification", "LogisticRegression")
+    Pipeline = cls("pipeline", "Pipeline")
+    Binarizer = cls("feature", "Binarizer")
+    path = tempfile.mkdtemp(prefix="ml-writer-attributes-")
+    writer = LR(maxIter=3).write()
+    writer._instance = LR(maxIter=9)
+    writer.save(path + "/lr")
+    assert LR.load(path + "/lr").getMaxIter() == 9
+    writer.shouldOverwrite = 0
+    with pytest.raises(Exception, match="already exists"):
+        writer.save(path + "/lr")
+    writer.shouldOverwrite, writer._instance = 1, LR(maxIter=4)
+    copy.copy(writer).save(path + "/lr")
+    assert LR.load(path + "/lr").getMaxIter() == 4
+    pickle.loads(pickle.dumps(writer)).save(path + "/lr")
+    type(writer)(LR(maxIter=5)).overwrite().save(path + "/lr")
+    assert pickle.loads(pickle.dumps(LR.read())).load(path + "/lr").getMaxIter() == 5
+    pipeline = Pipeline(stages=[Binarizer(threshold=0.5, inputCol="a", outputCol="b")])
+    pipeline.save(path + "/pipeline")
+    reader = LR.read()
+    reader._clazz = Pipeline
+    assert type(reader.load(path + "/pipeline")) is Pipeline
+    writer = pipeline.write()
+    writer.shouldOverwrite = 1
+    with pytest.raises(Exception, match=r"handleOverwrite\(java\.lang\.String, int\)"):
+        writer.save(path + "/pipeline")

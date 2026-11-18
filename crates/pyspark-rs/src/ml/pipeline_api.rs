@@ -186,11 +186,8 @@ native_pymethods! {
     /// The writer of the pipeline, as `Pipeline.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `PipelineWriter` does).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            save_pipeline,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(save_pipeline))
+            .object_of(slf.as_any())
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -203,7 +200,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(load_pipeline);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -317,11 +314,8 @@ native_pymethods! {
     /// The writer of the model, as `PipelineModel.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves it as `PipelineModelWriter` does).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            save_pipeline_model,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(save_pipeline_model))
+            .object_of(slf.as_any())
     }
 
     fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -332,7 +326,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(load_pipeline_model);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     #[classmethod]
@@ -377,9 +371,12 @@ fn pipeline_fit(slf: &Bound<'_, PyPipeline>, dataset: &Bound<'_, PyAny>) -> PyRe
     let base = py.import("pyspark.ml.base")?;
     let estimator = base.getattr("Estimator")?;
     let transformer = base.getattr("Transformer")?;
+    // As `Pipeline._fit`, which iterates the stages three times: to check their types, to find the
+    // last estimator, and to fit them. So the stages of an iterator, such as a generator, which the
+    // first consumes, give PySpark's PipelineModel of no stages.
     let stages = slf.call_method0("getStages")?;
-    let stages = stages.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-    for stage in &stages {
+    for stage in stages.try_iter()? {
+        let stage = stage?;
         if !(stage.is_instance(&estimator)? || stage.is_instance(&transformer)?) {
             return Err(PyTypeError::new_err(format!(
                 "Cannot recognize a pipeline stage of type {}.",
@@ -388,18 +385,19 @@ fn pipeline_fit(slf: &Bound<'_, PyPipeline>, dataset: &Bound<'_, PyAny>) -> PyRe
         }
     }
     let mut last_estimator = None;
-    for (i, stage) in stages.iter().enumerate() {
-        if stage.is_instance(&estimator)? {
+    for (i, stage) in stages.try_iter()?.enumerate() {
+        if stage?.is_instance(&estimator)? {
             last_estimator = Some(i);
         }
     }
     let mut dataset = dataset.clone();
     let transformers = PyList::empty(py);
-    for (i, stage) in stages.iter().enumerate() {
+    for (i, stage) in stages.try_iter()?.enumerate() {
+        let stage = stage?;
         match last_estimator {
             Some(last) if i <= last => {
                 if stage.is_instance(&transformer)? {
-                    transformers.append(stage)?;
+                    transformers.append(&stage)?;
                     dataset = stage.call_method1("transform", (&dataset,))?;
                 } else {
                     let model = stage.call_method1("fit", (&dataset,))?;
@@ -422,7 +420,7 @@ fn save_pipeline(
     spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    _options: &std::collections::HashMap<String, String>,
+    _options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let stages = instance.call_method0("getStages")?;
     let class = metadata_class::<PyPipeline>(instance, PIPELINE_CLASS)?;
@@ -435,7 +433,7 @@ fn save_pipeline_model(
     spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    _options: &std::collections::HashMap<String, String>,
+    _options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let stages = instance.getattr("stages")?;
     let class = metadata_class::<PyPipelineModel>(instance, PIPELINE_MODEL_CLASS)?;
