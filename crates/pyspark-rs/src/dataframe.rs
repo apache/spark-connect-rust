@@ -7103,8 +7103,10 @@ impl PyLocalRowIterator {
     }
 }
 
-/// The metrics and observed metrics of an execution, as the lists of `PlanMetrics` and
-/// `PlanObservedMetrics` that `SparkConnectClient._build_metrics` makes.
+/// The metrics and observed metrics of an execution, as the lists of PySpark's client: of the
+/// `PlanMetrics` that `SparkConnectClient._build_metrics` makes, and of the `PlanObservedMetrics`
+/// that `_execute_and_fetch_as_iterator` makes of the `Expression.Literal` messages that the
+/// server sent, which their `pairs` converts when it is read.
 pub(crate) fn execution_metrics<'py>(
     py: Python<'py>,
     info: &spark_connect::session::ExecutionInfo,
@@ -7297,8 +7299,10 @@ pub(crate) fn literal_to_py(
 }
 
 /// The `_UnsupportedLiteral` marker of `literal`, a literal of a kind that `literal_to_py` does
-/// not convert, of its text, for which `PlanObservedMetrics.pairs` raises PySpark's
-/// `UNSUPPORTED_LITERAL`.
+/// not convert, of its text: the value of such a metric of an Observation, whose metrics
+/// `check_observed_metrics` refuses before they are converted, raising PySpark's
+/// `UNSUPPORTED_LITERAL`. `PlanObservedMetrics` keeps the literals themselves, which its `pairs`
+/// converts with PySpark's `LiteralExpression._to_value` (see [`execution_metrics`]).
 fn unsupported_literal_marker(
     py: Python<'_>,
     literal: &spark_connect_proto::expression::Literal,

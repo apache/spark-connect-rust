@@ -23034,6 +23034,55 @@ def test_observed_metrics_expose_their_name_metrics_and_keys_as_pyspark():
     assert error.value.getMessageParameters() == {"literal": "year_month_interval: 12\n"}
 
 
+# The pickle of PySpark's PlanObservedMetrics("o", [pb2.Expression.Literal(long=3)], ["n"]), made
+# by pyspark-client 4.3.0 at protocol 4: its metric is protobuf's _InternalConstructMessage of the
+# full name of its type, spark.connect.Expression.Literal, and the bytes of the message.
+_PYSPARK_PLAN_OBSERVED_METRICS_PICKLE = bytes.fromhex(
+    "800495e1000000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265948c13"
+    "506c616e4f627365727665644d6574726963739493942981947d94288c055f6e616d65948c016f948c085f6d6574"
+    "72696373945d948c17676f6f676c652e70726f746f6275662e6d657373616765948c195f496e7465726e616c436f6e"
+    "7374727563744d6573736167659493948c20737061726b2e636f6e6e6563742e45787072657373696f6e2e4c697465"
+    "72616c94859452947d948c0a73657269616c697a65649443023803947362618c055f6b657973945d948c016e946175"
+    "622e"
+)
+
+
+@pytest.mark.parametrize("implementation", ["upb", "python"])
+def test_the_pickles_of_pysparks_observed_metrics_load_in_a_new_process_as_pyspark(
+        implementation):
+    # As PySpark's pyspark.sql.connect.client.core, which imports pyspark.sql.connect.proto, whose
+    # files protobuf's default pool then has: a pickle of PySpark's PlanObservedMetrics, such as
+    # one of the attrs of a pandas DataFrame of toPandas, loads in a new process, as the pickle
+    # imports that module before it makes its messages of their full names, with either
+    # implementation of protobuf.
+    import subprocess
+    import sys
+
+    pytest.importorskip("google.protobuf")
+    code = (
+        "import pickle, sys\n"
+        "metrics = pickle.loads(bytes.fromhex(sys.argv[1]))\n"
+        "print(type(metrics).__module__, type(metrics).__name__, metrics.keys, metrics.pairs)\n"
+        "print(repr(metrics), type(metrics.metrics[0]).__name__)\n"
+    )
+    env = dict(os.environ)
+    env.pop("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", None)
+    if implementation == "python":
+        env["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+    result = subprocess.run(
+        [sys.executable, "-c", code, _PYSPARK_PLAN_OBSERVED_METRICS_PICKLE.hex()],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (
+        "pyspark.sql.connect.client.core PlanObservedMetrics ['n'] {'n': 3}\n"
+        "Plan observed(o=[long: 3\n]) Literal\n"
+    )
+    # Unpickled here, where pyspark.sql.connect.proto is imported already, it is the same.
+    metrics = pickle.loads(_PYSPARK_PLAN_OBSERVED_METRICS_PICKLE)
+    assert (metrics.name, metrics.keys, metrics.pairs) == ("o", ["n"], {"n": 3})
+
+
 def test_to_pandas_attaches_the_metrics_of_an_execution_as_pyspark():
     import pyarrow as pa
     from pyspark.sql.connect.client import _to_pandas
