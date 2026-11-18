@@ -1,21 +1,24 @@
-//! Golden parity test for read operations, and the protos of the read relations and the save
-//! enums of the Rust plan.
+//! Golden parity test for read and write operations, and the protos of the read relations and
+//! the save enums of the Rust plan.
 //!
 //! The reads of the Rust API's `DataFrameReader` must serialize to the exact same protobuf that
-//! the reference PySpark client produces. The goldens live in `tests/golden/readwriter.jsonl`
-//! (captured by `scripts/capture_readwriter_golden.py`, base64-encoded `spark.connect.Plan`), whose
-//! plan IDs and origins are cleared, as they are here. Writes are commands, which the integration
-//! tests run against a server.
+//! the reference PySpark client produces, and so must the commands of the writes of its
+//! `DataFrameWriter` that the goldens capture. The goldens live in `tests/golden/readwriter.jsonl`
+//! (captured by `scripts/capture_readwriter_golden.py`, base64-encoded `spark.connect.Plan`s, of a
+//! root relation or of a command), whose plan IDs and origins are cleared, as they are here. The
+//! integration tests run the other writes against a server.
 
 #![allow(dead_code)] // golden-test helpers are copy-shared across suites; each binary uses a subset
 
 mod common;
 
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use spark_connect::plan::LogicalPlan;
 use spark_connect::readwriter::{ReadType, SaveMode, TableSaveMethod};
-use spark_connect::{DataFrame, SparkSession};
+use spark_connect::{DataFrame, ExecutePlanHook, SparkError, SparkSession};
+use spark_connect_core::RetryPolicy;
 use spark_connect_proto as proto;
 
 /// The read relation of each case of the capture, built by the Rust API's reader as PySpark's
@@ -65,7 +68,11 @@ fn reads_match_official_pyspark() {
                 .csv("data/test.csv"),
         ),
     ];
-    assert_eq!(cases.len(), goldens.len(), "a case of each golden");
+    let reads = goldens
+        .values()
+        .filter(|plan| matches!(plan.op_type, Some(proto::plan::OpType::Root(_))))
+        .count();
+    assert_eq!(cases.len(), reads, "a case of each golden of a read");
     for (name, df) in cases {
         let Some(proto::plan::OpType::Root(expected)) = &goldens[name].op_type else {
             panic!("{name}: the golden has no root relation");
@@ -86,6 +93,72 @@ fn reads_match_official_pyspark() {
         panic!("read_text: the golden has no root relation");
     };
     assert_eq!(&over, expected, "read_text over an earlier wholetext");
+}
+
+/// The command of each write case of the capture, sent by the Rust API's writer as PySpark's
+/// writer sends it, byte for byte but the plan ID and origin of its input: PySpark's
+/// `jdbc(url, table, mode, properties)` is `format("jdbc").mode(mode).options(**properties)`
+/// `.options(url=url, dbtable=table).save()`, so its `url` and `dbtable` are set over the
+/// properties of those names, as the Rust `jdbc` sets them over the options of the writer. The
+/// session's hook takes the request of each write, and stops it before it is sent.
+#[test]
+fn writes_match_official_pyspark() {
+    let clear_input = |plan: &mut proto::Plan| {
+        if let Some(proto::plan::OpType::Command(proto::Command {
+            command_type: Some(proto::command::CommandType::WriteOperation(write)),
+        })) = &mut plan.op_type
+        {
+            if let Some(input) = write.input.as_mut() {
+                input.common = None;
+            }
+        }
+    };
+    let goldens = common::load_goldens("readwriter.jsonl", clear_input);
+    // A session of a dead port whose requests are not retried, so that the read of the plan
+    // compression settings fails at once, before the hook.
+    let spark = SparkSession::builder()
+        .remote("sc://127.0.0.1:1")
+        .get_or_create()
+        .unwrap();
+    spark.set_retry_policy(RetryPolicy::no_retries());
+    let sent: Arc<Mutex<Vec<proto::Plan>>> = Arc::default();
+    let seen = Arc::clone(&sent);
+    let hook: ExecutePlanHook = Arc::new(move |request: proto::ExecutePlanRequest| {
+        seen.lock().unwrap().extend(request.plan);
+        Err(SparkError::value_msg("not sent"))
+    });
+    spark.set_execute_plan_hook(Some(hook));
+    let df = spark.range(3).unwrap();
+    let properties = HashMap::from(
+        [("user", "sa"), ("dbtable", "other"), ("url", "jdbc:other")]
+            .map(|(key, value)| (key.to_string(), value.to_string())),
+    );
+    let writes: Vec<(&str, spark_connect::Result<()>)> = vec![
+        ("write_jdbc", df.write().jdbc("jdbc:h2:mem:db", "people")),
+        (
+            "write_jdbc_with_mode_and_properties",
+            df.write()
+                .mode("overwrite")
+                .options(properties)
+                .jdbc("jdbc:h2:mem:db", "people"),
+        ),
+    ];
+    let commands = goldens
+        .values()
+        .filter(|plan| matches!(plan.op_type, Some(proto::plan::OpType::Command(_))))
+        .count();
+    assert_eq!(writes.len(), commands, "a case of each golden of a write");
+    let names: Vec<&str> = writes.iter().map(|(name, _)| *name).collect();
+    for (name, result) in &writes {
+        let error = result.as_ref().unwrap_err();
+        assert!(error.to_string().contains("not sent"), "{name}: {error}");
+    }
+    let mut sent = sent.lock().unwrap();
+    assert_eq!(sent.len(), names.len());
+    for (name, plan) in names.into_iter().zip(sent.iter_mut()) {
+        clear_input(plan);
+        assert_eq!(plan, &goldens[name], "{name}");
+    }
 }
 
 #[test]

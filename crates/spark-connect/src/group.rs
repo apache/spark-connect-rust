@@ -803,20 +803,50 @@ impl StatFunctions {
         DataFrame::new(self.dataframe.session.clone(), plan)
     }
 
-    /// Compute approximate quantiles.
+    /// Compute approximate quantiles, as PySpark's `approxQuantile(col, probabilities,
+    /// relativeError)`, which raises, before any request, `NOT_EXPECTED_TYPE` of the first
+    /// probability below 0 or above 1, which a NaN is not, and then `NEGATIVE_VALUE` of a negative
+    /// relative error (connect/dataframe.py:1721-1747). As this returns a DataFrame, its requests
+    /// fail with that error, and send nothing.
     pub fn approx_quantile<S: Into<String>>(
         &self,
         columns: impl IntoIterator<Item = S>,
         probabilities: Vec<f64>,
         relative_error: f64,
     ) -> DataFrame {
+        // As PySpark's `p < 0 or p > 1`, which a NaN passes, unlike a range's `contains`.
+        #[allow(clippy::manual_range_contains)]
+        let error = if probabilities.iter().any(|p| *p < 0.0 || *p > 1.0) {
+            Some(SparkError::classed(
+                SparkErrorKind::TypeError,
+                "NOT_EXPECTED_TYPE",
+                &[
+                    ("arg_name", "probabilities"),
+                    ("expected_type", "list[float, int]"),
+                    ("arg_type", "float"),
+                ],
+            ))
+        } else if relative_error < 0.0 {
+            // Of PySpark's `str` of the float.
+            let value = crate::expression::python_float_repr(relative_error);
+            Some(SparkError::value(
+                "NEGATIVE_VALUE",
+                &[("arg_name", "relativeError"), ("arg_value", &value)],
+            ))
+        } else {
+            None
+        };
         let plan = LogicalPlan::StatApproxQuantile {
             input: Arc::clone(&self.dataframe.plan),
             columns: columns.into_iter().map(Into::into).collect(),
             probabilities,
             relative_error,
         };
-        DataFrame::new(self.dataframe.session.clone(), plan)
+        let quantiles = DataFrame::new(self.dataframe.session.clone(), plan);
+        match error {
+            Some(error) => quantiles.unbuildable(error),
+            None => quantiles,
+        }
     }
 
     /// Compute correlation between two columns, as PySpark's `corr(col1, col2, method=None)`:
@@ -961,7 +991,28 @@ impl NaFunctions {
         self.dataframe.fillna(value, subset)
     }
 
-    /// Replace values. Mirrors `DataFrameNaFunctions.replace`.
+    /// Fill null values with a bool, an integer, a float or a string, or with the values of a
+    /// map by its columns. Mirrors `DataFrameNaFunctions.fill(value, subset)`, which is PySpark's
+    /// `DataFrame.fillna`, as [`DataFrame::fillna_value`], whose errors it has.
+    pub fn fill_value(
+        &self,
+        value: crate::row::Value,
+        subset: Option<Vec<&str>>,
+    ) -> Result<DataFrame> {
+        self.dataframe.fillna_value(value, subset)
+    }
+
+    /// Fill null values per column from `(column, value)` pairs. Mirrors
+    /// `DataFrameNaFunctions.fill` of a dict, as [`DataFrame::fillna_map`], whose errors it has.
+    pub fn fill_map(
+        &self,
+        pairs: impl IntoIterator<Item = (String, crate::row::Value)>,
+    ) -> Result<DataFrame> {
+        self.dataframe.fillna_map(pairs)
+    }
+
+    /// Replace strings. Mirrors `DataFrameNaFunctions.replace` of strings, as
+    /// [`DataFrame::replace`]: both sides are sent as string literals.
     pub fn replace(
         &self,
         to_replace: Vec<(String, String)>,
@@ -971,7 +1022,7 @@ impl NaFunctions {
     }
 
     /// Replace values given as literals. Mirrors `DataFrameNaFunctions.replace`, as
-    /// [`DataFrame::replace_literals`].
+    /// [`DataFrame::replace_literals`], whose checks and conversions it has.
     pub fn replace_literals(
         &self,
         replacements: Vec<(
@@ -1643,6 +1694,66 @@ mod tests {
                 assert_eq!(*relative_error, 0.05);
             }
             _ => panic!("expected StatApproxQuantile plan"),
+        }
+    }
+
+    /// As PySpark's `approxQuantile`, which raises `NOT_EXPECTED_TYPE` of a probability below 0
+    /// or above 1, before `NEGATIVE_VALUE` of a negative relative error, of its `str`, before
+    /// any request; a NaN, 0, 1, -0.0 and a relative error of 0 pass, as `p < 0 or p > 1` and
+    /// `relativeError < 0` let them.
+    #[test]
+    fn approx_quantile_refuses_the_arguments_that_pyspark_refuses() {
+        let stat = session().range(10).unwrap().stat();
+        for (probabilities, relative_error) in [
+            (vec![0.0, 1.0, f64::NAN, -0.0], 0.0),
+            (vec![], 1e300),
+            (vec![0.5], -0.0),
+            (vec![0.5], f64::NAN),
+        ] {
+            let quantiles = stat.approx_quantile(["id"], probabilities, relative_error);
+            assert!(quantiles.relation().is_ok());
+        }
+        let probabilities_error = "[NOT_EXPECTED_TYPE] Argument `probabilities` should be \
+                                   list[float, int], got float.";
+        for (probabilities, relative_error, kind, message) in [
+            (
+                vec![1.5],
+                0.1,
+                SparkErrorKind::TypeError,
+                probabilities_error,
+            ),
+            (
+                vec![0.5, -0.5],
+                -1.0,
+                SparkErrorKind::TypeError,
+                probabilities_error,
+            ),
+            (
+                vec![f64::INFINITY],
+                0.1,
+                SparkErrorKind::TypeError,
+                probabilities_error,
+            ),
+            (
+                vec![0.5],
+                -1.0,
+                SparkErrorKind::ValueError,
+                "[NEGATIVE_VALUE] Value for `relativeError` must be greater than or equal to 0, \
+                 got '-1.0'.",
+            ),
+            (
+                vec![],
+                -1e-20,
+                SparkErrorKind::ValueError,
+                "[NEGATIVE_VALUE] Value for `relativeError` must be greater than or equal to 0, \
+                 got '-1e-20'.",
+            ),
+        ] {
+            let error = stat
+                .approx_quantile(["id"], probabilities, relative_error)
+                .relation()
+                .unwrap_err();
+            assert_eq!((error.kind, error.message()), (kind, message.to_string()));
         }
     }
 

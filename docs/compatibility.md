@@ -19,8 +19,20 @@ one.
 
 `Value` and `LiteralExpression` add a `DayTimeInterval(i64)` variant for signed
 microseconds. Downstream exhaustive matches on these public enums must handle
-the new variant. Rust interval map keys are stringified as raw microseconds;
-Python `timedelta` map keys are not yet supported.
+the new variant. A collected map keeps its keys typed: `Value::Map` is a `Vec<(Value, Value)>` of
+its entries in order, where it was a `BTreeMap<String, Value>` of the text of its keys, so a
+day-time interval key is a `Value::DayTimeInterval` (a `timedelta` in Python, as in PySpark), and
+`create_dataframe` takes such keys. `Value::Struct` holds a `StructValue`
+(`Row::new(names, values).into()`), where it held a `Vec<(String, Value)>`. `Value` adds
+`TimestampNtz(i64)`, the microseconds of a `TIMESTAMP_NTZ` value, which collected as a
+`Value::Timestamp` before, and `Time(i64)`, the nanoseconds since midnight of a `TIME` value, which
+collected as its ISO text in a `Value::String`. `DataType` adds `TimestampNtzNanos` and
+`TimestampLtzNanos`; `SparkErrorKind` adds `BuiltinOverflowError`, `BuiltinRuntimeError`,
+`BuiltinTypeError`, `BuiltinValueError`, `ConnectMessage`, `RecursionError`, `Spark`,
+`UnicodeDecode` and `UnicodeEncode`; and `LogicalPlan` adds `ApplyInPandasWithState`, `AsOfJoin`,
+`CachedRelation`, `ChunkedCachedLocalRelation`, `HtmlString`, `Parse`, `Raw`, `ShowString`,
+`Unbuildable` and `WithRelations`. None of these enums is `#[non_exhaustive]`, so an exhaustive
+match of one of them must handle its new variants.
 
 `DataFrame::sort`, `order_by`, `sort_within_partitions`, `agg`, `observe`, `observe_with`,
 `hint_expressions`, `repartition_by_range`, `repartition_by_range_opt`,
@@ -74,13 +86,17 @@ The native ML classes take a JVM `Int` param as an `i32`: `LogisticRegression::s
 `LinearSVC::set_max_iter` and `LinearSVC::set_aggregation_depth` take an `i32`, and
 `LogisticRegression::max_iter` returns one. Every native estimator has a getter of each
 of its params (`KMeans::k`, `RandomForestClassifier::num_trees`, ...), which reads its
-`Params`: the value that is set, else Spark's default (`None` for `seed`, `weight_col` and
-`thresholds`). The fields of `LogisticRegressionModel`, `StringIndexerModel` and
-`MaxAbsScalerModel` are private, as those of the other fitted models but `PipelineModel`: use
-`Transformer::operator` and `Transformer::params`, and `LogisticRegressionModel::features_col`,
-`label_col` and `prediction_col`. `VectorAssembler::input_cols` and `Pipeline::stages`
-return a `Vec<String>`, and `VectorAssembler::set_input_cols` and `Pipeline::set_stages` take
-`impl IntoIterator<Item = impl Into<String>>`. The `input_col` of `StandardScaler`,
+`Params`: the value that is set, else Spark's default, which for `seed` is the Java hash code of
+the JVM class name, the seed that the server takes when none is sent (PySpark's `getSeed` gives
+Python's `hash` of the class name, which it does not send), and `None` for `weight_col` and
+`thresholds`, which have none. The fields of `LogisticRegressionModel`, `StringIndexerModel`,
+`MaxAbsScalerModel` and `PipelineModel` are private, as those of the other fitted models: use
+`Transformer::operator` and `Transformer::params`, `LogisticRegressionModel::features_col`,
+`label_col` and `prediction_col`, and `PipelineModel::stages`. `VectorAssembler::input_cols`
+returns a `Vec<String>`, and `VectorAssembler::set_input_cols` takes
+`impl IntoIterator<Item = impl Into<String>>`. `Pipeline::set_stages` takes the stages
+themselves, `impl IntoIterator<Item = PipelineStage>`, where it took their names, and
+`Pipeline::stages` returns them, a `&[PipelineStage]`. The `input_col` of `StandardScaler`,
 `MaxAbsScaler` and `StringIndexer` returns an `Option<&str>`, which is `None` unless set: as in
 Spark, it has no default. Their `output_col`, and that of `VectorAssembler`, return a `String`,
 Spark's `<uid>__output` unless set, the column that the server writes. Before, they gave names
@@ -155,11 +171,14 @@ destructuring one by value is a compile error (E0509). Match on a reference inst
 (`match &plan`, or `match plan.as_ref()` of an `Arc<LogicalPlan>`) and clone the
 fields you need; the inputs are `Arc`s, so cloning them shares them.
 
-`LogicalPlan::Raw` adds a `depth` field: the levels of its relation as a plan, with
-those of the DataFrames that it holds, as `pyspark.ml` builds a relation over its
-input. They count for `MAX_PLAN_DEPTH`, as PySpark's serializer counts the plan of the
-input within its own. Code that constructs the variant directly sets it to 1 for a
-relation without nested plans. `LogicalPlan::try_to_proto` serializes a plan as a
+The new `LogicalPlan::Raw { relation, owner, depth, observations }` is a relation built outside
+the core, as `pyspark.ml` builds one over its input. Its `depth` is the levels of its relation as a
+plan, with those of the DataFrames that it holds, which count for `MAX_PLAN_DEPTH`, as PySpark's
+serializer counts the plan of the input within its own. Code that constructs the variant directly
+sets it to 1 for a relation without nested plans. `MAX_PLAN_DEPTH` (746) guards the stack of this
+client, and is not PySpark's limit: PySpark's serializer, with upb, sends a plan of up to about
+990 levels, which the server fails from about 510 levels.
+`LogicalPlan::try_to_proto` serializes a plan as a
 request does: a plan deeper than `MAX_PLAN_DEPTH`, or with an expression deeper than
 `MAX_EXPRESSION_DEPTH`, is a `RecursionError`. `to_proto` still serializes a plan of
 any depth, but prost encodes and drops a protobuf by recursing, so the proto of a plan
@@ -217,7 +236,11 @@ where it sent `aggregate`, and `reduce_with_finish` is added. `DataFrame::unpers
 optional `blocking`, of which `None` sends none, as PySpark's `unpersist(None)`.
 `SparkSession::create_dataframe_from_arrow` of batches of no rows and a schema sends the schema
 alone, as PySpark's empty data, where it sent the batches, which the server failed to cast to a
-schema of other columns. `PythonUDFPayload::function` makes the payload of the function of a
+schema of other columns. Without a schema, it sends batches of no rows with their Arrow schema,
+where PySpark's `createDataFrame` of empty data, of a table too, raises `CANNOT_INFER_EMPTY_SCHEMA`
+before it reads the schema of the table, as the Python client does: the batches carry their
+schema, so there is none to infer.
+`PythonUDFPayload::function` makes the payload of the function of a
 streaming `foreach` or `foreachBatch` sink, which, as PySpark's, sends the command and the Python
 version of a payload only, and not its output type and eval type. A window frame sends a bound of
 0 as the current row, and a start of `Preceding(i64::MAX)` or before and an end of
@@ -234,7 +257,37 @@ These raise PySpark's errors where the request was sent before: the requests of 
 schema that is not a struct raise `NOT_EXPECTED_TYPE`; and the `await_termination` and
 `await_any_termination` of a timeout that is not positive raise `VALUE_NOT_POSITIVE`, where they
 raised `INVALID_TIMEOUT`, which PySpark does not have, and of a NaN, an infinite or a too large
-timeout the errors of PySpark's `int(timeout * 1000)`.
+timeout the errors of PySpark's `int(timeout * 1000)`. PySpark raises the errors of
+`lateralJoin`, `name` and `changes` at the call; those builders return a DataFrame, not a
+`Result`, so the plan of the DataFrame carries the error, which fails each request of it, and the
+request sends nothing.
+
+The same way, these raise PySpark's errors where the request was sent before: the requests of the
+DataFrames of `repartition`, `coalesce` and `repartition_by_id` of a count that is not positive,
+and of `repartition_by_expressions` of a negative count, raise `VALUE_NOT_POSITIVE`
+(`repartition_by_expressions` of a count of 0 sends no count, as PySpark's `repartition(*cols)`);
+those of `approx_quantile` of a probability below 0 or above 1 raise `NOT_EXPECTED_TYPE`, and of a
+negative relative error `NEGATIVE_VALUE`; and those of `DataStreamReader::load` and of its format
+methods of a path that is empty once Python's `strip()` takes its whitespace off raise
+`VALUE_NOT_NON_EMPTY_STR`.
+
+`DataFrame::replace`, `NaFunctions::replace` and `plan::na_replace` send both strings of each pair
+as string literals, as PySpark's `replace` of strings sends them, so that a string that reads as a
+number, such as `"1"`, `"nan"` or `"inf"`, is replaced in the string columns. Before, such a
+string was sent as a double, which replaced the number in the numeric columns and left the strings
+as they were, or failed the request with `CAST_INVALID_INPUT` when the replacement was not a
+number. Replace numbers with `replace_literals`, such as
+`replace_literals(vec![(LiteralExpression::Long(0), LiteralExpression::Long(9))], None)`: as
+PySpark's `replace`, it sends an integer or a float as a double, where it sent it as it was, and
+the requests of its DataFrame raise `MIXED_TYPE_REPLACEMENT` unless the values to replace and the
+replacements that are not null are all booleans, all strings or all numbers, of which a boolean is
+one too, as a Python bool is an int. `NaFunctions::replace_literals` does the same.
+
+`DataFrameWriter::jdbc` and `DataStreamReader::xml` are added, as PySpark's `jdbc` of a writer and
+`xml` of a stream reader, and so are the `approx_quantile`, `corr`, `cov`, `crosstab`,
+`freq_items` and `sample_by` of `DataFrame`, which PySpark's DataFrame has besides `stat`, the
+`fill_value` and `fill_map` of `NaFunctions`, of the values of `fillna_value` and `fillna_map`,
+and `Column::outer` and `Column::transform`. `SparkErrorKind` adds `BuiltinAttributeError`.
 
 `DataFrame::persist` takes `impl Into<Option<StorageLevel>>`, so a `StorageLevel` is passed
 as before. `None` sends no storage level, as PySpark's `persist(None)`, and the server then

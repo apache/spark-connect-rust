@@ -3715,15 +3715,6 @@ fn value_to_proto_literal(v: &crate::row::Value) -> proto::expression::Literal {
     }
 }
 
-/// The literal of a replacement given as a string: a double for a numeric-looking string,
-/// otherwise the string (used by the NAReplace of strings).
-pub(crate) fn numeric_or_string_literal(s: &str) -> LiteralExpression {
-    match s.parse::<f64>() {
-        Ok(v) => LiteralExpression::double(v),
-        Err(_) => LiteralExpression::string(s),
-    }
-}
-
 /// Create a NADrop plan.
 pub fn na_drop(
     input: impl Into<Arc<LogicalPlan>>,
@@ -3739,8 +3730,10 @@ pub fn na_drop(
     }
 }
 
-/// Create a NAReplace plan, of replacements given as strings: a numeric-looking string is a
-/// double, otherwise a string.
+/// Create a NAReplace plan of string replacements: each pair is a string and the string that
+/// replaces it, both sent as string literals, as PySpark's `replace` of strings sends them, a
+/// string that reads as a number too. A `LogicalPlan::NAReplace` of other literals replaces
+/// booleans, numbers or nulls.
 pub fn na_replace(
     input: impl Into<Arc<LogicalPlan>>,
     replacements: Vec<(String, String)>,
@@ -3749,11 +3742,11 @@ pub fn na_replace(
     LogicalPlan::NAReplace {
         input: input.into(),
         replacements: replacements
-            .iter()
+            .into_iter()
             .map(|(old, new)| {
                 (
-                    numeric_or_string_literal(old),
-                    numeric_or_string_literal(new),
+                    LiteralExpression::string(old),
+                    LiteralExpression::string(new),
                 )
             })
             .collect(),

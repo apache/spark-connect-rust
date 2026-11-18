@@ -910,24 +910,41 @@ impl DataFrame {
         self.with_merged_schema(other, plan)
     }
 
-    /// Repartition.
+    /// Repartition into `num_partitions` partitions. Mirrors
+    /// `DataFrame.repartition(numPartitions)`, which raises `VALUE_NOT_POSITIVE` of a count that
+    /// is not positive, before any request (connect/dataframe.py:417-425): as this returns a
+    /// DataFrame, its requests fail with it.
     pub fn repartition(&self, num_partitions: i32) -> DataFrame {
         let plan = LogicalPlan::Repartition {
             input: Arc::clone(&self.plan),
             num_partitions,
             shuffle: true,
         };
-        self.with_cached_schema(plan)
+        self.positive_partitions(num_partitions, plan)
     }
 
-    /// Coalesce.
+    /// Coalesce into `num_partitions` partitions. Mirrors `DataFrame.coalesce(numPartitions)`,
+    /// which raises `VALUE_NOT_POSITIVE` of a count that is not positive, before any request
+    /// (connect/dataframe.py:401-406): as this returns a DataFrame, its requests fail with it.
     pub fn coalesce(&self, num_partitions: i32) -> DataFrame {
         let plan = LogicalPlan::Repartition {
             input: Arc::clone(&self.plan),
             num_partitions,
             shuffle: false,
         };
-        self.with_cached_schema(plan)
+        self.positive_partitions(num_partitions, plan)
+    }
+
+    /// The DataFrame of `plan`, a repartition into `num_partitions` partitions, of the cached
+    /// schema of this DataFrame, as PySpark's repartitions copy it; or, of a count that is not
+    /// positive, one whose requests fail with PySpark's `VALUE_NOT_POSITIVE` of `numPartitions`,
+    /// which PySpark raises at the call, so that the DataFrame has no schema of its own.
+    fn positive_partitions(&self, num_partitions: i32, plan: LogicalPlan) -> DataFrame {
+        if num_partitions > 0 {
+            return self.with_cached_schema(plan);
+        }
+        DataFrame::new(self.session.clone(), plan)
+            .unbuildable(not_positive_partitions(num_partitions))
     }
 
     /// Add a hint.
@@ -2182,11 +2199,7 @@ impl DataFrame {
         columns: impl IntoIterator<Item = C>,
     ) -> Result<DataFrame> {
         if let Some(n) = num_partitions.filter(|n| *n <= 0) {
-            return Err(SparkError::classed(
-                SparkErrorKind::ValueError,
-                "VALUE_NOT_POSITIVE",
-                &[("arg_name", "numPartitions"), ("arg_value", &n.to_string())],
-            ));
+            return Err(not_positive_partitions(n));
         }
         let columns = expressions_of(columns);
         if columns.is_empty() {
@@ -2216,8 +2229,12 @@ impl DataFrame {
         Ok(self.with_cached_schema(plan))
     }
 
-    /// Repartition into `num_partitions` by hashing the given column expressions.
-    /// Mirrors `df.repartition(numPartitions, *cols)`.
+    /// Repartition into `num_partitions` by hashing the given column expressions. Mirrors
+    /// `df.repartition(numPartitions, *cols)`, and, of a `num_partitions` of 0, which sends no
+    /// count, so that the server picks it, `df.repartition(*cols)` of columns only, which the
+    /// Python client sends this way. A negative count is PySpark's `VALUE_NOT_POSITIVE`, which
+    /// PySpark raises before any request (connect/dataframe.py:417-425): as this returns a
+    /// DataFrame, its requests fail with it.
     pub fn repartition_by_expressions<C: Into<Column>>(
         &self,
         num_partitions: i32,
@@ -2228,6 +2245,10 @@ impl DataFrame {
             num_partitions,
             expressions: expressions_of(columns),
         };
+        if num_partitions < 0 {
+            return DataFrame::new(self.session.clone(), plan)
+                .unbuildable(not_positive_partitions(num_partitions));
+        }
         self.with_cached_schema(plan)
     }
 
@@ -2365,6 +2386,57 @@ impl DataFrame {
     /// Get stat functions.
     pub fn stat(&self) -> crate::group::StatFunctions {
         crate::group::StatFunctions::new(self.clone())
+    }
+
+    /// Compute approximate quantiles. Mirrors `DataFrame.approxQuantile`, which PySpark's
+    /// `stat.approxQuantile` calls, as [`crate::group::StatFunctions::approx_quantile`].
+    pub fn approx_quantile<S: Into<String>>(
+        &self,
+        columns: impl IntoIterator<Item = S>,
+        probabilities: Vec<f64>,
+        relative_error: f64,
+    ) -> DataFrame {
+        self.stat()
+            .approx_quantile(columns, probabilities, relative_error)
+    }
+
+    /// The correlation of two columns. Mirrors `DataFrame.corr`, which PySpark's `stat.corr`
+    /// calls, as [`crate::group::StatFunctions::corr`].
+    pub fn corr(&self, col1: &str, col2: &str, method: Option<&str>) -> Result<f64> {
+        self.stat().corr(col1, col2, method)
+    }
+
+    /// The sample covariance of two columns. Mirrors `DataFrame.cov`, which PySpark's `stat.cov`
+    /// calls, as [`crate::group::StatFunctions::cov`].
+    pub fn cov(&self, col1: &str, col2: &str) -> Result<f64> {
+        self.stat().cov(col1, col2)
+    }
+
+    /// The cross-tabulation of two columns. Mirrors `DataFrame.crosstab`, which PySpark's
+    /// `stat.crosstab` calls, as [`crate::group::StatFunctions::crosstab`].
+    pub fn crosstab(&self, col1: &str, col2: &str) -> DataFrame {
+        self.stat().crosstab(col1, col2)
+    }
+
+    /// The frequent items of columns. Mirrors `DataFrame.freqItems`, which PySpark's
+    /// `stat.freqItems` calls, as [`crate::group::StatFunctions::freq_items`].
+    pub fn freq_items<S: Into<String>>(
+        &self,
+        columns: impl IntoIterator<Item = S>,
+        support: f64,
+    ) -> DataFrame {
+        self.stat().freq_items(columns, support)
+    }
+
+    /// A stratified sample by the values of a column. Mirrors `DataFrame.sampleBy`, which
+    /// PySpark's `stat.sampleBy` calls, as [`crate::group::StatFunctions::sample_by`].
+    pub fn sample_by(
+        &self,
+        col: impl Into<Column>,
+        fractions: Vec<(Expression, f64)>,
+        seed: Option<i64>,
+    ) -> Result<DataFrame> {
+        self.stat().sample_by(col, fractions, seed)
     }
 
     /// Returns a [`crate::group::NaFunctions`] for handling missing values.
@@ -2541,29 +2613,38 @@ impl DataFrame {
         Ok(DataFrame::new(self.session.clone(), plan))
     }
 
-    /// Replace values, each given as a string: a numeric-looking string is a double, otherwise
-    /// a string. [`DataFrame::replace_literals`] takes the values as literals.
+    /// Replace strings, as PySpark's `DataFrame.replace` of strings: each pair is a string and
+    /// the string that replaces it, both sent as string literals, as PySpark sends the strings of
+    /// `replace("1", "2")`, so that a string that reads as a number, such as `"1"`, `"nan"` or
+    /// `"inf"`, is replaced as the string it is. The server replaces them in the string columns
+    /// of `subset`, or else in every string column. [`DataFrame::replace_literals`] replaces
+    /// booleans and numbers, and replaces values with nulls.
     pub fn replace(
         &self,
         to_replace: Vec<(String, String)>,
         subset: Option<Vec<&str>>,
     ) -> DataFrame {
+        use crate::expression::LiteralExpression;
         let replacements = to_replace
-            .iter()
+            .into_iter()
             .map(|(old, new)| {
                 (
-                    crate::plan::numeric_or_string_literal(old),
-                    crate::plan::numeric_or_string_literal(new),
+                    LiteralExpression::string(old),
+                    LiteralExpression::string(new),
                 )
             })
             .collect();
         self.replace_literals(replacements, subset)
     }
 
-    /// Replace values, mirroring `pyspark.sql.DataFrame.replace`: each pair is a literal and
-    /// the literal that replaces it, which may be a null, in the columns of `subset`, or else
-    /// in every column of the literal's type. The server replaces a boolean, a double or a
-    /// string.
+    /// Replace values, mirroring `pyspark.sql.DataFrame.replace` of a dict: each pair is a
+    /// literal and the literal that replaces it, which may be a null, in the columns of
+    /// `subset`, or else in every column of the type of the literals. As PySpark's, the literals
+    /// to replace and the replacements that are not null are all booleans, all strings or all
+    /// numbers, of which a boolean is one too, as a Python bool is an int; else the requests of
+    /// the DataFrame fail with PySpark's `MIXED_TYPE_REPLACEMENT`, which PySpark raises at the
+    /// call, as this returns a DataFrame. A number is sent as a double, as PySpark sends
+    /// `float(v)` of an int, and a boolean, a string or a null as it is.
     pub fn replace_literals(
         &self,
         replacements: Vec<(
@@ -2575,12 +2656,20 @@ impl DataFrame {
         let columns = subset
             .map(|v| v.iter().map(|s| s.to_string()).collect())
             .unwrap_or_default();
+        let mixed = is_mixed_type_replacement(&replacements);
         let plan = LogicalPlan::NAReplace {
             input: Arc::clone(&self.plan),
-            replacements,
+            replacements: replacements
+                .into_iter()
+                .map(|(old, new)| (replacement_literal(old), replacement_literal(new)))
+                .collect(),
             columns,
         };
-        DataFrame::new(self.session.clone(), plan)
+        let replaced = DataFrame::new(self.session.clone(), plan);
+        if mixed {
+            return replaced.unbuildable(SparkError::value("MIXED_TYPE_REPLACEMENT", &[]));
+        }
+        replaced
     }
 
     /// Describe this DataFrame (show statistics).
@@ -3128,11 +3217,19 @@ impl DataFrame {
     /// Repartition into `num_partitions` using the given column's value directly as
     /// the shuffle partition id. Mirrors `DataFrame.repartitionById(numPartitions,
     /// partitionIdCol)`: the column is wrapped in a `DirectShufflePartitionID`
-    /// expression and used as the sole repartition expression.
+    /// expression and used as the sole repartition expression. A count that is not positive is
+    /// PySpark's `VALUE_NOT_POSITIVE`, which PySpark raises before any request
+    /// (connect/dataframe.py:510-517): as this returns a DataFrame, its requests fail with it.
     pub fn repartition_by_id(&self, num_partitions: i32, partition_id_col: Column) -> DataFrame {
         let direct: Expression =
             ExpressionNode::DirectShufflePartitionId(partition_id_col.expression().clone()).into();
-        self.repartition_by_expressions(num_partitions, vec![direct])
+        let repartitioned = self.repartition_by_expressions(num_partitions, vec![direct]);
+        if num_partitions == 0 {
+            // Not the count of 0 of `repartition_by_expressions`, which sends no count; a
+            // negative count fails there.
+            return repartitioned.unbuildable(not_positive_partitions(num_partitions));
+        }
+        repartitioned
     }
 
     /// Append a monotonically increasing index column. Mirrors
@@ -3512,6 +3609,70 @@ fn set_observations(
         }
     }
     Ok(())
+}
+
+/// PySpark's `VALUE_NOT_POSITIVE` error of the partition count `num_partitions`, which its
+/// `repartition`, `coalesce`, `repartitionByRange` and `repartitionById` raise for a count that is
+/// not positive, of its `str`.
+fn not_positive_partitions(num_partitions: i32) -> SparkError {
+    SparkError::value(
+        "VALUE_NOT_POSITIVE",
+        &[
+            ("arg_name", "numPartitions"),
+            ("arg_value", &num_partitions.to_string()),
+        ],
+    )
+}
+
+/// Whether the literals of `replacements` are of the mixed types that PySpark's `replace` refuses
+/// with `MIXED_TYPE_REPLACEMENT`: unless the literals to replace and the replacements that are not
+/// null are all booleans, all strings or all numbers, as its `all_of_bool`, `all_of_str` and
+/// `all_of_numeric` check them (connect/dataframe.py:1550-1559). A boolean is a number too, as
+/// `isinstance(True, (float, int))`, and a null to replace, a decimal, binary, a date, a timestamp,
+/// an interval or an array is none of them.
+fn is_mixed_type_replacement(
+    replacements: &[(
+        crate::expression::LiteralExpression,
+        crate::expression::LiteralExpression,
+    )],
+) -> bool {
+    use crate::expression::LiteralExpression as L;
+    let literals = || {
+        replacements.iter().flat_map(|(old, new)| {
+            std::iter::once(old).chain((!matches!(new, L::Null(_))).then_some(new))
+        })
+    };
+    let all_of = |is: fn(&L) -> bool| literals().all(is);
+    !(all_of(|literal| matches!(literal, L::Boolean(_)))
+        || all_of(|literal| matches!(literal, L::String(_)))
+        || all_of(|literal| {
+            matches!(
+                literal,
+                L::Boolean(_)
+                    | L::Byte(_)
+                    | L::Short(_)
+                    | L::Integer(_)
+                    | L::Long(_)
+                    | L::Float(_)
+                    | L::Double(_)
+            )
+        }))
+}
+
+/// The literal of `literal` in a replacement, as PySpark's `replace` sends it: an integer or a
+/// float as a double, as it sends `float(v)` of an int (`_convert_int_to_float`), and any other
+/// literal, a boolean among them, as it is.
+fn replacement_literal(
+    literal: crate::expression::LiteralExpression,
+) -> crate::expression::LiteralExpression {
+    use crate::expression::LiteralExpression as L;
+    match literal {
+        L::Byte(v) | L::Short(v) | L::Integer(v) => L::Double(f64::from(v)),
+        // As Python's `float` of an int, the double nearest to it.
+        L::Long(v) => L::Double(v as f64),
+        L::Float(v) => L::Double(f64::from(v)),
+        other => other,
+    }
 }
 
 /// Whether `value` is a fill of PySpark's `fillna`: a bool, an integer, a float or a string. Any
@@ -7362,6 +7523,57 @@ mod plan_construction_tests {
         }
     }
 
+    /// As PySpark's `df.stat` functions, which call those of the DataFrame of the same names, and
+    /// its `df.na.fill`, which is `df.fillna`: the shortcuts build the plans and raise the errors
+    /// of `stat()` and `na()`, before any request.
+    #[test]
+    fn the_stat_and_na_shortcuts_of_a_dataframe_are_its_stat_and_na_functions() {
+        use crate::expression::LiteralExpression;
+        let df = session().range(3).unwrap();
+        let same = |shortcut: DataFrame, function: DataFrame| {
+            assert_eq!(shortcut.plan.to_proto(), function.plan.to_proto());
+        };
+        same(
+            df.approx_quantile(["id"], vec![0.25, 0.5], 0.1),
+            df.stat().approx_quantile(["id"], vec![0.25, 0.5], 0.1),
+        );
+        same(df.crosstab("id", "id"), df.stat().crosstab("id", "id"));
+        same(
+            df.freq_items(vec!["id"], 0.5),
+            df.stat().freq_items(vec!["id"], 0.5),
+        );
+        let fractions = || vec![(Expression::literal(LiteralExpression::Long(0)), 0.5)];
+        same(
+            df.sample_by("id", fractions(), Some(7)).unwrap(),
+            df.stat().sample_by("id", fractions(), Some(7)).unwrap(),
+        );
+        let error = df.corr("id", "id", Some("spearman")).unwrap_err();
+        assert_eq!(
+            error.get_error_class().as_deref(),
+            Some("VALUE_NOT_ALLOWED")
+        );
+        same(
+            df.na()
+                .fill_value(Value::Long(1), Some(vec!["id"]))
+                .unwrap(),
+            df.fillna_value(Value::Long(1), Some(vec!["id"])).unwrap(),
+        );
+        let pairs = || vec![("id".to_string(), Value::Double(0.5))];
+        same(
+            df.na().fill_map(pairs()).unwrap(),
+            df.fillna_map(pairs()).unwrap(),
+        );
+        let message = |result: Result<DataFrame>| result.err().expect("an error").message();
+        assert_eq!(
+            message(df.na().fill_value(Value::Null, None)),
+            message(df.fillna_value(Value::Null, None))
+        );
+        assert_eq!(
+            message(df.na().fill_map(Vec::new())),
+            message(df.fillna_map(Vec::new()))
+        );
+    }
+
     #[test]
     fn replace_literals_plan() {
         use crate::expression::LiteralExpression;
@@ -7388,20 +7600,114 @@ mod plan_construction_tests {
                 _ => panic!("expected NAReplace plan"),
             }
         }
-        // A string replacement that parses as a number is a double, as before.
-        match df
-            .replace(vec![("1".to_string(), "a".to_string())], None)
-            .plan
-            .as_ref()
+        // A string that reads as a number is a string, as PySpark's `replace("1", "a")` sends
+        // it, and so are "nan" and "inf", which read as doubles too.
+        for number in ["1", "nan", "inf", "-0.5e3"] {
+            match df
+                .replace(vec![(number.to_string(), "2".to_string())], None)
+                .plan
+                .as_ref()
+            {
+                LogicalPlan::NAReplace { replacements, .. } => assert_eq!(
+                    replacements,
+                    &vec![(
+                        LiteralExpression::string(number),
+                        LiteralExpression::string("2")
+                    )]
+                ),
+                _ => panic!("expected NAReplace plan"),
+            }
+        }
+    }
+
+    /// As PySpark's `replace` of a dict: the literals to replace and the replacements that are
+    /// not null are all booleans, all strings or all numbers, a boolean being a number too, else
+    /// `MIXED_TYPE_REPLACEMENT`, which the requests of the DataFrame raise; and a number is sent
+    /// as a double, as PySpark sends `float(v)` of an int: `replace({1: 9})` sends doubles,
+    /// `replace({True: 1.0})` a boolean and a double, as its `F.lit` of each.
+    #[test]
+    fn replace_literals_check_and_send_the_types_of_pyspark() {
+        use crate::expression::LiteralExpression as L;
+        // The pairs of literals of a replacement: those given, or those sent.
+        type Pairs = Vec<(L, L)>;
+        let df = session().range(3).unwrap();
+        let sent = |replacements: Pairs| match df.replace_literals(replacements, None).plan.as_ref()
         {
-            LogicalPlan::NAReplace { replacements, .. } => assert_eq!(
-                replacements,
-                &vec![(
-                    LiteralExpression::double(1.0),
-                    LiteralExpression::string("a")
-                )]
-            ),
+            LogicalPlan::NAReplace { replacements, .. } => replacements.clone(),
             _ => panic!("expected NAReplace plan"),
+        };
+        let null = || L::null(DataType::Null);
+        let cases: Vec<(Pairs, Pairs)> = vec![
+            (
+                vec![(L::Integer(1), L::Long(9))],
+                vec![(L::Double(1.0), L::Double(9.0))],
+            ),
+            (
+                vec![(L::Byte(1), L::Short(2))],
+                vec![(L::Double(1.0), L::Double(2.0))],
+            ),
+            (
+                vec![(L::Float(0.5), null())],
+                vec![(L::Double(0.5), null())],
+            ),
+            (
+                vec![(L::Long(i64::MAX), L::Double(1.0))],
+                vec![(L::Double(9_223_372_036_854_775_808.0), L::Double(1.0))],
+            ),
+            (
+                vec![(L::Boolean(true), L::Double(1.0))],
+                vec![(L::Boolean(true), L::Double(1.0))],
+            ),
+            (
+                vec![(L::Boolean(true), L::Boolean(false))],
+                vec![(L::Boolean(true), L::Boolean(false))],
+            ),
+            (
+                vec![(L::string("a"), null())],
+                vec![(L::string("a"), null())],
+            ),
+            (
+                vec![(L::Double(1.0), null()), (L::Integer(2), L::Integer(3))],
+                vec![(L::Double(1.0), null()), (L::Double(2.0), L::Double(3.0))],
+            ),
+            (vec![], vec![]),
+        ];
+        for (replacements, expected) in cases {
+            let replaced = df.replace_literals(replacements.clone(), None);
+            assert!(replaced.relation().is_ok(), "{replacements:?}");
+            assert_eq!(sent(replacements), expected);
+        }
+        let date = || L::Date(0);
+        for replacements in [
+            vec![(null(), L::Integer(1))],
+            vec![(L::string("a"), L::Integer(1))],
+            vec![(L::Integer(1), L::string("a"))],
+            vec![(L::Boolean(true), L::string("a"))],
+            vec![
+                (L::string("a"), L::string("b")),
+                (L::Double(1.0), L::Double(2.0)),
+            ],
+            vec![(date(), L::Integer(1))],
+            vec![(L::Integer(1), date())],
+            vec![(
+                L::Decimal {
+                    value: "1".to_string(),
+                    precision: 1,
+                    scale: 0,
+                },
+                L::Integer(2),
+            )],
+            vec![(L::Binary(b"a".to_vec()), L::Binary(b"b".to_vec()))],
+        ] {
+            let error = df
+                .replace_literals(replacements.clone(), Some(vec!["id"]))
+                .relation()
+                .unwrap_err();
+            assert_eq!(error.kind, SparkErrorKind::ValueError, "{replacements:?}");
+            assert_eq!(
+                error.message(),
+                "[MIXED_TYPE_REPLACEMENT] Mixed type replacements are not supported."
+            );
         }
     }
 
@@ -7501,6 +7807,58 @@ mod plan_construction_tests {
 
     /// As PySpark's `repartitionByRange(numPartitions, *cols)`: a count that is not positive,
     /// then no columns, are errors, where the server would split the rows round-robin.
+    /// As PySpark's `repartition`, `coalesce` and `repartitionById`, which raise
+    /// `VALUE_NOT_POSITIVE` of a count that is not positive before any request: the requests of
+    /// their DataFrames fail with it, and the DataFrames have no schema without a request, though
+    /// their input has one cached. `repartition_by_expressions` of a count of 0 sends no count, as
+    /// PySpark's `repartition(*cols)`, and refuses a negative one.
+    #[test]
+    fn repartitions_of_a_count_that_is_not_positive_fail_as_pyspark() {
+        use crate::functions::col;
+
+        let df = session().range(5).unwrap();
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(DataType::Struct { fields: vec![] }));
+        let id = || [col("id")];
+        for n in [0, -1, i32::MIN] {
+            let mut failing = vec![
+                df.repartition(n),
+                df.coalesce(n),
+                df.repartition_by_id(n, col("id")),
+            ];
+            if n < 0 {
+                failing.push(df.repartition_by_expressions(n, id()));
+            }
+            for repartitioned in failing {
+                assert!(repartitioned.cached_schema().is_none());
+                let error = repartitioned.relation().unwrap_err();
+                assert_eq!(error.kind, SparkErrorKind::ValueError);
+                assert_eq!(
+                    error.message(),
+                    format!(
+                        "[VALUE_NOT_POSITIVE] Value for `numPartitions` must be positive, got '{n}'."
+                    )
+                );
+            }
+        }
+        let count = |df: DataFrame| match df.relation().unwrap().rel_type {
+            Some(proto::relation::RelType::Repartition(repartition)) => {
+                Some(repartition.num_partitions)
+            }
+            Some(proto::relation::RelType::RepartitionByExpression(repartition)) => {
+                repartition.num_partitions
+            }
+            other => panic!("not a repartition: {other:?}"),
+        };
+        assert_eq!(count(df.repartition(1)), Some(1));
+        assert_eq!(count(df.coalesce(2)), Some(2));
+        assert_eq!(count(df.repartition_by_id(3, col("id"))), Some(3));
+        assert_eq!(count(df.repartition_by_expressions(4, id())), Some(4));
+        assert_eq!(count(df.repartition_by_expressions(0, id())), None);
+        for repartitioned in [df.repartition(1), df.repartition_by_expressions(0, id())] {
+            assert!(repartitioned.cached_schema().is_some());
+        }
+    }
+
     #[test]
     fn repartition_by_range_rejects_no_columns_and_a_count_that_is_not_positive_as_pyspark() {
         use crate::functions::col;

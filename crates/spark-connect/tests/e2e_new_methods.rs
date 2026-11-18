@@ -13,6 +13,8 @@ use std::collections::HashMap;
 
 use common::{session, should_run};
 use spark_connect::column::{col, lit};
+use spark_connect::expression::LiteralExpression;
+use spark_connect::row::Value;
 use spark_connect::session::SparkSession;
 use spark_connect::types::DataType;
 
@@ -127,8 +129,21 @@ fn stat_corr_cov_sample_by() {
     let spark = session();
     let df = numeric(&spark);
 
-    let _c = df.stat().corr("g", "v", None).expect("corr");
-    let _v = df.stat().cov("g", "v").expect("cov");
+    let c = df.stat().corr("g", "v", None).expect("corr");
+    let v = df.stat().cov("g", "v").expect("cov");
+    // As PySpark's `df.corr` and `df.cov`, which `df.stat` calls.
+    assert_eq!(df.corr("g", "v", None).expect("corr"), c);
+    assert_eq!(df.cov("g", "v").expect("cov"), v);
+    let rows = |df: spark_connect::dataframe::DataFrame| df.collect().expect("collect");
+    assert_eq!(
+        rows(df.approx_quantile(["g"], vec![0.5], 0.0)),
+        rows(df.stat().approx_quantile(["g"], vec![0.5], 0.0))
+    );
+    assert_eq!(rows(df.crosstab("g", "g")).len(), 4);
+    assert_eq!(
+        rows(df.freq_items(["g"], 0.5)),
+        rows(df.stat().freq_items(["g"], 0.5))
+    );
 
     let fractions = vec![
         (lit(0).expression().clone(), 1.0),
@@ -180,12 +195,28 @@ fn replace_to_with_metadata_random_split() {
     let spark = session();
     let df = numeric(&spark);
 
-    // replace values in the "g" column.
-    let replaced = df
-        .replace(vec![("0".to_string(), "9".to_string())], Some(vec!["g"]))
-        .collect()
-        .expect("replace collect");
-    assert_eq!(replaced.len(), 5);
+    // Replace a number in the "g" column, of ints, as PySpark's `replace(0, 9, subset=["g"])`,
+    // which sends doubles; the strings of `replace` replace strings only, as PySpark's
+    // `replace("0", "9", subset=["g"])`, which leaves the ints as they are.
+    let g = |df: spark_connect::dataframe::DataFrame| -> Vec<Value> {
+        df.collect()
+            .expect("replace collect")
+            .iter()
+            .map(|row| row.get(0).cloned().expect("g"))
+            .collect()
+    };
+    let ints = |values: [i32; 5]| values.map(Value::Integer).to_vec();
+    assert_eq!(
+        g(df.replace_literals(
+            vec![(LiteralExpression::Integer(0), LiteralExpression::Integer(9))],
+            Some(vec!["g"])
+        )),
+        ints([9, 1, 1, 2, 3])
+    );
+    assert_eq!(
+        g(df.replace(vec![("0".to_string(), "9".to_string())], Some(vec!["g"]))),
+        ints([0, 1, 1, 2, 3])
+    );
 
     // to(): reconcile to a target schema (g -> string).
     let schema = DataType::from_ddl("g string, v double").expect("ddl");

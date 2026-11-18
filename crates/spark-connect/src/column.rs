@@ -253,6 +253,19 @@ impl Column {
         }
     }
 
+    /// This column, as PySpark Connect's `Column.outer()`, which is `Column(self._expr)`: it marks
+    /// a column of an outer query in a subquery, which Spark Classic needs to analyze a DataFrame
+    /// lazily, and a Spark Connect DataFrame is always analyzed lazily.
+    pub fn outer(self) -> Column {
+        self
+    }
+
+    /// The column that `f` makes of this one, as PySpark's `Column.transform(f)`, which is
+    /// `f(self)`: so that functions chain, as `col("text").transform(trim).transform(upper)`.
+    pub fn transform(self, f: impl FnOnce(Column) -> Column) -> Column {
+        f(self)
+    }
+
     /// Mirrors `pyspark.sql.column.Column.withField`: add or replace a field in
     /// a struct-typed column.
     pub fn with_field(self, field_name: &str, value: Column) -> Column {
@@ -797,6 +810,22 @@ mod tests {
         let c = col("x");
         let aliased = c.alias("y");
         assert!(matches!(aliased.expr.node(), ExpressionNode::Alias(_)));
+    }
+
+    /// As PySpark Connect's `outer()`, of the same expression, and `transform(f)`, which is
+    /// `f(self)`: `col("text").transform(trim).transform(upper)` is `upper(trim(text))`.
+    #[test]
+    fn outer_is_the_column_and_transform_applies_its_function_as_pyspark() {
+        use crate::functions::{trim, upper};
+        let outer = col("e1.department_id").outer();
+        assert_eq!(outer, col("e1.department_id"));
+        let chained = col("text").transform(trim).transform(upper);
+        assert_eq!(chained, upper(trim(col("text"))));
+        assert_eq!(chained.expression().render(), "upper(trim(text))");
+        let arithmetic = col("value")
+            .transform(|c| c + lit(5))
+            .transform(|c| c * lit(2));
+        assert_eq!(arithmetic.expression().render(), "*(+(value, 5), 2)");
     }
 
     #[test]

@@ -217,49 +217,30 @@ fn test_replace_string_values_assertion() {
 
 #[test]
 fn test_replace_numeric_string_values() {
-    // Regression: numeric-looking strings ("1.0", "2.0") should parse as doubles
-    // (per the plan.rs str_to_proto_literal behavior).
-    let base = plan::range(0, 10, 1);
-    let df_plan = plan::na_replace(base, vec![("1.0".to_string(), "2.0".to_string())], vec![]);
-    let relation = plan_to_relation(df_plan);
+    // Numeric-looking strings ("1.0", "nan") are strings, as PySpark's `replace("1.0", "2.0")`
+    // sends them: a double would replace the number in the numeric columns instead.
+    for (old, new) in [("1.0", "2.0"), ("nan", "inf")] {
+        let base = plan::range(0, 10, 1);
+        let df_plan = plan::na_replace(base, vec![(old.to_string(), new.to_string())], vec![]);
+        let relation = plan_to_relation(df_plan);
 
-    let replace = match relation.rel_type {
-        Some(proto::relation::RelType::Replace(ref r)) => r,
-        _ => panic!("expected Replace relation"),
-    };
-
-    let repl = &replace.replacements[0];
-
-    // Both should be Double(1.0) and Double(2.0)
-    let old_lit = repl
-        .old_value
-        .as_ref()
-        .unwrap()
-        .literal_type
-        .clone()
-        .unwrap();
-    assert!(
-        matches!(
-            old_lit,
-            proto::expression::literal::LiteralType::Double(v) if (v - 1.0).abs() < 1e-9
-        ),
-        "numeric string '1.0' should parse as Double"
-    );
-
-    let new_lit = repl
-        .new_value
-        .as_ref()
-        .unwrap()
-        .literal_type
-        .clone()
-        .unwrap();
-    assert!(
-        matches!(
-            new_lit,
-            proto::expression::literal::LiteralType::Double(v) if (v - 2.0).abs() < 1e-9
-        ),
-        "numeric string '2.0' should parse as Double"
-    );
+        let replace = match relation.rel_type {
+            Some(proto::relation::RelType::Replace(ref r)) => r,
+            _ => panic!("expected Replace relation"),
+        };
+        let literal = |value: &Option<proto::expression::Literal>| {
+            value.as_ref().unwrap().literal_type.clone().unwrap()
+        };
+        let repl = &replace.replacements[0];
+        assert_eq!(
+            (literal(&repl.old_value), literal(&repl.new_value)),
+            (
+                proto::expression::literal::LiteralType::String(old.to_string()),
+                proto::expression::literal::LiteralType::String(new.to_string())
+            ),
+            "numeric-looking strings stay strings"
+        );
+    }
 }
 
 #[test]
