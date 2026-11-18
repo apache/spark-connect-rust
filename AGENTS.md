@@ -479,6 +479,13 @@ For every method matching a pyspark name:
   reference cycle through an instance dict is collected. No code of the extension wraps the
   `tp_dealloc` of a class any more. (PyO3 0.28 did not do any of this, which needed the
   `instance_dict` wrapper of SPARK-61490; that module was removed with the upgrade.)
+  On CPython 3.11 the collector can traverse such an object while it is created, before PyO3
+  writes its value, as `object.__new__` allocates the dict of the tracked object: a custom
+  `__traverse__` checks the class's `crate::gc::GcReady` first, unless it reads only
+  `Option<Py<_>>` fields, whose zeroed memory is `None` (an `Arc`, a `OnceLock` or an `Option` of
+  a struct is not valid then). The offline test
+  `test_objects_traversed_while_they_are_created_do_not_crash` makes a collection meet each such
+  class there; add a new one to it.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
