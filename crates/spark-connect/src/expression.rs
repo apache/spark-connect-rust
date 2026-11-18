@@ -895,7 +895,12 @@ impl Expression {
 
     /// Whether no other expression shares the node of this one.
     pub(crate) fn is_exclusive(&self) -> bool {
-        Arc::strong_count(&self.node) == 1
+        self.is_held_by(1)
+    }
+
+    /// Whether `holders` expressions, this one and its clones, hold the node of this one.
+    pub(crate) fn is_held_by(&self, holders: usize) -> bool {
+        Arc::strong_count(&self.node) == holders
     }
 
     /// The address of the node of this expression, which the expressions that share it have too.

@@ -1169,35 +1169,28 @@ fn trigger_of(kind: &str, value: Option<String>) -> PyResult<Trigger> {
 )]
 pub struct PyDataStreamWriter {
     /// The state of the writer, which a shallow copy of it shares, as PySpark's `_write_stream`.
+    /// It keeps the functions of `foreachBatch` and `foreach` as their pickles, as PySpark's
+    /// `WriteStreamOperationStart` does, and not the functions.
     inner: Arc<WriterState<DataStreamWriter>>,
     /// The DataFrame that is streamed, as the Python object of `df.writeStream`, as PySpark's
     /// plan of its writer.
     frame: Py<PyDataFrame>,
-    /// The functions of `foreachBatch` and `foreach` that the writer applied, in order, with
-    /// the kind of each, which a pickle keeps, as PySpark's pickle keeps the functions.
-    functions: AppliedFunctions,
+    /// Set once the value is written, as `__traverse__` reads `frame`, which is not valid while
+    /// the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
-
-/// The functions of `foreachBatch` and `foreach` that a stream writer applied, in order, each with
-/// its kind, shared by the shallow copies of the writer.
-type AppliedFunctions = Arc<std::sync::Mutex<Vec<(String, Py<PyAny>)>>>;
 
 impl PyDataStreamWriter {
     pub fn new(writer: DataStreamWriter, frame: Py<PyDataFrame>) -> Self {
         PyDataStreamWriter {
-            inner: Arc::new(WriterState::new(writer)),
+            inner: Arc::new(WriterState::of_frame(
+                writer,
+                &frame,
+                DataStreamWriter::shares_plan_with,
+            )),
             frame,
-            functions: Arc::new(std::sync::Mutex::new(Vec::new())),
+            gc_ready: crate::gc::GcReady::new(),
         }
-    }
-
-    /// Keep a function that the writer applied, as `kind` of `foreachBatch` or `foreach`.
-    fn record(&self, kind: &str, function: &Bound<'_, PyAny>) {
-        let mut functions = self
-            .functions
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        functions.push((kind.to_string(), function.clone().unbind()));
     }
 
     /// The steps of PySpark's `_start_internal` on the writer `w`, in its order: the options, the output
@@ -1277,7 +1270,8 @@ impl PyDataStreamWriter {
 #[pymethods]
 impl PyDataStreamWriter {
     /// The shallow copy of a stream writer, as PySpark's `copy.copy`: the copy shares the state
-    /// of this writer, as its `_write_stream` is the same object, and its functions.
+    /// of this writer, as its `_write_stream` is the same object, with the pickles of its
+    /// functions.
     fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
         let py = slf.py();
         let this = slf.borrow();
@@ -1286,15 +1280,35 @@ impl PyDataStreamWriter {
             PyDataStreamWriter {
                 inner: Arc::clone(&this.inner),
                 frame: this.frame.clone_ref(py),
-                functions: Arc::clone(&this.functions),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
         Ok(copy)
     }
 
+    /// As PySpark's stream writer, a Python object that holds the plan of its DataFrame, which
+    /// Python's garbage collector sees: the DataFrame is reported, which reports the objects of
+    /// the plan that the two share (see [`crate::gc::Holders`]). The functions of `foreachBatch`
+    /// and `foreach` are kept as their pickles, as PySpark keeps them, so nothing else is held.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.frame)
+    }
+
+    /// Drop this writer's reference to its state, of which it keeps a cleared copy; a copy of the
+    /// writer keeps the state.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.inner = Arc::new(self.inner.cleared(DataStreamWriter::clear_plan));
+        }
+    }
+
     /// The reduce of a stream writer, as PySpark's pickle of its DataFrame and its state, which
-    /// `_of_state` gives back, with the functions that it applied and its instance attributes.
+    /// `_of_state` gives back, with the pickles of the functions that it applied, which PySpark's
+    /// pickle keeps in its `WriteStreamOperationStart`, and its instance attributes.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::{state_reduce, str_dict};
 
@@ -1316,25 +1330,16 @@ impl PyDataStreamWriter {
             }
             None => py.None().into_bound(py),
         };
-        let functions = {
-            let functions = this
-                .functions
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let pairs = functions
-                .iter()
-                .map(|(kind, function)| {
-                    PyTuple::new(
-                        py,
-                        [
-                            kind.into_pyobject(py)?.into_any(),
-                            function.clone_ref(py).into_bound(py),
-                        ],
-                    )
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            PyList::new(py, pairs)?
-        };
+        let commands = PyList::empty(py);
+        for (kind, payload) in [
+            ("foreachBatch", writer.get_foreach_batch_payload()),
+            ("foreach", writer.get_foreach_payload()),
+        ] {
+            if let Some(payload) = payload {
+                let command = pyo3::types::PyBytes::new(py, &payload.command);
+                commands.append((kind, command, payload.python_ver.as_str()))?;
+            }
+        }
         let args = PyTuple::new(
             py,
             [
@@ -1346,7 +1351,7 @@ impl PyDataStreamWriter {
                 PyList::new(py, writer.get_cluster_cols())?.into_any(),
                 writer.get_query_name().into_pyobject(py)?.into_any(),
                 trigger,
-                functions.into_any(),
+                commands.into_any(),
             ],
         )?;
         let reduced = state_reduce(py, "stream_writer_reduce", args)?;
@@ -1355,8 +1360,9 @@ impl PyDataStreamWriter {
 
     /// A stream writer of its state, as `__reduce__` gives it: of the DataFrame `frame`, the
     /// format, the output mode, the options, the partitioning and clustering columns, the query
-    /// name, the trigger (a kind and its value, or None), and the functions that were applied,
-    /// which are applied again, in order, to the writer.
+    /// name, the trigger (a kind and its value, or None), and the pickles of the functions of
+    /// `foreachBatch` and `foreach`, each of its kind and of the version of Python that pickled
+    /// it, which the writer keeps as they are, as PySpark's unpickled writer does.
     #[staticmethod]
     fn _of_state<'py>(
         py: Python<'py>,
@@ -1368,7 +1374,7 @@ impl PyDataStreamWriter {
         cluster_cols: Vec<String>,
         query_name: Option<String>,
         trigger: Option<(String, Option<String>)>,
-        functions: Vec<(String, Py<PyAny>)>,
+        commands: Vec<(String, Vec<u8>, String)>,
     ) -> PyResult<Bound<'py, PyDataStreamWriter>> {
         let mut writer = frame.borrow(py).dataframe.write_stream();
         if let Some(format) = format {
@@ -1390,15 +1396,14 @@ impl PyDataStreamWriter {
         if let Some((kind, value)) = trigger {
             writer = writer.trigger(trigger_of(&kind, value)?);
         }
-        let restored = Bound::new(py, PyDataStreamWriter::new(writer, frame))?;
-        for (kind, function) in functions {
-            let function = function.into_bound(py);
-            match kind.as_str() {
-                "foreachBatch" => PyDataStreamWriter::foreachBatch(&restored, py, &function)?,
-                _ => PyDataStreamWriter::foreach(&restored, py, &function)?,
+        for (kind, command, python_ver) in commands {
+            let payload = PythonUDFPayload::function(command, python_ver);
+            writer = match kind.as_str() {
+                "foreachBatch" => writer.foreach_batch(payload),
+                _ => writer.foreach(payload),
             };
         }
-        Ok(restored)
+        Bound::new(py, PyDataStreamWriter::new(writer, frame))
     }
 
     /// The output mode, which PySpark sets in its protobuf string field at once, as
@@ -1637,7 +1642,8 @@ impl PyDataStreamWriter {
     /// `DataStreamWriter.foreachBatch(func)`: cloudpickle the `(batch_df, batch_id)`
     /// function (with PySpark's `CloudPickleSerializer`) and attach it as the
     /// foreach-batch sink. Pickling happens here so the Python skin can re-export this
-    /// class directly rather than subclassing a (non-subclassable) PyO3 type.
+    /// class directly rather than subclassing a (non-subclassable) PyO3 type. The writer keeps
+    /// the pickle and not the function, as PySpark's `WriteStreamOperationStart` does.
     fn foreachBatch<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'_>,
@@ -1646,8 +1652,6 @@ impl PyDataStreamWriter {
         let command = streaming_function_command(py, func, "foreachBatch")?;
         // As PySpark's, the function's command and Python version only.
         let payload = PythonUDFPayload::function(command, crate::dataframe::py_version(py));
-        slf.borrow().record("foreachBatch", func);
-
         slf.borrow().inner.update(|w| w.foreach_batch(payload));
 
         Ok(slf.clone())
@@ -1658,7 +1662,8 @@ impl PyDataStreamWriter {
     /// `ATTRIBUTE_NOT_CALLABLE` for an object without a callable `process`, in the command
     /// `(func, None, serializer, serializer)` of `AutoBatchedSerializer(CPickleSerializer())`,
     /// which the worker of the server deserializes with its own `pyspark.serializers`. Built
-    /// here to avoid a Python subclass of the PyO3 class.
+    /// here to avoid a Python subclass of the PyO3 class. The writer keeps the pickle and not
+    /// `f`, as PySpark's `WriteStreamOperationStart` does.
     fn foreach<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'_>,
@@ -1686,8 +1691,6 @@ impl PyDataStreamWriter {
         )?;
         let command = streaming_function_command(py, command_tuple.as_any(), "foreach")?;
         let payload = PythonUDFPayload::function(command, crate::dataframe::py_version(py));
-        slf.borrow().record("foreach", f);
-
         slf.borrow().inner.update(|w| w.foreach(payload));
 
         Ok(slf.clone())

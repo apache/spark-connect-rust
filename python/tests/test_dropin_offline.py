@@ -12161,12 +12161,16 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
     # As PySpark's plans and expressions, of Python objects, which hold the function of a UDF
     # until a request pickles it: a reference cycle through the function and the DataFrame or the
     # Column that holds it, as through a bound method of an object that keeps it, is collected,
-    # of a UDF, a map function and a UDTF. A function that live Columns and DataFrames share is
-    # kept, and pickles at their requests.
+    # of a UDF, a map function and a UDTF. So it is through the objects that hold such a Column or
+    # the plan of such a DataFrame, as PySpark's do: grouped data and their cogroups, a table
+    # argument, a window specification, the writers, the null and statistics functions, and a
+    # merge builder and its clauses. A function that live Columns and DataFrames share is kept,
+    # and pickles at their requests.
     import copy
     import gc
     import weakref
 
+    from pyspark.sql import Window
     from pyspark.sql import functions as F
     from pyspark.sql.connect.proto import base_pb2
 
@@ -12184,17 +12188,84 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
 
         return F.udtf(Handler, returnType="v: boolean")(F.lit(1))
 
+    def udf_frame(job):
+        return df.select(F.udf(job.f, "long")("id").alias("v"))
+
+    def udf_column(job, returns="long"):
+        return F.udf(job.f, returns)("id")
+
     holders = [
         lambda job: df.select(F.udf(job.f, "long")("id")),
         lambda job: F.udf(job.f, "long")("id"),
         lambda job: df.mapInPandas(job.f, "id long"),
         udtf_of,
+        lambda job: df.groupBy(udf_column(job)),
+        lambda job: udf_frame(job).groupBy("v"),
+        lambda job: udf_frame(job).groupBy("v").pivot("v", [1]),
+        lambda job: df.groupBy(udf_column(job)).cogroup(df.groupBy("id")),
+        lambda job: udf_frame(job).groupBy("v").cogroup(df.groupBy("id")),
+        lambda job: (lambda group: group.cogroup(group))(df.groupBy(udf_column(job))),
+        lambda job: copy.copy(df.groupBy(udf_column(job)).cogroup(df.groupBy("id"))),
+        lambda job: udf_frame(job).asTable(),
+        lambda job: df.asTable().partitionBy(udf_column(job)),
+        lambda job: Window.partitionBy(udf_column(job)),
+        lambda job: Window.orderBy(udf_column(job)).rowsBetween(-1, 1),
+        lambda job: udf_frame(job).write,
+        lambda job: copy.copy(udf_frame(job).write),
+        lambda job: udf_frame(job).writeTo("t"),
+        lambda job: df.writeTo("t").partitionedBy(udf_column(job)),
+        lambda job: udf_frame(job).writeStream,
+        lambda job: udf_frame(job).na,
+        lambda job: udf_frame(job).stat,
+        lambda job: udf_frame(job).mergeInto("t", F.lit(True)),
+        lambda job: df.mergeInto("t", udf_column(job, "boolean")),
+        lambda job: df.mergeInto("t", F.lit(True)).whenMatched(udf_column(job, "boolean")),
+        lambda job: df.mergeInto("t", F.lit(True)).whenNotMatched().insert(
+            {"id": udf_column(job)}),
     ]
     for holder in holders:
         job = Job()
         job.held = holder(job)
         freed = weakref.ref(job)
         del job
+        gc.collect()
+        assert freed() is None
+
+    # The function of the plan of a live DataFrame is reachable through it, whichever of its
+    # objects the cycle runs through: it is kept, untouched by the collector, until the
+    # DataFrame goes, and then collected. So is a cycle through both the DataFrame and an object
+    # that holds it; a table argument holds the plan and not the DataFrame, as PySpark's does,
+    # so it is not of those (see "Garbage collection" in known-differences.md).
+    objects = [
+        lambda frame: frame.groupBy("v"),
+        lambda frame: copy.copy(frame.groupBy("v")),
+        lambda frame: frame.groupBy("v").cogroup(frame.groupBy("v")),
+        lambda frame: frame.write,
+        lambda frame: copy.copy(frame.write),
+        lambda frame: frame.writeTo("t"),
+        lambda frame: frame.writeStream,
+        lambda frame: frame.na,
+        lambda frame: frame.stat,
+        lambda frame: frame.mergeInto("t", F.lit(True)).whenMatched(),
+        lambda frame: frame.asTable(),
+    ]
+    for of_frame in objects:
+        job = Job()
+        frame = udf_frame(job)
+        job.held = of_frame(frame)
+        freed = weakref.ref(job)
+        del job
+        gc.collect()
+        assert freed() is not None and "held" in vars(freed())
+        del frame
+        gc.collect()
+        assert freed() is None
+    for of_frame in objects[:-1]:
+        job = Job()
+        frame = udf_frame(job)
+        job.held = (frame, of_frame(frame))
+        freed = weakref.ref(job)
+        del job, frame
         gc.collect()
         assert freed() is None
 
@@ -12208,6 +12279,90 @@ def test_cycles_through_the_functions_of_udfs_are_collected_as_pyspark(mock_conn
         root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
         command = root.project.expressions[0].common_inline_user_defined_function.python_udf.command
         assert b"<live>" in command
+
+
+def test_cycles_through_the_dataframes_of_their_objects_are_collected_as_pyspark(mock_connect):
+    # As PySpark's grouped data, cogroups, null and statistics functions, which hold their
+    # DataFrame, and its writers and merge builder, whose callback holds it: a DataFrame that
+    # keeps one of these, or a table argument or a stream writer of it, is freed, by the garbage
+    # collector at the latest, as PySpark frees it. So is a DataFrame that keeps the cogroups of
+    # its grouped data with those of another DataFrame.
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    makers = [
+        lambda df: df.groupBy("id"),
+        lambda df: df.groupBy("id").cogroup(df.groupBy("id")),
+        lambda df: df.groupBy("id").cogroup(spark.range(2).groupBy("id")),
+        lambda df: df.write,
+        lambda df: df.writeTo("t"),
+        lambda df: df.writeStream,
+        lambda df: df.na,
+        lambda df: df.stat,
+        lambda df: df.asTable(),
+        lambda df: df.mergeInto("t", F.lit(True)),
+        lambda df: df.mergeInto("t", F.lit(True)).whenNotMatchedBySource(),
+    ]
+    for make in makers:
+        df = spark.range(3)
+        df.back = make(df)
+        freed = weakref.ref(df)
+        del df
+        gc.collect()
+        assert freed() is None
+    # As PySpark's merge builder, whose callback holds the DataFrame, and its clauses: they keep
+    # the DataFrame alive.
+    for make in makers[-2:]:
+        df = spark.range(3)
+        kept = make(df)
+        freed = weakref.ref(df)
+        del df
+        gc.collect()
+        assert freed() is not None
+        del kept
+
+
+def test_stream_writers_keep_the_pickles_of_their_functions_as_pyspark(mock_connect):
+    # As PySpark's DataStreamWriter, whose WriteStreamOperationStart keeps the pickle of the
+    # function of foreachBatch and foreach and not the function: an object that keeps the writer
+    # of its own function is freed once it is deleted, without a collection. A copy and a deep
+    # copy of the writer keep the pickles, of the function as it was at the call, which its query
+    # sends, so a change of the function afterwards is not seen, as in PySpark.
+    import copy
+    import sys
+    import weakref
+
+    spark, _ = mock_connect
+    stream = spark.readStream.format("rate").load()
+
+    class Sink:
+        state = "before"
+
+        def __call__(self, batch, batch_id):
+            pass
+
+        def process(self, row):
+            pass
+
+    for attach in (lambda w, s: w.foreachBatch(s), lambda w, s: w.foreach(s)):
+        sink = Sink()
+        sink.writer = attach(stream.writeStream, sink)
+        freed = weakref.ref(sink)
+        del sink
+        assert freed() is None
+
+    sink = Sink()
+    sink.state = "at the call"
+    writer = stream.writeStream.format("memory").queryName("q").foreachBatch(sink)
+    sink.state = "after"
+    for copied in (writer, copy.copy(writer), copy.deepcopy(writer)):
+        state = copied.__reduce__()[1][-1]
+        (kind, command, python_ver), = state
+        assert kind == "foreachBatch" and python_ver == "{}.{}".format(*sys.version_info[:2])
+        assert pickle.loads(command).state == "at the call"
 
 
 def test_freed_instances_given_attributes_keep_no_memory_as_pyspark(mock_connect):
@@ -21027,10 +21182,13 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     # object is written. The __traverse__ of the writers, the readers and their copies read the
     # zeroed memory of their state there, a null Arc or Py, and crashed the interpreter. A
     # collection at every second allocation (threshold 1), with the free list of dicts emptied and
-    # the allocations before each object shifted by one, meets each kind of object there.
+    # the allocations before each object shifted by one, meets each kind of object there: also the
+    # grouped data, the cogroups, the table arguments, the window specifications, the null and
+    # statistics functions, the merge clauses and the stream writers, and their copies.
     import copy
     import gc
 
+    from pyspark.sql import Window
     from pyspark.sql import functions as F
     from pyspark.sql.observation import Observation
 
@@ -21038,12 +21196,23 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     df = spark.range(1)
     writer, writer_v2 = df.write, df.writeTo("t")
     reader, stream_reader = spark.read, spark.readStream
+    group, table, window = df.groupBy("id"), df.asTable(), Window.partitionBy("id")
+    cogroup, merge = group.cogroup(group), df.mergeInto("t", F.lit(True))
+    na, stat, clause, stream_writer = df.na, df.stat, merge.whenMatched(), df.writeStream
     makers = [
         lambda: df.write, lambda: copy.copy(writer), lambda: df.writeTo("t"),
         lambda: copy.copy(writer_v2), lambda: df.mergeInto("t", F.lit(True)),
         lambda: spark.read, lambda: copy.copy(reader), lambda: spark.readStream,
         lambda: copy.copy(stream_reader), lambda: Observation("o"), lambda: df.select("id"),
-        lambda: F.col("id"),
+        lambda: F.col("id"), lambda: df.groupBy("id"), lambda: copy.copy(group),
+        lambda: group.pivot("id", [1]), lambda: group.cogroup(group), lambda: copy.copy(cogroup),
+        lambda: df.asTable(), lambda: table.partitionBy("id"), lambda: copy.copy(table),
+        lambda: Window.partitionBy("id"), lambda: window.orderBy("id"),
+        lambda: window.rowsBetween(-1, 1), lambda: df.na, lambda: copy.copy(na),
+        lambda: df.stat, lambda: copy.copy(stat), lambda: merge.whenMatched(),
+        lambda: merge.whenNotMatched(F.col("id") > 0), lambda: merge.whenNotMatchedBySource(),
+        lambda: copy.copy(clause), lambda: copy.copy(merge), lambda: df.writeStream,
+        lambda: copy.copy(stream_writer),
     ]
     thresholds = gc.get_threshold()
     gc.collect()
@@ -31727,16 +31896,21 @@ def test_worker_reconstructors_rebuild_the_readers_writers_and_streams_as_pyspar
 def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, monkeypatch):
     # As the test above, for the settings that it does not set: with pyspark._pyspark hidden, the
     # reconstructor of each object replays its buckets, its sorting, its clustering, the table
-    # settings of a V2 writer, the schema of a stream reader, and the partitioning, the trigger
-    # and the function of a stream writer, so that the rebuilt object has the same state. A
-    # bucket count that the proto refuses fails the write of the rebuilt writer, as PySpark's. A
-    # Column of the state, such as a V2 writer's partitioning, is rebuilt by PySpark's own
-    # Column classes, which only a worker has: the e2e tests of foreachBatch cover it.
+    # settings of a V2 writer, the schema of a stream reader, and the partitioning and the trigger
+    # of a stream writer, so that the rebuilt object has the same state. A bucket count that the
+    # proto refuses fails the write of the rebuilt writer, as PySpark's. A Column of the state,
+    # such as a V2 writer's partitioning, is rebuilt by PySpark's own Column classes, which only a
+    # worker has: the e2e tests of foreachBatch cover it. The pickles of the functions of
+    # foreachBatch and foreach, which a stream writer keeps as PySpark's does, are set in the
+    # WriteStreamOperationStart of PySpark's writer, where its foreachBatch and foreach set them.
     import sys
+    import types
 
     import cloudpickle
     import pyspark
     from pyspark.sql import Column
+    from pyspark.sql.connect import _state_reduce
+    from pyspark.sql.connect import proto as pb2
     from pyspark.sql.connect.session import SparkSession
 
     def comparable(value):
@@ -31765,11 +31939,12 @@ def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, mon
         df.write.clusterBy("id"),
         df.writeTo("t").using("parquet").option("k", "v").tableProperty("p", "q").clusterBy("id"),
         spark.readStream.format("rate").schema("id LONG"),
-        df.writeStream.partitionBy("id").trigger(processingTime="1 second")
-        .foreachBatch(on_batch),
-        df.writeStream.clusterBy("id").trigger(once=True).foreach(on_row),
+        df.writeStream.partitionBy("id").trigger(processingTime="1 second"),
+        df.writeStream.clusterBy("id").trigger(once=True),
     ]
     states = [comparable(obj.__reduce__()[1][1:]) for obj in objects]
+    commands = df.writeStream.foreachBatch(on_batch).foreach(on_row).__reduce__()[1][-1]
+    worker_writer = types.SimpleNamespace(_write_proto=pb2.WriteStreamOperationStart())
     refused = df.write.bucketBy(2**40, "id")
     builder = SparkSession.Builder().config("k", "v")
     builder._registerHook(lambda session: None)
@@ -31781,6 +31956,13 @@ def test_worker_reconstructors_replay_every_setting_as_pyspark(mock_connect, mon
         assert comparable(rebuilt.__reduce__()[1][1:]) == state
     with pytest.raises(ValueError):
         cloudpickle.loads(cloudpickle.dumps(refused)).save("p")
+    assert [kind for kind, _, _ in commands] == ["foreachBatch", "foreach"]
+    _state_reduce._worker_foreach_commands(worker_writer, commands)
+    sent = worker_writer._write_proto
+    sinks = [sent.foreach_batch.python_function, sent.foreach_writer.python_function]
+    assert [(sink.command, sink.python_ver) for sink in sinks] == [
+        (command, python_ver) for _, command, python_ver in commands]
+    assert cloudpickle.loads(commands[0][1]).__name__ == "on_batch"
     # The builder of a worker is rebuilt by the same calls, which keep its options and hooks.
     options, _, hooks = cloudpickle.loads(cloudpickle.dumps(builder)).__reduce__()[1]
     assert options == [("k", "v")] and len(hooks) == 1

@@ -19,11 +19,17 @@ use crate::window::window_columns;
 )]
 pub struct PyTableArg {
     pub(crate) inner: TableArg,
+    /// Set once the value is written, as `__traverse__` reads `inner`, which is not valid while
+    /// the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyTableArg {
     pub fn new(inner: TableArg) -> Self {
-        PyTableArg { inner }
+        PyTableArg {
+            inner,
+            gc_ready: crate::gc::GcReady::new(),
+        }
     }
 }
 
@@ -36,9 +42,9 @@ impl PyTableArg {
         // PySpark checks the partitioning before it converts the columns.
         self.inner.check_partition_by().to_pyerr()?;
         let columns = window_columns(cols)?;
-        Ok(PyTableArg {
-            inner: self.inner.clone().partition_by(columns).to_pyerr()?,
-        })
+        Ok(PyTableArg::new(
+            self.inner.clone().partition_by(columns).to_pyerr()?,
+        ))
     }
 
     /// Order the (partitioned) table argument by the given columns.
@@ -48,9 +54,9 @@ impl PyTableArg {
         // PySpark checks the partitioning before it converts the columns.
         self.inner.check_order_by().to_pyerr()?;
         let columns = window_columns(cols)?;
-        Ok(PyTableArg {
-            inner: self.inner.clone().order_by(columns).to_pyerr()?,
-        })
+        Ok(PyTableArg::new(
+            self.inner.clone().order_by(columns).to_pyerr()?,
+        ))
     }
 
     /// The `spark.connect.Expression` of the table argument, as PySpark Connect's
@@ -79,9 +85,9 @@ impl PyTableArg {
     /// Mark the table argument as requiring a single partition.
     #[allow(non_snake_case)]
     fn withSinglePartition(&self) -> PyResult<PyTableArg> {
-        Ok(PyTableArg {
-            inner: self.inner.clone().with_single_partition().to_pyerr()?,
-        })
+        Ok(PyTableArg::new(
+            self.inner.clone().with_single_partition().to_pyerr()?,
+        ))
     }
 
     /// The shallow copy of the table argument, as PySpark's `copy.copy`: of the same subquery,
@@ -115,5 +121,25 @@ impl PyTableArg {
             copy.getattr("__dict__")?.set_item(name, value)?;
         }
         Ok(copy)
+    }
+
+    /// As PySpark's table argument, a Python object that holds the plan of its DataFrame and its
+    /// partitioning and ordering columns, which Python's garbage collector sees: the functions of
+    /// the UDFs that the table argument alone keeps alive are reported, those of the plan once its
+    /// DataFrame is gone, so that a reference cycle through them is collected, as PySpark collects
+    /// it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        crate::udf_command::visit_pickler_objects(self.inner.exclusive_pickler_objects(), &visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the table argument
+    /// drops its plan and its expressions, and so the objects that `__traverse__` reported.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.inner.clear_plan();
+        }
     }
 }

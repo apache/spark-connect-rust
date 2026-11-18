@@ -14,14 +14,27 @@ use crate::errors::ResultExt;
     dict
 )]
 pub struct PyStatFunctions {
+    /// The share of the holders of the plan of `frame`, of which `stat` holds a clone, dropped
+    /// before it (see [`crate::gc::Holders`]).
+    frame_share: crate::gc::Share,
     stat: StatFunctions,
     /// The DataFrame of `df.stat`, as PySpark's `DataFrameStatFunctions.df`.
     frame: Py<PyDataFrame>,
+    /// Set once the value is written, as `__traverse__` reads `frame`, which is not valid while
+    /// the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyStatFunctions {
     pub fn new(stat: StatFunctions, frame: Py<PyDataFrame>) -> Self {
-        PyStatFunctions { stat, frame }
+        let frame_share =
+            PyDataFrame::plan_share(&frame, |dataframe| stat.shares_plan_with(dataframe));
+        PyStatFunctions {
+            frame_share,
+            stat,
+            frame,
+            gc_ready: crate::gc::GcReady::new(),
+        }
     }
 }
 
@@ -52,6 +65,25 @@ impl PyStatFunctions {
     #[getter(df)]
     fn frame(&self, py: Python<'_>) -> Py<PyDataFrame> {
         self.frame.clone_ref(py)
+    }
+
+    /// As PySpark's statistics functions, a Python object that holds its DataFrame, which
+    /// Python's garbage collector sees: the DataFrame is reported, which reports the objects of
+    /// the plan that the two share (see [`crate::gc::Holders`]).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.frame)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the statistics
+    /// functions drop their clone of the plan, after their share of it.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.frame_share = crate::gc::Share::none();
+            self.stat.clear_plan();
+        }
     }
 
     /// Pearson correlation between two numeric columns, as PySpark's, whose `method` is only

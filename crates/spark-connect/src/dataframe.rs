@@ -61,6 +61,18 @@ pub struct DataFrame {
 /// Where a DataFrame keeps the information of its last execution.
 pub(crate) type ExecutionSlot = Arc<Mutex<Option<ExecutionInfo>>>;
 
+/// The plan of a DataFrame, a writer or a table argument whose plan is dropped, an empty relation:
+/// the garbage collector of a Python wrapper breaks a reference cycle through the wrapper this
+/// way (see [`DataFrame::clear_plan`]).
+pub(crate) fn cleared_plan() -> Arc<LogicalPlan> {
+    Arc::new(LogicalPlan::Range {
+        start: 0,
+        end: 0,
+        step: 1,
+        num_partitions: None,
+    })
+}
+
 /// Iterator over rows from a DataFrame, yielded lazily as the server streams results.
 ///
 /// The options of an as-of join, as `DataFrame._joinAsOf` takes them.
@@ -1414,29 +1426,40 @@ impl DataFrame {
     }
 
     /// The objects of the picklers of the UDFs and the UDTFs of the plan of this DataFrame that
-    /// it alone keeps alive, as [`DataFrame::exclusive_relation_owners`] gives the owners of its
-    /// relations, which a Python wrapper reports to Python's garbage collector too: a function
-    /// of a UDF may keep the DataFrame of the UDF, as the bound method of an object that keeps
-    /// the DataFrame does (see `crate::udf::exclusive_pickler_objects`). Not a stable API.
+    /// it keeps alive with the clones of it of which the caller answers, `holders` holders of
+    /// its plan with this DataFrame, as [`DataFrame::exclusive_relation_owners`] gives the owners
+    /// of its relations, which a Python wrapper reports to Python's garbage collector too: a
+    /// function of a UDF may keep the DataFrame of the UDF, as the bound method of an object that
+    /// keeps the DataFrame does (see `crate::udf::exclusive_pickler_objects`). The wrapper answers
+    /// for the clones that the objects that keep it hold, such as its grouped data and its
+    /// writers, as what they hold is reachable through the wrapper too. Nothing is returned when
+    /// the plan has other holders. Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        if Arc::strong_count(&self.plan) != 1 {
+    pub fn exclusive_pickler_objects(
+        &self,
+        holders: usize,
+    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        if Arc::strong_count(&self.plan) != holders {
             return Vec::new();
         }
         crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
     }
 
     /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
-    /// alone keeps alive: every `Arc` from its plan down to such an owner is held once, by this
-    /// DataFrame. A Python wrapper reports them to Python's garbage collector, so that a
-    /// reference cycle through the wrapper can be freed, as through a DataFrame of PySpark
-    /// Connect, a Python object: a `pyspark.ml` model's summary keeps a DataFrame whose plan
-    /// keeps the model. An owner that another plan shares is not returned, so that the collector
-    /// does not count a reference twice. Not a stable API.
+    /// keeps alive with the clones of it of which the caller answers, `holders` holders of its
+    /// plan with this DataFrame, as [`DataFrame::exclusive_pickler_objects`] counts them: every
+    /// `Arc` below its plan down to such an owner is held once. A Python wrapper reports them to
+    /// Python's garbage collector, so that a reference cycle through the wrapper can be freed, as
+    /// through a DataFrame of PySpark Connect, a Python object: a `pyspark.ml` model's summary
+    /// keeps a DataFrame whose plan keeps the model. An owner that another plan shares is not
+    /// returned, so that the collector does not count a reference twice. Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_relation_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+    pub fn exclusive_relation_owners(
+        &self,
+        holders: usize,
+    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
         let mut owners = Vec::new();
-        if Arc::strong_count(&self.plan) != 1 {
+        if Arc::strong_count(&self.plan) != holders {
             return owners;
         }
         let mut pending: Vec<&LogicalPlan> = vec![self.plan.as_ref()];
@@ -1464,12 +1487,13 @@ impl DataFrame {
     /// way, as it clears the references of a Python object. Not a stable API.
     #[doc(hidden)]
     pub fn clear_plan(&mut self) {
-        self.plan = Arc::new(LogicalPlan::Range {
-            start: 0,
-            end: 0,
-            step: 1,
-            num_partitions: None,
-        });
+        self.plan = cleared_plan();
+    }
+
+    /// Whether `other` holds the plan of this DataFrame, as a clone of it does. Not a stable API.
+    #[doc(hidden)]
+    pub fn shares_plan_with(&self, other: &DataFrame) -> bool {
+        Arc::ptr_eq(&self.plan, &other.plan)
     }
 
     /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders, of
@@ -6147,7 +6171,9 @@ mod plan_construction_tests {
 
     /// The owners of the relations built outside the core that only one DataFrame keeps are the
     /// ones that a Python wrapper reports to the garbage collector: a relation that two plans
-    /// share is reported by neither, and a cleared plan keeps none.
+    /// share is reported by neither, and a cleared plan keeps none. A clone of the DataFrame that
+    /// the caller answers for, as the wrapper answers for those of its grouped data, is one more
+    /// holder of the plan, and no other one may hold it then.
     #[test]
     fn exclusive_relation_owners_are_those_only_this_dataframe_keeps() {
         let spark = session();
@@ -6159,28 +6185,34 @@ mod plan_construction_tests {
             })),
         };
         let df = DataFrame::from_relation(spark.clone(), relation, Some(Arc::new(7u8))).unwrap();
-        let owners = df.exclusive_relation_owners();
+        let owners = df.exclusive_relation_owners(1);
         assert_eq!(owners.len(), 1);
         assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
 
         let derived = df.filter(crate::functions::col("a").gt(crate::column::lit(0)));
-        assert!(df.exclusive_relation_owners().is_empty());
-        assert!(derived.exclusive_relation_owners().is_empty());
+        assert!(df.exclusive_relation_owners(1).is_empty());
+        assert!(derived.exclusive_relation_owners(1).is_empty());
         drop(df);
-        assert_eq!(derived.exclusive_relation_owners().len(), 1);
+        assert_eq!(derived.exclusive_relation_owners(1).len(), 1);
 
         let copy = derived.clone();
-        assert!(derived.exclusive_relation_owners().is_empty());
-        drop(copy);
+        assert!(copy.shares_plan_with(&derived));
+        assert!(derived.exclusive_relation_owners(1).is_empty());
+        assert_eq!(derived.exclusive_relation_owners(2).len(), 1);
+        let other = copy.clone();
+        assert!(derived.exclusive_relation_owners(2).is_empty());
+        drop((copy, other));
         let mut derived = derived;
-        assert_eq!(derived.exclusive_relation_owners().len(), 1);
+        assert!(derived.exclusive_relation_owners(2).is_empty());
+        assert_eq!(derived.exclusive_relation_owners(1).len(), 1);
         derived.clear_plan();
-        assert!(derived.exclusive_relation_owners().is_empty());
+        assert!(derived.exclusive_relation_owners(1).is_empty());
         assert!(spark
             .range(3)
             .unwrap()
-            .exclusive_relation_owners()
+            .exclusive_relation_owners(1)
             .is_empty());
+        assert!(!spark.range(3).unwrap().shares_plan_with(&derived));
     }
 
     #[test]

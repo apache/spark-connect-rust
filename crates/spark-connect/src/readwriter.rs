@@ -331,6 +331,21 @@ impl DataFrameWriter {
         self.session.clone()
     }
 
+    /// Whether this writer writes the plan of `dataframe`, which it shares (see
+    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
+        Arc::ptr_eq(&self.input_plan, &dataframe.plan)
+    }
+
+    /// Drop the plan that this writer writes, as [`DataFrame::clear_plan`] drops the plan of a
+    /// DataFrame: the garbage collector of a Python wrapper breaks a reference cycle through the
+    /// wrapper this way. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.input_plan = crate::dataframe::cleared_plan();
+    }
+
     /// The format of this writer, as set by `format`, if any. Not a stable API.
     #[doc(hidden)]
     pub fn get_format(&self) -> Option<&str> {
@@ -621,6 +636,38 @@ impl DataFrameWriterV2 {
     /// The session of this writer, whose executions it runs.
     pub fn spark_session(&self) -> SparkSession {
         self.session.clone()
+    }
+
+    /// Whether this writer writes the plan of `dataframe`, which it shares (see
+    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
+        Arc::ptr_eq(&self.input_plan, &dataframe.plan)
+    }
+
+    /// The objects of the picklers of the UDFs of the partitioning columns of this writer that it
+    /// alone keeps alive, as [`DataFrame::exclusive_pickler_objects`] gives those of a DataFrame,
+    /// which a Python wrapper reports to Python's garbage collector, as PySpark's writer, of
+    /// Python objects, holds the Columns of `partitionedBy`. The plan that it writes is not
+    /// visited: the wrapper of its DataFrame, which the wrapper of the writer keeps, reports what
+    /// it holds. Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_pickler_objects(
+            self.partition_cols
+                .iter()
+                .map(|column| crate::udf::PicklerHolder::Expression(column.expression()))
+                .collect(),
+        )
+    }
+
+    /// Drop the plan that this writer writes and its partitioning columns, as
+    /// [`DataFrame::clear_plan`] drops the plan of a DataFrame: the garbage collector of a Python
+    /// wrapper breaks a reference cycle through the wrapper this way. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.input_plan = crate::dataframe::cleared_plan();
+        self.partition_cols = Vec::new();
     }
 
     /// The table of this writer, as `writeTo` gives it. Not a stable API.

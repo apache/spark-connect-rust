@@ -2048,9 +2048,20 @@ Column raises the same error in both.
 A DataFrame or a Column reports the functions of its UDFs to Python's garbage collector, as
 PySpark's plan of Python objects is seen by it, so a reference cycle through a function and the
 DataFrame or the Column that holds it, such as through a bound method of an object that keeps the
-DataFrame, is collected. A function that a Column and a DataFrame of it share, or two DataFrames,
-is reported by neither, so that no reference is counted twice: a cycle through it is freed only
-when it is broken, where PySpark collects it.
+DataFrame, is collected. So do the objects that hold such Columns, or the plan of a DataFrame, as
+PySpark's do: grouped data and their cogroups, a table argument, a window specification, the
+writers of `write`, `writeTo` and `writeStream`, `na` and `stat`, and a merge builder and its
+clauses. Those that hold their DataFrame report it, and the DataFrame reports the functions of the
+plan that they share, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`,
+is collected too. A function that a Column and a DataFrame of it share, or two DataFrames, or a
+DataFrame and a table argument of it, which holds its plan and not the DataFrame, as PySpark's
+does, is reported by neither, so that no reference is counted twice: a cycle through it is freed
+only when it is broken, where PySpark collects it. A stream writer holds its DataFrame, where
+PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed by the collector,
+where PySpark frees it with its last reference. The functions of `foreachBatch` and `foreach` are
+kept as their pickles, as PySpark's stream writer keeps them, so a function that keeps its writer
+is freed with its last reference, and a copy or a pickle of the writer carries the pickle of the
+call.
 
 The condition and the assignments of a clause of `mergeInto` are pickled when the clause is added,
 which raises there, as PySpark's, and again when the merge runs, whose request carries the later

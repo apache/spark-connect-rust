@@ -493,6 +493,12 @@ For every method matching a pyspark name:
   a struct is not valid then). The offline test
   `test_objects_traversed_while_they_are_created_do_not_crash` makes a collection meet each such
   class there; add a new one to it.
+  A `__traverse__` reports each Python object once: what several objects share, such as the
+  plan `Arc` of a DataFrame and of its grouped data, is reported by none of them, unless one
+  answers for the others. A class that keeps a DataFrame and a clone of its plan, as grouped data
+  and the writers do, reports the DataFrame and holds a `crate::gc::Share` of its
+  `crate::gc::Holders` with the clone (`PyDataFrame::plan_share`), so that the DataFrame reports
+  what the plan holds; else the DataFrame reports nothing of its plan while the object lives.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;
