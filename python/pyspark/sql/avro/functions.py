@@ -23,7 +23,9 @@ from pyspark.sql.functions import (
     _dict_to_options_column,
     _invoke_function,
     _to_col,
-    lit,
+)
+from pyspark.sql.functions import (
+    lit as _lit,
 )
 
 
@@ -57,9 +59,9 @@ def from_avro(data, jsonFormatSchema, options=None):
     # As PySpark's, the schema is the literal of the str, which a request sets when it builds
     # the plan: one that UTF-8 cannot encode fails each DataFrame of the Column then.
     if options is None:
-        return _invoke_function("from_avro", _to_col(data), lit(jsonFormatSchema))
+        return _invoke_function("from_avro", _to_col(data), _lit(jsonFormatSchema))
     return _invoke_function(
-        "from_avro", _to_col(data), lit(jsonFormatSchema), _dict_to_options_column(options)
+        "from_avro", _to_col(data), _lit(jsonFormatSchema), _dict_to_options_column(options)
     )
 
 
@@ -78,7 +80,7 @@ def to_avro(data, jsonFormatSchema=""):
         )
     if jsonFormatSchema == "":
         return _call_function("to_avro", _to_col(data))
-    return _invoke_function("to_avro", _to_col(data), lit(jsonFormatSchema))
+    return _invoke_function("to_avro", _to_col(data), _lit(jsonFormatSchema))
 
 
 __all__ = ["from_avro", "to_avro"]

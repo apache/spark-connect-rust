@@ -18,7 +18,8 @@
 
 # As PySpark's `_to_col`, which raises NOT_EXPECTED_TYPE for a `data` that is not a Column or a str.
 from pyspark.sql.functions import _column_or_name as _to_col
-from pyspark.sql.functions import _dict_to_options_column, _invoke_function, lit
+from pyspark.sql.functions import _dict_to_options_column, _invoke_function
+from pyspark.sql.functions import lit as _lit
 
 
 def _descriptor_set(descFilePath, binaryDescriptorSet):
@@ -37,9 +38,9 @@ def _protobuf_function(name, data, messageName, descriptor, options):
     and which a request sets when it builds the plan, as the server reads them, so a str that
     UTF-8 cannot encode fails each DataFrame of the Column then, and a message name that is not a
     str, such as 5, bytes or None, is the server's error of the function."""
-    arguments = [_to_col(data), lit(messageName)]
+    arguments = [_to_col(data), _lit(messageName)]
     if descriptor is not None:
-        arguments.append(lit(descriptor))
+        arguments.append(_lit(descriptor))
     if options is not None:
         arguments.append(_dict_to_options_column(options))
     return _invoke_function(name, *arguments)

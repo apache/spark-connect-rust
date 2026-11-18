@@ -107,12 +107,14 @@ jobs:
           cache: pip
 
       - name: Install Python dependencies
-        # Two sets: (1) build deps for the Python-coverage half (maturin/pytest/coverage);
+        # Two sets: (1) build deps for the Python-coverage half (maturin/pytest/coverage), and
+        # mypy, which test_type_stubs_offline.py runs on a user's application, pinned so that
+        # a new release cannot change what it reports without a change here;
         # (2) the runtime deps the Connect server's Python workers need for arrow/pandas
         # execution (mirrors build_python_connect.yml).
         run: |
           python -m pip install --upgrade pip
-          python -m pip install maturin pytest coverage
+          python -m pip install maturin pytest coverage "mypy==2.4.1"
           python -m pip install pandas pyarrow numpy grpcio grpcio-status googleapis-common-protos cloudpickle zstandard py4j
 
       - name: Cache Spark ${{ env.SPARK_VERSION }} distribution
@@ -290,7 +292,8 @@ jobs:
             tests/test_evaluators_offline.py \
             tests/test_statistics_offline.py \
             tests/test_exit_cleanup_offline.py \
-            tests/test_create_dataframe_configs_offline.py
+            tests/test_create_dataframe_configs_offline.py \
+            tests/test_type_stubs_offline.py
           PYTHONPATH=$(pwd) python -m coverage json --rcfile=.coveragerc -o coverage-python.json
 
       - name: Parse Python coverage and create badge JSON
