@@ -144,7 +144,12 @@ buffers are shared; network decoding, sliced validity bitmaps, the cast and pand
 conversion may still copy. Batch schema consistency is validated before export. Field
 names or timezones containing NUL use IPC over the collected batches, without another RPC.
 Empty batch vectors retain the empty-schema behavior. `_to_table()`, PySpark's private
-method, gives the table of this handoff as it is, with the schema that the server sent.
+method, gives the table of this handoff, with the schema that the server sent, cast without a
+copy to the metadata that PySpark reads of the server's IPC stream: `{}` for the schema and for
+each field without metadata, nested ones too, and the keys of a field's metadata in the server's
+order, which the decoded batches do not keep. With
+`spark.sql.execution.arrow.pyspark.selfDestruct.enabled`, `toPandas` copies each column of each
+batch into its own allocation before the conversion, as PySpark's `_execute_and_fetch` does.
 
 `createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
 timestamp conversion helpers normalize the table, then arrow-rs imports its

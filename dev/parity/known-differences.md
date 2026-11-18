@@ -85,14 +85,22 @@ difference is intentional or tracked for a fix.
 
 ## `DataFrame`
 
-- **A session time zone that the server takes and Python's zone databases do not** (intentional;
-  the values are those of any other zone), such as `Z`, `PST`, `GMT+08:00` or `UTC+01:00`.
+- **A session time zone that the server takes and Python's zone databases do not, and a timestamp
+  out of Python's range in the session time zone** (intentional; the values are those of any
+  other zone and timestamp). The zones are such as `Z`, `PST`, `GMT+08:00` or `UTC+01:00`.
   PySpark's `collect`, `toLocalIterator` and `first` of a timestamp localize the values in the
   session time zone, looked up by its name in Python, so they raise pytz's
   `UnknownTimeZoneError`, or, without pytz, PyArrow's `ArrowInvalid` ("The zoneinfo module or
   pytz package must be installed."). This client's conversion of the rows reads no zone of the
   session: it returns the instant in the local time zone of the client, as both clients do of a
   zone that Python knows. `toArrow` and `toPandas` give the same values in both.
+  So a timestamp whose wall clock in the session time zone is outside the years 1 to 9999 of
+  Python's `datetime`, and in the local time zone is not, differs too: PySpark's localization in
+  the session time zone raises Python's `OverflowError` ("date value out of range"), where this
+  client returns the instant in the local time zone. For example, of
+  `timestamp_seconds(-62135596800)`, 0001-01-01 00:00:00 UTC, with the session time zone
+  `America/Los_Angeles` on a host in UTC, this client returns `datetime(1, 1, 1, 0, 0)`. Both
+  raise the `OverflowError` of a wall clock out of the range in the local time zone.
 - **The `__repr__` of a Column of a str that UTF-8 cannot encode** (intentional; the expressions
   of the core hold UTF-8). Such a str, of a name, a SQL string or a literal, fails the plans of the
   Column when they are built, as in PySpark, and its lone surrogates show escaped in the `__repr__`

@@ -15168,6 +15168,45 @@ def test_a_copy_of_a_dataframe_has_an_execution_info_of_its_own_as_pyspark(mock_
         assert later.executionInfo is None
 
 
+def test_execution_info_is_one_object_until_another_execution_as_pyspark(mock_connect):
+    # As PySpark's executionInfo, the _execution_info that the last execution of the DataFrame
+    # set: one object, with the attributes set on it, until another execution of the DataFrame
+    # replaces it, which an action of a derived DataFrame does not; also of an observed metric of
+    # a NaN, which is not equal to itself. The DataFrame keeps the object, which may keep the
+    # DataFrame: the garbage collector frees both.
+    import gc
+    import math
+    import struct
+    import weakref
+
+    spark, service = mock_connect
+    # ObservedMetrics: name=1, values=2 of a Literal of double=11 (wire type 1), keys=3.
+    nan = bytes([11 * 8 + 1]) + struct.pack("<d", math.nan)
+    service.execute_payload = message_field(
+        6, message_field(1, "o") + message_field(2, nan) + message_field(3, "x")
+    )
+    df = spark.range(3)
+    assert df.executionInfo is None
+    df.collect()
+    info = df.executionInfo
+    assert info is not None and df.executionInfo is info
+    ((name, pairs),) = info.flows
+    assert name == "o" and math.isnan(pairs["x"])
+    info.custom = 1
+    df.take(1)
+    df.first()
+    assert df.executionInfo is info and df.executionInfo.custom == 1
+    df.collect()
+    again = df.executionInfo
+    assert again is not info and again.operation_id != info.operation_id
+    assert df.executionInfo is again and not hasattr(again, "custom")
+    again.frame = df
+    frame = weakref.ref(df)
+    del df, info, again
+    gc.collect()
+    assert frame() is None
+
+
 def test_copies_and_unpickled_dataframes_keep_support_repr_html_as_pyspark(mock_connect):
     # As PySpark's DataFrame.__reduce__, whose state carries _support_repr_html to a copy, a deep
     # copy and an unpickled DataFrame: once _repr_html_ was called, their repr is the string of the

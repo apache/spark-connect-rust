@@ -612,7 +612,10 @@ def _udt_converter(dataType):
         def convert_spatial(value):
             if value is None:
                 return None
-            return spatial.fromWKB(value["wkb"], value["srid"])
+            # The WKB is bytes, as PySpark's converters of the spatial types take it of the Arrow
+            # struct, also where spark.sql.execution.pyspark.binaryAsBytes makes the binary values
+            # of the rows bytearray, its field `wkb` among them.
+            return spatial.fromWKB(bytes(value["wkb"]), value["srid"])
 
         return convert_spatial
     if isinstance(dataType, UserDefinedType):
