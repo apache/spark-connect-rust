@@ -1536,12 +1536,22 @@ that hold them, as `UserDefinedType`s of other parameters do, and `toNullable()`
 are. A struct, array or map made of core types, such as one of `fromJson`, holds the user-defined
 type of its JSON that a type was last made of, if one was. `IntegralType()` is one instance, as
 PySpark's `DataTypeSingleton` makes it, and a Python subclass of these classes, such as a
-`UserDefinedType` of parameters, takes the
-arguments of its `__init__`. A Python subclass of `IntegralType` cannot be instantiated, where
-PySpark's `DataTypeSingleton` makes one instance of each subclass: the constructor of a native
-class either returns an object that exists or makes one of the class it is called for. Neither
-client has a proto or an Arrow type of such a type: a plan of one raises `UNSUPPORTED_OPERATION`,
-and local rows of one `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION`.
+`UserDefinedType` of parameters, takes the arguments of its `__init__`. A Python subclass of
+`IntegralType` cannot be instantiated, where PySpark's `DataTypeSingleton` makes one instance of
+each subclass: the constructor of a native class either returns an object that exists or makes
+one of the class it is called for.
+
+Neither client has a proto or an Arrow type of such a type, also of one nested in another. A
+plan of one raises the `UNSUPPORTED_OPERATION` of PySpark's `pyspark_types_to_proto_types`, as
+PySpark's plans do: a cast, `DataFrame.to` and a UDTF at their first request, and the
+registration of a UDTF or of a Java UDF and `Catalog.createTable` at the call (and a UDF that is
+not Arrow-optimized at the call, see above). As the schema of `createDataFrame`, local rows of
+one raise `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION`, and a pandas DataFrame of one as its only
+type `UNSUPPORTED_DATA_TYPE_FOR_ARROW`. Data of no rows makes a relation of the JSON of the
+schema, which the server fails to parse (`PARSE_SYNTAX_ERROR`), and so does a pyarrow Table or a
+NumPy array of one as its only type. `DataType()` and a Python subclass of it that is not an
+`AtomicType` are not expected as a schema, as PySpark's `isinstance` reads them: their
+`NOT_EXPECTED_TYPE` names their class.
 
 PySpark's singleton types, from `NullType` and `IntegerType` to `CalendarIntervalType` and
 `IntegralType`, are classes of the metaclass `DataTypeSingleton`, which `type(IntegerType)` shows.
@@ -1549,7 +1559,9 @@ The drop-in's are native classes, whose metaclass is `type`, and `pyspark.sql.ty
 `DataTypeSingleton`: PyO3 has no option of a metaclass of a class, and CPython refuses to assign
 the `__class__` of a class of `type` after it is made. Their constructors return the one instance
 and raise the `TypeError` of `DataTypeSingleton.__call__` for an argument, as PySpark's, and
-`inspect.signature` of the class shows no parameters.
+`inspect.signature` of the class shows no parameters. A copy, a deep copy and a pickle of the one
+instance are the one instance too, where PySpark's `copy.copy`, `copy.deepcopy` and `pickle` make
+another object of the class, as the note of its `DataTypeSingleton` says.
 
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.

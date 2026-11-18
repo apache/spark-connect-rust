@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The drop-in's types and Columns as official PySpark 4.3.0's, without a server: the JSON type
 strings of `_parse_datatype_json_value`, the types that official PySpark pickled, the abstract
-classes of the types (`DataType`, `AtomicType`, ...) as types of their own, the pickle of a
+classes of the types (`DataType`, `AtomicType`, ...) as types of their own, and the errors of them
+in the types of UDTFs, Java UDFs, tables and `createDataFrame`, the pickle of a
 CalendarIntervalType, the parameters of the types as attributes, the parameters of the methods of
 the types, the origins of the expressions that Column methods send, the names of `Column.alias`
 and `Column.name`, and the user-set attributes of a Column's copies. The expected values are
@@ -605,6 +606,189 @@ def test_the_abstract_types_have_no_proto_nor_arrow_type_as_pysparks():
         with pytest.raises(PySparkValueError) as e:
             spark.range(1).to(schema).collect()
         assert e.value.getMessageParameters() == {"operation": "data type AtomicType()"}
+
+
+# Types that official PySpark 4.3.0's `pyspark_types_to_proto_types` has no proto of, nested in a
+# struct, and the operation of the UNSUPPORTED_OPERATION that it raises of each.
+UNSENDABLE_TYPES = [
+    (T.StructType([T.StructField("a", T.AtomicType())]), "data type AtomicType()"),
+    (T.StructType([T.StructField("a", T.ArrayType(T.DataType()))]), "data type DataType()"),
+    (
+        T.StructType([T.StructField("a", T.MapType(T.StringType(), T.IntegralType()))]),
+        "data type IntegralType()",
+    ),
+    (
+        T.StructType([T.StructField("a", T.ArrayType(T.StructField("b", T.IntegerType())))]),
+        "data type StructField('b', IntegerType(), True)",
+    ),
+    (T.AtomicType(), "data type AtomicType()"),
+]
+
+
+def _raises_unsupported_operation(call, operation):
+    with pytest.raises(PySparkValueError) as e:
+        call()
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    assert e.value.getMessageParameters() == {"operation": operation}
+
+
+@pytest.mark.parametrize(
+    "t, operation", UNSENDABLE_TYPES, ids=[t.simpleString() for t, _ in UNSENDABLE_TYPES]
+)
+def test_udtfs_java_udfs_and_tables_of_types_without_a_proto_raise_pysparks_errors(t, operation):
+    # As official PySpark's `PythonUDTF.to_plan`, `JavaUDF` and `CreateTable` plan, which convert
+    # the types with `pyspark_types_to_proto_types`: the DataFrame of a call of a UDTF raises its
+    # UNSUPPORTED_OPERATION at each request, after the errors of its arguments; the registration
+    # of a UDTF or of a Java UDF raises it at the call, and so does `createTable`, after the
+    # errors of its name, path and description, and before those of its options. No request is
+    # sent.
+    from pyspark.sql.functions import udtf
+
+    class Fn:
+        def eval(self, x):
+            yield (1,)
+
+    with mock_connect_session() as (spark, service):
+        sent = (len(service.analyze_requests), len(service.execute_requests))
+        df = udtf(Fn, returnType=t)(F.lit(1))
+        for request in (lambda: df.schema, df.collect, lambda: df.alias("x").columns):
+            _raises_unsupported_operation(request, operation)
+        with pytest.raises(UnicodeEncodeError):
+            udtf(Fn, returnType=t)(F.lit("a\ud800")).schema
+        _raises_unsupported_operation(
+            lambda: spark.udtf.register("f", udtf(Fn, returnType=t)), operation
+        )
+        _raises_unsupported_operation(
+            lambda: spark.udf.registerJavaFunction("f", "x.Y", t), operation
+        )
+        if isinstance(t, T.StructType):
+            for create in (spark.catalog.createTable, spark.catalog.createExternalTable):
+                _raises_unsupported_operation(lambda: create("t", schema=t), operation)
+            _raises_unsupported_operation(
+                lambda: spark.catalog.createTable("t", schema=t, k=1), operation
+            )
+            for name, path, description in [(1, None, None), ("t", 1, None), ("t", None, 1)]:
+                with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+                    spark.catalog.createTable(
+                        name, path=path, schema=t, description=description
+                    )
+        assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+
+
+class _OwnType(T.DataType):
+    pass
+
+
+class _OwnAtomicType(T.AtomicType):
+    pass
+
+
+def _local_data():
+    """Data of each kind that `createDataFrame` takes, with rows and without: its key, and a
+    function of it."""
+    import numpy as np
+    import pandas as pd
+    import pyarrow as pa
+
+    return {
+        "list": lambda: [1],
+        "empty list": lambda: [],
+        "tuple": lambda: (1,),
+        "empty tuple": lambda: (),
+        "pandas": lambda: pd.DataFrame({"a": [1]}),
+        "empty pandas": lambda: pd.DataFrame({"a": pd.Series([], dtype="int64")}),
+        "numpy": lambda: np.array([1]),
+        "empty numpy": lambda: np.array([], dtype="int64"),
+        "pyarrow": lambda: pa.table({"a": [1]}),
+        "empty pyarrow": lambda: pa.table({"a": pa.array([], type=pa.int64())}),
+        "iterator": lambda: iter([1]),
+    }
+
+
+@pytest.mark.parametrize(
+    "schema, arg_type", [(T.DataType(), "DataType"), (_OwnType(), "_OwnType")]
+)
+def test_create_dataframe_of_a_data_type_that_is_not_atomic_raises_pysparks_error(
+    schema, arg_type
+):
+    # As official PySpark's `isinstance(schema, (AtomicType, StructType))`, of the class of the
+    # schema: the base DataType() and a Python subclass of it are not expected, of any data, and
+    # named by their class, where the drop-in named the class of the type that it kept them as.
+    from pyspark.errors import PySparkTypeError
+
+    with mock_connect_session() as (spark, _):
+        for key, data in _local_data().items():
+            with pytest.raises(PySparkTypeError) as e:
+                spark.createDataFrame(data(), schema)
+            assert e.value.getCondition() == "NOT_EXPECTED_TYPE", key
+            assert e.value.getMessageParameters() == {
+                "arg_name": "schema",
+                "arg_type": arg_type,
+                "expected_type": "list, None or StructType",
+            }, key
+
+
+@pytest.mark.parametrize(
+    "schema, shown, json_text",
+    [
+        (T.AtomicType(), "AtomicType()", '"atomic"'),
+        (T.IntegralType(), "IntegralType()", '"integral"'),
+        (_OwnAtomicType(), "_OwnAtomicType()", '"_ownatomic"'),
+    ],
+)
+def test_create_dataframe_of_a_type_of_its_class_only_is_pysparks(schema, shown, json_text):
+    # As official PySpark, of an atomic type of its class only as the single type of the rows:
+    # local rows of it raise UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION, and a pandas DataFrame
+    # UNSUPPORTED_DATA_TYPE_FOR_ARROW, at the call; data of no rows, and a NumPy array or a
+    # pyarrow Table, make a relation of no data of the JSON of the type, which the server fails
+    # to parse (test_dropin_e2e.py), where the drop-in sent the JSON of the core's unparsed type.
+    from pyspark.errors import PySparkTypeError
+
+    errors = {
+        "list": "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+        "tuple": "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+        "iterator": "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
+        "pandas": "UNSUPPORTED_DATA_TYPE_FOR_ARROW",
+    }
+    with mock_connect_session() as (spark, service):
+        for key, data in _local_data().items():
+            sent = (len(service.analyze_requests), len(service.execute_requests))
+            if key in errors:
+                with pytest.raises(PySparkTypeError) as e:
+                    spark.createDataFrame(data(), schema)
+                assert e.value.getCondition() == errors[key], key
+                assert e.value.getMessageParameters() == {"data_type": shown}, key
+                assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+                continue
+            spark.createDataFrame(data(), schema).explain()
+            request = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+            relation = request.explain.plan.root.local_relation
+            assert (relation.schema, relation.HasField("data")) == (json_text, False), key
+
+
+def test_create_dataframe_of_rows_of_no_length_checks_the_schema_as_pysparks():
+    # As official PySpark, whose conversion of local rows takes the rows of an iterator apart
+    # first, and then checks the schema as of a list: a type of no proto nested in it raises
+    # UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION, and a nullable flag that is not a bool the
+    # AssertionError of its converter, where the drop-in checked neither of rows of no length.
+    from pyspark.errors import PySparkTypeError
+
+    with mock_connect_session() as (spark, _):
+        for schema, shown in [
+            (T.StructType([T.StructField("a", T.AtomicType())]), "AtomicType()"),
+            (
+                T.StructType([T.StructField("a", T.ArrayType(T.StructField("b", T.IntegerType())))]),
+                "StructField('b', IntegerType(), True)",
+            ),
+        ]:
+            with pytest.raises(PySparkTypeError) as e:
+                spark.createDataFrame(iter([([1],)]), schema)
+            assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+            assert e.value.getMessageParameters() == {"data_type": shown}
+        with pytest.raises(AssertionError):
+            spark.createDataFrame(iter([(1,)]), T.StructType([T.StructField("a", T.IntegerType(), 1)]))
+        with pytest.raises(IndexError, match="^list index out of range$"):
+            spark.createDataFrame(iter([]), T.AtomicType())
 
 
 def _same_named_classes():
