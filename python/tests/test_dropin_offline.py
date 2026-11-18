@@ -20622,6 +20622,50 @@ def test_plans_of_plugins_send_the_relations_of_their_dataframes_in_their_extens
     assert request.plan.command.extension.Unpack(sent) and sent.input == relation
 
 
+class _GcCounted:
+    """An object of a class without a free list, whose each allocation the collector counts."""
+
+
+def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
+    # The garbage collector of Python 3.11 can traverse an object of the extension while it is
+    # created: object.__new__ tracks the object that it allocates, then allocates its __dict__,
+    # which starts a collection when the free list of dicts is empty, before the value of the
+    # object is written. The __traverse__ of the writers, the readers and their copies read the
+    # zeroed memory of their state there, a null Arc or Py, and crashed the interpreter. A
+    # collection at every second allocation (threshold 1), with the free list of dicts emptied and
+    # the allocations before each object shifted by one, meets each kind of object there.
+    import copy
+    import gc
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.observation import Observation
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+    writer, writer_v2 = df.write, df.writeTo("t")
+    reader, stream_reader = spark.read, spark.readStream
+    makers = [
+        lambda: df.write, lambda: copy.copy(writer), lambda: df.writeTo("t"),
+        lambda: copy.copy(writer_v2), lambda: df.mergeInto("t", F.lit(True)),
+        lambda: spark.read, lambda: copy.copy(reader), lambda: spark.readStream,
+        lambda: copy.copy(stream_reader), lambda: Observation("o"), lambda: df.select("id"),
+        lambda: F.col("id"),
+    ]
+    thresholds = gc.get_threshold()
+    gc.collect()
+    gc.set_threshold(1)
+    try:
+        for make in makers:
+            for shift in range(4):
+                dicts = [{} for _ in range(100)]
+                counted = [_GcCounted() for _ in range(shift)]
+                made = make()
+                del dicts, counted, made
+    finally:
+        gc.set_threshold(*thresholds)
+    gc.collect()
+
+
 def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):
     # As PySpark's DataFrame, a Python object: a cycle through a DataFrame of a Python plan, whose
     # plan keeps an object that keeps the DataFrame (as a pyspark.ml model keeps its summary's

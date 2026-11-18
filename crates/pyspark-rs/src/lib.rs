@@ -22,6 +22,7 @@ mod datasource;
 mod errors;
 mod eval_type;
 mod functions;
+mod gc;
 mod group;
 mod infer;
 mod interrupt;

@@ -42,6 +42,9 @@ pub struct PyDataFrameReader {
     /// The UTF-32LE bytes of the schema, when it is a str that UTF-8 cannot encode, which the core
     /// reader leaves unset.
     unencodable_schema: Option<Vec<u8>>,
+    /// Set once the value is written, as `__traverse__` reads `unsent_format`, which is not valid
+    /// while the reader object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyDataFrameReader {
@@ -55,6 +58,7 @@ impl PyDataFrameReader {
                 UnencodableOptions::default(),
             )),
             unencodable_schema: None,
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 
@@ -687,6 +691,7 @@ impl PyDataFrameReader {
                     .map(|format| format.clone_ref(py)),
                 unencodable_options: std::sync::Arc::clone(&this.unencodable_options),
                 unencodable_schema: this.unencodable_schema.clone(),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
@@ -830,7 +835,12 @@ impl PyDataFrameReader {
         Ok(slf)
     }
 
+    /// The format that the reader keeps, a Python object, which Python's garbage collector sees;
+    /// nothing of a reader object that is being created.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
         if let Some(format) = &self.unsent_format {
             visit.call(&format.object)?;
         }

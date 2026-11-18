@@ -295,6 +295,8 @@ impl PyObservation {
 
     /// The `_result` and `_error` of an unpickled Observation, Python objects, which Python's
     /// garbage collector sees, as those of PySpark's: so a reference cycle through them is freed.
+    /// Only `Option<Py<_>>` fields are read, which are `None` while the object is created, so no
+    /// [`crate::gc::GcReady`] is needed.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if let Some(result) = &self.restored.result {
             visit.call(result)?;
