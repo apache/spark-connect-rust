@@ -83,7 +83,7 @@ class SparkSession:
     class Hook:
         def on_execute_plan(self, request: 'pb2.ExecutePlanRequest') -> 'pb2.ExecutePlanRequest': ...
     _client: SparkConnectClient
-    builder: Builder = ...
+    builder: Builder = ...  # type: ignore
     def __init__(self, connection: Union[str, DefaultChannelBuilder], userId: Optional[str]=None, hook_factories: Optional[list['Callable[[SparkSession], Hook]']]=None) -> None:
         hook_factories = hook_factories or []
         self._client = SparkConnectClient(

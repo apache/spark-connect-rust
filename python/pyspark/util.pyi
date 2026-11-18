@@ -24,7 +24,7 @@ import threading
 import socket
 from contextlib import contextmanager
 from types import TracebackType
-from typing import Any, Callable, Generator, IO, Iterator, Optional, TextIO, Tuple, TypeVar, Union
+from typing import Any, Callable, Generator, IO, Iterator, List, Optional, TextIO, Tuple, TypeVar, Union
 from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError
 from pyspark.serializers import write_int as write_int, read_int as read_int, write_with_length as write_with_length, SpecialLengths as SpecialLengths, UTF8Deserializer as UTF8Deserializer
 
