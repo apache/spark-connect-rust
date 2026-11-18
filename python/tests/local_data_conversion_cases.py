@@ -188,7 +188,9 @@ class TestLocalDataConversionInterrupts:
             spark.createDataFrame(data, schema)
         # The other thread takes the GIL at the checkpoints that the operating system schedules
         # it at, of which only some fall in the part: a conversion in which it read the part at
-        # none is run again, a few times. With no checkpoint, it reads it in none.
+        # none is run again, a few times, and so is one whose signal came only after it ended, as
+        # a read near the end of the part leaves no checkpoint after it. With no checkpoint, it
+        # reads it in none.
         for _ in range(5):
             data, schema, in_part, held, failure = _case(layout, _COUNT)
             in_part.arm()
@@ -202,7 +204,9 @@ class TestLocalDataConversionInterrupts:
                 except KeyboardInterrupt:
                     interrupted = True
             assert not probe.failures, probe.failures
-            if "progress" in probe.observed:
+            if "progress" in probe.observed and not (
+                cancel and "late_or_unproven_signal" in probe.observed
+            ):
                 break
         progress = probe.observed.get("progress")
         assert progress is not None, probe.observed
