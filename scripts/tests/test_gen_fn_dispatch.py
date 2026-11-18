@@ -227,8 +227,100 @@ class AliasTests(unittest.TestCase):
         self.assertIsNone(gen._alias_target(reference, "missing", names))
 
 
+STUB = """
+from typing import overload
+def abs(col: 'ColumnOrName') -> Column: ...
+def first(col: 'ColumnOrName', ignorenulls: bool=False) -> Column: ...
+@overload
+def to_timestamp(col: 'ColumnOrName') -> Column: ...
+@overload
+def to_timestamp(col: 'ColumnOrName', format: str) -> Column: ...
+@overload
+def make_timestamp(years: 'ColumnOrName', secs: 'ColumnOrName') -> Column: ...
+@overload
+def make_timestamp(*, date: 'ColumnOrName', time: 'ColumnOrName') -> Column: ...
+"""
+
+FORMS_RUST = """
+pub fn abs(col1: Column) -> Column {
+    todo!()
+}
+
+pub fn first(col1: Column) -> Column {
+    todo!()
+}
+
+pub fn first_with_ignore_nulls(col1: Column, ignore_nulls: Column) -> Column {
+    todo!()
+}
+
+pub fn to_timestamp(col1: Column) -> Column {
+    todo!()
+}
+
+pub fn make_timestamp(years: Column, secs: Column) -> Column {
+    todo!()
+}
+
+pub fn make_timestamp_with_date_and_time(date: Column, time: Column) -> Column {
+    todo!()
+}
+"""
+
+
+class OptionalArgumentTests(unittest.TestCase):
+    """Each optional argument of a PySpark function has a typed form in the Rust core."""
+
+    def gaps(self, **overrides):
+        tables = {
+            "variants": {"first": ["first_with_ignore_nulls"]},
+            "forms": {"make_timestamp": ["make_timestamp_with_date_and_time"]},
+            "otherwise": {},
+            "excluded": {"make_timestamp_with_date_and_time"},
+        }
+        functions = gen.parse_rust_functions(FORMS_RUST)
+        return gen.optional_argument_gaps(functions, STUB, **{**tables, **overrides})
+
+    def test_defaults_and_overloads_make_parameters_optional(self):
+        self.assertEqual(
+            gen.stub_optional_parameters(STUB),
+            {
+                "abs": [],
+                "first": ["ignorenulls"],
+                "to_timestamp": ["format"],
+                # Each overload lacks the parameters of the other.
+                "make_timestamp": ["years", "secs", "date", "time"],
+            },
+        )
+
+    def test_an_optional_argument_without_a_form_is_a_gap(self):
+        # ignorenulls is the ignore_nulls of a variant, years and secs those of the base, and
+        # date and time those of a form; nothing takes the format of to_timestamp.
+        self.assertEqual(self.gaps(), ["to_timestamp: no Rust form takes format"])
+        self.assertEqual(self.gaps(otherwise={"to_timestamp": "a reason"}), [])
+        self.assertEqual(
+            self.gaps(variants={}),
+            ["first: no Rust form takes ignorenulls", "to_timestamp: no Rust form takes format"],
+        )
+
+    def test_stale_or_ill_fitting_entries_fail(self):
+        cases = {
+            "names abs, which has no optional argument": {"otherwise": {"abs": "a reason"}},
+            "make_timestamp_with_date_and_time has an arm": {"excluded": set()},
+            "gone is not defined": {"forms": {"make_timestamp": ["gone"]}},
+        }
+        for message, overrides in cases.items():
+            with self.subTest(message), self.assertRaisesRegex(gen.GeneratorError, message):
+                self.gaps(**overrides)
+
+
 class CheckedInTests(unittest.TestCase):
     """The checked-in Rust dispatch is what the generator writes."""
+
+    def test_every_optional_argument_of_pyspark_has_a_rust_form(self):
+        functions = gen.parse_rust_functions((gen.REPO_ROOT / gen.FUNCTIONS_RS).read_text())
+        stub = (gen.REPO_ROOT / gen.CONNECT_FUNCTIONS_STUB).read_text()
+        self.assertEqual(gen.optional_argument_gaps(functions, stub), [])
 
     def test_dispatch_generated_rs_is_reproducible(self):
         outputs = gen.generate(gen.REPO_ROOT, log=lambda *_: None)

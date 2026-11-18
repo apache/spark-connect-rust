@@ -88,7 +88,7 @@ fn load_goldens() -> HashMap<String, proto::Expression> {
 
 #[test]
 fn all_golden_function_cases_pass() {
-    use spark_connect::column::Column;
+    use spark_connect::column::{lit_boolean, lit_double, lit_string, Column};
     use spark_connect::expression::Expression;
     use spark_connect::functions::*;
 
@@ -97,6 +97,12 @@ fn all_golden_function_cases_pass() {
     let b = || Column::new(Expression::column("b"));
     let c = || Column::new(Expression::column("c"));
     let d = || Column::new(Expression::column("d"));
+    let col_e = || Column::new(Expression::column("e"));
+    let col_f = || Column::new(Expression::column("f"));
+    let col_g = || Column::new(Expression::column("g"));
+    // The literal of a Python int, as PySpark's `lit` sends the optional arguments of the cases:
+    // an integer that fits in 32 bits, else a long (`functions::lit` passes a Column through).
+    let int = spark_connect::column::lit;
 
     let cases: Vec<(&str, Column)> = vec![
         ("abs", abs(a())),
@@ -104,11 +110,47 @@ fn all_golden_function_cases_pass() {
         ("acosh", acosh(a())),
         ("add_months", add_months(a(), b())),
         ("aes_decrypt", aes_decrypt(a(), b())),
+        (
+            "aes_decrypt_with_mode",
+            aes_decrypt_with_mode(a(), b(), c()),
+        ),
+        (
+            "aes_decrypt_with_mode_and_padding",
+            aes_decrypt_with_mode_and_padding(a(), b(), c(), d()),
+        ),
+        (
+            "aes_decrypt_with_mode_padding_and_aad",
+            aes_decrypt_with_mode_padding_and_aad(a(), b(), c(), d(), col_e()),
+        ),
         ("aes_encrypt", aes_encrypt(a(), b())),
+        (
+            "aes_encrypt_with_mode",
+            aes_encrypt_with_mode(a(), b(), c()),
+        ),
+        (
+            "aes_encrypt_with_mode_and_padding",
+            aes_encrypt_with_mode_and_padding(a(), b(), c(), d()),
+        ),
+        (
+            "aes_encrypt_with_mode_padding_and_iv",
+            aes_encrypt_with_mode_padding_and_iv(a(), b(), c(), d(), col_e()),
+        ),
+        (
+            "aes_encrypt_with_mode_padding_iv_and_aad",
+            aes_encrypt_with_mode_padding_iv_and_aad(a(), b(), c(), d(), col_e(), col_f()),
+        ),
         ("any_value", any_value(a())),
+        (
+            "any_value_with_ignore_nulls",
+            any_value_with_ignore_nulls(a(), lit_boolean(true)),
+        ),
         ("approxCountDistinct", approxCountDistinct(a())),
         ("approx_count_distinct", approx_count_distinct(a())),
         ("approx_percentile", approx_percentile(a(), b())),
+        (
+            "approx_percentile_with_accuracy",
+            approx_percentile_with_accuracy(a(), lit_double(0.5), int(100)),
+        ),
         ("array", array(Vec::<Column>::new())),
         ("array_agg", array_agg(a())),
         ("array_append", array_append(a(), b())),
@@ -119,6 +161,10 @@ fn all_golden_function_cases_pass() {
         ("array_insert", array_insert(a(), b(), c())),
         ("array_intersect", array_intersect(a(), b())),
         ("array_join", array_join(a(), b())),
+        (
+            "array_join_with_null_replacement",
+            array_join_with_null_replacement(a(), lit_string(","), lit_string("N")),
+        ),
         ("array_max", array_max(a())),
         ("array_min", array_min(a())),
         ("array_position", array_position(a(), b())),
@@ -137,6 +183,10 @@ fn all_golden_function_cases_pass() {
         ("asin", asin(a())),
         ("asinh", asinh(a())),
         ("assert_true", assert_true(a())),
+        (
+            "assert_true_with_err_msg",
+            assert_true_with_err_msg(a(), lit_string("boom")),
+        ),
         ("atan", atan(a())),
         ("atan2", atan2(a(), b())),
         ("atanh", atanh(a())),
@@ -160,6 +210,7 @@ fn all_golden_function_cases_pass() {
         ("bool_or", bool_or(a())),
         ("bround", bround(a())),
         ("btrim", btrim(a())),
+        ("btrim_with", btrim_with(a(), b())),
         ("bucket", bucket(a(), b())),
         ("call_function", call_function("x", Vec::<Column>::new())),
         ("call_udf", call_udf("x", Vec::<Column>::new())),
@@ -168,6 +219,7 @@ fn all_golden_function_cases_pass() {
         ("cbrt", cbrt(a())),
         ("ceil", ceil(a())),
         ("ceiling", ceiling(a())),
+        ("ceiling_scale", ceiling_scale(a(), int(2))),
         ("char", char(a())),
         ("char_length", char_length(a())),
         ("character_length", character_length(a())),
@@ -246,17 +298,41 @@ fn all_golden_function_cases_pass() {
         ("factorial", factorial(a())),
         ("find_in_set", find_in_set(a(), b())),
         ("first", first(a())),
+        (
+            "first_with_ignore_nulls",
+            first_with_ignore_nulls(a(), lit_boolean(true)),
+        ),
         ("first_value", first_value(a())),
+        (
+            "first_value_with_ignore_nulls",
+            first_value_with_ignore_nulls(a(), lit_boolean(true)),
+        ),
         ("flatten", flatten(a())),
         ("floor", floor(a())),
         ("format_number", format_number(a(), b())),
         ("format_string", format_string([a()])),
         ("from_base32", from_base32(a())),
         ("from_csv", from_csv(a(), b())),
+        (
+            "from_csv_with_options",
+            from_csv_with_options(a(), b(), [("sep", "|")]),
+        ),
         ("from_json", from_json(a(), b())),
+        (
+            "from_json_with_options",
+            from_json_with_options(a(), b(), [("mode", "FAILFAST"), ("allowComments", "true")]),
+        ),
         ("from_unixtime", from_unixtime(a())),
+        (
+            "from_unixtime_with_format",
+            from_unixtime_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("from_utc_timestamp", from_utc_timestamp(a(), b())),
         ("from_xml", from_xml(a(), b())),
+        (
+            "from_xml_with_options",
+            from_xml_with_options(a(), b(), [("rowTag", "r")]),
+        ),
         ("get", get(a(), b())),
         ("get_json_object", get_json_object(a(), b())),
         ("getbit", getbit(a(), b())),
@@ -267,15 +343,31 @@ fn all_golden_function_cases_pass() {
         ("hex", hex(a())),
         ("histogram_numeric", histogram_numeric(a(), b())),
         ("hll_sketch_agg", hll_sketch_agg(a())),
+        (
+            "hll_sketch_agg_with_lg_config_k",
+            hll_sketch_agg_with_lg_config_k(a(), int(12)),
+        ),
         ("hll_sketch_estimate", hll_sketch_estimate(a())),
         ("hll_union", hll_union(a(), b())),
+        (
+            "hll_union_with_allow_different_lg_config_k",
+            hll_union_with_allow_different_lg_config_k(a(), b(), lit_boolean(true)),
+        ),
         ("hll_union_agg", hll_union_agg(a())),
+        (
+            "hll_union_agg_with_allow_different_lg_config_k",
+            hll_union_agg_with_allow_different_lg_config_k(a(), lit_boolean(true)),
+        ),
         ("hmac", hmac(a(), b())),
         ("hour", hour(a())),
         ("hours", hours(a())),
         ("hypot", hypot(a(), b())),
         ("ifnull", ifnull(a(), b())),
         ("ilike", ilike(a(), b())),
+        (
+            "ilike_with_escape_char",
+            ilike_with_escape_char(a(), b(), lit_string("/")),
+        ),
         ("initcap", initcap(a())),
         ("inline", inline(a())),
         ("inline_outer", inline_outer(a())),
@@ -296,22 +388,47 @@ fn all_golden_function_cases_pass() {
         ("kurtosis", kurtosis(a())),
         ("lag", lag([a()])),
         ("last", last(a())),
+        (
+            "last_with_ignore_nulls",
+            last_with_ignore_nulls(a(), lit_boolean(true)),
+        ),
         ("last_day", last_day(a())),
         ("last_value", last_value(a())),
+        (
+            "last_value_with_ignore_nulls",
+            last_value_with_ignore_nulls(a(), lit_boolean(true)),
+        ),
         ("lcase", lcase(a())),
         ("lead", lead([a()])),
         ("least", least(a(), b())),
         ("left", left(a(), b())),
         ("length", length(a())),
         ("levenshtein", levenshtein(a(), b())),
+        (
+            "levenshtein_with_threshold",
+            levenshtein_with_threshold(a(), b(), int(2)),
+        ),
         ("like", like(a(), b())),
+        (
+            "like_with_escape_char",
+            like_with_escape_char(a(), b(), lit_string("/")),
+        ),
         ("listagg", listagg(a())),
+        (
+            "listagg_with_delimiter",
+            listagg_with_delimiter(a(), lit_string(",")),
+        ),
         ("listagg_distinct", listagg_distinct(a())),
         ("lit", lit(a())),
         ("ln", ln(a())),
         ("localtimestamp", localtimestamp()),
         ("locate", locate(a(), b())),
+        (
+            "locate_with_pos",
+            locate_with_pos(lit_string("x"), a(), int(2)),
+        ),
         ("log", log(a())),
+        ("log_with_base", log_with_base(lit_double(2.0), a())),
         ("log10", log10(a())),
         ("log1p", log1p(a())),
         ("log2", log2(a())),
@@ -320,9 +437,21 @@ fn all_golden_function_cases_pass() {
         ("ltrim", ltrim(a())),
         ("make_date", make_date(a(), b(), c())),
         ("make_dt_interval", make_dt_interval()),
+        (
+            "make_dt_interval_with_parts",
+            make_dt_interval_with_parts(None, Some(a()), None, None),
+        ),
         ("make_interval", make_interval()),
+        (
+            "make_interval_with_parts",
+            make_interval_with_parts(Some(a()), None, None, None, None, None, Some(b())),
+        ),
         ("make_valid_utf8", make_valid_utf8(a())),
         ("make_ym_interval", make_ym_interval()),
+        (
+            "make_ym_interval_with_parts",
+            make_ym_interval_with_parts(None, Some(a())),
+        ),
         ("map_concat", map_concat(Vec::<Column>::new())),
         ("map_contains_key", map_contains_key(a(), b())),
         ("map_entries", map_entries(a())),
@@ -331,20 +460,43 @@ fn all_golden_function_cases_pass() {
         ("map_keys", map_keys(a())),
         ("map_values", map_values(a())),
         ("mask", mask(a())),
+        ("mask_with_upper_char", mask_with_upper_char(a(), b())),
+        (
+            "mask_with_upper_char_and_lower_char",
+            mask_with_upper_char_and_lower_char(a(), b(), c()),
+        ),
+        (
+            "mask_with_upper_char_lower_char_and_digit_char",
+            mask_with_upper_char_lower_char_and_digit_char(a(), b(), c(), d()),
+        ),
+        (
+            "mask_with_upper_char_lower_char_digit_char_and_other_char",
+            mask_with_upper_char_lower_char_digit_char_and_other_char(a(), b(), c(), d(), col_e()),
+        ),
         ("max", max(a())),
         ("max_by", max_by(a(), b())),
+        ("max_by_with_k", max_by_with_k(a(), b(), int(2))),
         ("md5", md5(a())),
         ("mean", mean(a())),
         ("median", median(a())),
         ("min", min(a())),
         ("min_by", min_by(a(), b())),
+        ("min_by_with_k", min_by_with_k(a(), b(), int(2))),
         ("minute", minute(a())),
         ("mode", mode(a())),
+        (
+            "mode_with_deterministic",
+            mode_with_deterministic(a(), lit_boolean(true)),
+        ),
         ("monotonically_increasing_id", monotonically_increasing_id()),
         ("month", month(a())),
         ("monthname", monthname(a())),
         ("months", months(a())),
         ("months_between", months_between(a(), b())),
+        (
+            "months_between_with_round_off",
+            months_between_with_round_off(a(), b(), lit_boolean(false)),
+        ),
         ("named_struct", named_struct(Vec::<Column>::new())),
         ("nanvl", nanvl(a(), b())),
         ("negate", negate(a())),
@@ -352,6 +504,10 @@ fn all_golden_function_cases_pass() {
         ("next_day", next_day(a(), b())),
         ("now", now()),
         ("nth_value", nth_value(a(), b())),
+        (
+            "nth_value_with_ignore_nulls",
+            nth_value_with_ignore_nulls(a(), int(2), lit_boolean(true)),
+        ),
         ("ntile", ntile(a())),
         ("nullif", nullif(a(), b())),
         ("nullifzero", nullifzero(a())),
@@ -359,16 +515,30 @@ fn all_golden_function_cases_pass() {
         ("nvl2", nvl2(a(), b(), c())),
         ("octet_length", octet_length(a())),
         ("overlay", overlay(a(), b(), c())),
+        (
+            "overlay_with_len",
+            overlay_with_len(a(), b(), int(2), int(3)),
+        ),
         ("parse_json", parse_json(a())),
         ("parse_url", parse_url(a(), b())),
+        ("parse_url_with_key", parse_url_with_key(a(), b(), c())),
         ("percent_rank", percent_rank()),
         ("percentile", percentile(a(), b())),
+        (
+            "percentile_with_frequency",
+            percentile_with_frequency(a(), lit_double(0.5), int(2)),
+        ),
         ("percentile_approx", percentile_approx(a(), b())),
+        (
+            "percentile_approx_with_accuracy",
+            percentile_approx_with_accuracy(a(), lit_double(0.5), int(100)),
+        ),
         ("pi", pi()),
         ("pmod", pmod(a(), b())),
         ("posexplode", posexplode(a())),
         ("posexplode_outer", posexplode_outer(a())),
         ("position", position(a(), b())),
+        ("position_with_start", position_with_start(a(), b(), c())),
         ("positive", positive(a())),
         ("pow", pow(a(), b())),
         ("power", power(a(), b())),
@@ -387,7 +557,15 @@ fn all_golden_function_cases_pass() {
         ("regexp_count", regexp_count(a(), b())),
         ("regexp_extract", regexp_extract(a(), b(), c())),
         ("regexp_extract_all", regexp_extract_all(a(), b())),
+        (
+            "regexp_extract_all_with_idx",
+            regexp_extract_all_with_idx(a(), b(), int(1)),
+        ),
         ("regexp_instr", regexp_instr(a(), b())),
+        (
+            "regexp_instr_with_idx",
+            regexp_instr_with_idx(a(), b(), int(1)),
+        ),
         ("regexp_like", regexp_like(a(), b())),
         ("regexp_replace", regexp_replace(a(), b(), c())),
         ("regexp_substr", regexp_substr(a(), b())),
@@ -402,6 +580,7 @@ fn all_golden_function_cases_pass() {
         ("regr_syy", regr_syy(a(), b())),
         ("repeat", repeat(a(), b())),
         ("replace", replace(a(), b())),
+        ("replace_with", replace_with(a(), b(), c())),
         ("reverse", reverse(a())),
         ("right", right(a(), b())),
         ("rint", rint(a())),
@@ -411,14 +590,32 @@ fn all_golden_function_cases_pass() {
         ("rpad", rpad(a(), b(), c())),
         ("rtrim", rtrim(a())),
         ("schema_of_csv", schema_of_csv(a())),
+        (
+            "schema_of_csv_with_options",
+            schema_of_csv_with_options(a(), [("sep", "|")]),
+        ),
         ("schema_of_json", schema_of_json(a())),
+        (
+            "schema_of_json_with_options",
+            schema_of_json_with_options(a(), [("allowComments", "true")]),
+        ),
         ("schema_of_variant", schema_of_variant(a())),
         ("schema_of_variant_agg", schema_of_variant_agg(a())),
         ("schema_of_xml", schema_of_xml(a())),
+        (
+            "schema_of_xml_with_options",
+            schema_of_xml_with_options(a(), [("rowTag", "r")]),
+        ),
         ("sec", sec(a())),
         ("second", second(a())),
         ("sentences", sentences(a())),
+        ("sentences_with_language", sentences_with_language(a(), b())),
+        (
+            "sentences_with_language_and_country",
+            sentences_with_language_and_country(a(), b(), c()),
+        ),
         ("sequence", sequence(a(), b())),
+        ("sequence_with_step", sequence_with_step(a(), b(), c())),
         ("session_user", session_user()),
         ("session_window", session_window(a(), b())),
         ("sha", sha(a())),
@@ -439,9 +636,17 @@ fn all_golden_function_cases_pass() {
         ("slice", slice(a(), b(), c())),
         ("some", some(a())),
         ("sort_array", sort_array(a())),
+        (
+            "sort_array_with_asc",
+            sort_array_with_asc(a(), lit_boolean(false)),
+        ),
         ("soundex", soundex(a())),
         ("spark_partition_id", spark_partition_id()),
         ("split", split(a(), b())),
+        (
+            "split_with_limit",
+            split_with_limit(a(), lit_string(","), int(2)),
+        ),
         ("split_part", split_part(a(), b(), c())),
         ("sqrt", sqrt(a())),
         ("stack", stack(Vec::<Column>::new())),
@@ -451,10 +656,23 @@ fn all_golden_function_cases_pass() {
         ("stddev_pop", stddev_pop(a())),
         ("stddev_samp", stddev_samp(a())),
         ("str_to_map", str_to_map(a())),
+        (
+            "str_to_map_with_pair_delim",
+            str_to_map_with_pair_delim(a(), b()),
+        ),
+        (
+            "str_to_map_with_pair_delim_and_key_value_delim",
+            str_to_map_with_pair_delim_and_key_value_delim(a(), b(), c()),
+        ),
         ("string_agg", string_agg(a())),
+        (
+            "string_agg_with_delimiter",
+            string_agg_with_delimiter(a(), lit_string(",")),
+        ),
         ("string_agg_distinct", string_agg_distinct(a())),
         ("struct", r#struct(Vec::<Column>::new())),
         ("substr", substr(a(), b())),
+        ("substr_with_len", substr_with_len(a(), b(), c())),
         ("substring", substring(a(), b(), c())),
         ("substring_index", substring_index(a(), b(), c())),
         ("sum", sum(a())),
@@ -474,36 +692,116 @@ fn all_golden_function_cases_pass() {
         ("to_binary", to_binary(a())),
         ("to_char", to_char(a(), b())),
         ("to_csv", to_csv(a())),
+        (
+            "to_csv_with_options",
+            to_csv_with_options(a(), Vec::<(&str, &str)>::new()),
+        ),
         ("to_date", to_date(a())),
+        (
+            "to_date_with_format",
+            to_date_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("to_json", to_json(a())),
+        (
+            "to_json_with_options",
+            to_json_with_options(a(), [("pretty", "true"), ("ignoreNullFields", "false")]),
+        ),
         ("to_number", to_number(a(), b())),
         ("to_timestamp", to_timestamp(a())),
+        (
+            "to_timestamp_with_format",
+            to_timestamp_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("to_timestamp_ltz", to_timestamp_ltz(a())),
+        (
+            "to_timestamp_ltz_with_format",
+            to_timestamp_ltz_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("to_timestamp_ntz", to_timestamp_ntz(a())),
+        (
+            "to_timestamp_ntz_with_format",
+            to_timestamp_ntz_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("to_unix_timestamp", to_unix_timestamp(a())),
+        (
+            "to_unix_timestamp_with_format",
+            to_unix_timestamp_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("to_utc_timestamp", to_utc_timestamp(a(), b())),
         ("to_varchar", to_varchar(a(), b())),
         ("to_variant_object", to_variant_object(a())),
         ("to_xml", to_xml(a())),
+        (
+            "to_xml_with_options",
+            to_xml_with_options(a(), [("rowTag", "r")]),
+        ),
         ("translate", translate(a(), b(), c())),
         ("trim", trim(a())),
         ("trunc", trunc(a(), b())),
         ("try_add", try_add(a(), b())),
         ("try_aes_decrypt", try_aes_decrypt(a(), b())),
+        (
+            "try_aes_decrypt_with_mode",
+            try_aes_decrypt_with_mode(a(), b(), c()),
+        ),
+        (
+            "try_aes_decrypt_with_mode_and_padding",
+            try_aes_decrypt_with_mode_and_padding(a(), b(), c(), d()),
+        ),
+        (
+            "try_aes_decrypt_with_mode_padding_and_aad",
+            try_aes_decrypt_with_mode_padding_and_aad(a(), b(), c(), d(), col_e()),
+        ),
         ("try_avg", try_avg(a())),
         ("try_divide", try_divide(a(), b())),
         ("try_element_at", try_element_at(a(), b())),
         ("try_make_interval", try_make_interval()),
+        (
+            "try_make_interval_with_parts",
+            try_make_interval_with_parts(None, Some(a()), None, None, None, None, None),
+        ),
+        (
+            "try_make_timestamp_ltz_with_timezone",
+            try_make_timestamp_ltz_with_timezone(a(), b(), c(), d(), col_e(), col_f(), col_g()),
+        ),
+        (
+            "try_make_timestamp_ntz_with_date_and_time",
+            try_make_timestamp_ntz_with_date_and_time(a(), b()),
+        ),
+        (
+            "try_make_timestamp_with_date_and_time",
+            try_make_timestamp_with_date_and_time(a(), b()),
+        ),
+        (
+            "try_make_timestamp_with_date_time_and_timezone",
+            try_make_timestamp_with_date_time_and_timezone(a(), b(), c()),
+        ),
+        (
+            "try_make_timestamp_with_timezone",
+            try_make_timestamp_with_timezone(a(), b(), c(), d(), col_e(), col_f(), col_g()),
+        ),
         ("try_mod", try_mod(a(), b())),
         ("try_multiply", try_multiply(a(), b())),
         ("try_parse_json", try_parse_json(a())),
         ("try_parse_url", try_parse_url(a(), b())),
+        (
+            "try_parse_url_with_key",
+            try_parse_url_with_key(a(), b(), c()),
+        ),
         ("try_reflect", try_reflect(Vec::<Column>::new())),
         ("try_subtract", try_subtract(a(), b())),
         ("try_sum", try_sum(a())),
         ("try_to_binary", try_to_binary(a())),
+        (
+            "try_to_binary_format",
+            try_to_binary_format(a(), lit_string("hex")),
+        ),
         ("try_to_number", try_to_number(a(), b())),
         ("try_to_timestamp", try_to_timestamp(a())),
+        (
+            "try_to_timestamp_with_format",
+            try_to_timestamp_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("try_url_decode", try_url_decode(a())),
         ("try_validate_utf8", try_validate_utf8(a())),
         (
@@ -524,6 +822,14 @@ fn all_golden_function_cases_pass() {
         ("unix_nanos", unix_nanos(a())),
         ("unix_seconds", unix_seconds(a())),
         ("unix_timestamp", unix_timestamp()),
+        (
+            "unix_timestamp_with_format",
+            unix_timestamp_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
+        (
+            "unix_timestamp_with_timestamp",
+            unix_timestamp_with_timestamp(a()),
+        ),
         ("unwrap_udt", unwrap_udt(a())),
         ("upper", upper(a())),
         ("url_decode", url_decode(a())),
@@ -555,6 +861,10 @@ fn all_golden_function_cases_pass() {
         ("when", when(a(), b())),
         ("width_bucket", width_bucket(a(), b(), c(), d())),
         ("window", window(a(), "x")),
+        (
+            "window_with_slide",
+            window_with_slide(a(), "10 minutes", "5 minutes"),
+        ),
         ("window_time", window_time(a())),
         ("xpath", xpath(a(), b())),
         ("xpath_boolean", xpath_boolean(a(), b())),
@@ -573,13 +883,41 @@ fn all_golden_function_cases_pass() {
         ("chr", chr(a())),
         ("current_path", current_path()),
         ("current_time", current_time()),
+        (
+            "current_time_with_precision",
+            current_time_with_precision(int(3)),
+        ),
         ("is_valid_variant", is_valid_variant(a())),
         ("kll_merge_agg_bigint", kll_merge_agg_bigint(a())),
+        (
+            "kll_merge_agg_bigint_with_k",
+            kll_merge_agg_bigint_with_k(a(), int(200)),
+        ),
         ("kll_merge_agg_double", kll_merge_agg_double(a())),
+        (
+            "kll_merge_agg_double_with_k",
+            kll_merge_agg_double_with_k(a(), int(200)),
+        ),
         ("kll_merge_agg_float", kll_merge_agg_float(a())),
+        (
+            "kll_merge_agg_float_with_k",
+            kll_merge_agg_float_with_k(a(), int(200)),
+        ),
         ("kll_sketch_agg_bigint", kll_sketch_agg_bigint(a())),
+        (
+            "kll_sketch_agg_bigint_with_k",
+            kll_sketch_agg_bigint_with_k(a(), int(200)),
+        ),
         ("kll_sketch_agg_double", kll_sketch_agg_double(a())),
+        (
+            "kll_sketch_agg_double_with_k",
+            kll_sketch_agg_double_with_k(a(), int(200)),
+        ),
         ("kll_sketch_agg_float", kll_sketch_agg_float(a())),
+        (
+            "kll_sketch_agg_float_with_k",
+            kll_sketch_agg_float_with_k(a(), int(200)),
+        ),
         ("kll_sketch_get_n_bigint", kll_sketch_get_n_bigint(a())),
         ("kll_sketch_get_n_double", kll_sketch_get_n_double(a())),
         ("kll_sketch_get_n_float", kll_sketch_get_n_float(a())),
@@ -623,20 +961,64 @@ fn all_golden_function_cases_pass() {
             kll_sketch_to_string_float(a()),
         ),
         ("make_time", make_time(a(), b(), c())),
+        (
+            "make_timestamp_ltz_with_timezone",
+            make_timestamp_ltz_with_timezone(a(), b(), c(), d(), col_e(), col_f(), col_g()),
+        ),
+        (
+            "make_timestamp_ntz_with_date_and_time",
+            make_timestamp_ntz_with_date_and_time(a(), b()),
+        ),
+        (
+            "make_timestamp_with_date_and_time",
+            make_timestamp_with_date_and_time(a(), b()),
+        ),
+        (
+            "make_timestamp_with_date_time_and_timezone",
+            make_timestamp_with_date_time_and_timezone(a(), b(), c()),
+        ),
+        (
+            "make_timestamp_with_timezone",
+            make_timestamp_with_timezone(a(), b(), c(), d(), col_e(), col_f(), col_g()),
+        ),
         ("quote", quote(a())),
         ("st_asbinary", st_asbinary(a())),
+        (
+            "st_asbinary_with_endianness",
+            st_asbinary_with_endianness(a(), lit_string("NDR")),
+        ),
         ("st_geogfromwkb", st_geogfromwkb(a())),
         ("st_geomfromwkb", st_geomfromwkb(a())),
+        (
+            "st_geomfromwkb_with_srid",
+            st_geomfromwkb_with_srid(a(), int(4326)),
+        ),
         ("st_setsrid", st_setsrid(a(), b())),
         ("st_srid", st_srid(a())),
         ("theta_difference", theta_difference(a(), b())),
         ("theta_intersection", theta_intersection(a(), b())),
         ("theta_intersection_agg", theta_intersection_agg(a())),
         ("theta_sketch_agg", theta_sketch_agg(a())),
+        (
+            "theta_sketch_agg_with_lg_nom_entries",
+            theta_sketch_agg_with_lg_nom_entries(a(), int(14)),
+        ),
         ("theta_sketch_estimate", theta_sketch_estimate(a())),
         ("theta_union", theta_union(a(), b())),
+        (
+            "theta_union_with_lg_nom_entries",
+            theta_union_with_lg_nom_entries(a(), b(), int(14)),
+        ),
         ("theta_union_agg", theta_union_agg(a())),
+        (
+            "theta_union_agg_with_lg_nom_entries",
+            theta_union_agg_with_lg_nom_entries(a(), int(14)),
+        ),
         ("time_bucket", time_bucket(a(), b())),
+        (
+            "time_bucket_with_origin",
+            time_bucket_with_origin(a(), b(), c()),
+        ),
         ("time_diff", time_diff(a(), b(), c())),
         ("time_from_micros", time_from_micros(a())),
         ("time_from_millis", time_from_millis(a())),
@@ -646,8 +1028,20 @@ fn all_golden_function_cases_pass() {
         ("time_to_seconds", time_to_seconds(a())),
         ("time_trunc", time_trunc(a(), b())),
         ("to_time", to_time(a())),
+        (
+            "to_time_with_format",
+            to_time_with_format(a(), lit_string("HH:mm")),
+        ),
         ("try_to_date", try_to_date(a())),
+        (
+            "try_to_date_with_format",
+            try_to_date_with_format(a(), lit_string("yyyy-MM-dd")),
+        ),
         ("try_to_time", try_to_time(a())),
+        (
+            "try_to_time_with_format",
+            try_to_time_with_format(a(), lit_string("HH:mm")),
+        ),
         ("tuple_difference_double", tuple_difference_double(a(), b())),
         (
             "tuple_difference_integer",
@@ -666,24 +1060,48 @@ fn all_golden_function_cases_pass() {
             tuple_intersection_agg_double(a()),
         ),
         (
+            "tuple_intersection_agg_double_with_mode",
+            tuple_intersection_agg_double_with_mode(a(), lit_string("min")),
+        ),
+        (
             "tuple_intersection_agg_integer",
             tuple_intersection_agg_integer(a()),
+        ),
+        (
+            "tuple_intersection_agg_integer_with_mode",
+            tuple_intersection_agg_integer_with_mode(a(), lit_string("min")),
         ),
         (
             "tuple_intersection_double",
             tuple_intersection_double(a(), b()),
         ),
         (
+            "tuple_intersection_double_with_mode",
+            tuple_intersection_double_with_mode(a(), b(), lit_string("min")),
+        ),
+        (
             "tuple_intersection_integer",
             tuple_intersection_integer(a(), b()),
+        ),
+        (
+            "tuple_intersection_integer_with_mode",
+            tuple_intersection_integer_with_mode(a(), b(), lit_string("min")),
         ),
         (
             "tuple_intersection_theta_double",
             tuple_intersection_theta_double(a(), b()),
         ),
         (
+            "tuple_intersection_theta_double_with_mode",
+            tuple_intersection_theta_double_with_mode(a(), b(), lit_string("min")),
+        ),
+        (
             "tuple_intersection_theta_integer",
             tuple_intersection_theta_integer(a(), b()),
+        ),
+        (
+            "tuple_intersection_theta_integer_with_mode",
+            tuple_intersection_theta_integer_with_mode(a(), b(), lit_string("min")),
         ),
         (
             "tuple_sketch_estimate_double",
@@ -698,8 +1116,16 @@ fn all_golden_function_cases_pass() {
             tuple_sketch_summary_double(a()),
         ),
         (
+            "tuple_sketch_summary_double_with_mode",
+            tuple_sketch_summary_double_with_mode(a(), lit_string("min")),
+        ),
+        (
             "tuple_sketch_summary_integer",
             tuple_sketch_summary_integer(a()),
+        ),
+        (
+            "tuple_sketch_summary_integer_with_mode",
+            tuple_sketch_summary_integer_with_mode(a(), lit_string("min")),
         ),
         ("tuple_sketch_theta_double", tuple_sketch_theta_double(a())),
         (
@@ -708,20 +1134,104 @@ fn all_golden_function_cases_pass() {
         ),
         ("tuple_sketch_agg_double", tuple_sketch_agg_double(a(), b())),
         (
+            "tuple_sketch_agg_double_with_lg_nom_entries",
+            tuple_sketch_agg_double_with_lg_nom_entries(a(), b(), int(14)),
+        ),
+        (
+            "tuple_sketch_agg_double_with_lg_nom_entries_and_mode",
+            tuple_sketch_agg_double_with_lg_nom_entries_and_mode(
+                a(),
+                b(),
+                int(14),
+                lit_string("max"),
+            ),
+        ),
+        (
             "tuple_sketch_agg_integer",
             tuple_sketch_agg_integer(a(), b()),
         ),
+        (
+            "tuple_sketch_agg_integer_with_lg_nom_entries",
+            tuple_sketch_agg_integer_with_lg_nom_entries(a(), b(), int(14)),
+        ),
+        (
+            "tuple_sketch_agg_integer_with_lg_nom_entries_and_mode",
+            tuple_sketch_agg_integer_with_lg_nom_entries_and_mode(
+                a(),
+                b(),
+                int(14),
+                lit_string("max"),
+            ),
+        ),
         ("tuple_union_agg_double", tuple_union_agg_double(a())),
+        (
+            "tuple_union_agg_double_with_lg_nom_entries",
+            tuple_union_agg_double_with_lg_nom_entries(a(), int(14)),
+        ),
+        (
+            "tuple_union_agg_double_with_lg_nom_entries_and_mode",
+            tuple_union_agg_double_with_lg_nom_entries_and_mode(a(), int(14), lit_string("max")),
+        ),
         ("tuple_union_agg_integer", tuple_union_agg_integer(a())),
+        (
+            "tuple_union_agg_integer_with_lg_nom_entries",
+            tuple_union_agg_integer_with_lg_nom_entries(a(), int(14)),
+        ),
+        (
+            "tuple_union_agg_integer_with_lg_nom_entries_and_mode",
+            tuple_union_agg_integer_with_lg_nom_entries_and_mode(a(), int(14), lit_string("max")),
+        ),
         ("tuple_union_double", tuple_union_double(a(), b())),
+        (
+            "tuple_union_double_with_lg_nom_entries",
+            tuple_union_double_with_lg_nom_entries(a(), b(), int(14)),
+        ),
+        (
+            "tuple_union_double_with_lg_nom_entries_and_mode",
+            tuple_union_double_with_lg_nom_entries_and_mode(a(), b(), int(14), lit_string("max")),
+        ),
         ("tuple_union_integer", tuple_union_integer(a(), b())),
+        (
+            "tuple_union_integer_with_lg_nom_entries",
+            tuple_union_integer_with_lg_nom_entries(a(), b(), int(14)),
+        ),
+        (
+            "tuple_union_integer_with_lg_nom_entries_and_mode",
+            tuple_union_integer_with_lg_nom_entries_and_mode(a(), b(), int(14), lit_string("max")),
+        ),
         (
             "tuple_union_theta_double",
             tuple_union_theta_double(a(), b()),
         ),
         (
+            "tuple_union_theta_double_with_lg_nom_entries",
+            tuple_union_theta_double_with_lg_nom_entries(a(), b(), int(14)),
+        ),
+        (
+            "tuple_union_theta_double_with_lg_nom_entries_and_mode",
+            tuple_union_theta_double_with_lg_nom_entries_and_mode(
+                a(),
+                b(),
+                int(14),
+                lit_string("max"),
+            ),
+        ),
+        (
             "tuple_union_theta_integer",
             tuple_union_theta_integer(a(), b()),
+        ),
+        (
+            "tuple_union_theta_integer_with_lg_nom_entries",
+            tuple_union_theta_integer_with_lg_nom_entries(a(), b(), int(14)),
+        ),
+        (
+            "tuple_union_theta_integer_with_lg_nom_entries_and_mode",
+            tuple_union_theta_integer_with_lg_nom_entries_and_mode(
+                a(),
+                b(),
+                int(14),
+                lit_string("max"),
+            ),
         ),
         ("uuid", uuid()),
     ];

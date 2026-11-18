@@ -232,3 +232,128 @@ fn optional_arg_function_variants() {
         Some(1)
     );
 }
+
+/// The forms of the optional arguments of PySpark's functions give PySpark's results: those of
+/// the same calls of the reference client, against the same server.
+#[test]
+fn optional_argument_forms_give_pyspark_results() {
+    if !should_run() {
+        return;
+    }
+    use spark_connect::column::lit_boolean;
+    let s = session();
+    let df = s.range(1).unwrap();
+    let v = |c: Column| {
+        df.select(vec![c]).collect().unwrap()[0]
+            .get(0)
+            .cloned()
+            .unwrap()
+    };
+    let arr = || f::array([lit(3), lit(1), lit(2)]);
+
+    // A format, a limit and an order that the base functions send as their defaults or not.
+    assert_eq!(
+        v(
+            f::to_date_with_format(lit_string("2024/01/02"), lit_string("yyyy/MM/dd"))
+                .cast_str("string")
+        )
+        .as_str(),
+        Some("2024-01-02")
+    );
+    assert_eq!(
+        v(f::element_at(
+            f::split_with_limit(lit_string("a-b-c"), lit_string("-"), lit(2)),
+            lit(2)
+        ))
+        .as_str(),
+        Some("b-c")
+    );
+    assert_eq!(
+        v(f::element_at(
+            f::sort_array_with_asc(arr(), lit_boolean(false)),
+            lit(1)
+        ))
+        .as_i64(),
+        Some(3)
+    );
+    assert_eq!(
+        v(f::element_at(
+            f::array_sort_with_comparator(arr(), |args| args[1].clone() - args[0].clone()),
+            lit(1)
+        ))
+        .as_i64(),
+        Some(3)
+    );
+    // log of a base, which PySpark sends as `log` where the one-argument form sends `ln`.
+    assert_eq!(
+        v(f::log_with_base(lit_double(2.0), lit_double(8.0))).as_f64(),
+        Some(3.0)
+    );
+    // The options reach the parser: single quotes are no JSON without allowSingleQuotes.
+    assert!(v(f::from_json_with_options(
+        lit_string("{'a': 1}"),
+        lit_string("a INT"),
+        [("allowSingleQuotes", "false")]
+    )
+    .get_field("a"))
+    .is_null());
+    // The trailing defaults that PySpark sends: `x`, `n` and a null after the upper character.
+    assert_eq!(
+        v(f::mask_with_upper_char(lit_string("AbC1"), lit_string("U"))).as_str(),
+        Some("UxUn")
+    );
+    assert_eq!(
+        v(f::element_at(
+            f::str_to_map_with_pair_delim_and_key_value_delim(
+                lit_string("a=1&b=2"),
+                lit_string("&"),
+                lit_string("=")
+            ),
+            lit_string("b")
+        ))
+        .as_str(),
+        Some("2")
+    );
+    assert_eq!(
+        v(f::replace_with(
+            lit_string("abc"),
+            lit_string("b"),
+            lit_string("X")
+        ))
+        .as_str(),
+        Some("aXc")
+    );
+    assert_eq!(
+        v(f::locate_with_pos(
+            lit_string("b"),
+            lit_string("abcb"),
+            lit(3)
+        ))
+        .as_i64(),
+        Some(4)
+    );
+    assert_eq!(
+        v(f::overlay_with_len(
+            lit_string("SPARK_SQL"),
+            lit_string("CORE"),
+            lit(7),
+            lit(0)
+        ))
+        .as_str(),
+        Some("SPARK_CORESQL")
+    );
+    // A part of an interval that is given, with `lit(0)` of the others.
+    assert_eq!(
+        v(f::make_ym_interval_with_parts(None, Some(lit(14))).cast_str("string")).as_str(),
+        Some("INTERVAL '1-2' YEAR TO MONTH")
+    );
+    // first skips the null when it is told to ignore nulls.
+    let values = s
+        .sql("SELECT * FROM VALUES (CAST(NULL AS INT)), (1) AS t(x)")
+        .unwrap();
+    let first = values
+        .agg([f::first_with_ignore_nulls(col("x"), lit_boolean(true))])
+        .collect()
+        .unwrap();
+    assert_eq!(first[0].get(0).and_then(Value::as_i64), Some(1));
+}

@@ -14,7 +14,9 @@ function's Rust signature is declared in one of the tables below, so regeneratin
 reproduces the checked-in files byte for byte. ``--check`` regenerates in memory and
 fails with a diff when a checked-in file differs; CI runs it
 (.github/workflows/generated-drift.yml), and scripts/tests/test_gen_fn_dispatch.py runs
-the Rust half without a reference PySpark.
+the Rust half without a reference PySpark. That test also runs
+``optional_argument_gaps``, which checks with the same tables that each optional argument
+of a PySpark function has a typed form in the Rust core.
 
 Usage, from anywhere:
 
@@ -44,6 +46,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 FUNCTIONS_RS = Path("crates/spark-connect/src/functions.rs")
 DISPATCH_FILE = Path("crates/pyspark-rs/src/dispatch_generated.rs")
 WRAPPERS_FILE = Path("python/pyspark/sql/functions_generated.py")
+# The type stub of pyspark.sql.connect.functions.builtin, which scripts/gen_type_stubs.py
+# generates from the reference PySpark: the signatures of its functions.
+CONNECT_FUNCTIONS_STUB = Path("python/pyspark/sql/connect/functions/builtin.pyi")
 
 
 class GeneratorError(Exception):
@@ -237,22 +242,151 @@ DISPATCH_ONLY = {
 # arm of the base picks the function by the number of arguments it gets, and the longer
 # functions have no arm (nor Python wrapper) of their own.
 OPTIONAL_ARG_VARIANTS = {
+    "aes_decrypt": [
+        "aes_decrypt_with_mode",
+        "aes_decrypt_with_mode_and_padding",
+        "aes_decrypt_with_mode_padding_and_aad",
+    ],
+    "aes_encrypt": [
+        "aes_encrypt_with_mode",
+        "aes_encrypt_with_mode_and_padding",
+        "aes_encrypt_with_mode_padding_and_iv",
+        "aes_encrypt_with_mode_padding_iv_and_aad",
+    ],
+    "any_value": ["any_value_with_ignore_nulls"],
     "approx_count_distinct": ["approx_count_distinct_rsd"],
+    "approx_percentile": ["approx_percentile_with_accuracy"],
+    "array_join": ["array_join_with_null_replacement"],
+    "assert_true": ["assert_true_with_err_msg"],
     "bround": ["bround_scale"],
+    "btrim": ["btrim_with"],
     "ceil": ["ceil_scale"],
+    "ceiling": ["ceiling_scale"],
     "counter_diff": ["counter_diff_with_start_time"],
+    "first": ["first_with_ignore_nulls"],
+    "first_value": ["first_value_with_ignore_nulls"],
     "floor": ["floor_scale"],
+    "from_unixtime": ["from_unixtime_with_format"],
+    "hll_sketch_agg": ["hll_sketch_agg_with_lg_config_k"],
+    "hll_union": ["hll_union_with_allow_different_lg_config_k"],
+    "hll_union_agg": ["hll_union_agg_with_allow_different_lg_config_k"],
     "hmac": ["hmac_with_algorithm"],
+    "ilike": ["ilike_with_escape_char"],
     "instr": ["instr_with_start", "instr_with_start_and_occurrence"],
+    "kll_merge_agg_bigint": ["kll_merge_agg_bigint_with_k"],
+    "kll_merge_agg_double": ["kll_merge_agg_double_with_k"],
+    "kll_merge_agg_float": ["kll_merge_agg_float_with_k"],
+    "kll_sketch_agg_bigint": ["kll_sketch_agg_bigint_with_k"],
+    "kll_sketch_agg_double": ["kll_sketch_agg_double_with_k"],
+    "kll_sketch_agg_float": ["kll_sketch_agg_float_with_k"],
+    "last": ["last_with_ignore_nulls"],
+    "last_value": ["last_value_with_ignore_nulls"],
+    "levenshtein": ["levenshtein_with_threshold"],
+    "like": ["like_with_escape_char"],
+    "listagg": ["listagg_with_delimiter"],
     "listagg_distinct": ["listagg_distinct_with_delimiter"],
+    "locate": ["locate_with_pos"],
+    "log": ["log_with_base"],
     "ltrim": ["ltrim_with"],
+    "make_timestamp": ["make_timestamp_with_timezone"],
+    "make_timestamp_ltz": ["make_timestamp_ltz_with_timezone"],
+    "mask": [
+        "mask_with_upper_char",
+        "mask_with_upper_char_and_lower_char",
+        "mask_with_upper_char_lower_char_and_digit_char",
+        "mask_with_upper_char_lower_char_digit_char_and_other_char",
+    ],
+    "max_by": ["max_by_with_k"],
+    "min_by": ["min_by_with_k"],
+    "mode": ["mode_with_deterministic"],
+    "months_between": ["months_between_with_round_off"],
+    "nth_value": ["nth_value_with_ignore_nulls"],
+    "overlay": ["overlay_with_len"],
+    "parse_url": ["parse_url_with_key"],
+    "percentile": ["percentile_with_frequency"],
+    "percentile_approx": ["percentile_approx_with_accuracy"],
+    "position": ["position_with_start"],
+    "regexp_extract_all": ["regexp_extract_all_with_idx"],
+    "regexp_instr": ["regexp_instr_with_idx"],
     "regexp_replace": ["regexp_replace_with_position"],
+    "replace": ["replace_with"],
     "round": ["round_scale"],
     "rtrim": ["rtrim_with"],
+    "sentences": ["sentences_with_language", "sentences_with_language_and_country"],
+    "sequence": ["sequence_with_step"],
+    "sort_array": ["sort_array_with_asc"],
+    "split": ["split_with_limit"],
+    "st_asbinary": ["st_asbinary_with_endianness"],
+    "st_geomfromwkb": ["st_geomfromwkb_with_srid"],
+    "str_to_map": ["str_to_map_with_pair_delim", "str_to_map_with_pair_delim_and_key_value_delim"],
+    "string_agg": ["string_agg_with_delimiter"],
     "string_agg_distinct": ["string_agg_distinct_with_delimiter"],
+    "substr": ["substr_with_len"],
+    "theta_sketch_agg": ["theta_sketch_agg_with_lg_nom_entries"],
+    "theta_union": ["theta_union_with_lg_nom_entries"],
+    "theta_union_agg": ["theta_union_agg_with_lg_nom_entries"],
+    "time_bucket": ["time_bucket_with_origin"],
     "to_binary": ["to_binary_format"],
+    "to_date": ["to_date_with_format"],
+    "to_time": ["to_time_with_format"],
+    "to_timestamp": ["to_timestamp_with_format"],
+    "to_timestamp_ltz": ["to_timestamp_ltz_with_format"],
+    "to_timestamp_ntz": ["to_timestamp_ntz_with_format"],
+    "to_unix_timestamp": ["to_unix_timestamp_with_format"],
     "trim": ["trim_with"],
+    "try_aes_decrypt": [
+        "try_aes_decrypt_with_mode",
+        "try_aes_decrypt_with_mode_and_padding",
+        "try_aes_decrypt_with_mode_padding_and_aad",
+    ],
+    "try_make_timestamp": ["try_make_timestamp_with_timezone"],
+    "try_make_timestamp_ltz": ["try_make_timestamp_ltz_with_timezone"],
+    "try_parse_url": ["try_parse_url_with_key"],
+    "try_to_binary": ["try_to_binary_format"],
+    "try_to_date": ["try_to_date_with_format"],
+    "try_to_time": ["try_to_time_with_format"],
+    "try_to_timestamp": ["try_to_timestamp_with_format"],
     "try_variant_set": ["try_variant_set_with_create_if_missing"],
+    "tuple_intersection_agg_double": ["tuple_intersection_agg_double_with_mode"],
+    "tuple_intersection_agg_integer": ["tuple_intersection_agg_integer_with_mode"],
+    "tuple_intersection_double": ["tuple_intersection_double_with_mode"],
+    "tuple_intersection_integer": ["tuple_intersection_integer_with_mode"],
+    "tuple_intersection_theta_double": ["tuple_intersection_theta_double_with_mode"],
+    "tuple_intersection_theta_integer": ["tuple_intersection_theta_integer_with_mode"],
+    "tuple_sketch_agg_double": [
+        "tuple_sketch_agg_double_with_lg_nom_entries",
+        "tuple_sketch_agg_double_with_lg_nom_entries_and_mode",
+    ],
+    "tuple_sketch_agg_integer": [
+        "tuple_sketch_agg_integer_with_lg_nom_entries",
+        "tuple_sketch_agg_integer_with_lg_nom_entries_and_mode",
+    ],
+    "tuple_sketch_summary_double": ["tuple_sketch_summary_double_with_mode"],
+    "tuple_sketch_summary_integer": ["tuple_sketch_summary_integer_with_mode"],
+    "tuple_union_agg_double": [
+        "tuple_union_agg_double_with_lg_nom_entries",
+        "tuple_union_agg_double_with_lg_nom_entries_and_mode",
+    ],
+    "tuple_union_agg_integer": [
+        "tuple_union_agg_integer_with_lg_nom_entries",
+        "tuple_union_agg_integer_with_lg_nom_entries_and_mode",
+    ],
+    "tuple_union_double": [
+        "tuple_union_double_with_lg_nom_entries",
+        "tuple_union_double_with_lg_nom_entries_and_mode",
+    ],
+    "tuple_union_integer": [
+        "tuple_union_integer_with_lg_nom_entries",
+        "tuple_union_integer_with_lg_nom_entries_and_mode",
+    ],
+    "tuple_union_theta_double": [
+        "tuple_union_theta_double_with_lg_nom_entries",
+        "tuple_union_theta_double_with_lg_nom_entries_and_mode",
+    ],
+    "tuple_union_theta_integer": [
+        "tuple_union_theta_integer_with_lg_nom_entries",
+        "tuple_union_theta_integer_with_lg_nom_entries_and_mode",
+    ],
     "variant_set": ["variant_set_with_create_if_missing"],
     "vector_norm": ["vector_norm_with_degree"],
     "vector_normalize": ["vector_normalize_with_degree"],
@@ -287,10 +421,41 @@ NOT_DISPATCHED = {
     "shuffle_with_seed": "the Python wrapper of the base sends the seed",
     "uniform_with_seed": "the Python wrapper of the base sends the seed",
     "uuid_with_seed": "the Python wrapper of the base sends the seed",
+    # Forms of the optional arguments of PySpark functions that the arm of the base cannot
+    # pick by the number of columns: the Python wrappers of the bases are generated from the
+    # PySpark Connect implementations, which send the arguments themselves.
+    "current_time_with_precision": "the Python wrapper of the base sends the precision",
+    "unix_timestamp_with_timestamp": "the Python wrapper of the base sends the timestamp",
+    "unix_timestamp_with_format": "the Python wrapper of the base sends the format",
+    "make_timestamp_with_date_and_time": "takes the date and the time instead of the parts",
+    "make_timestamp_with_date_time_and_timezone": (
+        "takes the date and the time instead of the parts"
+    ),
+    "make_timestamp_ntz_with_date_and_time": "takes the date and the time instead of the parts",
+    "try_make_timestamp_with_date_and_time": "takes the date and the time instead of the parts",
+    "try_make_timestamp_with_date_time_and_timezone": (
+        "takes the date and the time instead of the parts"
+    ),
+    "try_make_timestamp_ntz_with_date_and_time": "takes the date and the time instead of the parts",
+    "make_dt_interval_with_parts": "takes an Option of each part",
+    "make_interval_with_parts": "takes an Option of each part",
+    "make_ym_interval_with_parts": "takes an Option of each part",
+    "try_make_interval_with_parts": "takes an Option of each part",
+    "from_csv_with_options": "takes the options as pairs of names and values",
+    "from_json_with_options": "takes the options as pairs of names and values",
+    "from_xml_with_options": "takes the options as pairs of names and values",
+    "schema_of_csv_with_options": "takes the options as pairs of names and values",
+    "schema_of_json_with_options": "takes the options as pairs of names and values",
+    "schema_of_xml_with_options": "takes the options as pairs of names and values",
+    "to_csv_with_options": "takes the options as pairs of names and values",
+    "to_json_with_options": "takes the options as pairs of names and values",
+    "to_xml_with_options": "takes the options as pairs of names and values",
+    "window_with_slide": "takes the durations as strings",
     # Higher-order functions: they take Rust closures. functions.py builds their lambdas
     # with _invoke_higher_order_function.
     "aggregate": "takes a Rust closure",
     "aggregate_with_finish": "takes a Rust closure",
+    "array_sort_with_comparator": "takes a Rust closure",
     "exists": "takes a Rust closure",
     "filter": "takes a Rust closure",
     "forall": "takes a Rust closure",
@@ -322,6 +487,59 @@ SECTION_OVERRIDES = {
 # name -> the function at whose place in functions.rs the arm is ordered.
 ORDER_AS = {
     "variant_delete": "variant_strip_nulls",
+}
+
+# The forms of the optional arguments of PySpark functions that are not OPTIONAL_ARG_VARIANTS
+# of their bases (they have no arm: NOT_DISPATCHED or SKIP_FUNCTIONS lists them): PySpark
+# function -> the Rust functions. optional_argument_gaps reads it with OPTIONAL_ARG_VARIANTS.
+OPTIONAL_ARG_FORMS = {
+    "aggregate": ["aggregate_with_finish"],
+    "array_sort": ["array_sort_with_comparator"],
+    "count_min_sketch": ["count_min_sketch_with_seed"],
+    "current_time": ["current_time_with_precision"],
+    "from_csv": ["from_csv_with_options"],
+    "from_json": ["from_json_with_options"],
+    "from_xml": ["from_xml_with_options"],
+    "make_dt_interval": ["make_dt_interval_with_parts"],
+    "make_interval": ["make_interval_with_parts"],
+    "make_timestamp": [
+        "make_timestamp_with_date_and_time",
+        "make_timestamp_with_date_time_and_timezone",
+    ],
+    "make_timestamp_ntz": ["make_timestamp_ntz_with_date_and_time"],
+    "make_ym_interval": ["make_ym_interval_with_parts"],
+    "rand": ["rand_with_seed"],
+    "randn": ["randn_with_seed"],
+    "randstr": ["randstr_with_seed"],
+    "reduce": ["reduce_with_finish"],
+    "schema_of_csv": ["schema_of_csv_with_options"],
+    "schema_of_json": ["schema_of_json_with_options"],
+    "schema_of_xml": ["schema_of_xml_with_options"],
+    "shuffle": ["shuffle_with_seed"],
+    "to_csv": ["to_csv_with_options"],
+    "to_json": ["to_json_with_options"],
+    "to_xml": ["to_xml_with_options"],
+    "try_make_interval": ["try_make_interval_with_parts"],
+    "try_make_timestamp": [
+        "try_make_timestamp_with_date_and_time",
+        "try_make_timestamp_with_date_time_and_timezone",
+    ],
+    "try_make_timestamp_ntz": ["try_make_timestamp_ntz_with_date_and_time"],
+    "uniform": ["uniform_with_seed"],
+    "unix_timestamp": ["unix_timestamp_with_timestamp", "unix_timestamp_with_format"],
+    "uuid": ["uuid_with_seed"],
+    "window": ["window_with_slide", "window_with_slide_and_start"],
+}
+
+# PySpark functions whose optional arguments no Rust form takes under their names, and why.
+OPTIONAL_ARGS_OTHERWISE = {
+    "approxCountDistinct": "it sends approx_count_distinct, which approx_count_distinct_rsd sends",
+    "arrow_udtf": "not a function of columns",
+    "lag": "the Rust function takes the offset and the default among its columns",
+    "lead": "the Rust function takes the offset and the default among its columns",
+    "log": "log_with_base takes arg1, the base, and arg2, the column",
+    "udf": "not a function of columns",
+    "udtf": "not a function of columns",
 }
 
 
@@ -524,6 +742,90 @@ _DISPATCH_FOOTER = """
 def render_dispatch(arms: list[dict]) -> str:
     lines = [line for arm in arms for line in render_arm(arm)]
     return _DISPATCH_HEADER + "\n".join(lines) + _DISPATCH_FOOTER
+
+
+# ---------------------------------------------------------------------------------------
+# The optional arguments of PySpark's functions
+# ---------------------------------------------------------------------------------------
+
+
+def stub_optional_parameters(stub_src: str) -> dict[str, list[str]]:
+    """name -> the optional parameters of each function of a type stub, in their order: those
+    with a default, and those that one of its overloads does not take."""
+    overloads: dict[str, list[ast.arguments]] = {}
+    for node in ast.parse(stub_src).body:
+        if isinstance(node, ast.FunctionDef):
+            overloads.setdefault(node.name, []).append(node.args)
+    out = {}
+    for name, signatures in overloads.items():
+        params: list[str] = []
+        optional: set[str] = set()
+        for args in signatures:
+            positional = args.posonlyargs + args.args
+            defaulted = positional[len(positional) - len(args.defaults) :] if args.defaults else []
+            optional.update(p.arg for p in defaulted)
+            optional.update(
+                p.arg for p, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None
+            )
+            params += [p.arg for p in positional + args.kwonlyargs if p.arg not in params]
+        for args in signatures:
+            taken = {p.arg for p in args.posonlyargs + args.args + args.kwonlyargs}
+            optional.update(set(params) - taken)
+        out[name] = [p for p in params if p in optional]
+    return out
+
+
+def optional_argument_gaps(
+    functions: dict[str, dict],
+    stub_src: str,
+    *,
+    variants=None,
+    forms=None,
+    otherwise=None,
+    excluded=None,
+) -> list[str]:
+    """The optional arguments of the functions of PySpark Connect (of their type stub) that no
+    Rust function takes, one message by function.
+
+    An optional argument has its typed form when the Rust function of the same name, or one of
+    its forms (its OPTIONAL_ARG_VARIANTS and OPTIONAL_ARG_FORMS), takes a parameter of its name
+    in snake case; OPTIONAL_ARGS_OTHERWISE lists the functions that send theirs otherwise.
+    Raises GeneratorError when a table names a function that does not exist, or a form of
+    OPTIONAL_ARG_FORMS that has an arm (`excluded` is the set of the functions without one).
+    """
+    variants = OPTIONAL_ARG_VARIANTS if variants is None else variants
+    forms = OPTIONAL_ARG_FORMS if forms is None else forms
+    otherwise = OPTIONAL_ARGS_OTHERWISE if otherwise is None else otherwise
+    if excluded is None:
+        excluded = (SKIP_FUNCTIONS - DISPATCH_ONLY) | set(NOT_DISPATCHED)
+    stub = stub_optional_parameters(stub_src)
+    for table, names in (("OPTIONAL_ARG_FORMS", forms), ("OPTIONAL_ARGS_OTHERWISE", otherwise)):
+        for name in names:
+            if not stub.get(name):
+                raise GeneratorError(f"{table} names {name}, which has no optional argument")
+    for rust_forms in forms.values():
+        for form in rust_forms:
+            if form not in functions:
+                raise GeneratorError(f"OPTIONAL_ARG_FORMS: {form} is not defined")
+            if form not in excluded:
+                raise GeneratorError(f"OPTIONAL_ARG_FORMS: {form} has an arm of its own")
+
+    def key(name: str) -> str:
+        return name.replace("_", "").lower()
+
+    gaps = []
+    for name, optional in sorted(stub.items()):
+        if not optional or name in otherwise:
+            continue
+        if name not in functions:
+            gaps.append(f"{name}: no Rust function")
+            continue
+        members = [name, *variants.get(name, []), *forms.get(name, [])]
+        taken = {key(p["name"]) for m in members if m in functions for p in functions[m]["params"]}
+        missing = [p for p in optional if key(p) not in taken]
+        if missing:
+            gaps.append(f"{name}: no Rust form takes {', '.join(missing)}")
+    return gaps
 
 
 # ---------------------------------------------------------------------------------------
