@@ -2202,10 +2202,73 @@ def test_small_numpy_frames_avoid_importer_configuration_overhead():
     assert prepare_int64_table(pd.DataFrame({"a": pd.Series([None], dtype="Int64")}), None) is not None
 
 
-@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit"])
-def test_nul_names_keep_lossless_ipc_row_fallback(protocol, schema_kind):
-    import pyarrow as pa
+@pytest.mark.parametrize("kind", ["struct", "field", "both", "mixin"])
+def test_struct_subclasses_take_pysparks_conversion(protocol, kind):
+    # As PySpark's createDataFrame, which converts a frame under any StructType of StructFields
+    # with its conversion: of a Python subclass of either that overrides none of the reads of the
+    # conversion too, with its errors, such as that of a lossy cast, where the row path raised
+    # its own ("Type mismatch in row data").
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql._pandas_input import accepts_pandas_schema
 
+    class Struct(T.StructType):
+        pass
+
+    class Field(T.StructField):
+        pass
+
+    class Mixin:
+        def extra(self):
+            return 1
+
+    class Mixed(Mixin, T.StructType):
+        pass
+
+    struct_class = {"struct": Struct, "field": T.StructType, "both": Struct, "mixin": Mixed}[kind]
+    field_class = Field if kind in ("field", "both") else T.StructField
+    schema = struct_class([field_class("i", T.LongType())])
+    assert accepts_pandas_schema(schema)
+    with _arrow_input_service(protocol) as (spark, state):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(pd.DataFrame({"i": [1.5]}), schema)
+        assert str(error.value).startswith(
+            "Exception thrown when converting pandas.Series (float64) with name 'i' to Arrow "
+            "Array (int64)."
+        )
+        spark.createDataFrame(pd.DataFrame({"i": [1]}), schema).toArrow()
+        assert state["input_tables"][0].to_pydict() == {"i": [1]}
+
+
+@pytest.mark.parametrize("read", [
+    "fields", "names", "__iter__", "__getattribute__", "name", "dataType", "nullable",
+    "metadata", "field_getattribute",
+])
+def test_struct_subclasses_that_override_the_reads_of_the_conversion_keep_the_row_path(read):
+    # The conversion reads the fields, names and types of a struct through its classes, and the
+    # importer reads the native types: a subclass that overrides one of these reads, whose
+    # values the two would read differently, keeps the row path, which reads the native types.
+    from pyspark.sql._pandas_input import accepts_pandas_schema
+
+    def override(name):
+        if name in ("__iter__", "__getattribute__", "field_getattribute"):
+            method = {"__iter__": lambda self: iter([]),
+                      "__getattribute__": object.__getattribute__,
+                      "field_getattribute": object.__getattribute__}[name]
+            return {"__getattribute__" if name == "field_getattribute" else name: method}
+        return {name: property(lambda self: None)}
+
+    struct_reads = ("fields", "names", "__iter__", "__getattribute__")
+    struct_class = type("Struct", (T.StructType,), override(read) if read in struct_reads else {})
+    field_class = (
+        T.StructField if read in struct_reads else type("Field", (T.StructField,), override(read))
+    )
+    schema = struct_class([field_class("i", T.LongType())])
+    assert not accepts_pandas_schema(schema)
+    assert accepts_pandas_schema(T.StructType([T.StructField("i", T.LongType())]))
+
+
+@pytest.mark.parametrize("schema_kind", ["inferred", "names", "explicit"])
+def test_nul_names_take_the_integer_path_whole(protocol, schema_kind):
     name = "a\x00b"
     frame = pd.DataFrame({name if schema_kind == "inferred" else "original":
                           np.arange(1000, dtype=np.int64)})
@@ -2214,19 +2277,116 @@ def test_nul_names_keep_lossless_ipc_row_fallback(protocol, schema_kind):
         schema = [name]
     elif schema_kind == "explicit":
         schema = T.StructType([T.StructField(name, T.LongType())])
-    # C Stream field names are NUL-terminated; IPC preserves the full string.
-    assert prepare_int64_table(frame, schema) is None
+    # A name with a NUL takes the fast path as any other name. The C data interface holds the
+    # names as C strings, which end at a NUL, so the importer reads such a table of its IPC
+    # stream, which keeps them whole, as PySpark's.
+    table = prepare_int64_table(frame, schema)
+    assert table.column_names == ["original" if schema_kind == "names" else name]
     with _arrow_input_service(protocol) as (spark, state):
         spark.createDataFrame(frame, schema).toArrow()
         assert state["result"] == (1000, 0, 999)
         payload = state["relations"][0].local_relation.data
-        if schema_kind == "explicit":
-            assert pa.ipc.open_stream(payload).schema.names == [name]
-        else:
+        assert pa.ipc.open_stream(payload).schema.names == table.column_names
+        assert state["column_names"] == [name]
+
+
+@pytest.mark.parametrize(
+    "kind", ["float64", "string", "date", "timestamp", "conversion", "nested", "nested_inferred"]
+)
+def test_nul_names_take_the_arrow_paths_whole(protocol, kind, monkeypatch):
+    # As PySpark's createDataFrame, which sends the IPC stream of its table, a name with a NUL,
+    # at any depth, reaches the relation whole, from each fast path and from PySpark's
+    # conversion, which the importer reads of the IPC stream of the table. The fast path of
+    # naive timestamps is taken on a UTC host only (`_timestamp_host_is_utc`).
+    import time
+
+    import pyspark.sql._pandas_input as helper
+
+    monkeypatch.setenv("TZ", "UTC")
+    monkeypatch.setattr(time, "tzname", ("UTC", "UTC"))
+
+    name = "x\x00y"
+    data_type = {
+        "float64": T.DoubleType(), "string": T.StringType(), "date": T.DateType(),
+        "timestamp": T.TimestampType(), "conversion": T.DecimalType(10, 2),
+        "nested": T.StructType([T.StructField("k\x00", T.LongType())]),
+    }.get(kind)
+    rows = 100000 if kind == "float64" else 10000
+    values = {
+        "float64": np.full(rows, 1.5), "string": ["text"] * rows,
+        "date": [date(2020, 1, 1)] * rows,
+        "timestamp": pd.to_datetime(["2020-01-01 00:00:00"] * rows),
+        "conversion": [Decimal("1.25")] * rows,
+        "nested": [{"k\x00": 1}] * rows, "nested_inferred": [{"k\x00": 1}] * rows,
+    }[kind]
+    frame = pd.DataFrame({"original": values})
+    if kind == "nested_inferred":
+        frame.columns = [name]
+        schema = None
+    else:
+        schema = T.StructType([T.StructField(name, data_type)])
+    fast_path = {
+        "float64": helper.prepare_float64_input, "string": helper.prepare_string_input,
+        "date": helper.prepare_date_table, "timestamp": helper.timestamp_columns,
+    }.get(kind)
+    if fast_path is not None:
+        assert fast_path(frame, schema) is not None
+    with _arrow_input_service(protocol) as (spark, state):
+        result = spark.createDataFrame(frame, schema)
+        result.toArrow()
+        payload = pa.ipc.open_stream(state["relations"][0].local_relation.data)
+        if kind == "nested_inferred":
             # As PySpark Connect's, the Arrow conversion of a frame without a schema names its
             # columns _0, _1, ..., which toDF names.
-            assert pa.ipc.open_stream(payload).schema.names == ["_0"]
-            assert state["column_names"] == [name]
+            assert payload.schema.names == ["_0"]
+            assert payload.schema.field(0).type == pa.struct([pa.field("k\x00", pa.int64())])
+        else:
+            assert payload.schema.names == [name]
+        if kind.startswith("nested"):
+            assert payload.schema.field(0).type.field(0).name == "k\x00"
+        assert state["column_names"] == [name]
+
+
+@pytest.mark.parametrize("kind", ["labels", "labels_int64", "names", "names_int64", "arrow"])
+def test_names_that_utf8_cannot_encode_fail_the_requests_as_pyspark(protocol, kind):
+    # As PySpark's createDataFrame, which applies the labels of a pandas DataFrame, a list of
+    # names of one, and the names of a pyarrow Table with toDF, whose plan sets them when a
+    # request builds it: a name that UTF-8 cannot encode fails the requests of the DataFrame with
+    # protobuf's UnicodeEncodeError, and not the call, also of a frame of the integer path. Of
+    # local rows, which name the table of PySpark's conversion, it fails the call.
+    bad = "a\ud800b"
+    message = (
+        "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed"
+    )
+    values = np.arange(1000 if kind.endswith("int64") else 2, dtype=np.int64)
+
+    def labeled(values):
+        # Of an object Index: the str Index of pandas 3, of Arrow, cannot hold such a label.
+        return pd.DataFrame({"a": values}).set_axis(pd.Index([bad], dtype=object), axis=1)
+
+    if kind.startswith("labels"):
+        data, schema = labeled(values), None
+    elif kind.startswith("names"):
+        data, schema = pd.DataFrame({"a": values}), [bad]
+    else:
+        data, schema = pa.table({"a": values}), [bad]
+    if kind.endswith("int64"):
+        assert prepare_int64_table(data, schema) is None or kind == "names_int64"
+    with _arrow_input_service(protocol) as (spark, state):
+        df = spark.createDataFrame(data, schema)
+        for request in (lambda: df.schema, df.collect, lambda: df.select("*").columns):
+            with pytest.raises(UnicodeEncodeError) as error:
+                request()
+            assert str(error.value) == message
+        assert state["relations"] == []
+        with pytest.raises(UnicodeEncodeError) as error:
+            spark.createDataFrame([(1,)], [bad])
+        assert str(error.value) == message
+        # The labels name no column of a frame of a list of names or of a struct.
+        frame = labeled(values)
+        for schema in (["x"], T.StructType([T.StructField("x", T.LongType())])):
+            spark.createDataFrame(frame, schema).toArrow()
+            assert state["column_names"] == ["x"]
 
 
 @pytest.mark.parametrize("nullable", [False, True])
@@ -3567,7 +3727,7 @@ def test_float64_pandas_infinity_missing_option_keeps_row_semantics(protocol, nu
 @pytest.mark.parametrize("reason", [
     "small", "empty", "zero_columns", "inferred", "names", "ddl", "float_schema",
     "long_schema", "mixed_schema", "width", "duplicate_input", "duplicate_schema",
-    "input_nul", "schema_nul", "input_number", "input_string_subclass", "frame_subclass",
+    "input_number", "input_string_subclass", "frame_subclass",
     "schema_proxy", "extension", "object", "float32", "float16", "non_native",
     "integer", "mixed", "nonnullable_nan", "late_unsupported",
 ])
@@ -3616,10 +3776,8 @@ def test_float64_column_guard_preserves_row_fallback(reason):
     elif reason == "input_string_subclass":
         frame.columns = pd.Index([Name("x")], dtype=object)
         assert type(frame.columns[0]) is Name
-    elif reason in ("input_nul", "input_number"):
-        frame.columns = [{"input_nul": "x\x00", "input_number": 1}[reason]]
-    elif reason == "schema_nul":
-        schema = T.StructType([T.StructField("x\x00", T.DoubleType())])
+    elif reason == "input_number":
+        frame.columns = [1]
     elif reason == "frame_subclass":
         frame = Frame(frame)
     elif reason == "schema_proxy":
@@ -3640,7 +3798,7 @@ def test_float64_column_guard_preserves_row_fallback(reason):
 
 @pytest.mark.parametrize("reason", [
     "small", "inferred", "names", "ddl", "float32", "extension", "object", "frame_subclass",
-    "duplicate_input", "duplicate_schema", "input_nul", "schema_nul",
+    "duplicate_input", "duplicate_schema",
 ])
 def test_float64_public_fallback_preserves_every_ipc_cell(protocol, reason):
 
@@ -3668,10 +3826,6 @@ def test_float64_public_fallback_preserves_every_ipc_cell(protocol, reason):
         schema = expected_schema
         if reason == "duplicate_input":
             frame.columns = ["x", "x"]
-    elif reason == "input_nul":
-        frame.columns = ["x\x00original"]
-    elif reason == "schema_nul":
-        schema = expected_schema = T.StructType([T.StructField("x\x00renamed", T.DoubleType())])
     if reason in ("inferred", "names"):
         # As PySpark Connect's, the Arrow conversion of a frame without a schema names its
         # columns _0, _1, ..., which toDF names.
@@ -4778,7 +4932,7 @@ def test_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, v
 
 @pytest.mark.parametrize("reason", [
     "small", "empty", "inferred", "names", "ddl", "cast", "atomic", "mixed_schema",
-    "width", "duplicate_input", "duplicate_schema", "input_nul", "schema_nul",
+    "width", "duplicate_input", "duplicate_schema",
     "input_number", "datetime", "date", "nan", "pd_na", "nat", "mixed", "bytes",
     "nonnullable_null", "frame_subclass", "string_subclass", "string_dtype",
     "arrow_string_dtype", "late_unsupported", "surrogate", "late_surrogate", "collation",
@@ -4820,10 +4974,8 @@ def test_string_column_guard_handles_supported_and_unsupported_inputs(reason):
             frame.columns = ["text", "text"]
         else:
             schema = T.StructType([T.StructField("text", T.StringType())] * 2)
-    elif reason in ("input_nul", "input_number"):
-        frame.columns = ["text\x00" if reason == "input_nul" else 1]
-    elif reason == "schema_nul":
-        schema = T.StructType([T.StructField("text\x00", T.StringType())])
+    elif reason == "input_number":
+        frame.columns = [1]
     elif reason == "frame_subclass":
         frame = Frame(frame)
     elif reason in ("string_dtype", "arrow_string_dtype"):
@@ -6783,7 +6935,7 @@ def test_date_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, ver
 
 @pytest.mark.parametrize("reason", [
     "small", "empty", "inferred", "names", "ddl", "cast", "mixed_schema",
-    "width", "duplicate_input", "duplicate_schema", "input_nul", "schema_nul",
+    "width", "duplicate_input", "duplicate_schema",
     "input_number", "datetime", "timestamp", "nan", "pd_na", "nat", "mixed",
     "nonnullable_null", "frame_subclass", "date_subclass", "late_unsupported",
 ])
@@ -6819,10 +6971,8 @@ def test_date_column_guard_preserves_row_fallback(reason):
             frame.columns = ["day", "day"]
         else:
             schema = T.StructType([T.StructField("day", T.DateType())] * 2)
-    elif reason in ("input_nul", "input_number"):
-        frame.columns = ["day\x00" if reason == "input_nul" else 1]
-    elif reason == "schema_nul":
-        schema = T.StructType([T.StructField("day\x00", T.DateType())])
+    elif reason == "input_number":
+        frame.columns = [1]
     elif reason == "frame_subclass":
         frame = Frame(frame)
     else:

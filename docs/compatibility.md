@@ -1862,12 +1862,15 @@ server is trusted, as SECURITY.md sets out, so this is not a bound on the respon
 
 The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested
 expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it
-sends the plan, where the drop-in sends it and the server runs it up to its own limit of 1,024
-nested messages (`spark.connect.grpc.marshallerRecursionLimit`): from about 510 nested
-expressions, the server fails the request with `[Unknown error] Application error processing RPC`.
+sends the plan, where the drop-in sends it, and the server runs it within its own limits. It
+parses a request of up to `spark.connect.grpc.marshallerRecursionLimit` nested messages (1024),
+so 509 nested `abs` run and 510 fail with `[Unknown error] Application error processing RPC`,
+and its analyzer resolves a plan in up to `spark.sql.analyzer.maxIterations` (100) iterations,
+so a chain of 98 `+` fails with its `AnalysisException` ("Max iterations (100) reached for batch
+Resolution").
 A Column of 745 levels or more raises a `RecursionError` when it is pickled, of the drop-in's own
-message. PySpark's pickler raises one from about 600 levels, under Python's default recursion limit,
-so a Column of 600 to 744 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a
+message. PySpark's pickler raises one from about 550 levels, under Python's default recursion limit,
+so a Column of 550 to 744 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a
 Column share its expression, of which a deep copy makes again only the levels above the UDFs whose
 functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy` does; PySpark's
 `copy.deepcopy` raises a `RecursionError` from about 165 levels.
@@ -1898,7 +1901,8 @@ literal of `Column.otherwise` or `getItem`, which shows the `repr` of its strs.
 The literal of a `bytearray` is of the bytes that it holds when the Column is made, which its
 `__repr__` shows as PySpark's (`Column<'bytearray(b'xy')'>`), so a change to the bytearray after
 `lit` is in neither the `__repr__` nor the plan, where PySpark's literal keeps the bytearray and
-shows and sends what it holds at the time.
+shows and sends what it holds at the time. The literals of the core are immutable bytes, so its
+plans, pickles and copies never share a mutable Python object.
 
 An `Observation` or a `SparkSession.Hook`, of the class or of a subclass (which a module defines
 in both clients), that PySpark pickled at protocol 0 or 1 raises a `TypeError` when the drop-in
@@ -1906,11 +1910,10 @@ unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's,
 native base; protocols 2 and up, pickle's default, load in both clients, of the class or the
 subclass, and PySpark loads the drop-in's at every protocol. A hook of a subclass with `__slots__`
 pickles at protocols 0 and 1 too, where PySpark's raises the `TypeError` of a class that defines
-`__slots__` without `__getstate__`. A `StorageLevel` pickles at the protocols 2 and up only: at 0
-and 1 the drop-in raises `TypeError: cannot pickle 'StorageLevel' object`, and a `StorageLevel`
-that PySpark pickled at 0 or 1 raises `TypeError: object.__new__(StorageLevel) is not safe, use
-StorageLevel.__new__()` when the drop-in unpickles it; at the protocols 2 and up both clients load
-each other's.
+`__slots__` without `__getstate__`. A `StorageLevel` pickles at every protocol, and PySpark loads
+the drop-in's; one that PySpark pickled at 0 or 1 raises `TypeError: object.__new__(StorageLevel)
+is not safe, use StorageLevel.__new__()` when the drop-in unpickles it, and at the protocols 2 and
+up both clients load each other's.
 
 So it is for the data types. PySpark's are plain classes, which pickle as their class and their
 `__dict__`: at the protocols 2 and up the drop-in makes its type of the class, without arguments,
@@ -2206,6 +2209,11 @@ request that carries it, which is not always the call that takes it. The error i
 - a `withColumns` name, or an as-of join's `how` or `direction`, fails the DataFrame when its plan
   is built, at its first request, such as `collect` or `columns`. A `direction` of bytes that are
   not UTF-8 fails there with PySpark's `UnicodeDecodeError`, as protobuf's string field gives it;
+- the names of `createDataFrame` of a pandas DataFrame, of its column labels or of a list, and of
+  a pyarrow Table, which PySpark applies with `toDF`, fail the DataFrame when its plan is built,
+  at its first request. Those of other data, local rows or a NumPy array, which PySpark's
+  conversion names its table by, fail the call, as PySpark's, which reads the settings of its
+  conversions first, where the drop-in sends no request;
 - the names, SQL strings and literal strs of Columns fail each DataFrame whose plan has the Column
   when its plan is built, while the Column is made, renders, copies and pickles: those of `F.col`,
   `F.expr`, `F.lit` and the other functions, `df[name]`, `df.name`, `colRegex`, `metadataColumn`,
@@ -2313,7 +2321,9 @@ PySpark's `expr`, a value that is not a Column the `AttributeError` of its `to_p
 object that is not a mapping the `AttributeError` of its `items`.
 
 A str that a later call unsets or replaces is no longer in the request, in the same cases as in
-PySpark. A stream reader's option of None leaves its option as it was, as PySpark's does. An option
+PySpark. A stream reader's option of None leaves its option as it was, as PySpark's does. A batch
+reader's removes the option, which PySpark's plans of `table` and `changes` set, failing their
+requests (see `dev/parity/known-differences.md`). An option
 key, a table property or a config key that is not a str fails at the same call as PySpark's, with
 the same error: an `AssertionError` at a reader's load of a path, and protobuf's `TypeError` where
 the request is built otherwise.
@@ -2501,8 +2511,10 @@ its client, which the drop-in does not have:
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped
 session fails the copy with `SparkConnectException`, as PySpark's does. One difference remains:
-PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` by reading the columns, which
-the drop-in does not, since it defines `__deepcopy__` itself. An unpickled DataFrame requests its
+PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` and
+`getattr(df, "__copy__")` by requesting the schema, to read the columns, and raises
+`ATTRIBUTE_NOT_SUPPORTED`, so `hasattr(df, "__copy__")` is false; the drop-in defines both
+itself, which it finds without a request. An unpickled DataFrame requests its
 schema once, at the unpickle, which raises the error of the request, as PySpark's pickle looks the
 `__setstate__` of the new DataFrame up through its `__getattr__`. Its cached schema is then that of
 the pickled DataFrame, as the state of PySpark's pickle sets it: of none, its `schema` requests it
@@ -2530,7 +2542,8 @@ the cached schema of their input in PySpark copy that of `to` too: `alias`, `fil
 `repartitionById` and `coalesce`, `distinct` and `dropDuplicates`, `sample`, `randomSplit` and
 `observe`, as do the set operations of equal ones.
 
-The other objects of a session above, a streaming query and `SparkSession.builder` keep the
+The other objects of a session above, a streaming query and the Connect builder,
+`pyspark.sql.connect.session.SparkSession.builder`, keep the
 attributes that are set on them through copies and pickles, as PySpark's copy and pickle their
 `__dict__`: a shallow copy shares them, and a deep copy, a pickle and cloudpickle copy them, where
 they copy the object at all. Where PySpark's fail, the drop-in's fail with the same errors, such as
@@ -2538,6 +2551,8 @@ the `AttributeError` of the creator of the session of a plain pickle of `spark.s
 `TypeError` of its lock of a deep copy and of cloudpickle. Their `__dict__` holds only those
 attributes, where PySpark's holds the state of the object too, as the `_options` of a builder: so a
 shallow copy of a builder has options of its own, where PySpark's shares its `_options` dict.
+`pyspark.sql.SparkSession.builder` is PySpark's own class, whose `__dict__` holds its `_options`,
+which a shallow copy shares, as in PySpark.
 
 A table name that is neither a str nor bytes, and bytes that are not UTF-8, give a DataFrame of
 `read.table`, `readStream.table` and `changes`, whose plan raises protobuf's `TypeError` or the

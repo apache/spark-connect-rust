@@ -153,7 +153,9 @@ batch into its own allocation before the conversion, as PySpark's `_execute_and_
 
 `createDataFrame(pyarrow_table)` uses the reverse boundary: Spark's schema and
 timestamp conversion helpers normalize the table, then arrow-rs imports its
-`RecordBatchReader` through the C Stream interface. The Rust core serializes
+`RecordBatchReader` through the C Stream interface. A table of a field name that holds a NUL, at
+any depth, which the C strings of that interface end at, is read of its IPC stream instead, which
+holds the names whole, as PySpark's stream does. The Rust core serializes
 those batches to IPC for the local relation sent to Spark. No Python rows are
 materialized; casts, buffer alignment, and IPC serialization may still copy.
 Empty tables require an explicit schema, matching PySpark Connect.

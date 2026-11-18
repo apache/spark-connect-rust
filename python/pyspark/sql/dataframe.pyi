@@ -24,7 +24,7 @@ from pyspark.sql.column import Column as Column
 from pyspark.sql.readwriter import DataFrameWriter, DataFrameWriterV2
 from pyspark.sql.merge import MergeIntoWriter
 from pyspark.sql.streaming import DataStreamWriter
-from pyspark.sql.table_arg import TableArg
+from pyspark.sql.table_arg import TableArg as TableArg
 from pyspark.sql.types import StructType as StructType, Row as Row
 from py4j.java_gateway import JavaObject
 import pyarrow as pa

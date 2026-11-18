@@ -545,6 +545,15 @@ def _has_canonical_columns(columns):
             and _defined_in(class_attribute(cls, "isna"), "isna", isna_module))
 
 
+def _encodes_as_utf8(text):
+    """Whether UTF-8 encodes the str `text`, as a name of an Arrow table does."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def prepare_int64_table(frame, schema):
     """Return an Arrow table only when each column is already a signed 64-bit integer.
 
@@ -588,8 +597,11 @@ def prepare_int64_table(frame, schema):
     if not _has_canonical_columns(frame.columns):
         return None
     width = len(frame.columns)
+    # The table is named by the labels, which Arrow encodes as UTF-8 when it is made. PySpark's
+    # conversion names its table _0, _1, ..., and applies the labels with toDF, whose plan sets
+    # them when a request builds it: a label that UTF-8 cannot encode takes that conversion.
     if not width or not frame.columns.is_unique or not all(
-        type(name) is str and "\x00" not in name for name in frame.columns
+        type(name) is str and _encodes_as_utf8(name) for name in frame.columns
     ):
         return None
     dtypes = frame.dtypes
@@ -660,7 +672,7 @@ def prepare_int64_table(frame, schema):
         fields = schema.fields
         if len(fields) != width or not all(
             type(field) is StructField and type(field.dataType) is LongType
-            and type(field.name) is str and "\x00" not in field.name
+            and type(field.name) is str
             for field in fields
         ):
             return None
@@ -669,7 +681,7 @@ def prepare_int64_table(frame, schema):
             return None
     elif schema is not None:
         if type(schema) not in (list, tuple) or len(schema) != width or not all(
-            type(name) is str and "\x00" not in name for name in schema
+            type(name) is str for name in schema
         ):
             return None
         # As PySpark Connect, the Arrow table keeps the pandas names, and the list is
@@ -814,10 +826,10 @@ def timestamp_columns(frame, schema):
     fields = schema.fields
     if not width or len(fields) != width or not frame.columns.is_unique:
         return None
-    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+    if not all(type(name) is str for name in frame.columns):
         return None
     if not all(type(field) is StructField and type(field.dataType) is TimestampType
-               and type(field.name) is str and "\x00" not in field.name for field in fields):
+               and type(field.name) is str for field in fields):
         return None
     if len(set(schema.names)) != width:
         return None
@@ -925,7 +937,7 @@ def prepare_float64_table(frame, schema):
         return None
     width = len(frame.columns)
     if not width or not frame.columns.is_unique or not all(
-        type(name) is str and "\x00" not in name for name in frame.columns
+        type(name) is str for name in frame.columns
     ):
         return None
     double_dtype = np.dtype("float64")
@@ -971,7 +983,7 @@ def prepare_float64_table(frame, schema):
     fields = schema.fields
     if len(fields) != width or not all(
         type(field) is native.StructField and type(field.dataType) is native.DoubleType
-        and type(field.name) is str and "\x00" not in field.name for field in fields
+        and type(field.name) is str for field in fields
     ) or len(set(schema.names)) != width:
         return None
 
@@ -1070,12 +1082,12 @@ def prepare_string_input(frame, schema):
     width = len(frame.columns)
     if not width or len(schema.fields) != width or not frame.columns.is_unique:
         return None
-    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+    if not all(type(name) is str for name in frame.columns):
         return None
     if not all(
         type(field) is StructField and type(field.dataType) is StringType
         and field.dataType.isUTF8BinaryCollation()
-        and type(field.name) is str and "\x00" not in field.name
+        and type(field.name) is str
         for field in schema.fields
     ) or len(set(schema.names)) != width:
         return None
@@ -1290,11 +1302,11 @@ def prepare_date_table(frame, schema):
     width = len(frame.columns)
     if not width or len(schema.fields) != width or not frame.columns.is_unique:
         return None
-    if not all(type(name) is str and "\x00" not in name for name in frame.columns):
+    if not all(type(name) is str for name in frame.columns):
         return None
     if not all(
         type(field) is StructField and type(field.dataType) is DateType
-        and type(field.name) is str and "\x00" not in field.name
+        and type(field.name) is str
         for field in schema.fields
     ) or len(set(schema.names)) != width:
         return None
@@ -1390,17 +1402,36 @@ def _converter_namespaces_intact():
     return True
 
 
+_STRUCT_READS = ("fields", "names", "__iter__")
+_FIELD_READS = ("name", "dataType", "nullable", "metadata")
+
+
+def _reads_as(cls, base, names):
+    """Whether `cls`, `base` or a Python subclass of it, reads `names` as `base` does: whether no
+    class before `base` in its MRO defines one of them, `__getattribute__` or `__class__`."""
+    for klass in cls.__mro__:
+        if klass is base:
+            return True
+        namespace = vars(klass)
+        if ("__getattribute__" in namespace or "__class__" in namespace
+                or any(name in namespace for name in names)):
+            return False
+    return False
+
+
 def _canonical_struct(schema):
     """Whether a native struct schema and its fields keep their own classes' behavior.
 
-    The conversion reads the fields, names and data types through the classes, so a
-    customized class keeps the row path.
+    The conversion reads the fields, names and data types through the classes, and the importer
+    the native types that they hold, so a class that overrides one of these reads keeps the row
+    path. As PySpark's createDataFrame, which converts a frame under any StructType of
+    StructFields with its conversion, a Python subclass that overrides none takes it too.
     """
     from types import GetSetDescriptorType, WrapperDescriptorType
 
     from pyspark._pyspark import StructField, StructType
 
-    if type(schema) is not StructType:
+    if not isinstance(schema, StructType) or not _reads_as(type(schema), StructType, _STRUCT_READS):
         return False
     for cls in (StructType, StructField):
         if (cls.__getattribute__ is not object.__getattribute__
@@ -1417,7 +1448,8 @@ def _canonical_struct(schema):
                     or descriptor.__objclass__ is not cls or descriptor.__name__ != name):
                 return False
     return all(
-        type(field) is StructField and type(field.name) is str and "\x00" not in field.name
+        isinstance(field, StructField) and _reads_as(type(field), StructField, _FIELD_READS)
+        and type(field.name) is str
         and type(field.dataType).__getattribute__ is object.__getattribute__
         for field in schema.fields
     )
