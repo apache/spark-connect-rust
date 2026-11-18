@@ -500,16 +500,38 @@ fn analyze_plans(analyze: &mut Analyze) -> Vec<&mut Option<Plan>> {
 pub type ExecutePlanHook =
     std::sync::Arc<dyn Fn(ExecutePlanRequest) -> Result<ExecutePlanRequest> + Send + Sync>;
 
-/// Let the server split the Arrow batches too large for one message into chunks, which the
-/// stream of the execution joins, as PySpark's client does, without a preferred chunk size.
-fn allow_arrow_batch_chunking(request: &mut ExecutePlanRequest) {
+/// The result chunking options of the executions of a client, as PySpark's `SparkConnectClient`
+/// sends them with each `ExecutePlanRequest`: by default, the server may split an Arrow batch too
+/// large for one message into chunks, which the stream of the execution joins, without a
+/// preferred chunk size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResultChunking {
+    /// Whether the server may split a large Arrow batch into chunks.
+    pub allow_arrow_batch_chunking: bool,
+    /// The preferred size of a chunk, in bytes, which the server uses when it is in its range.
+    pub preferred_arrow_chunk_size: Option<i64>,
+}
+
+impl Default for ResultChunking {
+    /// PySpark's: chunking allowed, without a preferred chunk size.
+    fn default() -> Self {
+        ResultChunking {
+            allow_arrow_batch_chunking: true,
+            preferred_arrow_chunk_size: None,
+        }
+    }
+}
+
+/// Append the result chunking options `chunking` to the options of `request`, as PySpark's
+/// `_execute_plan_request_with_metadata` appends them.
+fn add_result_chunking_option(request: &mut ExecutePlanRequest, chunking: ResultChunking) {
     use spark_connect_proto::execute_plan_request::request_option::RequestOption as Kind;
     use spark_connect_proto::execute_plan_request::RequestOption;
     request.request_options.push(RequestOption {
         request_option: Some(Kind::ResultChunkingOptions(
             spark_connect_proto::ResultChunkingOptions {
-                allow_arrow_batch_chunking: true,
-                preferred_arrow_chunk_size: None,
+                allow_arrow_batch_chunking: chunking.allow_arrow_batch_chunking,
+                preferred_arrow_chunk_size: chunking.preferred_arrow_chunk_size,
             },
         )),
     });
@@ -541,10 +563,22 @@ pub struct SparkConnectClient {
     user_agent: Result<String>,
     /// The user context extensions of the requests of the client.
     user_context_extensions: std::sync::Arc<std::sync::Mutex<UserContextExtensions>>,
-    /// Retry policy applied to RPCs (exponential backoff on transient failures).
-    retry_policy: RetryPolicy,
+    /// Retry policy applied to RPCs (exponential backoff on transient failures), shared by the
+    /// clones of the client, as PySpark's `set_retry_policies` replaces the policies of a client
+    /// in use: each call reads the policy when it starts its retries.
+    retry_policy: std::sync::Arc<std::sync::RwLock<RetryPolicy>>,
     /// The deadline of each kind of RPC.
     rpc_deadlines: RpcDeadlines,
+    /// The `token` parameter of the connection string, if any, which PySpark's
+    /// `SparkConnectClient.token` reads before the `SPARK_CONNECT_AUTHENTICATE_TOKEN` variable.
+    token: Option<String>,
+    /// The result chunking options of the executions, as the `allow_arrow_batch_chunking` and
+    /// `preferred_arrow_chunk_size` of PySpark's `SparkConnectClient`.
+    result_chunking: ResultChunking,
+    /// Whether the executions are reattachable, shared by the clones of the client, as PySpark's
+    /// `use_reattachable_execute`, which `enable_reattachable_execute` and
+    /// `disable_reattachable_execute` set on a client in use.
+    reattachable: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The hook of the executions, if any, shared by the clients of the clones of the session,
     /// as PySpark's clones keep the hooks of a session.
     execute_plan_hook: std::sync::Arc<std::sync::RwLock<Option<ExecutePlanHook>>>,
@@ -840,8 +874,11 @@ impl SparkConnectClient {
             headers,
             user_agent,
             user_context_extensions: Default::default(),
-            retry_policy: RetryPolicy::default(),
+            retry_policy: Default::default(),
             rpc_deadlines: RpcDeadlines::default(),
+            token: builder.get(crate::channel::PARAM_TOKEN).map(String::from),
+            result_chunking: ResultChunking::default(),
+            reattachable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             execute_plan_hook: Default::default(),
             closed: Default::default(),
             server_session_id: Default::default(),
@@ -859,7 +896,9 @@ impl SparkConnectClient {
     /// Create a new client that reuses this client's channel/stub/metadata but
     /// starts a brand-new server-side session (fresh session id). Mirrors the
     /// reference client's `newSession()`, which opens a new session over the same
-    /// connection.
+    /// connection: the new client keeps the deadlines, the hook and whether the executions are
+    /// reattachable, and has the default retry policy and result chunking, as PySpark's
+    /// `newSession()` and `clone()` build their client of these only.
     pub fn with_new_session_id(&self) -> Self {
         SparkConnectClient {
             channel: self.channel.clone(),
@@ -872,8 +911,13 @@ impl SparkConnectClient {
             user_agent: self.user_agent.clone(),
             // As PySpark's client of a new session, of no user context extensions.
             user_context_extensions: Default::default(),
-            retry_policy: self.retry_policy.clone(),
+            retry_policy: Default::default(),
             rpc_deadlines: self.rpc_deadlines.clone(),
+            token: self.token.clone(),
+            result_chunking: ResultChunking::default(),
+            reattachable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                self.reattachable_execute(),
+            )),
             execute_plan_hook: std::sync::Arc::clone(&self.execute_plan_hook),
             closed: Default::default(),
             server_session_id: Default::default(),
@@ -1216,7 +1260,58 @@ impl SparkConnectClient {
     /// like the single-shot grpcio stub the reference client expects (which does its own
     /// retrying on top); see that constructor for why double-retrying is wrong there.
     pub fn set_retry_policy(&mut self, policy: RetryPolicy) {
-        self.retry_policy = policy;
+        self.replace_retry_policy(policy);
+    }
+
+    /// Replace the retry policy of this client and of its clones while they are in use, as
+    /// PySpark's `SparkConnectClient.set_retry_policies`: each call reads the policy when it
+    /// starts its retries, so the calls that start from now on retry under `policy`.
+    pub fn replace_retry_policy(&self, policy: RetryPolicy) {
+        *self.retry_policy.write().unwrap_or_else(|e| e.into_inner()) = policy;
+    }
+
+    /// The retry policy of this client's RPCs.
+    pub fn retry_policy(&self) -> RetryPolicy {
+        self.retry_policy
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// The `token` parameter of the connection string, if it has one. PySpark's
+    /// `SparkConnectClient.token` is this parameter, else the `SPARK_CONNECT_AUTHENTICATE_TOKEN`
+    /// variable of the environment as it is when the token is read.
+    pub fn token_parameter(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    /// Set the result chunking options of this client's executions, as the
+    /// `allow_arrow_batch_chunking` and `preferred_arrow_chunk_size` of PySpark's
+    /// `SparkConnectClient`.
+    pub fn set_result_chunking(&mut self, chunking: ResultChunking) {
+        self.result_chunking = chunking;
+    }
+
+    /// The result chunking options of this client's executions.
+    pub fn result_chunking(&self) -> ResultChunking {
+        self.result_chunking
+    }
+
+    /// Make the executions of this client and of its clones reattachable or not, from the next
+    /// one on, as PySpark's `enable_reattachable_execute` and `disable_reattachable_execute`. A
+    /// reattachable execution, the default, asks the server to keep its results until they are
+    /// released, so that a dropped stream is resumed with `ReattachExecute`; one that is not is a
+    /// single `ExecutePlan`, sent again from the start when its stream fails in a way that the
+    /// retry policy retries, and never released.
+    pub fn set_reattachable_execute(&self, reattachable: bool) {
+        self.reattachable
+            .store(reattachable, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Whether the executions of this client are reattachable. See
+    /// [`SparkConnectClient::set_reattachable_execute`].
+    pub fn reattachable_execute(&self) -> bool {
+        self.reattachable.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Turn the tracking of the server-side session on (the default) or off. With it on, the
@@ -1313,7 +1408,7 @@ impl SparkConnectClient {
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
-        allow_arrow_batch_chunking(&mut request);
+        add_result_chunking_option(&mut request, self.result_chunking);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         if let Some(plan) = request.plan.as_mut() {
@@ -1494,7 +1589,7 @@ impl SparkConnectClient {
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
-        let mut retries = Retrying::new(&self.retry_policy).ending_with_abort();
+        let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
         self.with_retry_in(&mut retries, op).await
     }
 
@@ -1532,7 +1627,7 @@ impl SparkConnectClient {
     where
         Fut: std::future::Future<Output = std::result::Result<T, RetryError<SparkError>>>,
     {
-        let mut retries = Retrying::new(&self.retry_policy).ending_with_abort();
+        let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
         self.with_attempts_in(&mut retries, attempt).await
     }
 
@@ -1567,6 +1662,12 @@ impl SparkConnectClient {
     /// The responses are the raw responses of the execution, chunks included, as the server
     /// sent them: see [`ReattachableResponseStream`] for how a chunked Arrow batch is read.
     /// Mirrors the reference reattachable execute path.
+    ///
+    /// Once [`SparkConnectClient::set_reattachable_execute`] turned the reattachable executions
+    /// off, the execution is not reattachable, as PySpark's with `use_reattachable_execute`
+    /// False: its request has no reattach option, its `ExecutePlan` has no deadline, the stream
+    /// is never reattached or released, and a failure that the retry policy retries, of the call
+    /// or of its stream, sends the `ExecutePlan` again, under the retries of the whole execution.
     pub async fn execute_plan_reattachable(
         &self,
         mut request: ExecutePlanRequest,
@@ -1576,7 +1677,7 @@ impl SparkConnectClient {
         // PySpark's iterator is of the request that the hooks return.
         self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
-        allow_arrow_batch_chunking(&mut request);
+        add_result_chunking_option(&mut request, self.result_chunking);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         if let Some(plan) = request.plan.as_mut() {
@@ -1589,17 +1690,27 @@ impl SparkConnectClient {
         // As in `execute_plan`: the lookup of the plan compression may have closed the client,
         // and PySpark reads its `_stub` before it makes the iterator, so nothing is released.
         self.ensure_open()?;
-        let iter = ExecutePlanResponseReattachableIterator::new(request);
+        let reattachable = self.reattachable_execute();
+        let iter = if reattachable {
+            ExecutePlanResponseReattachableIterator::new(request)
+        } else {
+            ExecutePlanResponseReattachableIterator::not_reattachable(request)
+        };
         // Before the first RPC, so that an execution that waits for the server is in flight.
         let inflight = InflightGuard::register(
             std::sync::Arc::clone(&self.inflight_operations),
             iter.operation_id().to_string(),
         );
-        let deadline = self.rpc_deadlines.reattachable_execute_plan;
+        // As PySpark's: an execution that is not reattachable has no deadline, which would end it.
+        let deadline = if reattachable {
+            self.rpc_deadlines.reattachable_execute_plan
+        } else {
+            None
+        };
         let mut stream_deadline = None;
         // The attempts of the first RPC are those of the first response too, as the reference's
         // first `_has_next` retries both (see `first_response_retries`).
-        let mut first_response_retries = Retrying::new(&self.retry_policy).ending_with_abort();
+        let mut first_response_retries = Retrying::new(&self.retry_policy()).ending_with_abort();
         let stream = {
             // The first RPC is a wait of the caller for the execution.
             let _waiting = inflight.waiting();
@@ -1621,29 +1732,37 @@ impl SparkConnectClient {
             Ok(stream) => Some(stream),
             // As the reference iterator, past its deadline an execution is resumed by
             // reattaching, as it goes on on the server.
-            Err(error) if error.grpc_code == Some(tonic::Code::DeadlineExceeded as i32) => None,
+            Err(error)
+                if reattachable
+                    && error.grpc_code == Some(tonic::Code::DeadlineExceeded as i32) =>
+            {
+                None
+            }
             Err(error) => {
                 // As the reference iterator releases an execution that fails at once, such
                 // as for an analysis error, so the server does not keep it until its
                 // detached timeout. Once releases are refused, that release raises instead.
-                if let Some(refused) = release_refused() {
-                    return Err(refused);
+                // An execution that is not reattachable is not kept by the server.
+                if reattachable {
+                    if let Some(refused) = release_refused() {
+                        return Err(refused);
+                    }
+                    self.spawn_release(self.execution_metadata(), iter.release_all_request());
                 }
-                self.spawn_release(self.execution_metadata(), iter.release_all_request());
                 return Err(error.with_operation_id(iter.operation_id()));
             }
         };
-        let retry_policy = self.retry_policy.clone();
         Ok(ReattachableResponseStream {
             client: self.clone(),
-            retry_policy,
+            reattachable,
             first_response_retries: Some(first_response_retries),
             iter,
             stream,
             stream_deadline,
             execute_again: false,
             done: false,
-            released: false,
+            // Nothing is released of an execution that is not reattachable.
+            released: !reattachable,
             _inflight: inflight,
         })
     }
@@ -2551,13 +2670,17 @@ fn ascii_header_value(value: &str) -> Option<AsciiMetadataValue> {
 /// does. The high-level APIs of the `apache-spark-connect` crate, such as `DataFrame::collect`,
 /// do this join for their results.
 pub struct ReattachableResponseStream {
-    /// The client that started the execution, whose stub, headers and session it uses.
+    /// The client that started the execution, whose stub, headers, session and retry policy it
+    /// uses.
     client: SparkConnectClient,
-    retry_policy: RetryPolicy,
+    /// Whether the execution is reattachable, as
+    /// [`SparkConnectClient::set_reattachable_execute`] sets the executions of a client.
+    reattachable: bool,
     /// The retries of the first wait for a response, which carry on the attempts of the first RPC
     /// that started the execution: as the reference's first `_has_next` retries the initial
     /// ExecutePlan together with the reads of its first response, the policy's attempts are shared
-    /// by both. Taken by that wait; the later waits have their own.
+    /// by both. Taken by that wait; the later waits have their own. Those of an execution that is
+    /// not reattachable are of the whole execution, as PySpark's one `Retrying` around its stream.
     first_response_retries: Option<Retrying>,
     iter: ExecutePlanResponseReattachableIterator,
     /// The stream of the execution, or none to reattach before reading.
@@ -2634,7 +2757,7 @@ impl SparkConnectClient {
     /// no observed server-side session ID.
     fn spawn_release(&self, metadata: MetadataMap, request: ReleaseExecuteRequest) {
         let stub = self.stub.clone();
-        let policy = self.retry_policy.clone();
+        let policy = self.retry_policy();
         let release = async move {
             // As the reference's, which goes through the stub of its iterator rather than the
             // `_stub` of the client: a release is retried whether or not the client was closed.
@@ -2675,8 +2798,9 @@ impl SparkConnectClient {
     /// remote relation in `CachedRemoteRelation.__del__`: through the channel itself, as a
     /// `unary_unary` call of ExecutePlan, so neither reattachable, with no ReleaseExecute after
     /// it, nor passed to the hooks of the executions. Its request is that of
-    /// `_execute_plan_request_with_metadata`, whose only option allows result chunking, and the
-    /// call is retried under the retry policy of the client, as `_retrying()` retries it.
+    /// `_execute_plan_request_with_metadata`, whose only option is the result chunking of the
+    /// client, and the call is retried under the retry policy of the client, as `_retrying()`
+    /// retries it.
     ///
     /// The request is completed on the calling thread, whose user context extensions it takes,
     /// as PySpark's is of the thread of its finalizer. It is sent on the shared runtime without
@@ -2690,7 +2814,7 @@ impl SparkConnectClient {
         if self.is_closed() {
             return;
         }
-        allow_arrow_batch_chunking(&mut request);
+        add_result_chunking_option(&mut request, self.result_chunking);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
         // A user agent that PySpark refuses raises as its finalizer builds the request, before
@@ -2706,7 +2830,7 @@ impl SparkConnectClient {
             .clone();
         let stub = self.stub.clone();
         let metadata = self.execution_metadata();
-        let policy = self.retry_policy.clone();
+        let policy = self.retry_policy();
         let closed = std::sync::Arc::clone(&self.closed);
         let send = async move {
             // A client closed meanwhile makes no more attempts, as the channel of a closed
@@ -2773,6 +2897,15 @@ impl ReattachableResponseStream {
         }
         // Each wait for the next response is a wait of the caller for the execution.
         let _waiting = self._inflight.waiting();
+        if !self.reattachable {
+            let mut retrying = match self.first_response_retries.take() {
+                Some(retries) => retries,
+                None => Retrying::new(&self.client.retry_policy()).ending_with_abort(),
+            };
+            let next = self.next_of_one_execution(&mut retrying).await;
+            self.first_response_retries = Some(retrying);
+            return next;
+        }
         // As the reference iterator's `_has_next` retries with a `Retrying` of its own, the
         // reattaches of each response have the attempts and the elapsed time of the policy.
         // The clock of the retries that the reference makes as `RetryException`s, bounded by the
@@ -2781,7 +2914,7 @@ impl ReattachableResponseStream {
         // execution are its retries.
         let mut retrying = match self.first_response_retries.take() {
             Some(retries) => retries,
-            None => Retrying::new(&self.retry_policy).ending_with_abort(),
+            None => Retrying::new(&self.client.retry_policy()).ending_with_abort(),
         };
         if self.stream.is_none() && !retrying.retry_at_once() {
             // The initial ExecutePlan passed its deadline, a RetryException that fails at once
@@ -2890,6 +3023,73 @@ impl ReattachableResponseStream {
         }
     }
 
+    /// The next response of an execution that is not reattachable, as PySpark's client reads its
+    /// one `ExecutePlan` inside a `Retrying`: the stream ends with the end of the call, and a
+    /// failure that the policy retries, of the call or of its stream, sends the `ExecutePlan` again
+    /// after its backoff, whose responses follow. `retrying` is that of the whole execution.
+    async fn next_of_one_execution(
+        &mut self,
+        retrying: &mut Retrying,
+    ) -> Result<Option<ExecutePlanResponse>> {
+        loop {
+            let Some(stream) = self.stream.as_mut() else {
+                // As PySpark's `_stub`, which each attempt reads: once the client is closed, the
+                // ExecutePlan sent again raises NO_ACTIVE_SESSION.
+                if let Err(error) = self.client.ensure_open() {
+                    return Err(self.fail(error));
+                }
+                let opened = match crate::runtime::until_abort(
+                    crate::runtime::ABORT_RETRIES,
+                    self.open_execute_plan_again(),
+                )
+                .await
+                {
+                    Some(opened) => opened,
+                    None => return Err(self.fail(wait_aborted())),
+                };
+                match opened {
+                    Ok(stream) => self.stream = Some(stream),
+                    Err(status) => match retrying.backoff(&status).await {
+                        Backoff::Retry => {}
+                        Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                        Backoff::Aborted => return Err(self.fail(wait_aborted())),
+                    },
+                }
+                continue;
+            };
+            let next = match crate::runtime::until_abort(
+                crate::runtime::ABORT_ALL,
+                stream.message(),
+            )
+            .await
+            {
+                Some(next) => next,
+                None => return Err(self.fail(wait_aborted())),
+            };
+            match next {
+                Ok(Some(resp)) => {
+                    if let Err(error) = self
+                        .client
+                        .verify_response(&resp.session_id, &resp.server_side_session_id)
+                    {
+                        return Err(self.fail(error));
+                    }
+                    self.iter.set_last_response_id(&resp).await;
+                    return Ok(Some(resp));
+                }
+                Ok(None) => {
+                    self.done = true;
+                    return Ok(None);
+                }
+                Err(status) => match retrying.backoff(&status).await {
+                    Backoff::Retry => self.stream = None,
+                    Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                    Backoff::Aborted => return Err(self.fail(wait_aborted())),
+                },
+            }
+        }
+    }
+
     /// Opens the stream of the execution again: by reattaching to it from the last response
     /// read, or, when the server does not know it, by sending the ExecutePlan again. Transient
     /// failures are retried under the policy with their backoff ([`Retrying::backoff`]), and a
@@ -2966,11 +3166,16 @@ impl ReattachableResponseStream {
         Ok(response.into_inner())
     }
 
-    /// ExecutePlan of the request again, as the initial one, bounded by its deadline.
+    /// ExecutePlan of the request again, as the initial one, bounded by its deadline, which an
+    /// execution that is not reattachable has none of.
     async fn open_execute_plan_again(
         &mut self,
     ) -> std::result::Result<Streaming<ExecutePlanResponse>, tonic::Status> {
-        let deadline = self.client.rpc_deadlines.reattachable_execute_plan;
+        let deadline = if self.reattachable {
+            self.client.rpc_deadlines.reattachable_execute_plan
+        } else {
+            None
+        };
         let request = clone_on_grown_stack(self.iter.request());
         let mut req = with_deadline(Request::new(request), deadline);
         self.client._attach_metadata(&mut req);

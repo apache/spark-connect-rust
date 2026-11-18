@@ -43,7 +43,9 @@ dependencies = [
 # No optional-dependencies: unlike upstream PySpark's `connect` extra, this
 # package has no pure-Python gRPC client — the Rust extension (pyspark._pyspark)
 # speaks gRPC via tonic, so grpcio, grpcio-status, googleapis-common-protos and
-# zstandard (which pyspark-client requires) are never imported at runtime.
+# zstandard (which pyspark-client requires) are not imported at runtime, but by the
+# retry policies of SparkConnectClient (pyspark.sql.connect.client.retries, vendored
+# from Apache Spark), which import grpcio, grpcio-status and googleapis-common-protos.
 
 [project.urls]
 Homepage = "https://spark.apache.org/"
@@ -126,6 +128,7 @@ extend-exclude = [
     "python/pyspark/pipelines/tests/test_graph_element_registry.py",
     "python/pyspark/sql/connect/shell/progress.py",
     "python/pyspark/sql/connect/logging.py",
+    "python/pyspark/sql/connect/client/retries.py",
     "python/pyspark/sql/connect/_typing.py",
     "python/pyspark/sql/connect/conversion.py",
     "python/pyspark/sql/geo_utils.py",

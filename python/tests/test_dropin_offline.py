@@ -3906,14 +3906,15 @@ def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
     from pyspark.sql.connect.client import core
 
     for name in ["ChannelBuilder", "DefaultChannelBuilder", "PlanObservedMetrics",
-                 "SparkConnectClient"]:
+                 "SparkConnectClient", "RpcDeadlines", "AnalyzeResult", "ConfigResult"]:
         cls = getattr(client, name)
         assert (cls.__module__, cls.__qualname__) == ("pyspark.sql.connect.client.core", name)
         assert getattr(core, name) is cls
         assert pickle.loads(pickle.dumps(cls)) is cls
     assert repr(client.DefaultChannelBuilder("sc://localhost")).startswith(
         "<pyspark.sql.connect.client.core.DefaultChannelBuilder object at 0x")
-    assert core.__all__ == ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient"]
+    assert core.__all__ == [
+        "ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
 
 
 def test_session_constructor_and_its_flags_as_pyspark_connect():
@@ -4066,7 +4067,7 @@ def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
     class Session:
         session_id = "x"
 
-    client = SparkConnectClient(Session())
+    client = SparkConnectClient._of_session(Session())
     relation = pb2.Relation()
     relation.sql.query = "q" * 2000
     text = client._proto_to_string(relation, True)
@@ -22535,6 +22536,513 @@ def test_client_configuration_reads_and_ml_cache_guards_as_pyspark(mock_connect,
         None, {"ml_command_result": response}, None))
     assert client._delete_ml_cache(["id-1"]) == ["id-2", "id-3"]
     assert client._delete_ml_cache([]) == []
+
+
+def test_client_analyzes_the_plans_it_is_given_as_pyspark(mock_connect):
+    # As PySpark Connect's SparkConnectClient: schema, explain_string, same_semantics and
+    # semantic_hash send an AnalyzePlanRequest of the plan that they are given, as it is, of the
+    # placeholder of a DataFrame's relation replaced by the relation, and read its result.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    client = spark.client
+    # The relation of a DataFrame's plan stands for the DataFrame, which is alive while it is sent.
+    df, other_df = spark.range(3), spark.range(4)
+    plan = pb2.Plan()
+    plan.root.CopyFrom(df._plan.plan(client))
+    expected = T.StructType([T.StructField("id", T.LongType(), True, {"note": "original"})])
+    assert client.schema(plan).jsonValue() == expected.jsonValue()
+    sent = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    assert sent.session_id == spark.session_id and sent.schema.plan.root.range.end == 3
+
+    modes = pb2.AnalyzePlanRequest.Explain.ExplainMode
+    assert client.explain_string(plan, "simple") == service.explain_string
+    sent = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    assert sent.explain.explain_mode == modes.EXPLAIN_MODE_SIMPLE
+    # The default mode is extended, and a mode of no explain mode is VALUE_NOT_ALLOWED, of no
+    # request.
+    client.explain_string(plan)
+    sent = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    assert sent.explain.explain_mode == modes.EXPLAIN_MODE_EXTENDED
+    requests = len(service.analyze_requests)
+    with pytest.raises(PySparkValueError) as error:
+        client.explain_string(plan, "bogus")
+    assert error.value.getCondition() == "VALUE_NOT_ALLOWED"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "explain_mode",
+        "allowed_values": "['simple', 'extended', 'codegen', 'cost', 'formatted']",
+    }
+    # A message that is not a Plan is protobuf's TypeError, of no request either.
+    with pytest.raises(TypeError):
+        client.schema(plan.root)
+    assert len(service.analyze_requests) == requests
+
+    other = pb2.Plan()
+    other.root.CopyFrom(other_df._plan.plan(client))
+    assert client.same_semantics(plan, plan) is True
+    assert client.same_semantics(plan, other) is False
+    sent = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    assert sent.same_semantics.other_plan.root.range.end == 4
+    service.semantic_hash = 42
+    assert client.semantic_hash(plan) == 42
+
+
+def test_client_analysis_requests_and_results_are_those_of_pyspark():
+    # As PySpark Connect's SparkConnectClient._analyze and AnalyzeResult.fromProto: the
+    # AnalyzePlanRequest of each analysis, of the plans and relations that it is given, and the
+    # one field of its result that the response has. The session stands in for the transport.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkValueError
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.client import AnalyzeResult, SparkConnectClient
+    from pyspark.storagelevel import StorageLevel
+
+    class Session:
+        session_id = "s"
+        response = pb2.AnalyzePlanResponse()
+        sent = None
+
+        def _analyze_plan(self, data):
+            Session.sent = pb2.AnalyzePlanRequest.FromString(data)
+            return Session.response.SerializeToString()
+
+    client = SparkConnectClient._of_session(Session())
+    plan = pb2.Plan()
+    plan.root.range.end = 1
+    relation = plan.root
+    result = pb2.AnalyzePlanResponse
+    cases = [
+        ("tree_string", {"plan": plan, "level": 2}, result(tree_string=result.TreeString(
+            tree_string="t")), "tree_string", "t"),
+        ("is_local", {"plan": plan}, result(is_local=result.IsLocal(is_local=True)),
+         "is_local", True),
+        ("is_streaming", {"plan": plan}, result(is_streaming=result.IsStreaming(
+            is_streaming=True)), "is_streaming", True),
+        ("input_files", {"plan": plan}, result(input_files=result.InputFiles(files=["f"])),
+         "input_files", ["f"]),
+        ("spark_version", {}, result(spark_version=result.SparkVersion(version="4.3.0")),
+         "spark_version", "4.3.0"),
+        ("ddl_parse", {"ddl_string": "a int"}, result(ddl_parse=result.DDLParse(
+            parsed=pb2.DataType(integer=pb2.DataType.Integer()))), "parsed", T.IntegerType()),
+        ("persist", {"relation": relation, "storage_level": StorageLevel.DISK_ONLY},
+         result(persist=result.Persist()), None, None),
+        ("unpersist", {"relation": relation, "blocking": True},
+         result(unpersist=result.Unpersist()), None, None),
+        ("get_storage_level", {"relation": relation}, result(
+            get_storage_level=result.GetStorageLevel(storage_level=pb2.StorageLevel(
+                use_disk=True, replication=1))), "storage_level", StorageLevel.DISK_ONLY),
+        ("json_to_ddl", {"json_string": "{}"}, result(json_to_ddl=result.JsonToDDL(
+            ddl_string="a INT")), "ddl_string", "a INT"),
+    ]
+    for method, kwargs, response, field, value in cases:
+        Session.response = response
+        analyzed = client._analyze(method, **kwargs)
+        assert isinstance(analyzed, AnalyzeResult)
+        if field is not None:
+            assert getattr(analyzed, field) == value, method
+            assert list(Session.sent.ListFields())[0][0].name == method
+    assert Session.sent.json_to_ddl.json_string == "{}"
+    client._analyze("tree_string", plan=plan, level=2)
+    assert Session.sent.tree_string.level == 2 and Session.sent.tree_string.plan == plan
+    client._analyze("persist", relation=relation, storage_level=StorageLevel.DISK_ONLY)
+    assert Session.sent.persist.relation == relation
+    assert Session.sent.persist.storage_level.use_disk
+    client._analyze("unpersist", relation=relation, blocking=True)
+    assert Session.sent.unpersist.blocking is True
+    with pytest.raises(PySparkValueError) as error:
+        client._analyze("bogus")
+    assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+    # A response of no result is SparkConnectException's "No analyze result found!".
+    Session.response = pb2.AnalyzePlanResponse()
+    with pytest.raises(SparkConnectException, match="No analyze result found!"):
+        client._analyze("spark_version")
+
+
+def test_client_executes_the_plans_and_commands_it_is_given_as_pyspark(mock_connect):
+    # As PySpark Connect's SparkConnectClient: to_table, to_pandas and to_table_as_iterator
+    # execute the plan that they are given and read the schema and the Arrow batches of the
+    # server; execute_command and execute_command_as_iterator read the results of a command.
+    # Each ExecutionInfo is of the operation ID of the request, and the executions report their
+    # progress, but those of execute_command_as_iterator, as PySpark's.
+    import pyarrow as pa
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.metrics import ExecutionInfo
+
+    spark, service = mock_connect
+    client = spark.client
+    table = pa.table({"id": pa.array([1, 2], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, struct_schema()) + message_field(
+        2, varint_field(1, 2) + message_field(2, sink.getvalue().to_pybytes()))
+    done = []
+    client.register_progress_handler(lambda **progress: done.append(progress["done"]))
+
+    df = spark.range(2)
+    plan = pb2.Plan()
+    plan.root.CopyFrom(df._plan.plan(client))
+    result, schema, info = client.to_table(plan, {})
+    assert result.to_pydict() == {"id": [1, 2]} and schema.fieldNames() == ["id"]
+    sent = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert sent.plan.root.range.end == 2
+    assert isinstance(info, ExecutionInfo) and info.operation_id == sent.operation_id
+    assert done == [True]
+    service.confs = {
+        "spark.sql.execution.pandas.structHandlingMode": "legacy",
+        "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
+    }
+    frame, info = client.to_pandas(plan, {})
+    assert frame.to_dict("list") == {"id": [1, 2]} and isinstance(info, ExecutionInfo)
+    assert [type(item).__name__ for item in client.to_table_as_iterator(plan, {})] == [
+        "StructType", "Table"]
+    # A plan whose responses have no Arrow batch has no table, which to_table asserts.
+    service.execute_payload = b""
+    with pytest.raises(AssertionError):
+        client.to_table(plan, {})
+
+    command = pb2.Command()
+    command.sql_command.sql = "SELECT 1"
+    # ExecutePlanResponse.sql_command_result=5, SqlCommandResult.relation=1.
+    service.execute_payload = message_field(5, message_field(1, b""))
+    data, properties, info = client.execute_command(command)
+    sent = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert sent.plan.command.sql_command.sql == "SELECT 1"
+    assert data is None and list(properties) == ["sql_command_result"]
+    assert info.operation_id == sent.operation_id
+    calls = len(done)
+    assert [list(result) for result in client.execute_command_as_iterator(command)] == [
+        ["sql_command_result"]]
+    assert len(done) == calls
+    # A result that is not one of a command, such as metrics, is UNKNOWN_RESPONSE.
+    # ExecutePlanResponse.metrics=4, Metrics.metrics=1, MetricObject.name=1.
+    service.execute_payload = message_field(4, message_field(1, message_field(1, "scan")))
+    with pytest.raises(PySparkValueError) as error:
+        list(client.execute_command_as_iterator(command))
+    assert error.value.getCondition() == "UNKNOWN_RESPONSE"
+    client.clear_progress_handlers()
+
+
+def test_client_config_sends_the_operation_it_is_given_as_pyspark(mock_connect):
+    # As PySpark Connect's SparkConnectClient.config: a ConfigRequest of the operation, whose
+    # result has the pairs of the server, None for a key without a value, and its warnings.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client.core import ConfigResult
+
+    spark, service = mock_connect
+    service.confs = {"spark.a": "1", "spark.b": None}
+    client = spark.client
+    get = pb2.ConfigRequest.Operation()
+    get.get.keys.extend(["spark.a", "spark.b"])
+    result = client.config(get)
+    assert isinstance(result, ConfigResult)
+    assert (result.pairs, result.warnings) == ([("spark.a", "1"), ("spark.b", None)], [])
+    service.config_warnings = ["careful"]
+    set_ = pb2.ConfigRequest.Operation()
+    set_.set.pairs.add(key="spark.c", value="2")
+    assert client.config(set_).warnings == ["careful"]
+    assert service.set_confs[-1][0] == [("spark.c", "2")]
+    with pytest.raises(TypeError):
+        client.config(pb2.ConfigRequest())
+
+
+def test_client_retry_policies_retry_the_rpcs_of_the_transport_as_pyspark(mock_connect):
+    # As PySpark Connect's set_retry_policies: a failure is retried by the first policy that
+    # can retry it, a DefaultPolicy, with its backoff, until its retries are spent; a
+    # RetryPolicy retries none, and nothing retries without a policy. The Rust transport retries
+    # with the parameters of the policies, which get_retry_policies gives back.
+    pytest.importorskip("grpc_status")
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
+
+    spark, service = mock_connect
+    client = spark.client
+    (default,) = client.get_retry_policies()
+    assert type(default) is DefaultPolicy and vars(default) == vars(DefaultPolicy())
+    quick = {"initial_backoff": 1, "max_backoff": 1, "jitter": 0}
+    service.execute_failure = ("UNAVAILABLE", "down")
+    for policies, calls in (
+        ([DefaultPolicy(max_retries=2, **quick)], 3),
+        ([RetryPolicy(max_retries=5), DefaultPolicy(max_retries=1, **quick)], 2),
+        ([RetryPolicy(max_retries=5)], 1),
+        ([], 1),
+    ):
+        client.set_retry_policies(policies)
+        assert client.get_retry_policies() == policies
+        before = service.execute_calls
+        with pytest.raises(SparkConnectGrpcException):
+            spark.range(1).collect()
+        assert service.execute_calls - before == calls
+    # The policies are those of the session, whichever of its clients set them.
+    policies = [DefaultPolicy(max_retries=1, recognize_server_retry_delay=True, **quick)]
+    client.set_retry_policies(policies)
+    del client
+    assert spark.client.get_retry_policies() == policies
+    # The delay that a RetryInfo of the server asks for is waited.
+    service.execute_failure = None
+    service.retry_info_failures = [("UNAVAILABLE", 300)]
+    started = time.monotonic()
+    spark.range(1).collect()
+    assert time.monotonic() - started >= 0.3
+
+    # The transport classifies the failures as DefaultPolicy does and waits whole milliseconds:
+    # another classification, or a fractional backoff, is NOT_IMPLEMENTED, of no change.
+    class Always(DefaultPolicy):
+        def can_retry(self, e):
+            return True
+
+    for unsupported in ([Always()], [DefaultPolicy(initial_backoff=0.5)]):
+        with pytest.raises(PySparkNotImplementedError) as error:
+            spark.client.set_retry_policies(unsupported)
+        assert error.value.getCondition() == "NOT_IMPLEMENTED"
+    assert spark.client.get_retry_policies() == policies
+    # A client of a new session has the default policy, as PySpark's newSession and clone.
+    other = spark.client.newSession()
+    try:
+        assert vars(other.get_retry_policies()[0]) == vars(DefaultPolicy())
+    finally:
+        other.close()
+
+
+def test_client_of_a_connection_as_pyspark(monkeypatch):
+    # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
+    # neither the default nor the active one, of the channel builder of the connection string,
+    # which checks it, of its host and its token.
+    from pyspark.errors import PySparkNotImplementedError, PySparkValueError
+    from pyspark.sql.connect.client import DefaultChannelBuilder, RpcDeadlines, SparkConnectClient
+
+    monkeypatch.delenv("SPARK_CONNECT_AUTHENTICATE_TOKEN", raising=False)
+    client = SparkConnectClient("sc://Other:114/;token=abc", max_retry_exception_elapsed_time=5)
+    try:
+        assert (client.host, client.token, client.is_closed) == ("other", "abc", False)
+        assert client._session is not SparkSession.getActiveSession()
+        assert client._session._retry_policy()["max_retry_exception_elapsed_time"] == 5.0
+    finally:
+        client.close()
+    assert client.is_closed
+    # The channel options of a channel builder are not read, as PySpark's.
+    builder = DefaultChannelBuilder("sc://other:114")
+    client = SparkConnectClient(builder, channel_options=[("grpc.x", 1)])
+    try:
+        # The token of the environment, as it is when the token is read.
+        assert client.token is None
+        monkeypatch.setenv("SPARK_CONNECT_AUTHENTICATE_TOKEN", "env")
+        assert client.token == "env"
+    finally:
+        client.close()
+    # The Rust transport opens the channel: no gRPC channel options of a connection string.
+    with pytest.raises(PySparkNotImplementedError) as error:
+        SparkConnectClient("sc://other:114", channel_options=[("grpc.x", 1)])
+    assert error.value.getMessageParameters() == {"feature": "channelOptions"}
+    with pytest.raises(PySparkValueError) as error:
+        SparkConnectClient("http://other")
+    assert error.value.getCondition() == "INVALID_CONNECT_URL"
+    with pytest.raises(PySparkValueError) as error:
+        SparkConnectClient("sc://other/;session_id=abc")
+    assert error.value.getCondition() == "INVALID_SESSION_UUID_ID"
+    assert error.value.getMessageParameters() == {
+        "arg_name": "session_id", "origin": "badly formed hexadecimal UUID string"}
+    with pytest.raises(PySparkValueError, match="RpcDeadlines.config must be a positive number"):
+        RpcDeadlines(config=0)
+    assert RpcDeadlines.disabled() == RpcDeadlines(**dict.fromkeys(
+        f.name for f in __import__("dataclasses").fields(RpcDeadlines)))
+
+
+def test_client_of_a_connection_sends_its_settings_as_pyspark(mock_connect):
+    # The user, the session hooks, the reattachable executions, the result chunking and the RPC
+    # deadlines of SparkConnectClient(connection, ...) are those of the requests of its session,
+    # as PySpark's: an execution that is not reattachable has no ReattachOptions, is never
+    # released, and is sent again when its stream fails in a way that its policy retries.
+    pytest.importorskip("grpc_status")
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client import RpcDeadlines, SparkConnectClient
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    _, service = mock_connect
+    seen = []
+
+    class Hook:
+        def on_execute_plan(self, request):
+            seen.append(request.operation_id)
+            return request
+
+    def options(request):
+        return list(pb2.ExecutePlanRequest.FromString(request).request_options)
+
+    def released():
+        # The operations of the ReleaseExecute requests, which the client sends in the background.
+        return {pb2.ReleaseExecuteRequest.FromString(request).operation_id
+                for request in service.release_execute_requests}
+
+    command = pb2.Command()
+    command.sql_command.sql = "SELECT 1"
+    client = SparkConnectClient(
+        service.remote, user_id="bob", session_hooks=[Hook()], use_reattachable_execute=False,
+        allow_arrow_batch_chunking=False, preferred_arrow_chunk_size=4096)
+    try:
+        client.execute_command(command)
+        sent = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        not_reattachable = {sent.operation_id}
+        assert sent.user_context.user_id == "bob" and seen == [sent.operation_id]
+        assert not any(option.HasField("reattach_options") for option in options(
+            service.execute_requests[-1]))
+        (chunking,) = [option.result_chunking_options for option in options(
+            service.execute_requests[-1]) if option.HasField("result_chunking_options")]
+        assert not chunking.allow_arrow_batch_chunking
+        assert chunking.preferred_arrow_chunk_size == 4096
+
+        assert client.enable_reattachable_execute() is client
+        client.execute_command(command)
+        reattachable = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        assert [option.reattach_options.reattachable for option in options(
+            service.execute_requests[-1]) if option.HasField("reattach_options")] == [True]
+        deadline = time.monotonic() + 10
+        while reattachable.operation_id not in released() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert reattachable.operation_id in released()
+
+        assert client.disable_reattachable_execute() is client
+        client.set_retry_policies(
+            [DefaultPolicy(max_retries=1, initial_backoff=1, max_backoff=1, jitter=0)])
+        service.stream_failure = "UNAVAILABLE"
+        executions = service.execute_calls
+        with pytest.raises(SparkConnectGrpcException):
+            client.execute_command(command)
+        assert service.execute_calls - executions == 2
+        not_reattachable.add(
+            pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).operation_id)
+        assert service.reattach_requests == []
+        # The executions that are not reattachable are never released: a release would be sent in
+        # the background, as that of the reattachable one, which has arrived.
+        time.sleep(0.2)
+        assert not released() & not_reattachable
+    finally:
+        client.close()
+
+    service.stream_failure = None
+    service.block_config = True
+    get = pb2.ConfigRequest.Operation()
+    get.get.keys.append("spark.a")
+    client = SparkConnectClient(service.remote, rpc_deadlines=RpcDeadlines(config=0.2))
+    try:
+        with pytest.raises(SparkConnectGrpcException) as error:
+            client.config(get)
+        assert error.value.getGrpcStatusCode().name == "DEADLINE_EXCEEDED"
+    finally:
+        service.release_response()
+        client.close()
+
+
+def test_client_registers_functions_and_artifacts_as_pyspark(mock_connect, tmp_path):
+    # As PySpark Connect's SparkConnectClient: register_udf parses a DDL return type on the
+    # server and pickles the function with the type, register_udtf sends a DDL return type for
+    # the server to parse, register_java sends an aggregate function only without a return
+    # type, and add_artifacts and copy_from_local_to_fs make the checks of its ArtifactManager,
+    # not those of SparkSession.addArtifacts and copyFromLocalToFs.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.datasource import DataSource
+
+    spark, service = mock_connect
+    client = spark.client
+
+    def sent_command():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.command
+
+    assert client.register_udf(lambda x: x + 1, "int", "plus") == "plus"
+    assert pb2.AnalyzePlanRequest.FromString(
+        service.analyze_requests[-1]).ddl_parse.ddl_string == "int"
+    function = sent_command().register_function
+    assert (function.function_name, function.deterministic) == ("plus", True)
+    assert function.python_udf.output_type.HasField("integer")
+    assert function.python_udf.eval_type == 100
+    name = client.register_udf(lambda x: x, T.StringType(), deterministic=False)
+    assert re.fullmatch("fun_[0-9a-f]{32}", name)
+    assert sent_command().register_function.function_name == name
+
+    class Table:
+        def eval(self):
+            yield (1,)
+
+    assert client.register_udtf(Table, "a int", "tf") == "tf"
+    function = sent_command().register_table_function
+    assert (function.function_name, function.deterministic) == ("tf", True)
+    assert function.python_udtf.return_type.unparsed.data_type_string == "a int"
+    assert function.python_udtf.eval_type == 300
+
+    client.register_java("j", "com.example.J", "int", aggregate=True)
+    java = sent_command().register_function.java_udf
+    assert java.output_type.unparsed.data_type_string == "int" and not java.aggregate
+    client.register_java("k", "com.example.K", aggregate=True)
+    java = sent_command().register_function.java_udf
+    assert java.aggregate and not java.HasField("output_type")
+
+    class Source(DataSource):
+        @classmethod
+        def name(cls):
+            return "src"
+
+    client.register_data_source(Source)
+    assert sent_command().register_data_source.name == "src"
+
+    path = tmp_path / "a.py"
+    path.write_text("x = 1\n")
+    # Each path takes the first flag that it matches, which the client does not check.
+    client.add_artifacts(str(path), pyfile=True, archive=True, file=False)
+    with pytest.raises(PySparkValueError) as error:
+        spark.addArtifacts(str(path), pyfile=True, archive=True)
+    assert error.value.getCondition() == "INVALID_MULTIPLE_ARGUMENT_CONDITIONS"
+    with pytest.raises(AssertionError, match="local path must be a file path."):
+        client.copy_from_local_to_fs(str(tmp_path / "missing.py"), "/dest/a.py")
+    with pytest.raises(AssertionError, match="destination FS path must be an absolute path."):
+        client.copy_from_local_to_fs(str(path), "s3://bucket/a.py")
+    client.copy_from_local_to_fs(str(path), "/dest/a.py")
+
+
+def test_client_tags_interrupts_and_sessions_are_those_of_its_session_as_pyspark(mock_connect):
+    # As PySpark Connect's SparkConnectClient, whose tags, interrupts and sessions are those of
+    # SparkSession.addTag, interruptOperation, newSession and cloneSession.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    client = spark.client
+    client.add_tag("a")
+    assert client.get_tags() == spark.getTags() == {"a"}
+    for tag, condition in (
+        (None, "CANNOT_BE_NONE"), ("a,b", "VALUE_ALLOWED"), ("", "VALUE_NOT_NON_EMPTY_STR")):
+        with pytest.raises(PySparkValueError) as error:
+            client.add_tag(tag)
+        assert error.value.getCondition() == condition
+    client.remove_tag("missing")
+    client.clear_tags()
+    assert client.get_tags() == set()
+
+    # The interrupts of a tag and of an operation assert that there is one.
+    with pytest.raises(AssertionError):
+        client.interrupt_tag(None)
+    with pytest.raises(AssertionError):
+        client.interrupt_operation(None)
+    assert client.interrupt_operation("op") == ["op"]
+    sent = pb2.InterruptRequest.FromString(service.interrupt_requests[-1])
+    assert sent.operation_id == "op" and sent.session_id == spark.session_id
+
+    other = client.newSession()
+    cloned = client.clone()
+    try:
+        assert type(other) is type(client) and other is not client
+        assert other._session.session_id not in (spark.session_id, service.cloned_session_id)
+        assert cloned._session.session_id == service.cloned_session_id
+        assert pb2.CloneSessionRequest.FromString(
+            service.clone_requests[-1]).session_id == spark.session_id
+    finally:
+        other.close()
+        cloned.close()
 
 
 def test_literal_values_decode_from_their_protos_as_pyspark():

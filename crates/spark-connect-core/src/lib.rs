@@ -22,7 +22,7 @@ pub use artifact::{
     NamedArtifact, CHUNK_SIZE,
 };
 pub use channel::ChannelBuilder;
-pub use client::{ExecutePlanHook, RpcDeadlines, SparkConnectClient};
+pub use client::{ExecutePlanHook, ResultChunking, RpcDeadlines, SparkConnectClient};
 pub use error::{QueryContext, QueryContextType, Result, SparkError, SparkErrorKind};
 pub use reattach::ExecutePlanResponseReattachableIterator;
 pub use retries::{RetryPolicy, RetryPolicyState, DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME};
