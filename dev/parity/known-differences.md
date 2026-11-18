@@ -327,14 +327,18 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   core replaces by the relation while the DataFrame is alive, where `plan::resolve_relation`,
   `resolve_command` and `resolve_analysis` look for it: as the root relation of a plan or of an
   analysis, under it as the input of the relations of `pyspark.ml` (`MlRelation`,
-  `WithRelations`), as the dataset and the fetched arguments of the ML commands, and anywhere in
-  the message of the extension of a relation or of a command (a plugin's, as Delta Lake's
-  `merge`). Elsewhere it is sent as it is, and the server rejects the plan with
+  `WithRelations`) and of a `SubqueryAlias` (those of `pyspark.sql.connect.plan`, and so the views
+  of its `SQL`, aliases among the references of a `WithRelations`), as the dataset and the fetched
+  arguments of the ML commands, and anywhere in the message of the extension of a relation or of a
+  command (a plugin's, as Delta Lake's `merge`) that holds it as `plan(session)` gives it.
+  Elsewhere it is sent as it is, and the server rejects the plan with
   `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation: as the input
-  of another relation built in Python over it (a `Limit`, `Join` or `SubqueryAlias`, also in a
-  `WithRelations`), as the relation of a command that is neither an ML command nor an extension
-  (a `WriteOperation`, `CreateDataFrameView` or `CheckpointCommand`), and in an expression's
-  extension. A plan of it that `client.to_table`, `client.schema` or another method of the client
+  of a relation of another type built in Python over it, by a plugin or with
+  `pyspark.sql.connect.proto` (a `Limit`, `Join` or `Project`, also under a `SubqueryAlias` or in
+  a `WithRelations`), as the relation of a command that is neither an ML command nor an extension
+  (a `WriteOperation`, `CreateDataFrameView` or `CheckpointCommand`), in an expression's
+  extension, and in the message of an extension that changes it (`plan.common.plan_id = ...`). A
+  plan of it that `client.to_table`, `client.schema` or another method of the client
   sends after the DataFrame is freed fails with "a placeholder of a DataFrame that no longer
   exists".
 - **Default port** (intentional). `DefaultChannelBuilder.default_port()` is 15002. PySpark
@@ -412,6 +416,10 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   `update` and `merge` as PySpark sends them: the core replaces the shallow placeholder of the
   relation of a DataFrame, which `DataFrame._plan.plan(session)` gives, in the message of an
   extension too. What stays different (see `docs/compatibility.md`):
+  - the core replaces that placeholder where it replaces the plan of a DataFrame (see "Plans of a
+    DataFrame's relation" above). A placeholder under a relation of another type that a plugin
+    builds itself, or one that a plugin changes in the message of an extension, reaches the server
+    as a placeholder, which it refuses, where PySpark's plugins send the relation;
   - its classes are the runtime's, not subclasses of `google.protobuf.message.Message`, while its
     `DESCRIPTOR`, its `_*` descriptors, its extensions and services stay `protobuf`'s, and
     `protobuf`'s `message_factory` and `symbol_database` give `protobuf`'s classes of its types;

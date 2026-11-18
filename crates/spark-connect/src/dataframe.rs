@@ -6860,6 +6860,20 @@ mod plan_construction_tests {
         };
         let transformed = DataFrame::from_relation(spark.clone(), transform, None).unwrap();
         assert_observations(&transformed.limit(1), &[("m", &model_input)]);
+        // A SubqueryAlias of pyspark.sql.connect.plan over the placeholder of a DataFrame, whose
+        // observations are those of its child, as PySpark's.
+        let alias = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::SubqueryAlias(Box::new(
+                proto::SubqueryAlias {
+                    input: Some(Box::new(input.placeholder_relation())),
+                    alias: "s".to_string(),
+                    qualifier: Vec::new(),
+                },
+            ))),
+        };
+        let aliased = DataFrame::from_relation(spark.clone(), alias, None).unwrap();
+        assert_observations(&aliased, &[("m", &model_input)]);
         // A copy, of a relation that the session sent, while the DataFrame it was of is alive:
         // copies of its Observations, as PySpark's unpickled plan has.
         let copied = DataFrame::from_sent_relation(spark.clone(), input.to_relation().unwrap());
