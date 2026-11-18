@@ -15,11 +15,4 @@
 # limitations under the License.
 #
 
-"""Compatibility shim for pyspark.sql.connect.avro: re-exports from pyspark.sql.avro.functions."""
-
-try:
-    from pyspark.sql.avro.functions import from_avro, to_avro
-    __all__ = ["from_avro", "to_avro"]
-except ImportError:
-    # Optional dependency; guard if not available
-    __all__ = []
+"""Spark Connect Python Client - Avro Functions"""

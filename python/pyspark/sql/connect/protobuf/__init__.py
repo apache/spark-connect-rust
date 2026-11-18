@@ -15,11 +15,4 @@
 # limitations under the License.
 #
 
-"""Compatibility shim for pyspark.sql.connect.protobuf: re-exports from pyspark.sql.protobuf.functions."""
-
-try:
-    from pyspark.sql.protobuf.functions import from_protobuf, to_protobuf
-    __all__ = ["from_protobuf", "to_protobuf"]
-except ImportError:
-    # Optional dependency; guard if not available
-    __all__ = []
+"""Spark Connect Python Client - Protobuf Functions"""
