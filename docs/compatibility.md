@@ -1307,7 +1307,11 @@ client does:
   and the executions of a plan (`to_table`, `to_table_as_iterator`, `to_pandas`) or of a command
   (`execute_command`, `execute_command_as_iterator`), with the `ExecutionInfo` of the execution, the
   Observations that they are given set by their names, and the progress of the progress handlers
-  (`register_progress_handler`), except for `execute_command_as_iterator`, as in PySpark;
+  (`register_progress_handler`), except for `execute_command_as_iterator`, as in PySpark. The
+  observed metrics of an `ExecutionInfo`, of `DataFrame.executionInfo` and of the `attrs` of
+  `to_pandas` are PySpark's `PlanObservedMetrics`: their `metrics` are the `Expression.Literal`
+  messages that the server sent, of their `repr`, which `pairs` and `flows` convert as
+  `LiteralExpression._to_value` does, raising its `UNSUPPORTED_LITERAL` when they are read;
 - the registrations of `register_udf`, `register_udtf`, `register_java` and
   `register_data_source`, the artifacts of `add_artifacts`, `copy_from_local_to_fs`,
   `cache_artifact` and `cache_artifacts`, with the checks of PySpark's client rather than those of

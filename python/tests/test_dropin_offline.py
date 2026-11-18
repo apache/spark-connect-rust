@@ -14619,23 +14619,44 @@ def test_flows_raise_for_a_metric_that_holds_one_pyspark_cannot_convert_as_pyspa
     # As PySpark's PlanObservedMetrics.pairs, which converts each metric with
     # LiteralExpression._to_value: a metric of a name that holds a year-month interval as an
     # element, of an array, a struct or a map, raises UNSUPPORTED_LITERAL of that element.
+    import pyspark.sql.connect.proto as pb2
     from pyspark.errors import PySparkTypeError
     from pyspark.sql import functions as F
 
     spark, service = mock_connect
-    # Literal.string=13, year_month_interval=20, array=22 (Array.elements=2), map=23 (Map.keys=3,
-    # values=4), struct=24 (Struct.elements=2).
-    first, later = varint_field(20, 12), varint_field(20, 13)
+    # The literals as the server sends them, of their element, key, value and struct types.
+    interval = pb2.DataType(year_month_interval=pb2.DataType.YearMonthInterval())
+    string = pb2.DataType(string=pb2.DataType.String())
+    first, later = (pb2.Expression.Literal(year_month_interval=n) for n in (12, 13))
+
+    def struct(*elements):
+        struct = pb2.Expression.Literal()
+        struct.struct.struct_type.struct.fields.add(name="f", data_type=interval)
+        struct.struct.elements.extend(elements)
+        return struct
+
+    def array(element_type, *elements):
+        array = pb2.Expression.Literal()
+        array.array.element_type.CopyFrom(element_type)
+        array.array.elements.extend(elements)
+        return array
+
+    key_and_value = pb2.Expression.Literal()
+    key_and_value.map.key_type.CopyFrom(string)
+    key_and_value.map.value_type.CopyFrom(interval)
+    key_and_value.map.keys.add(string="k")
+    key_and_value.map.values.append(first)
     holders = [
-        message_field(22, message_field(2, first) + message_field(2, later)),
-        message_field(24, message_field(2, first)),
-        message_field(23, message_field(3, message_field(13, "k")) + message_field(4, first)),
-        message_field(22, message_field(2, message_field(24, message_field(2, first)))),
+        array(interval, first, later),
+        struct(first),
+        key_and_value,
+        array(struct(first).struct.struct_type, struct(first)),
     ]
     named = spark.range(3).observe("named", F.max("id").alias("m"))
     for holder in holders:
         service.execute_payload = message_field(
-            6, message_field(1, "named") + message_field(2, holder) + message_field(3, "m"))
+            6, message_field(1, "named") + message_field(2, holder.SerializeToString())
+            + message_field(3, "m"))
         assert named.collect() == []
         info = named.executionInfo
         with pytest.raises(PySparkTypeError) as error:
@@ -22762,27 +22783,34 @@ def test_connect_doctests_skip_without_connect_as_pyspark(monkeypatch, capsys):
 
 
 def test_observed_metrics_expose_their_name_metrics_and_keys_as_pyspark():
+    # As PySpark Connect's PlanObservedMetrics: its metrics are the Expression.Literal messages
+    # that the server sent, of their repr in its own, which pairs converts as
+    # LiteralExpression._to_value does, and so raises the UNSUPPORTED_LITERAL of a literal that it
+    # does not convert when it is read.
+    import pyspark.sql.connect.proto as pb2
     from pyspark.errors import PySparkTypeError
-    from pyspark.sql.connect.client import PlanObservedMetrics, _UnsupportedLiteral
+    from pyspark.sql.connect.client import PlanObservedMetrics
 
-    metrics = PlanObservedMetrics("o", [1, 2], [])
+    one, two = pb2.Expression.Literal(long=1), pb2.Expression.Literal(integer=2)
+    metrics = PlanObservedMetrics("o", [one, two], [])
+    assert repr(metrics) == "Plan observed(o=[long: 1\n, integer: 2\n])"
     # Without keys, each metric is named by its position, as the server names them.
-    assert repr(metrics) == "Plan observed(o=[1, 2])"
-    assert (metrics.name, metrics.metrics, metrics.keys) == (
-        "o", [1, 2], ["observed_metric_0", "observed_metric_1"])
+    assert (metrics.name, metrics.keys) == ("o", ["observed_metric_0", "observed_metric_1"])
+    assert metrics.metrics == [one, two]
+    assert all(type(metric) is pb2.Expression.Literal for metric in metrics.metrics)
     assert metrics.pairs == {"observed_metric_0": 1, "observed_metric_1": 2}
     assert metrics.to_dict() == {
         "name": "o", "keys": ["observed_metric_0", "observed_metric_1"],
         "pairs": {"observed_metric_0": 1, "observed_metric_1": 2}}
-    named = PlanObservedMetrics("p", [3], ["count"])
-    assert named.keys == ["count"] and named.pairs == {"count": 3}
-    # A literal that the transport could not decode is an error when the pairs are read.
-    unsupported = PlanObservedMetrics("u", [_UnsupportedLiteral("x"), 1], ["a", "b"])
-    assert repr(_UnsupportedLiteral("x")) == "_UnsupportedLiteral(x)"
+    named = PlanObservedMetrics("p", [pb2.Expression.Literal(string="x")], ["count"])
+    assert named.keys == ["count"] and named.pairs == {"count": "x"}
+    unsupported = PlanObservedMetrics(
+        "u", [pb2.Expression.Literal(year_month_interval=12), one], ["a", "b"])
+    assert repr(unsupported) == "Plan observed(u=[year_month_interval: 12\n, long: 1\n])"
     with pytest.raises(PySparkTypeError) as error:
         _ = unsupported.pairs
     assert error.value.getCondition() == "UNSUPPORTED_LITERAL"
-    assert error.value.getMessageParameters() == {"literal": "x"}
+    assert error.value.getMessageParameters() == {"literal": "year_month_interval: 12\n"}
 
 
 def test_to_pandas_attaches_the_metrics_of_an_execution_as_pyspark():
@@ -24788,7 +24816,10 @@ def test_execution_info_and_operation_id():
         assert spark.range(1).executionInfo is None
     finally:
         spark.stop()
-    ei = ExecutionInfo([], [PlanObservedMetrics("o", [1, 2], [])], "op-1")
+    import pyspark.sql.connect.proto as pb2
+
+    literals = [pb2.Expression.Literal(long=1), pb2.Expression.Literal(long=2)]
+    ei = ExecutionInfo([], [PlanObservedMetrics("o", literals, [])], "op-1")
     assert ei.operation_id == "op-1"
     assert ei.flows == [("o", {"observed_metric_0": 1, "observed_metric_1": 2})]
     assert ei.metrics is None
@@ -25265,20 +25296,26 @@ def _request_operation_id(request):
 def test_execution_info_decodes_observed_metrics_and_operation_id(mock_connect):
     import datetime
 
+    import pyspark.sql.connect.proto as pb2
+
     spark, service = mock_connect
     ts = 1_700_000_000_123_456
-    # expressions.proto Literal: integer=6, string=13, date=16, timestamp=17,
-    # day_time_interval=21, map=23 (keys=3, values=4), struct=24 (elements=2),
-    # data_type=100; types.proto DataType.struct=21 (fields=1; StructField.name=1).
-    struct_type = message_field(
-        21, message_field(1, message_field(1, "a")) + message_field(1, message_field(1, "b"))
-    )
-    struct_literal = message_field(
-        24, message_field(2, varint_field(6, 7)) + message_field(2, message_field(13, "x"))
-    ) + message_field(100, struct_type)
-    map_literal = message_field(
-        23, message_field(3, message_field(13, "k")) + message_field(4, varint_field(16, 1))
-    )
+    # expressions.proto Literal: timestamp=17, day_time_interval=21; a struct and a map of their
+    # types, as the server sends them.
+    struct = pb2.Expression.Literal()
+    struct.struct.struct_type.struct.fields.add(
+        name="a", data_type=pb2.DataType(integer=pb2.DataType.Integer()))
+    struct.struct.struct_type.struct.fields.add(
+        name="b", data_type=pb2.DataType(string=pb2.DataType.String()))
+    struct.struct.elements.add(integer=7)
+    struct.struct.elements.add(string="x")
+    struct_literal = struct.SerializeToString()
+    key_and_value = pb2.Expression.Literal()
+    key_and_value.map.key_type.string.SetInParent()
+    key_and_value.map.value_type.date.SetInParent()
+    key_and_value.map.keys.add(string="k")
+    key_and_value.map.values.add(date=1)
+    map_literal = key_and_value.SerializeToString()
     # base.proto ObservedMetrics: name=1, values=2, keys=3; ExecutePlanResponse.observed_metrics=6.
     observed = message_field(1, "o")
     for literal in (

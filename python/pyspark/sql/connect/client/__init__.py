@@ -425,10 +425,11 @@ class DefaultChannelBuilder(ChannelBuilder):
 
 
 class _UnsupportedLiteral:
-    """An observed-metric literal of a kind ``LiteralExpression._to_value`` rejects. The
-    Rust transport decodes eagerly, so it leaves this marker and ``pairs`` raises the
-    reference's ``UNSUPPORTED_LITERAL`` when read, as the reference does. A metric that holds
-    such a literal as an element is the marker of that literal, which the reference names."""
+    """The value that the native conversion of a literal (``literal_to_py``) gives for a literal of
+    a kind that ``LiteralExpression._to_value`` rejects, of its text. The metrics of an
+    Observation are checked before they are converted, so that the action raises PySpark's
+    ``UNSUPPORTED_LITERAL`` instead; those of ``PlanObservedMetrics`` are the literals themselves,
+    which its ``pairs`` converts as PySpark's."""
 
     def __init__(self, literal: str):
         self.literal = literal
@@ -439,16 +440,18 @@ class _UnsupportedLiteral:
 
 class PlanObservedMetrics(ObservedMetrics):
     """Observed metrics of one ``observe(...)`` node, as carried by
-    ``DataFrame.executionInfo.flows``. Mirrors ``pyspark.sql.connect.client.core
-    .PlanObservedMetrics``; the Rust transport has already decoded the literal values."""
+    ``DataFrame.executionInfo.flows``, as PySpark Connect's: its ``metrics`` are the
+    ``Expression.Literal`` messages (of ``pyspark.sql.connect.proto``) that the server sent,
+    which ``pairs`` converts with ``LiteralExpression._to_value``, and so raises PySpark's
+    ``UNSUPPORTED_LITERAL`` of a literal that it does not convert."""
 
     # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
     __module__ = "pyspark.sql.connect.client.core"
 
-    def __init__(self, name: str, metrics: list[Any], keys: list[str]):
+    def __init__(self, name: str, metrics: list["pb2.Expression.Literal"], keys: list[str]):
         self._name = name
         self._metrics = metrics
-        self._keys = keys if keys else [f"observed_metric_{i}" for i in range(len(metrics))]
+        self._keys = keys if keys else [f"observed_metric_{i}" for i in range(len(self.metrics))]
 
     def __repr__(self) -> str:
         return f"Plan observed({self._name}={self._metrics})"
@@ -458,27 +461,30 @@ class PlanObservedMetrics(ObservedMetrics):
         return self._name
 
     @property
-    def metrics(self) -> list[Any]:
+    def metrics(self) -> list["pb2.Expression.Literal"]:
         return self._metrics
 
     @property
     def pairs(self) -> dict[str, Any]:
-        for metric in self._metrics:
-            if isinstance(metric, _UnsupportedLiteral):
-                from pyspark.errors import PySparkTypeError
+        from pyspark.sql.connect.expressions import LiteralExpression
 
-                raise PySparkTypeError(
-                    errorClass="UNSUPPORTED_LITERAL",
-                    messageParameters={"literal": metric.literal},
-                )
-        return {self._keys[i]: self._metrics[i] for i in range(len(self._metrics))}
+        result = {}
+        for x in range(len(self._metrics)):
+            result[self.keys[x]] = LiteralExpression._to_value(self.metrics[x])
+        return result
 
     @property
     def keys(self) -> list[str]:
         return self._keys
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self._name, "keys": self._keys, "pairs": self.pairs}
+        """Return a JSON-serializable dictionary representation of this observed metrics,
+        with the keys ``name``, ``keys`` and ``pairs``, as PySpark Connect's."""
+        return {
+            "name": self._name,
+            "keys": self._keys,
+            "pairs": self.pairs,
+        }
 
 
 class AnalyzeResult:
