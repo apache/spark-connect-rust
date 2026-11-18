@@ -2886,8 +2886,9 @@ impl LogicalPlan {
                     local.data = Some(d.clone().into());
                 }
                 // Explicit schemas apply server-side casts. Inferred Arrow input
-                // omits this to avoid a redundant projection on every query.
-                local.schema = schema.as_ref().map(DataType::json);
+                // omits this to avoid a redundant projection on every query. The JSON is
+                // PySpark's, of the types that the Python client lowered too.
+                local.schema = schema.as_ref().map(DataType::json_as_pyspark);
                 relation.rel_type = Some(proto::relation::RelType::LocalRelation(local));
             }
 

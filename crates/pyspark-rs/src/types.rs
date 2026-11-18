@@ -1094,8 +1094,9 @@ fn nested_field_in<'py>(
 }
 
 /// The first type of `data_type` that the core has no type of, in the depth-first order of its
-/// fields, as its Python object: a `StructField` as a type, or a type of its class only, of which
-/// PySpark has no proto (`pyspark_types_to_proto_types`), nor an Arrow type (`to_arrow_type`).
+/// fields and of the SQL types of its user-defined types, as its Python object: a `StructField`
+/// as a type, or a type of its class only, of which PySpark has no proto
+/// (`pyspark_types_to_proto_types`), nor an Arrow type (`to_arrow_type`).
 pub(crate) fn nested_python_type_in<'py>(
     py: Python<'py>,
     data_type: &DataType,
@@ -1105,7 +1106,8 @@ pub(crate) fn nested_python_type_in<'py>(
 
 /// The first type of `data_type` that the client lowered by its JSON, a `StructField` as a type
 /// (only, if `fields_only`) or a type of its class only, in the depth-first order of its fields,
-/// down to `depth` levels, as its Python object.
+/// down to `depth` levels, as its Python object; unless `fields_only`, also of the SQL type of a
+/// user-defined type.
 fn nested_lowered_in<'py>(
     py: Python<'py>,
     data_type: &DataType,
@@ -1123,6 +1125,12 @@ fn nested_lowered_in<'py>(
             value_type,
             ..
         } => vec![key_type, value_type],
+        // PySpark's `pyspark_types_to_proto_types` and `to_arrow_type` convert the `sqlType()` of
+        // a user-defined type too, which a tree string does not print.
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } if !fields_only => vec![sql_type],
         _ => Vec::new(),
     };
     for child in children {

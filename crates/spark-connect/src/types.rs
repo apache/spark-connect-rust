@@ -581,6 +581,19 @@ impl DataType {
         self.json_value().to_string()
     }
 
+    /// The JSON of this type as PySpark's `json()` writes the type objects that the Python client
+    /// made it of. A type that the client lowered by its JSON, which it holds as an
+    /// [`DataType::Unparsed`] of that JSON text (a type of its class only such as `AtomicType()`,
+    /// or a `StructField` as a type), is written as that JSON, where [`DataType::json`] writes
+    /// `unparsed(...)`, which its parser reads back. The schema of a relation of local data is
+    /// sent so, as PySpark sends the `json()` of its schema. Not a stable API.
+    #[doc(hidden)]
+    pub fn json_as_pyspark(&self) -> String {
+        let mut value = self.json_value();
+        lowered_json_in(self, &mut value);
+        value.to_string()
+    }
+
     /// Parses a JSON value into a DataType, mirroring the reverse of `json()` / `jsonValue()`.
     pub fn from_json(value: &serde_json::Value) -> Result<DataType> {
         parse_json_value(value, "", &CollationsMap::new())
@@ -1666,6 +1679,57 @@ fn take_field_collations(
         by_path.insert(path.clone(), collation.to_string());
     }
     Ok(by_path)
+}
+
+/// Writes into `value`, the [`DataType::json_value`] of `data_type`, the JSON of each type of
+/// `data_type` that the Python client lowered by its JSON, for [`DataType::json_as_pyspark`]: an
+/// [`DataType::Unparsed`] of the text of a JSON string or object, as the `json()` of a type
+/// object is. Another unparsed type, of a DDL string, stays `unparsed(...)`.
+fn lowered_json_in(data_type: &DataType, value: &mut serde_json::Value) {
+    match data_type {
+        DataType::Unparsed { data_type_string } => {
+            if let Ok(json @ (serde_json::Value::String(_) | serde_json::Value::Object(_))) =
+                serde_json::from_str(data_type_string)
+            {
+                *value = json;
+            }
+        }
+        DataType::Array { element_type, .. } => {
+            if let Some(element) = value.get_mut("elementType") {
+                lowered_json_in(element_type, element);
+            }
+        }
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => {
+            if let Some(key) = value.get_mut("keyType") {
+                lowered_json_in(key_type, key);
+            }
+            if let Some(value) = value.get_mut("valueType") {
+                lowered_json_in(value_type, value);
+            }
+        }
+        DataType::Struct { fields } => {
+            if let Some(serde_json::Value::Array(values)) = value.get_mut("fields") {
+                for (field, field_value) in fields.iter().zip(values.iter_mut()) {
+                    if let Some(field_type) = field_value.get_mut("type") {
+                        lowered_json_in(&field.data_type, field_type);
+                    }
+                }
+            }
+        }
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => {
+            if let Some(sql) = value.get_mut("sqlType") {
+                lowered_json_in(sql_type, sql);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Parses the JSON object of a struct field, mirroring `StructField.fromJson`: the strings at
@@ -4551,5 +4615,75 @@ mod tests {
 
         let varchar_type = DataType::Varchar { length: 100 };
         assert_eq!(varchar_type.simple_string(), "varchar(100)");
+    }
+
+    #[test]
+    fn json_as_pyspark_writes_the_json_of_the_types_that_the_python_client_lowered() {
+        // As PySpark's `json()` of its type objects: a type that the Python client lowered by
+        // its JSON, a type of its class only or a `StructField` as a type, is that JSON, also
+        // nested in an array, a map, a struct or the SQL type of a user-defined type. An unparsed
+        // DDL string, and every other type, is written as `json()` writes it.
+        let lowered = |json: &str| DataType::Unparsed {
+            data_type_string: json.to_string(),
+        };
+        let field = |name: &str, data_type: DataType| StructField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: BTreeMap::new(),
+        };
+        let field_json = r#"{"metadata":{},"name":"x","nullable":true,"type":"integer"}"#;
+        let schema = DataType::Struct {
+            fields: vec![
+                field("a", lowered(r#""atomic""#)),
+                field(
+                    "b",
+                    DataType::Array {
+                        element_type: Box::new(lowered(field_json)),
+                        contains_null: true,
+                    },
+                ),
+                field(
+                    "c",
+                    DataType::Map {
+                        key_type: Box::new(DataType::Integer),
+                        value_type: Box::new(lowered(r#""numeric""#)),
+                        value_contains_null: true,
+                    },
+                ),
+                field(
+                    "d",
+                    DataType::Udt {
+                        type_str: "udt".to_string(),
+                        jvm_class: None,
+                        python_class: Some("m.U".to_string()),
+                        serialized_python_class: None,
+                        sql_type: Some(Box::new(DataType::Struct {
+                            fields: vec![field("v", lowered(r#""data""#))],
+                        })),
+                    },
+                ),
+                field("e", lowered("int")),
+            ],
+        };
+        assert_eq!(
+            schema.json_as_pyspark(),
+            concat!(
+                r#"{"fields":["#,
+                r#"{"metadata":{},"name":"a","nullable":true,"type":"atomic"},"#,
+                r#"{"metadata":{},"name":"b","nullable":true,"type":{"containsNull":true,"#,
+                r#""elementType":{"metadata":{},"name":"x","nullable":true,"type":"integer"},"#,
+                r#""type":"array"}},"#,
+                r#"{"metadata":{},"name":"c","nullable":true,"type":{"keyType":"integer","#,
+                r#""type":"map","valueContainsNull":true,"valueType":"numeric"}},"#,
+                r#"{"metadata":{},"name":"d","nullable":true,"type":{"pyClass":"m.U","#,
+                r#""sqlType":{"fields":[{"metadata":{},"name":"v","nullable":true,"#,
+                r#""type":"data"}],"type":"struct"},"type":"udt"}},"#,
+                r#"{"metadata":{},"name":"e","nullable":true,"type":"unparsed(int)"}"#,
+                r#"],"type":"struct"}"#
+            )
+        );
+        let plain = DataType::from_ddl("a INT, b ARRAY<MAP<STRING, DECIMAL(10,2)>>").unwrap();
+        assert_eq!(plain.json_as_pyspark(), plain.json());
     }
 }

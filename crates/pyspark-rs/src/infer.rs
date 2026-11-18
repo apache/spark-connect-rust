@@ -1623,12 +1623,15 @@ pub(crate) fn convert<'py>(
             let text = obj.str()?;
             Ok(late.defer(|| utf8_text(&text)))
         }
-        // As PySpark, which has no converter of these types: the value goes as it is to
-        // `to_arrow_schema`, which raises for the type (`arrow_schema_error`).
+        // As PySpark, which has no converter of these types, nor of a type of its class only
+        // such as `AtomicType()` or a `StructField` as a type, which the client lowers as
+        // unparsed types: the value goes as it is to `to_arrow_schema`, which raises for the type
+        // (`arrow_schema_error`).
         DataType::Char { .. }
         | DataType::Varchar { .. }
         | DataType::YearMonthInterval { .. }
-        | DataType::CalendarInterval => Ok(Value::Null),
+        | DataType::CalendarInterval
+        | DataType::Unparsed { .. } => Ok(Value::Null),
         DataType::Boolean
         | DataType::Byte
         | DataType::Short
@@ -1788,7 +1791,8 @@ fn date_days(obj: &Bound<'_, PyAny>) -> PyResult<i32> {
 
 /// The first error of PySpark's `to_arrow_schema` of the schema of local rows, which builds the
 /// Arrow fields one at a time, depth first, each once its type is built: a char, varchar,
-/// year-month or calendar interval type, of which Arrow has no type, is
+/// year-month or calendar interval type, of which Arrow has no type, and a type of its class
+/// only or a `StructField` as a type, of which `to_arrow_type` has none either, is
 /// `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION`, and a field of the null type that is not
 /// nullable, as a map key never is, is the `ValueError` of PyArrow's
 /// `pa.field(name, pa.null(), nullable=False)`. A user-defined type is built as its SQL type.
@@ -1805,7 +1809,8 @@ pub(crate) fn arrow_schema_error(
             DataType::Char { .. }
             | DataType::Varchar { .. }
             | DataType::YearMonthInterval { .. }
-            | DataType::CalendarInterval => Some(Error::Unsupported(dt)),
+            | DataType::CalendarInterval
+            | DataType::Unparsed { .. } => Some(Error::Unsupported(dt)),
             DataType::Struct { fields } => fields
                 .iter()
                 .find_map(|f| of_field(&f.data_type, f.nullable)),

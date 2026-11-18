@@ -1709,17 +1709,24 @@ PySpark's `DataTypeSingleton` makes it, and so is each Python subclass of it, of
 own, and a Python subclass of the other classes, such as a `UserDefinedType` of parameters, takes
 the arguments of its `__init__`.
 
-Neither client has a proto or an Arrow type of such a type, also of one nested in another. A
-plan of one raises the `UNSUPPORTED_OPERATION` of PySpark's `pyspark_types_to_proto_types`, as
-PySpark's plans do: a cast, `DataFrame.to` and a UDTF at their first request, and the
-registration of a UDTF or of a Java UDF and `Catalog.createTable` at the call (and a UDF that is
-not Arrow-optimized at the call, see above). As the schema of `createDataFrame`, local rows of
-one raise `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION`, and a pandas DataFrame of one as its only
-type `UNSUPPORTED_DATA_TYPE_FOR_ARROW`. Data of no rows makes a relation of the JSON of the
-schema, which the server fails to parse (`PARSE_SYNTAX_ERROR`), and so does a pyarrow Table or a
-NumPy array of one as its only type. `DataType()` and a Python subclass of it that is not an
-`AtomicType` are not expected as a schema, as PySpark's `isinstance` reads them: their
-`NOT_EXPECTED_TYPE` names their class.
+Neither client has a proto or an Arrow type of such a type, also of one nested in another or in the
+`sqlType()` of a user-defined type. A plan of one raises the `UNSUPPORTED_OPERATION` of PySpark's
+`pyspark_types_to_proto_types`, as PySpark's plans do: a cast, `DataFrame.to` and a UDTF at their
+first request, and the registration of a UDTF or of a Java UDF, `Catalog.createTable` and the schema
+of a table or a materialized view of a pipeline at the call or the decorator (and a UDF that is not
+Arrow-optimized at the call, see above). As the schema of `createDataFrame`, local rows of one raise
+`UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` once their values are converted, as PySpark's
+`to_arrow_schema` raises it after its converters run, so that the errors of the values, and of the
+`serialize` of a user-defined type, come first; and a pandas DataFrame of one as its only type
+raises `UNSUPPORTED_DATA_TYPE_FOR_ARROW`. Data of no rows and a NumPy array make a relation of the
+JSON of the schema, PySpark's `json()`, in which such a type is its own JSON, also nested; the
+server fails to parse it (`PARSE_SYNTAX_ERROR`), and so does a pyarrow Table of one as its only
+type. A reader's `csv`, `json` or `xml` of a DataFrame reads a schema of JSON as PySpark's `Parse`
+plan does when it is built, with `StructType.fromJson`, so each request of the DataFrame raises the
+`CANNOT_PARSE_DATATYPE` of the name of a type of its class only, and the `UNSUPPORTED_DATA_TYPE` of
+a `StructField` as a type. `DataType()` and a Python subclass of it that is not an `AtomicType` are
+not expected as a schema, as PySpark's `isinstance` reads them: their `NOT_EXPECTED_TYPE` names
+their class.
 
 PySpark's singleton types, from `NullType` and `IntegerType` to `CalendarIntervalType` and
 `IntegralType`, are classes of the metaclass `DataTypeSingleton`, which `type(IntegerType)` shows.

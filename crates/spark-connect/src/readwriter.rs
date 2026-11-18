@@ -130,8 +130,21 @@ impl DataFrameReader {
     /// Parse the strings of `input`, a DataFrame of one string column, as `format`, with the
     /// schema and the options of this reader, mirroring `DataFrameReader.json`, `csv` and `xml`
     /// of a DataFrame: a schema of JSON, or else of DDL, which the server parses, as PySpark's
-    /// `StructType.fromDDL`.
+    /// `StructType.fromDDL`. A type of a JSON schema that PySpark's `StructType.fromJson` does
+    /// not parse fails each request of the DataFrame with its error, which PySpark's `Parse` plan
+    /// raises when it is built (see `parse_schema_error`), and sends nothing.
     pub fn parse(self, format: crate::plan::ParseFormat, input: &DataFrame) -> Result<DataFrame> {
+        if self.schema.starts_with('{') {
+            if let Some(error) = parse_schema_error(&self.schema) {
+                let plan = LogicalPlan::Parse {
+                    input: Arc::clone(&input.plan),
+                    format,
+                    schema: None,
+                    options: self.options,
+                };
+                return Ok(DataFrame::new(self.session, plan).unbuildable(error));
+            }
+        }
         let schema = if self.schema.is_empty() {
             None
         } else if self.schema.starts_with('{') {
@@ -212,6 +225,51 @@ impl DataFrameReader {
             is_streaming: false,
         };
         DataFrame::new(self.session, plan)
+    }
+}
+
+/// The error that PySpark's `Parse` plan raises of the JSON schema `schema` of a reader, if any,
+/// when its `StructType.fromJson` reads the type of a field, depth first: its
+/// `_parse_datatype_json_value` raises `CANNOT_PARSE_DATATYPE` of a type name that it does not
+/// parse, and `UNSUPPORTED_DATA_TYPE` of an object whose `type` is none of an array, a map, a
+/// struct and a UDT, such as the JSON of a `StructField` as a type. The core's parser takes more,
+/// which PySpark's does not: the names `null` and `calendarinterval`, and `unparsed(...)`. Another
+/// error of the JSON, such as that of a field without a name, is the core parser's.
+fn parse_schema_error(schema: &str) -> Option<SparkError> {
+    let value: serde_json::Value = serde_json::from_str(schema).ok()?;
+    value
+        .get("fields")?
+        .as_array()?
+        .iter()
+        .find_map(|field| field.get("type").and_then(json_type_error))
+}
+
+/// The error of [`parse_schema_error`] of the JSON `value` of a type.
+fn json_type_error(value: &serde_json::Value) -> Option<SparkError> {
+    match value {
+        serde_json::Value::String(name) => {
+            let parsed = crate::types::DataType::from_json(value);
+            let parses = !matches!(name.as_str(), "null" | "calendarinterval")
+                && parsed
+                    .is_ok_and(|parsed| !matches!(parsed, crate::types::DataType::Unparsed { .. }));
+            (!parses).then(|| SparkError::value("CANNOT_PARSE_DATATYPE", &[("msg", name)]))
+        }
+        serde_json::Value::Object(object) => match object.get("type")?.as_str()? {
+            "array" => json_type_error(object.get("elementType")?),
+            "map" => json_type_error(object.get("keyType")?)
+                .or_else(|| json_type_error(object.get("valueType")?)),
+            "struct" => object
+                .get("fields")?
+                .as_array()?
+                .iter()
+                .find_map(|field| field.get("type").and_then(json_type_error)),
+            "udt" => None,
+            other => Some(SparkError::value(
+                "UNSUPPORTED_DATA_TYPE",
+                &[("data_type", other)],
+            )),
+        },
+        _ => None,
     }
 }
 
@@ -1330,5 +1388,94 @@ mod tests {
             .schema("{not json".to_string())
             .parse(ParseFormat::Json, &strings)
             .is_err());
+    }
+
+    #[test]
+    fn parse_raises_pysparks_errors_of_the_types_of_a_json_schema_that_it_does_not_parse() {
+        use crate::plan::ParseFormat;
+
+        // As PySpark's `Parse` plan, whose `StructType.fromJson` raises, when the plan is built,
+        // `CANNOT_PARSE_DATATYPE` of a type name that it does not parse and
+        // `UNSUPPORTED_DATA_TYPE` of an object of another type: the call does not raise, and each
+        // request of the DataFrame does. The `json()` of a type of its class only, such as
+        // `AtomicType()`, is its name, and that of a `StructField` as a type its object; the
+        // core's `unparsed(...)` is a name that PySpark does not parse either.
+        let spark = session();
+        let strings = spark.range(1).unwrap();
+        let struct_of = |field_type: &str| {
+            format!(
+                r#"{{"fields":[{{"metadata":{{}},"name":"i","nullable":true,"type":"integer"}},{{"metadata":{{}},"name":"a","nullable":true,"type":{field_type}}}],"type":"struct"}}"#
+            )
+        };
+        let field = r#"{"metadata":{},"name":"x","nullable":true,"type":"integer"}"#;
+        let unparsed_field = format!("unparsed({field})");
+        let unparsed_field_json = serde_json::Value::String(unparsed_field.clone()).to_string();
+        for (field_type, error_class, parameter, value) in [
+            (r#""atomic""#, "CANNOT_PARSE_DATATYPE", "msg", "atomic"),
+            (
+                r#""unparsed(\"atomic\")""#,
+                "CANNOT_PARSE_DATATYPE",
+                "msg",
+                r#"unparsed("atomic")"#,
+            ),
+            (r#""null""#, "CANNOT_PARSE_DATATYPE", "msg", "null"),
+            (
+                r#""calendarinterval""#,
+                "CANNOT_PARSE_DATATYPE",
+                "msg",
+                "calendarinterval",
+            ),
+            (field, "UNSUPPORTED_DATA_TYPE", "data_type", "integer"),
+            (
+                &unparsed_field_json,
+                "CANNOT_PARSE_DATATYPE",
+                "msg",
+                &unparsed_field,
+            ),
+            (
+                r#"{"containsNull":true,"elementType":"numeric","type":"array"}"#,
+                "CANNOT_PARSE_DATATYPE",
+                "msg",
+                "numeric",
+            ),
+            (
+                r#"{"keyType":"string","type":"map","valueContainsNull":true,"valueType":"data"}"#,
+                "CANNOT_PARSE_DATATYPE",
+                "msg",
+                "data",
+            ),
+            (
+                &struct_of(r#""atomic""#),
+                "CANNOT_PARSE_DATATYPE",
+                "msg",
+                "atomic",
+            ),
+        ] {
+            let schema = struct_of(field_type);
+            let df = spark
+                .read()
+                .schema(schema.clone())
+                .parse(ParseFormat::Json, &strings)
+                .unwrap_or_else(|error| panic!("the call raised {error} for {schema}"));
+            let error = df.relation().expect_err(&schema);
+            assert_eq!(error.kind, SparkErrorKind::ValueError, "{schema}");
+            assert_eq!(error.error_class, error_class, "{schema}");
+            assert_eq!(
+                error.params.get(parameter).map(String::as_str),
+                Some(value),
+                "{schema}"
+            );
+        }
+        // The types that PySpark parses are sent, also of a user-defined type.
+        let udt = r#"{"pyClass":"m.U","sqlType":"long","type":"udt"}"#;
+        for field_type in [r#""interval""#, r#""void""#, r#""decimal(10,2)""#, udt] {
+            let schema = struct_of(field_type);
+            let df = spark
+                .read()
+                .schema(schema.clone())
+                .parse(ParseFormat::Json, &strings)
+                .unwrap();
+            assert!(df.relation().is_ok(), "{schema}");
+        }
     }
 }
