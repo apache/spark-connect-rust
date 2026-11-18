@@ -45,6 +45,7 @@ def cases(F):
         "reduce_finish",
         F.reduce(F.col("a"), F.lit(0), lambda acc, x: acc + x, lambda acc: acc * 2),
     )
+    yield "array_sort_comparator", F.array_sort(F.col("a"), lambda x, y: y - x)
 
 
 def main() -> None:

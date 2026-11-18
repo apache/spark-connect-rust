@@ -212,6 +212,13 @@ CI runs the same command with `--check`:
 python scripts/gen_fn_dispatch.py --pyspark-src "$SPARK_HOME/python"
 ```
 
+Each optional argument of a PySpark function has a typed form there too:
+`scripts/tests/test_gen_fn_dispatch.py` fails on an optional parameter of a function of
+`python/pyspark/sql/connect/functions/builtin.pyi` that no Rust function of its name or of its
+forms takes, unless `OPTIONAL_ARGS_OTHERWISE` of the generator gives the reason. A form of more
+trailing Columns goes into `OPTIONAL_ARG_VARIANTS`, whose arm picks it by the number of arguments,
+and another form into `NOT_DISPATCHED` and `OPTIONAL_ARG_FORMS`.
+
 The type stubs (`.pyi`) of the modules whose classes are native or whose functions are made at
 import time, such as `python/pyspark/sql/functions/*.pyi` and `python/pyspark/sql/dataframe.pyi`,
 are generated from PySpark 4.3.0's modules, so that type checkers see PySpark's API. A stub

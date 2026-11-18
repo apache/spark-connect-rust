@@ -14,8 +14,9 @@ use std::collections::{BTreeSet, HashMap};
 use spark_connect::column::col;
 use spark_connect::expression::Expression;
 use spark_connect::functions::{
-    aggregate, aggregate_with_finish, exists, filter, forall, map_filter, map_zip_with, reduce,
-    reduce_with_finish, transform, transform_idx, transform_keys, transform_values, zip_with,
+    aggregate, aggregate_with_finish, array_sort_with_comparator, exists, filter, forall,
+    map_filter, map_zip_with, reduce, reduce_with_finish, transform, transform_idx, transform_keys,
+    transform_values, zip_with,
 };
 use spark_connect_proto as proto;
 
@@ -173,6 +174,12 @@ fn build(name: &str) -> Option<Expression> {
         })
         .expression()
         .clone(),
+        // As PySpark's `array_sort(col, comparator)`, a lambda of two elements after the column.
+        "array_sort_comparator" => {
+            array_sort_with_comparator(col("a"), |args| args[1].clone() - args[0].clone())
+                .expression()
+                .clone()
+        }
         _ => return None,
     };
     Some(e)
@@ -193,6 +200,7 @@ const REQUIRED: &[&str] = &[
     "transform_values",
     "map_filter",
     "map_zip_with",
+    "array_sort_comparator",
 ];
 
 #[test]

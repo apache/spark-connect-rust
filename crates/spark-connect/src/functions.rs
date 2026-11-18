@@ -74,6 +74,57 @@ fn lit_binary(b: Vec<u8>) -> Expression {
     Expression::literal(LiteralExpression::binary(b))
 }
 
+/// The string-literal Column of the default that PySpark sends for an optional argument.
+fn lit_str_column(s: &str) -> Column {
+    Column::new(lit_str(s))
+}
+
+/// The null literal of no type, `lit(None)`, that PySpark sends as the default of an optional
+/// argument.
+fn lit_null_column() -> Column {
+    Column::new(Expression::literal(LiteralExpression::null(
+        crate::types::DataType::Null,
+    )))
+}
+
+/// The options of a function, as PySpark's `_options_to_col` sends a mapping: the function `map`
+/// of the string literal of each name and of its value, in their order (`map()` of no options).
+fn options_map<K: Into<String>, V: Into<String>>(
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Expression {
+    let args = options
+        .into_iter()
+        .flat_map(|(name, value)| {
+            [
+                Expression::literal(LiteralExpression::string(name)),
+                Expression::literal(LiteralExpression::string(value)),
+            ]
+        })
+        .collect();
+    Expression::function("map", args)
+}
+
+/// A part of PySpark's interval constructors: the Column, else the `lit(0)` that they send for a
+/// part that is `None`.
+fn interval_part(part: Option<Column>) -> Expression {
+    part.map_or_else(|| lit_int(0), |part| part.expression().clone())
+}
+
+/// The seconds of PySpark's interval constructors: the Column, else the `lit(decimal.Decimal(0))`,
+/// a decimal(10, 0), that they send for seconds that are `None`.
+fn interval_seconds(secs: Option<Column>) -> Expression {
+    secs.map_or_else(
+        || {
+            Expression::literal(LiteralExpression::Decimal {
+                value: "0".to_string(),
+                precision: 10,
+                scale: 0,
+            })
+        },
+        |secs| secs.expression().clone(),
+    )
+}
+
 // ============================================================================
 // Special functions (custom expression shapes)
 // ============================================================================
@@ -192,6 +243,19 @@ pub fn window(col: Column, window_duration: &str) -> Column {
     func(
         "window",
         vec![col.expression().clone(), lit_str(window_duration)],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.window(timeColumn, windowDuration, slideDuration)`: a sliding
+/// window, which PySpark sends without a start time.
+pub fn window_with_slide(col: Column, window_duration: &str, slide_duration: &str) -> Column {
+    func(
+        "window",
+        vec![
+            col.expression().clone(),
+            lit_str(window_duration),
+            lit_str(slide_duration),
+        ],
     )
 }
 
@@ -335,44 +399,72 @@ pub fn localtimestamp() -> Column {
 
 /// Mirrors `pyspark.sql.functions.make_dt_interval`.
 pub fn make_dt_interval() -> Column {
+    make_dt_interval_with_parts(None, None, None, None)
+}
+
+/// Mirrors `pyspark.sql.functions.make_dt_interval(days, hours, mins, secs)`: PySpark sends every
+/// part, `lit(0)` for one that is `None` (`lit(decimal.Decimal(0))` for the seconds), as
+/// [`make_dt_interval`] sends them all.
+pub fn make_dt_interval_with_parts(
+    days: Option<Column>,
+    hours: Option<Column>,
+    mins: Option<Column>,
+    secs: Option<Column>,
+) -> Column {
     func(
         "make_dt_interval",
         vec![
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            Expression::literal(LiteralExpression::Decimal {
-                value: "0".to_string(),
-                precision: 10,
-                scale: 0,
-            }),
+            interval_part(days),
+            interval_part(hours),
+            interval_part(mins),
+            interval_seconds(secs),
         ],
     )
 }
 
 /// Mirrors `pyspark.sql.functions.make_interval`.
 pub fn make_interval() -> Column {
+    make_interval_with_parts(None, None, None, None, None, None, None)
+}
+
+/// Mirrors `pyspark.sql.functions.make_interval(years, months, weeks, days, hours, mins, secs)`:
+/// PySpark sends every part, `lit(0)` for one that is `None` (`lit(decimal.Decimal(0))` for the
+/// seconds), as [`make_interval`] sends them all.
+pub fn make_interval_with_parts(
+    years: Option<Column>,
+    months: Option<Column>,
+    weeks: Option<Column>,
+    days: Option<Column>,
+    hours: Option<Column>,
+    mins: Option<Column>,
+    secs: Option<Column>,
+) -> Column {
     func(
         "make_interval",
         vec![
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            Expression::literal(LiteralExpression::Decimal {
-                value: "0".to_string(),
-                precision: 10,
-                scale: 0,
-            }),
+            interval_part(years),
+            interval_part(months),
+            interval_part(weeks),
+            interval_part(days),
+            interval_part(hours),
+            interval_part(mins),
+            interval_seconds(secs),
         ],
     )
 }
 
 /// Mirrors `pyspark.sql.functions.make_ym_interval`.
 pub fn make_ym_interval() -> Column {
-    func("make_ym_interval", vec![lit_int(0), lit_int(0)])
+    make_ym_interval_with_parts(None, None)
+}
+
+/// Mirrors `pyspark.sql.functions.make_ym_interval(years, months)`: PySpark sends every part,
+/// `lit(0)` for one that is `None`, as [`make_ym_interval`] sends them all.
+pub fn make_ym_interval_with_parts(years: Option<Column>, months: Option<Column>) -> Column {
+    func(
+        "make_ym_interval",
+        vec![interval_part(years), interval_part(months)],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.map_concat`.
@@ -492,20 +584,32 @@ pub fn r#struct<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column {
 
 /// Mirrors `pyspark.sql.functions.try_make_interval`.
 pub fn try_make_interval() -> Column {
+    try_make_interval_with_parts(None, None, None, None, None, None, None)
+}
+
+/// Mirrors
+/// `pyspark.sql.functions.try_make_interval(years, months, weeks, days, hours, mins, secs)`:
+/// PySpark sends every part, `lit(0)` for one that is `None` (`lit(decimal.Decimal(0))` for the
+/// seconds), as [`try_make_interval`] sends them all.
+pub fn try_make_interval_with_parts(
+    years: Option<Column>,
+    months: Option<Column>,
+    weeks: Option<Column>,
+    days: Option<Column>,
+    hours: Option<Column>,
+    mins: Option<Column>,
+    secs: Option<Column>,
+) -> Column {
     func(
         "try_make_interval",
         vec![
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            lit_int(0),
-            Expression::literal(LiteralExpression::Decimal {
-                value: "0".to_string(),
-                precision: 10,
-                scale: 0,
-            }),
+            interval_part(years),
+            interval_part(months),
+            interval_part(weeks),
+            interval_part(days),
+            interval_part(hours),
+            interval_part(mins),
+            interval_seconds(secs),
         ],
     )
 }
@@ -522,6 +626,17 @@ pub fn try_reflect<C: Into<Column>>(cols: impl IntoIterator<Item = C>) -> Column
 /// Mirrors `pyspark.sql.functions.unix_timestamp`.
 pub fn unix_timestamp() -> Column {
     func("unix_timestamp", vec![])
+}
+
+/// Mirrors `pyspark.sql.functions.unix_timestamp(timestamp)`, which sends PySpark's default
+/// format, `"yyyy-MM-dd HH:mm:ss"`, after the timestamp.
+pub fn unix_timestamp_with_timestamp(timestamp: Column) -> Column {
+    unix_timestamp_with_format(timestamp, lit_str_column("yyyy-MM-dd HH:mm:ss"))
+}
+
+/// Mirrors `pyspark.sql.functions.unix_timestamp(timestamp, format)`.
+pub fn unix_timestamp_with_format(timestamp: Column, format: Column) -> Column {
+    func("unix_timestamp", expressions_of([timestamp, format]))
 }
 
 /// Mirrors `pyspark.sql.functions.user`.
@@ -565,6 +680,12 @@ pub fn acosh(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.any_value`.
 pub fn any_value(col1: Column) -> Column {
     func("any_value", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.any_value(col, ignoreNulls)`. [`any_value`] omits the
+/// `ignoreNulls`, as PySpark does when it is `None`.
+pub fn any_value_with_ignore_nulls(col1: Column, ignore_nulls: Column) -> Column {
+    func("any_value", expressions_of([col1, ignore_nulls]))
 }
 
 /// Mirrors `pyspark.sql.functions.approxCountDistinct`.
@@ -638,6 +759,12 @@ pub fn asinh(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.assert_true`.
 pub fn assert_true(col1: Column) -> Column {
     func("assert_true", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.assert_true(col, errMsg)`. [`assert_true`] omits the `errMsg`, as
+/// PySpark does when it is `None`.
+pub fn assert_true_with_err_msg(col1: Column, err_msg: Column) -> Column {
+    func("assert_true", expressions_of([col1, err_msg]))
 }
 
 /// Mirrors `pyspark.sql.functions.atan`.
@@ -761,6 +888,12 @@ pub fn btrim(col1: Column) -> Column {
     func("btrim", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.btrim(str, trim)`. [`btrim`] omits the `trim`, as PySpark does
+/// when it is `None`.
+pub fn btrim_with(col1: Column, trim: Column) -> Column {
+    func("btrim", expressions_of([col1, trim]))
+}
+
 /// Mirrors `pyspark.sql.functions.cardinality`.
 pub fn cardinality(col1: Column) -> Column {
     func("cardinality", vec![col1.expression().clone()])
@@ -787,6 +920,12 @@ pub fn ceil_scale(col1: Column, scale: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.ceiling`.
 pub fn ceiling(col1: Column) -> Column {
     func("ceiling", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.ceiling(col, scale)`, which sends the function `ceiling`, as
+/// [`ceiling`] does, where [`ceil_scale`] sends `ceil`.
+pub fn ceiling_scale(col1: Column, scale: Column) -> Column {
+    func("ceiling", expressions_of([col1, scale]))
 }
 
 /// Mirrors `pyspark.sql.functions.char`.
@@ -961,9 +1100,21 @@ pub fn first(col1: Column) -> Column {
     func("first", vec![col1.expression().clone(), lit_bool(false)])
 }
 
+/// Mirrors `pyspark.sql.functions.first(col, ignorenulls)`: the `ignorenulls` takes the
+/// place of PySpark's default, `false`, which [`first`] sends.
+pub fn first_with_ignore_nulls(col1: Column, ignore_nulls: Column) -> Column {
+    func("first", expressions_of([col1, ignore_nulls]))
+}
+
 /// Mirrors `pyspark.sql.functions.first_value`.
 pub fn first_value(col1: Column) -> Column {
     func("first_value", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.first_value(col, ignoreNulls)`. [`first_value`] omits the
+/// `ignoreNulls`, as PySpark does when it is `None`.
+pub fn first_value_with_ignore_nulls(col1: Column, ignore_nulls: Column) -> Column {
+    func("first_value", expressions_of([col1, ignore_nulls]))
 }
 
 /// Mirrors `pyspark.sql.functions.flatten`.
@@ -1003,6 +1154,12 @@ pub fn from_unixtime(col1: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.from_unixtime(timestamp, format)`: the `format` takes the
+/// place of PySpark's default, `"yyyy-MM-dd HH:mm:ss"`, which [`from_unixtime`] sends.
+pub fn from_unixtime_with_format(col1: Column, format: Column) -> Column {
+    func("from_unixtime", expressions_of([col1, format]))
+}
+
 /// Mirrors `pyspark.sql.functions.grouping`.
 pub fn grouping(col1: Column) -> Column {
     func("grouping", vec![col1.expression().clone()])
@@ -1018,6 +1175,12 @@ pub fn hll_sketch_agg(col1: Column) -> Column {
     func("hll_sketch_agg", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.hll_sketch_agg(col, lgConfigK)`. [`hll_sketch_agg`] omits the
+/// `lgConfigK`, as PySpark does when it is `None`.
+pub fn hll_sketch_agg_with_lg_config_k(col1: Column, lg_config_k: Column) -> Column {
+    func("hll_sketch_agg", expressions_of([col1, lg_config_k]))
+}
+
 /// Mirrors `pyspark.sql.functions.hll_sketch_estimate`.
 pub fn hll_sketch_estimate(col1: Column) -> Column {
     func("hll_sketch_estimate", vec![col1.expression().clone()])
@@ -1026,6 +1189,18 @@ pub fn hll_sketch_estimate(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.hll_union_agg`.
 pub fn hll_union_agg(col1: Column) -> Column {
     func("hll_union_agg", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.hll_union_agg(col, allowDifferentLgConfigK)`. [`hll_union_agg`]
+/// omits the `allowDifferentLgConfigK`, as PySpark does when it is `None`.
+pub fn hll_union_agg_with_allow_different_lg_config_k(
+    col1: Column,
+    allow_different_lg_config_k: Column,
+) -> Column {
+    func(
+        "hll_union_agg",
+        expressions_of([col1, allow_different_lg_config_k]),
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.hour`.
@@ -1121,6 +1296,12 @@ pub fn last(col1: Column) -> Column {
     func("last", vec![col1.expression().clone(), lit_bool(false)])
 }
 
+/// Mirrors `pyspark.sql.functions.last(col, ignorenulls)`: the `ignorenulls` takes the
+/// place of PySpark's default, `false`, which [`last`] sends.
+pub fn last_with_ignore_nulls(col1: Column, ignore_nulls: Column) -> Column {
+    func("last", expressions_of([col1, ignore_nulls]))
+}
+
 /// Mirrors `pyspark.sql.functions.last_day`.
 pub fn last_day(col1: Column) -> Column {
     func("last_day", vec![col1.expression().clone()])
@@ -1129,6 +1310,12 @@ pub fn last_day(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.last_value`.
 pub fn last_value(col1: Column) -> Column {
     func("last_value", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.last_value(col, ignoreNulls)`. [`last_value`] omits the
+/// `ignoreNulls`, as PySpark does when it is `None`.
+pub fn last_value_with_ignore_nulls(col1: Column, ignore_nulls: Column) -> Column {
+    func("last_value", expressions_of([col1, ignore_nulls]))
 }
 
 /// Mirrors `pyspark.sql.functions.lcase`.
@@ -1158,6 +1345,12 @@ pub fn listagg(col1: Column) -> Column {
     func("listagg", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.listagg(col, delimiter)`. [`listagg`] omits the `delimiter`, as
+/// PySpark does when it is `None`.
+pub fn listagg_with_delimiter(col1: Column, delimiter: Column) -> Column {
+    func("listagg", expressions_of([col1, delimiter]))
+}
+
 /// Mirrors `pyspark.sql.functions.listagg_distinct`.
 pub fn listagg_distinct(col1: Column) -> Column {
     func_distinct("listagg", vec![col1.expression().clone()])
@@ -1179,6 +1372,13 @@ pub fn ln(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.log`.
 pub fn log(col1: Column) -> Column {
     func("ln", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.log(arg1, arg2)` of two arguments: the logarithm of `col` in
+/// the base `base`, which PySpark sends as the function `log` of `lit(arg1)` and the column, where
+/// [`log`] of one argument sends `ln`.
+pub fn log_with_base(base: Column, col: Column) -> Column {
+    func("log", expressions_of([base, col]))
 }
 
 /// Mirrors `pyspark.sql.functions.log10`.
@@ -1253,6 +1453,60 @@ pub fn mask(col1: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.mask(col, upperChar)`, with PySpark's defaults of `lowerChar`,
+/// `digitChar` and `otherChar`.
+pub fn mask_with_upper_char(col1: Column, upper_char: Column) -> Column {
+    mask_with_upper_char_and_lower_char(col1, upper_char, lit_str_column("x"))
+}
+
+/// Mirrors `pyspark.sql.functions.mask(col, upperChar, lowerChar)`, with PySpark's defaults of
+/// `digitChar` and `otherChar`.
+pub fn mask_with_upper_char_and_lower_char(
+    col1: Column,
+    upper_char: Column,
+    lower_char: Column,
+) -> Column {
+    mask_with_upper_char_lower_char_and_digit_char(
+        col1,
+        upper_char,
+        lower_char,
+        lit_str_column("n"),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.mask(col, upperChar, lowerChar, digitChar)`, with PySpark's
+/// default of `otherChar`.
+pub fn mask_with_upper_char_lower_char_and_digit_char(
+    col1: Column,
+    upper_char: Column,
+    lower_char: Column,
+    digit_char: Column,
+) -> Column {
+    mask_with_upper_char_lower_char_digit_char_and_other_char(
+        col1,
+        upper_char,
+        lower_char,
+        digit_char,
+        lit_null_column(),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.mask(col, upperChar, lowerChar, digitChar, otherChar)`. PySpark
+/// sends every argument, the default of each one that is `None` (`"X"`, `"x"`, `"n"` and a null),
+/// as [`mask`] sends them: pass those to set a later argument alone.
+pub fn mask_with_upper_char_lower_char_digit_char_and_other_char(
+    col1: Column,
+    upper_char: Column,
+    lower_char: Column,
+    digit_char: Column,
+    other_char: Column,
+) -> Column {
+    func(
+        "mask",
+        expressions_of([col1, upper_char, lower_char, digit_char, other_char]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.max`.
 pub fn max(col1: Column) -> Column {
     func("max", vec![col1.expression().clone()])
@@ -1286,6 +1540,12 @@ pub fn minute(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.mode`.
 pub fn mode(col1: Column) -> Column {
     func("mode", vec![col1.expression().clone(), lit_bool(false)])
+}
+
+/// Mirrors `pyspark.sql.functions.mode(col, deterministic)`: the `deterministic` takes the
+/// place of PySpark's default, `false`, which [`mode`] sends.
+pub fn mode_with_deterministic(col1: Column, deterministic: Column) -> Column {
+    func("mode", expressions_of([col1, deterministic]))
 }
 
 /// Mirrors `pyspark.sql.functions.month`.
@@ -1430,9 +1690,34 @@ pub fn schema_of_csv(col1: Column) -> Column {
     func("schema_of_csv", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.schema_of_csv(csv, options)`: PySpark sends the options as the
+/// map of their names and values, which [`schema_of_csv`] omits, as PySpark does when it is `None`.
+pub fn schema_of_csv_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "schema_of_csv",
+        vec![col1.expression().clone(), options_map(options)],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.schema_of_json`.
 pub fn schema_of_json(col1: Column) -> Column {
     func("schema_of_json", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.schema_of_json(json, options)`: PySpark sends the options as the
+/// map of their names and values, which [`schema_of_json`] omits, as PySpark does when it is
+/// `None`.
+pub fn schema_of_json_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "schema_of_json",
+        vec![col1.expression().clone(), options_map(options)],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.schema_of_variant`.
@@ -1448,6 +1733,18 @@ pub fn schema_of_variant_agg(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.schema_of_xml`.
 pub fn schema_of_xml(col1: Column) -> Column {
     func("schema_of_xml", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.schema_of_xml(xml, options)`: PySpark sends the options as the
+/// map of their names and values, which [`schema_of_xml`] omits, as PySpark does when it is `None`.
+pub fn schema_of_xml_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "schema_of_xml",
+        vec![col1.expression().clone(), options_map(options)],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.sec`.
@@ -1466,6 +1763,23 @@ pub fn sentences(col1: Column) -> Column {
         "sentences",
         vec![col1.expression().clone(), lit_str(""), lit_str("")],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.sentences(string, language)`, with PySpark's default of
+/// `country`.
+pub fn sentences_with_language(col1: Column, language: Column) -> Column {
+    sentences_with_language_and_country(col1, language, lit_str_column(""))
+}
+
+/// Mirrors `pyspark.sql.functions.sentences(string, language, country)`. PySpark sends
+/// every argument, the default of each one that is `None` (`""` and `""`), as
+/// [`sentences`] sends them: pass those to set a later argument alone.
+pub fn sentences_with_language_and_country(
+    col1: Column,
+    language: Column,
+    country: Column,
+) -> Column {
+    func("sentences", expressions_of([col1, language, country]))
 }
 
 /// Mirrors `pyspark.sql.functions.sha`.
@@ -1537,6 +1851,12 @@ pub fn sort_array(col1: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.sort_array(col, asc)`: the `asc` takes the
+/// place of PySpark's default, `true`, which [`sort_array`] sends.
+pub fn sort_array_with_asc(col1: Column, asc: Column) -> Column {
+    func("sort_array", expressions_of([col1, asc]))
+}
+
 /// Mirrors `pyspark.sql.functions.soundex`.
 pub fn soundex(col1: Column) -> Column {
     func("soundex", vec![col1.expression().clone()])
@@ -1575,9 +1895,35 @@ pub fn str_to_map(col1: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.str_to_map(text, pairDelim)`, with PySpark's default of
+/// `keyValueDelim`.
+pub fn str_to_map_with_pair_delim(col1: Column, pair_delim: Column) -> Column {
+    str_to_map_with_pair_delim_and_key_value_delim(col1, pair_delim, lit_str_column(":"))
+}
+
+/// Mirrors `pyspark.sql.functions.str_to_map(text, pairDelim, keyValueDelim)`. PySpark sends
+/// every argument, the default of each one that is `None` (`","` and `":"`), as
+/// [`str_to_map`] sends them: pass those to set a later argument alone.
+pub fn str_to_map_with_pair_delim_and_key_value_delim(
+    col1: Column,
+    pair_delim: Column,
+    key_value_delim: Column,
+) -> Column {
+    func(
+        "str_to_map",
+        expressions_of([col1, pair_delim, key_value_delim]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.string_agg`.
 pub fn string_agg(col1: Column) -> Column {
     func("string_agg", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.string_agg(col, delimiter)`. [`string_agg`] omits the
+/// `delimiter`, as PySpark does when it is `None`.
+pub fn string_agg_with_delimiter(col1: Column, delimiter: Column) -> Column {
+    func("string_agg", expressions_of([col1, delimiter]))
 }
 
 /// Mirrors `pyspark.sql.functions.string_agg_distinct`.
@@ -1661,9 +2007,27 @@ pub fn to_csv(col1: Column) -> Column {
     func("to_csv", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.to_csv(col, options)`: PySpark sends the options as the map of
+/// their names and values, which [`to_csv`] omits, as PySpark does when it is `None`.
+pub fn to_csv_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "to_csv",
+        vec![col1.expression().clone(), options_map(options)],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.to_date`.
 pub fn to_date(col1: Column) -> Column {
     func("to_date", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.to_date(col, format)`. [`to_date`] omits the `format`, as PySpark
+/// does when it is `None`.
+pub fn to_date_with_format(col1: Column, format: Column) -> Column {
+    func("to_date", expressions_of([col1, format]))
 }
 
 /// Mirrors `pyspark.sql.functions.to_json`.
@@ -1671,9 +2035,27 @@ pub fn to_json(col1: Column) -> Column {
     func("to_json", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.to_json(col, options)`: PySpark sends the options as the map of
+/// their names and values, which [`to_json`] omits, as PySpark does when it is `None`.
+pub fn to_json_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "to_json",
+        vec![col1.expression().clone(), options_map(options)],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.to_timestamp`.
 pub fn to_timestamp(col1: Column) -> Column {
     func("to_timestamp", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.to_timestamp(col, format)`. [`to_timestamp`] omits the `format`,
+/// as PySpark does when it is `None`.
+pub fn to_timestamp_with_format(col1: Column, format: Column) -> Column {
+    func("to_timestamp", expressions_of([col1, format]))
 }
 
 /// Mirrors `pyspark.sql.functions.to_timestamp_ltz`.
@@ -1681,14 +2063,32 @@ pub fn to_timestamp_ltz(col1: Column) -> Column {
     func("to_timestamp_ltz", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.to_timestamp_ltz(timestamp, format)`. [`to_timestamp_ltz`] omits
+/// the `format`, as PySpark does when it is `None`.
+pub fn to_timestamp_ltz_with_format(col1: Column, format: Column) -> Column {
+    func("to_timestamp_ltz", expressions_of([col1, format]))
+}
+
 /// Mirrors `pyspark.sql.functions.to_timestamp_ntz`.
 pub fn to_timestamp_ntz(col1: Column) -> Column {
     func("to_timestamp_ntz", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.to_timestamp_ntz(timestamp, format)`. [`to_timestamp_ntz`] omits
+/// the `format`, as PySpark does when it is `None`.
+pub fn to_timestamp_ntz_with_format(col1: Column, format: Column) -> Column {
+    func("to_timestamp_ntz", expressions_of([col1, format]))
+}
+
 /// Mirrors `pyspark.sql.functions.to_unix_timestamp`.
 pub fn to_unix_timestamp(col1: Column) -> Column {
     func("to_unix_timestamp", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.to_unix_timestamp(timestamp, format)`. [`to_unix_timestamp`]
+/// omits the `format`, as PySpark does when it is `None`.
+pub fn to_unix_timestamp_with_format(col1: Column, format: Column) -> Column {
+    func("to_unix_timestamp", expressions_of([col1, format]))
 }
 
 /// Mirrors `pyspark.sql.functions.to_variant_object`.
@@ -1699,6 +2099,18 @@ pub fn to_variant_object(col1: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.to_xml`.
 pub fn to_xml(col1: Column) -> Column {
     func("to_xml", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.to_xml(col, options)`: PySpark sends the options as the map of
+/// their names and values, which [`to_xml`] omits, as PySpark does when it is `None`.
+pub fn to_xml_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "to_xml",
+        vec![col1.expression().clone(), options_map(options)],
+    )
 }
 
 /// Mirrors `pyspark.sql.functions.trim`.
@@ -1735,9 +2147,21 @@ pub fn try_to_binary(col1: Column) -> Column {
     func("try_to_binary", vec![col1.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.try_to_binary(col, format)`. [`try_to_binary`] omits the
+/// `format`, as PySpark does when it is `None`.
+pub fn try_to_binary_format(col1: Column, format: Column) -> Column {
+    func("try_to_binary", expressions_of([col1, format]))
+}
+
 /// Mirrors `pyspark.sql.functions.try_to_timestamp`.
 pub fn try_to_timestamp(col1: Column) -> Column {
     func("try_to_timestamp", vec![col1.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.try_to_timestamp(col, format)`. [`try_to_timestamp`] omits the
+/// `format`, as PySpark does when it is `None`.
+pub fn try_to_timestamp_with_format(col1: Column, format: Column) -> Column {
+    func("try_to_timestamp", expressions_of([col1, format]))
 }
 
 /// Mirrors `pyspark.sql.functions.try_url_decode`.
@@ -1886,6 +2310,39 @@ pub fn aes_decrypt(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.aes_decrypt(input, key, mode)`, with PySpark's defaults of
+/// `padding` and `aad`.
+pub fn aes_decrypt_with_mode(col1: Column, col2: Column, mode: Column) -> Column {
+    aes_decrypt_with_mode_and_padding(col1, col2, mode, lit_str_column("DEFAULT"))
+}
+
+/// Mirrors `pyspark.sql.functions.aes_decrypt(input, key, mode, padding)`, with PySpark's default
+/// of `aad`.
+pub fn aes_decrypt_with_mode_and_padding(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+    padding: Column,
+) -> Column {
+    aes_decrypt_with_mode_padding_and_aad(col1, col2, mode, padding, lit_str_column(""))
+}
+
+/// Mirrors `pyspark.sql.functions.aes_decrypt(input, key, mode, padding, aad)`. PySpark sends
+/// every argument, the default of each one that is `None` (`"GCM"`, `"DEFAULT"` and `""`), as
+/// [`aes_decrypt`] sends them: pass those to set a later argument alone.
+pub fn aes_decrypt_with_mode_padding_and_aad(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+    padding: Column,
+    aad: Column,
+) -> Column {
+    func(
+        "aes_decrypt",
+        expressions_of([col1, col2, mode, padding, aad]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.aes_encrypt`.
 pub fn aes_encrypt(col1: Column, col2: Column) -> Column {
     func(
@@ -1901,6 +2358,52 @@ pub fn aes_encrypt(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.aes_encrypt(input, key, mode)`, with PySpark's defaults of
+/// `padding`, `iv` and `aad`.
+pub fn aes_encrypt_with_mode(col1: Column, col2: Column, mode: Column) -> Column {
+    aes_encrypt_with_mode_and_padding(col1, col2, mode, lit_str_column("DEFAULT"))
+}
+
+/// Mirrors `pyspark.sql.functions.aes_encrypt(input, key, mode, padding)`, with PySpark's defaults
+/// of `iv` and `aad`.
+pub fn aes_encrypt_with_mode_and_padding(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+    padding: Column,
+) -> Column {
+    aes_encrypt_with_mode_padding_and_iv(col1, col2, mode, padding, lit_str_column(""))
+}
+
+/// Mirrors `pyspark.sql.functions.aes_encrypt(input, key, mode, padding, iv)`, with PySpark's
+/// default of `aad`.
+pub fn aes_encrypt_with_mode_padding_and_iv(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+    padding: Column,
+    iv: Column,
+) -> Column {
+    aes_encrypt_with_mode_padding_iv_and_aad(col1, col2, mode, padding, iv, lit_str_column(""))
+}
+
+/// Mirrors `pyspark.sql.functions.aes_encrypt(input, key, mode, padding, iv, aad)`. PySpark sends
+/// every argument, the default of each one that is `None` (`"GCM"`, `"DEFAULT"`, `""` and `""`), as
+/// [`aes_encrypt`] sends them: pass those to set a later argument alone.
+pub fn aes_encrypt_with_mode_padding_iv_and_aad(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+    padding: Column,
+    iv: Column,
+    aad: Column,
+) -> Column {
+    func(
+        "aes_encrypt",
+        expressions_of([col1, col2, mode, padding, iv, aad]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.approx_percentile`.
 pub fn approx_percentile(col1: Column, col2: Column) -> Column {
     func(
@@ -1911,6 +2414,12 @@ pub fn approx_percentile(col1: Column, col2: Column) -> Column {
             lit_int(10000),
         ],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.approx_percentile(col, percentage, accuracy)`: the `accuracy`
+/// takes the place of PySpark's default, `10000`, which [`approx_percentile`] sends.
+pub fn approx_percentile_with_accuracy(col1: Column, col2: Column, accuracy: Column) -> Column {
+    func("approx_percentile", expressions_of([col1, col2, accuracy]))
 }
 
 /// Mirrors `pyspark.sql.functions.array_append`.
@@ -1951,6 +2460,16 @@ pub fn array_join(col1: Column, col2: Column) -> Column {
         "array_join",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.array_join(col, delimiter, null_replacement)`. [`array_join`]
+/// omits the `null_replacement`, as PySpark does when it is `None`.
+pub fn array_join_with_null_replacement(
+    col1: Column,
+    col2: Column,
+    null_replacement: Column,
+) -> Column {
+    func("array_join", expressions_of([col1, col2, null_replacement]))
 }
 
 /// Mirrors `pyspark.sql.functions.array_position`.
@@ -2209,11 +2728,45 @@ pub fn from_csv(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.from_csv(col, schema, options)`: PySpark sends the options as the
+/// map of their names and values, which [`from_csv`] omits, as PySpark does when it is `None`.
+pub fn from_csv_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    col2: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "from_csv",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            options_map(options),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.from_json`.
 pub fn from_json(col1: Column, col2: Column) -> Column {
     func(
         "from_json",
         vec![col1.expression().clone(), col2.expression().clone()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.from_json(col, schema, options)`: PySpark sends the options as
+/// the map of their names and values, which [`from_json`] omits, as PySpark does when it is `None`.
+pub fn from_json_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    col2: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "from_json",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            options_map(options),
+        ],
     )
 }
 
@@ -2230,6 +2783,23 @@ pub fn from_xml(col1: Column, col2: Column) -> Column {
     func(
         "from_xml",
         vec![col1.expression().clone(), col2.expression().clone()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.from_xml(col, schema, options)`: PySpark sends the options as the
+/// map of their names and values, which [`from_xml`] omits, as PySpark does when it is `None`.
+pub fn from_xml_with_options<K: Into<String>, V: Into<String>>(
+    col1: Column,
+    col2: Column,
+    options: impl IntoIterator<Item = (K, V)>,
+) -> Column {
+    func(
+        "from_xml",
+        vec![
+            col1.expression().clone(),
+            col2.expression().clone(),
+            options_map(options),
+        ],
     )
 }
 
@@ -2281,6 +2851,19 @@ pub fn hll_union(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.hll_union(col1, col2, allowDifferentLgConfigK)`. [`hll_union`]
+/// omits the `allowDifferentLgConfigK`, as PySpark does when it is `None`.
+pub fn hll_union_with_allow_different_lg_config_k(
+    col1: Column,
+    col2: Column,
+    allow_different_lg_config_k: Column,
+) -> Column {
+    func(
+        "hll_union",
+        expressions_of([col1, col2, allow_different_lg_config_k]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.hypot`.
 pub fn hypot(col1: Column, col2: Column) -> Column {
     func(
@@ -2303,6 +2886,12 @@ pub fn ilike(col1: Column, col2: Column) -> Column {
         "ilike",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.ilike(str, pattern, escapeChar)`. [`ilike`] omits the
+/// `escapeChar`, as PySpark does when it is `None`.
+pub fn ilike_with_escape_char(col1: Column, col2: Column, escape_char: Column) -> Column {
+    func("ilike", expressions_of([col1, col2, escape_char]))
 }
 
 /// Mirrors `pyspark.sql.functions.instr`.
@@ -2378,12 +2967,24 @@ pub fn levenshtein(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.levenshtein(left, right, threshold)`. [`levenshtein`] omits the
+/// `threshold`, as PySpark does when it is `None`.
+pub fn levenshtein_with_threshold(col1: Column, col2: Column, threshold: Column) -> Column {
+    func("levenshtein", expressions_of([col1, col2, threshold]))
+}
+
 /// Mirrors `pyspark.sql.functions.like`.
 pub fn like(col1: Column, col2: Column) -> Column {
     func(
         "like",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.like(str, pattern, escapeChar)`. [`like`] omits the `escapeChar`,
+/// as PySpark does when it is `None`.
+pub fn like_with_escape_char(col1: Column, col2: Column, escape_char: Column) -> Column {
+    func("like", expressions_of([col1, col2, escape_char]))
 }
 
 /// Mirrors `pyspark.sql.functions.locate`.
@@ -2396,6 +2997,12 @@ pub fn locate(col1: Column, col2: Column) -> Column {
             lit_int(1),
         ],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.locate(substr, str, pos)`: the `pos` takes the
+/// place of PySpark's default, `1`, which [`locate`] sends.
+pub fn locate_with_pos(col1: Column, col2: Column, pos: Column) -> Column {
+    func("locate", expressions_of([col1, col2, pos]))
 }
 
 /// Mirrors `pyspark.sql.functions.map_contains_key`.
@@ -2422,12 +3029,24 @@ pub fn max_by(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.max_by(col, ord, k)`. [`max_by`] omits the `k`, as PySpark does
+/// when it is `None`.
+pub fn max_by_with_k(col1: Column, col2: Column, k: Column) -> Column {
+    func("max_by", expressions_of([col1, col2, k]))
+}
+
 /// Mirrors `pyspark.sql.functions.min_by`.
 pub fn min_by(col1: Column, col2: Column) -> Column {
     func(
         "min_by",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.min_by(col, ord, k)`. [`min_by`] omits the `k`, as PySpark does
+/// when it is `None`.
+pub fn min_by_with_k(col1: Column, col2: Column, k: Column) -> Column {
+    func("min_by", expressions_of([col1, col2, k]))
 }
 
 /// Mirrors `pyspark.sql.functions.months_between`.
@@ -2440,6 +3059,12 @@ pub fn months_between(col1: Column, col2: Column) -> Column {
             lit_bool(true),
         ],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.months_between(date1, date2, roundOff)`: the `roundOff` takes the
+/// place of PySpark's default, `true`, which [`months_between`] sends.
+pub fn months_between_with_round_off(col1: Column, col2: Column, round_off: Column) -> Column {
+    func("months_between", expressions_of([col1, col2, round_off]))
 }
 
 /// Mirrors `pyspark.sql.functions.nanvl`.
@@ -2470,6 +3095,13 @@ pub fn nth_value(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.nth_value(col, offset, ignoreNulls)`: the `ignoreNulls` takes the
+/// place of PySpark's default, `false`, which [`nth_value`] sends. (PySpark's `ignoreNulls=None`
+/// sends no flag, which the server takes as `false`, of the same column name.)
+pub fn nth_value_with_ignore_nulls(col1: Column, col2: Column, ignore_nulls: Column) -> Column {
+    func("nth_value", expressions_of([col1, col2, ignore_nulls]))
+}
+
 /// Mirrors `pyspark.sql.functions.nullif`.
 pub fn nullif(col1: Column, col2: Column) -> Column {
     func(
@@ -2494,6 +3126,12 @@ pub fn parse_url(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.parse_url(url, partToExtract, key)`. [`parse_url`] omits the
+/// `key`, as PySpark does when it is `None`.
+pub fn parse_url_with_key(col1: Column, col2: Column, key: Column) -> Column {
+    func("parse_url", expressions_of([col1, col2, key]))
+}
+
 /// Mirrors `pyspark.sql.functions.percentile`.
 pub fn percentile(col1: Column, col2: Column) -> Column {
     func(
@@ -2506,6 +3144,12 @@ pub fn percentile(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.percentile(col, percentage, frequency)`: the `frequency` takes
+/// the place of PySpark's default, `1`, which [`percentile`] sends.
+pub fn percentile_with_frequency(col1: Column, col2: Column, frequency: Column) -> Column {
+    func("percentile", expressions_of([col1, col2, frequency]))
+}
+
 /// Mirrors `pyspark.sql.functions.percentile_approx`.
 pub fn percentile_approx(col1: Column, col2: Column) -> Column {
     func(
@@ -2516,6 +3160,12 @@ pub fn percentile_approx(col1: Column, col2: Column) -> Column {
             lit_int(10000),
         ],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.percentile_approx(col, percentage, accuracy)`: the `accuracy`
+/// takes the place of PySpark's default, `10000`, which [`percentile_approx`] sends.
+pub fn percentile_approx_with_accuracy(col1: Column, col2: Column, accuracy: Column) -> Column {
+    func("percentile_approx", expressions_of([col1, col2, accuracy]))
 }
 
 /// Mirrors `pyspark.sql.functions.pmod`.
@@ -2532,6 +3182,12 @@ pub fn position(col1: Column, col2: Column) -> Column {
         "position",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.position(substr, str, start)`. [`position`] omits the `start`, as
+/// PySpark does when it is `None`.
+pub fn position_with_start(col1: Column, col2: Column, start: Column) -> Column {
+    func("position", expressions_of([col1, col2, start]))
 }
 
 /// Mirrors `pyspark.sql.functions.pow`.
@@ -2574,12 +3230,24 @@ pub fn regexp_extract_all(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.regexp_extract_all(str, regexp, idx)`. [`regexp_extract_all`]
+/// omits the `idx`, as PySpark does when it is `None`.
+pub fn regexp_extract_all_with_idx(col1: Column, col2: Column, idx: Column) -> Column {
+    func("regexp_extract_all", expressions_of([col1, col2, idx]))
+}
+
 /// Mirrors `pyspark.sql.functions.regexp_instr`.
 pub fn regexp_instr(col1: Column, col2: Column) -> Column {
     func(
         "regexp_instr",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.regexp_instr(str, regexp, idx)`. [`regexp_instr`] omits the
+/// `idx`, as PySpark does when it is `None`.
+pub fn regexp_instr_with_idx(col1: Column, col2: Column, idx: Column) -> Column {
+    func("regexp_instr", expressions_of([col1, col2, idx]))
 }
 
 /// Mirrors `pyspark.sql.functions.regexp_like`.
@@ -2686,6 +3354,12 @@ pub fn replace(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.replace(src, search, replace)`. [`replace`] omits the `replace`,
+/// as PySpark does when it is `None`.
+pub fn replace_with(col1: Column, col2: Column, replace: Column) -> Column {
+    func("replace", expressions_of([col1, col2, replace]))
+}
+
 /// Mirrors `pyspark.sql.functions.right`.
 pub fn right(col1: Column, col2: Column) -> Column {
     func(
@@ -2708,6 +3382,12 @@ pub fn sequence(col1: Column, col2: Column) -> Column {
         "sequence",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.sequence(start, stop, step)`. [`sequence`] omits the `step`, as
+/// PySpark does when it is `None`.
+pub fn sequence_with_step(col1: Column, col2: Column, step: Column) -> Column {
+    func("sequence", expressions_of([col1, col2, step]))
 }
 
 /// Mirrors `pyspark.sql.functions.session_window`.
@@ -2778,6 +3458,12 @@ pub fn split(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.split(str, pattern, limit)`: the `limit` takes the
+/// place of PySpark's default, `-1`, which [`split`] sends.
+pub fn split_with_limit(col1: Column, col2: Column, limit: Column) -> Column {
+    func("split", expressions_of([col1, col2, limit]))
+}
+
 /// Mirrors `pyspark.sql.functions.startswith`.
 pub fn startswith(col1: Column, col2: Column) -> Column {
     func(
@@ -2792,6 +3478,12 @@ pub fn substr(col1: Column, col2: Column) -> Column {
         "substr",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.substr(str, pos, len)`. [`substr`] omits the `len`, as PySpark
+/// does when it is `None`.
+pub fn substr_with_len(col1: Column, col2: Column, len: Column) -> Column {
+    func("substr", expressions_of([col1, col2, len]))
 }
 
 /// Mirrors `pyspark.sql.functions.to_char`.
@@ -2856,6 +3548,39 @@ pub fn try_aes_decrypt(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.try_aes_decrypt(input, key, mode)`, with PySpark's defaults of
+/// `padding` and `aad`.
+pub fn try_aes_decrypt_with_mode(col1: Column, col2: Column, mode: Column) -> Column {
+    try_aes_decrypt_with_mode_and_padding(col1, col2, mode, lit_str_column("DEFAULT"))
+}
+
+/// Mirrors `pyspark.sql.functions.try_aes_decrypt(input, key, mode, padding)`, with PySpark's
+/// default of `aad`.
+pub fn try_aes_decrypt_with_mode_and_padding(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+    padding: Column,
+) -> Column {
+    try_aes_decrypt_with_mode_padding_and_aad(col1, col2, mode, padding, lit_str_column(""))
+}
+
+/// Mirrors `pyspark.sql.functions.try_aes_decrypt(input, key, mode, padding, aad)`. PySpark sends
+/// every argument, the default of each one that is `None` (`"GCM"`, `"DEFAULT"` and `""`), as
+/// [`try_aes_decrypt`] sends them: pass those to set a later argument alone.
+pub fn try_aes_decrypt_with_mode_padding_and_aad(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+    padding: Column,
+    aad: Column,
+) -> Column {
+    func(
+        "try_aes_decrypt",
+        expressions_of([col1, col2, mode, padding, aad]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.try_divide`.
 pub fn try_divide(col1: Column, col2: Column) -> Column {
     func(
@@ -2894,6 +3619,12 @@ pub fn try_parse_url(col1: Column, col2: Column) -> Column {
         "try_parse_url",
         vec![col1.expression().clone(), col2.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.try_parse_url(url, partToExtract, key)`. [`try_parse_url`] omits
+/// the `key`, as PySpark does when it is `None`.
+pub fn try_parse_url_with_key(col1: Column, col2: Column, key: Column) -> Column {
+    func("try_parse_url", expressions_of([col1, col2, key]))
 }
 
 /// Mirrors `pyspark.sql.functions.try_subtract`.
@@ -3134,6 +3865,12 @@ pub fn overlay(col1: Column, col2: Column, col3: Column) -> Column {
             lit_int(-1),
         ],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.overlay(src, replace, pos, len)`: the `len` takes the
+/// place of PySpark's default, `-1`, which [`overlay`] sends.
+pub fn overlay_with_len(col1: Column, col2: Column, col3: Column, len: Column) -> Column {
+    func("overlay", expressions_of([col1, col2, col3, len]))
 }
 
 /// Mirrors `pyspark.sql.functions.regexp_extract`.
@@ -3420,6 +4157,23 @@ where
     )
 }
 
+/// Mirrors `pyspark.sql.functions.array_sort(col, comparator)` with the 2-arg lambda of a
+/// comparator, negative, 0 or positive as its first element sorts before, with or after its
+/// second: `array_sort(col, lambda (x, y): comparator(x, y))`.
+pub fn array_sort_with_comparator<F>(col: Column, comparator: F) -> Column
+where
+    F: FnOnce(Vec<Column>) -> Column,
+{
+    let lambda = make_lambda(2, comparator);
+    func(
+        "array_sort",
+        vec![
+            col.expression().clone(),
+            ExpressionNode::LambdaFunction(Box::new(lambda)).into(),
+        ],
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.aggregate` with 2-arg merge lambda.
 /// `aggregate(col, init, lambda (acc, x): merge(acc, x))`
 pub fn aggregate<F>(col: Column, init: Column, f: F) -> Column
@@ -3439,13 +4193,13 @@ where
 
 /// Mirrors `pyspark.sql.functions.aggregate` with both merge and finish lambdas.
 /// `aggregate(col, init, lambda (acc, x): merge(acc, x), lambda acc: finish(acc))`
-pub fn aggregate_with_finish<F, G>(col: Column, init: Column, merge_f: F, finish_f: G) -> Column
+pub fn aggregate_with_finish<F, G>(col: Column, init: Column, merge: F, finish: G) -> Column
 where
     F: FnOnce(Vec<Column>) -> Column,
     G: FnOnce(Vec<Column>) -> Column,
 {
-    let merge_lambda = make_lambda(2, merge_f);
-    let finish_lambda = make_lambda(1, finish_f);
+    let merge_lambda = make_lambda(2, merge);
+    let finish_lambda = make_lambda(1, finish);
     func(
         "aggregate",
         vec![
@@ -3559,13 +4313,13 @@ where
 
 /// Mirrors `pyspark.sql.functions.reduce` with both merge and finish lambdas, as [`reduce`].
 /// `reduce(col, init, lambda (acc, x): merge(acc, x), lambda acc: finish(acc))`
-pub fn reduce_with_finish<F, G>(col: Column, init: Column, merge_f: F, finish_f: G) -> Column
+pub fn reduce_with_finish<F, G>(col: Column, init: Column, merge: F, finish: G) -> Column
 where
     F: FnOnce(Vec<Column>) -> Column,
     G: FnOnce(Vec<Column>) -> Column,
 {
-    let merge_lambda = make_lambda(2, merge_f);
-    let finish_lambda = make_lambda(1, finish_f);
+    let merge_lambda = make_lambda(2, merge);
+    let finish_lambda = make_lambda(1, finish);
     func(
         "reduce",
         vec![
@@ -3772,6 +4526,12 @@ pub fn current_time() -> Column {
     func("current_time", vec![])
 }
 
+/// Mirrors `pyspark.sql.functions.current_time(precision)`. [`current_time`] omits the precision,
+/// as PySpark does when it is `None`.
+pub fn current_time_with_precision(precision: Column) -> Column {
+    func("current_time", expressions_of([precision]))
+}
+
 /// Mirrors `pyspark.sql.functions.hmac`.
 pub fn hmac(key: Column, message: Column) -> Column {
     func(
@@ -3810,9 +4570,21 @@ pub fn kll_merge_agg_bigint(col: Column) -> Column {
     func("kll_merge_agg_bigint", vec![col.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.kll_merge_agg_bigint(col, k)`. [`kll_merge_agg_bigint`] omits the
+/// `k`, as PySpark does when it is `None`.
+pub fn kll_merge_agg_bigint_with_k(col: Column, k: Column) -> Column {
+    func("kll_merge_agg_bigint", expressions_of([col, k]))
+}
+
 /// Mirrors `pyspark.sql.functions.kll_merge_agg_double`.
 pub fn kll_merge_agg_double(col: Column) -> Column {
     func("kll_merge_agg_double", vec![col.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.kll_merge_agg_double(col, k)`. [`kll_merge_agg_double`] omits the
+/// `k`, as PySpark does when it is `None`.
+pub fn kll_merge_agg_double_with_k(col: Column, k: Column) -> Column {
+    func("kll_merge_agg_double", expressions_of([col, k]))
 }
 
 /// Mirrors `pyspark.sql.functions.kll_merge_agg_float`.
@@ -3820,9 +4592,21 @@ pub fn kll_merge_agg_float(col: Column) -> Column {
     func("kll_merge_agg_float", vec![col.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.kll_merge_agg_float(col, k)`. [`kll_merge_agg_float`] omits the
+/// `k`, as PySpark does when it is `None`.
+pub fn kll_merge_agg_float_with_k(col: Column, k: Column) -> Column {
+    func("kll_merge_agg_float", expressions_of([col, k]))
+}
+
 /// Mirrors `pyspark.sql.functions.kll_sketch_agg_bigint`.
 pub fn kll_sketch_agg_bigint(col: Column) -> Column {
     func("kll_sketch_agg_bigint", vec![col.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.kll_sketch_agg_bigint(col, k)`. [`kll_sketch_agg_bigint`] omits
+/// the `k`, as PySpark does when it is `None`.
+pub fn kll_sketch_agg_bigint_with_k(col: Column, k: Column) -> Column {
+    func("kll_sketch_agg_bigint", expressions_of([col, k]))
 }
 
 /// Mirrors `pyspark.sql.functions.kll_sketch_agg_double`.
@@ -3830,9 +4614,21 @@ pub fn kll_sketch_agg_double(col: Column) -> Column {
     func("kll_sketch_agg_double", vec![col.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.kll_sketch_agg_double(col, k)`. [`kll_sketch_agg_double`] omits
+/// the `k`, as PySpark does when it is `None`.
+pub fn kll_sketch_agg_double_with_k(col: Column, k: Column) -> Column {
+    func("kll_sketch_agg_double", expressions_of([col, k]))
+}
+
 /// Mirrors `pyspark.sql.functions.kll_sketch_agg_float`.
 pub fn kll_sketch_agg_float(col: Column) -> Column {
     func("kll_sketch_agg_float", vec![col.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.kll_sketch_agg_float(col, k)`. [`kll_sketch_agg_float`] omits the
+/// `k`, as PySpark does when it is `None`.
+pub fn kll_sketch_agg_float_with_k(col: Column, k: Column) -> Column {
+    func("kll_sketch_agg_float", expressions_of([col, k]))
 }
 
 /// Mirrors `pyspark.sql.functions.kll_sketch_get_n_bigint`.
@@ -3977,6 +4773,38 @@ pub fn make_timestamp(
     )
 }
 
+/// Mirrors
+/// `pyspark.sql.functions.make_timestamp(years, months, days, hours, mins, secs, timezone)`.
+pub fn make_timestamp_with_timezone(
+    years: Column,
+    months: Column,
+    days: Column,
+    hours: Column,
+    mins: Column,
+    secs: Column,
+    timezone: Column,
+) -> Column {
+    func(
+        "make_timestamp",
+        expressions_of([years, months, days, hours, mins, secs, timezone]),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.make_timestamp(date=date, time=time)`: the timestamp of a
+/// date and a time, which PySpark sends in place of the parts.
+pub fn make_timestamp_with_date_and_time(date: Column, time: Column) -> Column {
+    func("make_timestamp", expressions_of([date, time]))
+}
+
+/// Mirrors `pyspark.sql.functions.make_timestamp(date=date, time=time, timezone=timezone)`.
+pub fn make_timestamp_with_date_time_and_timezone(
+    date: Column,
+    time: Column,
+    timezone: Column,
+) -> Column {
+    func("make_timestamp", expressions_of([date, time, timezone]))
+}
+
 /// Mirrors `pyspark.sql.functions.make_timestamp_ltz`.
 pub fn make_timestamp_ltz(
     years: Column,
@@ -3996,6 +4824,23 @@ pub fn make_timestamp_ltz(
             mins.expression().clone(),
             secs.expression().clone(),
         ],
+    )
+}
+
+/// Mirrors
+/// `pyspark.sql.functions.make_timestamp_ltz(years, months, days, hours, mins, secs, timezone)`.
+pub fn make_timestamp_ltz_with_timezone(
+    years: Column,
+    months: Column,
+    days: Column,
+    hours: Column,
+    mins: Column,
+    secs: Column,
+    timezone: Column,
+) -> Column {
+    func(
+        "make_timestamp_ltz",
+        expressions_of([years, months, days, hours, mins, secs, timezone]),
     )
 }
 
@@ -4021,6 +4866,12 @@ pub fn make_timestamp_ntz(
     )
 }
 
+/// Mirrors `pyspark.sql.functions.make_timestamp_ntz(date=date, time=time)`: the timestamp of a
+/// date and a time, which PySpark sends in place of the parts.
+pub fn make_timestamp_ntz_with_date_and_time(date: Column, time: Column) -> Column {
+    func("make_timestamp_ntz", expressions_of([date, time]))
+}
+
 /// Mirrors `pyspark.sql.functions.quote`.
 pub fn quote(col: Column) -> Column {
     func("quote", vec![col.expression().clone()])
@@ -4036,6 +4887,12 @@ pub fn st_asbinary(geo: Column) -> Column {
     func("st_asbinary", vec![geo.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.st_asbinary(geo, endianness)`. [`st_asbinary`] omits the
+/// `endianness`, as PySpark does when it is `None`.
+pub fn st_asbinary_with_endianness(geo: Column, endianness: Column) -> Column {
+    func("st_asbinary", expressions_of([geo, endianness]))
+}
+
 /// Mirrors `pyspark.sql.functions.st_geogfromwkb`.
 pub fn st_geogfromwkb(wkb: Column) -> Column {
     func("st_geogfromwkb", vec![wkb.expression().clone()])
@@ -4044,6 +4901,12 @@ pub fn st_geogfromwkb(wkb: Column) -> Column {
 /// Mirrors `pyspark.sql.functions.st_geomfromwkb`.
 pub fn st_geomfromwkb(wkb: Column) -> Column {
     func("st_geomfromwkb", vec![wkb.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.st_geomfromwkb(wkb, srid)`. [`st_geomfromwkb`] omits the `srid`,
+/// as PySpark does when it is `None`.
+pub fn st_geomfromwkb_with_srid(wkb: Column, srid: Column) -> Column {
+    func("st_geomfromwkb", expressions_of([wkb, srid]))
 }
 
 /// Mirrors `pyspark.sql.functions.st_setsrid`.
@@ -4085,6 +4948,12 @@ pub fn theta_sketch_agg(col: Column) -> Column {
     func("theta_sketch_agg", vec![col.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.theta_sketch_agg(col, lgNomEntries)`. [`theta_sketch_agg`] omits
+/// the `lgNomEntries`, as PySpark does when it is `None`.
+pub fn theta_sketch_agg_with_lg_nom_entries(col: Column, lg_nom_entries: Column) -> Column {
+    func("theta_sketch_agg", expressions_of([col, lg_nom_entries]))
+}
+
 /// Mirrors `pyspark.sql.functions.theta_sketch_estimate`.
 pub fn theta_sketch_estimate(col: Column) -> Column {
     func("theta_sketch_estimate", vec![col.expression().clone()])
@@ -4098,9 +4967,25 @@ pub fn theta_union(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.theta_union(col1, col2, lgNomEntries)`. [`theta_union`] omits the
+/// `lgNomEntries`, as PySpark does when it is `None`.
+pub fn theta_union_with_lg_nom_entries(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+) -> Column {
+    func("theta_union", expressions_of([col1, col2, lg_nom_entries]))
+}
+
 /// Mirrors `pyspark.sql.functions.theta_union_agg`.
 pub fn theta_union_agg(col: Column) -> Column {
     func("theta_union_agg", vec![col.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.theta_union_agg(col, lgNomEntries)`. [`theta_union_agg`] omits
+/// the `lgNomEntries`, as PySpark does when it is `None`.
+pub fn theta_union_agg_with_lg_nom_entries(col: Column, lg_nom_entries: Column) -> Column {
+    func("theta_union_agg", expressions_of([col, lg_nom_entries]))
 }
 
 /// Mirrors `pyspark.sql.functions.time_bucket`.
@@ -4109,6 +4994,12 @@ pub fn time_bucket(bucket_size: Column, ts: Column) -> Column {
         "time_bucket",
         vec![bucket_size.expression().clone(), ts.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.time_bucket(bucket_size, ts, origin)`. [`time_bucket`] omits the
+/// `origin`, as PySpark does when it is `None`.
+pub fn time_bucket_with_origin(bucket_size: Column, ts: Column, origin: Column) -> Column {
+    func("time_bucket", expressions_of([bucket_size, ts, origin]))
 }
 
 /// Mirrors `pyspark.sql.functions.time_diff`.
@@ -4171,6 +5062,12 @@ pub fn to_time(str: Column) -> Column {
     func("to_time", vec![str.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.to_time(str, format)`. [`to_time`] omits the `format`, as PySpark
+/// does when it is `None`.
+pub fn to_time_with_format(str: Column, format: Column) -> Column {
+    func("to_time", expressions_of([str, format]))
+}
+
 /// Mirrors `pyspark.sql.functions.try_make_timestamp`.
 pub fn try_make_timestamp(
     years: Column,
@@ -4193,6 +5090,38 @@ pub fn try_make_timestamp(
     )
 }
 
+/// Mirrors
+/// `pyspark.sql.functions.try_make_timestamp(years, months, days, hours, mins, secs, timezone)`.
+pub fn try_make_timestamp_with_timezone(
+    years: Column,
+    months: Column,
+    days: Column,
+    hours: Column,
+    mins: Column,
+    secs: Column,
+    timezone: Column,
+) -> Column {
+    func(
+        "try_make_timestamp",
+        expressions_of([years, months, days, hours, mins, secs, timezone]),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.try_make_timestamp(date=date, time=time)`: the timestamp of a
+/// date and a time, which PySpark sends in place of the parts.
+pub fn try_make_timestamp_with_date_and_time(date: Column, time: Column) -> Column {
+    func("try_make_timestamp", expressions_of([date, time]))
+}
+
+/// Mirrors `pyspark.sql.functions.try_make_timestamp(date=date, time=time, timezone=timezone)`.
+pub fn try_make_timestamp_with_date_time_and_timezone(
+    date: Column,
+    time: Column,
+    timezone: Column,
+) -> Column {
+    func("try_make_timestamp", expressions_of([date, time, timezone]))
+}
+
 /// Mirrors `pyspark.sql.functions.try_make_timestamp_ltz`.
 pub fn try_make_timestamp_ltz(
     years: Column,
@@ -4212,6 +5141,23 @@ pub fn try_make_timestamp_ltz(
             mins.expression().clone(),
             secs.expression().clone(),
         ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.try_make_timestamp_ltz(years, months, days, hours, mins, secs,
+/// timezone)`.
+pub fn try_make_timestamp_ltz_with_timezone(
+    years: Column,
+    months: Column,
+    days: Column,
+    hours: Column,
+    mins: Column,
+    secs: Column,
+    timezone: Column,
+) -> Column {
+    func(
+        "try_make_timestamp_ltz",
+        expressions_of([years, months, days, hours, mins, secs, timezone]),
     )
 }
 
@@ -4237,14 +5183,32 @@ pub fn try_make_timestamp_ntz(
     )
 }
 
+/// Mirrors `pyspark.sql.functions.try_make_timestamp_ntz(date=date, time=time)`: the timestamp of a
+/// date and a time, which PySpark sends in place of the parts.
+pub fn try_make_timestamp_ntz_with_date_and_time(date: Column, time: Column) -> Column {
+    func("try_make_timestamp_ntz", expressions_of([date, time]))
+}
+
 /// Mirrors `pyspark.sql.functions.try_to_date`.
 pub fn try_to_date(col: Column) -> Column {
     func("try_to_date", vec![col.expression().clone()])
 }
 
+/// Mirrors `pyspark.sql.functions.try_to_date(col, format)`. [`try_to_date`] omits the `format`, as
+/// PySpark does when it is `None`.
+pub fn try_to_date_with_format(col: Column, format: Column) -> Column {
+    func("try_to_date", expressions_of([col, format]))
+}
+
 /// Mirrors `pyspark.sql.functions.try_to_time`.
 pub fn try_to_time(str: Column) -> Column {
     func("try_to_time", vec![str.expression().clone()])
+}
+
+/// Mirrors `pyspark.sql.functions.try_to_time(str, format)`. [`try_to_time`] omits the `format`, as
+/// PySpark does when it is `None`.
+pub fn try_to_time_with_format(str: Column, format: Column) -> Column {
+    func("try_to_time", expressions_of([str, format]))
 }
 
 /// Mirrors `pyspark.sql.functions.try_variant_array_append`.
@@ -4483,11 +5447,26 @@ pub fn tuple_intersection_agg_double(col: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_intersection_agg_double(col, mode)`.
+/// [`tuple_intersection_agg_double`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_intersection_agg_double_with_mode(col: Column, mode: Column) -> Column {
+    func("tuple_intersection_agg_double", expressions_of([col, mode]))
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_intersection_agg_integer`.
 pub fn tuple_intersection_agg_integer(col: Column) -> Column {
     func(
         "tuple_intersection_agg_integer",
         vec![col.expression().clone()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_intersection_agg_integer(col, mode)`.
+/// [`tuple_intersection_agg_integer`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_intersection_agg_integer_with_mode(col: Column, mode: Column) -> Column {
+    func(
+        "tuple_intersection_agg_integer",
+        expressions_of([col, mode]),
     )
 }
 
@@ -4499,11 +5478,29 @@ pub fn tuple_intersection_double(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_intersection_double(col1, col2, mode)`.
+/// [`tuple_intersection_double`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_intersection_double_with_mode(col1: Column, col2: Column, mode: Column) -> Column {
+    func(
+        "tuple_intersection_double",
+        expressions_of([col1, col2, mode]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_intersection_integer`.
 pub fn tuple_intersection_integer(col1: Column, col2: Column) -> Column {
     func(
         "tuple_intersection_integer",
         vec![col1.expression().clone(), col2.expression().clone()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_intersection_integer(col1, col2, mode)`.
+/// [`tuple_intersection_integer`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_intersection_integer_with_mode(col1: Column, col2: Column, mode: Column) -> Column {
+    func(
+        "tuple_intersection_integer",
+        expressions_of([col1, col2, mode]),
     )
 }
 
@@ -4515,11 +5512,37 @@ pub fn tuple_intersection_theta_double(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_intersection_theta_double(col1, col2, mode)`.
+/// [`tuple_intersection_theta_double`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_intersection_theta_double_with_mode(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_intersection_theta_double",
+        expressions_of([col1, col2, mode]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_intersection_theta_integer`.
 pub fn tuple_intersection_theta_integer(col1: Column, col2: Column) -> Column {
     func(
         "tuple_intersection_theta_integer",
         vec![col1.expression().clone(), col2.expression().clone()],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_intersection_theta_integer(col1, col2, mode)`.
+/// [`tuple_intersection_theta_integer`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_intersection_theta_integer_with_mode(
+    col1: Column,
+    col2: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_intersection_theta_integer",
+        expressions_of([col1, col2, mode]),
     )
 }
 
@@ -4539,6 +5562,36 @@ pub fn tuple_sketch_agg_double(key: Column, summary: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_sketch_agg_double(key, summary, lgNomEntries)`, with
+/// PySpark's default of `mode`.
+pub fn tuple_sketch_agg_double_with_lg_nom_entries(
+    key: Column,
+    summary: Column,
+    lg_nom_entries: Column,
+) -> Column {
+    tuple_sketch_agg_double_with_lg_nom_entries_and_mode(
+        key,
+        summary,
+        lg_nom_entries,
+        lit_str_column("sum"),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_sketch_agg_double(key, summary, lgNomEntries, mode)`.
+/// PySpark sends every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_sketch_agg_double`] sends them: pass those to set a later argument alone.
+pub fn tuple_sketch_agg_double_with_lg_nom_entries_and_mode(
+    key: Column,
+    summary: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_sketch_agg_double",
+        expressions_of([key, summary, lg_nom_entries, mode]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_sketch_agg_integer`.
 ///
 /// As with the double variant, the reference client materializes the default
@@ -4552,6 +5605,36 @@ pub fn tuple_sketch_agg_integer(key: Column, summary: Column) -> Column {
             lit_int(12),
             lit_str("sum"),
         ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_sketch_agg_integer(key, summary, lgNomEntries)`, with
+/// PySpark's default of `mode`.
+pub fn tuple_sketch_agg_integer_with_lg_nom_entries(
+    key: Column,
+    summary: Column,
+    lg_nom_entries: Column,
+) -> Column {
+    tuple_sketch_agg_integer_with_lg_nom_entries_and_mode(
+        key,
+        summary,
+        lg_nom_entries,
+        lit_str_column("sum"),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_sketch_agg_integer(key, summary, lgNomEntries, mode)`.
+/// PySpark sends every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_sketch_agg_integer`] sends them: pass those to set a later argument alone.
+pub fn tuple_sketch_agg_integer_with_lg_nom_entries_and_mode(
+    key: Column,
+    summary: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_sketch_agg_integer",
+        expressions_of([key, summary, lg_nom_entries, mode]),
     )
 }
 
@@ -4579,12 +5662,24 @@ pub fn tuple_sketch_summary_double(col: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_sketch_summary_double(col, mode)`.
+/// [`tuple_sketch_summary_double`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_sketch_summary_double_with_mode(col: Column, mode: Column) -> Column {
+    func("tuple_sketch_summary_double", expressions_of([col, mode]))
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_sketch_summary_integer`.
 pub fn tuple_sketch_summary_integer(col: Column) -> Column {
     func(
         "tuple_sketch_summary_integer",
         vec![col.expression().clone()],
     )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_sketch_summary_integer(col, mode)`.
+/// [`tuple_sketch_summary_integer`] omits the `mode`, as PySpark does when it is `None`.
+pub fn tuple_sketch_summary_integer_with_mode(col: Column, mode: Column) -> Column {
+    func("tuple_sketch_summary_integer", expressions_of([col, mode]))
 }
 
 /// Mirrors `pyspark.sql.functions.tuple_sketch_theta_double`.
@@ -4606,12 +5701,52 @@ pub fn tuple_union_agg_double(col: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_union_agg_double(col, lgNomEntries)`, with PySpark's
+/// default of `mode`.
+pub fn tuple_union_agg_double_with_lg_nom_entries(col: Column, lg_nom_entries: Column) -> Column {
+    tuple_union_agg_double_with_lg_nom_entries_and_mode(col, lg_nom_entries, lit_str_column("sum"))
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_agg_double(col, lgNomEntries, mode)`. PySpark sends
+/// every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_union_agg_double`] sends them: pass those to set a later argument alone.
+pub fn tuple_union_agg_double_with_lg_nom_entries_and_mode(
+    col: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_union_agg_double",
+        expressions_of([col, lg_nom_entries, mode]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_union_agg_integer`, which sends the default `lgNomEntries` (12) and
 /// `mode` ("sum"), as `tuple_sketch_agg_integer` does.
 pub fn tuple_union_agg_integer(col: Column) -> Column {
     func(
         "tuple_union_agg_integer",
         vec![col.expression().clone(), lit_int(12), lit_str("sum")],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_agg_integer(col, lgNomEntries)`, with PySpark's
+/// default of `mode`.
+pub fn tuple_union_agg_integer_with_lg_nom_entries(col: Column, lg_nom_entries: Column) -> Column {
+    tuple_union_agg_integer_with_lg_nom_entries_and_mode(col, lg_nom_entries, lit_str_column("sum"))
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_agg_integer(col, lgNomEntries, mode)`. PySpark sends
+/// every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_union_agg_integer`] sends them: pass those to set a later argument alone.
+pub fn tuple_union_agg_integer_with_lg_nom_entries_and_mode(
+    col: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_union_agg_integer",
+        expressions_of([col, lg_nom_entries, mode]),
     )
 }
 
@@ -4629,6 +5764,36 @@ pub fn tuple_union_double(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_union_double(col1, col2, lgNomEntries)`, with PySpark's
+/// default of `mode`.
+pub fn tuple_union_double_with_lg_nom_entries(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+) -> Column {
+    tuple_union_double_with_lg_nom_entries_and_mode(
+        col1,
+        col2,
+        lg_nom_entries,
+        lit_str_column("sum"),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_double(col1, col2, lgNomEntries, mode)`. PySpark
+/// sends every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_union_double`] sends them: pass those to set a later argument alone.
+pub fn tuple_union_double_with_lg_nom_entries_and_mode(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_union_double",
+        expressions_of([col1, col2, lg_nom_entries, mode]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_union_integer`, which sends the default `lgNomEntries` (12) and
 /// `mode` ("sum"), as `tuple_sketch_agg_double` does.
 pub fn tuple_union_integer(col1: Column, col2: Column) -> Column {
@@ -4640,6 +5805,36 @@ pub fn tuple_union_integer(col1: Column, col2: Column) -> Column {
             lit_int(12),
             lit_str("sum"),
         ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_integer(col1, col2, lgNomEntries)`, with PySpark's
+/// default of `mode`.
+pub fn tuple_union_integer_with_lg_nom_entries(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+) -> Column {
+    tuple_union_integer_with_lg_nom_entries_and_mode(
+        col1,
+        col2,
+        lg_nom_entries,
+        lit_str_column("sum"),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_integer(col1, col2, lgNomEntries, mode)`. PySpark
+/// sends every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_union_integer`] sends them: pass those to set a later argument alone.
+pub fn tuple_union_integer_with_lg_nom_entries_and_mode(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_union_integer",
+        expressions_of([col1, col2, lg_nom_entries, mode]),
     )
 }
 
@@ -4657,6 +5852,36 @@ pub fn tuple_union_theta_double(col1: Column, col2: Column) -> Column {
     )
 }
 
+/// Mirrors `pyspark.sql.functions.tuple_union_theta_double(col1, col2, lgNomEntries)`, with
+/// PySpark's default of `mode`.
+pub fn tuple_union_theta_double_with_lg_nom_entries(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+) -> Column {
+    tuple_union_theta_double_with_lg_nom_entries_and_mode(
+        col1,
+        col2,
+        lg_nom_entries,
+        lit_str_column("sum"),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_theta_double(col1, col2, lgNomEntries, mode)`.
+/// PySpark sends every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_union_theta_double`] sends them: pass those to set a later argument alone.
+pub fn tuple_union_theta_double_with_lg_nom_entries_and_mode(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_union_theta_double",
+        expressions_of([col1, col2, lg_nom_entries, mode]),
+    )
+}
+
 /// Mirrors `pyspark.sql.functions.tuple_union_theta_integer`, which sends the default `lgNomEntries` (12) and
 /// `mode` ("sum"), as `tuple_sketch_agg_double` does.
 pub fn tuple_union_theta_integer(col1: Column, col2: Column) -> Column {
@@ -4668,6 +5893,36 @@ pub fn tuple_union_theta_integer(col1: Column, col2: Column) -> Column {
             lit_int(12),
             lit_str("sum"),
         ],
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_theta_integer(col1, col2, lgNomEntries)`, with
+/// PySpark's default of `mode`.
+pub fn tuple_union_theta_integer_with_lg_nom_entries(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+) -> Column {
+    tuple_union_theta_integer_with_lg_nom_entries_and_mode(
+        col1,
+        col2,
+        lg_nom_entries,
+        lit_str_column("sum"),
+    )
+}
+
+/// Mirrors `pyspark.sql.functions.tuple_union_theta_integer(col1, col2, lgNomEntries, mode)`.
+/// PySpark sends every argument, the default of each one that is `None` (`12` and `"sum"`), as
+/// [`tuple_union_theta_integer`] sends them: pass those to set a later argument alone.
+pub fn tuple_union_theta_integer_with_lg_nom_entries_and_mode(
+    col1: Column,
+    col2: Column,
+    lg_nom_entries: Column,
+    mode: Column,
+) -> Column {
+    func(
+        "tuple_union_theta_integer",
+        expressions_of([col1, col2, lg_nom_entries, mode]),
     )
 }
 

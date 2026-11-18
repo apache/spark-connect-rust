@@ -280,6 +280,11 @@ which the server parses. The `update` and `insert` of the clauses of `MergeIntoW
 passed as before, and the merge sends the assignments in their order, as PySpark sends those of
 `assignments.items()`: a `Vec` or a `BTreeMap` keeps an order, and a `HashMap` sends its own.
 
+`functions` adds a form of each optional argument of a PySpark function that had none, which sends
+PySpark's request, such as `to_date_with_format`, `first_with_ignore_nulls`,
+`from_json_with_options` (of name and value pairs) and `make_interval_with_parts` (of an `Option`
+of each part).
+
 ## Native ML objects: fetch, summaries, save and load (Rust API)
 
 `spark_connect::ml` reads and writes the server-side objects of Spark Connect ML as PySpark 4.3.0
