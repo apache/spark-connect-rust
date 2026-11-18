@@ -305,17 +305,28 @@ fn message_copy<'py>(
     Ok(message)
 }
 
-/// Whether `value` is a message, of this runtime or of protobuf's, as upb's `append` checks it.
+/// Whether `value` is a message, of this runtime or of protobuf's (`google.protobuf.message
+/// .Message`, of any type), as upb's `append` checks it: an object that only has a `DESCRIPTOR` and
+/// a `SerializeToString` is not. A message of another type is the error of its merge.
 fn verify_message(value: &Bound<'_, PyAny>) -> PyResult<()> {
-    if value.cast::<PyMessage>().is_ok()
-        || (value.hasattr("DESCRIPTOR")? && value.hasattr("SerializeToString")?)
-    {
+    if value.cast::<PyMessage>().is_ok() || is_protobufs_message(value) {
         return Ok(());
     }
     let repr = value.repr().map(|r| r.to_string()).unwrap_or_default();
     Err(PyTypeError::new_err(format!(
         "Expected a message object, but got {repr}."
     )))
+}
+
+/// Whether `value` is a message of protobuf's (`google.protobuf.message.Message`), where protobuf
+/// is installed.
+fn is_protobufs_message(value: &Bound<'_, PyAny>) -> bool {
+    value
+        .py()
+        .import("google.protobuf.message")
+        .and_then(|module| module.getattr("Message"))
+        .and_then(|message| value.is_instance(&message))
+        .unwrap_or(false)
 }
 
 /// The field of a container of scalars, which its values are converted for: the kind of the
@@ -1449,7 +1460,28 @@ impl MapContainer {
         Ok(())
     }
 
-    /// Whether `a` and `b` have the same keys, of equal values.
+    /// Whether the maps `a` and `b` are equal as upb's `==` of two maps tells, which is
+    /// `Mapping.__eq__`: as dicts of their keys and values, of Python's `==`. So a map equals a map
+    /// of other key or value types of equal keys and values (`{1: "t"}` of int32 keys and of
+    /// int64 or bool keys), and a map of a NaN value equals no map, itself neither, where `==` of
+    /// two messages compares their maps' values of their bits (see [`MapContainer::equal`]). Two
+    /// maps of the same key and value types of no floats are compared in place.
+    fn equal_as_dicts(py: Python<'_>, a: &Bound<'_, Self>, b: &Bound<'_, Self>) -> PyResult<bool> {
+        let (x, y) = (Self::map_of(a), Self::map_of(b));
+        let in_place = x.key == y.key
+            && x.value == y.value
+            && x.value_type == y.value_type
+            && !matches!(x.value, Kind::Double | Kind::Float);
+        if in_place {
+            return Self::equal(py, a, b);
+        }
+        let mine = a.borrow().to_dict(py)?;
+        let theirs = b.borrow().to_dict(py)?;
+        mine.as_any().eq(theirs)
+    }
+
+    /// Whether `a` and `b` have the same keys, of equal values, as upb's `==` of two messages
+    /// compares their maps: a float or a double of its bits.
     pub(crate) fn equal(
         py: Python<'_>,
         a: &Bound<'_, Self>,
@@ -1467,7 +1499,7 @@ impl MapContainer {
                 return Ok(false);
             };
             let equal = match (value, other) {
-                (MapValue::Scalar(v), MapValue::Scalar(w)) => v == w,
+                (MapValue::Scalar(v), MapValue::Scalar(w)) => v.eq_as_upb(w),
                 (MapValue::Message(m), MapValue::Message(n)) => {
                     content_eq(py, m.bind(py), n.bind(py))?
                 }
@@ -1896,7 +1928,7 @@ impl MapContainer {
             return Ok(py.NotImplemented());
         }
         let equal = if let Ok(other) = other.cast::<MapContainer>() {
-            Self::equal(py, slf, other)?
+            Self::equal_as_dicts(py, slf, other)?
         } else if other.cast::<PyDict>().is_ok() {
             let mine = slf.borrow().to_dict(py)?;
             mine.as_any().eq(other)?

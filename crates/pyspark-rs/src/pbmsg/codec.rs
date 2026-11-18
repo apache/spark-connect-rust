@@ -449,6 +449,67 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The value of a field of the unknown fields of a message, as upb's comparison of unknown fields
+/// reads it: a varint of its value, whatever its encoding, a length-delimited field of its bytes,
+/// and a group of its fields.
+#[derive(PartialEq)]
+enum UnknownValue<'a> {
+    Varint(u64),
+    Fixed64(u64),
+    Fixed32(u32),
+    Delimited(&'a [u8]),
+    Group(Vec<(u32, UnknownValue<'a>)>),
+}
+
+/// The fields of the unknown fields that `reader` reads, up to its end, or up to the end of the
+/// group `group`: each of its tag and value, stably sorted by their tags, as upb sorts them to
+/// compare them (`upb_UnknownFields_Build`), the fields of a group too.
+fn unknown_fields_of<'a>(
+    reader: &mut Reader<'a>,
+    group: Option<u32>,
+) -> PyResult<Vec<(u32, UnknownValue<'a>)>> {
+    let mut fields = Vec::new();
+    loop {
+        if reader.done() {
+            if group.is_some() {
+                return Err(decode_error("unterminated group"));
+            }
+            break;
+        }
+        let (number, wire_type) = reader.tag()?;
+        let value = match wire_type {
+            0 => UnknownValue::Varint(reader.varint()?),
+            1 => UnknownValue::Fixed64(u64::from_le_bytes(reader.fixed64()?)),
+            2 => UnknownValue::Delimited(reader.len_delimited()?),
+            3 => UnknownValue::Group(grow(|| unknown_fields_of(reader, Some(number)))?),
+            4 if group == Some(number) => break,
+            5 => UnknownValue::Fixed32(u32::from_le_bytes(reader.fixed32()?)),
+            _ => return Err(decode_error("invalid unknown field")),
+        };
+        fields.push(((number << 3) | u32::from(wire_type), value));
+    }
+    fields.sort_by_key(|&(tag, _)| tag);
+    Ok(fields)
+}
+
+/// Whether the unknown fields `a` and `b` of two messages are equal as upb's `==` compares them
+/// (`upb_Message_UnknownFieldsAreEqual`): of the same bytes, or of the same fields, each of its
+/// number, wire type and value, in the order of their tags, so that the order of fields of other
+/// numbers or wire types, and the encoding of a varint, do not count. The fields of the same tag
+/// keep their order. A length-delimited field compares its bytes as they are.
+pub(crate) fn unknown_fields_eq(a: &[u8], b: &[u8]) -> bool {
+    if a == b {
+        return true;
+    }
+    match (
+        unknown_fields_of(&mut Reader::new(a), None),
+        unknown_fields_of(&mut Reader::new(b), None),
+    ) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
 /// Merge the encoded message `data` into `message`, as protobuf's `MergeFromString` does. A
 /// failure is upb's `DecodeError` of the message type, also of a failure in a message that it
 /// holds: "Error parsing message with type 'spark.connect.Plan': Wire format was corrupt", of the

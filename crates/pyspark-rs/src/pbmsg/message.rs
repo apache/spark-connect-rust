@@ -480,14 +480,29 @@ pub(crate) fn name_and_bytes(message: &Bound<'_, PyAny>) -> PyResult<(String, Ve
     Ok((name, bytes))
 }
 
-/// Whether `value`, an object other than a message of the runtime, has the `DESCRIPTOR` of the
-/// message type `full_name`, as a message of protobuf's of the type has.
-fn is_described_as(value: &Bound<'_, PyAny>, full_name: &str) -> bool {
-    value
-        .getattr("DESCRIPTOR")
-        .and_then(|d| d.getattr("full_name"))
-        .and_then(|n| n.extract::<String>())
-        .is_ok_and(|n| n == full_name)
+/// Whether `value`, an object other than a message of the runtime, is a message of protobuf's
+/// (of upb, or of protobuf's pure-Python implementation) of the type `full_name` of protobuf's
+/// default pool: the pool whose files the runtime holds, so that the message is of the type of the
+/// runtime of that name, as upb has one class of each type of a pool. A message of a type of
+/// another pool, of another class for upb too, is not, nor is an object that only has a
+/// `DESCRIPTOR` and a `SerializeToString`, which upb's messages refuse too.
+fn is_protobufs_message_of(value: &Bound<'_, PyAny>, full_name: &str) -> bool {
+    let py = value.py();
+    let of_the_type = || -> PyResult<bool> {
+        let message = py.import("google.protobuf.message")?.getattr("Message")?;
+        if !value.is_instance(&message)? {
+            return Ok(false);
+        }
+        let descriptor = value.getattr("DESCRIPTOR")?;
+        if descriptor.getattr("full_name")?.extract::<String>()? != full_name {
+            return Ok(false);
+        }
+        let default = py
+            .import("google.protobuf.descriptor_pool")?
+            .call_method0("Default")?;
+        Ok(descriptor.getattr("file")?.getattr("pool")?.is(&default))
+    };
+    of_the_type().unwrap_or(false)
 }
 
 /// A new message of the type `full_name` of `value`: a copy of a message of that type, of this
@@ -517,7 +532,7 @@ pub(crate) fn message_from_value<'py>(
     if value.cast::<PyDict>().is_ok() {
         return from_mapping();
     }
-    if is_described_as(value, full_name) {
+    if is_protobufs_message_of(value, full_name) {
         if let Ok((_, bytes)) = name_and_bytes(value) {
             let child = new_instance(py, full_name)?;
             codec::merge_in(py, &child, &bytes, budget)?;
@@ -546,21 +561,8 @@ fn as_message_of_type<'py>(
     if other.is_none() || other.is_instance_of::<PyType>() {
         return Ok(None);
     }
-    let Some(descriptor) = other.getattr_opt("DESCRIPTOR").ok().flatten() else {
-        return Ok(None);
-    };
     let full_name = message.borrow().desc.full_name.clone();
-    let of_default_pool = || -> PyResult<bool> {
-        if descriptor.getattr("full_name")?.extract::<String>()? != full_name {
-            return Ok(false);
-        }
-        let pool = descriptor.getattr("file")?.getattr("pool")?;
-        let default = py
-            .import("google.protobuf.descriptor_pool")?
-            .call_method0("Default")?;
-        Ok(pool.is(&default))
-    };
-    if !of_default_pool().unwrap_or(false) {
+    if !is_protobufs_message_of(other, &full_name) {
         return Ok(None);
     }
     message_from_value(py, &full_name, other, &ConversionBudget::full()).map(Some)
@@ -585,7 +587,7 @@ fn message_for_field<'py>(
         }
     }
     let is_mapping = value.cast::<PyDict>().is_ok() || value.hasattr("keys").unwrap_or(false);
-    let is_of_type = runtime_message.is_none() && is_described_as(value, full_name);
+    let is_of_type = runtime_message.is_none() && is_protobufs_message_of(value, full_name);
     if !is_mapping && !is_of_type && assigns_values(py, full_name) {
         let child = new_instance(py, full_name)?;
         child.call_method1("_internal_assign", (value,))?;
@@ -883,7 +885,7 @@ pub(crate) fn content_eq(
                 return Ok(false);
             }
         }
-        Ok(x.unknown == y.unknown)
+        Ok(codec::unknown_fields_eq(&x.unknown, &y.unknown))
     })
 }
 
@@ -931,7 +933,7 @@ fn slot_eq(
             x.as_ref().map_or(&[][..], |c| &c.items[..]),
             y.as_ref().map_or(&[][..], |c| &c.items[..]),
         );
-        return Ok(x == y);
+        return Ok(x.len() == y.len() && x.iter().zip(y).all(|(v, w)| v.eq_as_upb(w)));
     }
     if field.kind == Kind::Message {
         return match (a, b) {
@@ -948,12 +950,11 @@ fn slot_eq(
             _ => None,
         }
     }
-    // A scalar that one sets is equal to the other's default, of a field without presence.
+    // As upb's, of the bits of a float or a double. A scalar that one sets is equal to the
+    // other's default, of a field without presence: of the bits of 0.0, which -0.0 is not.
     Ok(match (value(a), value(b)) {
-        (Some(v), Some(w)) => v == w,
-        (Some(v), None) | (None, Some(v)) => {
-            !field.has_presence() && *v == Scalar::default_of(field.kind)
-        }
+        (Some(v), Some(w)) => v.eq_as_upb(w),
+        (Some(v), None) | (None, Some(v)) => !field.has_presence() && v.is_default(),
         (None, None) => true,
     })
 }
@@ -1343,11 +1344,13 @@ impl PyMessage {
             mark_present(slf)?;
             merge_into_with(py, slf, other, budget)
         } else {
-            let (name, bytes) = name_and_bytes(other_msg)
-                .map_err(|_| not_same_class("MergeFrom", slf.as_any(), other_msg))?;
-            if name != full_name {
+            // As upb's, which takes a message of its class of the type only: protobuf's message
+            // of the type of its default pool, of its bytes.
+            if !is_protobufs_message_of(other_msg, &full_name) {
                 return Err(not_same_class("MergeFrom", slf.as_any(), other_msg));
             }
+            let (_, bytes) = name_and_bytes(other_msg)
+                .map_err(|_| not_same_class("MergeFrom", slf.as_any(), other_msg))?;
             mark_present(slf)?;
             codec::merge_in(py, slf, &bytes, budget)
         }
@@ -1585,11 +1588,13 @@ impl PyMessage {
             }
             Ok(())
         } else {
-            let (name, bytes) = name_and_bytes(other_msg)
-                .map_err(|_| not_same_class("CopyFrom", slf.as_any(), other_msg))?;
-            if name != full_name {
+            // As upb's, which takes a message of its class of the type only: protobuf's message
+            // of the type of its default pool, of its bytes.
+            if !is_protobufs_message_of(other_msg, &full_name) {
                 return Err(not_same_class("CopyFrom", slf.as_any(), other_msg));
             }
+            let (_, bytes) = name_and_bytes(other_msg)
+                .map_err(|_| not_same_class("CopyFrom", slf.as_any(), other_msg))?;
             mark_present(slf)?;
             slf.borrow_mut()
                 .replace_slots(py, Slots::default(), Vec::new())?;

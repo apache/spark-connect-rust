@@ -586,12 +586,14 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
     whose messages equal (`==`) the runtime's of the same contents, as upb's of its one class of a
     type do;
   - a file that it imports that does not import the protos of Spark Connect (Delta Lake's
-    `delta/connect/base.proto`) keeps `protobuf`'s classes. A field of the runtime of one of its
-    types takes `protobuf`'s messages of the type, and gives a message of the runtime's class of
-    the type, not of the module's class, which upb gives, so `isinstance` with the module's class
-    is false, the message pickles only within the message that holds it, and the module's class
-    takes it only through bytes or dicts (`CopyFrom` raises `TypeError`), though the two are equal
-    of the same contents;
+    `delta/connect/base.proto`) keeps `protobuf`'s classes, as the drop-in cannot know, when
+    `protobuf`'s builder builds it, that a plugin's file will import it later, and giving the
+    runtime's classes to every proto3 module would change unrelated libraries. A field of the
+    runtime of one of its types takes `protobuf`'s messages of the type, and gives a message of the
+    runtime's class of the type, not of the module's class, which upb gives, so `isinstance` with
+    the module's class is false, the message pickles only within the message that holds it, and the
+    module's class takes it only through bytes or dicts (`CopyFrom` raises `TypeError`), though the
+    two are equal of the same contents;
   - a file that is not proto3, or that imports one or a well-known type other than `Any` and
     `Timestamp`, keeps `protobuf`'s classes, which take the package's messages, and those of a
     module of a file that it imports that has the runtime's classes (a proto3 file of the plugin

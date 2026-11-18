@@ -3787,6 +3787,205 @@ def test_messages_of_a_type_of_protobufs_classes_and_of_the_runtimes_compare_as_
     assert literal.map == literal_map and literal_map == literal.map
 
 
+def test_equality_of_messages_compares_floats_of_their_bits_as_upbs(upb):
+    # upb's == of two messages (upb_Message_IsEqual) compares a float or a double field of its
+    # bits, as it compares an integer: a NaN equals a NaN of the same bits, a message of a NaN
+    # equals its copy, and -0.0 is not 0.0, nor the unset default of a field without presence. So
+    # do `in` and `remove` of the containers of messages, and == of two messages' maps. The
+    # runtime compared their values, as Python's ==, so a message of a NaN never equaled itself
+    # but by its identity. == of the containers and maps themselves compares their values as
+    # Python's == does, on both runtimes.
+    import struct
+
+    nan = float("nan")
+    other_nan = struct.unpack("<d", struct.pack("<Q", 0x7FF8000000000001))[0]
+
+    def cases(new):
+        literal = new("spark.connect.Expression.Literal")
+        sample = new("spark.connect.Sample")
+        quantile = new("spark.connect.StatApproxQuantile")
+        sql = new("spark.connect.SQL")
+        relation = new("spark.connect.Relation")
+        return {
+            "double NaN": (literal(double=nan), literal(double=nan)),
+            "double NaNs of other bits": (literal(double=nan), literal(double=other_nan)),
+            "double -0.0 and 0.0": (literal(double=-0.0), literal(double=0.0)),
+            "float NaN": (literal(float=nan), literal(float=nan)),
+            "float -0.0 and 0.0": (literal(float=-0.0), literal(float=0.0)),
+            "a NaN of no presence": (sample(upper_bound=nan), sample(upper_bound=nan)),
+            "-0.0 of no presence and the default": (sample(lower_bound=-0.0), sample()),
+            "-0.0 and 0.0 of no presence": (sample(lower_bound=-0.0), sample(lower_bound=0.0)),
+            "repeated NaN": (
+                quantile(probabilities=[nan, 1.0]),
+                quantile(probabilities=[nan, 1.0]),
+            ),
+            "repeated -0.0 and 0.0": (
+                quantile(probabilities=[-0.0]),
+                quantile(probabilities=[0.0]),
+            ),
+            "a map of a NaN": (
+                sql(args={"k": {"double": nan}}),
+                sql(args={"k": {"double": nan}}),
+            ),
+            "a nested NaN": (
+                relation(sample={"upper_bound": nan}),
+                relation(sample={"upper_bound": nan}),
+            ),
+        }
+
+    real_cases, mine_cases = cases(upb), cases(ours)
+    for label in real_cases:
+        (r1, r2), (m1, m2) = real_cases[label], mine_cases[label]
+        real = (r1 == r2, r1 != r2, r2 == r1, r1 == copy.deepcopy(r1))
+        real += (r1 == type(r1).FromString(r1.SerializeToString()),)
+        mine = (m1 == m2, m1 != m2, m2 == m1, m1 == copy.deepcopy(m1))
+        mine += (m1 == type(m1).FromString(m1.SerializeToString()),)
+        assert mine == real, label
+    for new in (upb, ours):
+        literal = new("spark.connect.Expression.Literal")
+        array = new("spark.connect.Expression.Literal.Array")(elements=[{"double": nan}])
+        assert literal(double=nan) in array.elements
+        array.elements.remove(literal(double=nan))
+        assert len(array.elements) == 0
+        # The containers and maps compare their values as Python's == does.
+        quantile = new("spark.connect.StatApproxQuantile")
+        with_nan = quantile(probabilities=[nan]).probabilities
+        assert with_nan != quantile(probabilities=[nan]).probabilities and with_nan != with_nan
+        assert quantile(probabilities=[-0.0]).probabilities == [0.0]
+
+
+def test_unknown_fields_of_messages_compare_as_upbs(upb):
+    # upb's == compares the unknown fields of two messages by their fields, of their tags and
+    # values, in the order of their tags (upb_Message_UnknownFieldsAreEqual): the order of the
+    # fields of other numbers or wire types and the encoding of a varint do not count, in a group
+    # either, and fields of the same tag keep their order. The runtime compared their bytes. So do
+    # a message of the runtime and protobuf's message of its type.
+    from google.protobuf import descriptor_pool, message_factory
+
+    def group(number, body):
+        return _tag(number, 3) + body + _tag(number, 4)
+
+    first, second = _tag(1, 0) + _varint(7), _tag(2, 0) + _varint(8)
+    varint, fixed32 = _tag(501, 0) + _varint(5), _tag(501, 5) + b"\x05\x00\x00\x00"
+    cases = {
+        "the same fields": (varint + _field(502, b"abc"), varint + _field(502, b"abc")),
+        "fields of other numbers swapped": (
+            varint + _field(502, b"abc"),
+            _field(502, b"abc") + varint,
+        ),
+        "three numbers rotated": (
+            _tag(503, 0) + b"\x01" + _tag(501, 0) + b"\x02" + _tag(502, 0) + b"\x03",
+            _tag(501, 0) + b"\x02" + _tag(502, 0) + b"\x03" + _tag(503, 0) + b"\x01",
+        ),
+        "fields of the same number and wire type swapped": (
+            varint + _tag(501, 0) + _varint(6),
+            _tag(501, 0) + _varint(6) + varint,
+        ),
+        "fields of the same number of other wire types swapped": (
+            varint + fixed32,
+            fixed32 + varint,
+        ),
+        "a varint of more bytes": (_tag(501, 0) + b"\x85\x00", varint),
+        "a varint of ten bytes": (_tag(501, 0) + b"\x85" + b"\x80" * 8 + b"\x00", varint),
+        "a varint and a fixed32 of the same value": (varint, fixed32),
+        "length-delimited fields of their fields swapped": (
+            _field(502, first + second),
+            _field(502, second + first),
+        ),
+        "a group of its fields swapped": (group(503, first + second), group(503, second + first)),
+        "groups swapped": (
+            group(503, first) + group(504, second),
+            group(504, second) + group(503, first),
+        ),
+        "nested groups of their fields swapped": (
+            group(503, group(5, first + second)),
+            group(503, group(5, second + first)),
+        ),
+        "a fixed64 of other bytes": (_tag(501, 1) + b"\x01" * 8, _tag(501, 1) + b"\x02" * 8),
+        "one field and none": (varint, b""),
+    }
+    pool = descriptor_pool.Default()
+    protobufs = message_factory.GetMessageClass(
+        pool.FindMessageTypeByName("spark.connect.Expression.Literal")
+    )
+    real, mine = upb("spark.connect.Expression.Literal"), ours("spark.connect.Expression.Literal")
+    for label, (a, b) in cases.items():
+        expected = real.FromString(a) == real.FromString(b)
+        assert (mine.FromString(a) == mine.FromString(b)) is expected, label
+        assert (mine.FromString(a) != mine.FromString(b)) is not expected, label
+        assert (mine.FromString(a) == protobufs.FromString(b)) is expected, label
+        assert (protobufs.FromString(b) == mine.FromString(a)) is expected, label
+        # In a message that the message holds too.
+        held_real = upb("spark.connect.Relation")()
+        held_real.limit.MergeFromString(a)
+        held_mine = ours("spark.connect.Relation")()
+        held_mine.limit.MergeFromString(a)
+        other_real, other_mine = upb("spark.connect.Relation")(), ours("spark.connect.Relation")()
+        other_real.limit.MergeFromString(b)
+        other_mine.limit.MergeFromString(b)
+        assert (held_mine == other_mine) is (held_real == other_real) is expected, label
+
+
+class _Lookalike:
+    """An object of the `DESCRIPTOR` and `SerializeToString` of a message, which is not one."""
+
+    def __init__(self, cls, data):
+        self.DESCRIPTOR = cls.DESCRIPTOR
+        self.data = data
+
+    def SerializeToString(self, **kwargs):
+        return self.data
+
+    def __repr__(self):
+        return "<a lookalike>"
+
+
+def test_messages_take_only_protobufs_messages_of_their_type_of_its_default_pool_as_upbs(upb):
+    # upb's messages take a message of their class only. upb has one class of a type of a pool, so
+    # the runtime takes protobuf's message of its type of protobuf's default pool, whose files it
+    # holds, as upb takes its own. It also took a message of a type of the same name of another
+    # pool, and any object of a DESCRIPTOR of the name and a SerializeToString, of their bytes, in
+    # CopyFrom, MergeFrom, the constructors and the containers, which upb refuses, with the errors
+    # of another class. == already compared them unequal.
+    import types
+
+    others = _upb_classes_of([])
+
+    def run(new, other_of):
+        literal = new("spark.connect.Expression.Literal")
+        array = new("spark.connect.Expression.Literal.Array")
+        expression = new("spark.connect.Expression")
+        sql = new("spark.connect.SQL")
+        other = other_of()
+        return {
+            "CopyFrom": lambda: literal().CopyFrom(other),
+            "MergeFrom": lambda: literal().MergeFrom(other),
+            "CopyFrom of a field": lambda: expression().literal.CopyFrom(other),
+            "the constructor of a field": lambda: expression(literal=other),
+            "the constructor of a repeated field": lambda: array(elements=[other]),
+            "append": lambda: array().elements.append(other),
+            "extend": lambda: array().elements.extend([other]),
+            "insert": lambda: array().elements.insert(0, other),
+            "==": lambda: literal(integer=5) == other,
+            "!=": lambda: literal(integer=5) != other,
+            "in": lambda: other in array(elements=[{"integer": 5}]).elements,
+            "a value of a map of the constructor": lambda: sql(args={"k": other}),
+            "MergeFrom of a map": lambda: sql().args.MergeFrom(types.MappingProxyType({"k": other})),
+        }
+
+    name = "spark.connect.Expression.Literal"
+    data = ours(name)(integer=5).SerializeToString()
+    # A message of another pool: of the pool of _upb_classes_of for the runtime, and of a pool of
+    # its own for upb's classes. A lookalike of the descriptor of the class.
+    for kind, real_other, mine_other in [
+        ("another pool", lambda: others[name](integer=5), lambda: upb(name)(integer=5)),
+        ("a lookalike", lambda: _Lookalike(upb(name), data), lambda: _Lookalike(ours(name), data)),
+    ]:
+        real_cases, mine_cases = run(upb, real_other), run(ours, mine_other)
+        for label in real_cases:
+            assert _outcome(mine_cases[label]) == _outcome(real_cases[label]), (kind, label)
+
+
 def test_modules_that_keep_protobufs_classes_take_the_runtimes_messages_through_bytes(upb):
     # A module of a plugin's file that keeps protobuf's classes (a proto3 file that imports a
     # well-known type other than Any and Timestamp, a proto2 file or one of editions) and imports
@@ -4008,3 +4207,90 @@ def test_maps_of_integer_keys_merge_serialize_and_print_as_upbs(upb):
     assert str(mine) == str(real) and repr(mine) == repr(real)
     assert text_format.MessageToString(mine) == text_format.MessageToString(real)
     assert mine_class.FromString(real.SerializeToString()) == mine
+
+
+_EQUALITY_MAPS = "tests/eqmaps/maps.proto"
+
+
+def _maps_of_kinds(upb):
+    """The class of the runtime and upb's class of ``tests.eqmaps.M``, a message of a plugin's file
+    (which imports Spark Connect's relations.proto) of maps of int32, int64, uint32 and bool keys to
+    strings, of a map of int32 to int32 and one of int64 to int64, and of a map of strings to
+    doubles: the protos of Spark Connect have maps of string keys only, of no floats. The runtime's
+    class is that of the module that protoc generates of the file, which the hook gives the
+    runtime's classes; upb's is of a pool of its own, as ``_upb_classes_of`` makes them."""
+    from google.protobuf import descriptor_pb2, descriptor_pool
+
+    field = descriptor_pb2.FieldDescriptorProto
+    file = descriptor_pb2.FileDescriptorProto(
+        name=_EQUALITY_MAPS,
+        package="tests.eqmaps",
+        dependency=["spark/connect/relations.proto"],
+        syntax="proto3",
+    )
+    message = file.message_type.add(name="M")
+    maps = [
+        ("i32", field.TYPE_INT32, field.TYPE_STRING),
+        ("i64", field.TYPE_INT64, field.TYPE_STRING),
+        ("u32", field.TYPE_UINT32, field.TYPE_STRING),
+        ("b", field.TYPE_BOOL, field.TYPE_STRING),
+        ("ii", field.TYPE_INT32, field.TYPE_INT32),
+        ("ll", field.TYPE_INT64, field.TYPE_INT64),
+        ("d", field.TYPE_STRING, field.TYPE_DOUBLE),
+    ]
+    for number, (name, key_type, value_type) in enumerate(maps, 1):
+        entry = message.nested_type.add(name=name.capitalize() + "Entry")
+        entry.options.map_entry = True
+        entry.field.add(name="key", number=1, type=key_type, label=field.LABEL_OPTIONAL)
+        entry.field.add(name="value", number=2, type=value_type, label=field.LABEL_OPTIONAL)
+        message.field.add(
+            name=name,
+            number=number,
+            type=field.TYPE_MESSAGE,
+            label=field.LABEL_REPEATED,
+            type_name=f".tests.eqmaps.M.{entry.name}",
+        )
+    message.field.add(
+        name="input",
+        number=len(maps) + 1,
+        type=field.TYPE_MESSAGE,
+        label=field.LABEL_OPTIONAL,
+        type_name=".spark.connect.Relation",
+    )
+    serialized = file.SerializeToString()
+    pool = descriptor_pool.Default()
+    try:
+        added = pool.FindFileByName(_EQUALITY_MAPS)
+    except KeyError:
+        added = pool.AddSerializedFile(serialized)
+    mine = _build_generated_module(added)["M"]
+    assert issubclass(mine, _pyspark.ProtoMessage)
+    real = _upb_classes_of([(serialized, "tests.eqmaps.maps_pb2")])["tests.eqmaps.M"]
+    return mine, real
+
+
+def test_maps_of_integer_keys_and_of_doubles_compare_as_upbs(upb):
+    # The protos of Spark Connect have maps of string keys only, of no floats, so a plugin's file
+    # has the others. (The test comes after those that compare each class of the runtime with
+    # upb's, as the file adds its classes to the runtime's.) upb's == of two maps is
+    # Mapping.__eq__, of the dicts of their items: a map of int32 keys equals a map of int64 or
+    # bool keys of equal keys and values, as dicts of them are equal, and a map of a NaN value
+    # equals no map, itself neither, where == of two messages compares the values of their maps of
+    # their bits, as their fields. The runtime compared the maps of other types unequal and a map
+    # of a NaN equal to itself, and the messages of a NaN unequal and of -0.0 equal to 0.0.
+    nan = float("nan")
+    mine_class, real_class = _maps_of_kinds(upb)
+    for cls in (real_class, mine_class):
+        message = cls(i32={1: "t"}, i64={1: "t"}, u32={1: "t"}, b={True: "t"})
+        message.ii[1] = 2
+        message.ll[1] = 2
+        assert message.i32 == message.i64 and message.i64 == message.i32, cls
+        assert message.i32 == message.u32 and message.i32 == message.b, cls
+        assert not (message.i32 != message.b) and message.ii == message.ll, cls
+        assert message.i32 != cls(i64={1: "u"}).i64 and message.i32 == {1: "t"}, cls
+        with_nan = cls(d={"x": nan})
+        assert with_nan == cls(d={"x": nan}) and with_nan == copy.deepcopy(with_nan), cls
+        assert with_nan.d != cls(d={"x": nan}).d and with_nan.d != with_nan.d, cls
+        assert not (with_nan.d == with_nan.d) and with_nan.d != {"x": nan}, cls
+        assert cls(d={"x": -0.0}) != cls(d={"x": 0.0}), cls
+        assert cls(d={"x": -0.0}).d == cls(d={"x": 0.0}).d, cls

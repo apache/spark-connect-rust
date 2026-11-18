@@ -1568,13 +1568,16 @@ and the rest of such a module is `protobuf`'s:
   the builder makes too, as without the drop-in; a class of those takes a message of the package
   only through its bytes (`plugin.input.ParseFromString(relation.SerializeToString())`) or a dict;
 - a file that it imports that does not import the protos of Spark Connect (Delta Lake's
-  `delta/connect/base.proto`) keeps `protobuf`'s classes in its own module. A message field of the
-  runtime of one of its types takes `protobuf`'s messages of the type, by their full name and
-  bytes, and gives a message of the runtime's class of the type, which is not the module's class:
-  `isinstance(relation.scan.table, base_pb2.DeltaTable)` is false, such a message pickles only
-  within the message that holds it, and the module's class takes it only through its bytes or a
-  dict (`base_pb2.DeltaTable().CopyFrom(relation.scan.table)` raises `TypeError`), though the two
-  are equal (`==`) of the same contents, as below;
+  `delta/connect/base.proto`) keeps `protobuf`'s classes in its own module: when `protobuf`'s
+  builder builds such a file, the drop-in cannot know that a plugin's file will import it later
+  (Delta Lake's `delta/connect/proto/__init__.py` imports `base_pb2` first), and giving the
+  runtime's classes to every proto3 module would change the classes of unrelated libraries. A
+  message field of the runtime of one of its types takes `protobuf`'s messages of the type, by their
+  full name and bytes, and gives a message of the runtime's class of the type, which is not the
+  module's class: `isinstance(relation.scan.table, base_pb2.DeltaTable)` is false, such a message
+  pickles only within the message that holds it, and the module's class takes it only through its
+  bytes or a dict (`base_pb2.DeltaTable().CopyFrom(relation.scan.table)` raises `TypeError`), though
+  the two are equal (`==`) of the same contents, as below;
 - a file that is not proto3 (of proto2 or of editions, whose presence, defaults and packing the
   runtime does not read), or that imports one, or a well-known type other than `Any` and
   `Timestamp` (`protobuf`'s classes of `Duration`, `Struct` and the others have methods that the
@@ -1594,7 +1597,16 @@ runtime equals (`==`, on either side) a message of `protobuf`'s of its type of `
 pool of the same contents, as upb's messages of its one class of a type do: the runtime parses the
 bytes of `protobuf`'s message to compare it, as a field of the runtime takes it, so `in`, `remove`
 and `==` of the containers find such messages too. A message of a type of another pool, of
-another class for upb too, is not equal.
+another class for upb too, is not equal, and `CopyFrom`, `MergeFrom`, the constructors and the
+containers refuse it with upb's errors of a message of another class, as they refuse an object
+that only has the `DESCRIPTOR` and the `SerializeToString` of a message. As upb's, `==` of two
+messages compares a float or a double field of its bits, so that a NaN equals a NaN of the same
+bits and -0.0 is not 0.0 (nor the default of a field without presence), and their unknown fields
+of their numbers, wire types and values, in the order of their tags, so that the order of fields
+of other tags and the encoding of a varint do not count. `==` of the containers and maps compares
+their values as Python's `==` does, as upb's `list` and `Mapping` comparisons do: a NaN value is
+not equal to itself, and a map is equal to a map of other key or value types of equal keys and
+values.
 
 `google.protobuf.unknown_fields.UnknownFieldSet` is the drop-in's wrapper of `protobuf`'s class,
 once `pyspark.sql.connect.proto` is imported, which takes the messages of the package too, where
