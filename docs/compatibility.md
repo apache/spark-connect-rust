@@ -2446,20 +2446,23 @@ DataFrame or the Column that holds it, such as through a bound method of an obje
 DataFrame, is collected. So do the objects that hold such Columns, or the plan of a DataFrame, as
 PySpark's do: grouped data and their cogroups, a table argument, a window specification, the
 writers of `write`, `writeTo` and `writeStream`, `na` and `stat`, a merge builder and its clauses,
-the generator of `toLocalIterator`, which holds its DataFrame until it ends, as PySpark's
-generator holds `self`, and the expression of a Column (`Column._expr`) and of a table argument
-(`TableArg._subquery_expr`), which `copy.copy` and `copy.deepcopy` copy as they copy a Column.
-Those that hold their DataFrame report it, and the DataFrame reports the functions of the plan
-that they share, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`, is
-collected too. A function that a Column and a DataFrame of it share, or two DataFrames, or a
-DataFrame and a table argument of it, which holds its plan and not the DataFrame, as PySpark's
+the generator of `toLocalIterator`, which holds its DataFrame until it ends, as PySpark's generator
+holds `self`, and the expression of a Column (`Column._expr`) and of a table argument
+(`TableArg._subquery_expr`), which `copy.copy` and `copy.deepcopy` copy as they copy a Column. Those
+that hold their DataFrame report it, and the DataFrame reports the functions of the plan that they
+share, so a cycle through the DataFrame alone, such as `df.back = df.groupBy("id")`, is collected
+too. An `ArrayType`, a `MapType`, a `StructField` and a `StructType` report the type objects, the
+flags and the metadata dict that they hold, and the lists of a struct, as PySpark's `__dict__` holds
+them, so a cycle through a type that one holds, such as a `DecimalType` with an attribute that keeps
+the struct, is collected. A function that a Column and a DataFrame of it share, or two DataFrames,
+or a DataFrame and a table argument of it, which holds its plan and not the DataFrame, as PySpark's
 does, is reported by neither, so that no reference is counted twice: a cycle through it is freed
 only when it is broken, where PySpark collects it. A stream writer holds its DataFrame, where
 PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed by the collector,
 where PySpark frees it with its last reference. The functions of `foreachBatch` and `foreach` are
-kept as their pickles, as PySpark's stream writer keeps them, so a function that keeps its writer
-is freed with its last reference, and a copy or a pickle of the writer carries the pickle of the
-call. The registration of `dataSource` reports its session, and the builder of
+kept as their pickles, as PySpark's stream writer keeps them, so a function that keeps its writer is
+freed with its last reference, and a copy or a pickle of the writer carries the pickle of the call.
+The registration of `dataSource` reports its session, and the builder of
 `pyspark.sql.connect.session.SparkSession` its channel builder and its hook factories, as PySpark's
 plain objects hold them, so a session that keeps its `dataSource`, or a channel builder or a hook
 factory that keeps its builder, is collected. One that a copy of the builder shares is reported by
