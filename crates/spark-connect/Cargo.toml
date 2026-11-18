@@ -31,16 +31,17 @@ uuid.workspace = true
 stacker = "0.1"
 
 # Optional: only pulled in by the `wasm-udf` feature.
-base64 = { version = "0.21", optional = true }
+base64 = { version = "0.22", optional = true }
 
 # Optional conversion features (off by default).
 datafusion = { workspace = true, optional = true }
 polars = { workspace = true, optional = true }
 
 [dev-dependencies]
-base64 = "0.21"
+base64 = "0.22"
 futures.workspace = true
-tonic.workspace = true
+# The gRPC servers of the tests.
+tonic = { workspace = true, features = ["server", "router"] }
 
 [features]
 # Run Rust UDFs on Spark via WebAssembly (the `wasm_udf` module). Off by
