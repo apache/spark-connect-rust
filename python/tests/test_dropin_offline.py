@@ -22462,6 +22462,355 @@ def test_local_rows_are_serialized_by_the_udt_objects_of_the_schema_as_pysparks(
     assert table.to_pylist() == [{"a": 6, "b": 40}]
 
 
+class _ScaledValueUDT(T.UserDefinedType):
+    """A UserDefinedType of a scale, of the values of `_ScaledValue`."""
+
+    def __init__(self, scale=1):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return T.LongType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj.value * self.scale
+
+    def deserialize(self, datum):
+        return _ScaledValue(datum // self.scale, self.scale)
+
+
+class _ScaledValue:
+    """A value whose `__UDT__` is a `_ScaledValueUDT` of its own scale."""
+
+    def __init__(self, value, scale):
+        self.value, self.scale = value, scale
+
+    @property
+    def __UDT__(self):
+        return _ScaledValueUDT(self.scale)
+
+
+class _ScaledValuePairUDT(T.UserDefinedType):
+    """A UserDefinedType of a scale whose SQL type holds a `_ScaledValueUDT` of that scale."""
+
+    def __init__(self, scale=1):
+        self.scale = scale
+
+    def sqlType(self):
+        return T.StructType([
+            T.StructField("x", _ScaledValueUDT(self.scale)), T.StructField("y", T.LongType()),
+        ])
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return (_ScaledValue(obj.value, 0), obj.value)
+
+    def deserialize(self, datum):
+        return datum
+
+
+class _ScaledValuePair(_ScaledValue):
+    """A value whose `__UDT__` is a `_ScaledValuePairUDT` of its own scale."""
+
+    @property
+    def __UDT__(self):
+        return _ScaledValuePairUDT(self.scale)
+
+
+def test_local_rows_of_an_inferred_schema_are_serialized_by_its_udt_objects_as_pysparks(
+    mock_connect,
+):
+    # As PySpark: an inferred schema holds the `__UDT__` of the first value that is not None at
+    # each place of a user-defined type, as `_merge_type` keeps the first of two UDTs of one class,
+    # and its converters serialize every value there with it (`udt = dataType` of
+    # LocalDataToArrowConversion). So values whose `__UDT__` is of another scale serialize with
+    # the scale of the first: in a field, an array, the keys and the values of a map, a struct, a
+    # dict of a struct, and the SQL type of another UDT, of tuples, Rows, dicts and objects. The
+    # drop-in serialized each value with its own `__UDT__`. The values are those that official
+    # PySpark 4.3.0 sends of the same data.
+    spark, service = mock_connect
+    V, P = _ScaledValue, _ScaledValuePair
+
+    class Obj:
+        def __init__(self, a, b):
+            self.a, self.b = a, b
+
+    for data, expected in [
+        ([(V(3, 2),), (V(4, 10),)], [{"_1": 6}, {"_1": 8}]),
+        ([(None,), (V(3, 2),), (V(4, 10),)], [{"_1": None}, {"_1": 6}, {"_1": 8}]),
+        ([(V(1, 2), V(1, 3)), (V(2, 5), V(2, 7))], [{"_1": 2, "_2": 3}, {"_1": 4, "_2": 6}]),
+        ([Row(a=V(3, 2)), Row(a=V(4, 10))], [{"a": 6}, {"a": 8}]),
+        ([{"a": V(3, 2)}, {"a": V(4, 10)}], [{"a": 6}, {"a": 8}]),
+        ([{"b": 1}, {"a": V(3, 2), "b": 2}, {"a": V(4, 10), "b": 3}],
+         [{"b": 1, "a": None}, {"b": 2, "a": 6}, {"b": 3, "a": 8}]),
+        ([Obj(V(3, 2), 1), Obj(V(4, 10), 2)], [{"a": 6, "b": 1}, {"a": 8, "b": 2}]),
+        ([([V(1, 2), V(2, 10)],), ([V(3, 100)],)], [{"_1": [2, 4]}, {"_1": [6]}]),
+        ([([None, V(2, 10)],), ([V(3, 100)],)], [{"_1": [None, 20]}, {"_1": [30]}]),
+        ([({"k": V(1, 2), "j": V(2, 10)},), ({"k": V(3, 100)},)],
+         [{"_1": [("k", 2), ("j", 4)]}, {"_1": [("k", 6)]}]),
+        ([({V(1, 2): "a"},), ({V(2, 10): "b"},)], [{"_1": [(2, "a")]}, {"_1": [(4, "b")]}]),
+        ([((V(1, 2), 1),), ((V(2, 10), 2),)],
+         [{"_1": {"_1": 2, "_2": 1}}, {"_1": {"_1": 4, "_2": 2}}]),
+        ([(Row(x=V(1, 2)),), (Row(x=V(2, 10)),)], [{"_1": {"x": 2}}, {"_1": {"x": 4}}]),
+        ([(P(1, 2),), (P(2, 10),)], [{"_1": {"x": 2, "y": 1}}, {"_1": {"x": 4, "y": 2}}]),
+    ]:
+        table, _ = _local_rows_relation_of(service, spark.createDataFrame(data))
+        assert table.to_pylist() == expected
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([(V(3, 2), 1), (V(4, 10), 2)], ["u", "n"]))
+    assert table.to_pylist() == [{"u": 6, "n": 1}, {"u": 8, "n": 2}]
+    service.confs = {"spark.sql.pyspark.inferNestedDictAsStruct.enabled": "true"}
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([({"x": V(1, 2)},), ({"x": V(2, 10)},)]))
+    assert table.to_pylist() == [{"_1": {"x": 2}}, {"_1": {"x": 4}}]
+
+
+class _CallsTupleLen(tuple):
+    """A tuple that records the calls of its `__len__` and `__iter__`."""
+
+    calls = []
+
+    def __len__(self):
+        self.calls.append("len")
+        return tuple.__len__(self)
+
+    def __iter__(self):
+        self.calls.append("iter")
+        return tuple.__iter__(self)
+
+
+def test_tuple_rows_of_their_own_len_and_iter_convert_as_pysparks(mock_connect):
+    # As PySpark: `to_row` of LocalDataToArrowConversion takes a tuple row by `len(item)`, which
+    # must be the number of fields, and `tuple(item)`, which iterates it and reads its length hint;
+    # `_infer_schema` names it by `len(row)` and zips the names with `iter(row)`; and the converter
+    # of a struct reads a nested tuple by `len(value)` and `value[i]`. So a subclass of its own
+    # `__iter__`, `__len__` or `__getitem__` gives the values that they give, a raising one raises,
+    # and a row of fewer values than the fields raises the `IndexError` of `row[i]`. The drop-in
+    # read the values as the tuple stores them. The values and errors are those of official
+    # PySpark 4.3.0.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+
+    class Boom(Exception):
+        pass
+
+    class Iter(tuple):
+        def __iter__(self):
+            return iter((99, "z"))
+
+    class LongIter(tuple):
+        def __iter__(self):
+            return iter((99, "z", 3.5))
+
+    class ShortIter(tuple):
+        def __iter__(self):
+            return iter((99,))
+
+    class Len3(tuple):
+        def __len__(self):
+            return 3
+
+    class Len1(tuple):
+        def __len__(self):
+            return 1
+
+    class LenRaises(tuple):
+        def __len__(self):
+            raise Boom("len")
+
+    class IterRaises(tuple):
+        def __iter__(self):
+            raise Boom("iter")
+
+    class TextIter(tuple):
+        def __iter__(self):
+            return iter(("text", 1.5))
+
+    class Getitem(tuple):
+        def __getitem__(self, i):
+            return ("g0", "g1")[i]
+
+    class NamedIter(namedtuple("Named", ["a", "b"])):
+        def __iter__(self):
+            return iter((96, "w"))
+
+    class RowIter(Row):
+        def __iter__(self):
+            return iter((95, "v"))
+
+    schema, struct = "a long, b string", "s struct<a: bigint, b: string>"
+    for data, schema_or_names, expected in [
+        ([Iter((1, "a"))], schema, [{"a": 99, "b": "z"}]),
+        ([Iter((1, "a"))], None, [{"_1": 99, "_2": "z"}]),
+        ([Iter((1, "a"))], ["a"], [{"a": 99, "_2": "z"}]),
+        ([LongIter((1, "a"))], schema, [{"a": 99, "b": "z"}]),
+        ([LongIter((1, "a"))], None, [{"_1": 99, "_2": "z"}]),
+        ([Len1((1, "a"))], "a long", [{"a": 1}]),
+        ([Len1((1, "a"))], None, [{"_1": 1}]),
+        ([Len1((1, "a"))], ["x"], [{"x": 1}]),
+        ([TextIter((1, "a"))], None, [{"_1": "text", "_2": 1.5}]),
+        ([NamedIter(1, "a")], schema, [{"a": 96, "b": "w"}]),
+        ([NamedIter(1, "a")], None, [{"a": 96, "b": "w"}]),
+        ([RowIter(a=1, b="a")], schema, [{"a": 95, "b": "v"}]),
+        ([RowIter(a=1, b="a")], None, [{"a": 95, "b": "v"}]),
+        ([(Getitem((1, "a")),)], "s struct<a: string, b: string>", [{"s": {"a": "g0", "b": "g1"}}]),
+        ([(Len1((1, "a")),)], None, [{"_1": {"_1": 1}}]),
+        ([(Iter((1, "a")),)], None, [{"_1": {"_1": 1, "_2": "a"}}]),
+    ]:
+        df = spark.createDataFrame(data, schema_or_names)
+        table, _ = _local_rows_relation_of(service, df)
+        assert table.to_pylist() == expected
+    for data, schema_or_names, length in [
+        ([Len3((1, "a"))], schema, 3),
+        ([Len3((1, "a"))], None, 3),
+        ([Len3((1, "a"))], ["a"], 3),
+        ([Len1((1, "a"))], schema, 1),
+        ([(1, "a"), Iter((2, "b")), Len3((3, "c"))], schema, 3),
+        ([(Len3((1, "a")),)], struct, 3),
+    ]:
+        with pytest.raises(PySparkValueError) as e:
+            spark.createDataFrame(data, schema_or_names)
+        assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        assert e.value.getMessageParameters() == {
+            "expected_length": "2", "actual_length": str(length)}
+    for data, schema_or_names, error, message in [
+        ([ShortIter((1, "a"))], schema, IndexError, "tuple index out of range"),
+        ([LenRaises((i, "x")) for i in range(3000)], schema, Boom, "len"),
+        ([LenRaises((1, "a"))], None, Boom, "len"),
+        ([IterRaises((1, "a"))], schema, Boom, "iter"),
+        ([(LenRaises((1, "a")),)], struct, Boom, "len"),
+    ]:
+        with pytest.raises(error, match="^" + re.escape(message) + "$"):
+            spark.createDataFrame(data, schema_or_names)
+    # `len(item)`, then `tuple(item)`: `iter(item)` and its length hint; inference first reads
+    # `len(row)` and `iter(row)`; a nested tuple is read by `len(value)` alone.
+    for data, schema_or_names, calls in [
+        ([_CallsTupleLen((1, "a"))], schema, ["len", "iter", "len"]),
+        ([_CallsTupleLen((1, "a"))], None, ["len", "iter", "len", "iter", "len"]),
+        ([(_CallsTupleLen((1, "a")),)], struct, ["len"]),
+    ]:
+        _CallsTupleLen.calls.clear()
+        spark.createDataFrame(data, schema_or_names)
+        assert _CallsTupleLen.calls == calls
+
+
+def test_local_rows_name_and_convert_by_the_type_objects_of_the_schema_as_pysparks(mock_connect):
+    # As PySpark's converters of local rows, which hold the type objects of the schema: the error
+    # of a None of a field that is not nullable, and of a value of a null type, names the `str()`
+    # of the object, as of a subclass (`SubBool()`) or of its own `__repr__`, where the drop-in
+    # named its core type (`BooleanType()`); and a spatial type of a subclass converts each value
+    # with its `toInternal`, which the drop-in did not call, whose result PyArrow converts: a dict
+    # of its fields, a tuple, a sequence of pairs and None, or the error of another value. The
+    # messages and values are those of official PySpark 4.3.0.
+    import pyarrow as pa
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.types import Geography, Geometry
+
+    spark, service = mock_connect
+
+    class SubBool(T.BooleanType):
+        pass
+
+    class SubInt(T.IntegerType):
+        pass
+
+    class SubNull(T.NullType):
+        pass
+
+    class SubVariant(T.VariantType):
+        pass
+
+    class ReprInt(T.IntegerType):
+        def __repr__(self):
+            return "ReprInt<custom>"
+
+    def field(data_type, nullable=True):
+        return T.StructType([T.StructField("a", data_type, nullable)])
+
+    for data, schema, message in [
+        ([(None,)], field(SubBool(), False), "input for SubBool() must not be None"),
+        ([(None,)], field(ReprInt(), False), "input for ReprInt<custom> must not be None"),
+        ([(None,)], field(SubVariant(), False), "input for SubVariant() must not be None"),
+        ([([None],)], field(T.ArrayType(SubInt(), False)), "input for SubInt() must not be None"),
+        ([({None: "v"},)], field(T.MapType(SubInt(), T.StringType())),
+         "input for SubInt() must not be None"),
+        ([({"k": None},)], field(T.MapType(T.StringType(), SubInt(), False)),
+         "input for SubInt() must not be None"),
+        ([((None,),)], field(T.StructType([T.StructField("x", SubInt(), False)])),
+         "input for SubInt() must not be None"),
+        ([(None,)], field(T.ArrayType(SubInt()), False),
+         "input for ArrayType(SubInt(), True) must not be None"),
+        ([(1,)], field(SubNull()), "input for SubNull() must be None, but got 1"),
+    ]:
+        with pytest.raises(PySparkValueError, match="^" + re.escape(message) + "$"):
+            spark.createDataFrame(data, schema)
+
+    wkb = bytes.fromhex("010100000000000000000008400000000000001040")
+    calls = []
+
+    class SwapGeom(T.GeometryType):
+        def toInternal(self, obj):
+            calls.append(self.srid)
+            return {"srid": 0, "wkb": wkb}
+
+    class SwapGeog(T.GeographyType):
+        def toInternal(self, obj):
+            calls.append(self.srid)
+            return {"srid": 4269, "wkb": wkb}
+
+    class Of(T.GeometryType):
+        def __init__(self, srid, internal):
+            super().__init__(srid)
+            self.internal = internal
+
+        def toInternal(self, obj):
+            return self.internal
+
+    class Raises(T.GeometryType):
+        def toInternal(self, obj):
+            raise KeyError("toInternal")
+
+    class PlainGeom(T.GeometryType):
+        pass
+
+    point = bytes.fromhex("0101000000000000000000f03f0000000000000040")
+    g, gg = Geometry.fromWKB(point, 4326), Geography.fromWKB(point, 4326)
+    swapped = {"srid": 0, "wkb": wkb}
+    for data, schema, expected, called in [
+        ([(g,), (None,)], field(SwapGeom(4326)), [{"a": swapped}, {"a": None}], [4326]),
+        ([([g, None], {"k": g}, (g,))], T.StructType([
+            T.StructField("a", T.ArrayType(SwapGeom(4326))),
+            T.StructField("m", T.MapType(T.StringType(), SwapGeom(4326))),
+            T.StructField("s", T.StructType([T.StructField("x", SwapGeom(4326))])),
+        ]), [{"a": [swapped, None], "m": [("k", swapped)], "s": {"x": swapped}}],
+         [4326, 4326, 4326]),
+        ([(gg,)], field(SwapGeog(4326)), [{"a": {"srid": 4269, "wkb": wkb}}], [4326]),
+        ([(g,)], field(Of(4326, None)), [{"a": None}], []),
+        ([(g,)], field(Of(4326, (7, wkb))), [{"a": {"srid": 7, "wkb": wkb}}], []),
+        ([(g,)], field(Of(4326, [("srid", 8), ("wkb", wkb)])), [{"a": {"srid": 8, "wkb": wkb}}],
+         []),
+        ([(g,)], field(PlainGeom(4326)), [{"a": {"srid": 4326, "wkb": point}}], []),
+    ]:
+        calls.clear()
+        table, _ = _local_rows_relation_of(service, spark.createDataFrame(data, schema))
+        assert table.to_pylist() == expected
+        assert calls == called
+    with pytest.raises(pa.ArrowTypeError, match="^" + re.escape(
+            "Could not convert 5 with type int: was not a dict, tuple, or recognized null value "
+            "for conversion to struct type") + "$"):
+        spark.createDataFrame([(g,)], field(Of(4326, 5)))
+    with pytest.raises(KeyError, match="toInternal"):
+        spark.createDataFrame([(g,)], field(Raises(4326)))
+
+
 def test_numpy_arrays_in_array_fields_convert_as_pyspark(mock_connect):
     # As PySpark: an array whose elements need no converter (numbers and bools) is taken as
     # PyArrow takes it, so a NumPy array is an array of its values. An array whose elements
