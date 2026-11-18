@@ -2764,18 +2764,21 @@ def test_execute_command_converts_the_results_of_pyspark(ml_mock):
 
 def test_ml_execute_command_returns_the_results_of_pyspark(ml_mock):
     # As PySpark Connect's SparkSession.client.execute_command: no data, the results of the
-    # responses by their fields, and no execution information.
+    # responses by their fields, and the ExecutionInfo of the operation ID of the request.
+    from pyspark.sql.metrics import ExecutionInfo
+
     spark, service = ml_mock
     command = pb2.Command()
     command.ml_command.clean_cache.SetInParent()
     service.execute_payload = _operator_info("ref-1")
     data, properties, info = spark.client.execute_command(command)
-    assert data is None and info is None
+    assert data is None and isinstance(info, ExecutionInfo)
     assert list(properties) == ["ml_command_result"]
     assert properties["ml_command_result"].operator_info.obj_ref.id == "ref-1"
     request = _last_request_but_deletes(service)
     assert request.session_id == spark.session_id
     assert request.plan.command == command
+    assert info.operation_id == request.operation_id
 
     # The result of a SQL command is its relation, as SparkConnectClient's.
     relation = pb2.Relation(sql=pb2.SQL(query="SELECT 1"))

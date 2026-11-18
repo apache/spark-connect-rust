@@ -117,6 +117,9 @@ VENDORED_FILES=(
 
   # The logger of Spark Connect, and the types of the connect import path.
   "sql/connect/logging.py"
+  # The retry policies of SparkConnectClient.get_retry_policies and set_retry_policies, whose
+  # parameters the Rust transport retries with.
+  "sql/connect/client/retries.py"
   "sql/connect/_typing.py"
   # The conversions of the storage levels and the cached relations of their messages.
   "sql/connect/conversion.py"

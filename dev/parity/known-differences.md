@@ -294,10 +294,34 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.
-- **Retry and reattach** (intentional; DESIGN). `RpcDeadlines`, `client.retries`
-  (`RetryPolicy`, `Retrying`, `DefaultPolicy`, `RetryException`) and `client.reattach`
-  are not provided. Retries and reattachment live in the Rust transport, which has no
-  policy to configure from Python.
+- **Retry and reattach** (intentional; DESIGN). Retries and reattachment live in the Rust
+  transport. `client.retries` is PySpark's, vendored, and `SparkConnectClient.set_retry_policies`
+  makes the transport retry with the parameters of the first `DefaultPolicy` of its policies,
+  read when they are set. The transport classifies the failures as `DefaultPolicy.can_retry`
+  does, so a policy of its own `can_retry` or `to_state`, and a backoff, jitter or delay that
+  is not a whole number of milliseconds, raise `NOT_IMPLEMENTED`. `RpcDeadlines` sets the
+  deadlines of the transport, which has no GetStatus RPC (`get_status`). `client.reattach`
+  (`ExecutePlanResponseReattachableIterator`) is not provided: `disable_reattachable_execute`
+  and `enable_reattachable_execute` set the executions of the transport not reattachable or
+  reattachable.
+- **`SparkConnectClient.get_tags`** (intentional). A copy of the tags of the thread, where
+  PySpark returns the set that its client keeps, which its later changes change too, as
+  `SparkSession.getTags` does.
+- **Plans of a DataFrame's relation** (intentional; DESIGN, and tracked where the placeholder is
+  not replaced). `df._plan.plan(client)` is a placeholder of the DataFrame's relation, which the
+  core replaces by the relation while the DataFrame is alive, where `plan::resolve_relation`,
+  `resolve_command` and `resolve_analysis` look for it: as the root relation of a plan or of an
+  analysis, under it as the input of the relations of `pyspark.ml` (`MlRelation`,
+  `WithRelations`), as the dataset and the fetched arguments of the ML commands, and anywhere in
+  the message of the extension of a relation or of a command (a plugin's, as Delta Lake's
+  `merge`). Elsewhere it is sent as it is, and the server rejects the plan with
+  `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation: as the input
+  of another relation built in Python over it (a `Limit`, `Join` or `SubqueryAlias`, also in a
+  `WithRelations`), as the relation of a command that is neither an ML command nor an extension
+  (a `WriteOperation`, `CreateDataFrameView` or `CheckpointCommand`), and in an expression's
+  extension. A plan of it that `client.to_table`, `client.schema` or another method of the client
+  sends after the DataFrame is freed fails with "a placeholder of a DataFrame that no longer
+  exists".
 - **Default port** (intentional). `DefaultChannelBuilder.default_port()` is 15002. PySpark
   takes the port of a local JVM server in its testing mode; the drop-in has no JVM.
 - **Missing URL error** (intentional). The one builder of the drop-in serves

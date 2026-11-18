@@ -7009,7 +7009,7 @@ impl PyLocalRowIterator {
 
 /// The metrics and observed metrics of an execution, as the lists of `PlanMetrics` and
 /// `PlanObservedMetrics` that `SparkConnectClient._build_metrics` makes.
-fn execution_metrics<'py>(
+pub(crate) fn execution_metrics<'py>(
     py: Python<'py>,
     info: &spark_connect::session::ExecutionInfo,
 ) -> PyResult<(

@@ -36,13 +36,6 @@ pub struct ExecutePlanResponseReattachableIterator {
 impl ExecutePlanResponseReattachableIterator {
     /// Create a new reattachable iterator.
     pub fn new(mut request: ExecutePlanRequest) -> Self {
-        let operation_id = match request.operation_id.clone() {
-            Some(id) if !id.is_empty() => id,
-            _ => Uuid::new_v4().to_string(),
-        };
-
-        request.operation_id = Some(operation_id.clone());
-
         // Always append the reattachable option, as PySpark does: a hook may have added one
         // with `reattachable = False`, which the server takes as not reattachable only when no
         // option says true.
@@ -55,6 +48,19 @@ impl ExecutePlanResponseReattachableIterator {
                     ),
                 ),
             });
+        Self::not_reattachable(request)
+    }
+
+    /// Create an iterator of an execution that is not reattachable: of `request` as it is, with
+    /// no reattach option, as PySpark sends the request of a client whose
+    /// `use_reattachable_execute` is False.
+    pub fn not_reattachable(mut request: ExecutePlanRequest) -> Self {
+        let operation_id = match request.operation_id.clone() {
+            Some(id) if !id.is_empty() => id,
+            _ => Uuid::new_v4().to_string(),
+        };
+
+        request.operation_id = Some(operation_id.clone());
 
         Self {
             operation_id,

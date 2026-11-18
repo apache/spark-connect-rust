@@ -79,6 +79,7 @@ omit =
     */pyspark/sql/connect/profiler.py
     */pyspark/sql/connect/shell/progress.py
     */pyspark/sql/connect/resource/*
+    */pyspark/sql/connect/client/retries.py
     # The native extension and its embedded Row and value sources, which have synthetic
     # filenames.
     */pyspark/_pyspark*

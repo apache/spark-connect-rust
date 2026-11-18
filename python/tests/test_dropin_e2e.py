@@ -211,6 +211,111 @@ def test_client_reads_configurations_as_pyspark(session):
     assert repr(ps.Series([1, 2, 3], name="x")) == repr(pd.Series([1, 2, 3], name="x"))
 
 
+def test_client_runs_the_plans_and_commands_it_is_given_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient, of the plans and the commands that it is given:
+    # their analyses, their Arrow results with the ExecutionInfo of their executions, which set
+    # the Observations that they are given, the results of commands, the configurations, the
+    # registrations of functions and the cache of artifacts of the session.
+    import hashlib
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import Observation
+    from pyspark.sql.metrics import ExecutionInfo
+
+    client = session.client
+    observation = Observation("seen")
+    # The relation of a DataFrame's plan stands for the DataFrame, which is alive while it is sent.
+    df = session.range(4).observe(observation, F.count(F.lit(1)).alias("rows"))
+    plan = pb2.Plan()
+    plan.root.CopyFrom(df._plan.plan(client))
+    assert client.schema(plan).simpleString() == "struct<id:bigint>"
+    assert "Range" in client.explain_string(plan, "simple")
+    assert client.same_semantics(plan, plan) is True
+    assert isinstance(client.semantic_hash(plan), int)
+    table, schema, info = client.to_table(plan, {"seen": observation})
+    assert table.to_pydict() == {"id": [0, 1, 2, 3]}
+    assert schema.simpleString() == "struct<id:bigint>"
+    assert isinstance(info, ExecutionInfo) and info.operation_id
+    assert observation.get == {"rows": 4}
+    frame, info = client.to_pandas(plan, {})
+    assert frame["id"].tolist() == [0, 1, 2, 3] and isinstance(info, ExecutionInfo)
+    items = list(client.to_table_as_iterator(plan, {}))
+    assert type(items[0]).__name__ == "StructType"
+    assert sum(item.num_rows for item in items[1:]) == 4
+
+    command = pb2.Command()
+    command.sql_command.sql = "SELECT 1 AS one"
+    data, properties, info = client.execute_command(command)
+    assert data is None and list(properties) == ["sql_command_result"]
+    assert isinstance(info, ExecutionInfo) and info.operation_id
+    assert [list(result) for result in client.execute_command_as_iterator(command)] == [
+        ["sql_command_result"]]
+    get = pb2.ConfigRequest.Operation()
+    get.get.keys.append("spark.sql.session.timeZone")
+    assert client.config(get).pairs == [
+        ("spark.sql.session.timeZone", session.conf.get("spark.sql.session.timeZone"))]
+
+    name = client.register_udf(lambda x: x + 1, "int")
+    assert session.sql(f"SELECT {name}(1) AS v").first().v == 2
+
+    class TwoRows:
+        def eval(self):
+            yield (1,)
+            yield (2,)
+
+    assert client.register_udtf(TwoRows, "x int", "two_rows") == "two_rows"
+    assert [row.x for row in session.sql("SELECT * FROM two_rows()").collect()] == [1, 2]
+    with pytest.raises(AnalysisException):
+        client.register_java("missing_java", "org.example.MissingFunction", "int")
+
+    hashes = client.cache_artifacts([b"one", b"two", b"one"])
+    assert hashes == [hashlib.sha256(blob).hexdigest() for blob in (b"one", b"two", b"one")]
+    assert client.cache_artifact(b"two") == hashes[1]
+
+    client.add_tag("client-tag")
+    try:
+        assert session.getTags() == {"client-tag"}
+        assert client.interrupt_tag("client-tag") == []
+    finally:
+        client.clear_tags()
+
+
+def test_client_of_a_connection_string_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
+    # of the plans that it is given, built without a DataFrame, whose executions may be not
+    # reattachable, and whose clone has the configuration of its session and whose new session
+    # has none of it.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client import SparkConnectClient
+
+    client = SparkConnectClient(os.environ["SPARK_REMOTE"], use_reattachable_execute=False)
+    key = "spark.sql.shuffle.partitions"
+    get = pb2.ConfigRequest.Operation()
+    get.get.keys.append(key)
+    command = pb2.Command()
+    command.sql_command.sql = f"SET {key}=3"
+    plan = pb2.Plan()
+    plan.root.range.end = 3
+    plan.root.range.step = 1
+    try:
+        client.execute_command(command)
+        assert client.config(get).pairs == [(key, "3")]
+        assert client.to_table(plan, {})[0].to_pydict() == {"id": [0, 1, 2]}
+        client.enable_reattachable_execute()
+        assert client.to_table(plan, {})[0].to_pydict() == {"id": [0, 1, 2]}
+        cloned, fresh = client.clone(), client.newSession()
+        try:
+            assert cloned.config(get).pairs == [(key, "3")]
+            assert fresh.config(get).pairs == [(key, session.conf.get(key))]
+        finally:
+            for other in (cloned, fresh):
+                other.release_session()
+                other.close()
+    finally:
+        client.release_session()
+        client.close()
+
+
 def test_numpy_scalar_literals_have_the_types_of_their_dtypes_as_pyspark(session):
     np = pytest.importorskip("numpy")
     from pyspark.sql import functions as F
