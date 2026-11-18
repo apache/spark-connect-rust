@@ -220,13 +220,15 @@ forms takes, unless `OPTIONAL_ARGS_OTHERWISE` of the generator gives the reason.
 trailing Columns goes into `OPTIONAL_ARG_VARIANTS`, whose arm picks it by the number of arguments,
 and another form into `NOT_DISPATCHED` and `OPTIONAL_ARG_FORMS`.
 
-The type stubs (`.pyi`) of the modules whose classes are native or whose functions are made at
-import time, such as `python/pyspark/sql/functions/*.pyi` and `python/pyspark/sql/dataframe.pyi`,
-are generated from PySpark 4.3.0's modules, so that type checkers see PySpark's API. A stub
-re-exports a name of another module only when the drop-in's module has it, so regenerate them
-after a change to the generator, to the tracked version or to the names of a module of the
-drop-in; the generator also writes their block of ruff excludes in `pyproject.toml`, and CI runs
-it with `--check`:
+The type stubs (`.pyi`) of the modules whose classes are native or whose names are made at
+import time, such as `python/pyspark/sql/functions/*.pyi`, `python/pyspark/sql/dataframe.pyi` and
+`python/pyspark/sql/connect/proto/__init__.pyi`, are generated from PySpark 4.3.0's modules, so
+that type checkers see PySpark's API, and those of the modules of `pyspark.ml.connect` of native
+ML classes (`ML_CONNECT_MODULES` of the generator, and their package) from the drop-in's modules
+and PySpark's classes of `pyspark.ml` that their public classes subclass. A stub re-exports a name
+of another module only when the drop-in's module has it, so regenerate them after a change to the
+generator, to the tracked version or to the names of a module of the drop-in; the generator also
+writes their block of ruff excludes in `pyproject.toml`, and CI runs it with `--check`:
 
 ```bash
 python scripts/gen_type_stubs.py --pyspark-src "$SPARK_HOME/python"
@@ -236,15 +238,22 @@ A module that comes to re-export a native class gets a stub when you add it to `
 the generator, and a public name that the drop-in's module has and PySpark's does not goes into its
 `EXTRAS`. A module that becomes PySpark's own, vendored as it is, leaves `STUB_MODULES`, as a stub
 would only shadow PySpark's annotated source, and a name of `EXTRAS` that the drop-in's module no
-longer has leaves `EXTRAS`. A method that assigns an instance attribute keeps its body in the stub, from which type
-checkers infer the attribute; the generator fails on a public instance attribute that a stub would
-miss, and one whose type PySpark narrows before it assigns it goes into `ATTRIBUTE_TYPES`.
-`python/tests/test_type_stubs_offline.py` fails on a name that a stub misses or an instance
-attribute that mypy does not type, and on a name that a stub declares and the drop-in does not
-have at run time: give the drop-in the name if it is PySpark's API, list it in `DROPPED` of the
-generator if it is PySpark's plumbing that no annotation needs, or in `TYPE_ONLY` of the test,
-with the reason, if PySpark's annotations need it. It also runs mypy, and pyright where it is
-installed (as `coverage.yml` installs it), on a user's application.
+longer has leaves `EXTRAS`. A star import of PySpark's module of a module that the drop-in does not
+have goes into `DROPPED_STAR_IMPORTS`, with the reason. A method that assigns an instance attribute
+keeps its body in the stub, from which type checkers infer the attribute; the generator fails on a
+public instance attribute that a stub would miss, and one whose type PySpark narrows before it
+assigns it goes into `ATTRIBUTE_TYPES`. `python/tests/test_type_stubs_offline.py` runs mypy, and
+pyright where it is installed (as `coverage.yml` installs it), on a user's application and on
+probes of the stubbed modules, and fails:
+- on a public name of a stubbed module, or a public member of a class of a stub, that the drop-in
+  has at run time and the stub misses (a member that only PySpark Connect's class of a classic
+  import path has goes into `UNDECLARED_MEMBERS` of the test, with the reason), or an instance
+  attribute that mypy does not type;
+- on a name that a stub declares and the drop-in does not have at run time: give the drop-in the
+  name if it is PySpark's API, list it in `DROPPED` of the generator if it is PySpark's plumbing
+  that no annotation needs, or in `TYPE_ONLY` of the test, with the reason, if PySpark's
+  annotations need it;
+- on a name of `DROPPED` that the drop-in has at run time, which the stub would miss.
 
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).

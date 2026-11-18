@@ -510,11 +510,19 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   does not have, with their reasons: the classic-only `DataFrame.rdd`, as type checkers of
   `pyspark-client` see it, and the bases, metaclass, decorators and internal classes of PySpark's
   classes that the drop-in implements natively.
-- **`SparkSession.client` and `SQLContext`** (intentional; the drop-in's own classes). The client
-  has PySpark Connect's public API, of the class `pyspark.sql.connect.client.SparkConnectClient`,
-  whose parameters of protobuf messages are `Any`, as the drop-in's protobuf runtime is native;
-  `SQLContext` takes and returns `Any` in more places than PySpark's.
+- **`SparkSession.client`** (intentional; the drop-in's own class). The client has PySpark
+  Connect's public API, of the class `pyspark.sql.connect.client.SparkConnectClient` rather than
+  `pyspark.sql.connect.client.core`'s.
 - **The internals of PySpark Connect** (intentional). The private attributes of the Connect
-  classes that PySpark annotates with its plans, expressions and protobuf messages
-  (`MergeIntoWriter._matched_actions`, `DataFrameWriter._write`, ...) are `Any`, as the drop-in
-  builds them in Rust (`UNRESOLVED_IMPORTS` of the generator).
+  classes that PySpark annotates with its plans and expressions (`DataFrameWriter._write`, ...)
+  are `Any`, as the drop-in builds them in Rust (`UNRESOLVED_IMPORTS` of the generator).
+- **The modules of `pyspark.ml.connect`** (intentional; the drop-in's ML API, see
+  `docs/compatibility.md`). Their classes are typed as the drop-in's, subclasses of PySpark's
+  classes of `pyspark.ml`, as at run time, where those of `pyspark-client` are its ML API on
+  PyTorch.
+- **Docstrings** (tracked). The stubs keep no docstrings of PySpark's, so an editor shows the
+  signatures of the stubbed modules without their documentation.
+- **Modules of messages** (intentional). pyright warns that `pyspark.sql.connect.proto.base_pb2`
+  and the other modules of messages, which the drop-in's protobuf runtime makes at run time, have
+  a stub and no source (`reportMissingModuleSource`), as it does of
+  `pyspark.sql.functions.builtin`.

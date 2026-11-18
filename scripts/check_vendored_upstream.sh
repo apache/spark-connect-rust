@@ -147,6 +147,10 @@ VENDORED_FILES=(
   "sql/tvf.py"
   "sql/merge.py"
   "sql/observation.py"
+  # PySpark's classic SQLContext and HiveContext, as in PySpark: their getOrCreate() of Spark
+  # Connect returns those of pyspark.sql.connect.context, and their constructors read the
+  # SparkContext of a JVM, which a session of Spark Connect does not have.
+  "sql/context.py"
 
   # PEP 561: the package is typed, and the type aliases of PySpark's stubs.
   "py.typed"

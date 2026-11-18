@@ -1610,45 +1610,64 @@ The `__init__` of a native type of parameters, such as `ArrayType`, is a slot of
 `inspect.signature` is CPython's `(self, /, *args, **kwargs)`; that of the class shows the
 parameters, as PySpark's does.
 
-Type checkers and editors see PySpark's API, as with `pyspark-client`. The package is marked typed
-as PySpark's is (`py.typed`), and the modules whose classes are native or whose functions are made
-at import time, such as `pyspark.sql.functions`, `pyspark.sql.dataframe`, `pyspark.sql.types`,
-`pyspark.sql.connect.datasource` and `pyspark.ml.stat`, have stubs (`.pyi`) of PySpark 4.3.0's
-modules, with their annotations, their overloads and the attributes that their classes assign in
-their methods, which `scripts/gen_type_stubs.py` generates. So mypy and pyright type an
-application as they do with `pyspark-client`, which `python/tests/test_type_stubs_offline.py`
-checks with both. The differences:
+Type checkers and editors see PySpark's API, as with `pyspark-client`, without its docstrings. The
+package is marked typed as PySpark's is (`py.typed`), and the modules whose classes are native or
+whose names are made at import time, such as `pyspark.sql.functions`, `pyspark.sql.dataframe`,
+`pyspark.sql.types`, `pyspark.sql.connect.datasource`, the Avro and Protobuf functions of
+`pyspark.sql.connect`, the messages of `pyspark.sql.connect.proto` and `pyspark.ml.stat`, have
+stubs (`.pyi`) of PySpark 4.3.0's modules, with their annotations, their overloads and the
+attributes that their classes assign in their methods, which `scripts/gen_type_stubs.py`
+generates. The modules of `pyspark.ml.connect` of the native ML classes have stubs of their
+public classes, each a subclass of PySpark's class of its name of `pyspark.ml`, as at run time, of
+which type checkers see PySpark's API. So mypy and pyright type an application as they do with
+`pyspark-client`, which `python/tests/test_type_stubs_offline.py` checks with both, of each name
+of the stubbed modules and each member of their classes. The stubs keep no docstrings, so an
+editor shows the signatures of these names without PySpark's documentation. The differences:
 
 - The stubs declare only the names that the drop-in's modules have at run time. A name that a
   module of PySpark imports, which mypy takes for an attribute of the module by default, is
-  re-exported when the drop-in's module has it too, such as `F.partitioning` and
-  `F.PandasUDFType`, which pyright, and mypy with `--no-implicit-reexport`, then do not report as
-  they do with `pyspark-client`. One that the drop-in's module does not have, such as
-  `pyspark.sql.catalog.DataFrame`, is an error, where mypy takes it with `pyspark-client` by
-  default, as it fails at run time. So is the plumbing of PySpark's modules that the drop-in does
-  not have, such as the py4j converters of `pyspark.sql.types`.
+  re-exported when the drop-in's module has it too, so that `F.partitioning`, which pyright
+  reports as a private import with `pyspark-client`, and `F.PandasUDFType`, which mypy with
+  `--no-implicit-reexport` reports, are not reported. One that the drop-in's module does not
+  have, such as `pyspark.sql.catalog.DataFrame`, is an error, where mypy takes it with
+  `pyspark-client` by default, as it fails at run time. So is the plumbing of PySpark's modules
+  that the drop-in does not have, such as the py4j converters of `pyspark.sql.types`.
 - A few names that PySpark's annotations need are declared, which the drop-in does not have at run
   time: `DataFrame.rdd`, which PySpark defines when not `is_remote_only()`, so that type checkers
   of `pyspark-client` see it too, and neither client has it; and the bases, the metaclass and the
   decorators of PySpark's classes that the drop-in implements natively, such as `OptionUtils` of
   the readers and writers, `PandasGroupedOpsMixin` of `GroupedData`, `DataTypeSingleton` of the
-  atomic types and `dfapi` (`TYPE_ONLY` of the test lists them with their reasons).
+  atomic types and `dfapi` (`TYPE_ONLY` of the test lists them with their reasons). The
+  `SparkContext`, `RDD` and the other names of classic PySpark that PySpark's `pyspark` module
+  imports of `pyspark.core` when not `is_remote_only()`, which `pyspark-client` does not ship,
+  the drop-in's module imports so too, in a block that does not run either: mypy takes them as
+  `Any` and pyright reports their imports as of an unknown symbol, as with `pyspark-client`.
 - The classes that the drop-in implements in another way: the client of `SparkSession.client` has
   the public API of PySpark Connect's `SparkConnectClient`, whose class is
-  `pyspark.sql.connect.client.SparkConnectClient` rather than `pyspark.sql.connect.client.core`'s
-  and whose parameters of protobuf messages are `Any`; `SQLContext`; and the internal expressions,
-  plans and protobuf messages of PySpark Connect, which annotate private attributes and a few
-  internal constructors.
+  `pyspark.sql.connect.client.SparkConnectClient` rather than `pyspark.sql.connect.client.core`'s;
+  and the internal expressions and plans of PySpark Connect, which annotate private attributes
+  (`DataFrameWriter._write`) and a few internal constructors, and which are `Any`.
+- The classes of `pyspark.ml.connect` are those of the drop-in, of PySpark's API of `pyspark.ml`
+  (see "Native ML classes of the full pyspark.ml API"), where `pyspark-client`'s modules of these
+  names are its ML API on PyTorch, so a type checker types `LogisticRegression` of
+  `pyspark.ml.connect.classification` as a subclass of that of `pyspark.ml.classification` with
+  the drop-in, as at run time.
 - The names that only the drop-in has, such as `Trigger` of `pyspark.sql.streaming.readwriter` and
   `FrameBound` of `pyspark.sql.window`, are typed with the drop-in and are errors with
   `pyspark-client`, as at run time.
 
 PySpark's `pyspark.sql.functions` is a package of the modules `builtin` and `partitioning`, where
 the drop-in's is a module, with the stubs of the three in the directory `pyspark/sql/functions/`,
-which Python does not import. pyright types an import of `pyspark.sql.functions.builtin` or
-`pyspark.sql.functions.partitioning`, such as `from pyspark.sql.functions import partitioning`,
-from those stubs, and warns that the module "could not be resolved from source"
-(`reportMissingModuleSource`); `F.partitioning.bucket` has no warning.
+which Python does not import. It stays a module: a package would change it at run time (its
+`__file__` and `__path__`, what `pkgutil` reports of it, and how it binds the functions of
+`functions_generated.py` and makes the modules `builtin` and `partitioning`), and would remove no
+other difference of type checkers than the warning below. pyright types an import of
+`pyspark.sql.functions.builtin` or `pyspark.sql.functions.partitioning`, such as
+`from pyspark.sql.functions import partitioning`, from those stubs, and warns that the module
+"could not be resolved from source" (`reportMissingModuleSource`); `F.partitioning.bucket` has no
+warning. So does an import of a module of messages, such as
+`from pyspark.sql.connect.proto import base_pb2`, whose stub is PySpark's (`base_pb2.pyi`) and
+whose module the drop-in's protobuf runtime makes at run time.
 
 The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
 that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
