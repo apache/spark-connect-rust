@@ -205,7 +205,8 @@ impl WhenMatched {
     }
 
     /// Update the matched rows with `assignments`, of the target columns and their values, which
-    /// the merge sends in their order ([`assignment_pairs`]).
+    /// the merge sends in their order, as PySpark sends `assignments.items()`: a `Vec` or an
+    /// ordered map keeps the order of its pairs, and a `HashMap` sends them in its own order.
     pub fn update<K: Into<String>>(
         mut self,
         assignments: impl IntoIterator<Item = (K, Column)>,
@@ -248,7 +249,9 @@ impl WhenNotMatched {
     }
 
     /// Insert the rows that do not match with `assignments`, of the target columns and their
-    /// values, which the merge sends in their order ([`assignment_pairs`]).
+    /// values, which the merge sends in their order, as PySpark sends `assignments.items()`: a
+    /// `Vec` or an ordered map keeps the order of its pairs, and a `HashMap` sends them in its own
+    /// order.
     pub fn insert<K: Into<String>>(
         mut self,
         assignments: impl IntoIterator<Item = (K, Column)>,
@@ -281,8 +284,9 @@ impl WhenNotMatchedBySource {
     }
 
     /// Update the rows of the target that the source does not match with `assignments`, of the
-    /// target columns and their values, which the merge sends in their order
-    /// ([`assignment_pairs`]).
+    /// target columns and their values, which the merge sends in their order, as PySpark sends
+    /// `assignments.items()`: a `Vec` or an ordered map keeps the order of its pairs, and a
+    /// `HashMap` sends them in its own order.
     pub fn update<K: Into<String>>(
         mut self,
         assignments: impl IntoIterator<Item = (K, Column)>,
