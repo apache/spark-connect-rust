@@ -5519,6 +5519,80 @@ mod deep_plan_tests {
         assert!(error.message().contains("data type plan"), "{error}");
     }
 
+    /// As PySpark's pickle of a Column of a subquery, which keeps the plan objects of its
+    /// subqueries, of their plan IDs: the expression that the pickle sends, with the relations of
+    /// the plans of its subqueries (`subquery_relations`), is sent in a relation as the expression
+    /// was, with the same relations in its `WithRelations`, also from another session's plan IDs,
+    /// under another expression and pickled again.
+    #[test]
+    fn a_sent_expression_of_subqueries_sends_their_plans_as_the_expression_did() {
+        use crate::expression::{SubqueryExpression, SubqueryType};
+
+        let ids = Arc::new(PlanIds::new());
+        let inner = Arc::new(LogicalPlan::Project {
+            input: Arc::new(range(0, 5, 1)),
+            columns: vec![crate::column::Column::new(Expression::function(
+                "max",
+                vec![Expression::column("id")],
+            ))],
+        });
+        let subquery = SubqueryExpression {
+            plan_ids: Some(Arc::clone(&ids)),
+            ..SubqueryExpression::new(Arc::clone(&inner), ids.id_of(&inner), SubqueryType::Scalar)
+        };
+        let expression = Expression::function(
+            "+",
+            vec![
+                Expression::column("id"),
+                Expression::new(ExpressionNode::Subquery(Box::new(subquery))),
+            ],
+        );
+        let project = |expression: &Expression| {
+            Arc::new(LogicalPlan::Project {
+                input: Arc::new(range(0, 3, 1)),
+                columns: vec![crate::column::Column::new(expression.clone())],
+            })
+        };
+        // The expressions of the root of the `WithRelations` of `relation`, and its references.
+        let sent = |relation: proto::Relation| {
+            let Some(proto::relation::RelType::WithRelations(with)) = relation.rel_type else {
+                panic!("expected WithRelations: {relation:?}");
+            };
+            let Some(proto::relation::RelType::Project(root)) = with.root.and_then(|r| r.rel_type)
+            else {
+                panic!("expected a projection");
+            };
+            (root.expressions, with.references)
+        };
+        let original = sent(relation_with_ids(&project(&expression), &ids).unwrap());
+        let relations = expression.subquery_relations().unwrap();
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].0, original.1[0]);
+        let (built, levels) = expression.try_to_proto_with_levels().unwrap();
+        let unpickled =
+            Expression::sent_with_subqueries(built, expression.render(), levels, relations.clone())
+                .unwrap();
+        assert_eq!(unpickled.render(), expression.render());
+        assert_eq!(
+            sent(relation_with_ids(&project(&unpickled), &PlanIds::new()).unwrap()),
+            original
+        );
+        assert_eq!(unpickled.subquery_relations().unwrap(), relations);
+        let over = Expression::function("abs", vec![unpickled]);
+        assert_eq!(over.subquery_relations().unwrap(), relations);
+        let (_, references) = sent(relation_with_ids(&project(&over), &PlanIds::new()).unwrap());
+        assert_eq!(references, original.1);
+        // A relation deeper than a plan may be is the `RecursionError` of a pickled DataFrame's.
+        let error = Expression::sent_with_subqueries(
+            proto::Expression::default(),
+            String::new(),
+            1,
+            vec![(relations[0].0.clone(), MAX_PLAN_DEPTH + 1)],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, SparkErrorKind::RecursionError, "{error}");
+    }
+
     /// The plan of a subquery that a request fails to build fails the request of the plan
     /// that refers to it, as PySpark builds the plans of its references with the plan.
     #[test]

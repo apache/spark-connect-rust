@@ -77,10 +77,19 @@ thread_local! {
 /// recursion of the build, so the Python code of a pickling runs where PySpark's does; and when
 /// none fails and no expression failed after them, the second build takes their commands, in the
 /// same order. A build is deterministic, so the two meet the same UDFs.
+///
+/// PySpark's `WindowExpression.to_plan` warns of a window of no partitions as it builds it, in
+/// the same order: the first build warns of one that comes before the first pickler as it meets
+/// it, and of one after a pickler in its turn among the picklings, so a pickling that fails before
+/// it raises its error without the warning, and the error of the warning (of an `"error"` filter
+/// of the warnings) is raised before the picklings after it. The second build warns no more.
 #[derive(Default)]
 struct UdfCommands {
     /// The picklers that the first build met, in the order of the build.
     met: Vec<crate::udf::CommandPickler>,
+    /// The windows of no partitions that the first build met after a pickler, each the number of
+    /// picklers that it met before it, of which [`pickle_in_turn`] warns in their turn.
+    windows: Vec<usize>,
     /// The commands that they gave, which the second build takes in turn.
     pickled: std::collections::VecDeque<Vec<u8>>,
     /// Whether this is the second build, which takes `pickled`.
@@ -91,6 +100,7 @@ impl UdfCommands {
     const fn new() -> Self {
         UdfCommands {
             met: Vec::new(),
+            windows: Vec::new(),
             pickled: std::collections::VecDeque::new(),
             pickled_build: false,
         }
@@ -119,22 +129,64 @@ pub(crate) fn pickled_command(pickler: &crate::udf::CommandPickler) -> Vec<u8> {
     })
 }
 
-/// Whether this thread is in the second build of the plan of a request, which takes the commands
-/// that the first build's picklers gave (see [`UdfCommands`]): what PySpark's client does once as
-/// it builds the plan, the first build did.
-fn in_pickled_build() -> bool {
-    UDF_COMMANDS.with(|commands| commands.borrow().pickled_build)
+/// Warn of a window of no partitions that this thread builds, as PySpark's
+/// `WindowExpression.to_plan` warns once it has built its window function: now, unless the first
+/// build of a request met a pickler before it, after which it is warned of in its turn among the
+/// picklings, unless an expression before it failed to build; and not in the second build, which
+/// warns no more (see [`UdfCommands`]).
+fn warn_of_a_window_without_partitions() {
+    let now = UDF_COMMANDS.with(|commands| {
+        let mut commands = commands.borrow_mut();
+        if commands.pickled_build {
+            return false;
+        }
+        if commands.met.is_empty() {
+            return true;
+        }
+        if UNBUILDABLE_EXPRESSION_ERROR.with(|slot| slot.borrow().is_none()) {
+            let picklers_before = commands.met.len();
+            commands.windows.push(picklers_before);
+        }
+        false
+    });
+    if now {
+        tell_plan_build_listener(|listener| listener.window_without_partitions());
+    }
 }
 
-/// The commands of `picklers`, each pickled in turn, or the error of the first that fails, after
-/// which none is pickled, as PySpark's build stops at it.
+/// Tell the listener of the plans of the process ([`crate::plan_build`]), if any, of a window of
+/// no partitions that the first build of a request met after a pickler: its error is the
+/// request's.
+fn warn_of_a_met_window() -> Result<()> {
+    match crate::plan_build::listener() {
+        Some(listener) => listener.window_without_partitions(),
+        None => Ok(()),
+    }
+}
+
+/// The commands of `picklers`, each pickled in turn, each after the warnings of the `windows` of
+/// no partitions that the build met before it (each window is the number of picklers met before
+/// it), and then the warnings of the windows after them; or the error of the first pickling or
+/// warning that fails, after which none is pickled or warned of, as PySpark's build stops at it.
 fn pickle_in_turn(
     picklers: Vec<crate::udf::CommandPickler>,
+    windows: &[usize],
 ) -> Result<std::collections::VecDeque<Vec<u8>>> {
-    picklers
-        .iter()
-        .map(crate::udf::CommandPickler::pickle)
-        .collect()
+    let mut windows = windows.iter().peekable();
+    let mut pickled = std::collections::VecDeque::with_capacity(picklers.len());
+    for (picklers_before, pickler) in picklers.iter().enumerate() {
+        while windows
+            .next_if(|&&window| window <= picklers_before)
+            .is_some()
+        {
+            warn_of_a_met_window()?;
+        }
+        pickled.push_back(pickler.pickle()?);
+    }
+    for _ in windows {
+        warn_of_a_met_window()?;
+    }
+    Ok(pickled)
 }
 
 impl ExpressionNode {
@@ -325,9 +377,16 @@ impl DepthBoundScope {
         DEEPEST_EXPRESSION_LEVEL.with(Cell::get)
     }
 
-    /// The picklers that the build met since the scope was entered.
-    fn met_picklers(&self) -> Vec<crate::udf::CommandPickler> {
-        UDF_COMMANDS.with(|commands| std::mem::take(&mut commands.borrow_mut().met))
+    /// The picklers that the build met since the scope was entered, and the windows of no
+    /// partitions that it met after them (see [`UdfCommands`]).
+    fn met_picklers_and_windows(&self) -> (Vec<crate::udf::CommandPickler>, Vec<usize>) {
+        UDF_COMMANDS.with(|commands| {
+            let mut commands = commands.borrow_mut();
+            (
+                std::mem::take(&mut commands.met),
+                std::mem::take(&mut commands.windows),
+            )
+        })
     }
 
     /// Make the next build take `pickled`, the commands of the picklers that the first met.
@@ -389,17 +448,26 @@ fn with_expression_levels_and_unbuildable<T>(
     let mut value = serialize();
     let levels = scope.deepest();
     let mut unbuildable = scope.unbuildable();
+    let (picklers, windows) = scope.met_picklers_and_windows();
     if levels > MAX_EXPRESSION_DEPTH {
+        // The request fails with its `RecursionError`, which stands for the errors of the build,
+        // and no function is pickled: the windows after a pickler warn, as those before it did in
+        // the build, up to the first that fails.
+        for _ in &windows {
+            if warn_of_a_met_window().is_err() {
+                break;
+            }
+        }
         return Err(SparkError::recursion_msg(format!(
             "maximum recursion depth exceeded while serializing an expression; an expression \
              may be at most {MAX_EXPRESSION_DEPTH} levels deep"
         )));
     }
-    let picklers = scope.met_picklers();
     if !picklers.is_empty() {
-        // The picklers come before the first expression that failed to build, if any: the first
-        // of them that fails is the error, else that expression's.
-        match pickle_in_turn(picklers) {
+        // The picklers, and the windows after the first of them, come before the first
+        // expression that failed to build, if any: the first of them that fails is the error,
+        // else that expression's.
+        match pickle_in_turn(picklers, &windows) {
             Err(error) => unbuildable = Some(error),
             Ok(pickled) if unbuildable.is_none() => {
                 drop(value);
@@ -641,12 +709,65 @@ fn origin_proto(origin: &crate::origin::Origin) -> proto::ExpressionCommon {
 
 /// An expression of [`ExpressionNode::Sent`]: the `spark.connect.Expression` of a Column as it
 /// was sent, its rendering, as `Column<'...'>` shows it, and its levels, as
-/// [`Expression::try_to_proto_with_levels`] counts them when the Column was pickled.
+/// [`Expression::try_to_proto_with_levels`] counts them when the Column was pickled, and the
+/// plans that its subqueries refer to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SentExpression {
     pub expression: proto::Expression,
     pub rendered: String,
     pub levels: usize,
+    pub subqueries: SentSubqueries,
+}
+
+/// The plans that the subqueries of a [`SentExpression`] refer to by their plan IDs, which the
+/// relation that holds the expression sends in its `WithRelations`, as it sends the plan of a
+/// [`SubqueryExpression`]: each the relation of a plan as it was sent
+/// ([`Expression::subquery_relations`]), of its levels, which keeps its plan ID in plan IDs of its
+/// own, as PySpark's unpickled Column holds the plan objects of its subqueries, which keep their
+/// `_plan_id`. Two are equal when they are of the same plans.
+#[derive(Debug, Clone, Default)]
+pub struct SentSubqueries(Vec<(Arc<LogicalPlan>, Arc<crate::plan::PlanIds>)>);
+
+impl SentSubqueries {
+    /// The plans of `relations`, the relations of the plans that the subqueries of an expression
+    /// refer to, each of its levels. A relation of more levels than
+    /// [`crate::plan::MAX_PLAN_DEPTH`] is a `RecursionError`, as the API raises it when it sends
+    /// one.
+    fn of(relations: Vec<(proto::Relation, usize)>) -> Result<Self> {
+        relations
+            .into_iter()
+            .map(|(relation, levels)| {
+                if levels > crate::plan::MAX_PLAN_DEPTH {
+                    return Err(crate::plan::too_deep_a_plan(levels));
+                }
+                let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
+                let plan = Arc::new(LogicalPlan::Raw {
+                    relation: Box::new(relation),
+                    owner: None,
+                    depth: levels,
+                    observations: Vec::new(),
+                });
+                let ids = Arc::new(crate::plan::PlanIds::new());
+                if let Some(plan_id) = plan_id {
+                    ids.assign(&plan, plan_id);
+                }
+                Ok((plan, ids))
+            })
+            .collect::<Result<_>>()
+            .map(SentSubqueries)
+    }
+}
+
+impl PartialEq for SentSubqueries {
+    fn eq(&self, other: &Self) -> bool {
+        // Plans have no equality: the subqueries of the same plans are equal.
+        self.0.len() == other.0.len()
+            && self
+                .0
+                .iter()
+                .zip(&other.0)
+                .all(|((plan, _), (other, _))| Arc::ptr_eq(plan, other))
+    }
 }
 
 /// The type of a [`SubqueryExpression`]. Mirrors the `subquery_type` of
@@ -1168,6 +1289,22 @@ impl Expression {
         rendered: String,
         levels: usize,
     ) -> Result<Expression> {
+        Expression::sent_with_subqueries(expression, rendered, levels, Vec::new())
+    }
+
+    /// As [`Expression::sent`], of an expression whose subqueries refer to the plans of
+    /// `subqueries`, the relations that [`Expression::subquery_relations`] gave when the Column
+    /// was pickled, each of its levels: the relation that holds the expression sends them in its
+    /// `WithRelations`, of their plan IDs, as PySpark's unpickled Column holds the plans of its
+    /// subqueries, and its plan sends them. A relation of more levels than
+    /// [`crate::plan::MAX_PLAN_DEPTH`] is a `RecursionError`. Not a stable API.
+    #[doc(hidden)]
+    pub fn sent_with_subqueries(
+        expression: proto::Expression,
+        rendered: String,
+        levels: usize,
+        subqueries: Vec<(proto::Relation, usize)>,
+    ) -> Result<Expression> {
         if levels > MAX_EXPRESSION_DEPTH {
             return Err(SparkError::recursion_msg(format!(
                 "maximum recursion depth exceeded while unpickling an expression of {levels} \
@@ -1179,8 +1316,68 @@ impl Expression {
                 expression,
                 rendered,
                 levels,
+                subqueries: SentSubqueries::of(subqueries)?,
             },
         ))))
+    }
+
+    /// The relations of the plans that the subqueries of this expression refer to, each once, in
+    /// the order of the expression, of the plan IDs of the session of the DataFrame of each, as a
+    /// relation that holds the expression sends them in its `WithRelations`, and the levels of
+    /// each, which a pickled Column keeps for [`Expression::sent_with_subqueries`]: those of its
+    /// subqueries, of an IN subquery and of a table argument too, of the expressions of a
+    /// subquery, and of an expression that was sent. They are built as a request builds them, so
+    /// the functions of their UDFs are pickled, and the first error of a build is the error. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn subquery_relations(&self) -> Result<Vec<(proto::Relation, usize)>> {
+        use crate::udf::PicklerHolder;
+        let mut plans: Vec<(&Arc<LogicalPlan>, Option<&Arc<crate::plan::PlanIds>>)> = Vec::new();
+        let mut add = |plan, ids| {
+            if !plans.iter().any(|(known, _)| Arc::ptr_eq(known, plan)) {
+                plans.push((plan, ids));
+            }
+        };
+        let mut pending = vec![PicklerHolder::Expression(self)];
+        while let Some(holder) = pending.pop() {
+            let mut below = Vec::new();
+            match holder {
+                PicklerHolder::Expression(expression) => match expression.node() {
+                    ExpressionNode::Sent(sent) => {
+                        for (plan, ids) in &sent.subqueries.0 {
+                            add(plan, Some(ids));
+                        }
+                    }
+                    node => node.push_pickler_holders(&mut below),
+                },
+                PicklerHolder::Subquery(subquery) => {
+                    add(&subquery.plan, subquery.plan_ids.as_ref());
+                    below.extend(
+                        subquery
+                            .partition_spec
+                            .iter()
+                            .chain(&subquery.order_spec)
+                            .chain(&subquery.in_subquery_values)
+                            .map(PicklerHolder::Expression),
+                    );
+                }
+                PicklerHolder::Udf(udf) => {
+                    below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
+                }
+                PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) => {}
+            }
+            // The first is visited first.
+            pending.extend(below.into_iter().rev());
+        }
+        plans
+            .into_iter()
+            .map(|(plan, ids)| {
+                let ids = ids
+                    .cloned()
+                    .unwrap_or_else(|| Arc::new(crate::plan::PlanIds::new()));
+                Ok((crate::plan::relation_with_ids(plan, &ids)?, plan.depth()))
+            })
+            .collect()
     }
 
     fn to_proto_with_origin(&self) -> proto::Expression {
@@ -1266,6 +1463,11 @@ impl Expression {
             },
             ExpressionNode::Subquery(subquery) => subquery.to_proto(),
             ExpressionNode::Sent(sent) => {
+                // The relation that holds the expression sends the plans of its subqueries, as
+                // those of a subquery expression.
+                for (plan, ids) in &sent.subqueries.0 {
+                    crate::plan::refer_to(plan, Some(ids));
+                }
                 // The clone recurses for each level of the expression: grow the stack for them
                 // all, as the clone of a raw relation does.
                 let stack = sent_expression_stack(sent.levels);
@@ -2082,10 +2284,10 @@ impl WindowExpressionWrapper {
         // Set the window function
         window.window_function = Some(Box::new(self.window_function.to_proto()));
 
-        // Set partition spec. PySpark's `to_plan` warns of a window of no partitions here, once a
-        // build: the second build of a plan of UDFs (see [`UdfCommands`]) warns no more.
-        if self.partition_spec.is_empty() && !in_pickled_build() {
-            tell_plan_build_listener(|listener| listener.window_without_partitions());
+        // Set partition spec. PySpark's `to_plan` warns of a window of no partitions here, in the
+        // order of the build, among the picklings of the UDFs of the plan (see [`UdfCommands`]).
+        if self.partition_spec.is_empty() {
+            warn_of_a_window_without_partitions();
         }
         window.partition_spec = self.partition_spec.iter().map(|e| e.to_proto()).collect();
 
@@ -2770,6 +2972,7 @@ mod tests {
             expression: original.to_proto(),
             rendered: original.render(),
             levels: 3,
+            subqueries: SentSubqueries::default(),
         })));
         assert_eq!(sent.to_proto(), original.to_proto());
         assert_eq!(sent.render(), "+(a, 1) AS b");

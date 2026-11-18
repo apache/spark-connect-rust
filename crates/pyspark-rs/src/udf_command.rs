@@ -71,34 +71,55 @@ impl PythonCommand {
     /// Of a UDTF, the `PythonUdtf` message that the function returns; of a UDF, the `PythonUdf`
     /// message of its output type, converted first, and of the pickle of the object, as PySpark's
     /// `PythonUDF.to_plan` converts `pyspark_types_to_proto_types(output_type)` before it pickles
-    /// `(func, output_type)`, of the type as it is then; of a data type, its message.
+    /// `(func, output_type)`, of the type as it is then; of a data type, its message. Its error is
+    /// that of [`pickle_error`].
     fn pickle(&self) -> spark_connect_core::error::Result<Vec<u8>> {
-        Python::attach(|py| {
-            let object = self.object.bind(py);
-            match self.kind {
-                CommandKind::Udtf => command_of(&object.call0()?),
-                CommandKind::Udf => {
-                    use prost::Message;
-                    let output_type =
-                        crate::types::py_to_proto_data_type(&object.get_item(1)?)?.to_proto();
-                    let command = crate::dataframe::py_cloudpickle(py, object)?;
-                    Ok(spark_connect_proto::PythonUdf {
-                        output_type: Some(output_type),
-                        command: command.into(),
-                        ..Default::default()
-                    }
-                    .encode_to_vec())
-                }
-                CommandKind::DataType => {
-                    use prost::Message;
-                    Ok(crate::types::py_to_proto_data_type(object)?
-                        .to_proto()
-                        .encode_to_vec())
-                }
-            }
-        })
-        .map_err(crate::errors::callback_error)
+        Python::attach(|py| self.pickled(py).map_err(|error| pickle_error(py, error)))
     }
+
+    fn pickled(&self, py: Python<'_>) -> PyResult<Vec<u8>> {
+        let object = self.object.bind(py);
+        match self.kind {
+            CommandKind::Udtf => command_of(&object.call0()?),
+            CommandKind::Udf => {
+                use prost::Message;
+                let output_type =
+                    crate::types::py_to_proto_data_type(&object.get_item(1)?)?.to_proto();
+                let command = crate::dataframe::py_cloudpickle(py, object)?;
+                Ok(spark_connect_proto::PythonUdf {
+                    output_type: Some(output_type),
+                    command: command.into(),
+                    ..Default::default()
+                }
+                .encode_to_vec())
+            }
+            CommandKind::DataType => {
+                use prost::Message;
+                Ok(crate::types::py_to_proto_data_type(object)?
+                    .to_proto()
+                    .encode_to_vec())
+            }
+        }
+    }
+}
+
+/// The error of a request of `exception`, which the pickling of a command raised: the exception
+/// itself ([`crate::errors::callback_error`]). But while a DataFrame, a Column or a table argument
+/// is pickled ([`crate::origin::pickling`]), the pickle keeps an error of one of PySpark's error
+/// classes other than a `PySparkPicklingError`, which the conversion of a type raises before the
+/// function is pickled, such as the `UNSUPPORTED_OPERATION` of a type that has no proto, as the
+/// error of its plan (see `crate::column::described_error`): PySpark's pickle keeps the type
+/// object as it is, and the conversion fails at the requests of the unpickled object, or at the
+/// unpickle of a DataFrame, which builds its plan. The pickle raises the error of a pickling.
+fn pickle_error(py: Python<'_>, exception: PyErr) -> spark_connect_core::error::SparkError {
+    if crate::origin::is_pickling() {
+        if let Ok(Some(error)) = crate::errors::pyspark_class_error(py, &exception) {
+            if error.kind != spark_connect_core::error::SparkErrorKind::PicklingError {
+                return error;
+            }
+        }
+    }
+    crate::errors::callback_error(exception)
 }
 
 /// The pickler of `udtf`, a Python function of no arguments that returns the `PythonUDTF`

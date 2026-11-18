@@ -337,14 +337,17 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 `docs/compatibility.md`). These cases still differ, all of copies and pickles:
 
 - **A pickled Column or DataFrame** (intentional). It carries the commands that its functions
-  pickled to when it was pickled, in the protobuf of its expression or relation, which the
-  server's Python worker unpickles without the native client. PySpark's carries the functions,
-  which its requests pickle again: a value that a function reads, changed after the pickle, is
-  seen by PySpark's unpickled Column of a function that `pickle` pickles by reference, such as a
-  module-level function of `__main__`, but not by this client's. So `pickle.dumps` of a Column of
-  a UDF of a lambda pickles, where PySpark's raises the `PicklingError` of the lambda, and that of
-  a function that does not pickle by value raises its `PicklingError`, where PySpark's pickles a
-  module-level function by reference.
+  pickled to when it was pickled, in the protobuf of its expression or relation. PySpark's carries
+  the functions, which its requests pickle again: a value that a function reads, changed after the
+  pickle, is seen by PySpark's unpickled Column of a function that `pickle` pickles by reference,
+  such as a module-level function of `__main__`, but not by this client's. So `pickle.dumps` of a
+  Column of a UDF of a lambda pickles, where PySpark's raises the `PicklingError` of the lambda,
+  and that of a function that does not pickle by value raises its `PicklingError`, where
+  PySpark's pickles a module-level function by reference. Nothing requires the commands: the
+  server's Python worker could rebuild PySpark's UDFs of the functions, as it rebuilds PySpark's
+  Column of the expression. Carrying the functions, which would close these cases, is the
+  trade-off: a plain pickle of a Column of a UDF of a lambda, which pickles here, would then fail
+  as PySpark's does, and the pickles of every holder of a plan would change.
 - **A deep copy of a DataFrame into another session** (tracked). A deep copy whose session copies
   to another one, of a `memo` that maps it or of another active session of its ID, is a DataFrame
   of the relation of the copied one, so that its Observations are copies, as PySpark's, and so it
@@ -354,9 +357,6 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   PySpark's do: `copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo` of
   the call, which gives a function itself, and a copy of a callable object, a bound method or a
   `functools.partial`.
-- **The UDFs of a `mergeInto` clause** (tracked). Its condition and assignments are pickled when
-  the clause is added, as PySpark's `_build_merge_action` builds them, and again when `merge` runs,
-  whose command carries the second pickle; PySpark's carries the first.
 - **Garbage collection** (tracked). A DataFrame or a Column reports the functions of its UDFs that
   it alone holds to Python's garbage collector, and so do grouped data and their cogroups, a table
   argument, a window specification, the writers, `na`, `stat`, a merge builder and its clauses, the
@@ -366,11 +366,14 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   they hold, as PySpark's `__dict__` holds them. Those that hold their DataFrame report it, which
   reports the functions of the plan that they share (`crate::gc::Holders`). A function that a Column
   and a DataFrame of it share, or two DataFrames, or a DataFrame and a table argument of it, which
-  holds the plan and not the DataFrame, is reported by none, so that no reference is counted twice:
-  a reference cycle through it, such as through a bound method of an object that keeps both the
-  Column and the DataFrame, is not collected, where PySpark collects it. A stream writer holds its
-  DataFrame, where PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed by
-  the collector rather than at its last reference.
+  holds the plan and not the DataFrame, is reported by none: the holders share one reference to it,
+  which the Rust value of the plan or of the expression holds, and which the collector would count
+  as that of the holder that reports it, so it could clear the function with that holder while
+  another holder, still alive, reaches it. So a reference cycle through it, such as through a bound
+  method of an object that keeps both the Column and the DataFrame, is not collected, where PySpark
+  collects it, as each of its holders, a Python object, holds a reference of its own. A stream
+  writer holds its DataFrame, where PySpark's holds the plan, so a DataFrame that keeps its stream
+  writer is freed by the collector rather than at its last reference.
 
 ## Session and client (Connect)
 

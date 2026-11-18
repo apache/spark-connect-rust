@@ -2953,6 +2953,40 @@ def test_subqueries_and_table_arguments_return_the_rows_of_pyspark(session):
         session.range(1).asTable().orderBy("id")
 
 
+def test_pickled_subquery_columns_return_the_rows_of_pyspark(session, tmp_path):
+    # As PySpark's pickle of a Column of a subquery, which keeps the plans of its subqueries: the
+    # unpickled scalar, EXISTS and IN subqueries return the rows of the Columns built without the
+    # pickling, and a foreachBatch function that captures a scalar subquery selects it on the
+    # Python worker of the server, with PySpark's Column, which sends the plan of the subquery.
+    import pickle
+
+    df = session.range(3)
+    largest = session.range(5).select(F.max("id")).scalar()
+    for column in (largest, (F.col("id") + largest).alias("plus"),
+                   F.col("id").isin(session.range(2))):
+        copied = pickle.loads(pickle.dumps(column))
+        assert df.select(copied).collect() == df.select(column).collect()
+    missing = session.range(1).where(F.col("id") > 10).exists()
+    assert df.where(~pickle.loads(pickle.dumps(missing))).count() == 3
+
+    (tmp_path / "input.txt").write_text("a\nbb\n")
+    captured = session.range(5).select(F.max("id")).scalar()
+    table = "foreach_batch_captured_subquery"
+
+    def func(batch, batch_id):
+        batch.select((F.length("value") + captured).alias("n")).write.mode("append").saveAsTable(
+            table)
+
+    query = session.readStream.format("text").load(str(tmp_path)).writeStream.foreachBatch(func)
+    query = query.start()
+    try:
+        query.processAllAvailable()
+        assert sorted(row.n for row in session.table(table).collect()) == [5, 6]
+    finally:
+        query.stop()
+        session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+
+
 def test_columns_of_another_session_do_not_resolve_in_this_one(session):
     # As PySpark's, plan IDs come from one counter of the process, so a column of a DataFrame of
     # another session names no node of this one: CANNOT_RESOLVE_DATAFRAME_COLUMN, not the

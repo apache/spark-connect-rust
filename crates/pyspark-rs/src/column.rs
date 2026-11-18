@@ -191,6 +191,27 @@ impl PyColumnExpression {
             self.column = Column::new(spark_connect::expression::Expression::column(""));
         }
     }
+
+    /// An expression pickles, as PySpark's expression, a Python object, pickles its fields: as the
+    /// `_expr` of its Column, `getattr(column, "_expr")`, of the pickle of the Column (see
+    /// `PyColumn::__reduce__`), so that the unpickled expression is that of the unpickled Column,
+    /// also on a Python worker of the server, where it is the expression of PySpark Connect's
+    /// Column.
+    fn __reduce__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
+        let column = Py::new(py, PyColumn::new(self.column.clone()))?;
+        let args = PyTuple::new(
+            py,
+            [
+                column.into_any().into_bound(py),
+                pyo3::types::PyString::new(py, "_expr").into_any(),
+            ],
+        )?;
+        PyTuple::new(
+            py,
+            [py.import("builtins")?.getattr("getattr")?, args.into_any()],
+        )
+    }
+
     /// As PySpark's `__repr__` of the expression, which raises its error of an expression that it
     /// does not render (a `ColumnAlias` of names that are not all `str`).
     fn __repr__(&self) -> PyResult<String> {
@@ -930,7 +951,10 @@ impl PyColumn {
     /// that `pickle` keeps it, as it does of PySpark's Column. The function of a UDF of the
     /// Column is pickled now, into the command of the expression, as PySpark's pickle of the
     /// Column pickles the function with it; one that does not pickle raises the error of its
-    /// pickling.
+    /// pickling. A Column of subqueries pickles the relations of the plans that they refer to
+    /// too, of their plan IDs, after the expression, as PySpark's pickle keeps the plan objects of
+    /// its subqueries: the unpickled Column sends them in the `WithRelations` of the relation that
+    /// holds it, as PySpark's plan sends the plans of its subqueries.
     fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let this = slf.borrow();
         // Of an expression that a request fails to build, as PySpark's Column of an alias of a
@@ -948,10 +972,34 @@ impl PyColumn {
         {
             return Err(exception);
         }
-        let build_error = unbuildable
+        let mut build_error = unbuildable
             .as_ref()
             .map(|error| error_description(py, error))
             .transpose()?;
+        // A plan of a subquery that does not build pickles of its error, as a DataFrame does,
+        // which the requests of the unpickled Column raise; one that does not pickle, or that is
+        // too deep, raises its error. A CASE WHEN and a sort order are given back of their parts,
+        // which pickle their subqueries.
+        let mut subqueries = Vec::new();
+        let of_parts = matches!(
+            this.column.expression().node(),
+            ExpressionNode::CaseWhen(_) | ExpressionNode::SortOrder(_)
+        );
+        if build_error.is_none() && !of_parts {
+            match crate::origin::pickling(|| this.column.expression().subquery_relations()) {
+                Ok(relations) => {
+                    for (relation, levels) in relations {
+                        let relation =
+                            pyo3::types::PyBytes::new(py, &crate::encode_on_grown_stack(relation));
+                        subqueries.push((relation, levels));
+                    }
+                }
+                Err(error) => match described_error(py, &error)? {
+                    Some(description) => build_error = Some(description),
+                    None => return Err(crate::errors::spark_error_to_py_exception(error)),
+                },
+            }
+        }
         let repr_error = this
             .column
             .expression()
@@ -999,14 +1047,17 @@ impl PyColumn {
                 levels,
                 build_error,
                 repr_error,
+                subqueries,
             ))?;
         crate::group::reduce_with_state(&reduce, slf.as_any())
     }
 
     /// The Column of `expression`, the bytes of a `spark.connect.Expression`, and of its
     /// `rendered` rendering, of its `levels`, as a pickled Column unpickles: it sends the
-    /// expression as it is. The CASE WHEN of `branches` and `else_value`, the Columns of its
-    /// parts, is built as it was.
+    /// expression as it is, and the relations of `subqueries`, the bytes of the relation of each
+    /// plan that its subqueries refer to and its levels, in the `WithRelations` of the relation
+    /// that holds it. The CASE WHEN of `branches` and `else_value`, the Columns of its parts, is
+    /// built as it was.
     #[staticmethod]
     #[pyo3(signature = (
         expression,
@@ -1015,7 +1066,8 @@ impl PyColumn {
         else_value=None,
         levels=1,
         build_error=None,
-        repr_error=None
+        repr_error=None,
+        subqueries=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn _of_expression(
@@ -1026,6 +1078,7 @@ impl PyColumn {
         levels: usize,
         build_error: Option<&Bound<'_, PyAny>>,
         repr_error: Option<&Bound<'_, PyAny>>,
+        subqueries: Option<Vec<(Bound<'_, pyo3::types::PyBytes>, usize)>>,
     ) -> PyResult<PyColumn> {
         if let Some(branches) = branches {
             let branches = branches
@@ -1048,12 +1101,25 @@ impl PyColumn {
             )));
         }
         use prost::Message;
+        let subqueries: Vec<(&[u8], usize)> = subqueries
+            .iter()
+            .flatten()
+            .map(|(relation, levels)| (relation.as_bytes(), *levels))
+            .collect();
         // Decoded, and then built or dropped, on a stack that holds its levels.
         // The errors become Python exceptions on the caller's stack, which runs no Python code
         // on the grown one.
         let column = crate::on_grown_stack(|| {
-            spark_connect_proto::Expression::decode(expression)
-                .map(|expression| Column::sent(expression, rendered, levels))
+            let relations = subqueries
+                .iter()
+                .map(|(relation, levels)| {
+                    spark_connect_proto::Relation::decode(*relation)
+                        .map(|relation| (relation, *levels))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            spark_connect_proto::Expression::decode(expression).map(|expression| {
+                Column::sent_with_subqueries(expression, rendered, levels, relations)
+            })
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
