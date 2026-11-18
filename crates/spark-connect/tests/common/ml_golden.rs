@@ -530,6 +530,8 @@ struct Replay {
     /// The deletes sent since they were last taken. A delete is not a golden command: the client
     /// sends it when a released model is dropped, and it is answered with no result.
     deleted: Vec<proto::ml_command::Delete>,
+    /// The requests of the deletes sent since they were last taken, in order.
+    delete_requests: Vec<proto::ExecutePlanRequest>,
 }
 
 type Shared = Arc<Mutex<Replay>>;
@@ -592,6 +594,12 @@ impl ReplayServer {
     /// model that it holds is dropped, in the background: a test that drops a model waits for it.
     pub fn take_deletes(&self) -> Vec<proto::ml_command::Delete> {
         std::mem::take(&mut self.0.lock().unwrap().deleted)
+    }
+
+    /// The whole requests of the deletes sent since they were last taken, in order, which
+    /// [`ReplayServer::take_deletes`] does not take.
+    pub fn take_delete_requests(&self) -> Vec<proto::ExecutePlanRequest> {
+        std::mem::take(&mut self.0.lock().unwrap().delete_requests)
     }
 }
 
@@ -1083,6 +1091,15 @@ impl ServerStreamingService<Vec<u8>> for Execute {
         let request = proto::ExecutePlanRequest::decode(request.into_inner().as_slice()).unwrap();
         let session_id = request.session_id.clone();
         let operation_id = request.operation_id.clone().unwrap_or_default();
+        if let Some(proto::plan::OpType::Command(proto::Command {
+            command_type:
+                Some(proto::command::CommandType::MlCommand(proto::MlCommand {
+                    command: Some(proto::ml_command::Command::Delete(_)),
+                })),
+        })) = request.plan.as_ref().and_then(|plan| plan.op_type.as_ref())
+        {
+            self.0.lock().unwrap().delete_requests.push(request.clone());
+        }
         let command = match request.plan.and_then(|plan| plan.op_type) {
             Some(proto::plan::OpType::Command(command)) => match command.command_type {
                 Some(proto::command::CommandType::MlCommand(ml)) => Some(ml),

@@ -694,8 +694,10 @@ pub struct SubqueryExpression {
     pub with_single_partition: Option<bool>,
     /// The values of an IN subquery.
     pub in_subquery_values: Vec<Expression>,
-    /// The plan IDs of the session of the DataFrame of `plan`, in which a deep copy of the
-    /// subquery gives the plan that it rebuilds the plan ID of `plan`.
+    /// The plan IDs of the session of the DataFrame of `plan`: the relation that contains the
+    /// subquery sends `plan` in its `WithRelations` with them, also when it is of another session,
+    /// and a deep copy of the subquery gives the plan that it rebuilds the plan ID of `plan` in
+    /// them.
     pub(crate) plan_ids: Option<Arc<crate::plan::PlanIds>>,
 }
 
@@ -778,7 +780,7 @@ impl SubqueryExpression {
     fn to_proto(&self) -> proto::Expression {
         use proto::subquery_expression::SubqueryType as ProtoType;
 
-        crate::plan::refer_to(&self.plan);
+        crate::plan::refer_to(&self.plan, self.plan_ids.as_ref());
         let subquery_type = match self.subquery_type {
             SubqueryType::Scalar => ProtoType::Scalar,
             SubqueryType::Exists => ProtoType::Exists,
@@ -1983,6 +1985,20 @@ impl FrameBoundary {
             FrameBoundary::UnboundedFollowing => i64::MAX,
         }
     }
+
+    /// The boundary as the int of PySpark's frame, as [`FrameBoundary::value`], of the
+    /// `Preceding(i64::MIN)` too, which is beyond a long: `Window.unboundedPreceding`
+    /// (`JVM_LONG_MIN`), the negated count of a preceding boundary, 0, the count of a following
+    /// one, or `Window.unboundedFollowing` (`JVM_LONG_MAX`).
+    pub(crate) fn offset(&self) -> i128 {
+        match self {
+            FrameBoundary::UnboundedPreceding => i64::MIN.into(),
+            FrameBoundary::Preceding(n) => -i128::from(*n),
+            FrameBoundary::CurrentRow => 0,
+            FrameBoundary::Following(n) => (*n).into(),
+            FrameBoundary::UnboundedFollowing => i64::MAX.into(),
+        }
+    }
 }
 
 /// As `WindowSpec.__repr__` of PySpark Connect: its partitioning, ordering and frame. A
@@ -2009,8 +2025,8 @@ pub fn window_spec_repr(
         };
         parts.push(format!(
             "WindowFrame({kind}, {}, {})",
-            lower.value(),
-            upper.value()
+            lower.offset(),
+            upper.offset()
         ));
     }
     format!("WindowSpec({})", parts.join(", "))
@@ -2073,8 +2089,8 @@ impl WindowExpressionWrapper {
             frame.frame_type = *frame_type as i32;
             // A frame type of 1 is a row frame, and another a range frame.
             let rows = *frame_type == 1;
-            frame.lower = Some(Box::new(to_proto_frame_boundary(lower, rows)));
-            frame.upper = Some(Box::new(to_proto_frame_boundary(upper, rows)));
+            frame.lower = Some(Box::new(to_proto_frame_boundary(lower, rows, true)));
+            frame.upper = Some(Box::new(to_proto_frame_boundary(upper, rows, false)));
             window.frame_spec = Some(Box::new(frame));
         }
 
@@ -2083,42 +2099,57 @@ impl WindowExpressionWrapper {
     }
 }
 
-/// Convert FrameBoundary to proto FrameBoundary, as PySpark Connect's `WindowExpression`
-/// sends the boundary of a value: an integer literal in a row frame, and a long literal in a
-/// range frame.
+/// Convert FrameBoundary to proto FrameBoundary, the lower boundary of a frame if `lower`, else
+/// its upper one, as PySpark Connect's `WindowExpression.to_plan` sends the int of a boundary
+/// ([`FrameBoundary::offset`]): 0 is the current row, `Window.unboundedPreceding` as the lower
+/// boundary and `Window.unboundedFollowing` as the upper one are unbounded, and another int is
+/// the int literal of a row frame, or the long literal of a range frame. So an unbounded
+/// boundary on the other side is the literal of its int.
+///
+/// As PySpark's, an int beyond an int32 in a row frame fails the request with `VALUE_NOT_BETWEEN`
+/// of `start` or `end`, and one beyond a long in a range frame with protobuf's `ValueError` of its
+/// field; the boundary is sent as a long literal of the int, saturated, by a serialization that
+/// does not fail.
 fn to_proto_frame_boundary(
     boundary: &FrameBoundary,
     rows: bool,
+    lower: bool,
 ) -> proto::expression::window::window_frame::FrameBoundary {
-    let offset = |value: i64| {
-        // A ROWS-frame offset must be an IntegerType literal (Spark rejects bigint with
-        // SPECIFIED_WINDOW_FRAME_UNACCEPTED_TYPE); one out of its range is sent as a long,
-        // for the server to reject, rather than truncated.
-        let literal = match i32::try_from(value) {
-            Ok(value) if rows => LiteralExpression::int(value),
-            _ => LiteralExpression::long(value),
+    use proto::expression::window::window_frame::frame_boundary::Boundary;
+
+    let offset = boundary.offset();
+    let unbounded = if lower { i64::MIN } else { i64::MAX };
+    let boundary = if offset == 0 {
+        Boundary::CurrentRow(true)
+    } else if offset == i128::from(unbounded) {
+        Boundary::Unbounded(true)
+    } else {
+        let literal = match (rows, i32::try_from(offset), i64::try_from(offset)) {
+            (true, Ok(value), _) => LiteralExpression::int(value),
+            (false, _, Ok(value)) => LiteralExpression::long(value),
+            _ => {
+                record_unbuildable(&if rows {
+                    SparkError::value(
+                        "VALUE_NOT_BETWEEN",
+                        &[
+                            ("arg_name", if lower { "start" } else { "end" }),
+                            ("min", &i32::MIN.to_string()),
+                            ("max", &i32::MAX.to_string()),
+                        ],
+                    )
+                } else {
+                    SparkError::builtin_value_msg(format!("Value out of range: {offset}"))
+                });
+                let saturated =
+                    i64::try_from(offset).unwrap_or(if offset < 0 { i64::MIN } else { i64::MAX });
+                LiteralExpression::long(saturated)
+            }
         };
-        Some(
-            proto::expression::window::window_frame::frame_boundary::Boundary::Value(Box::new(
-                Expression::literal(literal).to_proto(),
-            )),
-        )
+        Boundary::Value(Box::new(Expression::literal(literal).to_proto()))
     };
-    let boundary = match boundary {
-        FrameBoundary::UnboundedPreceding => {
-            Some(proto::expression::window::window_frame::frame_boundary::Boundary::Unbounded(true))
-        }
-        FrameBoundary::UnboundedFollowing => {
-            Some(proto::expression::window::window_frame::frame_boundary::Boundary::Unbounded(true))
-        }
-        FrameBoundary::CurrentRow => Some(
-            proto::expression::window::window_frame::frame_boundary::Boundary::CurrentRow(true),
-        ),
-        // A preceding boundary is a negative offset.
-        FrameBoundary::Preceding(n) => offset(n.saturating_neg()),
-        FrameBoundary::Following(n) => offset(*n),
-    };
-    proto::expression::window::window_frame::FrameBoundary { boundary }
+    proto::expression::window::window_frame::FrameBoundary {
+        boundary: Some(boundary),
+    }
 }
 
 impl SortOrder {

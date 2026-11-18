@@ -200,6 +200,65 @@ fn a_nan_param_of_a_fit_matches_its_golden() {
 }
 
 #[test]
+fn a_dropped_model_is_deleted_by_an_execution_of_the_dropping_thread_as_pyspark() {
+    // As PySpark's `RemoteModelRef.release_ref`, whose `_delete_ml_cache` runs one
+    // `execute_command` on the thread that drops the last reference to the model, the thread of
+    // its finalizer: the request has the tags and the user context extensions of that thread, goes
+    // to the hook of the executions, and is reattachable, as any execution of `execute_command`.
+    let features = fixture(FEATURE_MODELS);
+    let fit = &features["fits"]["Imputer"]["fit"];
+    let (server, session) = ReplayServer::start(&[fit]);
+    let df = session.range(1).unwrap();
+    let model = Imputer::new()
+        .set_input_col("missing")
+        .set_output_col("out")
+        .set_missing_value(f64::NAN)
+        .fit(&df)
+        .unwrap();
+    assert_commands(&server, fit, "Imputer fit");
+    session.add_tag("dropper").unwrap();
+    let extension = prost_types::Any {
+        type_url: "type.googleapis.com/test.dropper".into(),
+        value: b"dropper".to_vec(),
+    };
+    session.add_threadlocal_user_context_extension(extension.clone());
+    let hooked = Arc::new(Mutex::new(0));
+    let calls = Arc::clone(&hooked);
+    let hook: spark_connect::ExecutePlanHook = Arc::new(move |request| {
+        *calls.lock().unwrap() += 1;
+        Ok(request)
+    });
+    session.set_execute_plan_hook(Some(hook));
+
+    drop(model);
+    let started = std::time::Instant::now();
+    let mut requests = server.take_delete_requests();
+    while requests.is_empty() && started.elapsed() < std::time::Duration::from_secs(10) {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        requests = server.take_delete_requests();
+    }
+    let [request] = requests.as_slice() else {
+        panic!("the requests of the deletes of the dropped model: {requests:?}");
+    };
+    assert_eq!(request.session_id, session.session_id());
+    assert_eq!(request.tags, ["dropper"]);
+    let context = request.user_context.as_ref().expect("a user context");
+    assert_eq!(context.extensions, [extension]);
+    assert!(
+        request.request_options.iter().any(|option| matches!(
+            option.request_option,
+            Some(
+                proto::execute_plan_request::request_option::RequestOption::ReattachOptions(
+                    proto::ReattachOptions { reattachable: true }
+                )
+            )
+        )),
+        "the delete is not reattachable: {request:?}"
+    );
+    assert_eq!(*hooked.lock().unwrap(), 1, "the delete went to no hook");
+}
+
+#[test]
 fn a_dropped_model_sends_a_delete_that_the_replay_records() {
     // The client releases a fitted model in the background when the model is dropped. The delete
     // is no golden command: the replay records it apart, with the id of the model's golden

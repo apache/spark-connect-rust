@@ -127,7 +127,7 @@ fn stat_corr_cov_sample_by() {
     let spark = session();
     let df = numeric(&spark);
 
-    let _c = df.stat().corr("g", "v").expect("corr");
+    let _c = df.stat().corr("g", "v", None).expect("corr");
     let _v = df.stat().cov("g", "v").expect("cov");
 
     let fractions = vec![

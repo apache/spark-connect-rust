@@ -527,6 +527,15 @@ impl PythonUDFPayload {
         }
     }
 
+    /// The payload of a Python function that is not a UDF, such as the function of a streaming
+    /// `foreach` or `foreachBatch` sink: of its command and Python version, which PySpark sets in
+    /// the `PythonUDF` of the function, and of no output type nor eval type, which it does not
+    /// set. Its output type is [`DataType::Null`], which is not sent (see
+    /// [`crate::streaming::DataStreamWriter::foreach_batch`]).
+    pub fn function(command: Vec<u8>, python_ver: String) -> Self {
+        PythonUDFPayload::new(DataType::Null, 0, command, python_ver)
+    }
+
     /// Convert to a proto PythonUDF message.
     pub fn to_proto(&self) -> proto::PythonUdf {
         let mut proto = proto::PythonUdf::default();
@@ -535,6 +544,17 @@ impl PythonUDFPayload {
         proto.command = command_bytes(&self.command, self.pickler.as_ref());
         proto.python_ver = self.python_ver.clone();
         proto
+    }
+
+    /// The `PythonUDF` of the function of a streaming `foreach` or `foreachBatch` sink, as
+    /// PySpark's `DataStreamWriter` sets it: of the command and the Python version only, as the
+    /// function is not a UDF (connect/streaming/readwriter.py).
+    pub(crate) fn to_function_proto(&self) -> proto::PythonUdf {
+        proto::PythonUdf {
+            command: command_bytes(&self.command, self.pickler.as_ref()),
+            python_ver: self.python_ver.clone(),
+            ..Default::default()
+        }
     }
 }
 

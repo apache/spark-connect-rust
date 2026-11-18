@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use spark_connect_core::error::Result;
+use spark_connect_core::error::{Result, SparkError, SparkErrorKind};
 use spark_connect_proto as proto;
 
 use crate::column::Column;
@@ -115,14 +115,16 @@ impl DataFrameReader {
         DataFrame::new(self.session, plan)
     }
 
-    /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`.
+    /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`, which raises an
+    /// `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a schema, before any
+    /// request: each request of the DataFrame of such a reader fails with it, and sends nothing.
     pub fn changes(self, table_name: &str) -> DataFrame {
         let plan = LogicalPlan::RelationChanges {
             table_name: table_name.to_string(),
             options: self.options,
             is_streaming: None,
         };
-        DataFrame::new(self.session, plan)
+        changes_of_schema(DataFrame::new(self.session, plan), &self.schema)
     }
 
     /// Parse the strings of `input`, a DataFrame of one string column, as `format`, with the
@@ -211,6 +213,24 @@ impl DataFrameReader {
         };
         DataFrame::new(self.session, plan)
     }
+}
+
+/// `changes`, the DataFrame of the changes of a table that a reader of `schema` reads. PySpark's
+/// `DataFrameReader.changes` and `DataStreamReader.changes` raise an `AnalysisException` of
+/// `_LEGACY_ERROR_TEMP_1189` when the reader has a schema (`if self._schema:`), before any
+/// request: each request of the DataFrame fails with it then, and sends nothing.
+pub(crate) fn changes_of_schema(changes: DataFrame, schema: &str) -> DataFrame {
+    if schema.is_empty() {
+        return changes;
+    }
+    let mut error = SparkError::classed(
+        SparkErrorKind::Analysis,
+        "_LEGACY_ERROR_TEMP_1189",
+        &[("operation", "changes")],
+    );
+    // The message of the JVM's error class, which PySpark's error classes lack.
+    error.message = "User specified schema not supported with `changes`.".to_string();
+    changes.unbuildable(error)
 }
 
 /// ReadType variant for Read relation.
@@ -460,7 +480,9 @@ impl DataFrameWriter {
         self
     }
 
-    /// Set the bucketing specification.
+    /// Set the bucketing specification, as PySpark's `bucketBy(numBuckets, col, *cols)`, whose
+    /// `WriteOperation` sends the bucketing only of a count above 0: a count that is not
+    /// positive sends none, also over an earlier call, as the last `bucketBy` wins.
     pub fn bucket_by<S: Into<String>>(
         mut self,
         num_buckets: i32,
@@ -506,7 +528,8 @@ impl DataFrameWriter {
         op.clustering_columns = self.cluster_cols.clone();
         op.options = self.options.clone();
         op.save_type = save_type;
-        if let Some(num_buckets) = self.num_buckets {
+        // As PySpark's `if self.num_buckets > 0`.
+        if let Some(num_buckets) = self.num_buckets.filter(|num_buckets| *num_buckets > 0) {
             let mut bucket_by = proto::write_operation::BucketBy::default();
             bucket_by.num_buckets = num_buckets;
             bucket_by.bucket_column_names = self.bucket_cols.clone();
@@ -1110,6 +1133,36 @@ mod tests {
             (bucket_by.num_buckets, bucket_by.bucket_column_names),
             (2, vec!["col2".to_string()])
         );
+    }
+
+    #[test]
+    fn v1_write_bucket_by_of_a_count_that_is_not_positive_sends_no_bucketing() {
+        // As PySpark's `WriteOperation`, which sends the bucketing only `if self.num_buckets >
+        // 0`: of a count of 0 or less, also over an earlier one, the last call winning.
+        let spark = session();
+        let df = spark.range(3).unwrap();
+        let sent = |writer: &DataFrameWriter| {
+            writer
+                .build_write_operation(Some(proto::write_operation::SaveType::Path(
+                    "/tmp/out".to_string(),
+                )))
+                .unwrap()
+                .bucket_by
+        };
+        for count in [0, -1, i32::MIN] {
+            assert_eq!(sent(&df.write().bucket_by(count, vec!["col1"])), None);
+            let writer = df
+                .write()
+                .bucket_by(4, vec!["col1"])
+                .bucket_by(count, vec!["col2"]);
+            assert_eq!(sent(&writer), None);
+            assert_eq!(
+                sent(&writer.bucket_by(1, vec!["col3"]))
+                    .unwrap()
+                    .num_buckets,
+                1
+            );
+        }
     }
 
     #[test]

@@ -205,7 +205,36 @@ two runs, were equal. For reproducible values, use the `_with_seed` variants
 
 `DataFrameWriter::clear_bucket_by` is added: it unsets the bucketing of a writer, so that
 its write sends none, as PySpark's `bucketBy` of a count that is not positive, the last
-`bucketBy` winning. `bucket_by` is unchanged and sends the count it is given.
+`bucketBy` winning. `bucket_by` of a count that is not positive does the same, as PySpark's
+`WriteOperation` sends the bucketing only of a count above 0; it sent the count, which the server
+refused.
+
+`StatFunctions::corr` takes the `method` of PySpark's `corr(col1, col2, method=None)`: `None` and
+`""` are `"pearson"`, which the request sends, and another method is `VALUE_NOT_ALLOWED`;
+`LogicalPlan::StatCorr` adds its `method` field. `DataFrame::col("*")` is the star of the
+DataFrame, as PySpark's `df["*"]`. `functions::reduce` sends the function `reduce`, as PySpark's,
+where it sent `aggregate`, and `reduce_with_finish` is added. `DataFrame::unpersist_opt` takes an
+optional `blocking`, of which `None` sends none, as PySpark's `unpersist(None)`.
+`SparkSession::create_dataframe_from_arrow` of batches of no rows and a schema sends the schema
+alone, as PySpark's empty data, where it sent the batches, which the server failed to cast to a
+schema of other columns. `PythonUDFPayload::function` makes the payload of the function of a
+streaming `foreach` or `foreachBatch` sink, which, as PySpark's, sends the command and the Python
+version of a payload only, and not its output type and eval type. A window frame sends a bound of
+0 as the current row, and a start of `Preceding(i64::MAX)` or before and an end of
+`Following(i64::MAX)` or after as unbounded, as PySpark's `rowsBetween` and `rangeBetween` of
+`-sys.maxsize` and `sys.maxsize`; an unbounded bound on the other side of the frame is the literal
+of its int, and an offset of a row frame beyond an int fails the request with `VALUE_NOT_BETWEEN`,
+where the server refused it.
+
+These raise PySpark's errors where the request was sent before: the requests of the DataFrame of a
+`lateral_join` of another join type than an inner, a left outer or a cross join raise
+`UNSUPPORTED_JOIN_TYPE`, those of a `DataStreamReader` given a name that PySpark's `name` refuses
+`INVALID_STREAMING_SOURCE_NAME`, and those of the `changes` of a reader of a schema
+`_LEGACY_ERROR_TEMP_1189`; `Catalog::create_table_with` and `create_external_table_with` of a
+schema that is not a struct raise `NOT_EXPECTED_TYPE`; and the `await_termination` and
+`await_any_termination` of a timeout that is not positive raise `VALUE_NOT_POSITIVE`, where they
+raised `INVALID_TIMEOUT`, which PySpark does not have, and of a NaN, an infinite or a too large
+timeout the errors of PySpark's `int(timeout * 1000)`.
 
 `DataFrame::persist` takes `impl Into<Option<StorageLevel>>`, so a `StorageLevel` is passed
 as before. `None` sends no storage level, as PySpark's `persist(None)`, and the server then

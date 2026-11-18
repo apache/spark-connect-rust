@@ -371,11 +371,12 @@ pub enum LogicalPlan {
         probabilities: Vec<f64>,
         relative_error: f64,
     },
-    /// StatCorr: `df.stat.corr(col1, col2)`.
+    /// StatCorr: `df.stat.corr(col1, col2, method)`, of the method that PySpark sends, "pearson".
     StatCorr {
         input: Arc<LogicalPlan>,
         col1: String,
         col2: String,
+        method: String,
     },
     /// StatCov: `df.stat.cov(col1, col2)`.
     StatCov {
@@ -1436,19 +1437,24 @@ fn relation_of(node: &Arc<LogicalPlan>, ids: Option<&PlanIds>) -> proto::Relatio
     relation_with_references(node, Some(node), ids)
 }
 
+/// A plan that a subquery expression refers to, with the plan IDs of the session of its
+/// DataFrame, if it has them.
+type Reference = (Arc<LogicalPlan>, Option<Arc<PlanIds>>);
+
 thread_local! {
     /// For each relation being serialized, innermost last, the plans that the subquery
     /// expressions of its own expressions refer to.
-    static SUBQUERY_REFERENCES: std::cell::RefCell<Vec<Vec<Arc<LogicalPlan>>>> =
+    static SUBQUERY_REFERENCES: std::cell::RefCell<Vec<Vec<Reference>>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Record that a subquery expression being serialized refers to `plan`, which the relation
-/// that contains the expression sends in its `WithRelations`.
-pub(crate) fn refer_to(plan: &Arc<LogicalPlan>) {
+/// Record that a subquery expression being serialized refers to `plan`, of the plan IDs `ids`
+/// of the session of its DataFrame, which the relation that contains the expression sends in
+/// its `WithRelations`.
+pub(crate) fn refer_to(plan: &Arc<LogicalPlan>, ids: Option<&Arc<PlanIds>>) {
     SUBQUERY_REFERENCES.with(|frames| {
         if let Some(frame) = frames.borrow_mut().last_mut() {
-            frame.push(Arc::clone(plan));
+            frame.push((Arc::clone(plan), ids.cloned()));
         }
     });
 }
@@ -1458,7 +1464,7 @@ pub(crate) fn refer_to(plan: &Arc<LogicalPlan>) {
 fn relation_and_references(
     node: &LogicalPlan,
     ids: Option<&PlanIds>,
-) -> (proto::Relation, Vec<Arc<LogicalPlan>>) {
+) -> (proto::Relation, Vec<Reference>) {
     struct Frame;
     impl Drop for Frame {
         fn drop(&mut self) {
@@ -1526,11 +1532,16 @@ fn relation_with_references_of_a_level(
     if let Some((ids, shared)) = plan_ids {
         relation.common.get_or_insert_with(Default::default).plan_id = Some(ids.root_id_of(shared));
     }
+    // As PySpark's `ref.plan(session)`, each plan with its own plan IDs, which the subquery
+    // and the columns of its plan refer to: those of the session of its DataFrame, which may be
+    // another session than this relation's.
     let with_relations = proto::WithRelations {
         root: Some(Box::new(relation)),
         references: references
             .iter()
-            .map(|reference| relation_of(reference, ids))
+            .map(|(reference, own)| {
+                relation_of(reference, ids.map(|ids| own.as_deref().unwrap_or(ids)))
+            })
             .collect(),
     };
     proto::Relation {
@@ -3018,11 +3029,17 @@ impl LogicalPlan {
                 relation.rel_type = Some(proto::relation::RelType::ApproxQuantile(Box::new(stat)));
             }
 
-            LogicalPlan::StatCorr { input, col1, col2 } => {
+            LogicalPlan::StatCorr {
+                input,
+                col1,
+                col2,
+                method,
+            } => {
                 let mut stat = proto::StatCorr::default();
                 stat.input = Some(Box::new(relation_of(input, plan_ids)));
                 stat.col1 = col1.clone();
                 stat.col2 = col2.clone();
+                stat.method = Some(method.clone());
                 relation.rel_type = Some(proto::relation::RelType::Corr(Box::new(stat)));
             }
 

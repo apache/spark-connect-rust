@@ -1023,12 +1023,20 @@ impl SparkSession {
     /// RPC, rejecting incompatible child types or union ordering.
     /// Non-empty inputs read the server's local-relation configuration. Large inputs
     /// are uploaded as cache artifacts and referenced by hash in the resulting plan.
+    /// Batches of no rows are sent with no request: of a schema, as the schema alone, as
+    /// PySpark's `createDataFrame` sends empty data, and without one, as their Arrow schema.
     pub fn create_dataframe_from_arrow(
         &self,
         batches: Vec<arrow::record_batch::RecordBatch>,
         schema: impl Into<Option<DataType>>,
     ) -> Result<DataFrame> {
-        let plan = crate::arrow_input::create_relation(&self.client, batches, schema.into(), None)?;
+        let plan = match schema.into() {
+            // As PySpark's createDataFrame of a table of no rows, `len(data) == 0`.
+            Some(schema) if batches.iter().all(|batch| batch.num_rows() == 0) => {
+                crate::arrow_input::empty_relation(&batches, schema)?
+            }
+            schema => crate::arrow_input::create_relation(&self.client, batches, schema, None)?,
+        };
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -1038,7 +1046,10 @@ impl SparkSession {
         crate::ArrowInputOptions::from_client(&self.client)
     }
 
-    /// Internal Arrow import entry point using the normalization settings snapshot.
+    /// Internal Arrow import entry point using the normalization settings snapshot. Its caller
+    /// checks for empty data first, as PySpark's `len(data) == 0` comes before the conversion of
+    /// the table, so batches of no rows here are sent as they are: those of a table of no columns,
+    /// whose rows the conversion drops, which PySpark sends as its IPC stream.
     #[doc(hidden)]
     pub fn create_dataframe_from_arrow_with_options(
         &self,
@@ -1243,14 +1254,22 @@ impl SparkSession {
     }
 
     /// Delete the ML cached objects `refs` on the server, as PySpark's `RemoteModelRef` does
-    /// when the last reference to a model goes. It does not wait for the server: the request
-    /// runs on the shared runtime, and its errors (a closed channel) are ignored. As
-    /// `release_cached_remote_relation`, a stopped session is not released: stopping it
-    /// released its server state, ML cache included. Safe to call from `Drop`.
+    /// when the last reference to a model goes: through its `_delete_ml_cache`, one
+    /// `execute_command` of the tags and the user context extensions of the thread that drops
+    /// the model, the thread of its finalizer. It does not wait for the server: the request is
+    /// built on this thread and runs on the shared runtime (see
+    /// `SparkConnectClient::spawn_execute_plan_reattachable`), and its errors (a closed channel)
+    /// are ignored. As `release_cached_remote_relation`, a stopped session is not released:
+    /// stopping it released its server state, ML cache included. Safe to call from `Drop`.
     pub(crate) fn release_ml_objects(&self, refs: Vec<proto::ObjectRef>) {
         if self.is_stopped() {
             return;
         }
+        // A tag that UTF-8 cannot encode fails PySpark's request before it is sent, and
+        // `_delete_ml_cache` ignores the error.
+        let Ok(tags) = self.tags() else {
+            return;
+        };
         let command = proto::Command {
             command_type: Some(proto::command::CommandType::MlCommand(proto::MlCommand {
                 command: Some(proto::ml_command::Command::Delete(
@@ -1262,7 +1281,17 @@ impl SparkSession {
                 )),
             })),
         };
-        self.execute_command_in_background(command);
+        let request = proto::ExecutePlanRequest {
+            session_id: self.client.session_id().to_string(),
+            user_context: Some(proto::UserContext::default()),
+            operation_id: Some(uuid::Uuid::new_v4().to_string()),
+            tags,
+            plan: Some(proto::Plan {
+                op_type: Some(proto::plan::OpType::Command(command)),
+            }),
+            ..Default::default()
+        };
+        self.client.spawn_execute_plan_reattachable(request);
     }
 
     /// Remove the cached remote relation `relation_id` on the server, as PySpark's
@@ -1299,26 +1328,6 @@ impl SparkSession {
             ..Default::default()
         };
         self.client.spawn_unary_execute_plan(request);
-    }
-
-    /// Execute `command` on the server without waiting for its responses, on the shared
-    /// runtime. Its errors are ignored; safe to call from `Drop`.
-    fn execute_command_in_background(&self, command: proto::Command) {
-        let mut plan = proto::Plan::default();
-        plan.op_type = Some(proto::plan::OpType::Command(command));
-        let request = proto::ExecutePlanRequest {
-            session_id: self.client.session_id().to_string(),
-            user_context: Some(proto::UserContext::default()),
-            operation_id: Some(uuid::Uuid::new_v4().to_string()),
-            plan: Some(plan),
-            ..Default::default()
-        };
-        let client = Arc::clone(&self.client);
-        spark_connect_core::runtime::get_runtime().spawn(async move {
-            if let Ok(mut stream) = client.execute_plan_reattachable(request).await {
-                while let Ok(Some(_)) = stream.message().await {}
-            }
-        });
     }
 
     /// Get the runtime configuration for this session.
