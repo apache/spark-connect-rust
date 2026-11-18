@@ -7056,17 +7056,23 @@ pub(crate) fn execution_metrics<'py>(
     let observed_cls = py
         .import("pyspark.sql.connect.client")?
         .getattr("PlanObservedMetrics")?;
+    // The metrics as PySpark's client keeps them, the `Expression.Literal` messages that the
+    // server sent, of `pyspark.sql.connect.proto`, which `PlanObservedMetrics.pairs` converts
+    // when it is read, and so raises the `UNSUPPORTED_LITERAL` of a literal that PySpark does not
+    // convert there.
+    let literal_cls = py
+        .import("pyspark.sql.connect.proto")?
+        .getattr("Expression")?
+        .getattr("Literal")?;
     let observed = pyo3::types::PyList::empty(py);
     for o in &info.observed_metrics {
-        // A metric that holds a literal of a kind that PySpark does not convert, itself or as an
-        // element, is the marker of that literal, for which `pairs` raises as PySpark's raises
-        // when it converts the metric.
         let values = o
             .values
             .iter()
-            .map(|l| match unsupported_literal(l) {
-                Some(literal) => unsupported_literal_marker(py, literal),
-                None => literal_to_py(py, l, None),
+            .map(|literal| {
+                use prost::Message;
+                let encoded = pyo3::types::PyBytes::new(py, &literal.encode_to_vec());
+                literal_cls.call_method1("FromString", (encoded,))
             })
             .collect::<PyResult<Vec<_>>>()?;
         observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
@@ -7074,12 +7080,11 @@ pub(crate) fn execution_metrics<'py>(
     Ok((plan_metrics, observed))
 }
 
-/// Convert an observed-metric literal to a Python value. Mirrors
-/// `LiteralExpression._to_value`, which `PlanObservedMetrics.pairs` applies: the kinds it
-/// decodes map to the same Python values, and for any other kind (which the reference
-/// rejects with `UNSUPPORTED_LITERAL`) this returns an `_UnsupportedLiteral` marker, so
-/// the error surfaces when `flows` is read, as in the reference, not when the
-/// `ExecutionInfo` is built.
+/// Convert an observed-metric literal to a Python value, as the metrics of an Observation.
+/// Mirrors `LiteralExpression._to_value`: the kinds it decodes map to the same Python values,
+/// and for any other kind (which the reference rejects with `UNSUPPORTED_LITERAL`, and which
+/// `check_observed_metrics` refuses before) this returns an `_UnsupportedLiteral` marker.
+/// `PlanObservedMetrics` keeps the literals themselves (see [`execution_metrics`]).
 ///
 /// `data_type` is the literal's type when the enclosing literal carries it; a struct's
 /// field names come from it, else from the literal's own `data_type`, else from the
