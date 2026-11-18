@@ -138,14 +138,18 @@ The same budget (`ConversionBudget` in `crates/pyspark-rs/src/interrupt.rs`) che
 native conversion of the local data of `createDataFrame`, whose PySpark counterpart is
 Python code: the collection of the rows, the sorting of dict rows, inference, taking the
 rows apart, the converters and their values in arrays, maps and structs, the integer columns
-of an explicit schema, the cells of the native pandas row path, and the release of the rows.
+of an explicit schema, the cells of the native pandas row path (of no PyArrow), the strings of
+the columns of objects of a plain pandas frame of a struct of strings (`_pandas_string_ipc`, in
+its check and its encoding of the values), and the release of the rows.
 The rows are assembled into the relation without the GIL. Its offline regression cases
 (`python/tests/local_data_conversion_cases.py`, with the probe of
 `python/tests/_local_data_conversion_probe.py`) observe each of these parts but the integer
 columns, whose scan of a few hundred thousand rows is too short to observe, and the release,
 by the references that the conversion holds to the objects of the data, read with
 `sys.getrefcount`. The data of each case ends with a value that fails the conversion right
-after that part, without running Python code, so that no later part can be mistaken for it.
+after that part, without running Python code, so that no later part can be mistaken for it; of
+the strings, PySpark's conversion that follows the native one fails for it, without holding the
+values that the case observes.
 They disable automatic GC during the conversion, whose finalizers and weakref callbacks run
 Python code, and warm up the caches of the conversion first. A build without these
 checkpoints fails every case.

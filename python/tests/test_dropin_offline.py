@@ -16066,8 +16066,8 @@ def test_multi_and_categorical_labels_convert_cells_as_pyspark(
     mock_connect, labels, cell, arrow_type
 ):
     # A plain frame whose labels are a MultiIndex or a CategoricalIndex converts with Arrow,
-    # as one with default labels: its cells take the types that PySpark infers, and not the
-    # ones of the row path (a timestamp in the session time zone, a map, or an error).
+    # as one with default labels and every frame: its cells take the types that PySpark infers
+    # (a timestamp_ntz of a naive datetime, a struct of a dict).
     import pyarrow as pa
 
     pd = pytest.importorskip("pandas")
@@ -16088,12 +16088,19 @@ def test_create_dataframe_pandas_errors_as_pyspark(mock_connect):
     from pyspark.errors import PySparkTypeError, PySparkValueError
 
     pdf = pd.DataFrame({"a": [1, 2], "b": ["x", "y"]})
-    # pyspark reports the parsed type, also for an atomic DDL string.
-    for schema, data_type in [(T.LongType(), "LongType()"), ("int", "IntegerType()")]:
-        with pytest.raises(PySparkTypeError) as error:
-            _local_create_dataframe(pdf, schema, session=mock_connect[0])
-        assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW"
-        assert error.value.getMessageParameters() == {"data_type": data_type}
+
+    class Unconverted(pd.DataFrame):
+        def astype(self, *args, **kwargs):
+            raise AssertionError("no conversion of the rows of a frame of an atomic schema")
+
+    # pyspark reports the parsed type, also for an atomic DDL string, and reads no data of the
+    # frame, whatever its class.
+    for frame in (pdf, Unconverted(pdf)):
+        for schema, data_type in [(T.LongType(), "LongType()"), ("int", "IntegerType()")]:
+            with pytest.raises(PySparkTypeError) as error:
+                _local_create_dataframe(frame, schema, session=mock_connect[0])
+            assert error.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW"
+            assert error.value.getMessageParameters() == {"data_type": data_type}
     for data, schema in [(pd.DataFrame(index=[0, 1]), None), ([], None), ([], ["a"]),
                          (pdf.iloc[:0], None), (pdf.iloc[:0], ["a", "b"])]:
         with pytest.raises(PySparkValueError) as error:
@@ -16876,9 +16883,10 @@ def test_nullable_and_arrow_labels_convert_cells_as_pyspark(
     assert table.column(0).to_pylist() == values
 
 
-def test_label_arrays_with_a_hook_of_their_own_keep_the_row_path():
-    # The labels of the Arrow routes run no user code: a nullable or Arrow label array whose
-    # instance shadows a hook that reading the labels reaches keeps the native row path.
+def test_label_arrays_with_a_hook_of_their_own_decline_the_fast_paths():
+    # The fast paths read the labels without running user code: a nullable or Arrow label array
+    # whose instance shadows a hook that reading the labels reaches is declined, and the frame
+    # takes PySpark's conversion, which reads the labels as PySpark does.
     pd = pytest.importorskip("pandas")
     pytest.importorskip("pyarrow")
     from pyspark.sql._pandas_input import _has_canonical_columns
@@ -17120,32 +17128,107 @@ def test_create_dataframe_raises_recursion_error_for_a_value_that_contains_itsel
             _local_create_dataframe([(value,)], session=mock_connect[0])
 
 
-# py_to_value converts object-dtype cells of customized pandas frames, plus fillna
-# and pivot values; local rows use infer.convert. The "local" source below is a
-# control for values that the exact-number fast path must not change.
-def _RowPathFrame(pd):
-    """A subclass of pandas.DataFrame: createDataFrame converts a customized frame with its
-    row path (py_to_value), where it converts a plain one with PySpark's Arrow conversion."""
-    return type("RowPathFrame", (pd.DataFrame,), {})
+# py_to_value converts the object cells of the pandas row path, which createDataFrame takes
+# without PyArrow, plus fillna and pivot values; local rows use infer.convert. The "local"
+# source below is a control for values that the exact-number fast path must not change.
+@contextlib.contextmanager
+def _pandas_row_path():
+    """Meanwhile, createDataFrame converts pandas frames with its row path (py_to_value), as it
+    does without PyArrow; with it, it converts every frame with PySpark's Arrow conversion."""
+    import importlib
+
+    # The module of the native binding, which earlier import-hook tests can leave another object
+    # than the attribute of the package.
+    helper = importlib.import_module("pyspark.sql._pandas_input")
+    available = helper.pyarrow_available
+    helper.pyarrow_available = lambda: False
+    try:
+        yield
+    finally:
+        helper.pyarrow_available = available
 
 
-def _native_number_input_table(mock_connect, data, schema=None, *, source="local"):
+@pytest.fixture
+def pandas_row_path():
+    """The row path of pandas frames for the test (`_pandas_row_path`)."""
+    with _pandas_row_path():
+        yield
+
+
+def _CustomizedFrame(pd):
+    """A subclass of pandas.DataFrame, which createDataFrame converts with PySpark's Arrow
+    conversion, as it converts a plain one: PySpark converts every pandas DataFrame so."""
+    return type("CustomizedFrame", (pd.DataFrame,), {})
+
+
+def _native_number_input_table(mock_connect, data, schema=None, *, source="local", named=False):
+    """The Arrow table of the local relation of `createDataFrame(data, schema)`; `named`, of the
+    names of the DataFrame, which PySpark's conversion of a pandas frame without a schema applies
+    with toDF to its columns `_0`, `_1`, .... Of the "pandas" source, the values of the rows
+    `data` are the object column `value` of a frame on the row path (`_pandas_row_path`)."""
     import pyarrow as pa
 
+    spark, service = mock_connect
     if source == "pandas":
         pd = pytest.importorskip("pandas")
-        # Local rows now use infer.convert. Object-backed pandas input of a customized frame, of
-        # a subclass, retains py_to_value, the converter of the row path optimized by this
-        # patch; a plain frame converts with PySpark's Arrow conversion.
-        data = _RowPathFrame(pd)({"value": [row[0] for row in data]}, dtype=object)
-    spark, service = mock_connect
-    spark.createDataFrame(data, schema).toArrow()
+        data = pd.DataFrame({"value": [row[0] for row in data]}, dtype=object)
+        with _pandas_row_path():
+            df = spark.createDataFrame(data, schema)
+    else:
+        df = spark.createDataFrame(data, schema)
+    df.toArrow()
     request = parse_message(service.execute_requests[-1])
     relation = parse_message(parse_message(request[3][0])[1][0])
-    while 18 in relation:  # Relation.to_df -> ToDF.input.
-        relation = parse_message(parse_message(relation[18][0])[1][0])
+    names = None
+    while 18 in relation:  # Relation.to_df -> ToDF.input; column_names=2.
+        rename = parse_message(relation[18][0])
+        if names is None:
+            names = [name.decode() for name in rename.get(2, [])]
+        relation = parse_message(rename[1][0])
     local = parse_message(relation[11][0])
-    return pa.ipc.open_stream(local[1][0]).read_all()
+    table = pa.ipc.open_stream(local[1][0]).read_all()
+    return table.rename_columns(names) if named and names else table
+
+
+def _third_party_integer_array(pd, values):
+    """An extension array of a class of a module outside pandas, as of a library such as
+    BigQuery's `db_dtypes`, made of pandas' IntegerArray."""
+    cls = type("ThirdPartyIntegerArray", (pd.arrays.IntegerArray,), {"__module__": __name__})
+    return cls(np.array(values, dtype="int64"), np.zeros(len(values), dtype=bool))
+
+
+@pytest.mark.parametrize("host", ["UTC", "America/Los_Angeles"])
+@pytest.mark.parametrize("kind", ["subclass", "third-party array"])
+@pytest.mark.parametrize("schema", [None, "t timestamp, id long"])
+def test_customized_pandas_frames_take_the_session_time_zone_as_pyspark(
+    mock_connect, monkeypatch, host, kind, schema
+):
+    # As PySpark, which converts every pandas DataFrame, of any class and any arrays, with its
+    # conversion of each column to Arrow, which takes a naive datetime64 column as times of the
+    # session time zone, whatever the zone of the host. Official, of a UTC or a Los Angeles host
+    # and the session zone America/Los_Angeles: the instant 2021-06-01 19:00 UTC.
+    from datetime import datetime, timezone
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("client timezone control requires time.tzset")
+    pd = pytest.importorskip("pandas")
+    _, service = mock_connect
+    service.confs = {"spark.sql.session.timeZone": "America/Los_Angeles"}
+    times = pd.to_datetime(["2021-06-01 12:00:00"])
+    if kind == "subclass":
+        frame = _CustomizedFrame(pd)({"t": times, "id": [1]})
+    else:
+        frame = pd.DataFrame({"t": times, "id": pd.Series(_third_party_integer_array(pd, [1]))})
+        assert type(frame["id"].array).__module__ == __name__
+    try:
+        with monkeypatch.context() as environment:
+            environment.setenv("TZ", host)
+            time.tzset()
+            table = _native_number_input_table(mock_connect, frame, schema, named=True)
+    finally:
+        time.tzset()
+    assert table.column("t").to_pylist() == [datetime(2021, 6, 1, 19, tzinfo=timezone.utc)]
+    assert table.column("id").to_pylist() == [1]
 
 
 @pytest.mark.parametrize("schema", [None, ["renamed"]])
@@ -17167,7 +17250,7 @@ def test_customized_pandas_named_rows_are_inferred_as_arrays(
     import pyarrow as pa
 
     pd = pytest.importorskip("pandas")
-    frame = _RowPathFrame(pd)({"value": values}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": values}, dtype=object)
     actual = _native_number_input_table(mock_connect, frame, schema).column(0).combine_chunks()
     wanted = pa.array(expected, from_pandas=True)
     assert actual.equals(wanted)
@@ -17185,7 +17268,7 @@ def test_customized_pandas_mixed_named_rows_raise_arrow_errors(mock_connect, sch
 
     pd = pytest.importorskip("pandas")
     spark, service = mock_connect
-    frame = _RowPathFrame(pd)({"value": values}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": values}, dtype=object)
     before = len(service.execute_requests)
     with pytest.raises(PySparkValueError, match=r"pandas.Series \(object\) with name 'value'"):
         spark.createDataFrame(frame, schema)
@@ -17197,7 +17280,7 @@ def test_customized_pandas_named_row_keys_raise_arrow_errors(mock_connect):
 
     pd = pytest.importorskip("pandas")
     spark, service = mock_connect
-    frame = _RowPathFrame(pd)({"value": [{Row(a=1, b=2): 3}]}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": [{Row(a=1, b=2): 3}]}, dtype=object)
     before = len(service.execute_requests)
     with pytest.raises(PySparkTypeError, match=r"pandas.Series \(object\) with name 'value'"):
         spark.createDataFrame(frame)
@@ -17212,7 +17295,7 @@ def test_customized_pandas_named_rows_preserve_dict_inference_option(mock_connec
     _, service = mock_connect
     service.confs = {"spark.sql.execution.pandas.inferPandasDictAsMap": "true"}
     values = [{"child": Row(a=1, b=2)}, None, {"child": Row(a=3, b=4)}]
-    frame = _RowPathFrame(pd)({"value": values}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": values}, dtype=object)
     actual = _native_number_input_table(mock_connect, frame, schema).column(0).combine_chunks()
     if schema is None:
         expected_type = pa.map_(pa.string(), pa.list_(pa.int64()))
@@ -17233,7 +17316,7 @@ def test_customized_pandas_named_row_errors_respect_safecheck_option(mock_connec
     service.confs = {
         "spark.sql.execution.pandas.convertToArrowArraySafely": str(safecheck).lower()
     }
-    frame = _RowPathFrame(pd)({"value": [Row(a=1, b="x")]}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": [Row(a=1, b="x")]}, dtype=object)
     with pytest.raises(PySparkValueError) as error:
         spark.createDataFrame(frame)
     expected = (
@@ -17265,21 +17348,23 @@ def test_customized_pandas_row_frames_share_absent_safecheck_setting(
 
     class NarrowDecimal(Decimal):
         def as_tuple(self):
-            # Keep the native Decimal exactness check observable through its tuple hook.
+            # Arrow types the column of a scale and precision of one, which 1.5 does not fit.
             return Decimal("0.0").as_tuple()
 
     columns = {"native": [Decimal("1.5") if kind == "row" else NarrowDecimal("1.5")]}
     if kind != "native_without_rows":
         columns["rows"] = [Row(a=1, b="x") if kind == "row" else Row(a=1)]
-    frame = _RowPathFrame(pd)(columns, dtype=object)
+    frame = _CustomizedFrame(pd)(columns, dtype=object)
     before_reads = service.read_confs.count(key)
     before_execute = len(service.execute_requests)
     with pytest.raises(PySparkValueError) as error:
         spark.createDataFrame(frame)
-    label, arrow_type = ("rows", "None") if kind == "row" else ("native", "decimal128(1, 1)")
+    # PySpark's conversion converts the columns from left to right, each of the type that Arrow
+    # infers, which the message names as None.
+    label = "rows" if kind == "row" else "native"
     expected = (
         f"Exception thrown when converting pandas.Series (object) with name '{label}' "
-        f"to Arrow Array ({arrow_type})."
+        "to Arrow Array (None)."
     )
     # Every kind takes the setting of the one read of createDataFrame, as PySpark's does, so an
     # absent value is no safe check, and the message has no hint of it.
@@ -17307,7 +17392,7 @@ def test_customized_pandas_named_row_timestamps_preserve_arrow_type_and_wall_clo
         "spark.sql.execution.pandas.inferPandasDictAsMap": str(infer_dict_as_map).lower(),
     }
     value = datetime(2020, 1, 2, 3, 4, 5, 123456, tzinfo=timezone.utc if aware else None)
-    frame = _RowPathFrame(pd)({"value": [Row(t=value), None]}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": [Row(t=value), None]}, dtype=object)
     try:
         with monkeypatch.context() as environment:
             environment.setenv("TZ", "America/Los_Angeles")
@@ -17333,7 +17418,7 @@ def test_customized_pandas_named_row_dates_and_timedeltas_keep_arrow_values(mock
     pd = pytest.importorskip("pandas")
     values = ([date(1969, 12, 31), date(2000, 2, 29)] if kind == "date"
               else [timedelta(microseconds=-1), timedelta(days=2, seconds=3, microseconds=456)])
-    frame = _RowPathFrame(pd)({"value": [Row(v=value) for value in values]}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": [Row(v=value) for value in values]}, dtype=object)
     actual = _native_number_input_table(mock_connect, frame).column(0).combine_chunks()
     expected_type = pa.list_(pa.date32() if kind == "date" else pa.duration("us"))
     assert actual.type == expected_type
@@ -17354,7 +17439,7 @@ def test_customized_pandas_named_row_strings_keep_arrow_width_options(
         "spark.sql.execution.arrow.useLargeVarTypes": str(large).lower(),
         "spark.sql.execution.pandas.inferPandasDictAsMap": str(infer_dict_as_map).lower(),
     }
-    frame = _RowPathFrame(pd)({"value": [Row(a="x", b="longer"), None]}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": [Row(a="x", b="longer"), None]}, dtype=object)
     actual = _native_number_input_table(mock_connect, frame, schema).column(0).combine_chunks()
     # With no Spark coercion type, PyArrow infers ordinary string offsets. The
     # schema=None dict option supplies a type and activates large variable widths.
@@ -17372,13 +17457,15 @@ def test_customized_pandas_multiple_named_row_columns_keep_names_padding(mock_co
         data = {"left": data["left"], "text": ["a", "b"], "right": data["right"]}
         expected = [{"first": [1, 2], "_2": "a", "_3": [3]},
                     {"first": None, "_2": "b", "_3": [4]}]
-    frame = _RowPathFrame(pd)(data, dtype=object)
-    actual = _native_number_input_table(mock_connect, frame, ["first"])
+    frame = _CustomizedFrame(pd)(data, dtype=object)
+    actual = _native_number_input_table(mock_connect, frame, ["first"], named=True)
     assert actual.to_pylist() == expected
 
 
 @pytest.mark.parametrize("row_position", [0, 3, 6])
-def test_customized_pandas_named_rows_preserve_multiple_native_columns(mock_connect, row_position):
+def test_customized_pandas_named_rows_among_other_columns_convert_as_pyspark(
+    mock_connect, row_position
+):
     from decimal import Decimal
 
     import pyarrow as pa
@@ -17393,82 +17480,27 @@ def test_customized_pandas_named_rows_preserve_multiple_native_columns(mock_conn
         ("flag", [True, False, None]),
     ]
     columns.insert(row_position, ("rows", [Row(a=1, b=2), None, Row(a=3, b=4)]))
-    frame = _RowPathFrame(pd)(dict(columns), dtype=object)
-    actual = _native_number_input_table(mock_connect, frame)
+    frame = _CustomizedFrame(pd)(dict(columns), dtype=object)
+    actual = _native_number_input_table(mock_connect, frame, named=True)
     assert actual.column_names == [name for name, _ in columns]
     expected = [{name: values[i] for name, values in columns} for i in range(3)]
     for row, values in zip(expected, [[1, 2], None, [3, 4]]):
         row["rows"] = values
     assert actual.to_pylist() == expected
+    # As PySpark's conversion, of the types that Arrow infers of all the values of each column:
+    # the Decimals of a list too take the smallest precision and scale that hold them.
     assert actual.column("decimal").type == pa.decimal128(4, 3)
     assert actual.column("mixed_decimal").type == pa.decimal128(3, 2)
-    assert actual.column("nested").type == pa.list_(pa.decimal128(38, 3))
+    assert actual.column("nested").type == pa.list_(pa.decimal128(4, 3))
 
 
-def test_customized_pandas_named_row_arrow_field_metadata_and_nullability_survive(
-    mock_connect, monkeypatch
+def test_customized_pandas_named_rows_keep_native_fallback_without_pyarrow(
+    mock_connect, pandas_row_path
 ):
-    import pyarrow as pa
-    from pyspark.sql import _pandas_input
-
+    # Without PyArrow, which PySpark's conversion needs, the row path converts the frame: it
+    # infers a named Row as a struct (dev/parity/known-differences.md).
     pd = pytest.importorskip("pandas")
-    original = _pandas_input.prepare_inferred_pandas_row_column
-
-    def tagged(*args):
-        data_type, table = original(*args)
-        field = table.schema.field(0)
-        field = pa.field(field.name, field.type, nullable=False, metadata={b"source": b"row"})
-        return data_type, pa.Table.from_arrays(table.columns, schema=pa.schema([field]))
-
-    monkeypatch.setattr(_pandas_input, "prepare_inferred_pandas_row_column", tagged)
-    frame = _RowPathFrame(pd)({"value": [Row(a=1, b=2)]}, dtype=object)
-    actual = _native_number_input_table(mock_connect, frame)
-    assert not actual.schema.field(0).nullable
-    assert actual.schema.field(0).metadata == {b"source": b"row"}
-    assert actual.to_pylist() == [{"value": [1, 2]}]
-
-
-def test_customized_pandas_named_row_columns_align_different_arrow_chunks(mock_connect, monkeypatch):
-    import pyarrow as pa
-    from pyspark.sql import _pandas_input
-
-    pd = pytest.importorskip("pandas")
-    original = _pandas_input.prepare_inferred_pandas_row_column
-
-    def chunked(values, name, *args):
-        data_type, table = original(values, name, *args)
-        split = 1 if name == "left" else 2
-        empty = table.slice(0, 0)
-        return data_type, pa.concat_tables([
-            empty, table.slice(0, split), empty, table.slice(split), empty,
-        ])
-
-    monkeypatch.setattr(_pandas_input, "prepare_inferred_pandas_row_column", chunked)
-    frame = _RowPathFrame(pd)({
-        "left": [Row(v=1), Row(v=2), Row(v=3)],
-        "text": ["a", "b", "c"],
-        "right": [Row(v=4), Row(v=5), Row(v=6)],
-    }, dtype=object)
-    actual = _native_number_input_table(mock_connect, frame)
-    assert actual.to_pylist() == [
-        {"left": [1], "text": "a", "right": [4]},
-        {"left": [2], "text": "b", "right": [5]},
-        {"left": [3], "text": "c", "right": [6]},
-    ]
-    assert actual.column(0).num_chunks == 3
-
-
-def test_customized_pandas_named_rows_keep_native_fallback_without_pyarrow(mock_connect, monkeypatch):
-    from pyspark.sql import _pandas_input
-
-    pd = pytest.importorskip("pandas")
-    monkeypatch.setattr(_pandas_input, "pyarrow_available", lambda: False)
-
-    def unexpected(*args):
-        raise AssertionError("unavailable PyArrow must retain native Row conversion")
-
-    monkeypatch.setattr(_pandas_input, "inferred_pandas_row_columns", unexpected)
-    frame = _RowPathFrame(pd)({"value": [Row(a=1, b="x")]}, dtype=object)
+    frame = _CustomizedFrame(pd)({"value": [Row(a=1, b="x")]}, dtype=object)
     assert _native_number_input_table(mock_connect, frame).column(0).to_pylist() == [
         {"a": 1, "b": "x"}
     ]
@@ -17479,7 +17511,7 @@ def test_customized_pandas_named_rows_keep_native_fallback_without_pyarrow(mock_
 def test_customized_pandas_named_row_errors_follow_column_order(mock_connect, kind, row_first):
     from decimal import Decimal
 
-    from pyspark.errors import PySparkRuntimeError, PySparkTypeError, PySparkValueError
+    from pyspark.errors import PySparkTypeError, PySparkValueError
 
     pd = pytest.importorskip("pandas")
     spark, service = mock_connect
@@ -17492,8 +17524,10 @@ def test_customized_pandas_named_row_errors_follow_column_order(mock_connect, ki
     columns = {"native": native, "rows": [Row(a=1, b="x"), Row(a=2, b="y")]}
     if row_first:
         columns = {"rows": columns["rows"], "native": native}
-    frame = _RowPathFrame(pd)(columns, dtype=object)
+    frame = _CustomizedFrame(pd)(columns, dtype=object)
     before = len(service.execute_requests)
+    # As PySpark's conversion, which converts the columns from left to right: the first one
+    # that Arrow cannot convert raises its error.
     if row_first:
         error_type, message = PySparkValueError, r"with name 'rows'"
     elif kind == "overflow":
@@ -17501,17 +17535,17 @@ def test_customized_pandas_named_row_errors_follow_column_order(mock_connect, ki
     elif kind in ("null_map_key", "decimal"):
         error_type, message = PySparkTypeError, r"with name 'native'"
     else:
-        # The inherited native encoder rejects the string in an inferred long array.
-        error_type, message = PySparkRuntimeError, "Type mismatch in row data"
+        # Arrow infers the array of the type of the first value, which the string is not of.
+        error_type, message = PySparkValueError, r"with name 'native'"
     with pytest.raises(error_type, match=message) as error:
         spark.createDataFrame(frame)
-    if not row_first and kind == "encoder":
+    if not row_first:
         assert "with name 'rows'" not in str(error.value)
     assert len(service.execute_requests) == before
 
 
 @pytest.mark.parametrize("row_first", [False, True])
-def test_customized_pandas_failed_named_rows_do_not_repeat_native_scalar_hooks(mock_connect, row_first):
+def test_customized_pandas_object_columns_convert_with_arrow_as_pyspark(mock_connect, row_first):
     from pyspark.errors import PySparkValueError
 
     pd = pytest.importorskip("pandas")
@@ -17529,12 +17563,13 @@ def test_customized_pandas_failed_named_rows_do_not_repeat_native_scalar_hooks(m
                "rows": [Row(a=1, b="x"), Row(a=2, b="y")]}
     if row_first:
         columns = {"rows": columns["rows"], "native": columns["native"]}
-    frame = _RowPathFrame(pd)(columns, dtype=object)
-    with pytest.raises(PySparkValueError, match=r"with name 'rows'"):
+    frame = _CustomizedFrame(pd)(columns, dtype=object)
+    # As PySpark's conversion: Arrow infers no type of an object of an `__index__` only, and does
+    # not call it, and the first column that fails, from the left, raises.
+    first = "rows" if row_first else "native"
+    with pytest.raises(PySparkValueError, match=f"with name '{first}'"):
         mock_connect[0].createDataFrame(frame)
-    # The fallback retains one native scalar traversal, including callbacks in later
-    # columns on failing input; it does not retry objects to choose an earlier error.
-    assert calls == [1, 2]
+    assert calls == []
 
 
 @pytest.mark.parametrize("row_first", [False, True])
@@ -17557,7 +17592,7 @@ def test_customized_pandas_native_error_stops_later_hooks_in_its_column(mock_con
                "rows": [Row(a=1), Row(a=2)]}
     if row_first:
         columns = {"rows": columns["rows"], "native": columns["native"]}
-    frame = _RowPathFrame(pd)(columns, dtype=object)
+    frame = _CustomizedFrame(pd)(columns, dtype=object)
     before = len(service.execute_requests)
     with pytest.raises(LookupError, match="^native column conversion failed$") as error:
         spark.createDataFrame(frame)
@@ -17585,7 +17620,7 @@ def test_customized_pandas_native_base_exception_stops_later_hooks(mock_connect,
             calls.append("later")
             return 1
 
-    frame = _RowPathFrame(pd)({
+    frame = _CustomizedFrame(pd)({
         "rows": [Row(a=1), Row(a=2)],
         "native": [InterruptedDecimal("1.0"), InterruptedDecimal("2.0")],
         "later": [LaterIndexed(), LaterIndexed()],
@@ -17596,69 +17631,6 @@ def test_customized_pandas_native_base_exception_stops_later_hooks(mock_connect,
     assert error.value is failure
     assert calls == ["native"]
     assert len(service.execute_requests) == before
-
-
-@pytest.mark.parametrize("native_invalid", [False, True])
-@pytest.mark.parametrize("failure_kind", ["lookup", "discovery"])
-def test_customized_pandas_helper_reported_row_error_follows_column_order(
-    mock_connect, monkeypatch, native_invalid, failure_kind
-):
-    from pyspark.sql import _pandas_input
-
-    pd = pytest.importorskip("pandas")
-    spark, service = mock_connect
-    # Inject the discovery error without constructing a cyclic or deep input.
-    failure = (ValueError("cyclic container in inferred pandas Row discovery")
-               if failure_kind == "discovery" else LookupError("Row values unavailable"))
-    calls = []
-
-    def reported_error(rows, width, candidates):
-        calls.append((len(rows), width, list(candidates)))
-        return [(1, failure)]
-
-    def unexpected(*args):
-        raise AssertionError("a helper-reported exception must not be encoded as a Row column")
-
-    monkeypatch.setattr(_pandas_input, "inferred_pandas_row_columns", reported_error)
-    monkeypatch.setattr(_pandas_input, "prepare_inferred_pandas_row_column", unexpected)
-    frame = _RowPathFrame(pd)({
-        "native": [2**63 if native_invalid else 1], "rows": [Row(a=2)],
-    }, dtype=object)
-    before = len(service.execute_requests)
-    expected = OverflowError if native_invalid else type(failure)
-    message = ("^Python int too large to convert to C long$" if native_invalid
-               else "^" + str(failure) + "$")
-    with pytest.raises(expected, match=message) as error:
-        spark.createDataFrame(frame)
-    if not native_invalid:
-        assert error.value is failure
-    assert calls == [(1, 2, [0, 1])]
-    assert len(service.execute_requests) == before
-
-
-def test_customized_pandas_row_discovery_walks_only_object_columns(mock_connect, monkeypatch):
-    from pyspark.sql import _pandas_input
-
-    pd = pytest.importorskip("pandas")
-    spark, _ = mock_connect
-    walk = _pandas_input.inferred_pandas_row_columns
-    calls = []
-
-    def recorded(rows, width, candidates):
-        calls.append(list(candidates))
-        return walk(rows, width, candidates)
-
-    monkeypatch.setattr(_pandas_input, "inferred_pandas_row_columns", recorded)
-    # Only a column of Python objects can hold a Row, so the cells of numeric, boolean,
-    # string and datetime columns are not walked, and a frame of them not at all.
-    frame = _RowPathFrame(pd)({
-        "n": [1, 2], "f": [0.5, None], "rows": [Row(a=1, b=2), Row(a=3, b=4)],
-        "b": [True, False], "t": pd.to_datetime(["2024-01-01", None]),
-    })
-    spark.createDataFrame(frame)
-    assert calls == [[2]]
-    spark.createDataFrame(_RowPathFrame(pd)({"n": [1, 2], "f": [0.5, None]}))
-    assert calls == [[2]]
 
 
 @pytest.mark.parametrize("native_invalid", [False, True])
@@ -17676,7 +17648,7 @@ def test_customized_pandas_row_conf_error_comes_before_any_conversion(
     monkeypatch.setattr(service, "default_confs", {
         key: value for key, value in service.default_confs.items() if key != missing
     })
-    frame = _RowPathFrame(pd)({
+    frame = _CustomizedFrame(pd)({
         "native": [2**63 if native_invalid else 1], "rows": [Row(a=2)],
     }, dtype=object)
     before = len(service.execute_requests)
@@ -17703,7 +17675,7 @@ def test_customized_pandas_without_rows_reads_the_settings_once(mock_connect, sc
         "spark.sql.execution.pandas.convertToArrowArraySafely",
         "spark.sql.execution.pandas.inferPandasDictAsMap",
     }
-    frame = _RowPathFrame(pd)({"native": [1, 2], "text": ["a", "b"]}, dtype=object)
+    frame = _CustomizedFrame(pd)({"native": [1, 2], "text": ["a", "b"]}, dtype=object)
     before_confs = len(service.read_confs)
     before_execute = len(service.execute_requests)
     assert type(spark.createDataFrame(frame, schema)).__name__ == "DataFrame"
@@ -17713,8 +17685,11 @@ def test_customized_pandas_without_rows_reads_the_settings_once(mock_connect, sc
     assert len(service.execute_requests) == before_execute
 
 
-def test_customized_pandas_named_rows_from_widened_normalization_keep_schema_names(mock_connect):
+def test_customized_pandas_normalization_methods_do_not_run_as_pyspark(mock_connect):
+    from pyspark.errors import PySparkValueError
+
     pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
 
     class Frame(pd.DataFrame):
         def astype(self, *args, **kwargs):
@@ -17723,12 +17698,18 @@ def test_customized_pandas_named_rows_from_widened_normalization_keep_schema_nam
         def where(self, *args, **kwargs):
             return pd.DataFrame({"first": [1], "second": [Row(a=2, b=3)]}, dtype=object)
 
+    # As PySpark's conversion, which takes the columns of the frame itself, and none of a frame
+    # of its methods: the one column is fewer than the two names.
     frame = Frame({"original": [1]}, dtype=object)
-    actual = _native_number_input_table(mock_connect, frame, ["x", "y"])
-    assert actual.to_pylist() == [{"x": 1, "y": [2, 3]}]
+    before = len(service.execute_requests)
+    with pytest.raises(PySparkValueError) as error:
+        spark.createDataFrame(frame, ["x", "y"])
+    assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert error.value.getMessageParameters() == {"expected_length": "2", "actual_length": "1"}
+    assert len(service.execute_requests) == before
 
 
-def test_customized_pandas_named_row_inference_preserves_frame_and_other_column_hooks(mock_connect):
+def test_customized_pandas_hooks_of_frames_and_cells_as_pyspark(mock_connect):
     from decimal import Decimal
 
     pd = pytest.importorskip("pandas")
@@ -17767,197 +17748,22 @@ def test_customized_pandas_named_row_inference_preserves_frame_and_other_column_
 
     frame = Frame({"row": [Row(a=1, b=2)], "text": [IndexedString("x")],
                    "decimal": [TracedDecimal("1.20")]}, dtype=object)
-    actual = _native_number_input_table(mock_connect, frame)
-    assert actual.to_pylist() == [{"row": [1, 2], "text": 42, "decimal": Decimal("1.20")}]
-    assert calls[:3] == ["notna", "astype", "where"]
-    assert calls[3:] == ["index", "decimal str", "decimal tuple", "decimal tuple"]
+    actual = _native_number_input_table(mock_connect, frame, named=True)
+    # As PySpark's conversion, which calls none of the normalization methods of the frame and
+    # converts each column with Arrow, of its own reads of the cells: a str of an `__index__` is a
+    # string, and PyArrow types a Decimal by its tuple, then converts its text. Official, on
+    # PyArrow 26: these values and calls.
+    assert actual.to_pylist() == [{"row": [1, 2], "text": "x", "decimal": Decimal("1.20")}]
+    assert calls == ["decimal tuple", "decimal str"]
 
 
-def test_pandas_named_row_adaptation_accepts_tuple_rows_without_reading_fields():
-    # Exercise the shipped Row representation and its subclasses: field metadata
-    # and iterator overrides must not change the positional values Arrow sees.
-    from pyspark.sql import _pandas_input
-
-    class TupleRow(Row):
-        def __iter__(self):
-            raise AssertionError("inferred pandas conversion used a Row iterator override")
-
-        @property
-        def __fields__(self):
-            raise AssertionError("inferred pandas conversion read Row field names")
-
-    value = TupleRow(1, TupleRow(2, 3))
-    assert _pandas_input.inferred_pandas_row_columns([[value]], 1) == [(0, [(1, (2, 3))])]
-    key = TupleRow(1, 2)
-    assert _pandas_input.inferred_pandas_row_columns([[{key: 3}]], 1) == [
-        (0, [{(1, 2): 3}])
-    ]
-    adapted = _pandas_input.inferred_pandas_row_columns([[{key: 3}]], 1)
-    assert next(iter(adapted[0][1][0])) is key
-
-
-def test_pandas_named_row_discovery_retains_key_hash_error_column():
-    from pyspark.sql import _pandas_input
-
-    cause = ValueError("key callback unavailable")
-    failure = LookupError("dict replacement unavailable")
-    failure.__cause__ = cause
-    fail_hash = False
-    calls = []
-
-    class Key:
-        def __hash__(self):
-            calls.append("hash")
-            if fail_hash:
-                raise failure
-            return 17
-
-    key = Key()
-    original_row = Row(a=1, b=2)
-    original = {key: original_row}
-    calls.clear()
-    fail_hash = True
-    rows = [[1, original], [2, original]]
-    errors = _pandas_input.inferred_pandas_row_columns(rows, 2)
-    assert len(errors) == 1
-    assert errors[0][0] == 1
-    assert errors[0][1] is failure
-    assert errors[0][1].__cause__ is cause
-    assert str(errors[0][1]) == "dict replacement unavailable"
-    assert calls == ["hash"]
-    assert len(original) == 1
-    assert next(iter(original)) is key
-    assert list(original.values())[0] is original_row
-    assert rows[0][1] is original and rows[1][1] is original
-
-
-@pytest.mark.parametrize("first", [None, False, 1, 1.5, 2 + 3j, "x", b"x", bytearray(b"x")])
-def test_pandas_named_row_detection_keeps_later_nested_rows_after_scalars(first):
-    from pyspark.sql import _pandas_input
-
-    nested = {"child": [0, (Row(a=1, b=2),)]}
-    adapted = _pandas_input.inferred_pandas_row_columns([[first, first], [nested, first]], 2)
-    assert len(adapted) == 1
-    assert adapted[0][0] == 0
-    assert adapted[0][1][0] is first
-    assert adapted[0][1][1] == {"child": [0, ((1, 2),)]}
-
-
-def test_pandas_named_row_detection_does_not_compare_or_hash_cell_types():
-    from pyspark.sql import _pandas_input
-
-    class Meta(type):
-        def __eq__(cls, other):
-            raise AssertionError("Row detection compared a cell type")
-
-        def __hash__(cls):
-            raise AssertionError("Row detection hashed a cell type")
-
-    class Opaque(metaclass=Meta):
-        pass
-
-    value = Opaque()
-    adapted = _pandas_input.inferred_pandas_row_columns([[value], [Row(a=1)]], 1)
-    assert adapted[0][0] == 0
-    assert adapted[0][1][0] is value
-    assert adapted[0][1][1] == (1,)
-
-
-def test_pandas_named_row_adaptation_revisits_shared_acyclic_containers():
-    from pyspark.sql import _pandas_input
-
-    original_row = Row(a=1, b=2)
-    shared = [original_row]
-    untouched = {"numbers": [3, 4]}
-    value = {"left": shared, "right": (shared,), "untouched": untouched}
-    adapted = _pandas_input.inferred_pandas_row_columns([[value], [value]], 1)
-    assert len(adapted) == 1
-    assert adapted[0][0] == 0
-    values = adapted[0][1]
-    expected = {"left": [(1, 2)], "right": ([(1, 2)],), "untouched": untouched}
-    assert values == [expected, expected]
-    assert values[0] is not values[1]
-    for converted in values:
-        assert converted["left"] is not converted["right"][0]
-        assert converted["untouched"] is untouched
-    assert value["left"] is shared
-    assert value["right"][0] is shared
-    assert shared[0] is original_row
-
-
-@pytest.mark.parametrize("parent_kind", ["list", "tuple", "dict"])
-def test_pandas_named_row_discovery_active_id_guard_retains_column(monkeypatch, parent_kind):
-    from pyspark.sql import _pandas_input
-
-    child = Row(a=1, b=2)
-    if parent_kind == "list":
-        parent = [child]
-    elif parent_kind == "tuple":
-        parent = (child,)
-    else:
-        parent = {"child": child}
-    original_id = id
-    parent_id = original_id(parent)
-    guard_calls = []
-
-    def controlled_id(value):
-        if value is parent:
-            guard_calls.append("parent")
-        if value is child:
-            guard_calls.append("child")
-            return parent_id
-        return original_id(value)
-
-    # This ordinary acyclic input exercises the guard through a simulated ID collision.
-    monkeypatch.setattr(_pandas_input, "id", controlled_id, raising=False)
-    errors = _pandas_input.inferred_pandas_row_columns([[1, parent], [2, None]], 2)
-    assert len(errors) == 1
-    assert errors[0][0] == 1
-    assert type(errors[0][1]) is ValueError
-    assert str(errors[0][1]) == "cyclic container in inferred pandas Row discovery"
-    assert guard_calls == ["parent", "child"]
-    assert (parent["child"] if parent_kind == "dict" else parent[0]) is child
-    assert tuple.__getitem__(child, slice(None)) == (1, 2)
-    assert child.__fields__ == ["a", "b"]
-
-
-def test_pandas_named_row_discovery_reports_stable_key_hash_hook():
-    from pyspark.sql import _pandas_input
-
-    calls = []
-
-    class StableKey:
-        def __hash__(self):
-            calls.append("hash")
-            return 17
-
-    key = StableKey()
-    original_row = Row(a=1, b=2)
-    original = {key: original_row}
-    calls.clear()
-    adapted = _pandas_input.inferred_pandas_row_columns([[original]], 1)
-    converted = adapted[0][1][0]
-    assert len(converted) == 1
-    assert next(iter(converted)) is key
-    assert list(converted.values()) == [(1, 2)]
-    assert list(original.values())[0] is original_row
-    # This single stable, collision-free key needs one replacement hash lookup.
-    assert calls == ["hash"]
-
-
-def test_named_row_struct_schemas_and_plain_pandas_arrow_are_preserved(mock_connect, monkeypatch):
-    from pyspark.sql import _pandas_input
-
+def test_named_row_struct_schemas_and_plain_pandas_arrow_are_preserved(mock_connect):
     pd = pytest.importorskip("pandas")
     struct = T.StructType().add("a", T.LongType()).add("b", T.StringType())
     schema = T.StructType().add("value", struct)
-    # An explicit struct and local-row inference retain named structures.
-    frame = _RowPathFrame(pd)({"value": [Row(a=1, b="x")]}, dtype=object)
-
-    def unexpected(*args):
-        raise AssertionError("input unexpectedly used inferred Row adaptation")
-
-    monkeypatch.setattr(_pandas_input, "inferred_pandas_row_columns", unexpected)
+    # An explicit struct, of PySpark's conversion of a frame of any class, and local-row
+    # inference retain named structures.
+    frame = _CustomizedFrame(pd)({"value": [Row(a=1, b="x")]}, dtype=object)
     assert _native_number_input_table(mock_connect, frame, schema).column(0).to_pylist() == [
         {"a": 1, "b": "x"}
     ]
@@ -18089,15 +17895,10 @@ def test_local_input_native_numbers_inside_nested_values(mock_connect):
     (lambda: Row("a", "b")(1, "x"), {"a": 1, "b": "x"}),
     (lambda: Row("a", "b")(1), {"a": 1}),
 ])
-def test_tuple_rows_remain_named_structs_in_native_input(
-    mock_connect, monkeypatch, source, make, expected
-):
-    # Keep the pandas cases on the native fallback contract; inferred Row columns
-    # with PyArrow available are covered by the adaptation tests above.
-    if source == "pandas":
-        from pyspark.sql import _pandas_input
-
-        monkeypatch.setattr(_pandas_input, "pyarrow_available", lambda: False)
+def test_tuple_rows_remain_named_structs_in_native_input(mock_connect, source, make, expected):
+    # The pandas cases are of the row path, without PyArrow (`_native_number_input_table`),
+    # which keeps a named Row a struct, as local rows do; with PyArrow, PySpark's conversion
+    # takes it as an array (test_customized_pandas_named_rows_are_inferred_as_arrays).
     value = make()
     actual = _native_number_input_table(
         mock_connect, [(value,)], source=source
@@ -18109,8 +17910,8 @@ def test_tuple_rows_remain_named_structs_in_native_input(
 def test_unnamed_nested_row_inference_matches_pyspark(mock_connect, source):
     import pyarrow as pa
 
-    # Local inference makes positional structs; the customized pandas row path
-    # keeps unnamed tuple values as arrays.
+    # Local inference makes positional structs; the pandas row path, without PyArrow, keeps
+    # unnamed tuple values as arrays, as PySpark's conversion of pandas does.
     column = _native_number_input_table(
         mock_connect, [(Row(1, 2),)], source=source
     ).column(0)
@@ -18414,12 +18215,14 @@ def _exact_date_converted_value(mock_connect, value, schema=None):
 
     pd = pytest.importorskip("pandas")
     spark, service = mock_connect
-    # py_to_value remains the pandas converter of the row path, which a customized frame, of a
-    # subclass, keeps; a plain frame converts with PySpark's Arrow conversion. Local rows use
-    # infer.convert, which intentionally has different subclass/type semantics.
-    data = _RowPathFrame(pd)({"value": [value]}, dtype=object)
+    # py_to_value is the converter of the pandas row path, without PyArrow; with it, a frame
+    # converts with PySpark's Arrow conversion. Local rows use infer.convert, which
+    # intentionally has different subclass/type semantics.
+    data = pd.DataFrame({"value": [value]}, dtype=object)
     before = len(service.execute_requests)
-    spark.createDataFrame(data, schema).toArrow()
+    with _pandas_row_path():
+        df = spark.createDataFrame(data, schema)
+    df.toArrow()
     requests = service.execute_requests
     assert len(requests) == before + 1
     request = parse_message(requests[-1])
@@ -18500,6 +18303,80 @@ def test_exact_date_datetime_timestamp_encoding(mock_connect):
         assert actual == _exact_date_datetime.fromtimestamp(expected.timestamp(), _exact_date_timezone.utc)
 
 
+@pytest.mark.parametrize("host", ["UTC", "America/Los_Angeles"])
+@pytest.mark.parametrize("schema", [None, ["renamed"], "t timestamp", "t timestamp_ntz"])
+def test_pandas_row_path_takes_naive_datetime64_as_pyspark(
+    mock_connect, monkeypatch, pandas_row_path, host, schema
+):
+    # As PySpark's conversion, whose converter of a timestamp field, or of no schema, takes a
+    # naive datetime64 column as times of the session time zone, an ambiguous one of its
+    # standard time (`_check_series_convert_timestamps_internal`), and which takes those of a
+    # timestamp_ntz field as wall clocks, whatever the zone of the host: so does the row path,
+    # without PyArrow. Official, of the session zone America/Los_Angeles: these values.
+    from datetime import datetime, timezone
+
+    if not hasattr(time, "tzset"):
+        pytest.skip("client timezone control requires time.tzset")
+    pd = pytest.importorskip("pandas")
+    _, service = mock_connect
+    service.confs = {"spark.sql.session.timeZone": "America/Los_Angeles"}
+    frame = pd.DataFrame({"t": pd.to_datetime(
+        ["2021-06-01 12:00:00", None, "2021-11-07 01:30:00.123456"], format="ISO8601")})
+    try:
+        with monkeypatch.context() as environment:
+            environment.setenv("TZ", host)
+            time.tzset()
+            table = _native_number_input_table(mock_connect, frame, schema)
+    finally:
+        time.tzset()
+    if schema == "t timestamp_ntz":
+        expected = [datetime(2021, 6, 1, 12), None, datetime(2021, 11, 7, 1, 30, 0, 123456)]
+    else:
+        expected = [datetime(2021, 6, 1, 19, tzinfo=timezone.utc), None,
+                    datetime(2021, 11, 7, 9, 30, 0, 123456, tzinfo=timezone.utc)]
+    assert table.column(0).to_pylist() == expected
+
+
+def test_pandas_row_path_raises_the_error_of_a_skipped_time_as_pyspark(
+    mock_connect, pandas_row_path
+):
+    # As PySpark's conversion, whose localization in the session time zone raises pandas' error of
+    # a time that the zone skips (pytz's NonExistentTimeError, or pandas 3's ValueError).
+    pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
+    service.confs = {"spark.sql.session.timeZone": "America/Los_Angeles"}
+    frame = pd.DataFrame({"t": pd.to_datetime(["2021-03-14 02:30:00"])})
+    with pytest.raises(Exception) as localized:
+        frame["t"].dt.tz_localize("America/Los_Angeles", ambiguous=False)
+    before = len(service.execute_requests)
+    with pytest.raises(type(localized.value), match="^" + re.escape(str(localized.value)) + "$"):
+        spark.createDataFrame(frame)
+    assert len(service.execute_requests) == before
+
+
+@pytest.mark.parametrize("schema", [None, ["renamed"], "v long"])
+def test_pandas_frames_take_the_row_path_without_pyarrow(mock_connect, monkeypatch, schema):
+    # PySpark converts every pandas DataFrame with PyArrow, which it requires, as the fast paths of
+    # plain frames do: without it, the row path converts a plain frame too, which uses none of
+    # them.
+    import importlib
+
+    pd = pytest.importorskip("pandas")
+    helper = importlib.import_module("pyspark.sql._pandas_input")
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("a frame without PyArrow reached a conversion that needs it")
+
+    for name in ("prepare_int64_table", "timestamp_columns", "prepare_float64_input",
+                 "prepare_string_input", "prepare_date_table", "prepare_pandas_table",
+                 "prepare_inferred_pandas_table"):
+        monkeypatch.setattr(helper, name, unexpected)
+    monkeypatch.setattr(helper, "pyarrow_available", lambda: False)
+    frame = pd.DataFrame({"v": np.arange(1000, dtype=np.int64)})
+    table = _native_number_input_table(mock_connect, frame, schema)
+    assert table.column(0).to_pylist() == list(range(1000))
+
+
 def test_exact_date_nested_unrelated_values(mock_connect):
     value = _exact_date_Row(items=[_exact_date_date.min, None, _exact_date_date.max],
                 mapping={"epoch": _exact_date_date(1970, 1, 1)},
@@ -18520,7 +18397,7 @@ def test_exact_date_nested_unrelated_values(mock_connect):
     assert (actual["number"], actual["flag"], actual["label"]) == (42, True, "date")
 
 
-def test_exact_date_native_inferred_nested_dict_and_unrelated_values(mock_connect):
+def test_exact_date_native_inferred_nested_dict_and_unrelated_values(mock_connect, pandas_row_path):
     import pyarrow as pa
 
     pd = pytest.importorskip("pandas")
@@ -18531,7 +18408,7 @@ def test_exact_date_native_inferred_nested_dict_and_unrelated_values(mock_connec
         "amounts": [[_exact_date_Decimal("-12.340")]],
         "number": [42], "flag": [True], "label": ["date"],
     }
-    frame = _RowPathFrame(pd)(values, dtype=object)
+    frame = pd.DataFrame(values, dtype=object)
     actual = _native_number_input_table(mock_connect, frame)
     expected_types = {
         "days": pa.map_(pa.string(), pa.list_(pa.date32())),
@@ -18942,10 +18819,11 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 from pyspark.sql import SparkSession
+from pyspark.sql import _pandas_input
 from pyspark.sql import types as T
 
-class RowPathFrame(pd.DataFrame):
-    pass
+# The row path of pandas frames, which createDataFrame takes without PyArrow.
+_pandas_input.pyarrow_available = lambda: False
 
 @contextlib.contextmanager
 def session():
@@ -19022,9 +18900,9 @@ with session() as (spark, payload):
             calls.append("tuple")
             return super().as_tuple()
 
-    frame = RowPathFrame({"v": [Traced("1.20"), None, Traced("-30.5"),
-                              decimal.Decimal("1E+3")]}, dtype=object)
-    # Customized frames retain the native conversion path and its Decimal hooks.
+    frame = pd.DataFrame({"v": [Traced("1.20"), None, Traced("-30.5"),
+                                decimal.Decimal("1E+3")]}, dtype=object)
+    # The row path keeps the Decimal hooks of its converter.
     build(spark, frame).collect()
     assert calls == ["str", "tuple", "str", "tuple", "tuple", "tuple"], calls
     assert_decimal_cells(payload, 6, 2, [120, None, -3050, 100000])
@@ -19033,7 +18911,7 @@ with session() as (spark, payload):
         def as_tuple(self):
             raise LookupError("pure Decimal tuple hook")
 
-    failing = RowPathFrame({"v": [Broken("1.25")]}, dtype=object)
+    failing = pd.DataFrame({"v": [Broken("1.25")]}, dtype=object)
     payload.unlink()
     with pytest.raises(LookupError, match="^pure Decimal tuple hook$"):
         build(spark, failing)
@@ -19087,16 +18965,16 @@ assert "pyspark._pyspark" not in sys.modules
 sys.path.insert(0, sys.argv[1])
 from _mock_connect_server import parse_message
 from pyspark.sql import SparkSession
+from pyspark.sql import _pandas_input
 assert decimal.Decimal is _pydecimal.Decimal
 
-class RowPathFrame(pd.DataFrame):
-    pass
-
+# The row path of pandas frames, which createDataFrame takes without PyArrow.
+_pandas_input.pyarrow_available = lambda: False
 values = [_pydecimal.Decimal("1.0000000000000000000001"), None,
           _pydecimal.Decimal("9007199254740993")]
 spark = SparkSession.builder.remote(sys.argv[2]).create()
 for schema in (None, ["v"]):
-    frame = RowPathFrame({"v": values}, dtype=object)
+    frame = pd.DataFrame({"v": values}, dtype=object)
     relation = parse_message(spark.createDataFrame(frame, schema)._relation_bytes())
     while 18 in relation:
         relation = parse_message(parse_message(relation[18][0])[1][0])
@@ -19357,10 +19235,10 @@ def test_decimal_scale_of_subclasses(decimal_ipc_session):
 @pytest.mark.parametrize("schema_mode", ["explicit", "names", "inferred"])
 @pytest.mark.parametrize("hook_behavior", ["error", "scale"])
 def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
-    decimal_ipc_session, monkeypatch, schema_mode, hook_behavior
+    decimal_ipc_session, monkeypatch, pandas_row_path, schema_mode, hook_behavior
 ):
     # A subclass rebound as decimal.Decimal is still a subclass, not the immutable C type.
-    # Both conversion and inferred pandas typing must retain its as_tuple hook.
+    # Both conversion and inferred pandas typing of the row path must retain its as_tuple hook.
     import decimal
     from unittest.mock import Mock
 
@@ -19386,7 +19264,7 @@ def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
     # Canonical-looking metadata must not make a Python heap type eligible either.
     Rebound.__name__ = "Decimal"
     Rebound.__module__ = "decimal"
-    frame = _RowPathFrame(pd)({"v": [Rebound("1.20"), None]}, dtype=object)
+    frame = pd.DataFrame({"v": [Rebound("1.20"), None]}, dtype=object)
     schema = T.StructType([T.StructField("v", T.DecimalType(10, 2))])
     if schema_mode != "explicit":
         schema = ["v"] if schema_mode == "names" else None
@@ -19416,7 +19294,7 @@ def test_decimal_scale_rebound_subclass_keeps_tuple_hook(
 
 
 @pytest.mark.parametrize("schema", [["v"], T.StructType([T.StructField("v", T.DecimalType(10, 4))])])
-def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
+def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, pandas_row_path, schema):
     # Exact Decimals are typed and converted from their text: no DecimalTuple is built.
     import cProfile
     from decimal import Decimal
@@ -19424,9 +19302,8 @@ def test_decimal_scale_avoids_coefficient_tuple(decimal_ipc_session, schema):
     pd = pytest.importorskip("pandas")
     spark, _ = decimal_ipc_session
     tuple_constructor = type(Decimal("1.20").as_tuple()).__new__.__code__
-    # Of the converter of the row path, which a customized frame keeps (_RowPathFrame).
-    values = _RowPathFrame(pd)(
-        {"v": [Decimal("123.4500"), Decimal("-2.3000"), None]}, dtype=object)
+    # Of the converter of the row path (`pandas_row_path`).
+    values = pd.DataFrame({"v": [Decimal("123.4500"), Decimal("-2.3000"), None]}, dtype=object)
     profile = cProfile.Profile()
     profile.enable()
     try:
@@ -19464,14 +19341,14 @@ def test_decimal_explicit_pandas_schema_uses_arrow_conversion(decimal_ipc_sessio
 
 
 @pytest.mark.parametrize("text", ["Infinity", "-Infinity"])
-def test_decimal_scale_of_non_finite_values(decimal_ipc_session, text):
+def test_decimal_scale_of_non_finite_values(decimal_ipc_session, pandas_row_path, text):
     # An infinity has no precision to type a column by.
     from decimal import Decimal
 
     pd = pytest.importorskip("pandas")
     spark, payload = decimal_ipc_session
-    # Of the converter of the row path, which a customized frame keeps (_RowPathFrame).
-    data = _RowPathFrame(pd)({"v": [Decimal(text), Decimal("1.5")]}, dtype=object)
+    # Of the converter of the row path (`pandas_row_path`).
+    data = pd.DataFrame({"v": [Decimal(text), Decimal("1.5")]}, dtype=object)
     with pytest.raises(ValueError, match="has no precision to type a column by"):
         spark.createDataFrame(data, ["v"])
     assert not payload.exists()
@@ -19605,8 +19482,8 @@ def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, s
     import pyarrow as pa
 
     decimals = [Decimal("1.5"), Decimal("1.25"), Decimal("0.003"), Decimal("1E+3")]
-    # Non-Row containers retain the native precision of 38 (SPARK-60696). A column
-    # containing Rows follows Arrow's array inference, including Decimal precision.
+    # The row path, without PyArrow, keeps the native precision of 38 (SPARK-60696), of every
+    # observed scale, and infers a named Row as a struct.
     decimal_type = pa.decimal128(38, 3)
     if layout == "array":
         values = [[decimals[0], decimals[1]], None, [], decimals[2:]]
@@ -19618,8 +19495,8 @@ def test_pandas_nested_decimals_use_every_observed_scale(mock_connect, layout, s
         expected_type = pa.list_(pa.list_(decimal_type))
     elif layout in ("row", "array_row"):
         values = [Row(d=value, keep=index) for index, value in enumerate(decimals)]
-        expected_values = [[value, Decimal(index)] for index, value in enumerate(decimals)]
-        expected_type = pa.list_(pa.decimal128(7, 3))
+        expected_values = [{"d": value, "keep": index} for index, value in enumerate(decimals)]
+        expected_type = pa.struct([("d", decimal_type), ("keep", pa.int64())])
         if layout == "array_row":
             values = [[values[0]], None, values[1:]]
             expected_values = [[expected_values[0]], None, expected_values[1:]]
@@ -19653,7 +19530,8 @@ def test_pandas_nested_decimals_mixed_row_dict_raise_arrow_errors(mock_connect, 
 
     from pyspark.errors import PySparkValueError
 
-    _, service = mock_connect
+    pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
     values = [
         Row(d=Decimal("1.5"), keep=0),
         {"d": Decimal("1.25"), "keep": 1},
@@ -19662,10 +19540,10 @@ def test_pandas_nested_decimals_mixed_row_dict_raise_arrow_errors(mock_connect, 
     ]
     names = ["renamed"] if schema_kind == "names" else None
     before_execute = len(service.execute_requests)
-    with pytest.raises(PySparkValueError, match=r"pandas.Series \(object\)"):
-        _native_number_input_table(
-            mock_connect, [(value,) for value in values], names, source="pandas"
-        )
+    # As PySpark's conversion of the column, whose Arrow inference merges no array, of a Row, with
+    # a struct, of a dict. Official: this error.
+    with pytest.raises(PySparkValueError, match=r"pandas.Series \(object\) with name 'value'"):
+        spark.createDataFrame(pd.DataFrame({"value": values}, dtype=object), names)
     assert len(service.execute_requests) == before_execute
 
 
@@ -19679,11 +19557,11 @@ def test_pandas_nested_decimal_scale_bounds(mock_connect, scale):
     values = [[Decimal("0.1")], [Decimal(f"1E-{scale}")]]
     if scale > 38:
         pd = pytest.importorskip("pandas")
-        frame = _RowPathFrame(pd)({"value": values}, dtype=object)
+        frame = pd.DataFrame({"value": values}, dtype=object)
         with pytest.raises(
             ValueError,
             match=r"^Decimal scale is out of the range of DecimalType, up to 38$",
-        ):
+        ), _pandas_row_path():
             spark.createDataFrame(frame)
         assert not service.execute_requests
     else:
@@ -19712,7 +19590,9 @@ def test_pandas_nested_decimal_trailing_zeros_preserve_values(mock_connect):
     assert actual.equals(expected)
 
 
-def test_pandas_nested_decimal_scale_widening_can_overflow_precision(decimal_ipc_session):
+def test_pandas_nested_decimal_scale_widening_can_overflow_precision(
+    decimal_ipc_session, pandas_row_path
+):
     from decimal import Decimal
 
     from pyspark.errors import PySparkRuntimeError
@@ -19723,7 +19603,7 @@ def test_pandas_nested_decimal_scale_widening_can_overflow_precision(decimal_ipc
     # Preserving every observed scale (7) requires 44 digits for the first value, beyond
     # the native fallback's inherited precision of 38. See known-differences.md.
     values = [[Decimal("9" * 37 + ".0")], [Decimal("1.0000000")]]
-    frame = _RowPathFrame(pd)({"v": values}, dtype=object)
+    frame = pd.DataFrame({"v": values}, dtype=object)
     with pytest.raises(PySparkRuntimeError, match=r"does not fit decimal\(38,7\) exactly"):
         spark.createDataFrame(frame)
     assert not payload.exists()
@@ -23720,9 +23600,10 @@ def test_customized_int64_frames_keep_their_values_as_pyspark(mock_connect):
     pd = pytest.importorskip("pandas")
     import pyarrow as pa
 
-    # A subclass takes the row path, which keeps every int64 value, beyond 2**53 as well.
+    # A subclass takes PySpark's conversion, which keeps every int64 value, beyond 2**53 as
+    # well, as the fast path of a plain frame does.
     values = [2**60 + i for i in range(1000)]
-    table = _pandas_local_table(mock_connect, _RowPathFrame(pd)({"v": values}))
+    table = _pandas_local_table(mock_connect, _CustomizedFrame(pd)({"v": values}))
     assert table.schema.field(0).type == pa.int64()
     assert table.column(0).to_pylist() == values
 
@@ -30307,13 +30188,14 @@ def test_default_range_index_frame_takes_arrow_route(mock_connect, frame, schema
     assert [table.column(i).to_pylist() for i in range(table.num_columns)] == expected
 
 
-def test_default_range_index_labels_keep_row_path_for_overrides(monkeypatch):
+def test_default_range_index_labels_decline_the_fast_paths_for_overrides(monkeypatch):
     from pyspark.sql._pandas_input import _has_canonical_columns
 
     pd = pytest.importorskip("pandas")
     columns = pd.DataFrame([[1, 2]]).columns
     assert _has_canonical_columns(columns)
-    # A subclass, or an instance or class override of iteration, keeps the row path as for an Index.
+    # A subclass, or an instance or class override of iteration, declines the fast paths as for
+    # an Index: the frame takes PySpark's conversion.
 
     class RangeSubclass(pd.RangeIndex):
         pass

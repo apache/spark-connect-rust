@@ -161,26 +161,37 @@ threshold, and empty data reads none. The Rust API's `create_dataframe` and
 `create_dataframe_from_columns` read the same settings in one request, once they have converted
 their rows or columns, and apply the cache threshold at any size too. Of no rows, or columns of
 no rows, they send the schema alone and read none, as PySpark's empty data does.
-Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns also
-use this importer, preserving integer precision and null masks without Python
-rows. Small frames (fewer than 1,000 rows) with only NumPy columns retain the
-row path; nullable `Int64` columns use Arrow at any size.
-This initial path accepts inferred schemas, complete string column names,
-and explicit `StructType` schemas whose fields are all `LongType`. Other dtypes,
-DDL/atomic schemas, schema conversions, NUL names, and duplicate/non-string input names
-retain the existing row conversion path. `verifySchema` remains ignored for
-pandas Arrow input, matching Spark Connect.
-Pandas frames of at least 100,000 rows whose columns are all NumPy `float64`,
-with an explicit `StructType` of `DoubleType` fields, are encoded to Arrow IPC
-from their columns, with pandas' missing values as nulls, and sent inline as the
-row path sends them, below the cache threshold.
-Pandas object columns containing exact `datetime.date` values or `None` use the
-Arrow importer at 10,000 rows or more with an explicit `StructType` of `DateType`
-fields. Unsupported values and customized inputs retain the row conversion path.
-Pandas frames of at least 10,000 rows whose columns are all kept in pandas' Arrow
-string storage (`string[pyarrow]` in pandas 2.2 and later, and the `str` dtype of
-pandas 3), with an explicit `StructType` of `StringType` fields, pass that storage
-to this importer as Arrow string columns, without Python rows.
+Every pandas DataFrame, of any class, labels and arrays, converts with PySpark's conversion of
+each column to Arrow, in the session time zone (`prepare_pandas_table` and
+`prepare_inferred_pandas_table` of `pyspark/sql/_pandas_input.py`, of the vendored
+`create_arrow_table_from_pandas`), whose table this importer sends, as PySpark's
+`createDataFrame` does. Fast paths take plain frames of some columns, of which they make the
+values of that conversion without its per-column work; the frames that they decline, such as a
+subclass or a frame of customized hooks, take PySpark's conversion. Without PyArrow, which that
+conversion needs, the native row path of the session converts every frame from its rows of
+Python values, and no fast path is taken (see `dev/parity/known-differences.md`).
+`verifySchema` remains ignored for pandas input, matching Spark Connect. The fast paths:
+- Pandas inputs with only NumPy `int64` or pandas nullable `Int64` columns use this importer,
+  preserving integer precision and null masks without Python rows. Small frames (fewer than
+  1,000 rows) with only NumPy columns are left to PySpark's conversion; nullable `Int64`
+  columns take this path at any size. It accepts inferred schemas, complete string column
+  names, and explicit `StructType` schemas whose fields are all `LongType`.
+- Pandas frames whose columns are all `datetime64` of microseconds (or nanoseconds of whole
+  microseconds), with an explicit `StructType` of `TimestampType` fields, use this importer:
+  aware columns, and naive ones on a UTC host of a UTC session, whose values are their
+  instants as they are.
+- Pandas frames of at least 100,000 rows whose columns are all NumPy `float64`,
+  with an explicit `StructType` of `DoubleType` fields, are encoded to Arrow IPC
+  from their columns, with pandas' missing values as nulls, and sent inline below the cache
+  threshold.
+- Pandas object columns containing exact `datetime.date` values or `None` use the
+  Arrow importer at 10,000 rows or more with an explicit `StructType` of `DateType`
+  fields.
+- Pandas frames of at least 10,000 rows whose columns are all kept in pandas' Arrow
+  string storage (`string[pyarrow]` in pandas 2.2 and later, and the `str` dtype of
+  pandas 3), with an explicit `StructType` of `StringType` fields, pass that storage
+  to this importer as Arrow string columns, without Python rows; columns of exact `str`
+  objects are encoded to Arrow IPC natively, a checkpoint of the conversion budget a value.
 Inputs at or above `spark.sql.session.localRelationCacheThreshold` are serialized
 into independent IPC streams and uploaded as session-scoped cache artifacts.
 The plan carries `ChunkedCachedLocalRelation` hashes instead of embedding the

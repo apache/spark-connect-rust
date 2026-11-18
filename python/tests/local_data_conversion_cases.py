@@ -1,3 +1,4 @@
+import importlib
 import sys
 from decimal import Decimal
 
@@ -56,13 +57,6 @@ class _OneHeld:
         counts = list(map(sys.getrefcount, self.objects))
         top = max(counts)
         return top == min(counts) + 1 and counts.count(top) == 1
-
-
-def _customized_frame(data):
-    """A pandas DataFrame of a class of its own, which the row path of pandas converts."""
-    import pandas as pd
-
-    return type("CustomizedFrame", (pd.DataFrame,), {})(data)
 
 
 def _case(layout, count):
@@ -126,8 +120,23 @@ def _case(layout, count):
         data = [([value] * (count - 1) + [_deep()],)]
         held = _Held(lambda row: row > 0, data[0])
         return data, ["c"], _Held(lambda values: values >= 1, value), held, RecursionError
-    assert layout == "pandas rows"
     pd = pytest.importorskip("pandas")
+    if layout == "pandas strings":
+        # The exact strings of the columns of objects of a plain frame of at least 10,000 rows,
+        # of a struct of strings, which `_pandas_string_ipc` checks, then encodes, a step a
+        # value: the value that it takes, of the same text in every cell, is referred to once
+        # more. The last cell, a lone surrogate, which UTF-8 cannot encode, ends the encoding,
+        # and the general conversion that follows raises for it, without reading the cells in
+        # Python code. The frame is held until the conversion ends.
+        rows = max(4 * count, 10000)
+        frame = pd.DataFrame({
+            "s": pd.Series([text] * rows, dtype=object),
+            "t": pd.Series([text] * (rows - 1) + ["\ud800"], dtype=object),
+        })
+        schema = T.StructType([T.StructField(name, T.StringType()) for name in ("s", "t")])
+        in_part = _Held(lambda texts: texts > 0, text)
+        return frame, schema, in_part, _Held(lambda frames: frames > 0, frame), PySparkValueError
+    assert layout == "pandas rows"
     # Each row and each cell is a step: of four cells a row, four of five checkpoints fall on
     # cells.
     count //= 2
@@ -136,8 +145,9 @@ def _case(layout, count):
     last = object()
     columns[-1][-1] = last
     # Columns of objects keep the cells as given, which pandas 3 would otherwise keep as its `str`
-    # dtype, of no reference to them.
-    frame = _customized_frame({
+    # dtype, of no reference to them. The row path converts the frame without PyArrow
+    # (`_without_pyarrow`).
+    frame = pd.DataFrame({
         name: pd.Series(column, dtype=object) for name, column in zip(names, columns)
     })
     schema = T.StructType([T.StructField(name, T.StringType()) for name in names])
@@ -147,19 +157,30 @@ def _case(layout, count):
     return frame, schema, _OneHeld(cells), _Held(lambda cell: cell > 0, last), TypeError
 
 
+def _without_pyarrow(monkeypatch):
+    """Make createDataFrame convert pandas frames with the native row path, which converts them
+    without PyArrow: with it, PySpark's conversion of each column to Arrow converts them."""
+    # The module of the native binding, which earlier import-hook tests can leave another object
+    # than the attribute of the package.
+    helper = importlib.import_module("pyspark.sql._pandas_input")
+    monkeypatch.setattr(helper, "pyarrow_available", lambda: False)
+
+
 class TestLocalDataConversionInterrupts:
     @pytest.mark.parametrize("layout", [
         "collected rows", "rows taken apart", "converted columns", "inferred rows",
-        "sorted dicts", "array", "inferred array", "pandas rows",
+        "sorted dicts", "array", "inferred array", "pandas rows", "pandas strings",
     ])
     @pytest.mark.parametrize("cancel", [False, True])
     def test_python_thread_runs_before_native_conversion_finishes(
-        self, mock_connect, layout, cancel,
+        self, mock_connect, monkeypatch, layout, cancel,
     ):
         # As PySpark's createDataFrame, whose conversion of local data is Python code: in each
         # part of the native conversion, another thread runs, and a signal interrupts it, before
         # the part finishes.
         spark, service = mock_connect
+        if layout == "pandas rows":
+            _without_pyarrow(monkeypatch)
         # The first conversion of a process caches the Python classes and modules that it
         # reads, which runs Python code: a conversion of a few rows caches them first.
         data, schema, _, _, failure = _case(layout, 8)
