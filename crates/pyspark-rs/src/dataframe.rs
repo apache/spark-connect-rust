@@ -46,9 +46,11 @@ pub struct PyDataFrame {
     semantic_hash: std::sync::OnceLock<i32>,
     is_empty: std::sync::OnceLock<bool>,
     input_files: std::sync::OnceLock<Vec<String>>,
-    /// The schema of a DataFrame of `to` that is not a DataType, such as a DDL string, which
-    /// PySpark keeps as the `_cached_schema` of the DataFrame: `schema` returns it, and the
-    /// DataFrame fails at each action, as the plan of the DataFrame does not build.
+    /// The schema of a DataFrame of `to`, such as a DDL string or a DataType, or the `StructType`
+    /// of a map function, which PySpark keeps as the `_cached_schema` of the DataFrame, as the
+    /// object that it is: `schema` returns a copy of it as it is then, and `columns` its names
+    /// then. A schema that is not a DataType fails the DataFrame at each action, as its plan does
+    /// not build.
     schema_object: Option<Py<PyAny>>,
 }
 
@@ -76,7 +78,7 @@ impl PyDataFrame {
     /// The names of the columns of the schema of this DataFrame, as Rust callers need them. Not
     /// a method of the Python class, as PySpark's DataFrame has none of this name: so
     /// `df.column_names` is the column of that name, of `__getattr__`.
-    fn column_names(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+    pub(crate) fn column_names(&self, py: Python<'_>) -> PyResult<Vec<String>> {
         if self.schema_object.is_some() {
             return self.columns(py)?.bind(py).extract();
         }
@@ -908,13 +910,24 @@ impl PyDataFrame {
                 None => return Err(crate::errors::spark_error_to_py_exception(error)),
             },
         };
-        // The schema that this DataFrame cached, of the types of PySpark, when they hold it.
-        let cached_schema = this
-            .dataframe
-            .known_schema()
-            .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
-            .map(|schema| crate::types::data_type_to_py(py, &schema))
-            .transpose()?;
+        // The schema that this DataFrame cached, of the types of PySpark, when they hold it: the
+        // `StructType` that it keeps as an object, of `to` or of a map function, as it is now, as
+        // PySpark's state carries the object.
+        let cached_schema = match &this.schema_object {
+            Some(schema)
+                if schema
+                    .bind(py)
+                    .is_instance_of::<crate::types::PyStructType>() =>
+            {
+                Some(schema.clone_ref(py))
+            }
+            _ => this
+                .dataframe
+                .known_schema()
+                .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
+                .map(|schema| crate::types::data_type_to_py(py, &schema))
+                .transpose()?,
+        };
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
             .call1((
@@ -969,11 +982,17 @@ impl PyDataFrame {
 
     /// The shallow copy of a DataFrame, as PySpark's `copy.copy` of its `__reduce__`: the same
     /// plan, and so the same Observations, as PySpark's copy shares its plan, with the
-    /// `_support_repr_html` and the schema that its state carries, and an `executionInfo` of its
+    /// `_support_repr_html` and the schema that its state carries, the one that it keeps as an
+    /// object, of `to` or of a map function, as the same object, and an `executionInfo` of its
     /// own, None until it executes, as that of PySpark's `DataFrame(plan, session)`.
     fn __copy__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
         self.fresh_schema_request(py)?;
-        Ok(self.copy_of(self.dataframe.shallow_copy()))
+        let mut copy = self.copy_of(self.dataframe.shallow_copy());
+        copy.schema_object = self
+            .schema_object
+            .as_ref()
+            .map(|schema| schema.clone_ref(py));
+        Ok(copy)
     }
 
     /// The deep copy of a DataFrame, as PySpark's `copy.deepcopy` of its `__reduce__`, which
@@ -1036,9 +1055,18 @@ impl PyDataFrame {
                 .deep_copy_with_pickler_copies(session, observations, &copies)
         })
         .to_pyerr()?;
-        // As PySpark's reconstruction of the copy, which requests its schema, as the copy has none.
-        let copy = self.copy_of(copy);
+        // As PySpark's reconstruction of the copy, which requests its schema, as the copy has none,
+        // before it sets the deep copy of the state, of the schema that it keeps as an object too,
+        // which the deep copy of the plan shares in `memo`.
+        let mut copy = self.copy_of(copy);
         copy.fresh_schema_request(py)?;
+        if let Some(schema) = &self.schema_object {
+            copy.schema_object = Some(
+                py.import("copy")?
+                    .call_method1(pyo3::intern!(py, "deepcopy"), (schema.bind(py), memo))?
+                    .unbind(),
+            );
+        }
         Ok(copy)
     }
 
@@ -1816,7 +1844,10 @@ impl PyDataFrame {
 
     /// Union by name, optionally filling columns missing on one side with null. The flag is
     /// converted as PySpark's set operation sets it: None is a `TypeError`.
-    #[pyo3(signature = (other, allowMissingColumns=ProtoBool::default()))]
+    #[pyo3(
+        signature = (other, allowMissingColumns=ProtoBool::default()),
+        text_signature = "($self, other, allowMissingColumns=False)"
+    )]
     fn unionByName(
         &self,
         py: Python<'_>,
@@ -2561,8 +2592,11 @@ impl PyDataFrame {
     /// Reconcile to a target schema (StructType or DDL string). As PySpark's, a schema that is
     /// not a DataType is kept as it is, and the DataFrame fails at each action, which PySpark's
     /// client raises when it builds the plan; a DDL string is not parsed. As PySpark's, the
-    /// schema is the cached schema of the DataFrame whatever it is, so a DataType that is not a
-    /// struct, which the core does not cache, is kept as it is too, while its plan is sent.
+    /// schema is the cached schema of the DataFrame whatever it is, as the object that it is, so a
+    /// DataType that is not a struct, which the core does not cache, is kept as it is too, while
+    /// its plan is sent; and as PySpark's `ToSchema` converts the type object when it builds the
+    /// plan, a `StructType` changed in place after the call is the schema of the DataFrame, and
+    /// the schema that its requests send, as it is then.
     fn to(&self, schema: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if schema.is_none() {
             // As PySpark's `assert schema is not None`.
@@ -2576,11 +2610,10 @@ impl PyDataFrame {
             if let Ok(dt) = crate::types::py_to_data_type(schema) {
                 match crate::types::unsendable_field_repr(schema, &dt)? {
                     None => {
-                        let is_struct = matches!(dt, spark_connect::types::DataType::Struct { .. });
-                        let mut result = PyDataFrame::new(self.dataframe.to(dt));
-                        if !is_struct {
-                            result.schema_object = Some(schema.clone().unbind());
-                        }
+                        let reader = crate::udf_command::data_type_pickler(schema.clone().unbind());
+                        let mut result =
+                            PyDataFrame::new(self.dataframe.to_read_at_build(dt, reader));
+                        result.schema_object = Some(schema.clone().unbind());
                         return Ok(result);
                     }
                     Some(field) => unsendable = Some(field),
@@ -2687,6 +2720,26 @@ impl PyDataFrame {
         if total.le(0)? {
             return Err(not_positive("sum(weights)", &total)?);
         }
+        // As PySpark's, which iterates the weights once more for their proportions, and adds
+        // them up from 0.0 for the bounds of the splits, in Python: so any iterable is taken, as
+        // a set or the keys of a dict, and a weight that does not add to a float, such as a
+        // Decimal, raises the TypeError of the addition. The core computes the same bounds of
+        // the weights as floats.
+        let mut given = Vec::new();
+        let mut proportions = Vec::new();
+        for weight in weights.try_iter()? {
+            let weight = weight?;
+            proportions.push(weight.div(&total)?);
+            given.push(weight);
+        }
+        let mut bound = pyo3::types::PyFloat::new(py, 0.0).into_any();
+        for proportion in &proportions {
+            bound = bound.add(proportion)?;
+        }
+        let float_weights = given
+            .iter()
+            .map(|weight| weight.extract::<f64>())
+            .collect::<PyResult<Vec<_>>>()?;
         // Converted once the sum is checked, as PySpark's plans do with int(seed). The long of the
         // proto is converted as the plan is sent: a value out of its range fails each split.
         let seed = py.import("builtins")?.getattr("int")?.call1((&seed,))?;
@@ -2700,10 +2753,9 @@ impl PyDataFrame {
                 )?),
             ),
         };
-        let weights: Vec<f64> = weights.extract()?;
         Ok(self
             .dataframe
-            .random_split(weights, Some(seed))
+            .random_split(float_weights, Some(seed))
             .to_pyerr()?
             .into_iter()
             .map(|df| {
@@ -3575,7 +3627,10 @@ impl PyDataFrame {
     /// As PySpark's `DataFrame.__getitem__`: a column by name (`df["col"]`), of this DataFrame
     /// by its plan ID, as its star of `df["*"]`, or by position (`df[0]`), the rows that match
     /// a Column (`df[df.a > 1]`, as `filter`), or the projection of a list or tuple of columns
-    /// (`df[["a", "b"]]`, as `select`).
+    /// (`df[["a", "b"]]`, as `select`). With `PYSPARK_VALIDATE_COLUMN_NAME_LEGACY=1`, a name is
+    /// validated first, as PySpark's: by `verify_col_name` of the cached schema, which is
+    /// requested unless it is cached, and else by the server, of `select(item).isLocal()`, whose
+    /// request raises its error, such as `UNRESOLVED_COLUMN.WITH_SUGGESTION`.
     fn __getitem__(&self, py: Python<'_>, item: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         use pyo3::IntoPyObjectExt;
 
@@ -3585,6 +3640,28 @@ impl PyDataFrame {
             let column = if item.eq("*")? {
                 self.dataframe.star()
             } else {
+                let legacy =
+                    std::env::var("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY").as_deref() == Ok("1");
+                if legacy
+                    && !self
+                        .spark_session(py)?
+                        .bind(py)
+                        .hasattr("is_mock_session")?
+                {
+                    // `self._schema`: the schema that it keeps as a Python object, as it is.
+                    let schema = match &self.schema_object {
+                        Some(schema) => schema.clone_ref(py),
+                        None => self.schema(py)?,
+                    };
+                    let verified = py
+                        .import("pyspark.sql.connect.types")?
+                        .getattr("verify_col_name")?
+                        .call1((item, schema))?
+                        .is_truthy()?;
+                    if !verified {
+                        self.select(py, vec![item.clone()])?.is_local(py)?;
+                    }
+                }
                 crate::plan_args::df_col(&self.dataframe, item, false)?
             };
             return PyColumn::new(column).into_py_any(py);
@@ -3721,7 +3798,7 @@ impl PyDataFrame {
         // input are read.
         let session = self.dataframe.spark_session();
         let return_type = resolve_datatype(py, &session, &schema)?;
-        let cols = interruptible(py, &session, || self.dataframe.columns())?;
+        let cols = self.column_names(py)?;
         let udf = map_udf_of(
             py,
             &func,
@@ -3730,13 +3807,10 @@ impl PyDataFrame {
             eval_type::SQL_MAP_PANDAS_ITER_UDF,
             &cols,
         )?;
-        Ok(PyDataFrame::new(map_partitions_of(
-            py,
-            &self.dataframe,
-            udf,
-            &barrier,
-            profile,
-        )?))
+        Ok(map_result_of(
+            &schema,
+            map_partitions_of(py, &self.dataframe, udf, &barrier, profile)?,
+        ))
     }
 
     /// `DataFrame.mapInArrow` — map an iterator of Arrow batches, in a stage of the
@@ -3759,7 +3833,7 @@ impl PyDataFrame {
         // input are read.
         let session = self.dataframe.spark_session();
         let return_type = resolve_datatype(py, &session, &schema)?;
-        let cols = interruptible(py, &session, || self.dataframe.columns())?;
+        let cols = self.column_names(py)?;
         let udf = map_udf_of(
             py,
             &func,
@@ -3768,13 +3842,10 @@ impl PyDataFrame {
             eval_type::SQL_MAP_ARROW_ITER_UDF,
             &cols,
         )?;
-        Ok(PyDataFrame::new(map_partitions_of(
-            py,
-            &self.dataframe,
-            udf,
-            &barrier,
-            profile,
-        )?))
+        Ok(map_result_of(
+            &schema,
+            map_partitions_of(py, &self.dataframe, udf, &barrier, profile)?,
+        ))
     }
 
     /// `DataFrame.foreach`, as PySpark Connect's: a UDF over a struct of the columns of each
@@ -6630,6 +6701,20 @@ fn profile_id_reader(profile: Py<PyAny>) -> spark_connect::udf::CommandPickler {
     })
 }
 
+/// The DataFrame `dataframe` of a map or group-map function of `schema`, the schema that the call
+/// was given, as PySpark's `_map_partitions`, `applyInPandas`, `applyInArrow` and those of a
+/// cogroup cache it: a `StructType` is the cached schema of the DataFrame as the object that it
+/// is, so `schema` gives a copy of it as it is then and `columns` its names then, also once it
+/// was changed in place, as the plan sends it as it is then (`udf_command::udf_pickler`). The
+/// core keeps the type of a DDL string, which PySpark parses into an object of its own.
+pub(crate) fn map_result_of(schema: &Bound<'_, PyAny>, dataframe: DataFrame) -> PyDataFrame {
+    let mut result = PyDataFrame::new(dataframe);
+    if schema.is_instance_of::<crate::types::PyStructType>() {
+        result.schema_object = Some(schema.clone().unbind());
+    }
+    result
+}
+
 /// Validate the function of a map UDF for its eval type with
 /// `pyspark.sql.pandas.functions._validate_vectorized_udf`, as the reference client does
 /// before it builds the UDF.
@@ -6730,19 +6815,22 @@ pub(crate) fn map_udf_of(
     } else {
         schema.clone()
     };
-    // As PySpark's `PythonUDF.to_plan`, the function is pickled each time a request builds the
-    // plan, not here.
+    // As PySpark's `PythonUDF.to_plan`, each request that builds the plan converts the output
+    // type of the schema and pickles it with the function, not this call: so a `StructType`
+    // changed in place after the call is the type that the server gets, and the command's.
     let tup = PyTuple::new(py, [func.clone(), pickled_type])?;
-    let pickler = crate::udf_command::object_pickler(tup.into_any().unbind());
+    let pickler = crate::udf_command::udf_pickler(tup.into_any().unbind());
     let payload =
         PythonUDFPayload::pickled_at_build(return_type, eval_type_id, pickler, py_version(py));
     // The worker reconstructs the input pandas/Arrow DataFrame of a map or group function from
     // the UDF's argument columns; without them the input columns are unnamed (KeyError in the
     // user fn). Mirror the reference Connect client, which passes the child's columns as the
-    // function arguments, and none for a cogroup function, which takes the whole cogroups.
+    // function arguments, and none for a cogroup function, which takes the whole cogroups: each
+    // the `ColumnReference` of the name, of `to_expr` of a UDF call, so a column named `*` or
+    // `s.*` is that column, not a star.
     let arguments = input_cols
         .iter()
-        .map(|c| spark_connect::functions::col(c).expression().clone())
+        .map(spark_connect::expression::Expression::column)
         .collect();
     Ok(CommonInlineUserDefinedFunctionExpression::new(
         name, true, arguments, payload,
@@ -6917,21 +7005,50 @@ pub(crate) fn check_schema_conversion(
 }
 
 /// The result of a set operation of `this` and `other`, `dataframe`, which keeps the schema that
-/// PySpark's `_merge_cached_schema` keeps: that of `this` when both are the schemas of `to` that
-/// are not DataTypes and equal, else none.
+/// PySpark's `_merge_cached_schema` keeps: `this.schema` when the cached schemas of both are
+/// equal, else none. The core keeps that of two cached structs; of a schema that a DataFrame
+/// keeps as a Python object, the schema of `to` that is not a DataType or the `StructType` of a
+/// map function, the objects are compared as they are now, as PySpark compares them with `==`,
+/// and the result keeps a deep copy of that of `this`, as `this.schema` gives.
 fn set_operation_result(
     py: Python<'_>,
     this: &PyDataFrame,
     other: &PyDataFrame,
     dataframe: DataFrame,
 ) -> PyResult<PyDataFrame> {
-    let mut result = PyDataFrame::new(dataframe);
-    if let (Some(left), Some(right)) = (&this.schema_object, &other.schema_object) {
+    if this.schema_object.is_none() && other.schema_object.is_none() {
+        return Ok(PyDataFrame::new(dataframe));
+    }
+    let cached = |df: &PyDataFrame| -> PyResult<Option<Py<PyAny>>> {
+        match &df.schema_object {
+            Some(schema) => Ok(Some(schema.clone_ref(py))),
+            None => df
+                .dataframe
+                .known_schema()
+                .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
+                .map(|schema| crate::types::data_type_to_py(py, &schema))
+                .transpose(),
+        }
+    };
+    if let (Some(left), Some(right)) = (cached(this)?, cached(other)?) {
         if left.bind(py).eq(right.bind(py))? {
-            result.schema_object = Some(left.clone_ref(py));
+            return Ok(match &this.schema_object {
+                Some(schema) => {
+                    let mut result = PyDataFrame::new(dataframe.with_known_schema(None));
+                    result.schema_object = Some(
+                        py.import("copy")?
+                            .call_method1(pyo3::intern!(py, "deepcopy"), (schema.bind(py),))?
+                            .unbind(),
+                    );
+                    result
+                }
+                None => {
+                    PyDataFrame::new(dataframe.with_known_schema(this.dataframe.known_schema()))
+                }
+            });
         }
     }
-    Ok(result)
+    Ok(PyDataFrame::new(dataframe.with_known_schema(None)))
 }
 
 /// The reduce of a writer with the instance dictionary of `writer` as its state, as the reduce of

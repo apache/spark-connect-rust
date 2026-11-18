@@ -271,6 +271,10 @@ the struct or the variant directly sets it to `None`. `PythonUDFPayload::new` an
 the reader of the id of the resource profile of the Python client's `mapInPandas` and
 `mapInArrow`, which a request calls when it builds the plan, as PySpark reads `profile.id` then.
 Code that constructs the variant directly sets it to `None`; `profile_id` is sent as before.
+`LogicalPlan::ToSchema` adds a `schema_reader` field, which is not a stable API either: the reader
+of the schema of the Python client's `DataFrame.to`, which a request calls when it builds the plan,
+as PySpark converts the schema object then. Code that constructs the variant directly sets it to
+`None`; `DataFrame::to` sends its schema as before.
 
 `GroupedData::transform_with_state` takes the output schema of its `TransformWithStateInfo`, as
 `transform_with_state_in_pandas` does, where it sent the return type of its function: PySpark's
@@ -1559,7 +1563,12 @@ server raises has the frames of the user's code only, without those of PySpark's
 (`collect`, `_to_table`, `_execute_and_fetch`, ...), which the native core does not have. At run
 time, `pyspark.sql.SparkSession`, PySpark's own class, has PySpark's signatures and docstrings,
 while the functions of `pyspark.sql.functions` and the methods of the native classes, such as
-`DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
+`DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings. A
+default of an object, which the text signature of a native method cannot hold (`inspect` takes only
+literals there), shows as `Ellipsis`: the `StorageLevel(True, True, False, True, 1)` of
+`DataFrame.persist`, and the `<no value>` (`pyspark._globals._NoValue`) of the `value` of
+`DataFrame.replace` and `DataFrameNaFunctions.replace` and of the `default` of `RuntimeConf.get`.
+Their calls take PySpark's defaults.
 The `__init__` of a native type of parameters, such as `ArrayType`, is a slot of its class, whose
 `inspect.signature` is CPython's `(self, /, *args, **kwargs)`; that of the class shows the
 parameters, as PySpark's does.
@@ -1622,11 +1631,9 @@ Column share its expression, of which a deep copy makes again only the levels ab
 functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy` does; PySpark's
 `copy.deepcopy` raises a `RecursionError` from about 165 levels.
 
-A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
-builds the Column or the window: the frame bounds of `Window.rowsBetween` and `rangeBetween`, and a
-`StructField` or an abstract type such as `AtomicType()`, also one nested in the type, given as the
-return type of a UDF that is not Arrow-optimized. Their errors are PySpark's, raised at the call
-rather than when the plan is built. The type of `cast` and `try_cast` is converted when the plan is
+The frame bounds of `Window.rowsBetween` and `rangeBetween`, which PySpark's client converts when
+it builds the plan, the drop-in converts when it builds the window: their errors are PySpark's,
+raised at the call rather than when the plan is built. The type of `cast` and `try_cast` is converted when the plan is
 built, as in PySpark: a `StructField`, the base `DataType()`, an abstract type such as `AtomicType()`
 and a Python subclass of them, also one nested in the type, make a Column that renders as the
 `simpleString` of the type, and whose plans raise PySpark's `UNSUPPORTED_OPERATION`.
@@ -1711,10 +1718,10 @@ the arguments of its `__init__`.
 
 Neither client has a proto or an Arrow type of such a type, also of one nested in another or in the
 `sqlType()` of a user-defined type. A plan of one raises the `UNSUPPORTED_OPERATION` of PySpark's
-`pyspark_types_to_proto_types`, as PySpark's plans do: a cast, `DataFrame.to` and a UDTF at their
-first request, and the registration of a UDTF or of a Java UDF, `Catalog.createTable` and the schema
-of a table or a materialized view of a pipeline at the call or the decorator (and a UDF that is not
-Arrow-optimized at the call, see above). As the schema of `createDataFrame`, local rows of one raise
+`pyspark_types_to_proto_types`, as PySpark's plans do: a cast, `DataFrame.to`, a UDF that is not
+Arrow-optimized and a UDTF at their first request, and the registration of a UDTF or of a Java UDF,
+`Catalog.createTable` and the schema of a table or a materialized view of a pipeline at the call or
+the decorator. As the schema of `createDataFrame`, local rows of one raise
 `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` once their values are converted, as PySpark's
 `to_arrow_schema` raises it after its converters run, so that the errors of the values, and of the
 `serialize` of a user-defined type, come first; and a pandas DataFrame of one as its only type
@@ -1988,10 +1995,13 @@ The `barrier` of `mapInPandas` and `mapInArrow` is a protobuf bool, which their 
 pickled the function, when it is built: an int is taken, as `barrier=1`, and another value, such
 as `"x"`, None or a float, fails each request with the `TypeError` of protobuf, and not the call.
 The DataFrame keeps its schema, of the schema that it is given, as PySpark's `_map_partitions`
-caches it. The plan reads `profile.id` of its resource profile after that, so the profile is
-created on the server by the first request that builds the plan, such as `collect`, and not by the
-call nor by `schema`, as in PySpark; a profile without an `id`, such as a str, fails the requests
-with that `AttributeError`, and the id of a request whose flag fails is not read.
+caches it: a `StructType` as the object that it is, so `schema` gives a copy of it as it is then,
+and `columns` and `dtypes` its fields then, as do those of `applyInPandas`, `applyInArrow` and the
+cogroup's; the type of a DDL string is parsed at the call. The plan reads `profile.id` of its
+resource profile after that, so the profile is created on the server by the first request that
+builds the plan, such as `collect`, and not by the call nor by `schema`, as in PySpark; a profile
+without an `id`, such as a str, fails the requests with that `AttributeError`, and the id of a
+request whose flag fails is not read.
 
 A merge builder keeps its condition and the conditions of its clauses as they are given, as
 PySpark's: `mergeInto(table, 5)` and `whenMatched(5)` raise nothing, the clause's action raises the
@@ -2014,10 +2024,18 @@ the cogroup's `applyInPandas` and `applyInArrow`, `applyInPandasWithState`,
 `transformWithStateInPandas` and `transformWithState` is pickled each time a request builds a plan
 that holds it, as PySpark's `PythonUDF.to_plan` and `PythonUDTF.to_plan` pickle it. So a value that
 the function reads, changed after the function was applied and before an action, is the value that
-the action runs with, and so for each later action. A function that does not pickle fails each
-request of the plan, from the first, such as `df.schema`, with PySpark's error, the `PicklingError`
-of `CloudPickleSerializer.dumps`, or `UDTF_SERIALIZATION_ERROR` of a UDTF, and no request is sent;
-the call that applies it does not fail. The functions are pickled in the order in which PySpark
+the action runs with, and so for each later action. The output type of a UDF and of a map or
+group-map function is converted then too, of the type object that PySpark's `PythonUDF` keeps, as
+are the output schema of `transformWithState` and `transformWithStateInPandas` and the schema of
+`DataFrame.to`: a `StructType` changed in place after the call, as by `add` or by a field renamed,
+is the type that the request sends, and that the pickled command carries, as it is then. A type
+that the conversion does not take, such as `AtomicType()` or a `StructField` as a type, fails the
+requests with its `UNSUPPORTED_OPERATION`, not the call, where the eval type of the UDF does not
+refuse it at the call, as the Arrow and pandas ones do with `NOT_IMPLEMENTED`. A function that does
+not pickle fails each request of the plan, from the first, such as `df.schema`, with PySpark's
+error, the `PicklingError` of `CloudPickleSerializer.dumps`, or `UDTF_SERIALIZATION_ERROR` of a
+UDTF, and no request is sent; the call that applies it does not fail. The functions are pickled in
+the order in which PySpark
 builds the plan, the initial state of `transformWithState` before its function and the arguments of
 a UDTF before its handler, and the first error of the build, of a pickling or of a value that the
 plan does not take, such as a str above, is raised. The return type of a UDTF is converted after
@@ -2131,15 +2149,17 @@ the DataFrame, `Observation`, `DataFrameReader` and `DataStreamReader`, which co
 PySpark arguments (`DataFrameReader(spark)`), also a subclass of an `__init__` of its own, and whose
 setters, copies and pickles are of the subclass; `SparkSession.Hook`, `StorageLevel` and
 `PythonEvalType`; and the `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window`, of
-static methods, which a subclass has too, but of no instances: `Window()`, also of a subclass,
-raises `TypeError: cannot create '...' instances`, where PySpark's makes an object of no state; and
-the data types, from `StringType` and `DecimalType` to `ArrayType`, `StructField` and `StructType`
-(see above). A reader is made of a session, which one of the arguments of its constructor must be,
-where PySpark's `__init__` keeps any `client`: without a session the TypeError is of the missing
-`client`, or of the argument that is not a session, also where PySpark's subclass raises the error
-of the other arguments of its `__init__`. So a reader that PySpark pickled, which unpickles of its
-class without arguments, raises that TypeError in the drop-in, where the drop-in's pickle of a
-reader loads in PySpark, of its class, as PySpark's own do: where the session of its ID is active.
+static methods and of PySpark's class attributes, `_PRECEDING_THRESHOLD` and `_FOLLOWING_THRESHOLD`
+among them, and the `_spec` of the Connect class, which a subclass has too: `Window()`, also of a
+subclass, makes an object of no state, as PySpark's, which takes attributes and weak references and
+pickles as a plain object; and the data types, from `StringType` and `DecimalType` to `ArrayType`,
+`StructField` and `StructType` (see above). A reader is made of a session, which one of the
+arguments of its constructor must be, where PySpark's `__init__` keeps any `client`: without a
+session the TypeError is of the missing `client`, or of the argument that is not a session, also
+where PySpark's subclass raises the error of the other arguments of its `__init__`. So a reader that
+PySpark pickled, which unpickles of its class without arguments, raises that TypeError in the
+drop-in, where the drop-in's pickle of a reader loads in PySpark, of its class, as PySpark's own do:
+where the session of its ID is active.
 The other native classes cannot be subclassed
 (`TypeError: type 'Catalog' is not an acceptable base type`), as their objects are of the state of
 the Rust core. `SparkSession(connection=...)`, `Catalog(spark)` and `DataSourceRegistration(spark)`
@@ -2155,7 +2175,11 @@ its client, which the drop-in does not have:
 - `DataFrameNaFunctions` and `DataFrameStatFunctions` take a DataFrame, of whose native plan they
   are.
 - `WindowSpec` takes the expressions of its partitioning and ordering and a `WindowFrame`, and
-  `TableArg` a `SubqueryExpression`, of the plan of the Rust core.
+  `TableArg` a `SubqueryExpression`, of the plan of the Rust core. A WindowSpec has PySpark's
+  `_partitionSpec`, `_orderSpec` and `_frame` as properties of the native object, not in its
+  `__dict__`: lists of the `_expr` of Columns, whose `repr` is that of PySpark's expressions (`[a]`,
+  `[a ASC NULLS FIRST]`), made at each read, and the `WindowFrame` of `pyspark.sql.connect.window`,
+  or None.
 - `RuntimeConf` takes a `SparkConnectClient`, whose transport is native.
 - `StreamingQueryManager` and `StreamingQuery` take a session and the IDs of a query, of the
   listener bus and the queries of the Rust core.
@@ -2173,12 +2197,25 @@ again. So does the unpickle of an object that PySpark pickles with its DataFrame
 callback, grouped data, `na` and `stat`; a stream writer, which PySpark's pickles of the plan of
 the DataFrame, requests nothing.
 
-`to` caches its schema whatever it is, as PySpark's, so of a DataType that is not a struct, such as
-`LongType()`, `schema` gives a copy of it without a request, while its plan is sent, which the
-server rejects. The methods that copy the cached schema of their input in PySpark copy that of
-`to` too: `alias`, `filter` and `where`, `limit`, `sort`, `orderBy` and `sortWithinPartitions`,
-`hint`, `repartition`, `repartitionByRange`, `repartitionById` and `coalesce`, `distinct` and
-`dropDuplicates`, `sample`, `randomSplit` and `observe`, as do the set operations of equal ones.
+The drop-in does not keep the schema that a copy, a deep copy or an unpickle of a DataFrame
+requests, where PySpark's keeps it apart from the cached schema of the state, as the
+`_cached_schema_serialized` that its `schema` returns. So the two differ when the schema on the
+server changed since the DataFrame cached it, such as that of a view that was replaced: PySpark's
+copy gives the schema that it requested for `schema`, `printSchema`, `toArrow` and the set
+operations of equal cached schemas (`c.union(c).schema`), and the cached schema for `columns`,
+`dtypes`, `repr`, the column lookups and the methods that copy the cached schema, such as
+`filter`; the drop-in's copy gives the cached schema for all, so its `toArrow` raises the
+`ValueError` of the cast of the table to it. Of a DataFrame that had no cached schema, both give
+the schema of the server.
+
+`to` caches its schema whatever it is, as the object that it is, as PySpark's, so of a DataType that
+is not a struct, such as `LongType()`, `schema` gives a copy of it without a request, while its plan
+is sent, which the server rejects; and of a `StructType` changed in place after the call, `schema`,
+`columns` and the plan that the requests send are of the type as it is then. The methods that copy
+the cached schema of their input in PySpark copy that of `to` too: `alias`, `filter` and `where`,
+`limit`, `sort`, `orderBy` and `sortWithinPartitions`, `hint`, `repartition`, `repartitionByRange`,
+`repartitionById` and `coalesce`, `distinct` and `dropDuplicates`, `sample`, `randomSplit` and
+`observe`, as do the set operations of equal ones.
 
 The other objects of a session above, a streaming query and `SparkSession.builder` keep the
 attributes that are set on them through copies and pickles, as PySpark's copy and pickle their

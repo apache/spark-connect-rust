@@ -35,14 +35,6 @@ from pyspark.util import PythonEvalType
 __all__ = ["UDFRegistration"]
 
 
-def _pickled_command(func: Callable[..., Any], returnType: DataType) -> bytes:
-    """The command of a UDF of ``func`` and ``returnType``, as PySpark's ``PythonUDF.to_plan``
-    pickles it each time it builds a plan that holds the UDF: so the function is pickled as it is
-    then, with the globals that it reads, and one that does not pickle raises the
-    ``PicklingError`` of ``CloudPickleSerializer.dumps`` from the request."""
-    return CloudPickleSerializer().dumps((func, returnType))
-
-
 def _as_concrete_datatype(returnType: Any) -> DataType:
     """Return a concrete, picklable pyspark ``DataType``.
 
@@ -332,15 +324,18 @@ class UserDefinedFunction:
         cols = list(args)
         named = list(kwargs.items())
 
-        # As PySpark's PythonUDF, the command is the pickled (func, returnType) for the
-        # server-side Python worker, which each request pickles when it builds the plan, as
-        # PySpark's `PythonUDF.to_plan` does, and pyfunc_make_udf builds the proto output type.
-        return_type = self.returnType
+        # As PySpark's PythonUDF, which keeps the function and the return type object: each
+        # request that builds the plan converts the output type of that object and pickles
+        # (func, returnType) for the server-side Python worker with CloudPickleSerializer, as
+        # PySpark's `PythonUDF.to_plan` does. So the function is pickled as it is then, with
+        # the globals that it reads, and a StructType changed in place after the call is the
+        # type that is sent, and pickled, as it is then; a function that does not pickle raises
+        # the PicklingError of `CloudPickleSerializer.dumps` from the request.
         return _pyspark.functions.pyfunc_make_udf(
             self._name,
-            return_type,
+            self.returnType,
             self.evalType,
-            functools.partial(_pickled_command, self.func, return_type),
+            self.func,
             "%d.%d" % sys.version_info[:2],
             *cols,
             deterministic=self.deterministic,

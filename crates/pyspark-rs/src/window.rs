@@ -87,6 +87,26 @@ impl PyFrameBound {
 const UNBOUNDED_PRECEDING: i64 = i64::MIN;
 const UNBOUNDED_FOLLOWING: i64 = i64::MAX;
 
+/// PySpark's `Window._PRECEDING_THRESHOLD`, `max(-sys.maxsize, JVM_LONG_MIN)`, at or below which
+/// the start of a frame is unbounded preceding, and `Window._FOLLOWING_THRESHOLD`,
+/// `min(sys.maxsize, JVM_LONG_MAX)`, at or above which its end is unbounded following.
+const PRECEDING_THRESHOLD: i64 = {
+    let preceding = -(isize::MAX as i64);
+    if preceding > UNBOUNDED_PRECEDING {
+        preceding
+    } else {
+        UNBOUNDED_PRECEDING
+    }
+};
+const FOLLOWING_THRESHOLD: i64 = {
+    let following = isize::MAX as i64;
+    if following < UNBOUNDED_FOLLOWING {
+        following
+    } else {
+        UNBOUNDED_FOLLOWING
+    }
+};
+
 /// The literal fields of the boundary of a value, which PySpark's `WindowExpression` sets: an
 /// int32 in a row frame, and a long in a range frame.
 const ROW_BOUNDARY_FIELD: &str = "spark.connect.Expression.Literal.integer";
@@ -113,10 +133,10 @@ fn compared_frame_argument<'a, 'py>(
     if let Ok(fb) = v.extract::<PyFrameBound>() {
         return Ok(FrameArgument::Bound(fb.bound));
     }
-    if start && v.le(-i64::MAX)? {
+    if start && v.le(PRECEDING_THRESHOLD)? {
         return Ok(FrameArgument::Bound(FrameBound::UnboundedPreceding));
     }
-    if !start && v.ge(i64::MAX)? {
+    if !start && v.ge(FOLLOWING_THRESHOLD)? {
         return Ok(FrameArgument::Bound(FrameBound::UnboundedFollowing));
     }
     Ok(FrameArgument::Value(v))
@@ -310,6 +330,46 @@ impl PyWindowSpec {
         self.spec.repr()
     }
 
+    /// The expressions of the partitioning, as the `_partitionSpec` of PySpark Connect's
+    /// WindowSpec: a list of the `_expr` of each Column, whose `repr` is PySpark's.
+    #[getter]
+    fn _partitionSpec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+        expression_list(py, self.spec.partition_spec.iter().cloned())
+    }
+
+    /// The sort orders of the ordering, as the `_orderSpec` of PySpark Connect's WindowSpec: a
+    /// list of the `_expr` of each sort order, ascending with nulls first of a Column that is not
+    /// one, whose `repr` is PySpark's, such as `a ASC NULLS FIRST`.
+    #[getter]
+    fn _orderSpec<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+        expression_list(
+            py,
+            self.spec
+                .order_spec
+                .iter()
+                .map(|sort| ExpressionNode::SortOrder(Box::new(sort.clone())).into()),
+        )
+    }
+
+    /// The frame, as the `_frame` of PySpark Connect's WindowSpec: None without one, else the
+    /// `WindowFrame` of `pyspark.sql.connect.window` of its ROWS flag and its start and end, as
+    /// the ints of `Window`, such as `WindowFrame(ROW_FRAME, -1, 1)`.
+    #[getter]
+    fn _frame(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let Some((frame_type, start, end)) = &self.spec.frame_spec else {
+            return Ok(py.None());
+        };
+        Ok(py
+            .import("pyspark.sql.connect.window")?
+            .getattr("WindowFrame")?
+            .call1((
+                *frame_type == FrameType::Row,
+                frame_bound_value(start),
+                frame_bound_value(end),
+            ))?
+            .unbind())
+    }
+
     /// A WindowSpec pickles as the partition and sort Columns and the frame of it, which the
     /// function `pyspark.sql.connect._window_reduce.window_of` gives back as a WindowSpec built
     /// through `Window`, also on a Python worker of the server, as PySpark's WindowSpec pickles
@@ -340,19 +400,16 @@ impl PyWindowSpec {
             })
             .collect::<PyResult<Vec<_>>>()?;
         // The frame as its ROWS flag and its start and end, as the ints of `Window`.
-        let bound = |bound: &FrameBound| match bound {
-            FrameBound::UnboundedPreceding => UNBOUNDED_PRECEDING,
-            FrameBound::Preceding(n) => -n,
-            FrameBound::CurrentRow => 0,
-            FrameBound::Following(n) => *n,
-            FrameBound::UnboundedFollowing => UNBOUNDED_FOLLOWING,
-        };
         let frame = this
             .spec
             .frame_spec
             .as_ref()
             .map(|(frame_type, start, end)| {
-                (*frame_type == FrameType::Row, bound(start), bound(end))
+                (
+                    *frame_type == FrameType::Row,
+                    frame_bound_value(start),
+                    frame_bound_value(end),
+                )
             });
         let window_of = py
             .import("pyspark.sql.connect.window")?
@@ -383,13 +440,78 @@ impl PyWindowSpec {
     }
 }
 
+/// The int of the frame bound `bound`, as PySpark's `WindowFrame` keeps it: the sentinel of
+/// `Window` of an unbounded one, else its offset, negative when it precedes.
+fn frame_bound_value(bound: &FrameBound) -> i64 {
+    match bound {
+        FrameBound::UnboundedPreceding => UNBOUNDED_PRECEDING,
+        FrameBound::Preceding(n) => -n,
+        FrameBound::CurrentRow => 0,
+        FrameBound::Following(n) => *n,
+        FrameBound::UnboundedFollowing => UNBOUNDED_FOLLOWING,
+    }
+}
+
+/// The list of the `_expr` of a Column of each of `expressions`, as PySpark Connect's WindowSpec
+/// keeps the expressions of its partitioning and ordering.
+fn expression_list<'py>(
+    py: Python<'py>,
+    expressions: impl Iterator<Item = Expression>,
+) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+    let items = expressions
+        .map(|expression| Bound::new(py, PyColumn::new(Column::new(expression)))?.getattr("_expr"))
+        .collect::<PyResult<Vec<_>>>()?;
+    pyo3::types::PyList::new(py, items)
+}
+
 /// Python wrapper for the Window static builder, `pyspark.sql.window.Window`. As PySpark's, it is
-/// subclassed by PySpark Connect's `pyspark.sql.connect.window.Window`, a class of its own.
-#[pyclass(name = "Window", module = "pyspark.sql.window", subclass)]
+/// subclassed by PySpark Connect's `pyspark.sql.connect.window.Window`, a class of its own, and is
+/// a plain class: its objects, and those of a subclass, construct as `object.__new__` makes
+/// PySpark's (see `reduce::check_plain_new`), take attributes and weak references, and pickle and
+/// copy as plain objects.
+#[pyclass(
+    name = "Window",
+    module = "pyspark.sql.window",
+    subclass,
+    weakref,
+    dict
+)]
 pub struct PyWindow;
 
 #[pymethods]
 impl PyWindow {
+    // As `object.__new__` of PySpark's class, of its signature `()`.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Self> {
+        crate::reduce::check_plain_new(cls, args, kwargs)?;
+        Ok(PyWindow)
+    }
+
+    // The reduce of a plain object (see `reduce::plain_reduce`).
+    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        crate::reduce::plain_reduce(slf.as_any())
+    }
+
+    /// The start at or below which `rowsBetween` and `rangeBetween` make a frame unbounded
+    /// preceding, as PySpark's `max(-sys.maxsize, JVM_LONG_MIN)`.
+    #[classattr]
+    fn _PRECEDING_THRESHOLD() -> i64 {
+        PRECEDING_THRESHOLD
+    }
+
+    /// The end at or above which `rowsBetween` and `rangeBetween` make a frame unbounded
+    /// following, as PySpark's `min(sys.maxsize, JVM_LONG_MAX)`.
+    #[classattr]
+    fn _FOLLOWING_THRESHOLD() -> i64 {
+        FOLLOWING_THRESHOLD
+    }
+
     /// UNBOUNDED PRECEDING sentinel (matches pyspark's integer value).
     #[classattr]
     fn unboundedPreceding() -> i64 {
@@ -448,9 +570,5 @@ impl PyWindow {
         Ok(PyWindowSpec::new(
             WindowSpec::new().range_between(start, end),
         ))
-    }
-
-    fn __repr__(&self) -> String {
-        "Window".to_string()
     }
 }

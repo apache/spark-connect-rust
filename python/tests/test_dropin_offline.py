@@ -914,6 +914,31 @@ def test_casts_to_types_that_pyspark_does_not_convert_fail_when_the_plan_is_buil
     assert service.analyze_requests == []
 
 
+def test_udfs_of_types_that_pyspark_does_not_convert_fail_when_the_plan_is_built(mock_connect):
+    # As PySpark's `PythonUDF.to_plan`, which converts the output type of a UDF with
+    # `pyspark_types_to_proto_types` when a request builds the plan: a UDF whose eval type does not
+    # check its type at the call, as one that is not Arrow-optimized, is applied, and its plans
+    # raise the UNSUPPORTED_OPERATION of the type that the conversion fails on.
+    import pyspark.sql.types as T
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    df = spark.range(1)
+    field = T.StructField("b", T.IntegerType())
+    for data_type, unsupported in [
+        (T.AtomicType(), "AtomicType()"),
+        (field, repr(field)),
+        (T.StructType([T.StructField("x", field)]), repr(field)),
+    ]:
+        column = F.udf(lambda x: x, data_type, useArrow=False)("id")
+        with pytest.raises(PySparkValueError) as error:
+            df.select(column).schema
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert str(error.value) == f"[UNSUPPORTED_OPERATION] data type {unsupported} is not supported."
+    assert service.analyze_requests == []
+
+
 def test_json_forms_accept_trailing_whitespace_as_pyspark(mock_connect):
     # As PySpark's `_parse_datatype_json_value`, whose patterns match a prefix of the string: the
     # whitespace after a form with an argument or a field is not a part of it. A bare name is
@@ -3222,6 +3247,30 @@ def test_add_artifacts_raises_for_paths_that_pyspark_does_not_upload(tmp_path):
         "arg_names": "'pyfile', 'archive' and/or 'file'", "condition": "True together"}
 
 
+def test_native_methods_show_the_literal_defaults_of_pyspark():
+    # As PySpark's signatures, of the defaults that are literals: those of the methods whose
+    # binding tells an omitted argument from a given one show PySpark's default. A default that is
+    # an object, which the text signature of a native method cannot hold, shows as Ellipsis (see
+    # docs/compatibility.md), as the StorageLevel of `persist`.
+    import inspect
+
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.session import SparkSession
+    from pyspark.sql.connect.streaming.query import StreamingQuery
+    from pyspark.sql.connect.tvf import TableValuedFunction
+
+    def defaults(method):
+        return {name: parameter.default
+                for name, parameter in inspect.signature(method).parameters.items()
+                if parameter.default is not inspect.Parameter.empty}
+
+    assert defaults(DataFrame.unionByName) == {"allowMissingColumns": False}
+    for range_ in (SparkSession.range, TableValuedFunction.range):
+        assert defaults(range_) == {"end": None, "step": 1, "numPartitions": None}
+    assert defaults(StreamingQuery.explain) == {"extended": False}
+    assert defaults(DataFrame.persist) == {"storageLevel": Ellipsis}
+
+
 def test_show_checks_its_arguments_as_pyspark():
     import inspect
 
@@ -4416,6 +4465,123 @@ def test_the_functions_of_udfs_are_pickled_when_their_plans_are_built_as_pyspark
         root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
         command = command_of(root)
         assert value.encode() in command and before not in command
+
+
+def _output_type_cases():
+    # The DataFrame of each API of the StructType `schema`, given at the call, with the PythonUDF
+    # of its function in the root of a request, and the other type that the plan converts of the
+    # schema, if any. A map or group-map DataFrame caches `schema` too.
+    import pandas as pd
+    from pyspark.sql import functions as F
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    class Processor(StatefulProcessor):
+        def init(self, handle):
+            pass
+
+        def handleInputRows(self, key, rows, timerValues):
+            yield from rows
+
+        def close(self):
+            pass
+
+    def frame_of(s: pd.Series) -> pd.DataFrame:
+        return pd.DataFrame({"id": s})
+
+    def scalar(root):
+        return root.project.expressions[0].common_inline_user_defined_function.python_udf
+
+    def group(root):
+        return root.group_map.func.python_udf
+
+    def cogroup(root):
+        return root.co_group_map.func.python_udf
+
+    def state_schema(root):
+        return root.group_map.transform_with_state_info.output_schema
+
+    def grouped(df):
+        return df.groupBy("id")
+
+    return {
+        "udf": (lambda df, schema: df.select(F.udf(lambda v: (v,), schema)("id")), scalar, None),
+        "arrow-optimized udf": (
+            lambda df, schema: df.select(F.udf(lambda v: (v,), schema, useArrow=True)("id")),
+            scalar, None),
+        "pandas_udf": (lambda df, schema: df.select(F.pandas_udf(frame_of, schema)("id")),
+                       scalar, None),
+        "mapInPandas": (lambda df, schema: df.mapInPandas(lambda it: it, schema),
+                        lambda root: root.map_partitions.func.python_udf, None),
+        "mapInArrow": (lambda df, schema: df.mapInArrow(lambda it: it, schema),
+                       lambda root: root.map_partitions.func.python_udf, None),
+        "applyInPandas": (lambda df, schema: grouped(df).applyInPandas(lambda p: p, schema),
+                          group, None),
+        "applyInArrow": (lambda df, schema: grouped(df).applyInArrow(lambda t: t, schema),
+                         group, None),
+        "cogroup applyInPandas": (
+            lambda df, schema: grouped(df).cogroup(grouped(df)).applyInPandas(
+                lambda left, right: left, schema),
+            cogroup, None),
+        "cogroup applyInArrow": (
+            lambda df, schema: grouped(df).cogroup(grouped(df)).applyInArrow(
+                lambda left, right: left, schema),
+            cogroup, None),
+        "applyInPandasWithState": (
+            lambda df, schema: grouped(df).applyInPandasWithState(
+                lambda key, pdfs, state: pdfs, schema, "c long", "append", "NoTimeout"),
+            lambda root: root.apply_in_pandas_with_state.func.python_udf, None),
+        "transformWithStateInPandas": (
+            lambda df, schema: grouped(df).transformWithStateInPandas(
+                Processor(), schema, "append", "None"),
+            group, state_schema),
+        "transformWithState": (
+            lambda df, schema: grouped(df).transformWithState(
+                Processor(), schema, "append", "None", initialState=grouped(df)),
+            group, state_schema),
+        "to": (lambda df, schema: df.to(schema), None, lambda root: root.to_schema.schema),
+    }
+
+
+@pytest.mark.parametrize("case", list(_output_type_cases()))
+def test_the_output_types_of_udfs_are_converted_when_their_plans_are_built_as_pyspark(
+    mock_connect, case
+):
+    # As PySpark's PythonUDF.to_plan, which converts the output type of the type object that a UDF
+    # keeps and pickles it with the function each time it builds a plan, of the one object, as
+    # BaseTransformWithStateInPySpark.plan and ToSchema.plan convert their schema: a StructType
+    # changed in place after the call is the type that a request sends, in each place, and that
+    # its command carries, as it is then. A map or group-map DataFrame, and that of `to`, cache
+    # the object as their schema, as PySpark's, so their `schema` and `columns` are of it then,
+    # without a request. applyInPandasWithState sends the JSON of its output schema of the call,
+    # as PySpark's.
+    from pyspark.sql.connect.proto import base_pb2
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+
+    spark, service = mock_connect
+    make, udf_of, other_of = _output_type_cases()[case]
+    schema = T.StructType([T.StructField("id", T.LongType())])
+    called = schema.json()
+    frame = make(spark.range(2), schema)
+    caches = case.startswith(("map", "apply", "cogroup", "to")) and case != "applyInPandasWithState"
+    for change in (lambda: None, lambda: schema.add("x", T.StringType())):
+        change()
+        frame.explain()
+        # AnalyzePlanRequest.explain of the plan of the DataFrame.
+        root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
+        expected = pyspark_types_to_proto_types(schema)
+        if udf_of is not None:
+            udf = udf_of(root)
+            assert udf.output_type == expected
+            assert pickle.loads(udf.command)[1] == schema
+        if other_of is not None:
+            assert other_of(root) == expected
+        if case == "applyInPandasWithState":
+            assert root.apply_in_pandas_with_state.output_schema == called
+        if caches:
+            requests = len(service.recorded_order)
+            assert frame.schema == schema and frame.schema is not schema
+            assert frame.columns == schema.names
+            assert len(service.recorded_order) == requests
 
 
 def test_udtf_handlers_are_pickled_when_plans_are_built_as_pyspark(mock_connect, tmp_path):
@@ -16549,6 +16715,39 @@ def test_random_split_converts_its_seed_with_int_as_pyspark(mock_connect):
     assert error.value.getCondition() == "VALUE_NOT_POSITIVE"
 
 
+def test_random_split_iterates_its_weights_as_pyspark(mock_connect):
+    # As PySpark Connect's randomSplit, which iterates the weights for their check, their sum and
+    # their proportions, and adds the proportions up from 0.0: any iterable is taken, as a set,
+    # the keys of a dict or a dict; a generator is consumed by the check, so its sum is 0; and a
+    # weight that does not add to a float, such as a Decimal, raises the TypeError of the
+    # addition, before the seed is converted.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    df = spark.range(10)
+
+    def bounds(splits):
+        # Relation.sample=12: lower_bound=2, upper_bound=3, of the plan of the last request.
+        found = []
+        for split in splits:
+            split.collect()
+            plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+            sample = parse_message(parse_message(plan)[12][0])
+            found.append(tuple(sample.get(field, [b""])[0] for field in (2, 3)))
+        return found
+
+    expected = bounds(df.randomSplit([1.0, 3.0], 7))
+    for weights in ({1.0: "x", 3.0: "y"}, {1.0: 0, 3.0: 0}.keys(), (1.0, 3.0),
+                    np.array([1.0, 3.0])):
+        assert bounds(df.randomSplit(weights, 7)) == expected
+    assert len(df.randomSplit({2.0, 1.0}, 7)) == 2
+    with pytest.raises(PySparkValueError) as error:
+        df.randomSplit((w for w in [1.0, 3.0]), 7)
+    assert error.value.getMessageParameters() == {"arg_name": "sum(weights)", "arg_value": "0"}
+    with pytest.raises(TypeError, match="unsupported operand type.*'float' and 'decimal.Decimal'"):
+        df.randomSplit([decimal.Decimal("0.5"), decimal.Decimal("0.5")], "not a seed")
+
+
 def test_seeds_that_pyspark_cannot_send_are_refused_as_pyspark(mock_connect):
     # As PySpark Connect's: randomSplit and sample take int() of the seed, and an int out of the
     # range of a long is the ValueError of protobuf. sampleBy's StatSampleBy asserts an int, so
@@ -20783,6 +20982,39 @@ def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect,
 
 
 
+def test_getitem_validates_a_name_with_the_legacy_flag_as_pyspark(mock_connect, monkeypatch):
+    # As PySpark's `__getitem__` with PYSPARK_VALIDATE_COLUMN_NAME_LEGACY=1: `verify_col_name` of
+    # the cached schema, which is requested unless it is cached, and else the server, of
+    # `self.select(item).isLocal()`, whose request raises its error; a star is not validated.
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    monkeypatch.setenv("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY", "1")
+    service.data_type = struct_schema("a")
+
+    def kinds(item):
+        start = len(service.recorded_order)
+        assert repr(df[item]) == f"Column<'{item}'>"
+        return _sent_kinds(service, start)
+
+    df = spark.range(2)
+    assert kinds("a") == ["schema"]
+    assert kinds("a") == []
+    assert kinds("`a`") == []
+    assert kinds("b") == ["is_local"]
+    request = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    project = request.is_local.plan.root.project
+    assert [e.unresolved_attribute.unparsed_identifier for e in project.expressions] == ["b"]
+    assert kinds("a.b") == ["is_local"]
+    star = len(service.recorded_order)
+    assert repr(df["*"]) == "Column<'unresolvedstar()'>"
+    assert _sent_kinds(service, star) == []
+    df = spark.range(2)
+    assert kinds("c") == ["schema", "is_local"]
+    monkeypatch.delenv("PYSPARK_VALIDATE_COLUMN_NAME_LEGACY")
+    assert kinds("d") == []
+
+
 def test_a_column_named_as_an_internal_method_is_an_attribute_as_pyspark(mock_connect):
     # As PySpark's DataFrame, which has no `column_names`, a method of the drop-in's Rust code
     # only: `df.column_names` is the Column of that name, of `__getattr__`.
@@ -20793,14 +21025,17 @@ def test_a_column_named_as_an_internal_method_is_an_attribute_as_pyspark(mock_co
 
 
 def test_schema_cache_to_uses_supplied_struct_schema(mock_connect):
+    # As PySpark's `to`, which caches the StructType object that it is given as the schema, of
+    # which `schema` is a copy as it is then: a field added in place after the call is in it, and
+    # in the schema of a limit of it, which copies the cached schema, without a request.
     spark, service = mock_connect
     df = spark.range(10)
     target = T.StructType([T.StructField("converted", T.StringType(), True)])
-    expected = target.jsonValue()
     converted = df.to(target)
     target.add("extra", T.LongType())
-    assert converted.schema.jsonValue() == expected
-    assert converted.limit(1).dtypes == [("converted", "string")]
+    assert converted.schema.jsonValue() == target.jsonValue()
+    assert converted.schema is not target
+    assert converted.limit(1).dtypes == [("converted", "string"), ("extra", "bigint")]
     assert service.calls == 0
     assert df.columns == ["id"]
     assert service.calls == 1
@@ -26620,6 +26855,59 @@ def _sent_udf_command(request):
     raise AssertionError(f"no map function in the relation fields {sorted(root)}")
 
 
+@pytest.mark.parametrize("method", [
+    "mapInPandas", "mapInArrow", "applyInPandas", "applyInArrow", "applyInPandasWithState",
+    "transformWithStateInPandas", "transformWithState", "foreachPartition",
+])
+def test_map_functions_bind_the_columns_of_their_input_by_name_as_pyspark(mock_connect, method):
+    # As PySpark's `to_expr` of the UDF of a map or group-map function, which makes a
+    # ColumnReference of each column of the input: a column named `*` or `s.*` is that column,
+    # not a star of all the columns or of a struct.
+    from _mock_connect_server import data_type_proto
+    from pyspark.sql.connect.proto import base_pb2
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    class Processor(StatefulProcessor):
+        def init(self, handle):
+            pass
+
+        def handleInputRows(self, key, rows, timerValues):
+            yield from rows
+
+        def close(self):
+            pass
+
+    spark, service = mock_connect
+    names = ["*", "s.*", "id"]
+    service.data_type = data_type_proto({"type": "struct", "fields": [
+        {"name": name, "type": "long", "nullable": True, "metadata": {}} for name in names]})
+    df = spark.range(2)
+    grouped = df.groupBy("id")
+    build = {
+        "mapInPandas": lambda: df.mapInPandas(lambda it: it, "id long"),
+        "mapInArrow": lambda: df.mapInArrow(lambda it: it, "id long"),
+        "applyInPandas": lambda: grouped.applyInPandas(lambda p: p, "id long"),
+        "applyInArrow": lambda: grouped.applyInArrow(lambda t: t, "id long"),
+        "applyInPandasWithState": lambda: grouped.applyInPandasWithState(
+            lambda key, pdfs, state: pdfs, "id long", "c long", "append", "NoTimeout"),
+        "transformWithStateInPandas": lambda: grouped.transformWithStateInPandas(
+            Processor(), "id long", "append", "None"),
+        "transformWithState": lambda: grouped.transformWithState(
+            Processor(), "id long", "append", "None"),
+    }
+    if method == "foreachPartition":
+        df.foreachPartition(lambda rows: None)
+    else:
+        build[method]().collect()
+    root = base_pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+    relation = root.WhichOneof("rel_type")
+    func = getattr(root, relation).func
+    assert [argument.WhichOneof("expr_type") for argument in func.arguments] == [
+        "unresolved_attribute"] * len(names)
+    assert [argument.unresolved_attribute.unparsed_identifier
+            for argument in func.arguments] == names
+
+
 @pytest.mark.parametrize("build", [
     lambda df: df.mapInPandas(lambda frames: frames, "id long"),
     lambda df: df.mapInArrow(lambda batches: batches, "id long"),
@@ -29494,6 +29782,60 @@ def test_stateful_group_methods_set_their_modes_when_the_plan_is_built_as_pyspar
             dataframe.schema
         assert type(error.value) is error_type and message in repr(str(error.value)), message
     assert _sent_kinds(service, start) == []
+
+
+@pytest.mark.parametrize("method", ["transformWithStateInPandas", "transformWithState"])
+def test_transform_with_state_checks_its_initial_state_and_type_first_as_pyspark(
+    mock_connect, method
+):
+    # As PySpark's, which checks `self._df._check_same_session(initialState._df)` first: an object
+    # without `_df` raises its AttributeError, and a `_df` that is not a DataFrame of the session,
+    # as the Column of a DataFrame's `_df`, or grouped data of another session, SESSION_NOT_SAME.
+    # Then UserDefinedFunction raises NOT_EXPECTED_TYPE of an output type that is neither a
+    # DataType nor a str, then the `_grouping_cols` of the initial state are read, and then the
+    # columns of the input, so a bad type raises before any request.
+    from pyspark.errors import PySparkTypeError, SessionNotSameException
+    from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+
+    class Processor(StatefulProcessor):
+        def init(self, handle):
+            pass
+
+        def handleInputRows(self, key, rows, timerValues):
+            yield from rows
+
+        def close(self):
+            pass
+
+    class Fake:
+        def __init__(self, df):
+            self._df = df
+
+    spark, service = mock_connect
+    other = spark.newSession()
+    df = spark.range(2)
+
+    def call(initial=None, output="id long"):
+        return getattr(df.groupBy("id"), method)(
+            Processor(), output, "append", "None", initialState=initial)
+
+    start = len(service.recorded_order)
+    with pytest.raises(AttributeError, match="'int' object has no attribute '_df'"):
+        call(5, output=5)
+    for initial in (df, other.range(2).groupBy("id"), Fake(other.range(2))):
+        with pytest.raises(SessionNotSameException) as error:
+            call(initial, output=5)
+        assert error.value.getCondition() == "SESSION_NOT_SAME"
+    for initial in (None, df.groupBy("id"), Fake(df)):
+        with pytest.raises(PySparkTypeError) as error:
+            call(initial, output=5)
+        assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+        assert error.value.getMessageParameters() == {
+            "expected_type": "DataType or str", "arg_name": "returnType", "arg_type": "int"}
+    with pytest.raises(AttributeError, match="'Fake' object has no attribute '_grouping_cols'"):
+        call(Fake(df))
+    assert _sent_kinds(service, start) == []
+    assert call(df.groupBy("id")).columns == ["id"]
 
 
 @pytest.mark.parametrize("read", [

@@ -8,8 +8,8 @@ use spark_connect::udf::eval_type;
 
 use crate::column::PyColumn;
 use crate::dataframe::{
-    build_map_udf, check_return_type_argument, infer_group_map_eval_type, map_udf_of,
-    resolve_datatype, validate_map_function, PyDataFrame,
+    build_map_udf, check_return_type_argument, infer_group_map_eval_type, map_result_of,
+    map_udf_of, resolve_datatype, validate_map_function, PyDataFrame,
 };
 use crate::errors::ResultExt;
 
@@ -52,6 +52,43 @@ fn check_same_session(
             &[],
         ))
     }
+}
+
+/// `other`, the grouped data of an argument that PySpark checks with
+/// `self._df._check_same_session(other._df)`, as `cogroup` and the `initialState` of
+/// `transformWithState` and `transformWithStateInPandas` do: an object that is not grouped data
+/// raises the `AttributeError` of its `_df`, or `SESSION_NOT_SAME` of a `_df` that is not a
+/// DataFrame of the session of `this`, such as the Column of a DataFrame's `_df`; grouped data of
+/// another session raises `SESSION_NOT_SAME`. Another object whose `_df` is a DataFrame of the
+/// session passes the check, as in PySpark, which then reads the rest of it: the inner `Err` is
+/// the `TypeError` of its type, which the caller raises then, as the drop-in takes grouped data
+/// only.
+fn grouped_of_same_session<'py>(
+    py: Python<'py>,
+    this: &RustGroupedData,
+    other: &Bound<'py, PyAny>,
+) -> PyResult<Result<Bound<'py, PyGroupedData>, PyErr>> {
+    let other = match other.cast::<PyGroupedData>() {
+        Ok(other) => other.clone(),
+        Err(err) => {
+            let df = other.getattr("_df")?;
+            let session = this.spark_session();
+            let same_session = df
+                .extract::<PyRef<'_, PyDataFrame>>()
+                .is_ok_and(|df| df.dataframe.spark_session().session_id() == session.session_id());
+            if !same_session {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "SessionNotSameException",
+                    "SESSION_NOT_SAME",
+                    &[],
+                ));
+            }
+            return Ok(Err(err.into()));
+        }
+    };
+    check_same_session(py, this, &other.borrow().grouped_data)?;
+    Ok(Ok(other))
 }
 
 /// The shallow copy of the user-set attributes of `source`, its `__dict__`, onto `copy`, as
@@ -164,6 +201,14 @@ pub(crate) fn dict_aggregates(
 }
 
 impl PyGroupedData {
+    /// The columns of the DataFrame that is grouped, as PySpark's `self._df.columns`, which a
+    /// group-map function binds as its arguments: of the schema that the DataFrame caches, that
+    /// which it keeps as an object as it is now too, such as the `StructType` of a map function,
+    /// else of a request.
+    fn frame_columns(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+        self.df(py).bind(py).borrow().column_names(py)
+    }
+
     /// `sum`, `avg`, `mean`, `min` and `max`, as PySpark's `_numeric_agg`: of column names,
     /// which it asserts, every numeric column without any, and `NOT_NUMERIC_COLUMNS` for a
     /// column that is not numeric.
@@ -560,9 +605,12 @@ impl PyGroupedData {
         // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let session = self.grouped_data.spark_session();
         let return_type = resolve_datatype(py, &session, &schema)?;
-        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
+        let cols = self.frame_columns(py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        Ok(PyDataFrame::new(self.grouped_data.apply_in_pandas(udf)))
+        Ok(map_result_of(
+            &schema,
+            self.grouped_data.apply_in_pandas(udf),
+        ))
     }
 
     /// Deprecated grouped-map apply: `apply(udf)` where `udf` is a
@@ -619,9 +667,12 @@ impl PyGroupedData {
         // As PySpark's: a DDL string is parsed before the columns of the input are read.
         let session = self.grouped_data.spark_session();
         let return_type = resolve_datatype(py, &session, &schema)?;
-        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
+        let cols = self.frame_columns(py)?;
         let udf = map_udf_of(py, &func, &schema, return_type, eval_type_id, &cols)?;
-        Ok(PyDataFrame::new(self.grouped_data.apply_in_arrow(udf)))
+        Ok(map_result_of(
+            &schema,
+            self.grouped_data.apply_in_arrow(udf),
+        ))
     }
 
     /// `GroupedData.cogroup`, as PySpark's `PandasCogroupedOps`, which checks
@@ -634,28 +685,7 @@ impl PyGroupedData {
         py: Python<'_>,
         other: &Bound<'_, PyAny>,
     ) -> PyResult<PyCoGroupedData> {
-        let other = match other.cast::<PyGroupedData>() {
-            Ok(other) => other,
-            Err(err) => {
-                let df = other.getattr("_df")?;
-                let session = slf.borrow().grouped_data.spark_session();
-                let same_session = df.extract::<PyRef<'_, PyDataFrame>>().is_ok_and(|df| {
-                    df.dataframe.spark_session().session_id() == session.session_id()
-                });
-                if !same_session {
-                    return Err(crate::column::raise_pyspark(
-                        py,
-                        "SessionNotSameException",
-                        "SESSION_NOT_SAME",
-                        &[],
-                    ));
-                }
-                return Err(err.into());
-            }
-        };
-        let this = slf.borrow();
-        let that = other.borrow();
-        check_same_session(py, &this.grouped_data, &that.grouped_data)?;
+        let other = grouped_of_same_session(py, &slf.borrow().grouped_data, other)??;
         Ok(PyCoGroupedData::new(
             py,
             slf.clone().unbind(),
@@ -686,7 +716,7 @@ impl PyGroupedData {
         let output_schema = sent_schema(py, &outputStructType)?;
         let state_schema = sent_schema(py, &stateStructType)?;
         let session = self.grouped_data.spark_session();
-        let cols = interruptible(py, &session, || self.grouped_data.input_columns())?;
+        let cols = self.frame_columns(py)?;
         let udf = build_map_udf(
             py,
             &session,
@@ -735,16 +765,16 @@ impl PyGroupedData {
         outputStructType: Bound<'_, PyAny>,
         outputMode: Bound<'_, PyAny>,
         timeMode: Bound<'_, PyAny>,
-        initialState: Option<PyRef<'_, PyGroupedData>>,
+        initialState: Option<Bound<'_, PyAny>>,
         eventTimeColumnName: DefaultedOption,
     ) -> PyResult<PyDataFrame> {
         transform_with_state_of(
             py,
-            &self.grouped_data,
+            self,
             &statefulProcessor,
             &outputStructType,
             [&outputMode, &timeMode],
-            initialState.as_deref(),
+            initialState.as_ref(),
             &eventTimeColumnName,
             true,
         )
@@ -766,48 +796,65 @@ impl PyGroupedData {
         outputStructType: Bound<'_, PyAny>,
         outputMode: Bound<'_, PyAny>,
         timeMode: Bound<'_, PyAny>,
-        initialState: Option<PyRef<'_, PyGroupedData>>,
+        initialState: Option<Bound<'_, PyAny>>,
         eventTimeColumnName: DefaultedOption,
     ) -> PyResult<PyDataFrame> {
         transform_with_state_of(
             py,
-            &self.grouped_data,
+            self,
             &statefulProcessor,
             &outputStructType,
             [&outputMode, &timeMode],
-            initialState.as_deref(),
+            initialState.as_ref(),
             &eventTimeColumnName,
             false,
         )
     }
 }
 
-/// The DataFrame of `transformWithStateInPandas` (`pandas`) or `transformWithState` of `grouped`,
+/// The DataFrame of `transformWithStateInPandas` (`pandas`) or `transformWithState` of `this`,
 /// as PySpark's `BaseTransformWithStateInPySpark` plan: its output schema is `outputStructType`,
 /// a DDL string as an `UnparsedDataType`, which the server parses, or the type, and its event-time
-/// column is always set, `""` when it is omitted. The plan sets its values in its string fields
-/// when it is built: the output mode once it built the grouping, and the time mode and the
-/// event-time column once it built the initial state, before it pickles the function. A value that
-/// protobuf does not take as a str (bytes of UTF-8 it does) fails each request of the DataFrame
-/// there, as PySpark's plan fails to build, and not this call: the last grouping expression
-/// carries its error, or the input when there is none.
+/// column is always set, `""` when it is omitted. As PySpark's, the initial state, if any, is
+/// checked with `_check_same_session` of its `_df` (see [`grouped_of_same_session`]), then the
+/// output type with the `NOT_EXPECTED_TYPE` of `UserDefinedFunction`, then the `_grouping_cols`
+/// of the initial state are read, and then the columns of the input. The plan sets its values in
+/// its string fields when it is built: the output mode once it built the grouping, and the time
+/// mode and the event-time column once it built the initial state, before it pickles the
+/// function. A value that protobuf does not take as a str (bytes of UTF-8 it does) fails each
+/// request of the DataFrame there, as PySpark's plan fails to build, and not this call: the last
+/// grouping expression carries its error, or the input when there is none.
 #[allow(clippy::too_many_arguments)]
 fn transform_with_state_of(
     py: Python<'_>,
-    grouped: &RustGroupedData,
+    this: &PyGroupedData,
     processor: &Bound<'_, PyAny>,
     output_struct_type: &Bound<'_, PyAny>,
     [output_mode, time_mode]: [&Bound<'_, PyAny>; 2],
-    initial_state: Option<&PyGroupedData>,
+    initial_state: Option<&Bound<'_, PyAny>>,
     event_time_column_name: &DefaultedOption,
     pandas: bool,
 ) -> PyResult<PyDataFrame> {
-    if let Some(state) = initial_state {
-        check_same_session(py, grouped, &state.grouped_data)?;
-    }
+    let grouped = &this.grouped_data;
     let (func, et) = twus_func(py, processor, time_mode, initial_state.is_some(), pandas)?;
+    let initial_state = initial_state
+        .map(|state| Ok::<_, PyErr>((state, grouped_of_same_session(py, grouped, state)?)))
+        .transpose()?;
+    check_return_type_argument(output_struct_type)?;
+    // As PySpark's, which reads the `_grouping_cols` of the initial state once it made the
+    // function: of an object of a `_df` of the session that is not grouped data, its
+    // `AttributeError`, else the `TypeError` of its type.
+    let initial_state = match initial_state {
+        Some((_, Ok(state))) => Some(state),
+        Some((state, Err(err))) => {
+            state.getattr("_grouping_cols")?;
+            return Err(err);
+        }
+        None => None,
+    };
+    let initial_state = initial_state.as_ref().map(|state| state.borrow());
     let session = grouped.spark_session();
-    let cols = interruptible(py, &session, || grouped.input_columns())?;
+    let cols = this.frame_columns(py)?;
     let udf = build_map_udf(py, &session, &func, output_struct_type, et, &cols)?;
     // As PySpark's, which sends a DDL string as an `UnparsedDataType`, for the server to parse.
     let out = if output_struct_type.is_instance_of::<pyo3::types::PyString>() {
@@ -1058,7 +1105,7 @@ impl PyCoGroupedData {
             eval_type::SQL_COGROUPED_MAP_PANDAS_UDF,
             &[],
         )?;
-        Ok(PyDataFrame::new(self.inner.apply_in_pandas(udf)))
+        Ok(map_result_of(&schema, self.inner.apply_in_pandas(udf)))
     }
 
     /// `PandasCogroupedOps.applyInArrow`.
@@ -1081,6 +1128,6 @@ impl PyCoGroupedData {
             eval_type::SQL_COGROUPED_MAP_ARROW_UDF,
             &[],
         )?;
-        Ok(PyDataFrame::new(self.inner.apply_in_arrow(udf)))
+        Ok(map_result_of(&schema, self.inner.apply_in_arrow(udf)))
     }
 }

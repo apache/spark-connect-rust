@@ -23,7 +23,7 @@ from pyspark.util import JVM_LONG_MIN, JVM_LONG_MAX
 from py4j.java_gateway import JavaObject
 from pyspark.sql._typing import ColumnOrName
 
-__all__ = ['Window', 'WindowSpec', 'FrameBound']
+__all__ = ['Window', 'WindowSpec']
 
 class Window:
     _PRECEDING_THRESHOLD = max(-sys.maxsize, JVM_LONG_MIN)

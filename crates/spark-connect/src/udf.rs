@@ -92,11 +92,15 @@ pub struct CommandPickler(Arc<dyn Pickling>);
 trait Pickling: Send + Sync {
     fn pickle(&self) -> Result<Vec<u8>>;
     fn object(&self) -> &(dyn std::any::Any + Send + Sync);
+    /// Whether the pickle is a `PythonUdf` message of the output type and the command of a UDF
+    /// (see [`CommandPickler::with_output_type`]).
+    fn gives_output_type(&self) -> bool;
 }
 
 struct PicklingOf<O, F> {
     object: O,
     pickle: F,
+    gives_output_type: bool,
 }
 
 impl<O, F> Pickling for PicklingOf<O, F>
@@ -111,6 +115,10 @@ where
     fn object(&self) -> &(dyn std::any::Any + Send + Sync) {
         &self.object
     }
+
+    fn gives_output_type(&self) -> bool {
+        self.gives_output_type
+    }
 }
 
 impl CommandPickler {
@@ -120,12 +128,41 @@ impl CommandPickler {
         object: O,
         pickle: impl Fn(&O) -> Result<Vec<u8>> + Send + Sync + 'static,
     ) -> Self {
-        CommandPickler(Arc::new(PicklingOf { object, pickle }))
+        CommandPickler(Arc::new(PicklingOf {
+            object,
+            pickle,
+            gives_output_type: false,
+        }))
+    }
+
+    /// The pickler of the command of a Python UDF and of its output type, both of `object`, as
+    /// PySpark's `PythonUDF.to_plan` converts the output type of the UDF and pickles it with the
+    /// function each time it builds the plan, of the one object that it keeps: so a type that was
+    /// changed in place after the UDF was applied is the type that the request sends and the
+    /// function's command carries. `pickle` gives the bytes of a `PythonUdf` message of the
+    /// `output_type` and the `command`, which [`PythonUDFPayload::to_proto`] takes, or the error
+    /// that the request raises. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_output_type<O: std::any::Any + Send + Sync>(
+        object: O,
+        pickle: impl Fn(&O) -> Result<Vec<u8>> + Send + Sync + 'static,
+    ) -> Self {
+        CommandPickler(Arc::new(PicklingOf {
+            object,
+            pickle,
+            gives_output_type: true,
+        }))
     }
 
     /// The command as it pickles now.
     pub(crate) fn pickle(&self) -> Result<Vec<u8>> {
         self.0.pickle()
+    }
+
+    /// Whether this pickler gives the output type of its UDF with the command
+    /// ([`CommandPickler::with_output_type`]).
+    pub(crate) fn gives_output_type(&self) -> bool {
+        self.0.gives_output_type()
     }
 
     /// The object of this pickler, which a deep copy of the UDF copies, as PySpark's deep copy of
@@ -553,12 +590,33 @@ impl PythonUDFPayload {
         PythonUDFPayload::new(DataType::Null, 0, command, python_ver)
     }
 
-    /// Convert to a proto PythonUDF message.
+    /// Convert to a proto PythonUDF message. Of a pickler that gives the output type with the
+    /// command ([`CommandPickler::with_output_type`]), both are those that it gives as the
+    /// request builds the plan, as PySpark's `PythonUDF.to_plan` converts them then; the
+    /// `output_type` of the payload stands until it gives one, as in the build of a request
+    /// that meets the picklers first (see `crate::expression::pickled_command`).
     pub fn to_proto(&self) -> proto::PythonUdf {
         let mut proto = proto::PythonUdf::default();
-        proto.output_type = Some(self.output_type.to_proto());
+        match self
+            .pickler
+            .as_ref()
+            .filter(|pickler| pickler.gives_output_type())
+        {
+            Some(pickler) => {
+                use prost::Message;
+                let built = crate::expression::pickled_command(pickler);
+                let built = proto::PythonUdf::decode(built.as_slice()).unwrap_or_default();
+                proto.output_type = built
+                    .output_type
+                    .or_else(|| Some(self.output_type.to_proto()));
+                proto.command = built.command;
+            }
+            None => {
+                proto.output_type = Some(self.output_type.to_proto());
+                proto.command = command_bytes(&self.command, self.pickler.as_ref());
+            }
+        }
         proto.eval_type = self.eval_type;
-        proto.command = command_bytes(&self.command, self.pickler.as_ref());
         proto.python_ver = self.python_ver.clone();
         proto
     }
@@ -674,6 +732,48 @@ mod tests {
             payload,
             PythonUDFPayload::new(DataType::Long, 200, Vec::new(), "3.11".to_string())
         );
+    }
+
+    #[test]
+    fn test_a_pickler_with_the_output_type_gives_the_type_and_the_command_of_each_build() {
+        use prost::Message;
+        use std::sync::Mutex;
+        // As PySpark's `PythonUDF.to_plan`, which converts the output type of the object that it
+        // pickles with the function each time it builds the plan: the type that the object has
+        // then is sent, not the type of the payload, which stands when the pickler gives none.
+        let current = Arc::new(Mutex::new(DataType::Long));
+        let pickler = CommandPickler::with_output_type(Arc::clone(&current), |current| {
+            let output_type = current.lock().unwrap().clone();
+            Ok(proto::PythonUdf {
+                output_type: Some(output_type.to_proto()),
+                command: bytes::Bytes::from(format!("command of {}", output_type.json())),
+                ..Default::default()
+            }
+            .encode_to_vec())
+        });
+        let payload = PythonUDFPayload::pickled_at_build(
+            DataType::Long,
+            eval_type::SQL_BATCHED_UDF,
+            pickler,
+            "3.11".to_string(),
+        );
+        let built = payload.to_proto();
+        assert_eq!(built.output_type, Some(DataType::Long.to_proto()));
+        assert_eq!(built.command.as_ref(), b"command of \"long\"");
+        assert_eq!((built.eval_type, built.python_ver.as_str()), (100, "3.11"));
+        *current.lock().unwrap() = DataType::Double;
+        let built = payload.to_proto();
+        assert_eq!(built.output_type, Some(DataType::Double.to_proto()));
+        assert_eq!(built.command.as_ref(), b"command of \"double\"");
+        let silent = PythonUDFPayload::pickled_at_build(
+            DataType::Integer,
+            eval_type::SQL_BATCHED_UDF,
+            CommandPickler::with_output_type((), |_| Ok(Vec::new())),
+            "3.11".to_string(),
+        );
+        let built = silent.to_proto();
+        assert_eq!(built.output_type, Some(DataType::Integer.to_proto()));
+        assert!(built.command.is_empty());
     }
 
     /// A UDF of `x` whose pickler's object is `tag`.

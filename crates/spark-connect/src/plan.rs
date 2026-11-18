@@ -219,6 +219,12 @@ pub enum LogicalPlan {
     ToSchema {
         input: Arc<LogicalPlan>,
         schema: DataType,
+        /// The reader of the schema of a client, which a request calls when it builds the plan,
+        /// in place of `schema`, as PySpark's `ToSchema` converts the type object of its schema
+        /// then: it gives the bytes of the `spark.connect.DataType` of the schema. Not a stable
+        /// API.
+        #[doc(hidden)]
+        schema_reader: Option<crate::udf::CommandPickler>,
     },
     /// A plan that PySpark's client fails to build when a request sends it, with `error`: the
     /// error is raised by each request of the plan, and the plan is not sent, as PySpark's
@@ -1893,7 +1899,6 @@ impl LogicalPlan {
             | LogicalPlan::Repartition { input, .. }
             | LogicalPlan::WithColumnsRenamed { input, .. }
             | LogicalPlan::ToDF { input, .. }
-            | LogicalPlan::ToSchema { input, .. }
             | LogicalPlan::Unbuildable { input, .. }
             | LogicalPlan::Parse { input, .. }
             | LogicalPlan::NAFill { input, .. }
@@ -1911,6 +1916,15 @@ impl LogicalPlan {
             | LogicalPlan::StatCorr { input, .. }
             | LogicalPlan::StatCov { input, .. }
             | LogicalPlan::MlTransform { input, .. } => parts.push(Input(input)),
+            // A deep copy copies the schema object of the reader, as PySpark's copies the schema.
+            LogicalPlan::ToSchema {
+                input,
+                schema_reader,
+                ..
+            } => {
+                parts.push(Input(input));
+                parts.push(Pickler(schema_reader));
+            }
             LogicalPlan::Range { .. }
             | LogicalPlan::LocalRelation { .. }
             | LogicalPlan::ChunkedCachedLocalRelation { .. }
@@ -2058,6 +2072,9 @@ impl LogicalPlan {
                 pending.extend(arguments.iter().map(Of));
                 pending.extend(pickler.iter().map(Pickler));
             }
+            LogicalPlan::ToSchema { schema_reader, .. } => {
+                pending.extend(schema_reader.iter().map(Pickler));
+            }
             LogicalPlan::Range { .. }
             | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Limit { .. }
@@ -2071,7 +2088,6 @@ impl LogicalPlan {
             | LogicalPlan::Repartition { .. }
             | LogicalPlan::WithColumnsRenamed { .. }
             | LogicalPlan::ToDF { .. }
-            | LogicalPlan::ToSchema { .. }
             | LogicalPlan::Unbuildable { .. }
             | LogicalPlan::Parse { .. }
             | LogicalPlan::NAFill { .. }
@@ -2693,10 +2709,24 @@ impl LogicalPlan {
                 crate::expression::record_unbuildable(error);
             }
 
-            LogicalPlan::ToSchema { input, schema } => {
+            LogicalPlan::ToSchema {
+                input,
+                schema,
+                schema_reader,
+            } => {
                 let mut to_schema = proto::ToSchema::default();
                 to_schema.input = Some(Box::new(relation_of(input, plan_ids)));
-                to_schema.schema = Some(schema.to_proto());
+                // As PySpark's, which converts the schema once it built the input: of the reader,
+                // the schema that it gives, else `schema`, as before the reader gives one.
+                let read = schema_reader
+                    .as_ref()
+                    .map(crate::expression::pickled_command)
+                    .filter(|read| !read.is_empty())
+                    .and_then(|read| {
+                        use prost::Message;
+                        proto::DataType::decode(read.as_slice()).ok()
+                    });
+                to_schema.schema = read.or_else(|| Some(schema.to_proto()));
                 relation.rel_type = Some(proto::relation::RelType::ToSchema(Box::new(to_schema)));
             }
 
@@ -3186,7 +3216,11 @@ impl LogicalPlan {
                         .map(|t| proto::TransformWithStateInfo {
                             time_mode: t.time_mode.clone(),
                             event_time_column_name: t.event_time_column_name.clone(),
-                            output_schema: t.output_schema.as_ref().map(|d| d.to_proto()),
+                            output_schema: transform_with_state_output_schema(
+                                t,
+                                func,
+                                gm.func.as_ref(),
+                            ),
                         });
                 relation.rel_type = Some(proto::relation::RelType::GroupMap(Box::new(gm)));
             }
@@ -3279,6 +3313,33 @@ impl LogicalPlan {
 
         relation
     }
+}
+
+/// The output schema of the `TransformWithStateInfo` `info` of a plan of the function `func`,
+/// whose build is `built`. As PySpark's `BaseTransformWithStateInPySpark.plan` converts the output
+/// schema when it builds the plan, of the type object that the output type of the function is of
+/// too: a schema that is the output type of a function whose pickler converts that type as the
+/// request builds the plan ([`crate::udf::CommandPickler::with_output_type`]) is the type of that
+/// build, so a type changed in place since the call is sent as it is then, in both. A DDL string,
+/// sent as it is, is not the output type of the function, which is the type that it parses to.
+fn transform_with_state_output_schema(
+    info: &TransformWithStateInfo,
+    func: &CommonInlineUserDefinedFunctionExpression,
+    built: Option<&proto::CommonInlineUserDefinedFunction>,
+) -> Option<proto::DataType> {
+    let of_build = func
+        .python_udf
+        .pickler
+        .as_ref()
+        .is_some_and(crate::udf::CommandPickler::gives_output_type);
+    if of_build && info.output_schema.as_ref() == Some(&func.python_udf.output_type) {
+        if let Some(proto::common_inline_user_defined_function::Function::PythonUdf(udf)) =
+            built.and_then(|built| built.function.as_ref())
+        {
+            return udf.output_type.clone();
+        }
+    }
+    info.output_schema.as_ref().map(DataType::to_proto)
 }
 
 /// The `CommonInlineUserDefinedTableFunction` of a Python UDTF: of a call with `arguments`,
@@ -3594,6 +3655,7 @@ pub fn to_schema(input: impl Into<Arc<LogicalPlan>>, schema: DataType) -> Logica
     LogicalPlan::ToSchema {
         input: input.into(),
         schema,
+        schema_reader: None,
     }
 }
 

@@ -23,9 +23,10 @@ mod dispatch {
 /// - name: str - name of the UDF
 /// - return_type: DataType - return type of the UDF
 /// - eval_type: int - evaluation type (from PythonEvalType)
-/// - command: bytes - cloudpickled command (usually (func, output_type)), or a function of no
-///   arguments that returns it, which each request that builds the plan calls, as PySpark's
-///   `PythonUDF.to_plan` pickles the function each time
+/// - command: bytes - cloudpickled command (usually (func, output_type)), sent as it is with the
+///   output type of `return_type`; or the function of the UDF, of which each request that builds
+///   the plan converts the output type of `return_type` and pickles `(func, return_type)`, as
+///   PySpark's `PythonUDF.to_plan` does each time, of the type as it is then
 /// - python_ver: str - Python version (e.g., "3.9")
 /// - *args: Column - argument columns
 /// - named_args: (str, Column) pairs - the keyword arguments, in order
@@ -42,9 +43,6 @@ fn pyfunc_make_udf(
     deterministic: bool,
     named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
 ) -> PyResult<PyColumn> {
-    // Accept any DataType object (our type classes / DataType) or a DDL string.
-    let return_data_type = crate::types::py_to_proto_data_type(return_type)?;
-
     // The positional arguments, then the named ones, as PySpark's UDF call.
     let arg_exprs: Vec<Expression> = udf_arguments(args, named_args, false)?
         .into_iter()
@@ -52,13 +50,26 @@ fn pyfunc_make_udf(
         .collect();
 
     // Create the Python UDF payload
-    let python_udf = match crate::udf_command::UdfCommand::of(command) {
-        crate::udf_command::UdfCommand::Pickled(bytes) => {
-            PythonUDFPayload::new(return_data_type, eval_type, bytes, python_ver)
-        }
-        crate::udf_command::UdfCommand::AtBuild(pickler) => {
-            PythonUDFPayload::pickled_at_build(return_data_type, eval_type, pickler, python_ver)
-        }
+    let python_udf = match command.cast::<pyo3::types::PyBytes>() {
+        Ok(bytes) => PythonUDFPayload::new(
+            crate::types::py_to_proto_data_type(return_type)?,
+            eval_type,
+            bytes.as_bytes().to_vec(),
+            python_ver,
+        ),
+        // As PySpark's `PythonUDF`, which keeps the function and the type object, and converts
+        // and pickles them when it builds the plan: a type that the build refuses fails the
+        // requests and not this call. The type of the payload stands for it until then.
+        Err(_) => PythonUDFPayload::pickled_at_build(
+            crate::types::py_to_data_type(return_type)?,
+            eval_type,
+            crate::udf_command::udf_pickler(
+                pyo3::types::PyTuple::new(return_type.py(), [command, return_type])?
+                    .into_any()
+                    .unbind(),
+            ),
+            python_ver,
+        ),
     };
 
     // Create the UDF expression

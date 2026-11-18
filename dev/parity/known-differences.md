@@ -387,9 +387,9 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   PySpark's: a subclass constructs of the arguments of its `__init__`, and its copies and pickles
   are of the subclass.
   The `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window` is subclassed, of its
-  static methods, but neither it nor a subclass has instances (`Window()` raises
-  `cannot create '...' instances`), as it has no state. A reader is made of a session, one of
-  those arguments, so PySpark's pickle of a reader, which makes it of its class without arguments,
+  static methods, and it and a subclass make objects of no state, as PySpark's. A reader is made
+  of a session, one of those arguments, so PySpark's pickle of a reader, which makes it of its
+  class without arguments,
   does not load in the drop-in (`TypeError`). The other native classes are not subclassable
   (`TypeError: type '...' is not an acceptable base type`), and of them only `SparkSession`,
   `Catalog` and `DataSourceRegistration` construct, as PySpark's do; the others
