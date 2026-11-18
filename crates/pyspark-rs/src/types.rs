@@ -29,22 +29,31 @@ fn type_reduce(py: Python<'_>, json: &str) -> PyResult<(Py<PyAny>, (String,))> {
     Ok((f.unbind(), (json.to_string(),)))
 }
 
-/// The `__reduce__` of a type of `data_type`, whose class is `cls`: by its JSON, as
-/// [`type_reduce`], unless it has a user-defined type, whose JSON need not import its class, or
-/// a nullable flag that is not a bool, which the JSON does not keep (`flagged`). Such a type
-/// pickles of the type objects it is made of, `args()`, as PySpark's types do; the class is that
-/// of `pyspark.sql.types`, also on the Python workers of the server.
+/// The `__reduce__` of the type object `obj` of `data_type`: by its JSON, as [`type_reduce`],
+/// unless it has a user-defined type, whose JSON need not import its class, or a nullable flag
+/// that is not a bool, which the JSON does not keep (`flagged`). Such a type pickles of the type
+/// objects it is made of, `args()`, as PySpark's types do; the class is that of
+/// `pyspark.sql.types`, also on the Python workers of the server. The JSON is that of PySpark's
+/// `json()`, of the metadata dicts of its fields as they are (see `holds_metadata`).
 fn reduce_with_udts<'py>(
-    cls: Bound<'py, pyo3::types::PyType>,
+    obj: &Bound<'py, PyAny>,
     data_type: &DataType,
     flagged: bool,
     args: impl FnOnce() -> PyResult<Bound<'py, pyo3::types::PyTuple>>,
 ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
-    let py = cls.py();
+    let py = obj.py();
     if flagged || has_udt(data_type) {
-        return Ok((cls.into_any().unbind(), args()?.into_any().unbind()));
+        return Ok((
+            obj.get_type().into_any().unbind(),
+            args()?.into_any().unbind(),
+        ));
     }
-    let (f, args) = type_reduce(py, &data_type.json())?;
+    let json = if holds_metadata(py, obj)? {
+        type_json_text(obj)?
+    } else {
+        data_type.json()
+    };
+    let (f, args) = type_reduce(py, &json)?;
     Ok((f, args.into_pyobject(py)?.into_any().unbind()))
 }
 
@@ -128,6 +137,232 @@ pub(crate) fn is_class_type(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     }
 }
 
+/// The type classes of the extension: a type of one of them is of its class, and a type of a
+/// Python subclass of a concrete one is of the subclass (see [`is_subclass_object`]).
+fn native_type_classes(py: Python<'_>) -> &[Py<pyo3::types::PyType>] {
+    static CLASSES: PyOnceLock<Vec<Py<pyo3::types::PyType>>> = PyOnceLock::new();
+    CLASSES.get_or_init(py, || {
+        [
+            py.get_type::<PyStructField>(),
+            py.get_type::<PyStructType>(),
+            py.get_type::<PyStringType>(),
+            py.get_type::<PyIntegerType>(),
+            py.get_type::<PyLongType>(),
+            py.get_type::<PyDoubleType>(),
+            py.get_type::<PyArrayType>(),
+            py.get_type::<PyMapType>(),
+            py.get_type::<PyDecimalType>(),
+            py.get_type::<PyBooleanType>(),
+            py.get_type::<PyDateType>(),
+            py.get_type::<PyTimestampType>(),
+            py.get_type::<PyTimestampNTZType>(),
+            py.get_type::<PyFloatType>(),
+            py.get_type::<PyShortType>(),
+            py.get_type::<PyByteType>(),
+            py.get_type::<PyBinaryType>(),
+            py.get_type::<PyNullType>(),
+            py.get_type::<PyCharType>(),
+            py.get_type::<PyVarcharType>(),
+            py.get_type::<PyTimeType>(),
+            py.get_type::<PyCalendarIntervalType>(),
+            py.get_type::<PyYearMonthIntervalType>(),
+            py.get_type::<PyDayTimeIntervalType>(),
+            py.get_type::<PyVariantType>(),
+            py.get_type::<PyGeometryType>(),
+            py.get_type::<PyGeographyType>(),
+            py.get_type::<PyTimestampNTZNanosType>(),
+            py.get_type::<PyTimestampLTZNanosType>(),
+        ]
+        .into_iter()
+        .map(Bound::unbind)
+        .collect()
+    })
+}
+
+/// The type classes of the extension, the concrete ones of [`native_type_classes`] and the
+/// abstract classes of their hierarchy, from `DataType` down.
+fn type_class_hierarchy(py: Python<'_>) -> &[Py<pyo3::types::PyType>] {
+    static CLASSES: PyOnceLock<Vec<Py<pyo3::types::PyType>>> = PyOnceLock::new();
+    CLASSES.get_or_init(py, || {
+        let abstract_classes = [
+            py.get_type::<PyDataType>(),
+            py.get_type::<PyAtomicType>(),
+            py.get_type::<PyNumericType>(),
+            py.get_type::<PyIntegralType>(),
+            py.get_type::<PyFractionalType>(),
+            py.get_type::<PyDatetimeType>(),
+            py.get_type::<PyAnyTimeType>(),
+            py.get_type::<PyAnsiIntervalType>(),
+            py.get_type::<PySpatialType>(),
+        ];
+        abstract_classes
+            .into_iter()
+            .map(Bound::unbind)
+            .chain(native_type_classes(py).iter().map(|cls| cls.clone_ref(py)))
+            .collect()
+    })
+}
+
+/// That the class `cls` of a type is of one branch of the hierarchy of the type classes: the type
+/// classes of its MRO are its first one and the classes that this one extends, of which the
+/// native constructor of the first makes the state of its objects. A class of type classes of two
+/// branches, such as `class X(StringType, IntegerType)`, which PySpark's plain classes allow,
+/// raises the `TypeError` that CPython raises of bases of conflicting layouts: its objects would
+/// be of the state of one. A constructor checks it too, of a class whose `__init_subclass__` does
+/// not call that of `DataType`.
+fn check_one_branch(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<()> {
+    let natives = type_class_hierarchy(cls.py());
+    if natives.iter().any(|native| cls.is(native)) {
+        return Ok(());
+    }
+    let mut first: Option<Bound<'_, pyo3::types::PyType>> = None;
+    for class in cls.mro().iter() {
+        let class = class.cast_into::<pyo3::types::PyType>()?;
+        if !natives.iter().any(|native| class.is(native)) {
+            continue;
+        }
+        match &first {
+            None => first = Some(class),
+            Some(first) if !first.is_subclass(&class)? => {
+                return Err(pyo3::exceptions::PyTypeError::new_err(
+                    "multiple bases have instance lay-out conflict",
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Whether `obj` is a type of a Python subclass of a concrete type class, such as `class
+/// MyString(StringType)`, as PySpark's plain classes are subclassed. Its core type is that of
+/// the class, as PySpark's conversions read it by `isinstance`, and the methods of its class call
+/// its own methods where PySpark's call them (`typeName`, `simpleString`, `jsonValue`, ...), of
+/// which an array, a map or a struct that holds it calls its methods too. A type of no core type,
+/// of an abstract class or a `UserDefinedType`, is not one (see [`is_class_type`]).
+pub(crate) fn is_subclass_object(obj: &Bound<'_, PyAny>) -> bool {
+    if !obj.is_instance_of::<PyDataType>() || has_state_of_dict(obj) {
+        return false;
+    }
+    let ty = obj.get_type();
+    !native_type_classes(obj.py()).iter().any(|cls| ty.is(cls))
+}
+
+/// Whether `slf` is of the class `T` itself, rather than of a Python subclass of it.
+fn is_native<T: pyo3::PyClass>(slf: &Bound<'_, T>) -> bool {
+    slf.as_any().get_type().is(slf.py().get_type::<T>())
+}
+
+/// As PySpark's `DataType.json`, `json.dumps(self.jsonValue(), separators=(",", ":"),
+/// sort_keys=True)`, of the `jsonValue` of `obj`: its own, of a Python subclass.
+fn json_of_json_value(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    let py = obj.py();
+    json_dumps(py, &obj.call_method0(pyo3::intern!(py, "jsonValue"))?)
+}
+
+/// As PySpark's `DataType.__repr__`, `self.__class__.__name__ + "()"`: the name of the class of
+/// `obj`, of a Python subclass its own.
+fn class_repr(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    Ok(format!("{}()", obj.get_type().name()?))
+}
+
+/// The `typeName()` of `obj`, which PySpark's `DataType.simpleString` and `jsonValue` return, and
+/// the `jsonValue` of an array, a map and a struct names their type by: of a Python subclass, the
+/// name of its class without `Type`, in lower case, or its own `typeName`.
+fn type_name_of<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    obj.call_method0(pyo3::intern!(obj.py(), "typeName"))
+}
+
+/// The reduce of `obj`, a type of a Python subclass of a type class, as PySpark's plain classes
+/// reduce at every protocol from 2: `copyreg.__newobj__(cls)` and the `__dict__` of the type,
+/// which holds the attributes `parameters` that PySpark's `__init__` sets, in its order, and the
+/// attributes that a user set, of the `__dict__` of `obj`; no state when there are none. So a
+/// copy, a deep copy and a pickle are of the subclass, which `cls.__new__(cls)` makes and
+/// `__setstate__` sets, and PySpark loads it as its own subclass, also on the Python workers of
+/// the server, to which cloudpickle sends a class of `__main__` by value.
+fn subclass_reduce<'py>(
+    obj: &Bound<'py, PyAny>,
+    parameters: Vec<(&str, Bound<'py, PyAny>)>,
+) -> PyResult<Py<PyAny>> {
+    let py = obj.py();
+    let state = pyo3::types::PyDict::new(py);
+    for (name, value) in parameters {
+        state.set_item(name, value)?;
+    }
+    let attributes = obj.getattr(pyo3::intern!(py, "__dict__"))?;
+    state.call_method1(pyo3::intern!(py, "update"), (attributes,))?;
+    // Of a class of `__slots__`, the state pairs the `__dict__`, None if empty, with the slots
+    // that are set, as `object.__getstate__` does.
+    let slots = crate::reduce::slot_values(obj)?;
+    let state = match (state.is_empty(), slots.is_empty()) {
+        (true, true) => py.None().into_bound(py),
+        (false, true) => state.into_any(),
+        (empty, false) => {
+            let attributes = if empty {
+                py.None().into_bound(py)
+            } else {
+                state.into_any()
+            };
+            pyo3::types::PyTuple::new(py, [attributes, slots.into_any()])?.into_any()
+        }
+    };
+    let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+    Ok((newobj, (obj.get_type(),), state, py.None(), py.None())
+        .into_pyobject(py)?
+        .into_any()
+        .unbind())
+}
+
+/// The reduce of a type of the class `T` itself, of its JSON `json` (see [`type_reduce`]), or else
+/// of a type of a Python subclass of it, of the attributes `parameters` (see [`subclass_reduce`]).
+fn reduce_of<'py, T: pyo3::PyClass>(
+    slf: &Bound<'py, T>,
+    json: &str,
+    parameters: impl FnOnce() -> PyResult<Vec<(&'static str, Bound<'py, PyAny>)>>,
+) -> PyResult<Py<PyAny>> {
+    if !is_native(slf) {
+        return subclass_reduce(slf.as_any(), parameters()?);
+    }
+    let py = slf.py();
+    Ok(type_reduce(py, json)?
+        .into_pyobject(py)?
+        .into_any()
+        .unbind())
+}
+
+/// The one instance of the type class `T` of PySpark's `DataTypeSingleton`, of `cls`: of `T`
+/// itself, the one that `instance` keeps, made of `init` once, and of a Python subclass, the one
+/// of that class, as `DataTypeSingleton.__call__(cls)` keeps one instance of each class in
+/// `_instances`, made of `init` on the first call. Arguments raise its `TypeError`. The
+/// constructor of the class makes the instance, and Python calls the `__init__` of a subclass
+/// after it at each call, where PySpark's metaclass calls it on the first one only.
+fn singleton_of<T: pyo3::PyClass>(
+    cls: &Bound<'_, pyo3::types::PyType>,
+    args: &Bound<'_, pyo3::types::PyTuple>,
+    kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    instance: &PyOnceLock<Py<T>>,
+    init: fn() -> pyo3::PyClassInitializer<T>,
+) -> PyResult<Py<T>> {
+    singleton_arguments(args, kwargs)?;
+    let py = cls.py();
+    if cls.is(py.get_type::<T>()) {
+        return instance
+            .get_or_try_init(py, || Py::new(py, init()))
+            .map(|instance| instance.clone_ref(py));
+    }
+    check_one_branch(cls)?;
+    static INSTANCES: PyOnceLock<Py<pyo3::types::PyDict>> = PyOnceLock::new();
+    let instances = INSTANCES
+        .get_or_init(py, || pyo3::types::PyDict::new(py).unbind())
+        .bind(py);
+    if let Some(instance) = instances.get_item(cls)? {
+        return Ok(instance.cast_into::<T>()?.unbind());
+    }
+    let instance = crate::reduce::new_of_class(cls, init())?;
+    instances.set_item(cls, &instance)?;
+    Ok(instance.unbind())
+}
+
 /// What CPython's `object.__new__(cls, *args, **kwargs)` raises of PySpark's plain classes, whose
 /// `__new__` the native `__new__` of `base` stands for: arguments are those of the `__init__` of
 /// a subclass, such as a `UserDefinedType` of parameters, so they raise only when `cls` takes
@@ -139,6 +374,7 @@ fn object_new_arguments(
     args: &Bound<'_, pyo3::types::PyTuple>,
     kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
 ) -> PyResult<()> {
+    check_one_branch(cls)?;
     if args.is_empty() && kwargs.is_none_or(|kwargs| kwargs.is_empty()) {
         return Ok(());
     }
@@ -280,24 +516,37 @@ fn sync_base(obj: &Bound<'_, PyAny>) -> PyResult<()> {
 /// and sets each entry as `setattr` does: a parameter through its setter, so that the core type
 /// is that of the parameters, and any other attribute in the `__dict__` of `obj`, as PySpark's
 /// has it. `computed` takes the entries that PySpark keeps of the parameters, which the drop-in
-/// computes of them, and returns whether it took the entry.
+/// computes of them, and returns whether it took the entry. The state of an object of a class of
+/// `__slots__` is the pair of its `__dict__`, None if empty, and of its slots, which are set as
+/// pickle sets them.
 fn set_pickled_state<'py>(
     obj: &Bound<'py, PyAny>,
-    state: &Bound<'py, pyo3::types::PyDict>,
+    state: &Bound<'py, PyAny>,
     mut computed: impl FnMut(&str, &Bound<'py, PyAny>) -> PyResult<bool>,
 ) -> PyResult<()> {
     let py = obj.py();
-    for (key, value) in state.iter() {
-        match key.cast::<pyo3::types::PyString>() {
-            Ok(name) => {
-                if !computed(&name.to_cow()?, &value)? {
-                    obj.setattr(name, &value)?;
+    let (state, slots) = match state.cast::<pyo3::types::PyTuple>() {
+        Ok(pair) if pair.len() == 2 => (pair.get_item(0)?, Some(pair.get_item(1)?)),
+        _ => (state.clone(), None),
+    };
+    if !state.is_none() {
+        for (key, value) in state.cast::<pyo3::types::PyDict>()?.iter() {
+            match key.cast::<pyo3::types::PyString>() {
+                Ok(name) => {
+                    if !computed(&name.to_cow()?, &value)? {
+                        obj.setattr(name, &value)?;
+                    }
                 }
+                // A key that is not a str is only an entry of the `__dict__`, as pickle sets it.
+                Err(_) => obj
+                    .getattr(pyo3::intern!(py, "__dict__"))?
+                    .set_item(&key, &value)?,
             }
-            // A key that is not a str is only an entry of the `__dict__`, as pickle sets it.
-            Err(_) => obj
-                .getattr(pyo3::intern!(py, "__dict__"))?
-                .set_item(&key, &value)?,
+        }
+    }
+    if let Some(slots) = slots.filter(|slots| !slots.is_none()) {
+        for (name, value) in slots.cast::<pyo3::types::PyDict>()?.iter() {
+            obj.setattr(name.cast_into::<pyo3::types::PyString>()?, value)?;
         }
     }
     Ok(())
@@ -338,11 +587,9 @@ macro_rules! abstract_type {
 
         #[pymethods]
         impl $ty {
-            /// The one instance of the class, as PySpark's `DataTypeSingleton.__call__(cls)`
-            /// returns, which raises its `TypeError` of an argument. A native constructor either
-            /// returns an object that exists or makes one of the class that it is called for, so
-            /// a Python subclass cannot have the one instance of its own that PySpark's
-            /// `DataTypeSingleton._instances` keeps of each class: it cannot be instantiated.
+            /// The one instance of the class, and of each Python subclass of it, as PySpark's
+            /// `DataTypeSingleton.__call__(cls)` returns, which raises its `TypeError` of an
+            /// argument (see `singleton_of`).
             #[new]
             #[classmethod]
             #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
@@ -351,18 +598,10 @@ macro_rules! abstract_type {
                 args: &Bound<'_, pyo3::types::PyTuple>,
                 kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
             ) -> PyResult<Py<Self>> {
-                singleton_arguments(args, kwargs)?;
-                let py = cls.py();
-                if !cls.is(py.get_type::<Self>()) {
-                    return Err(pyo3::exceptions::PyTypeError::new_err(format!(
-                        "cannot create '{}' instances",
-                        cls.name()?
-                    )));
-                }
                 static INSTANCE: PyOnceLock<Py<$ty>> = PyOnceLock::new();
-                INSTANCE
-                    .get_or_try_init(py, || Py::new(py, class_type_chain!($ty, [$($chain),*])))
-                    .map(|instance| instance.clone_ref(py))
+                singleton_of(cls, args, kwargs, &INSTANCE, || {
+                    class_type_chain!($ty, [$($chain),*])
+                })
             }
         }
     };
@@ -514,7 +753,7 @@ fn struct_parts(py: Python<'_>, fields: Bound<'_, PyList>) -> PyResult<(DataType
         names.append(object.borrow().field.name.as_str())?;
         base_fields.push(object.borrow().current_field(py)?);
     }
-    let need_conversion = need_conversion_of(py, &base_fields)?;
+    let need_conversion = need_conversion_of_fields(py, &fields)?;
     let parts = PyStructType {
         fields: fields.unbind(),
         names: names.unbind(),
@@ -528,41 +767,47 @@ fn struct_parts(py: Python<'_>, fields: Bound<'_, PyList>) -> PyResult<(DataType
     ))
 }
 
-/// The `needConversion` of each of `fields`, as PySpark's `_needConversion`.
-fn need_conversion_of(py: Python<'_>, fields: &[StructField]) -> PyResult<Vec<bool>> {
-    fields
-        .iter()
-        .map(|field| need_conversion(py, &field.data_type))
-        .collect()
-}
-
-/// The `needConversion` of each of the `StructField` objects of `fields`, as they are now.
+/// The `needConversion` of each of the `StructField` objects of `fields`, as they are now, as
+/// PySpark's `_needConversion`, `[f.needConversion() for f in self]`: of a field of a Python
+/// subclass, of its own method.
 fn need_conversion_of_fields(py: Python<'_>, fields: &Bound<'_, PyList>) -> PyResult<Vec<bool>> {
     fields
         .iter()
-        .map(|item| as_struct_field(&item)?.borrow().need_conversion_now(py))
+        .map(|item| {
+            if is_subclass_object(&item) {
+                return item
+                    .call_method0(pyo3::intern!(py, "needConversion"))?
+                    .is_truthy();
+            }
+            as_struct_field(&item)?.borrow().need_conversion_now(py)
+        })
         .collect()
 }
 
 /// The `needConversion` of the data type object `obj`, as PySpark's: a struct and a user-defined
 /// type always need a conversion, and an array or a map when one of its element types does. The
 /// fields of a struct are not read, nor their metadata, so this does not grow with the struct.
+/// The types that `obj` holds are read as PySpark's call of their `needConversion` reads them
+/// (see `child_need_conversion`).
 fn need_conversion_of_object(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     fn of_child(py: Python<'_>, kept: &KeptType, snapshot: &DataType) -> PyResult<bool> {
         match kept.kept(py) {
-            Some(object) => need_conversion_of_object(py, object.bind(py)),
+            Some(object) => child_need_conversion(py, object.bind(py)),
             None => need_conversion(py, snapshot),
         }
     }
     if obj.is_instance_of::<PyStructType>() {
         return Ok(true);
     }
-    // A StructField as a type needs a conversion as its dataType does, as PySpark's does.
+    // A StructField, also as a type, needs a conversion as its dataType does, as PySpark's does.
     if let Ok(field) = obj.cast::<PyStructField>() {
-        let kept = field.borrow().data_type_object.kept(py);
-        return match kept {
-            Some(object) => need_conversion_of_object(py, object.bind(py)),
-            None => need_conversion(py, &py_to_data_type(obj)?),
+        let field = field.borrow();
+        return match field.data_type_object.kept(py) {
+            Some(object) => {
+                drop(field);
+                child_need_conversion(py, object.bind(py))
+            }
+            None => need_conversion(py, &field.field.data_type),
         };
     }
     if let Ok(array) = obj.cast::<PyArrayType>() {
@@ -578,6 +823,18 @@ fn need_conversion_of_object(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult
         return Ok(true);
     }
     need_conversion(py, &py_to_data_type(obj)?)
+}
+
+/// The `needConversion` of the type object `child` that a type holds, as PySpark's call of its
+/// method reads it: of a Python subclass, of its own method, and else as the class's (see
+/// [`need_conversion_of_object`]).
+fn child_need_conversion(py: Python<'_>, child: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if is_subclass_object(child) {
+        return child
+            .call_method0(pyo3::intern!(py, "needConversion"))?
+            .is_truthy();
+    }
+    need_conversion_of_object(py, child)
 }
 
 /// The `TypeError` of an iteration of `obj`, which is not iterable, as CPython words it: with the
@@ -666,6 +923,32 @@ fn tree_type_name_text(
         Some(_) => Ok(None),
         None => class_type_name(root.py(), json),
     }
+}
+
+/// The name that a tree string writes of the type at `path` below the type `root` when it is of a
+/// Python subclass (see `is_subclass_object`), as PySpark's `_get_jvm_type_name` writes it: the
+/// `simpleString()` of a decimal, a char, a varchar, an interval of fields or a time, and else the
+/// `typeName()`, of its own methods; None for another type.
+fn subclass_tree_type_name(root: &Bound<'_, PyAny>, path: &[TreeStep]) -> PyResult<Option<String>> {
+    let Some(node) = tree_node(root, path)? else {
+        return Ok(None);
+    };
+    if !is_subclass_object(&node) {
+        return Ok(None);
+    }
+    let of_simple_string = node.is_instance_of::<PyDecimalType>()
+        || node.is_instance_of::<PyCharType>()
+        || node.is_instance_of::<PyVarcharType>()
+        || node.is_instance_of::<PyDayTimeIntervalType>()
+        || node.is_instance_of::<PyYearMonthIntervalType>()
+        || node.is_instance_of::<PyTimeType>();
+    let py = root.py();
+    let name = if of_simple_string {
+        node.call_method0(pyo3::intern!(py, "simpleString"))?
+    } else {
+        type_name_of(&node)?
+    };
+    Ok(Some(name.str()?.to_cow()?.into_owned()))
 }
 
 /// The text of the nullable flag `flag` of the type at `path` below the type `root`, as PySpark's
@@ -1006,8 +1289,12 @@ fn converter_flag_is_other(
 
 /// Whether the JSON of the type object `obj` is written from its objects, rather than from the
 /// core type: a nullable flag of it, or of a field in it, is other than a bool, a name is not a
-/// str, or a type is a `StructField`.
+/// str, a type is a `StructField`, or a type, `obj` itself or one in it, is of a Python subclass,
+/// whose JSON is of its own methods.
 pub(crate) fn has_other_flag(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if is_subclass_object(obj) {
+        return Ok(true);
+    }
     if let Ok(field) = obj.cast::<PyStructField>() {
         let field = field.borrow();
         if field.name_object.is_some() || !is_bool_flag(field.nullable.bind(py)) {
@@ -1062,12 +1349,35 @@ fn child_has_other_flag(py: Python<'_>, child: &Bound<'_, PyAny>) -> PyResult<bo
     has_other_flag(py, child)
 }
 
+/// The key of the metadata of a struct field that holds the collations of its strings.
+const COLLATIONS_METADATA_KEY: &str = "__COLLATIONS";
+
+/// Whether the type `data_type` of a struct field has a string of a collation, also in its arrays
+/// and maps, but not in a struct, whose fields are of their own: PySpark's `jsonValue` of the
+/// field then writes the types of `removeCollations(self.dataType)`, of the base classes of its
+/// strings, arrays and maps, and the collations in its metadata, as the core's JSON does.
+fn has_collations(data_type: &DataType) -> bool {
+    match data_type {
+        DataType::String { collation } => collation != "UTF8_BINARY",
+        DataType::Array { element_type, .. } => has_collations(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_collations(key_type) || has_collations(value_type),
+        _ => false,
+    }
+}
+
 /// Set the nullable flags in the JSON value `json` of `obj` to the flags as they were given, as
-/// PySpark's `jsonValue` has them. Returns whether one of them is other than a bool.
+/// PySpark's `jsonValue` has them, and the JSON of the types of Python subclasses to their own.
+/// Returns whether one of them is other than a bool, or one type is written of its own object.
+/// `collated` is of a type in a field that has collations (see `has_collations`).
 fn keep_flags_in_json(
     py: Python<'_>,
     json: &Bound<'_, PyAny>,
     obj: &Bound<'_, PyAny>,
+    collated: bool,
 ) -> PyResult<bool> {
     if let Ok(field) = obj.cast::<PyStructField>() {
         let field = field.borrow();
@@ -1078,8 +1388,32 @@ fn keep_flags_in_json(
         }
         json.set_item("nullable", field.nullable.bind(py))?;
         other |= !is_bool_flag(field.nullable.bind(py));
+        // As PySpark's, the metadata dict of the field, of the values as they were given, which
+        // the core's JSON values do not keep, and the collations of its strings, if it has some.
+        let metadata = field.metadata.bind(py);
+        if !metadata.is_empty() {
+            let collated = match field.data_type_object.kept(py) {
+                Some(object) => has_collations(&py_to_data_type(object.bind(py))?),
+                None => has_collations(&field.field.data_type),
+            };
+            if collated {
+                let with_collations = metadata.copy()?;
+                let collations = json
+                    .get_item("metadata")?
+                    .get_item(COLLATIONS_METADATA_KEY)?;
+                with_collations.set_item(COLLATIONS_METADATA_KEY, collations)?;
+                json.set_item("metadata", with_collations)?;
+            } else {
+                json.set_item("metadata", metadata)?;
+            }
+            other = true;
+        }
         if let Some(data_type) = field.data_type_object.kept(py) {
-            other |= keep_child_json(py, json, "type", data_type.bind(py))?;
+            let data_type = data_type.bind(py);
+            // The collations matter only to the types of Python subclasses in the field.
+            let collated = holds_subclass_object(py, data_type)?
+                && has_collations(&py_to_data_type(data_type)?);
+            other |= keep_child_json(py, json, "type", data_type, collated)?;
         }
         return Ok(other);
     }
@@ -1088,7 +1422,7 @@ fn keep_flags_in_json(
         json.set_item("containsNull", array.contains_null_object.bind(py))?;
         let mut other = !is_bool_flag(array.contains_null_object.bind(py));
         if let Some(element) = array.element_object.kept(py) {
-            other |= keep_child_json(py, json, "elementType", element.bind(py))?;
+            other |= keep_child_json(py, json, "elementType", element.bind(py), collated)?;
         }
         return Ok(other);
     }
@@ -1097,19 +1431,26 @@ fn keep_flags_in_json(
         json.set_item("valueContainsNull", map.value_contains_null_object.bind(py))?;
         let mut other = !is_bool_flag(map.value_contains_null_object.bind(py));
         if let Some(key) = map.key_object.kept(py) {
-            other |= keep_child_json(py, json, "keyType", key.bind(py))?;
+            other |= keep_child_json(py, json, "keyType", key.bind(py), collated)?;
         }
         if let Some(value) = map.value_object.kept(py) {
-            other |= keep_child_json(py, json, "valueType", value.bind(py))?;
+            other |= keep_child_json(py, json, "valueType", value.bind(py), collated)?;
         }
         return Ok(other);
     }
     if let Ok(st) = obj.cast::<PyStructType>() {
-        let st = st.borrow();
+        let items = st.borrow().fields.clone_ref(py);
         let fields = json.get_item("fields")?;
         let mut other = false;
-        for (i, item) in st.fields.bind(py).iter().enumerate() {
-            other |= keep_flags_in_json(py, &fields.get_item(i)?, &item)?;
+        for (i, item) in items.bind(py).iter().enumerate() {
+            // As PySpark's `[f.jsonValue() for f in self]`, of the own method of a field of a
+            // Python subclass.
+            if is_subclass_object(&item) {
+                fields.set_item(i, item.call_method0(pyo3::intern!(py, "jsonValue"))?)?;
+                other = true;
+                continue;
+            }
+            other |= keep_flags_in_json(py, &fields.get_item(i)?, &item, false)?;
         }
         return Ok(other);
     }
@@ -1117,24 +1458,33 @@ fn keep_flags_in_json(
 }
 
 /// Set the type at `key` of the JSON object `json` to the JSON of `child`, with its flags as given.
-/// A `StructField` as a type is its own JSON object, and a type of its class only is its own
-/// `jsonValue()`, as PySpark's `jsonValue` has them.
+/// A `StructField` as a type is its own JSON object, and a type of its class only, or of a Python
+/// subclass, is its own `jsonValue()`, as PySpark's `jsonValue` has them, but a string, an array
+/// and a map of a Python subclass in a field of collations, which PySpark writes of their base
+/// classes (`removeCollations`), as the core's JSON has them.
 fn keep_child_json(
     py: Python<'_>,
     json: &Bound<'_, PyAny>,
     key: &str,
     child: &Bound<'_, PyAny>,
+    collated: bool,
 ) -> PyResult<bool> {
     if let Ok(field) = child.cast::<PyStructField>() {
         let (nested, _) = field_json_value(py, field)?;
         json.set_item(key, nested)?;
         return Ok(true);
     }
-    if is_class_type(child)? {
+    let of_base_class = collated
+        && (child.is_instance_of::<PyStringType>()
+            || child.is_instance_of::<PyCharType>()
+            || child.is_instance_of::<PyVarcharType>()
+            || child.is_instance_of::<PyArrayType>()
+            || child.is_instance_of::<PyMapType>());
+    if is_class_type(child)? || (is_subclass_object(child) && !of_base_class) {
         json.set_item(key, child.call_method0(pyo3::intern!(py, "jsonValue"))?)?;
         return Ok(true);
     }
-    keep_flags_in_json(py, &json.get_item(key)?, child)
+    keep_flags_in_json(py, &json.get_item(key)?, child, collated)
 }
 
 /// The `jsonValue` of the type object `obj`, with its nullable flags as given, and whether one
@@ -1144,7 +1494,17 @@ fn type_json_value<'py>(
     obj: &Bound<'py, PyAny>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
     let json = py_json_value(py, &py_to_data_type(obj)?.json_value(), false)?;
-    let other = keep_flags_in_json(py, &json, obj)?;
+    let mut other = keep_flags_in_json(py, &json, obj, false)?;
+    // As PySpark's `jsonValue` of an array, a map and a struct, of `self.typeName()`: of a Python
+    // subclass, the name of its class, or its own `typeName`.
+    if is_subclass_object(obj)
+        && (obj.is_instance_of::<PyArrayType>()
+            || obj.is_instance_of::<PyMapType>()
+            || obj.is_instance_of::<PyStructType>())
+    {
+        json.set_item("type", type_name_of(obj)?)?;
+        other = true;
+    }
     Ok((json, other))
 }
 
@@ -1169,17 +1529,23 @@ fn json_dumps(py: Python<'_>, json: &Bound<'_, PyAny>) -> PyResult<String> {
         .extract()
 }
 
-/// The `json()` text of the struct type `schema`, as PySpark's `json()` writes it, when one of its
-/// nullable flags is other than a bool, which the core's text does not keep. None for no schema,
-/// any other schema, or a struct of bool flags.
-pub(crate) fn raw_struct_json(schema: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+/// The `json()` text of the type object `schema`, as PySpark's `json()` writes it, when the core's
+/// text is not it: of a type of a Python subclass, of its own method, and of a struct of a nullable
+/// flag that is not a bool or of metadata (see `type_json_value`). None for no schema, or another
+/// one.
+pub(crate) fn raw_schema_json(schema: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
     let Some(schema) = schema else {
         return Ok(None);
     };
+    let py = schema.py();
+    if is_subclass_object(schema) {
+        return Ok(Some(
+            schema.call_method0(pyo3::intern!(py, "json"))?.extract()?,
+        ));
+    }
     if !schema.is_instance_of::<PyStructType>() {
         return Ok(None);
     }
-    let py = schema.py();
     let (json, other) = type_json_value(py, schema)?;
     if !other {
         return Ok(None);
@@ -1195,7 +1561,7 @@ fn field_json_value<'py>(
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
     let v = field.borrow().current_field(py)?.json_value();
     let json = py_json_value(py, &v, true)?;
-    let other = keep_flags_in_json(py, &json, field.as_any())?;
+    let other = keep_flags_in_json(py, &json, field.as_any(), false)?;
     Ok((json, other))
 }
 
@@ -1388,6 +1754,25 @@ impl PyDataType {
         Ok(PyDataType { inner: None })
     }
 
+    /// A Python subclass of the type classes is of one branch of their hierarchy (see
+    /// `check_one_branch`), which the class raises of when it is made, as CPython raises of bases
+    /// of conflicting layouts. As `object.__init_subclass__` then, which takes no keyword
+    /// arguments.
+    #[classmethod]
+    #[pyo3(signature = (**kwargs))]
+    fn __init_subclass__(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<()> {
+        check_one_branch(cls)?;
+        let py = cls.py();
+        py.import("builtins")?
+            .getattr("super")?
+            .call1((py.get_type::<PyDataType>(), cls))?
+            .call_method("__init_subclass__", (), kwargs)?;
+        Ok(())
+    }
+
     /// A type of its class only pickles as PySpark's plain class does, as its class and its
     /// `__dict__`, of `copyreg.__newobj__(cls)`, which both clients load at every protocol: this
     /// is what `object.__reduce_ex__` gives of PySpark's at the protocols 2 and up, whose pickle
@@ -1420,14 +1805,7 @@ impl PyDataType {
     /// subclass, such as an `UnparsedDataType`, whose `jsonValue` raises.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        let py = slf.py();
-        let kwargs = pyo3::types::PyDict::new(py);
-        kwargs.set_item("separators", (",", ":"))?;
-        kwargs.set_item("sort_keys", true)?;
-        py.import("json")?
-            .getattr("dumps")?
-            .call((slf.call_method0("jsonValue")?,), Some(&kwargs))?
-            .extract()
+        json_of_json_value(slf.as_any())
     }
     /// As PySpark's `DataType.jsonValue`, the `typeName()` of a type of its class only.
     #[pyo3(name = "jsonValue")]
@@ -1502,7 +1880,7 @@ impl PyDataType {
     /// the concrete types override it. There is no `__str__`, so `str()` is `repr()`, as
     /// in pyspark.
     fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
-        Ok(format!("{}()", slf.get_type().name()?))
+        class_repr(slf.as_any())
     }
 
     /// As pyspark's `simpleString()`, the `typeName()` of a type of its class only. An array, map
@@ -1618,7 +1996,11 @@ fn has_pyspark_attributes(data_type: &DataType) -> bool {
 /// the base `DataType`, an abstract class such as `AtomicType`, and a Python subclass, such as
 /// a `UserDefinedType`. Of such a `self` and a type of a core type, PySpark's `__dict__` of the
 /// latter holds its parameters. `==` calls the `__eq__` of a subclass first, as Python does, so
-/// that `DataType() == AtomicType()` is `AtomicType().__eq__(DataType())`, false.
+/// that `DataType() == AtomicType()` is `AtomicType().__eq__(DataType())`, false. So it is for a
+/// Python subclass of a concrete class, whose type is equal only to a type of its class or of a
+/// subclass of it, of the same parameters and of the same attributes of its `__dict__`, which
+/// holds the attributes that a user set: `StringType() == MyString()` is
+/// `MyString().__eq__(StringType())`, false in both orders.
 fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
     if !b.is_instance_of::<PyDataType>() {
         return Ok(false);
@@ -1635,8 +2017,8 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
         let dict = pyo3::intern!(a.py(), "__dict__");
         return a.getattr(dict)?.eq(b.getattr(dict)?);
     }
-    // The class of a type of a core type has no subclasses, of which `b` would be one.
-    if has_state_of_dict(b) {
+    // A type of no core type is not of the class of `a`, nor of a subclass of it.
+    if has_state_of_dict(b) || !b.is_instance(&a.get_type())? {
         return Ok(false);
     }
     // A struct also compares its `names`, which PySpark's `__dict__` comparison does too.
@@ -1664,8 +2046,14 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
             return Ok(false);
         }
     }
-    // The flags as they were given are compared as PySpark's `__dict__` does: `1` equals `True`.
-    if has_other_flag(a.py(), a)? || has_other_flag(b.py(), b)? {
+    // The flags as they were given are compared as PySpark's `__dict__` does: `1` equals `True`,
+    // and so are the metadata dicts of the fields, as Python compares them (`(1, 2)` is not
+    // `[1, 2]`, nor `{1: "a"}` `{"1": "a"}`), which the JSON values of the types hold.
+    if has_other_flag(a.py(), a)?
+        || has_other_flag(b.py(), b)?
+        || holds_metadata(a.py(), a)?
+        || holds_metadata(b.py(), b)?
+    {
         let (ja, _) = type_json_value(a.py(), a)?;
         let (jb, _) = type_json_value(b.py(), b)?;
         if !ja.eq(jb)? {
@@ -1674,26 +2062,48 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
     }
     // The types that the client keeps as their objects, whose core types are their JSON, compare
     // by those objects, as PySpark's `__dict__` holds them: `ArrayType(t)` is not equal to
-    // `ArrayType(u)` of a `u` of another `__dict__` or class, of the same JSON.
-    Ok(!holds_objects(&core) || held_objects_eq(a, b, &core)?)
+    // `ArrayType(u)` of a `u` of another `__dict__` or class, of the same JSON. So do the types
+    // of Python subclasses, of the core types of their classes, and the types that keep them.
+    let py = a.py();
+    if (holds_objects(&core) || keeps_subclass_objects(py, a)? || keeps_subclass_objects(py, b)?)
+        && !held_objects_eq(a, b, &core)?
+    {
+        return Ok(false);
+    }
+    // The attributes that a user set on a type of a Python subclass, of its `__dict__`, which
+    // PySpark's `__dict__` holds after the parameters.
+    if is_subclass_object(a) || is_subclass_object(b) {
+        let dict = pyo3::intern!(py, "__dict__");
+        return a.getattr(dict)?.eq(b.getattr(dict)?);
+    }
+    Ok(true)
 }
 
 // Define concrete type classes
-#[pyclass(name = "NullType", module = "pyspark.sql.types", extends = PyDataType)]
+#[pyclass(subclass, name = "NullType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyNullType;
 
 #[pymethods]
 impl PyNullType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -1715,33 +2125,42 @@ impl PyNullType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"void\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"void\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyNullType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(py, init_chain!(DataType::Null, PyNullType, []))
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(DataType::Null, PyNullType, [])
+        })
     }
-    fn __repr__(&self) -> String {
-        "NullType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("NullType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "void"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "void").clone().into_any())
     }
     /// As PySpark's, which names this type `void`.
     #[classmethod]
@@ -1751,21 +2170,30 @@ impl PyNullType {
     }
 }
 
-#[pyclass(name = "BooleanType", module = "pyspark.sql.types", extends = PyAtomicType)]
+#[pyclass(subclass, name = "BooleanType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyBooleanType;
 
 #[pymethods]
 impl PyBooleanType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -1787,54 +2215,69 @@ impl PyBooleanType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"boolean\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"boolean\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyBooleanType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(DataType::Boolean, PyBooleanType, [PyAtomicType]),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(DataType::Boolean, PyBooleanType, [PyAtomicType])
+        })
     }
-    fn __repr__(&self) -> String {
-        "BooleanType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("BooleanType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "boolean"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "boolean").clone().into_any())
     }
 }
 
-#[pyclass(name = "ByteType", module = "pyspark.sql.types", extends = PyIntegralType)]
+#[pyclass(subclass, name = "ByteType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyByteType;
 
 #[pymethods]
 impl PyByteType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -1856,36 +2299,37 @@ impl PyByteType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"byte\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"byte\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyByteType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::Byte,
-                        PyByteType,
-                        [PyAtomicType, PyNumericType, PyIntegralType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::Byte,
+                PyByteType,
+                [PyAtomicType, PyNumericType, PyIntegralType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "ByteType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("ByteType()".to_string())
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
@@ -1893,21 +2337,30 @@ impl PyByteType {
     }
 }
 
-#[pyclass(name = "ShortType", module = "pyspark.sql.types", extends = PyIntegralType)]
+#[pyclass(subclass, name = "ShortType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyShortType;
 
 #[pymethods]
 impl PyShortType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -1929,36 +2382,37 @@ impl PyShortType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"short\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"short\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyShortType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::Short,
-                        PyShortType,
-                        [PyAtomicType, PyNumericType, PyIntegralType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::Short,
+                PyShortType,
+                [PyAtomicType, PyNumericType, PyIntegralType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "ShortType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("ShortType()".to_string())
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
@@ -1966,21 +2420,30 @@ impl PyShortType {
     }
 }
 
-#[pyclass(name = "IntegerType", module = "pyspark.sql.types", extends = PyIntegralType)]
+#[pyclass(subclass, name = "IntegerType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyIntegerType;
 
 #[pymethods]
 impl PyIntegerType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2002,36 +2465,37 @@ impl PyIntegerType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"integer\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"integer\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyIntegerType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::Integer,
-                        PyIntegerType,
-                        [PyAtomicType, PyNumericType, PyIntegralType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::Integer,
+                PyIntegerType,
+                [PyAtomicType, PyNumericType, PyIntegralType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "IntegerType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("IntegerType()".to_string())
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
@@ -2039,21 +2503,30 @@ impl PyIntegerType {
     }
 }
 
-#[pyclass(name = "LongType", module = "pyspark.sql.types", extends = PyIntegralType)]
+#[pyclass(subclass, name = "LongType", module = "pyspark.sql.types", extends = PyIntegralType)]
 pub struct PyLongType;
 
 #[pymethods]
 impl PyLongType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2075,36 +2548,37 @@ impl PyLongType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"long\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"long\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyLongType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::Long,
-                        PyLongType,
-                        [PyAtomicType, PyNumericType, PyIntegralType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::Long,
+                PyLongType,
+                [PyAtomicType, PyNumericType, PyIntegralType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "LongType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("LongType()".to_string())
     }
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> &'static str {
@@ -2112,21 +2586,30 @@ impl PyLongType {
     }
 }
 
-#[pyclass(name = "FloatType", module = "pyspark.sql.types", extends = PyFractionalType)]
+#[pyclass(subclass, name = "FloatType", module = "pyspark.sql.types", extends = PyFractionalType)]
 pub struct PyFloatType;
 
 #[pymethods]
 impl PyFloatType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2148,58 +2631,73 @@ impl PyFloatType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"float\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"float\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyFloatType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::Float,
-                        PyFloatType,
-                        [PyAtomicType, PyNumericType, PyFractionalType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::Float,
+                PyFloatType,
+                [PyAtomicType, PyNumericType, PyFractionalType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "FloatType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("FloatType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "float"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "float").clone().into_any())
     }
 }
 
-#[pyclass(name = "DoubleType", module = "pyspark.sql.types", extends = PyFractionalType)]
+#[pyclass(subclass, name = "DoubleType", module = "pyspark.sql.types", extends = PyFractionalType)]
 pub struct PyDoubleType;
 
 #[pymethods]
 impl PyDoubleType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2221,44 +2719,50 @@ impl PyDoubleType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"double\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"double\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyDoubleType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::Double,
-                        PyDoubleType,
-                        [PyAtomicType, PyNumericType, PyFractionalType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::Double,
+                PyDoubleType,
+                [PyAtomicType, PyNumericType, PyFractionalType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "DoubleType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("DoubleType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "double"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "double").clone().into_any())
     }
 }
 
-#[pyclass(name = "DecimalType", module = "pyspark.sql.types", extends = PyFractionalType)]
+#[pyclass(subclass, name = "DecimalType", module = "pyspark.sql.types", extends = PyFractionalType)]
 pub struct PyDecimalType {
     pub precision: i32,
     pub scale: i32,
@@ -2292,12 +2796,16 @@ impl PyDecimalType {
     }
     /// The type of the state that PySpark pickled, of `precision`, `scale` and
     /// `hasPrecisionInfo`, which pickle sets as attributes (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
@@ -2326,23 +2834,59 @@ impl PyDecimalType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let this = slf.borrow();
         let dt = DataType::Decimal {
-            precision: self.precision,
-            scale: self.scale,
+            precision: this.precision,
+            scale: this.scale,
         };
-        type_reduce(py, &dt.json())
+        reduce_of(slf, &dt.json(), || {
+            Ok(vec![
+                ("precision", this.precision.into_pyobject(py)?.into_any()),
+                ("scale", this.scale.into_pyobject(py)?.into_any()),
+                ("hasPrecisionInfo", this.has_precision_info.bind(py).clone()),
+            ])
+        })
     }
-    /// `DecimalType(precision=10, scale=0)` - defaults match pyspark.
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `DecimalType.__new__(DecimalType)`, of which pickle's `copyreg.__newobj__` makes the type
+    /// that PySpark pickled, is a `DecimalType(10, 0)` until `__setstate__` sets it. The class
+    /// shows the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    #[pyo3(signature = (precision=10, scale=0))]
-    fn new(py: Python<'_>, precision: i32, scale: i32) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    #[classmethod]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(precision=10, scale=0)"
+    )]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        let py = cls.py();
+        let (precision, scale) = (10, 0);
+        Ok(init_chain!(
             DataType::Decimal { precision, scale },
             PyDecimalType::of(py, precision, scale),
             [PyAtomicType, PyNumericType, PyFractionalType],
             value
-        )
+        ))
+    }
+    /// As PySpark's `__init__(self, precision=10, scale=0)`, which sets `hasPrecisionInfo` true.
+    #[pyo3(signature = (precision=10, scale=0))]
+    fn __init__(slf: &Bound<'_, Self>, precision: i32, scale: i32) -> PyResult<()> {
+        let py = slf.py();
+        let parts = PyDecimalType::of(py, precision, scale);
+        {
+            let mut this = slf.borrow_mut();
+            this.precision = parts.precision;
+            this.scale = parts.scale;
+            this.has_precision_info = parts.has_precision_info;
+        }
+        sync_base(slf.as_any())
     }
     // The parameters are plain attributes, as PySpark's: an assignment of one makes the type of
     // it, as its repr, JSON, `==` and hash show.
@@ -2373,9 +2917,22 @@ impl PyDecimalType {
     }
 }
 
-#[pyclass(name = "StringType", module = "pyspark.sql.types", extends = PyAtomicType)]
+#[pyclass(subclass, name = "StringType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyStringType {
     pub collation: String,
+}
+
+impl PyStringType {
+    /// PySpark's `self.isUTF8BinaryCollation()`, which its `simpleString` and `__repr__` call: of a
+    /// Python subclass, its own.
+    fn of_binary_collation(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        if !is_native(slf) {
+            return slf
+                .call_method0(pyo3::intern!(slf.py(), "isUTF8BinaryCollation"))?
+                .is_truthy();
+        }
+        Ok(slf.borrow().collation == "UTF8_BINARY")
+    }
 }
 
 #[pymethods]
@@ -2392,7 +2949,7 @@ impl PyStringType {
         sync_base(slf.as_any())
     }
     /// The type of the state that PySpark pickled, of `collation` (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // Collation providers, mirroring `StringType.providerSpark/providerICU/providers`.
@@ -2408,15 +2965,24 @@ impl PyStringType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `StringType.jsonValue`, the `simpleString()` of the type, of a Python
+    /// subclass its own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return slf.call_method0(pyo3::intern!(py, "simpleString"));
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2438,41 +3004,66 @@ impl PyStringType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let collation = slf.borrow().collation.clone();
         let dt = DataType::String {
-            collation: self.collation.clone(),
+            collation: collation.clone(),
         };
-        type_reduce(py, &dt.json())
+        reduce_of(slf, &dt.json(), || {
+            Ok(vec![("collation", collation.into_pyobject(py)?.into_any())])
+        })
     }
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `StringType.__new__(StringType)`, of which pickle's `copyreg.__newobj__` makes the type that
+    /// PySpark pickled, is a `StringType()` until `__setstate__` sets it. The class shows the
+    /// signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(
-        signature = (collation="UTF8_BINARY".to_string()),
+        signature = (*_args, **_kwargs),
         text_signature = "(collation='UTF8_BINARY')"
     )]
-    fn new(collation: String) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        let collation = "UTF8_BINARY".to_string();
+        Ok(init_chain!(
             DataType::String {
                 collation: collation.clone()
             },
             PyStringType { collation },
             [PyAtomicType],
             value
-        )
+        ))
     }
-    fn __repr__(&self) -> String {
-        if self.collation == "UTF8_BINARY" {
+    /// As PySpark's `__init__(self, collation="UTF8_BINARY")`.
+    #[pyo3(signature = (collation="UTF8_BINARY".to_string()))]
+    fn __init__(slf: &Bound<'_, Self>, collation: String) -> PyResult<()> {
+        Self::set_collation(slf, collation)
+    }
+    /// As PySpark's, of `isUTF8BinaryCollation()`, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let collation = slf.borrow().collation.clone();
+        Ok(if Self::of_binary_collation(slf)? {
             "StringType()".to_string()
         } else {
-            format!("StringType('{}')", self.collation)
-        }
+            format!("StringType('{collation}')")
+        })
     }
+    /// As PySpark's, of `isUTF8BinaryCollation()`, of a Python subclass its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> String {
-        if self.collation == "UTF8_BINARY" {
+    fn simple_string(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let collation = slf.borrow().collation.clone();
+        Ok(if Self::of_binary_collation(slf)? {
             "string".to_string()
         } else {
-            format!("string collate {}", self.collation)
-        }
+            format!("string collate {collation}")
+        })
     }
 
     /// Provider ("spark" for UTF8*, else "icu") for a collation name.
@@ -2494,21 +3085,30 @@ impl PyStringType {
     }
 }
 
-#[pyclass(name = "BinaryType", module = "pyspark.sql.types", extends = PyAtomicType)]
+#[pyclass(subclass, name = "BinaryType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyBinaryType;
 
 #[pymethods]
 impl PyBinaryType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2530,40 +3130,46 @@ impl PyBinaryType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"binary\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"binary\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyBinaryType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType]),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(DataType::Binary, PyBinaryType, [PyAtomicType])
+        })
     }
-    fn __repr__(&self) -> String {
-        "BinaryType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("BinaryType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "binary"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "binary").clone().into_any())
     }
 }
 
-#[pyclass(name = "DateType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+#[pyclass(subclass, name = "DateType", module = "pyspark.sql.types", extends = PyDatetimeType)]
 pub struct PyDateType;
 
 #[pymethods]
@@ -2572,15 +3178,24 @@ impl PyDateType {
     #[classattr]
     const EPOCH_ORDINAL: i32 = 719163;
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2602,54 +3217,69 @@ impl PyDateType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", d)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"date\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"date\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyDateType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(DataType::Date, PyDateType, [PyAtomicType, PyDatetimeType]),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(DataType::Date, PyDateType, [PyAtomicType, PyDatetimeType])
+        })
     }
-    fn __repr__(&self) -> String {
-        "DateType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("DateType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "date"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "date").clone().into_any())
     }
 }
 
-#[pyclass(name = "TimestampType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+#[pyclass(subclass, name = "TimestampType", module = "pyspark.sql.types", extends = PyDatetimeType)]
 pub struct PyTimestampType;
 
 #[pymethods]
 impl PyTimestampType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2671,58 +3301,78 @@ impl PyTimestampType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", dt)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"timestamp\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"timestamp\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyTimestampType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::Timestamp,
-                        PyTimestampType,
-                        [PyAtomicType, PyDatetimeType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::Timestamp,
+                PyTimestampType,
+                [PyAtomicType, PyDatetimeType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "TimestampType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("TimestampType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "timestamp"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "timestamp").clone().into_any())
     }
 }
 
-#[pyclass(name = "TimestampNTZType", module = "pyspark.sql.types", extends = PyDatetimeType)]
+#[pyclass(
+    subclass,
+    name = "TimestampNTZType",
+    module = "pyspark.sql.types",
+    extends = PyDatetimeType
+)]
 pub struct PyTimestampNTZType;
 
 #[pymethods]
 impl PyTimestampNTZType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -2744,40 +3394,46 @@ impl PyTimestampNTZType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", dt)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"timestamp_ntz\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"timestamp_ntz\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyTimestampNTZType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(
-                        DataType::TimestampNtz,
-                        PyTimestampNTZType,
-                        [PyAtomicType, PyDatetimeType]
-                    ),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(
+                DataType::TimestampNtz,
+                PyTimestampNTZType,
+                [PyAtomicType, PyDatetimeType]
+            )
+        })
     }
-    fn __repr__(&self) -> String {
-        "TimestampNTZType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("TimestampNTZType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "timestamp_ntz"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "timestamp_ntz").clone().into_any())
     }
     /// As PySpark's, which names this type `timestamp_ntz`.
     #[classmethod]
@@ -2787,7 +3443,7 @@ impl PyTimestampNTZType {
     }
 }
 
-#[pyclass(name = "ArrayType", module = "pyspark.sql.types", extends = PyDataType)]
+#[pyclass(subclass, name = "ArrayType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyArrayType {
     pub element_type: DataType,
     pub contains_null: bool,
@@ -2822,8 +3478,12 @@ impl PyArrayType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         type_json_text(slf.as_any())
     }
     #[pyo3(name = "jsonValue")]
@@ -2833,9 +3493,11 @@ impl PyArrayType {
     ) -> PyResult<Bound<'py, PyAny>> {
         Ok(type_json_value(py, slf.as_any())?.0)
     }
+    /// As PySpark's, of the `needConversion()` of the types that it holds (see
+    /// `need_conversion_of_object`).
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
+        need_conversion_of_object(slf.py(), slf.as_any())
     }
     #[pyo3(name = "fromInternal")]
     fn __obj_from_internal<'py>(
@@ -2851,34 +3513,56 @@ impl PyArrayType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    /// Of its JSON, or of the types it is made of (see `reduce_with_udts`), and of a Python
+    /// subclass, of its class and its `__dict__` (see `subclass_reduce`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
+        if !is_native(slf) {
+            let (element_type, contains_null) = {
+                let this = slf.borrow();
+                (
+                    this.element_object.object(py, &this.element_type)?,
+                    this.contains_null_object.clone_ref(py),
+                )
+            };
+            return subclass_reduce(
+                slf.as_any(),
+                vec![
+                    ("elementType", element_type.into_bound(py)),
+                    ("containsNull", contains_null.into_bound(py)),
+                ],
+            );
+        }
         let this = slf.borrow();
         let dt = DataType::Array {
             element_type: Box::new(this.element_object.live(py, &this.element_type)?),
             contains_null: this.contains_null,
         };
         let flagged = has_other_flag(slf.py(), slf.as_any())?;
-        reduce_with_udts(slf.get_type(), &dt, flagged, || {
+        let (f, args) = reduce_with_udts(slf.as_any(), &dt, flagged, || {
             let element_type = this.element_object.object(py, &this.element_type)?;
             (element_type, this.contains_null_object.clone_ref(py)).into_pyobject(py)
-        })
+        })?;
+        Ok((f, args).into_pyobject(py)?.into_any().unbind())
     }
     /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
     /// `ArrayType.__new__(ArrayType)`, of which pickle's `copyreg.__newobj__` makes the type that
     /// PySpark pickled, is an array of `NullType()` until `__setstate__` sets its attributes. The
     /// class shows the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(
         signature = (*_args, **_kwargs),
         text_signature = "(elementType, containsNull=True)"
     )]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         _args: &Bound<'_, pyo3::types::PyTuple>,
         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        let py = cls.py();
+        Ok(init_chain!(
             DataType::Array {
                 element_type: Box::new(DataType::Null),
                 contains_null: true,
@@ -2891,7 +3575,7 @@ impl PyArrayType {
             },
             [],
             value
-        )
+        ))
     }
     /// As PySpark's `__init__(self, elementType, containsNull=True)`, which asserts that the
     /// element type is a `DataType`.
@@ -2917,7 +3601,7 @@ impl PyArrayType {
     }
     /// The type of the state that PySpark pickled, of `elementType` and `containsNull`, which
     /// pickle sets as attributes (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -2943,8 +3627,9 @@ impl PyArrayType {
         let this = slf.borrow();
         let element_type = this.element_object.live(py, &this.element_type)?;
         // Of the type objects that it holds, as PySpark's `_as_nullable`, when one is a type that
-        // the client keeps as its object, which its JSON does not tell apart.
-        if holds_objects(&element_type) {
+        // the client keeps as its object, which its JSON does not tell apart, or a type of a
+        // Python subclass, which it keeps.
+        if holds_objects(&element_type) || kept_holds_subclass_object(py, &this.element_object)? {
             drop(this);
             return Ok(as_nullable(slf.as_any())?.unbind());
         }
@@ -2976,7 +3661,7 @@ impl PyArrayType {
     }
 }
 
-#[pyclass(name = "MapType", module = "pyspark.sql.types", extends = PyDataType)]
+#[pyclass(subclass, name = "MapType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyMapType {
     pub key_type: DataType,
     pub value_type: DataType,
@@ -3028,8 +3713,12 @@ impl PyMapType {
     }
 
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         type_json_text(slf.as_any())
     }
     #[pyo3(name = "jsonValue")]
@@ -3039,9 +3728,11 @@ impl PyMapType {
     ) -> PyResult<Bound<'py, PyAny>> {
         Ok(type_json_value(py, slf.as_any())?.0)
     }
+    /// As PySpark's, of the `needConversion()` of the types that it holds (see
+    /// `need_conversion_of_object`).
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
+        need_conversion_of_object(slf.py(), slf.as_any())
     }
     #[pyo3(name = "fromInternal")]
     fn __obj_from_internal<'py>(
@@ -3057,8 +3748,28 @@ impl PyMapType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
+    /// Of its JSON, or of the types it is made of (see `reduce_with_udts`), and of a Python
+    /// subclass, of its class and its `__dict__` (see `subclass_reduce`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
+        if !is_native(slf) {
+            let (key_type, value_type, value_contains_null) = {
+                let this = slf.borrow();
+                (
+                    this.key_object.object(py, &this.key_type)?,
+                    this.value_object.object(py, &this.value_type)?,
+                    this.value_contains_null_object.clone_ref(py),
+                )
+            };
+            return subclass_reduce(
+                slf.as_any(),
+                vec![
+                    ("keyType", key_type.into_bound(py)),
+                    ("valueType", value_type.into_bound(py)),
+                    ("valueContainsNull", value_contains_null.into_bound(py)),
+                ],
+            );
+        }
         let this = slf.borrow();
         let dt = DataType::Map {
             key_type: Box::new(this.key_object.live(py, &this.key_type)?),
@@ -3066,7 +3777,7 @@ impl PyMapType {
             value_contains_null: this.value_contains_null,
         };
         let flagged = has_other_flag(slf.py(), slf.as_any())?;
-        reduce_with_udts(slf.get_type(), &dt, flagged, || {
+        let (f, args) = reduce_with_udts(slf.as_any(), &dt, flagged, || {
             let key_type = this.key_object.object(py, &this.key_type)?;
             let value_type = this.value_object.object(py, &this.value_type)?;
             (
@@ -3075,7 +3786,8 @@ impl PyMapType {
                 this.value_contains_null_object.clone_ref(py),
             )
                 .into_pyobject(py)
-        })
+        })?;
+        Ok((f, args).into_pyobject(py)?.into_any().unbind())
     }
     /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
     /// `MapType.__new__(MapType)`, of which pickle's `copyreg.__newobj__` makes the type that
@@ -3083,16 +3795,19 @@ impl PyMapType {
     /// attributes. The class shows the signature of `__init__`, as `inspect.signature` of
     /// PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(
         signature = (*_args, **_kwargs),
         text_signature = "(keyType, valueType, valueContainsNull=True)"
     )]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         _args: &Bound<'_, pyo3::types::PyTuple>,
         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        let py = cls.py();
+        Ok(init_chain!(
             DataType::Map {
                 key_type: Box::new(DataType::Null),
                 value_type: Box::new(DataType::Null),
@@ -3108,7 +3823,7 @@ impl PyMapType {
             },
             [],
             value
-        )
+        ))
     }
     /// As PySpark's `__init__(self, keyType, valueType, valueContainsNull=True)`, which asserts
     /// that the key and the value types are `DataType`s.
@@ -3139,7 +3854,7 @@ impl PyMapType {
     }
     /// The type of the state that PySpark pickled, of `keyType`, `valueType` and
     /// `valueContainsNull`, which pickle sets as attributes (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -3178,7 +3893,11 @@ impl PyMapType {
         let key_type = this.key_object.live(py, &this.key_type)?;
         let value_type = this.value_object.live(py, &this.value_type)?;
         // Of the type objects that it holds, as PySpark's `_as_nullable` (see `ArrayType`'s).
-        if holds_objects(&key_type) || holds_objects(&value_type) {
+        if holds_objects(&key_type)
+            || holds_objects(&value_type)
+            || kept_holds_subclass_object(py, &this.key_object)?
+            || kept_holds_subclass_object(py, &this.value_object)?
+        {
             drop(this);
             return Ok(as_nullable(slf.as_any())?.unbind());
         }
@@ -3211,7 +3930,7 @@ impl PyMapType {
     }
 }
 
-#[pyclass(name = "StructField", module = "pyspark.sql.types", extends = PyDataType)]
+#[pyclass(subclass, name = "StructField", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyStructField {
     /// The data type object, which is the field's `dataType` once it is kept (see `KeptType`).
     data_type_object: KeptType,
@@ -3282,12 +4001,14 @@ impl PyStructField {
         let (need, fixed) = match self.data_type_object.kept(py) {
             Some(object) => {
                 let object = object.bind(py);
+                // Nor a type of a Python subclass, whose method is its own.
                 let fixed = !(object.is_instance_of::<PyStructType>()
                     || object.is_instance_of::<PyArrayType>()
                     || object.is_instance_of::<PyMapType>()
                     || object.is_instance_of::<PyYearMonthIntervalType>()
-                    || is_udt(object)?);
-                (need_conversion_of_object(py, object)?, fixed)
+                    || is_udt(object)?
+                    || is_subclass_object(object));
+                (child_need_conversion(py, object)?, fixed)
             }
             None => {
                 let data_type = &self.field.data_type;
@@ -3347,9 +4068,13 @@ impl PyStructField {
             &[],
         ))
     }
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the field, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __sf_json(slf: &Bound<'_, Self>) -> PyResult<String> {
         let py = slf.py();
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         let (json, other) = field_json_value(py, slf)?;
         if other {
             return json_dumps(py, &json);
@@ -3360,9 +4085,11 @@ impl PyStructField {
     fn __sf_json_value<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         Ok(field_json_value(slf.py(), slf)?.0)
     }
+    /// As PySpark's, of the `needConversion()` of the type of the field (see
+    /// `need_conversion_of_object`).
     #[pyo3(name = "needConversion")]
-    fn __sf_need_conversion(&self, py: Python<'_>) -> PyResult<bool> {
-        need_conversion(py, &self.data_type_object.live(py, &self.field.data_type)?)
+    fn __sf_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        need_conversion_of_object(slf.py(), slf.as_any())
     }
     #[pyo3(name = "fromInternal")]
     fn __sf_from_internal<'py>(
@@ -3463,15 +4190,18 @@ impl PyStructField {
     /// sets its attributes. The class shows the signature of `__init__`, as `inspect.signature`
     /// of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(
         signature = (*_args, **_kwargs),
         text_signature = "(name, dataType, nullable=True, metadata=None)"
     )]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         _args: &Bound<'_, pyo3::types::PyTuple>,
         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        let py = cls.py();
         let field = StructField {
             name: String::new(),
             data_type: DataType::Null,
@@ -3512,7 +4242,7 @@ impl PyStructField {
     }
     /// The field of the state that PySpark pickled, of `name`, `dataType`, `nullable` and
     /// `metadata`, which pickle sets as attributes (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // The attributes are plain ones, as PySpark's `StructField`: an assignment of them is the
@@ -3588,18 +4318,29 @@ impl PyStructField {
             self.field.name, dt_repr, nullable
         ))
     }
+    /// As PySpark's `DataType.__eq__`: of a field of the class of `self` or a subclass of it, as
+    /// `isinstance(other, self.__class__)`, and of its `__dict__`, of the parameters and of the
+    /// attributes that a user set on a field of a Python subclass (see `data_type_eq`).
     fn __eq__(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<bool> {
         let py = slf.py();
         let Ok(o) = other.cast::<PyStructField>() else {
             return Ok(false);
         };
+        if !other.is_instance(&slf.get_type())? {
+            return Ok(false);
+        }
         // Of the metadata as Python's `==` compares the dict of PySpark's field.
         let field = slf.borrow().current_field(py)?;
         if !field.eq_as_python(&o.borrow().current_field(py)?) {
             return Ok(false);
         }
-        // The flags as they were given are compared as PySpark's `__dict__` does.
-        if has_other_flag(py, slf.as_any())? || has_other_flag(py, other)? {
+        // The flags as they were given are compared as PySpark's `__dict__` does, and so are the
+        // metadata dicts, as Python compares them (see `data_type_eq`).
+        if has_other_flag(py, slf.as_any())?
+            || has_other_flag(py, other)?
+            || holds_metadata(py, slf.as_any())?
+            || holds_metadata(py, other)?
+        {
             let (a, _) = field_json_value(py, slf)?;
             let (b, _) = field_json_value(py, o)?;
             if !a.eq(b)? {
@@ -3607,12 +4348,30 @@ impl PyStructField {
             }
         }
         // A type that the client keeps as its object, or one that holds one, compares by the
-        // objects, as PySpark's `__dict__` holds them, which their JSON does not tell apart.
-        if holds_objects(&field.data_type) {
+        // objects, as PySpark's `__dict__` holds them, which their JSON does not tell apart, and
+        // so does a type of a Python subclass, or one that keeps one.
+        let held = {
             let (this, that) = (slf.borrow(), o.borrow());
-            let a = this.data_type_object.object(py, &this.field.data_type)?;
-            let b = that.data_type_object.object(py, &that.field.data_type)?;
-            return a.bind(py).eq(b.bind(py));
+            holds_objects(&field.data_type)
+                || kept_holds_subclass_object(py, &this.data_type_object)?
+                || kept_holds_subclass_object(py, &that.data_type_object)?
+        };
+        if held {
+            let (a, b) = {
+                let (this, that) = (slf.borrow(), o.borrow());
+                (
+                    this.data_type_object.object(py, &this.field.data_type)?,
+                    that.data_type_object.object(py, &that.field.data_type)?,
+                )
+            };
+            if !a.bind(py).eq(b.bind(py))? {
+                return Ok(false);
+            }
+        }
+        // The attributes that a user set on a field of a Python subclass, of its `__dict__`.
+        if is_subclass_object(slf.as_any()) || is_subclass_object(other) {
+            let dict = pyo3::intern!(py, "__dict__");
+            return slf.getattr(dict)?.eq(other.getattr(dict)?);
         }
         Ok(true)
     }
@@ -3622,27 +4381,40 @@ impl PyStructField {
         slf.str()?.hash()
     }
     /// A field pickles, as PySpark's does: of its name, type, nullability and metadata, with
-    /// the class of `pyspark.sql.types`, also on the Python workers of the server.
-    fn __reduce__<'py>(
-        slf: &Bound<'py, Self>,
-    ) -> PyResult<(
-        Bound<'py, pyo3::types::PyType>,
-        Bound<'py, pyo3::types::PyTuple>,
-    )> {
+    /// the class of `pyspark.sql.types`, also on the Python workers of the server. A field of a
+    /// Python subclass pickles of its class and its `__dict__` (see `subclass_reduce`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        let this = slf.borrow();
-        let args = (
-            this.field.name.clone(),
-            this.data_type_object.object(py, &this.field.data_type)?,
-            this.nullable.clone_ref(py),
-            this.metadata.clone_ref(py),
-        )
-            .into_pyobject(py)?;
-        Ok((slf.get_type(), args))
+        let (name, data_type, nullable, metadata) = {
+            let this = slf.borrow();
+            (
+                this.name(py),
+                this.data_type_object.object(py, &this.field.data_type)?,
+                this.nullable.clone_ref(py),
+                this.metadata.clone_ref(py),
+            )
+        };
+        if !is_native(slf) {
+            return subclass_reduce(
+                slf.as_any(),
+                vec![
+                    ("name", name.into_bound(py)),
+                    ("dataType", data_type.into_bound(py)),
+                    ("nullable", nullable.into_bound(py)),
+                    ("metadata", metadata.into_bound(py).into_any()),
+                ],
+            );
+        }
+        let name = slf.borrow().field.name.clone();
+        let args = (name, data_type, nullable, metadata).into_pyobject(py)?;
+        Ok((slf.get_type(), args)
+            .into_pyobject(py)?
+            .into_any()
+            .unbind())
     }
 }
 
-#[pyclass(name = "StructType", module = "pyspark.sql.types", extends = PyDataType)]
+#[pyclass(subclass, name = "StructType", module = "pyspark.sql.types", extends = PyDataType)]
 pub struct PyStructType {
     /// The `StructField` objects, as PySpark's `StructType.fields` list holds them. The list is
     /// the struct's own: an edit of it (append, `[i] = `, pop, sort, ...) is an edit of the
@@ -3675,59 +4447,16 @@ impl PyStructType {
     }
 }
 
-#[pymethods]
 impl PyStructType {
-    // --- DataType object-model methods (v4.2.0 parity) ---
-    #[pyo3(name = "json")]
-    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
-        type_json_text(slf.as_any())
-    }
-    #[pyo3(name = "jsonValue")]
-    fn __obj_json_value<'py>(
-        slf: &Bound<'py, Self>,
-        py: Python<'py>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        Ok(type_json_value(py, slf.as_any())?.0)
-    }
-    #[pyo3(name = "needConversion")]
-    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
-        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
-    }
-    #[pyo3(name = "fromInternal")]
-    fn __obj_from_internal<'py>(
-        slf: &Bound<'py, Self>,
-        obj: Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        shim_conversion(slf.as_any(), "_from_internal", obj)
-    }
-    #[pyo3(name = "toInternal")]
-    fn __obj_to_internal<'py>(
-        slf: &Bound<'py, Self>,
-        obj: Bound<'py, PyAny>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        shim_conversion(slf.as_any(), "_to_internal", obj)
-    }
-    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
-        let py = slf.py();
-        let this = slf.borrow();
-        let dt = this.current_data_type(py)?;
-        let flagged = has_other_flag(slf.py(), slf.as_any())?;
-        reduce_with_udts(slf.get_type(), &dt, flagged, || {
-            let objects = PyList::new(py, this.fields.bind(py).iter())?;
-            (objects,).into_pyobject(py)
-        })
-    }
-    /// `StructType(fields=None)` where each field is a `StructField`, as PySpark's `__init__`.
-    #[new]
-    #[pyo3(signature = (fields=None))]
-    fn new(
+    /// The base core type and the parts of `StructType(fields)`, as PySpark's `__init__` takes
+    /// the fields: no fields, or none given, is a new empty list (`if not fields`), and a list of
+    /// fields is the struct's own list.
+    fn parts_of(
         py: Python<'_>,
         fields: Option<Bound<'_, PyAny>>,
-    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        // As PySpark's `if not fields`: no fields, or none given, is a new empty list.
+    ) -> PyResult<(DataType, PyStructType)> {
         let Some(fields) = fields.filter(|fs| fs.is_truthy().unwrap_or(false)) else {
-            let (base, parts) = struct_parts(py, PyList::empty(py))?;
-            return Ok(init_chain!(base, parts, [], value));
+            return struct_parts(py, PyList::empty(py));
         };
         // As PySpark's `[f.name for f in fields]`, which reads the name of each item first: an
         // item without one, such as a character of a str or a tuple, is an AttributeError.
@@ -3757,8 +4486,116 @@ impl PyStructType {
             Ok(list) => list.clone(),
             Err(_) => PyList::new(py, items.iter())?,
         };
-        let (base, parts) = struct_parts(py, list)?;
+        struct_parts(py, list)
+    }
+}
+
+#[pymethods]
+impl PyStructType {
+    // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
+    #[pyo3(name = "json")]
+    fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
+        type_json_text(slf.as_any())
+    }
+    #[pyo3(name = "jsonValue")]
+    fn __obj_json_value<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        Ok(type_json_value(py, slf.as_any())?.0)
+    }
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        need_conversion(slf.py(), &py_to_data_type(slf.as_any())?)
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_from_internal", obj)
+    }
+    #[pyo3(name = "toInternal")]
+    fn __obj_to_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        shim_conversion(slf.as_any(), "_to_internal", obj)
+    }
+    /// Of its JSON, or of the types it is made of (see `reduce_with_udts`), and of a Python
+    /// subclass, of its class and its `__dict__`, of the `fields`, `names`, `_needConversion` and
+    /// `_needSerializeAnyField` that PySpark's `__init__` sets (see `subclass_reduce`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        if !is_native(slf) {
+            let (fields, names, need_conversion) = {
+                let this = slf.borrow();
+                (
+                    this.fields.clone_ref(py),
+                    this.names.clone_ref(py),
+                    this.need_conversion.clone(),
+                )
+            };
+            let any = need_conversion.iter().any(|&need| need);
+            return subclass_reduce(
+                slf.as_any(),
+                vec![
+                    ("fields", fields.into_bound(py).into_any()),
+                    ("names", names.into_bound(py).into_any()),
+                    (
+                        "_needConversion",
+                        need_conversion.into_pyobject(py)?.into_any(),
+                    ),
+                    (
+                        "_needSerializeAnyField",
+                        any.into_pyobject(py)?.to_owned().into_any(),
+                    ),
+                ],
+            );
+        }
+        let this = slf.borrow();
+        let dt = this.current_data_type(py)?;
+        let flagged = has_other_flag(slf.py(), slf.as_any())?;
+        let (f, args) = reduce_with_udts(slf.as_any(), &dt, flagged, || {
+            let objects = PyList::new(py, this.fields.bind(py).iter())?;
+            (objects,).into_pyobject(py)
+        })?;
+        Ok((f, args).into_pyobject(py)?.into_any().unbind())
+    }
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `StructType.__new__(StructType)`, of which pickle's `copyreg.__newobj__` makes the type that
+    /// PySpark pickled, is a struct of no fields until `__setstate__` sets them. The class shows
+    /// the signature of `__init__`, as `inspect.signature` of PySpark's class does.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(fields=None)")]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        let py = cls.py();
+        let (base, parts) = struct_parts(py, PyList::empty(py))?;
         Ok(init_chain!(base, parts, [], value))
+    }
+    /// `StructType(fields=None)` where each field is a `StructField`, as PySpark's `__init__`,
+    /// which sets the `fields`, the `names` and the `_needConversion` of the struct.
+    #[pyo3(signature = (fields=None))]
+    fn __init__(slf: &Bound<'_, Self>, fields: Option<Bound<'_, PyAny>>) -> PyResult<()> {
+        let py = slf.py();
+        let (base, parts) = Self::parts_of(py, fields)?;
+        let mut this = slf.borrow_mut();
+        this.as_super().inner = Some(base);
+        // The parts that this replaces are freed after the borrow ends.
+        let replaced = std::mem::replace(&mut *this, parts);
+        drop(this);
+        drop(replaced);
+        Ok(())
     }
 
     /// The struct of the state that PySpark pickled, of `fields`, `names`, `_needConversion` and
@@ -3766,7 +4603,7 @@ impl PyStructType {
     /// fields and the names as they were, also when an edit of the fields made them differ, and
     /// `_needConversion` as PySpark kept it, of which `_needSerializeAnyField` is. A state without
     /// it has the `needConversion` of its fields.
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         let mut kept: Option<Vec<bool>> = None;
         set_pickled_state(slf.as_any(), state, |key, value| match key {
@@ -3961,11 +4798,19 @@ impl PyStructType {
     }
 
     /// As PySpark's, of the `simpleString()` of each field object, which names its type by the
-    /// type object that it holds (see `child_simple_string`).
+    /// type object that it holds (see `child_simple_string`), of a field of a Python subclass its
+    /// own.
     #[pyo3(name = "simpleString")]
     fn simple_string(&self, py: Python<'_>) -> PyResult<String> {
         let mut parts = Vec::with_capacity(self.fields.bind(py).len());
         for item in self.fields.bind(py).iter() {
+            if is_subclass_object(&item) {
+                parts.push(
+                    item.call_method0(pyo3::intern!(py, "simpleString"))?
+                        .extract()?,
+                );
+                continue;
+            }
             parts.push(as_struct_field(&item)?.borrow().__sf_simple_string(py)?);
         }
         Ok(format!("struct<{}>", parts.join(",")))
@@ -4028,8 +4873,10 @@ impl PyStructType {
             ));
         }
         // The flags are written as they were given, which the core's bools are not, and a type of
-        // its class only by its `typeName()`, which PySpark's `_get_jvm_type_name` writes of it.
+        // its class only, or of a Python subclass, by its `typeName()`, which PySpark's
+        // `_get_jvm_type_name` writes of it.
         let other_flags = has_other_flag(py, slf.as_any())?;
+        let subclasses = keeps_subclass_objects(py, slf.as_any())?;
         let error: std::cell::RefCell<Option<PyErr>> = std::cell::RefCell::new(None);
         let keep = |result: PyResult<Option<String>>| match result {
             Ok(text) => text,
@@ -4052,6 +4899,7 @@ impl PyStructType {
                 DataType::Unparsed { data_type_string } => {
                     keep(tree_type_name_text(slf.as_any(), path, data_type_string))
                 }
+                _ if subclasses => keep(subclass_tree_type_name(slf.as_any(), path)),
                 _ => None,
             },
         );
@@ -4066,7 +4914,7 @@ impl PyStructType {
     fn __st_to_nullable(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let data_type = slf.borrow().current_data_type(py)?;
         // Of the type objects that it holds, as PySpark's `_as_nullable` (see `ArrayType`'s).
-        if holds_objects(&data_type) {
+        if holds_objects(&data_type) || keeps_subclass_objects(py, slf.as_any())? {
             return Ok(as_nullable(slf.as_any())?.unbind());
         }
         let fields = match data_type.to_nullable() {
@@ -4099,7 +4947,7 @@ impl PyStructType {
     }
 }
 
-#[pyclass(name = "CharType", module = "pyspark.sql.types", extends = PyAtomicType)]
+#[pyclass(subclass, name = "CharType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyCharType {
     pub length: i32,
 }
@@ -4118,12 +4966,16 @@ impl PyCharType {
         sync_base(slf.as_any())
     }
     /// The type of the state that PySpark pickled, of `length` (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
@@ -4152,28 +5004,34 @@ impl PyCharType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        let dt = DataType::Char {
-            length: self.length,
-        };
-        type_reduce(py, &dt.json())
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let length = slf.borrow().length;
+        let dt = DataType::Char { length };
+        reduce_of(slf, &dt.json(), || {
+            Ok(vec![("length", length.into_pyobject(py)?.into_any())])
+        })
     }
     /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
     /// `CharType.__new__(CharType)`, of which pickle's `copyreg.__newobj__` makes the type that
     /// PySpark pickled, is a type of length 0 until `__setstate__` sets it. The class shows the
     /// signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*_args, **_kwargs), text_signature = "(length)")]
     fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
         _args: &Bound<'_, pyo3::types::PyTuple>,
         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        Ok(init_chain!(
             DataType::Char { length: 0 },
             PyCharType { length: 0 },
             [PyAtomicType],
             value
-        )
+        ))
     }
     /// As PySpark's `__init__(self, length)`.
     fn __init__(slf: &Bound<'_, Self>, length: i32) -> PyResult<()> {
@@ -4188,7 +5046,7 @@ impl PyCharType {
     }
 }
 
-#[pyclass(name = "VarcharType", module = "pyspark.sql.types", extends = PyAtomicType)]
+#[pyclass(subclass, name = "VarcharType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyVarcharType {
     pub length: i32,
 }
@@ -4207,12 +5065,16 @@ impl PyVarcharType {
         sync_base(slf.as_any())
     }
     /// The type of the state that PySpark pickled, of `length` (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
@@ -4241,28 +5103,34 @@ impl PyVarcharType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        let dt = DataType::Varchar {
-            length: self.length,
-        };
-        type_reduce(py, &dt.json())
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let length = slf.borrow().length;
+        let dt = DataType::Varchar { length };
+        reduce_of(slf, &dt.json(), || {
+            Ok(vec![("length", length.into_pyobject(py)?.into_any())])
+        })
     }
     /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
     /// `VarcharType.__new__(VarcharType)`, of which pickle's `copyreg.__newobj__` makes the type
     /// that PySpark pickled, is a type of length 0 until `__setstate__` sets it. The class shows
     /// the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*_args, **_kwargs), text_signature = "(length)")]
     fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
         _args: &Bound<'_, pyo3::types::PyTuple>,
         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        Ok(init_chain!(
             DataType::Varchar { length: 0 },
             PyVarcharType { length: 0 },
             [PyAtomicType],
             value
-        )
+        ))
     }
     /// As PySpark's `__init__(self, length)`.
     fn __init__(slf: &Bound<'_, Self>, length: i32) -> PyResult<()> {
@@ -4277,7 +5145,7 @@ impl PyVarcharType {
     }
 }
 
-#[pyclass(name = "TimeType", module = "pyspark.sql.types", extends = PyAnyTimeType)]
+#[pyclass(subclass, name = "TimeType", module = "pyspark.sql.types", extends = PyAnyTimeType)]
 pub struct PyTimeType {
     pub precision: i32,
 }
@@ -4296,12 +5164,16 @@ impl PyTimeType {
         sync_base(slf.as_any())
     }
     /// The type of the state that PySpark pickled, of `precision` (see `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
@@ -4330,22 +5202,40 @@ impl PyTimeType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", t)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        let dt = DataType::Time {
-            precision: self.precision,
-        };
-        type_reduce(py, &dt.json())
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let precision = slf.borrow().precision;
+        let dt = DataType::Time { precision };
+        reduce_of(slf, &dt.json(), || {
+            Ok(vec![("precision", precision.into_pyobject(py)?.into_any())])
+        })
     }
-    /// `TimeType(precision=6)` (microsecond precision default), matching pyspark 4.2.
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `TimeType.__new__(TimeType)`, of which pickle's `copyreg.__newobj__` makes the type that
+    /// PySpark pickled, is a `TimeType(6)` until `__setstate__` sets it. The class shows the
+    /// signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    #[pyo3(signature = (precision=6))]
-    fn new(precision: i32) -> pyo3::PyClassInitializer<Self> {
-        init_chain!(
+    #[classmethod]
+    #[pyo3(signature = (*_args, **_kwargs), text_signature = "(precision=6)")]
+    fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
+        let precision = 6;
+        Ok(init_chain!(
             DataType::Time { precision },
             PyTimeType { precision },
             [PyAtomicType, PyDatetimeType, PyAnyTimeType],
             value
-        )
+        ))
+    }
+    /// As PySpark's `__init__(self, precision=6)`, of microseconds.
+    #[pyo3(signature = (precision=6))]
+    fn __init__(slf: &Bound<'_, Self>, precision: i32) -> PyResult<()> {
+        Self::set_precision(slf, precision)
     }
     fn __repr__(&self) -> String {
         format!("TimeType({})", self.precision)
@@ -4516,21 +5406,35 @@ impl PyTimestampLTZNanosType {
     }
 }
 
-#[pyclass(name = "CalendarIntervalType", module = "pyspark.sql.types", extends = PyDataType)]
+#[pyclass(
+    subclass,
+    name = "CalendarIntervalType",
+    module = "pyspark.sql.types",
+    extends = PyDataType
+)]
 pub struct PyCalendarIntervalType;
 
 #[pymethods]
 impl PyCalendarIntervalType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -4552,36 +5456,42 @@ impl PyCalendarIntervalType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"interval\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"interval\"", || Ok(Vec::new()))
     }
-    /// The one instance of the type, as PySpark's `DataTypeSingleton`: every call of the class
-    /// returns it, and raises its `TypeError` of an argument. The class shows the signature of
+    /// The one instance of the type, and of each Python subclass of it, as PySpark's
+    /// `DataTypeSingleton`: every call of the class returns it, and raises its `TypeError` of an
+    /// argument (see `singleton_of`). The class shows the signature of
     /// `DataTypeSingleton.__call__(cls)`, `()`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Py<Self>> {
-        singleton_arguments(args, kwargs)?;
         static INSTANCE: PyOnceLock<Py<PyCalendarIntervalType>> = PyOnceLock::new();
-        INSTANCE
-            .get_or_try_init(py, || {
-                Py::new(
-                    py,
-                    init_chain!(DataType::CalendarInterval, PyCalendarIntervalType, []),
-                )
-            })
-            .map(|instance| instance.clone_ref(py))
+        singleton_of(cls, args, kwargs, &INSTANCE, || {
+            init_chain!(DataType::CalendarInterval, PyCalendarIntervalType, [])
+        })
     }
-    fn __repr__(&self) -> String {
-        "CalendarIntervalType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("CalendarIntervalType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "interval"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "interval").clone().into_any())
     }
     /// As PySpark's, which names this type `interval`.
     #[classmethod]
@@ -4591,7 +5501,12 @@ impl PyCalendarIntervalType {
     }
 }
 
-#[pyclass(name = "YearMonthIntervalType", module = "pyspark.sql.types", extends = PyAnsiIntervalType)]
+#[pyclass(
+    subclass,
+    name = "YearMonthIntervalType",
+    module = "pyspark.sql.types",
+    extends = PyAnsiIntervalType
+)]
 pub struct PyYearMonthIntervalType {
     pub start_field: i32,
     pub end_field: i32,
@@ -4626,7 +5541,7 @@ impl PyYearMonthIntervalType {
     }
     /// The type of the state that PySpark pickled, of `startField` and `endField` (see
     /// `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     #[classattr]
@@ -4634,8 +5549,12 @@ impl PyYearMonthIntervalType {
     #[classattr]
     const MONTH: i32 = 1;
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
@@ -4664,47 +5583,94 @@ impl PyYearMonthIntervalType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        let dt = DataType::YearMonthInterval {
-            start_field: self.start_field,
-            end_field: self.end_field,
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let (start_field, end_field) = {
+            let this = slf.borrow();
+            (this.start_field, this.end_field)
         };
-        type_reduce(py, &dt.json())
+        let dt = DataType::YearMonthInterval {
+            start_field,
+            end_field,
+        };
+        reduce_of(slf, &dt.json(), || {
+            Ok(vec![
+                ("startField", start_field.into_pyobject(py)?.into_any()),
+                ("endField", end_field.into_pyobject(py)?.into_any()),
+            ])
+        })
     }
-    /// Fields: YEAR=0, MONTH=1. Defaults to the full YEAR..MONTH range.
-    /// As PySpark's `YearMonthIntervalType(startField=None, endField=None)`, of the fields YEAR
-    /// and MONTH: `INVALID_INTERVAL_CASTING` for another.
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `YearMonthIntervalType.__new__(YearMonthIntervalType)`, of which pickle's
+    /// `copyreg.__newobj__` makes the type that PySpark pickled, is a `YearMonthIntervalType(0, 1)`
+    /// until `__setstate__` sets it. The class shows the signature of `__init__`, as
+    /// `inspect.signature` of PySpark's class does.
     #[new]
-    #[pyo3(signature = (startField=None, endField=None))]
-    #[allow(non_snake_case)]
+    #[classmethod]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(startField=None, endField=None)"
+    )]
     fn new(
-        py: Python<'_>,
-        startField: Option<&Bound<'_, PyAny>>,
-        endField: Option<&Bound<'_, PyAny>>,
+        cls: &Bound<'_, pyo3::types::PyType>,
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let (start, end) = interval_fields(py, startField, endField, (0, 1), 1)?;
+        check_one_branch(cls)?;
+        let (start_field, end_field) = (0, 1);
         Ok(init_chain!(
             DataType::YearMonthInterval {
-                start_field: start,
-                end_field: end,
+                start_field,
+                end_field,
             },
             PyYearMonthIntervalType {
-                start_field: start,
-                end_field: end,
+                start_field,
+                end_field,
             },
             [PyAtomicType, PyAnsiIntervalType],
             value
         ))
     }
-    fn __repr__(&self) -> String {
-        format!(
-            "YearMonthIntervalType({}, {})",
-            self.start_field, self.end_field
-        )
+    /// Fields: YEAR=0, MONTH=1. Defaults to the full YEAR..MONTH range.
+    /// As PySpark's `__init__(self, startField=None, endField=None)`, of the fields
+    /// YEAR and MONTH: `INVALID_INTERVAL_CASTING` for another.
+    #[pyo3(signature = (startField=None, endField=None))]
+    #[allow(non_snake_case)]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        startField: Option<&Bound<'_, PyAny>>,
+        endField: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let (start, end) = interval_fields(slf.py(), startField, endField, (0, 1), 1)?;
+        {
+            let mut this = slf.borrow_mut();
+            this.start_field = start;
+            this.end_field = end;
+        }
+        sync_base(slf.as_any())
+    }
+    /// As PySpark's, `"%s(%d, %d)" % (type(self).__name__, ...)`: of a Python subclass, of the
+    /// name of its class.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let (start_field, end_field) = {
+            let this = slf.borrow();
+            (this.start_field, this.end_field)
+        };
+        if !is_native(slf) {
+            let name = slf.get_type().name()?;
+            return Ok(format!("{name}({start_field}, {end_field})"));
+        }
+        Ok(format!("YearMonthIntervalType({start_field}, {end_field})"))
     }
 }
 
-#[pyclass(name = "DayTimeIntervalType", module = "pyspark.sql.types", extends = PyAnsiIntervalType)]
+#[pyclass(
+    subclass,
+    name = "DayTimeIntervalType",
+    module = "pyspark.sql.types",
+    extends = PyAnsiIntervalType
+)]
 pub struct PyDayTimeIntervalType {
     pub start_field: i32,
     pub end_field: i32,
@@ -4739,7 +5705,7 @@ impl PyDayTimeIntervalType {
     }
     /// The type of the state that PySpark pickled, of `startField` and `endField` (see
     /// `set_pickled_state`).
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |_, _| Ok(false))
     }
     #[classattr]
@@ -4751,8 +5717,12 @@ impl PyDayTimeIntervalType {
     #[classattr]
     const SECOND: i32 = 3;
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
     #[pyo3(name = "jsonValue")]
@@ -4781,61 +5751,112 @@ impl PyDayTimeIntervalType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", dt)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        let dt = DataType::DayTimeInterval {
-            start_field: self.start_field,
-            end_field: self.end_field,
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let (start_field, end_field) = {
+            let this = slf.borrow();
+            (this.start_field, this.end_field)
         };
-        type_reduce(py, &dt.json())
+        let dt = DataType::DayTimeInterval {
+            start_field,
+            end_field,
+        };
+        reduce_of(slf, &dt.json(), || {
+            Ok(vec![
+                ("startField", start_field.into_pyobject(py)?.into_any()),
+                ("endField", end_field.into_pyobject(py)?.into_any()),
+            ])
+        })
     }
-    /// Fields: DAY=0, HOUR=1, MINUTE=2, SECOND=3. Defaults to the full DAY..SECOND range.
-    /// As PySpark's `DayTimeIntervalType(startField=None, endField=None)`, of the fields DAY,
-    /// HOUR, MINUTE and SECOND: `INVALID_INTERVAL_CASTING` for another.
+    /// As the `object.__new__` of PySpark's plain class, of any arguments, which `__init__` takes:
+    /// `DayTimeIntervalType.__new__(DayTimeIntervalType)`, of which pickle's
+    /// `copyreg.__newobj__` makes the type that PySpark pickled, is a `DayTimeIntervalType(0, 3)`
+    /// until `__setstate__` sets it. The class shows the signature of `__init__`, as
+    /// `inspect.signature` of PySpark's class does.
     #[new]
-    #[pyo3(signature = (startField=None, endField=None))]
-    #[allow(non_snake_case)]
+    #[classmethod]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(startField=None, endField=None)"
+    )]
     fn new(
-        py: Python<'_>,
-        startField: Option<&Bound<'_, PyAny>>,
-        endField: Option<&Bound<'_, PyAny>>,
+        cls: &Bound<'_, pyo3::types::PyType>,
+        _args: &Bound<'_, pyo3::types::PyTuple>,
+        _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        let (start, end) = interval_fields(py, startField, endField, (0, 3), 3)?;
+        check_one_branch(cls)?;
+        let (start_field, end_field) = (0, 3);
         Ok(init_chain!(
             DataType::DayTimeInterval {
-                start_field: start,
-                end_field: end,
+                start_field,
+                end_field,
             },
             PyDayTimeIntervalType {
-                start_field: start,
-                end_field: end,
+                start_field,
+                end_field,
             },
             [PyAtomicType, PyAnsiIntervalType],
             value
         ))
     }
-    fn __repr__(&self) -> String {
-        format!(
-            "DayTimeIntervalType({}, {})",
-            self.start_field, self.end_field
-        )
+    /// Fields: DAY=0, HOUR=1, MINUTE=2, SECOND=3. Defaults to the full DAY..SECOND range.
+    /// As PySpark's `__init__(self, startField=None, endField=None)`, of the fields
+    /// DAY, HOUR, MINUTE and SECOND: `INVALID_INTERVAL_CASTING` for another.
+    #[pyo3(signature = (startField=None, endField=None))]
+    #[allow(non_snake_case)]
+    fn __init__(
+        slf: &Bound<'_, Self>,
+        startField: Option<&Bound<'_, PyAny>>,
+        endField: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<()> {
+        let (start, end) = interval_fields(slf.py(), startField, endField, (0, 3), 3)?;
+        {
+            let mut this = slf.borrow_mut();
+            this.start_field = start;
+            this.end_field = end;
+        }
+        sync_base(slf.as_any())
+    }
+    /// As PySpark's, `"%s(%d, %d)" % (type(self).__name__, ...)`: of a Python subclass, of the
+    /// name of its class.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let (start_field, end_field) = {
+            let this = slf.borrow();
+            (this.start_field, this.end_field)
+        };
+        if !is_native(slf) {
+            let name = slf.get_type().name()?;
+            return Ok(format!("{name}({start_field}, {end_field})"));
+        }
+        Ok(format!("DayTimeIntervalType({start_field}, {end_field})"))
     }
 }
 
-#[pyclass(name = "VariantType", module = "pyspark.sql.types", extends = PyAtomicType)]
+#[pyclass(subclass, name = "VariantType", module = "pyspark.sql.types", extends = PyAtomicType)]
 pub struct PyVariantType;
 
 #[pymethods]
 impl PyVariantType {
     // --- DataType object-model methods (v4.2.0 parity) ---
+    /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
     fn __obj_json(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return json_of_json_value(slf.as_any());
+        }
         Ok(py_to_data_type(slf.as_any())?.json())
     }
+    /// As PySpark's `DataType.jsonValue`, the `typeName()` of the type, of a Python subclass its
+    /// own.
     #[pyo3(name = "jsonValue")]
     fn __obj_json_value<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
         let v = py_to_data_type(slf.as_any())?.json_value();
         py_json_value(py, &v, false)
     }
@@ -4857,8 +5878,9 @@ impl PyVariantType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", variant)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, "\"variant\"")
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        reduce_of(slf, "\"variant\"", || Ok(Vec::new()))
     }
     /// As the `object.__new__` of PySpark's plain class, which takes no arguments (see
     /// `object_new_arguments`).
@@ -4870,23 +5892,32 @@ impl PyVariantType {
         args: &Bound<'_, pyo3::types::PyTuple>,
         kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<pyo3::PyClassInitializer<Self>> {
-        object_new_arguments(cls, cls, args, kwargs)?;
+        object_new_arguments(cls, &cls.py().get_type::<Self>(), args, kwargs)?;
         Ok(init_chain!(
             DataType::Variant,
             PyVariantType,
             [PyAtomicType]
         ))
     }
-    fn __repr__(&self) -> String {
-        "VariantType()".to_string()
+    /// As PySpark's `DataType.__repr__`, of the name of the class, of a Python subclass its own.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        if !is_native(slf) {
+            return class_repr(slf.as_any());
+        }
+        Ok("VariantType()".to_string())
     }
+    /// As PySpark's `DataType.simpleString`, the `typeName()` of the type, of a Python subclass
+    /// its own.
     #[pyo3(name = "simpleString")]
-    fn simple_string(&self) -> &'static str {
-        "variant"
+    fn simple_string<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        if !is_native(slf) {
+            return type_name_of(slf.as_any());
+        }
+        Ok(pyo3::intern!(slf.py(), "variant").clone().into_any())
     }
 }
 
-#[pyclass(name = "GeometryType", module = "pyspark.sql.types", extends = PySpatialType)]
+#[pyclass(subclass, name = "GeometryType", module = "pyspark.sql.types", extends = PySpatialType)]
 pub struct PyGeometryType {
     pub srid: i32,
 }
@@ -4906,18 +5937,21 @@ impl PyGeometryType {
     /// that PySpark pickled, is a type of the default SRID until `__setstate__` sets it. The class
     /// shows the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*_args, **_kwargs), text_signature = "(srid)")]
     fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
         _args: &Bound<'_, pyo3::types::PyTuple>,
         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> pyo3::PyClassInitializer<Self> {
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
         let srid = Self::DEFAULT_SRID;
-        init_chain!(
+        Ok(init_chain!(
             DataType::Geometry { srid },
             PyGeometryType { srid },
             [PyAtomicType, PySpatialType],
             value
-        )
+        ))
     }
     /// As PySpark's `__init__(self, srid)`: `"ANY"` for a mixed SRID, or an SRID of a
     /// coordinate reference system that PySpark knows.
@@ -4942,7 +5976,7 @@ impl PyGeometryType {
     /// The type of the state that PySpark pickled, of `srid` and `_crs`, which pickle sets as
     /// attributes (see `set_pickled_state`): the type is of the `srid`, whose CRS the JSON
     /// names, as PySpark's constructor sets `_crs` of it.
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |key, _| Ok(key == "_crs"))
     }
     /// As PySpark's `GeometryType.toInternal(geometry)`: the dict of the SRID and the WKB of a
@@ -4954,8 +5988,20 @@ impl PyGeometryType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", geometry)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, &DataType::Geometry { srid: self.srid }.json())
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__`, which holds the
+    /// `_crs` of the SRID that PySpark's constructor sets and its `jsonValue` reads (see
+    /// `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let srid = slf.borrow().srid;
+        let dt = DataType::Geometry { srid };
+        reduce_of(slf, &dt.json(), || {
+            let (crs, _) = spatial_json_parts(&dt, "geometry");
+            Ok(vec![
+                ("srid", srid.into_pyobject(py)?.into_any()),
+                ("_crs", crs.into_pyobject(py)?.into_any()),
+            ])
+        })
     }
     /// As PySpark's `GeometryType._from_crs(crs)`, of the JSON of a geometry type: the mixed
     /// SRID of `SRID:ANY` of any case, or else the SRID of a CRS of `geo_utils`, and
@@ -4982,7 +6028,7 @@ impl PyGeometryType {
     }
 }
 
-#[pyclass(name = "GeographyType", module = "pyspark.sql.types", extends = PySpatialType)]
+#[pyclass(subclass, name = "GeographyType", module = "pyspark.sql.types", extends = PySpatialType)]
 pub struct PyGeographyType {
     pub srid: i32,
 }
@@ -5004,18 +6050,21 @@ impl PyGeographyType {
     /// type that PySpark pickled, is a type of the default SRID until `__setstate__` sets it. The
     /// class shows the signature of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[classmethod]
     #[pyo3(signature = (*_args, **_kwargs), text_signature = "(srid)")]
     fn new(
+        cls: &Bound<'_, pyo3::types::PyType>,
         _args: &Bound<'_, pyo3::types::PyTuple>,
         _kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> pyo3::PyClassInitializer<Self> {
+    ) -> PyResult<pyo3::PyClassInitializer<Self>> {
+        check_one_branch(cls)?;
         let srid = Self::DEFAULT_SRID;
-        init_chain!(
+        Ok(init_chain!(
             DataType::Geography { srid },
             PyGeographyType { srid },
             [PyAtomicType, PySpatialType],
             value
-        )
+        ))
     }
     /// As PySpark's `__init__(self, srid)`: `"ANY"` for a mixed SRID, or an SRID of a
     /// geographic coordinate reference system that PySpark knows.
@@ -5040,7 +6089,7 @@ impl PyGeographyType {
     /// The type of the state that PySpark pickled, of `srid`, `_crs` and `_alg`, which pickle
     /// sets as attributes (see `set_pickled_state`): the type is of the `srid`, whose CRS and
     /// algorithm the JSON names, as PySpark's constructor sets `_crs` and `_alg` of it.
-    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |key, _| {
             Ok(matches!(key, "_crs" | "_alg"))
         })
@@ -5054,8 +6103,21 @@ impl PyGeographyType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", geography)
     }
-    fn __reduce__(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, (String,))> {
-        type_reduce(py, &DataType::Geography { srid: self.srid }.json())
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__`, which holds the
+    /// `_crs` of the SRID and the `_alg` that PySpark's constructor sets and its `jsonValue` reads
+    /// (see `reduce_of`).
+    fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        let srid = slf.borrow().srid;
+        let dt = DataType::Geography { srid };
+        reduce_of(slf, &dt.json(), || {
+            let (crs, alg) = spatial_json_parts(&dt, "geography");
+            Ok(vec![
+                ("srid", srid.into_pyobject(py)?.into_any()),
+                ("_crs", crs.into_pyobject(py)?.into_any()),
+                ("_alg", alg.into_pyobject(py)?.into_any()),
+            ])
+        })
     }
     /// As PySpark's `GeographyType._from_crs(crs, alg)`, of the JSON of a geography type:
     /// `ST_INVALID_ALGORITHM_VALUE` of another algorithm than `SPHERICAL`, the mixed SRID of
@@ -5081,6 +6143,23 @@ impl PyGeographyType {
     #[pyo3(name = "simpleString")]
     fn simple_string(&self) -> String {
         DataType::Geography { srid: self.srid }.simple_string()
+    }
+}
+
+/// The CRS and, of a geography, the algorithm that the JSON of the spatial type `data_type`, of
+/// the name `name`, holds: `geometry(<crs>)` and `geography(<crs>, <alg>)`, as PySpark writes them
+/// of its private `_crs` and `_alg`.
+fn spatial_json_parts(data_type: &DataType, name: &str) -> (String, String) {
+    let json = data_type.json_value();
+    let text = json.as_str().unwrap_or_default();
+    let inner = text
+        .strip_prefix(name)
+        .and_then(|rest| rest.strip_prefix('('))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_default();
+    match inner.split_once(", ") {
+        Some((crs, alg)) => (crs.to_string(), alg.to_string()),
+        None => (inner.to_string(), String::new()),
     }
 }
 
@@ -5222,6 +6301,84 @@ fn holds_objects(data_type: &DataType) -> bool {
     }
 }
 
+/// Whether a type that the type object `obj` keeps as its object (see `KeptType`), at any depth,
+/// holds of `holds`: the field of a struct, the type of a field, the element of an array, or the
+/// key or the value of a map, which `holds` reads, as their own children.
+fn keeps_object_of(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    holds: fn(Python<'_>, &Bound<'_, PyAny>) -> PyResult<bool>,
+) -> PyResult<bool> {
+    let kept_holds = |kept: Option<Py<PyAny>>| -> PyResult<bool> {
+        match kept {
+            Some(object) => holds(py, object.bind(py)),
+            None => Ok(false),
+        }
+    };
+    if let Ok(field) = obj.cast::<PyStructField>() {
+        let kept = field.borrow().data_type_object.kept(py);
+        return kept_holds(kept);
+    }
+    if let Ok(array) = obj.cast::<PyArrayType>() {
+        let kept = array.borrow().element_object.kept(py);
+        return kept_holds(kept);
+    }
+    if let Ok(map) = obj.cast::<PyMapType>() {
+        let (key, value) = {
+            let map = map.borrow();
+            (map.key_object.kept(py), map.value_object.kept(py))
+        };
+        return Ok(kept_holds(key)? || kept_holds(value)?);
+    }
+    if let Ok(st) = obj.cast::<PyStructType>() {
+        let fields = st.borrow().fields.clone_ref(py);
+        for item in fields.bind(py).iter() {
+            if holds(py, &item)? {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Whether the type object `obj` keeps, at any depth of the types that it keeps as their objects
+/// (see `keeps_object_of`), a type of a Python subclass of a type class (see
+/// [`is_subclass_object`]). Its core type is that of the class, so such a type is compared,
+/// written and copied of its object, as PySpark's `__dict__` holds it.
+fn keeps_subclass_objects(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    keeps_object_of(py, obj, holds_subclass_object)
+}
+
+/// Whether `obj` is a type of a Python subclass of a type class, or keeps one (see
+/// [`keeps_subclass_objects`]).
+fn holds_subclass_object(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(is_subclass_object(obj) || keeps_subclass_objects(py, obj)?)
+}
+
+/// Whether the child kept as `kept`, if it is, is or keeps a type of a Python subclass of a type
+/// class.
+fn kept_holds_subclass_object(py: Python<'_>, kept: &KeptType) -> PyResult<bool> {
+    match kept.kept(py) {
+        Some(object) => holds_subclass_object(py, object.bind(py)),
+        None => Ok(false),
+    }
+}
+
+/// Whether the type object `obj` is, or keeps at any depth of the types that it keeps as their
+/// objects (see `keeps_object_of`), a field of metadata. PySpark's field keeps its metadata dict
+/// as it was given, which `==` compares as Python compares the dicts, and `json()` writes of
+/// `json.dumps`: so does the drop-in's of the dict (see `keep_flags_in_json`), whose values the
+/// core's JSON does not hold as they are (a tuple, a key that is not a str, an int of more than
+/// 64 bits, the text of a float).
+fn holds_metadata(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(field) = obj.cast::<PyStructField>() {
+        if !field.borrow().metadata.bind(py).is_empty() {
+            return Ok(true);
+        }
+    }
+    keeps_object_of(py, obj, holds_metadata)
+}
+
 /// The `simpleString()` of the type of a field, of the element of an array, or of the key or the
 /// value of a map, as PySpark's of the type object that it holds: the object's own when it is
 /// kept, so that a type that the client keeps as its object is named by it, which its JSON does
@@ -5269,11 +6426,12 @@ fn as_nullable<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
 }
 
 /// Whether the objects that the type objects `a` and `b`, of one class and of the equal core
-/// types `core`, hold at each place whose type holds an object (see `holds_objects`) are equal,
-/// as PySpark's comparison of the `__dict__`s compares the type objects that they hold: a field
-/// of a struct by the field, and the type of a field, the element of an array and the key and the
-/// value of a map by its object, kept, or else made of the core type. A `StructField` compares
-/// its type so itself (see its `__eq__`).
+/// types `core`, hold at each place whose type holds an object (see `holds_objects`), or whose
+/// object of either is or keeps a type of a Python subclass (see `holds_subclass_object`), are
+/// equal, as PySpark's comparison of the `__dict__`s compares the type objects that they hold: a
+/// field of a struct by the field, and the type of a field, the element of an array and the key
+/// and the value of a map by its object, kept, or else made of the core type. A `StructField`
+/// compares its type so itself (see its `__eq__`).
 fn held_objects_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, core: &DataType) -> PyResult<bool> {
     let py = a.py();
     let mut pairs: Vec<(Bound<'_, PyAny>, Bound<'_, PyAny>)> = Vec::new();
@@ -5288,20 +6446,29 @@ fn held_objects_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, core: &DataType) 
             );
             let (x, y) = (x.bind(py), y.bind(py));
             for (i, field) in fields.iter().enumerate() {
-                if holds_objects(&field.data_type) {
-                    pairs.push((x.get_item(i)?, y.get_item(i)?));
+                let (fx, fy) = (x.get_item(i)?, y.get_item(i)?);
+                if holds_objects(&field.data_type)
+                    || holds_subclass_object(py, &fx)?
+                    || holds_subclass_object(py, &fy)?
+                {
+                    pairs.push((fx, fy));
                 }
             }
         }
-        DataType::Array { .. } => {
+        DataType::Array { element_type, .. } => {
             let (Ok(x), Ok(y)) = (a.cast::<PyArrayType>(), b.cast::<PyArrayType>()) else {
                 return Ok(true);
             };
             let (x, y) = (x.borrow(), y.borrow());
-            pairs.push((
-                x.element_object.object(py, &x.element_type)?.into_bound(py),
-                y.element_object.object(py, &y.element_type)?.into_bound(py),
-            ));
+            if holds_objects(element_type)
+                || kept_holds_subclass_object(py, &x.element_object)?
+                || kept_holds_subclass_object(py, &y.element_object)?
+            {
+                pairs.push((
+                    x.element_object.object(py, &x.element_type)?.into_bound(py),
+                    y.element_object.object(py, &y.element_type)?.into_bound(py),
+                ));
+            }
         }
         DataType::Map {
             key_type,
@@ -5312,13 +6479,19 @@ fn held_objects_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, core: &DataType) 
                 return Ok(true);
             };
             let (x, y) = (x.borrow(), y.borrow());
-            if holds_objects(key_type) {
+            if holds_objects(key_type)
+                || kept_holds_subclass_object(py, &x.key_object)?
+                || kept_holds_subclass_object(py, &y.key_object)?
+            {
                 pairs.push((
                     x.key_object.object(py, &x.key_type)?.into_bound(py),
                     y.key_object.object(py, &y.key_type)?.into_bound(py),
                 ));
             }
-            if holds_objects(value_type) {
+            if holds_objects(value_type)
+                || kept_holds_subclass_object(py, &x.value_object)?
+                || kept_holds_subclass_object(py, &y.value_object)?
+            {
                 pairs.push((
                     x.value_object.object(py, &x.value_type)?.into_bound(py),
                     y.value_object.object(py, &y.value_type)?.into_bound(py),
@@ -5409,20 +6582,31 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             Py::new(py, $init)?.into_any()
         };
     }
+    // The one instance of a type of PySpark's `DataTypeSingleton`.
+    macro_rules! singleton {
+        ($ty:ty) => {
+            <$ty>::new(
+                &py.get_type::<$ty>(),
+                &pyo3::types::PyTuple::empty(py),
+                None,
+            )?
+            .into_any()
+        };
+    }
     let o = match dt {
-        DataType::Null => PyNullType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Null => singleton!(PyNullType),
         DataType::Boolean => {
-            PyBooleanType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+            singleton!(PyBooleanType)
         }
-        DataType::Byte => PyByteType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
-        DataType::Short => PyShortType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Byte => singleton!(PyByteType),
+        DataType::Short => singleton!(PyShortType),
         DataType::Integer => {
-            PyIntegerType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+            singleton!(PyIntegerType)
         }
-        DataType::Long => PyLongType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
-        DataType::Float => PyFloatType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Long => singleton!(PyLongType),
+        DataType::Float => singleton!(PyFloatType),
         DataType::Double => {
-            PyDoubleType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+            singleton!(PyDoubleType)
         }
         DataType::Decimal { precision, scale } => {
             let (precision, scale) = (*precision, *scale);
@@ -5444,14 +6628,14 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             value
         )),
         DataType::Binary => {
-            PyBinaryType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+            singleton!(PyBinaryType)
         }
-        DataType::Date => PyDateType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any(),
+        DataType::Date => singleton!(PyDateType),
         DataType::Timestamp => {
-            PyTimestampType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+            singleton!(PyTimestampType)
         }
         DataType::TimestampNtz => {
-            PyTimestampNTZType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+            singleton!(PyTimestampNTZType)
         }
         DataType::Array {
             element_type,
@@ -5548,7 +6732,7 @@ pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAn
             ))
         }
         DataType::CalendarInterval => {
-            PyCalendarIntervalType::new(py, &pyo3::types::PyTuple::empty(py), None)?.into_any()
+            singleton!(PyCalendarIntervalType)
         }
         DataType::YearMonthInterval {
             start_field,

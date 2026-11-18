@@ -624,9 +624,9 @@ pub(crate) fn check_refused_bucket_count(num_buckets: &Bound<'_, PyAny>) -> PyRe
 }
 
 /// A reader `schema` as pyspark's `DataFrameReader.schema` and `DataStreamReader.schema`
-/// send it: a StructType as its JSON, which keeps field metadata, and a string as is, for
-/// the server to parse. A str that UTF-8 cannot encode is the `Err` of its UTF-32LE bytes, whose
-/// plan fails. Anything else raises `NOT_EXPECTED_TYPE`.
+/// send it: a StructType as its `json()`, which keeps field metadata, of the methods of a Python
+/// subclass, and a string as is, for the server to parse. A str that UTF-8 cannot encode is the
+/// `Err` of its UTF-32LE bytes, whose plan fails. Anything else raises `NOT_EXPECTED_TYPE`.
 pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<Result<String, Vec<u8>>> {
     if schema.is_instance_of::<PyString>() {
         return Ok(match schema.extract::<String>() {
@@ -634,11 +634,10 @@ pub(crate) fn reader_schema(schema: &Bound<'_, PyAny>) -> PyResult<Result<String
             Err(_) => Err(utf32le_of(schema)?),
         });
     }
-    if let Ok(st) = schema.extract::<PyRef<crate::types::PyStructType>>() {
-        return Ok(Ok(spark_connect::types::DataType::Struct {
-            fields: st.current_fields(schema.py())?,
-        }
-        .json()));
+    if schema.is_instance_of::<crate::types::PyStructType>() {
+        return Ok(Ok(schema
+            .call_method0(pyo3::intern!(schema.py(), "json"))?
+            .extract()?));
     }
     let arg_type = schema.get_type().name()?.to_string();
     Err(crate::column::raise_pyspark(

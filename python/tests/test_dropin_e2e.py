@@ -4605,6 +4605,38 @@ def test_ml_vector_functions_as_pyspark(session):
     assert tuple(row.first()) == ([1.5, 2.0], [1.5, 2.0])
 
 
+def test_udfs_of_return_types_of_python_subclasses_run_their_methods_as_pyspark(session):
+    # As PySpark's: the return type object of a UDF pickles of its class and its `__dict__`, so
+    # the Python worker of the server calls the `toInternal` of a Python subclass, also of one in
+    # an array or a struct, for a UDF that is not Arrow-optimized, whose results it converts with
+    # it. The schema of the DataFrame is the server's, of the base classes.
+    class Suffixed(StringType):
+        def __init__(self, suffix):
+            super().__init__()
+            self.suffix = suffix
+
+        def needConversion(self):
+            return True
+
+        def toInternal(self, obj):
+            return None if obj is None else obj + self.suffix
+
+    class Tens(IntegerType):
+        def needConversion(self):
+            return True
+
+        def toInternal(self, obj):
+            return None if obj is None else obj * 10
+
+    df = session.range(1)
+    suffixed = F.udf(lambda x: "abc", Suffixed("!"), useArrow=False)
+    tens = F.udf(lambda x: [1, 2], ArrayType(Tens()), useArrow=False)
+    struct = F.udf(lambda x: (1,), StructType([StructField("a", Tens())]), useArrow=False)
+    result = df.select(suffixed("id").alias("s"), tens("id").alias("t"), struct("id").alias("r"))
+    assert result.collect() == [Row(s="abc!", t=[10, 20], r=Row(a=10))]
+    assert [type(f.dataType) for f in result.schema.fields] == [StringType, ArrayType, StructType]
+
+
 def test_udfs_of_types_with_user_defined_types_run_on_the_server_as_pyspark(session):
     # As PySpark's: a UDF of a return type of an array of ExamplePointUDT, whose JSON's pyClass
     # imports no class, runs on the Python worker of the server, to which the type pickles with

@@ -683,7 +683,7 @@ def _to_internal(dataType, obj):
         return dataType.dataType.toInternal(obj)
     elif isinstance(dataType, DateType):
         if obj is not None:
-            return obj.toordinal() - DateType.EPOCH_ORDINAL
+            return obj.toordinal() - dataType.EPOCH_ORDINAL
     elif isinstance(dataType, TimeType):
         if obj is not None:
             return (
@@ -706,9 +706,15 @@ def _to_internal(dataType, obj):
         if obj is not None:
             return (((obj.days * 86400) + obj.seconds) * 1_000_000) + obj.microseconds
     elif isinstance(dataType, (YearMonthIntervalType, CalendarIntervalType)):
+        # Of the name of PySpark's class, also for a Python subclass of it.
+        name = (
+            "YearMonthIntervalType"
+            if isinstance(dataType, YearMonthIntervalType)
+            else "CalendarIntervalType"
+        )
         raise PySparkNotImplementedError(
             errorClass="NOT_IMPLEMENTED",
-            messageParameters={"feature": "%s.toInternal" % type(dataType).__name__},
+            messageParameters={"feature": "%s.toInternal" % name},
         )
     elif isinstance(dataType, VariantType):
         if obj is None:
@@ -788,7 +794,7 @@ def _from_internal(dataType, obj):
         return dataType.dataType.fromInternal(obj)
     elif isinstance(dataType, DateType):
         if obj is not None:
-            return datetime.date.fromordinal(obj + DateType.EPOCH_ORDINAL)
+            return datetime.date.fromordinal(obj + dataType.EPOCH_ORDINAL)
     elif isinstance(dataType, TimeType):
         if obj is not None:
             hours, remainder = divmod(obj, 3_600_000_000_000)
@@ -812,9 +818,15 @@ def _from_internal(dataType, obj):
         if obj is not None:
             return datetime.timedelta(microseconds=obj)
     elif isinstance(dataType, (YearMonthIntervalType, CalendarIntervalType)):
+        # Of the name of PySpark's class, also for a Python subclass of it.
+        name = (
+            "YearMonthIntervalType"
+            if isinstance(dataType, YearMonthIntervalType)
+            else "CalendarIntervalType"
+        )
         raise PySparkNotImplementedError(
             errorClass="NOT_IMPLEMENTED",
-            messageParameters={"feature": "%s.fromInternal" % type(dataType).__name__},
+            messageParameters={"feature": "%s.fromInternal" % name},
         )
     elif isinstance(dataType, VariantType):
         if obj is None or not all(key in obj for key in ["value", "metadata"]):
