@@ -1231,6 +1231,122 @@ def test_containers_that_their_python_code_changes_behave_as_upbs(upb):
     assert extend_while_appending(ours) == extend_while_appending(upb) == ([], 250)
 
 
+def test_maps_keep_the_order_of_insertion_and_upbs_entries_through_removals(upb):
+    # A map finds a key in a hash table of its keys, as upb's does, and keeps the order in which
+    # its keys were inserted (which upb's does not, see docs/compatibility.md), through removals,
+    # which leave holes among its entries until they are dropped at once: the order of a dict,
+    # but of popitem, which takes the first key, as MutableMapping's does. After each of random
+    # operations on a few keys, which come and go, its entries and bytes are upb's.
+    rng = random.Random(11)
+    keys = [f"k{i}" for i in range(24)]
+    real, mine = upb("spark.connect.Read.DataSource")(), ours("spark.connect.Read.DataSource")()
+    order = {}
+    for step in range(4000):
+        key, value, kind = rng.choice(keys), f"v{step}", rng.random()
+        if kind < 0.35:
+            for m in (real, mine):
+                m.options[key] = value
+            order[key] = value
+        elif kind < 0.65:
+            outcomes = [_outcome(lambda m=m: m.options.__delitem__(key)) for m in (real, mine)]
+            assert outcomes[0] == outcomes[1], (step, key)
+            order.pop(key, None)
+        elif kind < 0.75:
+            # pop of a missing key gives the default, and keeps no entry of it.
+            assert real.options.pop(key) == mine.options.pop(key) == order.pop(key, ""), step
+        elif kind < 0.8:
+            if order:
+                first = next(iter(order))
+                assert mine.options.popitem() == (first, order.pop(first)), step
+                del real.options[first]
+        elif kind < 0.9:
+            pairs = [(rng.choice(keys), f"u{step}") for _ in range(3)]
+            for m in (real, mine):
+                m.options.update(pairs)
+            order.update(pairs)
+        elif kind < 0.98:
+            # Reading a missing key inserts it, of the default.
+            assert real.options[key] == mine.options[key] == order.setdefault(key, ""), step
+        else:
+            for m in (real, mine):
+                m.options.clear()
+            order.clear()
+        assert list(mine.options.items()) == list(order.items()), step
+        assert len(mine.options) == len(order) and all(k in mine.options for k in order), step
+        assert dict(real.options) == order, step
+        assert mine.SerializeToString() == real.SerializeToString(deterministic=True), step
+    # The same of a map of messages, of which reading a missing key inserts a new message.
+    real, mine = upb("spark.connect.SQL")(), ours("spark.connect.SQL")()
+    order = {}
+    for step in range(2000):
+        key = rng.choice(keys)
+        if rng.random() < 0.55:
+            for m in (real, mine):
+                m.named_arguments[key].literal.integer = step
+            order.setdefault(key, None)
+        else:
+            outcomes = [_outcome(lambda m=m: m.named_arguments.__delitem__(key)) for m in (real, mine)]
+            assert outcomes[0] == outcomes[1], (step, key)
+            order.pop(key, None)
+        assert list(mine.named_arguments) == list(order), step
+        assert mine.SerializeToString() == real.SerializeToString(deterministic=True), step
+    copied = copy.deepcopy(mine)
+    assert list(copied.named_arguments) == list(order) and copied == mine
+
+
+def test_operations_on_maps_of_many_keys_take_no_scan_of_their_keys(upb):
+    # As upb's, whose hash table finds a key at once: the parse, the constructor, update,
+    # MergeFrom, a copy, ==, the lookups and the removals of a map of 100,000 keys each take a
+    # fraction of a second, also of a map of messages, and give upb's entries. The bounds are
+    # generous: the maps that scanned their keys for each key took about 20 s for the constructor
+    # of a map of 100,000 keys, and as long for the others.
+    count = 100_000
+
+    def quick(operation):
+        started = time.perf_counter()
+        result = operation()
+        elapsed = time.perf_counter() - started
+        assert elapsed < 3.0, elapsed
+        return result
+
+    source = ours("spark.connect.Read.DataSource")
+    options = {f"k{i}": f"v{i}" for i in range(count)}
+    built = quick(lambda: source(options=options))
+    data = built.SerializeToString()
+    assert data == upb("spark.connect.Read.DataSource")(options=options).SerializeToString(
+        deterministic=True
+    )
+    assert list(built.options) == list(options)
+    parsed = quick(lambda: source.FromString(data))
+    assert quick(lambda: parsed == built)
+    updated = source()
+    quick(lambda: updated.options.update(options))
+    merged = source()
+    quick(lambda: merged.MergeFrom(built))
+    copied = quick(lambda: copy.deepcopy(built))
+    assert updated == merged == copied == built
+    assert list(copied.options) == list(options)
+    assert quick(lambda: sum(f"k{i}" in parsed.options for i in range(count))) == count
+    assert quick(lambda: all(parsed.options[f"k{i}"] == f"v{i}" for i in range(count)))
+    quick(lambda: [updated.options.__delitem__(f"k{i}") for i in range(0, count, 2)])
+    assert list(updated.options) == [f"k{i}" for i in range(1, count, 2)]
+    quick(lambda: [updated.options.popitem() for _ in range(count // 4)])
+    assert list(updated.options) == [f"k{i}" for i in range(count // 2 + 1, count, 2)]
+
+    sql = ours("spark.connect.SQL")
+    arguments = {f"k{i}": {"literal": {"integer": i}} for i in range(count)}
+    built = quick(lambda: sql(named_arguments=arguments))
+    data = built.SerializeToString()
+    assert data == upb("spark.connect.SQL")(named_arguments=arguments).SerializeToString(
+        deterministic=True
+    )
+    parsed = quick(lambda: sql.FromString(data))
+    assert quick(lambda: parsed == built)
+    merged = sql()
+    quick(lambda: merged.MergeFrom(parsed))
+    assert merged == built and list(merged.named_arguments) == list(parsed.named_arguments)
+
+
 _UNSET_CHILD_OPERATIONS = {
     "SerializeToString": lambda c: c.SerializeToString(),
     "ListFields": lambda c: c.ListFields(),
@@ -1421,25 +1537,67 @@ class _References:
         return self.test(sys.getrefcount(self.target) - self.base)
 
 
+class _Length:
+    """Whether an operation that sets the entries of `container` is in progress, of the number of
+    entries that it has set: more than none, fewer than `count`. Armed, the container is empty."""
+
+    def __init__(self, container, count):
+        self.container = container
+        self.count = count
+
+    def arm(self):
+        self.container.clear()
+
+    def __call__(self):
+        return 0 < len(self.container) < self.count
+
+
 def _large_operation(operation):
     """An operation of `operation` on a message of `_LARGE` messages, what it raises, and whether
     it is in progress, of the references that it holds while it runs."""
     literal_class = ours("spark.connect.Expression.Literal")
     element = _field(literal_class.Array.ELEMENTS_FIELD_NUMBER, literal_class(string="w").SerializeToString())
     data = _field(literal_class.ARRAY_FIELD_NUMBER, element * _LARGE)
-    if operation == "parse":
+    # Each message holds a reference to its class while it lives: those that an operation makes.
+    made = _References(literal_class, lambda extra: extra >= 1024)
+    if operation in ("parse", "map parse"):
         # The data ends with a corrupt tag, so that the parse fails once it has made its messages,
         # which it releases before it returns, running no Python code: each message holds a
-        # reference to its class until then.
+        # reference to its class until then. A map of SQL.args has a Literal of each entry.
+        if operation == "map parse":
+            value = _field(2, literal_class(string="w").SerializeToString())
+            data = b"".join(_field(2, _field(1, b"k%d" % i) + value) for i in range(_LARGE))
+            parsed = ours("spark.connect.SQL")
+        else:
+            parsed = literal_class
         corrupt = data + b"\xff"
-        in_progress = _References(literal_class, lambda extra: extra >= 1024)
-        return lambda: literal_class.FromString(corrupt), _rust.DecodeError, in_progress
+        return lambda: parsed.FromString(corrupt), _rust.DecodeError, made
     literal = literal_class.FromString(data)
+    # The constructor, the extend and the update of many values (here of a value that fails last,
+    # so that the messages that they made are released before they return, running no Python
+    # code) take one budget, not one of each message.
+    elements = list(literal.array.elements) + [5]
+    if operation == "constructor of a list":
+        return lambda: literal_class.Array(elements=elements), TypeError, made
+    if operation == "extend":
+        return lambda: literal_class.Array().elements.extend(elements), TypeError, made
+    if operation == "map constructor":
+        args = {f"k{i}": value for i, value in enumerate(elements)}
+        return lambda: ours("spark.connect.SQL")(args=args), TypeError, made
+    if operation == "map update":
+        options = {f"k{i}": "v" for i in range(_LARGE)}
+        options["bad"] = 5
+        source = ours("spark.connect.Read.DataSource")()
+        # The map is read by its length: the other thread reads it at the checkpoints, where the
+        # update holds no borrow of it.
+        in_progress = _Length(source.options, _LARGE)
+        return lambda: source.options.update(options), TypeError, in_progress
     operations = {
         "constructor": lambda: ours("spark.connect.Fetch.Method.Args")(param=literal),
         "CopyFrom": lambda: literal_class().CopyFrom(literal),
         "MergeFrom": lambda: literal_class().MergeFrom(literal),
         "deepcopy": lambda: copy.deepcopy(literal),
+        "deepcopy of a container": lambda: copy.deepcopy(literal.array.elements),
     }
     # The copy holds a reference to each message that it copies until it has copied it: of the
     # last one, until it ends.
@@ -1447,14 +1605,31 @@ def _large_operation(operation):
     return operations[operation], None, in_progress
 
 
-@pytest.mark.parametrize("operation", ["parse", "constructor", "CopyFrom", "MergeFrom", "deepcopy"])
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "parse",
+        "constructor",
+        "CopyFrom",
+        "MergeFrom",
+        "deepcopy",
+        "deepcopy of a container",
+        "constructor of a list",
+        "extend",
+        "map parse",
+        "map constructor",
+        "map update",
+    ],
+)
 @pytest.mark.parametrize("cancel", [False, True])
 def test_python_thread_runs_before_operations_on_large_messages_finish(operation, cancel):
-    # The parse, the copies and the merges of a message of many messages, which take longer than
-    # upb's, let another thread take the GIL every 1,024 messages, and a signal interrupt them,
-    # so that the GIL is held as long as upb's at most, for a thousand messages; upb holds it
-    # until the operation ends. The other thread reads the operation in progress from the
-    # references that it holds; a signal raises KeyboardInterrupt in it.
+    # The parse, the constructor, the copies, the merges, the extend of a repeated field of
+    # messages and the update of a map of many messages, values or entries, which take longer than
+    # upb's, let another thread take the GIL every 1,024 of them, and a signal interrupt them, so
+    # that the GIL is held as long as upb's at most, for a thousand messages; upb holds it until
+    # the operation ends (but in the update of a map, of MutableMapping's Python code). The other
+    # thread reads the operation in progress from the references that it holds, or from the
+    # entries of the map; a signal raises KeyboardInterrupt in it.
     from _local_data_conversion_probe import LocalDataConversionProbe
 
     action, failure, in_progress = _large_operation(operation)
@@ -2237,6 +2412,114 @@ def test_pickles_of_nested_messages_load_as_upbs(upb):
         mine = ours(full_name)(**fields)
         loaded = pickle.loads(pickle.dumps(mine))
         assert type(loaded) is ours(full_name) and loaded == mine, full_name
+
+
+# Unknown fields of each wire type: a varint, a fixed64, bytes, a group of a varint and bytes, a
+# fixed32 and bytes of a message.
+_UNKNOWN_FIELDS = (
+    _tag(501, 0) + _varint(5)
+    + _tag(502, 1) + (7).to_bytes(8, "little")
+    + _field(503, b"abc")
+    + _tag(504, 3) + _tag(1, 0) + _varint(9) + _field(2, b"x") + _tag(504, 4)
+    + _tag(505, 5) + (9).to_bytes(4, "little")
+    + _field(506, _tag(1, 0) + _varint(1))
+)  # fmt: skip
+
+
+def _unknown_field_cases(cls):
+    """Messages of unknown fields, of their own and in the messages that they hold (of a map value
+    too), a map entry that upb keeps among them, and messages of none, an unset child too."""
+    plan = cls("spark.connect.Plan")()
+    plan.MergeFromString(_UNKNOWN_FIELDS)
+    relation = cls("spark.connect.Relation")(sql={"query": "q"})
+    relation.sql.MergeFromString(_UNKNOWN_FIELDS)
+    relation.sql.named_arguments["a"].MergeFromString(_tag(900, 0) + _varint(1))
+    relation.MergeFromString(_tag(999, 0) + _varint(2))
+    source = cls("spark.connect.Read.DataSource")()
+    source.MergeFromString(_field(3, _field(1, b"k") + _tag(3, 0) + _varint(7)))
+    empty = cls("spark.connect.Relation")(range={"end": 1})
+    return [plan, relation, relation.sql, source, empty, cls("spark.connect.Relation")().read]
+
+
+def _unknown_field_sets(cls):
+    """The unknown fields of `_unknown_field_cases`, of protobuf's UnknownFieldSet (each its
+    number, wire type and data, of a group its fields), and their text of text_format."""
+    from google.protobuf import text_format, unknown_fields
+
+    def fields(field_set):
+        return [
+            (f.field_number, f.wire_type, fields(f.data) if f.wire_type == 3 else repr(f.data))
+            for f in field_set
+        ]
+
+    return [
+        (
+            fields(unknown_fields.UnknownFieldSet(message)),
+            text_format.MessageToString(message, print_unknown_fields=True),
+            text_format.MessageToString(message, print_unknown_fields=True, as_one_line=True),
+        )
+        for message in _unknown_field_cases(cls)
+    ]
+
+
+def test_unknown_field_sets_of_the_messages_are_upbs(upb):
+    # protobuf's unknown_fields.UnknownFieldSet takes the messages of the runtime, which protobuf's
+    # class refuses (the drop-in wraps it, as it does protobuf's builder): their sets have the
+    # fields, wire types, data and order of upb's, a group as a set of its own, and text_format
+    # prints them with print_unknown_fields=True as upb's, in the messages that a message holds
+    # too. Of other arguments, the sets and errors are protobuf's, and the sets are of protobuf's
+    # class. With protobuf's pure-Python implementation too, whose class is another.
+    from google.protobuf import unknown_fields
+
+    assert _unknown_field_sets(ours) == _unknown_field_sets(upb)
+    field_set = unknown_fields.UnknownFieldSet
+    real, mine = upb("spark.connect.Plan")(), ours("spark.connect.Plan")()
+    real.MergeFromString(_UNKNOWN_FIELDS)
+    mine.MergeFromString(_UNKNOWN_FIELDS)
+    for label, call in [
+        ("message=", lambda m: len(field_set(message=m))),
+        ("two", lambda m: field_set(m, 1)),
+        ("msg=", lambda m: field_set(msg=m)),
+        ("none", lambda m: field_set()),
+        ("5", lambda m: field_set(5)),
+        ("None", lambda m: field_set(None)),
+        ("dict", lambda m: field_set({})),
+        ("index", lambda m: field_set(m)[-1]),
+        ("past the end", lambda m: field_set(m)[6]),
+        ("hash", lambda m: hash(field_set(m))),
+        ("of the class", lambda m: isinstance(field_set(m), field_set)),
+        ("of a group", lambda m: isinstance(field_set(m)[3].data, field_set)),
+        ("after a discard", lambda m: (m.DiscardUnknownFields(), len(field_set(m)))[1]),
+    ]:
+        assert _outcome(lambda: call(mine)) == _outcome(lambda: call(real)), label
+    assert type(field_set(ours("spark.connect.Plan")())) is type(field_set(upb("spark.connect.Plan")()))
+    # One wrapper wraps protobuf's own class, also when the package installs again.
+    from google.protobuf.internal import api_implementation
+
+    _rust._hook_unknown_field_set()
+    protobuf_class = api_implementation._c_module.UnknownFieldSet
+    assert unknown_fields.UnknownFieldSet._protobuf_class is protobuf_class
+
+    script = textwrap.dedent(
+        """
+        import json
+
+        from google.protobuf.internal import api_implementation
+        from pyspark.sql.connect.proto import _rust
+        from tests.test_proto_rust_offline import _unknown_field_sets
+
+        print(json.dumps([api_implementation.Type(), _unknown_field_sets(_rust._CLASSES.__getitem__)]))
+        """
+    )
+    root = pathlib.Path(__file__).resolve().parent.parent
+    env = dict(os.environ, PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python")
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, cwd=str(root), env=env
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    implementation, found = json.loads(result.stdout)
+    assert implementation == "python"
+    assert found == json.loads(json.dumps(_unknown_field_sets(upb)))
 
 
 def _protobuf_cases(cls):

@@ -3437,6 +3437,7 @@ dependencies = [
  "apache-spark-connect-core",
  "apache-spark-connect-proto",
  "arrow",
+ "hashbrown 0.17.1",
  "prost",
  "prost-types",
  "pyo3",

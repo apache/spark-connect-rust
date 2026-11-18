@@ -108,6 +108,16 @@ fn _proto_message_to_string(
     text::to_text(message.py(), message, text::Style::TextFormat, as_one_line)
 }
 
+/// The encoded fields that `message` read that its type has no field for, in the order in which it
+/// read them, as upb keeps them: the fields of protobuf's `unknown_fields.UnknownFieldSet` of the
+/// message (see `pyspark.sql.connect.proto._rust`).
+#[pyfunction]
+fn _proto_unknown_fields<'py>(
+    message: &Bound<'py, message::PyMessage>,
+) -> Bound<'py, pyo3::types::PyBytes> {
+    pyo3::types::PyBytes::new(message.py(), &message.borrow().unknown)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("ProtoMessage", py.get_type::<message::PyMessage>())?;
@@ -171,5 +181,6 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_proto_file_descriptor, m)?)?;
     m.add_function(wrap_pyfunction!(message::_proto_register_classes, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_to_string, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_unknown_fields, m)?)?;
     Ok(())
 }

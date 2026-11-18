@@ -25,9 +25,10 @@ that protoc generates give them; the classes of the well-known types ``google.pr
 (``pyspark.sql.connect.proto.base_pb2``, ...) has the names of the generated module of the proto.
 
 Where the ``protobuf`` package is installed, the files of the protos are also added to its default
-descriptor pool, as the generated modules add them (see ``_add_files_to_protobuf``), and the
-modules that protoc generates of other protos that import them get the classes of this runtime
-(see ``_hook_protobuf_builder``).
+descriptor pool, as the generated modules add them (see ``_add_files_to_protobuf``), the modules
+that protoc generates of other protos that import them get the classes of this runtime (see
+``_hook_protobuf_builder``), and its ``unknown_fields.UnknownFieldSet`` takes the messages of the
+runtime (see ``_hook_unknown_field_set``).
 """
 import calendar
 import collections.abc
@@ -726,13 +727,73 @@ def _hook_protobuf_builder() -> None:
     builder.BuildTopDescriptorsAndMessages = BuildTopDescriptorsAndMessages
 
 
+class _UnknownFieldSetType(type):
+    """The metaclass of ``UnknownFieldSet``, the wrapper of protobuf's class: what ``isinstance``
+    and ``issubclass`` tell of the wrapper is what they tell of protobuf's class, of which the
+    wrapper makes its sets."""
+
+    def __instancecheck__(cls, instance: _Any) -> bool:
+        return cls._protobuf_class is not None and isinstance(instance, cls._protobuf_class)
+
+    def __subclasscheck__(cls, subclass: type) -> bool:
+        return cls._protobuf_class is not None and issubclass(subclass, cls._protobuf_class)
+
+
+class UnknownFieldSet(metaclass=_UnknownFieldSetType):
+    """protobuf's ``unknown_fields.UnknownFieldSet``, of the messages of this runtime too (see
+    ``_hook_unknown_field_set``): the set of the unknown fields of a message, as protobuf's class
+    of the implementation of the install (upb's) makes it."""
+
+    __slots__ = ()
+    # protobuf's class, and its class of google.protobuf.Empty, which the hook sets.
+    _protobuf_class: _Any = None
+    _empty_class: _Any = None
+
+    def __new__(cls, *args: _Any, **kwargs: _Any) -> _Any:
+        # protobuf's class takes a message of the runtime as a message of protobuf's
+        # google.protobuf.Empty, which has no fields, whose unknown fields are those of the
+        # message; it takes the arguments as they are otherwise, with its errors of them.
+        def taken(value: _Any) -> _Any:
+            if isinstance(value, Message):
+                return cls._empty_class.FromString(_pyspark._proto_unknown_fields(value))
+            return value
+
+        return cls._protobuf_class(
+            *map(taken, args), **{name: taken(value) for name, value in kwargs.items()}
+        )
+
+
+def _hook_unknown_field_set() -> None:
+    """Make ``UnknownFieldSet`` of protobuf's ``google.protobuf.unknown_fields`` the wrapper of this
+    module, when protobuf is installed, so that it takes the messages of this runtime, which
+    protobuf's class (upb's, or the pure-Python one) refuses ("Expected a message object"): the set
+    of a message of the runtime is protobuf's set of a message of protobuf's ``Empty`` that holds
+    the encoded unknown fields of the message, the fields, values and order of upb's set of a
+    message of upb that read the same bytes. Of any other argument, it is protobuf's set, or
+    protobuf's error. ``text_format`` reads the set of each message of the module's attribute, so
+    that ``MessageToString(message, print_unknown_fields=True)`` prints them. One wrapper wraps
+    protobuf's own class, of the runtime of the last install. A protobuf that has no such module,
+    or no ``Empty``, is passed over, as the drop-in itself needs none of this."""
+    try:
+        from google.protobuf import empty_pb2, unknown_fields
+
+        protobuf_class = unknown_fields.UnknownFieldSet
+        empty_class = empty_pb2.Empty
+    except Exception:  # pragma: no cover  # noqa: BLE001 - no protobuf, or one that fails or lacks it
+        return
+    UnknownFieldSet._protobuf_class = getattr(protobuf_class, "_protobuf_class", protobuf_class)
+    UnknownFieldSet._empty_class = empty_class
+    unknown_fields.UnknownFieldSet = UnknownFieldSet
+
+
 def install(package: dict[str, _Any]) -> None:
     """Export the messages of Spark Connect into ``package``, the globals of
     ``pyspark.sql.connect.proto``, as its ``from ..._pb2 import *`` of the generated modules does
     (so its ``DESCRIPTOR`` is that of the last, ``pipelines_pb2``), make each generated module
     (``pyspark.sql.connect.proto.base_pb2``, ...) the one of this runtime, and, when protobuf is
-    installed, add the files of the protos to its pool and give the modules that protoc generates
-    of other protos that import them the classes of the runtime."""
+    installed, add the files of the protos to its pool, give the modules that protoc generates of
+    other protos that import them the classes of the runtime, and make its ``UnknownFieldSet``
+    take the messages of the runtime."""
     prefix = "pyspark.sql.connect.proto."
     for module_name, module in _MODULES.items():
         if _is_exported(module_name):
@@ -751,6 +812,7 @@ def install(package: dict[str, _Any]) -> None:
     sys.meta_path.insert(0, _Finder())
     _add_files_to_protobuf()
     _hook_protobuf_builder()
+    _hook_unknown_field_set()
 
 
 @contextmanager

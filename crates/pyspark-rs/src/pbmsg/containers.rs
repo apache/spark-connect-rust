@@ -17,8 +17,10 @@
 //! past the end of a container that the Python code shortened, a read is upb's `IndexError`, a
 //! write is lost (as upb's is) and an insertion or a deletion takes the container as it is.
 
-use std::sync::Arc;
+use std::hash::{BuildHasher, Hash, Hasher, RandomState};
+use std::sync::{Arc, OnceLock};
 
+use hashbrown::HashTable;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::{
     PyAttributeError, PyFutureWarning, PyIndexError, PyKeyError, PyNotImplementedError,
@@ -34,8 +36,8 @@ use pyo3::types::{
 use pyo3::IntoPyObjectExt;
 
 use super::message::{
-    content_eq, duplicate, duplicate_with, mark_present, message_from_value, new_instance,
-    registered_class, MessageClass, PyMessage,
+    content_eq, duplicate_with, mark_present, message_from_value, new_instance, registered_class,
+    MessageClass, PyMessage,
 };
 use super::pool::{Kind, MapDesc};
 use super::scalar::Scalar;
@@ -856,6 +858,22 @@ impl RepeatedComposite {
         let owner = owner_of(slf.py(), &slf.borrow().owner);
         touch(slf.py(), &owner)
     }
+
+    /// `append` of `value`, each message that it merges or copies a step of `budget`.
+    fn append_with<'py>(
+        slf: &Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+        budget: &ConversionBudget,
+    ) -> PyResult<Bound<'py, PyMessage>> {
+        let py = slf.py();
+        Self::reify(slf)?;
+        verify_message(value)?;
+        let class = slf.borrow().class.clone_ref(py);
+        let child = class.new_message(py)?;
+        slf.borrow_mut().items.push(child.clone().unbind());
+        PyMessage::merge_from_with(&child, value, budget)?;
+        Ok(child)
+    }
 }
 
 #[pymethods]
@@ -888,22 +906,18 @@ impl RepeatedComposite {
         slf: &Bound<'py, Self>,
         value: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyMessage>> {
-        let py = slf.py();
-        Self::reify(slf)?;
-        verify_message(value)?;
-        let class = slf.borrow().class.clone_ref(py);
-        let child = class.new_message(py)?;
-        slf.borrow_mut().items.push(child.clone().unbind());
-        PyMessage::merge_from(&child, value)?;
-        Ok(child)
+        Self::append_with(slf, value, &ConversionBudget::full())
     }
 
     /// As upb's: each value of the iterator of `elem_seq` appended as it comes, so a failure
-    /// leaves the values before it appended.
+    /// leaves the values before it appended. One interrupt budget counts a step for each message
+    /// that the appends merge or copy, so that the extend of many messages lets another thread
+    /// take the GIL, and a signal interrupt it, as a copy does.
     fn extend(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
+        let budget = ConversionBudget::full();
         for value in elem_seq.try_iter()? {
-            Self::append(slf, &value?)?;
+            Self::append_with(slf, &value?, &budget)?;
         }
         Ok(())
     }
@@ -994,20 +1008,24 @@ impl RepeatedComposite {
         Self::extend(slf, other)
     }
 
-    /// A copy of the container, of copies of its messages, held by no message.
+    /// A copy of the container, of copies of its messages, held by no message. The messages are
+    /// read under a short borrow and copied after it, of one interrupt budget, as a copy of a
+    /// message copies them.
     #[pyo3(signature = (memo=None))]
-    fn __deepcopy__(&self, py: Python<'_>, memo: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+    fn __deepcopy__(slf: &Bound<'_, Self>, memo: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let _ = memo;
-        let items = self
-            .items
+        let py = slf.py();
+        let (class, items) = {
+            let me = slf.borrow();
+            let items: Vec<Py<PyMessage>> = me.items.iter().map(|m| m.clone_ref(py)).collect();
+            (me.class.clone_ref(py), items)
+        };
+        let budget = ConversionBudget::full();
+        let copies = items
             .iter()
-            .map(|m| duplicate(py, m.bind(py)).map(Bound::unbind))
+            .map(|m| duplicate_with(py, m.bind(py), &budget).map(Bound::unbind))
             .collect::<PyResult<Vec<_>>>()?;
-        Ok(RepeatedComposite::new(
-            self.class.clone_ref(py),
-            items,
-            None,
-        ))
+        Ok(RepeatedComposite::new(class, copies, None))
     }
 
     fn __len__(&self) -> usize {
@@ -1081,19 +1099,163 @@ pub(crate) enum MapValue {
     Message(Py<PyMessage>),
 }
 
+/// The hash of `key`, a key of a map, of one random state of the process.
+fn key_hash(key: &Scalar) -> u64 {
+    static STATE: OnceLock<RandomState> = OnceLock::new();
+    let mut hasher = STATE.get_or_init(RandomState::new).build_hasher();
+    match key {
+        Scalar::Str(v) => v.hash(&mut hasher),
+        Scalar::I64(v) => v.hash(&mut hasher),
+        Scalar::U64(v) => v.hash(&mut hasher),
+        Scalar::I32(v) | Scalar::Enum(v) => v.hash(&mut hasher),
+        Scalar::U32(v) => v.hash(&mut hasher),
+        Scalar::Bool(v) => v.hash(&mut hasher),
+        Scalar::Bytes(v) => v.hash(&mut hasher),
+        // A float is the key of no map (protobuf's keys are integers, bools and strings): it
+        // hashes of its bits, of 0.0 for -0.0 too, which it equals.
+        Scalar::F64(v) => (if *v == 0.0 { 0 } else { v.to_bits() }).hash(&mut hasher),
+        Scalar::F32(v) => (if *v == 0.0 { 0 } else { v.to_bits() }).hash(&mut hasher),
+    }
+    hasher.finish()
+}
+
+/// The entries of a map, in the order of their insertion, with the positions of their keys in a
+/// hash table, so that a key is found at once, as upb's hash table finds it, rather than by a scan
+/// of the entries, which made the operations of a map of many keys (the parse, the constructor,
+/// `update`, `MergeFrom`, `==`) take as long as the square of their number. A removed entry
+/// leaves a hole, which the iteration passes over, so that a removal moves no entry either, until
+/// the holes are more than the entries, when they are dropped at once.
+#[derive(Default)]
+pub(crate) struct Entries {
+    slots: Vec<Option<(Scalar, MapValue)>>,
+    /// The hash of the key of each entry and its position in `slots`, by the hash: the table
+    /// grows of the hashes that it holds, without reading the keys again.
+    positions: HashTable<(u64, usize)>,
+    /// The position of the first entry: the slots before it are holes.
+    first: usize,
+}
+
+impl Entries {
+    /// The entries `entries`, of distinct keys (those of a map), in their order.
+    fn of_distinct(entries: Vec<(Scalar, MapValue)>) -> Entries {
+        let mut positions = HashTable::with_capacity(entries.len());
+        for (at, (key, _)) in entries.iter().enumerate() {
+            let hash = key_hash(key);
+            positions.insert_unique(hash, (hash, at), |&(hash, _)| hash);
+        }
+        Entries {
+            slots: entries.into_iter().map(Some).collect(),
+            positions,
+            first: 0,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.positions.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+
+    /// Room for `additional` more entries.
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.slots.reserve(additional);
+        self.positions.reserve(additional, |&(hash, _)| hash);
+    }
+
+    /// The entries, in the order of their insertion.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &(Scalar, MapValue)> {
+        self.slots[self.first..].iter().flatten()
+    }
+
+    /// Whether the entry at `at`, a position of `positions`, is of `key`.
+    fn is_at(slots: &[Option<(Scalar, MapValue)>], at: usize, key: &Scalar) -> bool {
+        matches!(&slots[at], Some((held, _)) if held == key)
+    }
+
+    /// The value of `key`, if the map has one.
+    pub(crate) fn get(&self, key: &Scalar) -> Option<&MapValue> {
+        let hash = key_hash(key);
+        let slots = &self.slots;
+        let &(_, at) = self
+            .positions
+            .find(hash, |&(h, at)| h == hash && Self::is_at(slots, at, key))?;
+        slots[at].as_ref().map(|(_, value)| value)
+    }
+
+    /// Set the value of `key`, after the other entries if the map has none of it, and give back
+    /// the value that it replaces.
+    pub(crate) fn insert(&mut self, key: Scalar, value: MapValue) -> Option<MapValue> {
+        let hash = key_hash(&key);
+        let Entries {
+            slots, positions, ..
+        } = self;
+        let found = positions.entry(
+            hash,
+            |&(h, at)| h == hash && Self::is_at(slots, at, &key),
+            |&(hash, _)| hash,
+        );
+        match found {
+            hashbrown::hash_table::Entry::Occupied(entry) => {
+                let (_, at) = *entry.get();
+                let (_, held) = slots[at].as_mut().expect("a position of an entry");
+                Some(std::mem::replace(held, value))
+            }
+            hashbrown::hash_table::Entry::Vacant(entry) => {
+                entry.insert((hash, slots.len()));
+                slots.push(Some((key, value)));
+                None
+            }
+        }
+    }
+
+    /// Remove the entry of `key`, and give it back (to drop once the map is no longer borrowed).
+    pub(crate) fn remove(&mut self, key: &Scalar) -> Option<(Scalar, MapValue)> {
+        let hash = key_hash(key);
+        let Entries {
+            slots,
+            positions,
+            first,
+        } = self;
+        let found = positions
+            .find_entry(hash, |&(h, at)| h == hash && Self::is_at(slots, at, key))
+            .ok()?;
+        let ((_, at), _) = found.remove();
+        let removed = slots[at].take();
+        while slots.get(*first).is_some_and(Option::is_none) {
+            *first += 1;
+        }
+        if slots.len() > 2 * positions.len() {
+            self.drop_holes();
+        }
+        removed
+    }
+
+    /// Drop the holes of the removed entries, moving the entries after them.
+    fn drop_holes(&mut self) {
+        let mut moved_to = Vec::with_capacity(self.slots.len());
+        let mut next = 0;
+        for slot in &self.slots {
+            moved_to.push(next);
+            next += usize::from(slot.is_some());
+        }
+        for (_, at) in self.positions.iter_mut() {
+            *at = moved_to[*at];
+        }
+        self.slots.retain(Option::is_some);
+        self.first = 0;
+    }
+}
+
 /// The key of `key` for a map of `map`, with the errors of its entry's `key` field.
 fn key_of(map: &MapDesc, key: &Bound<'_, PyAny>) -> PyResult<Scalar> {
-    Scalar::from_py(map.key, &format!("{}.key", map.entry), "", key)
+    Scalar::from_py(map.key, &map.key_name, "", key)
 }
 
 /// The value of `value` for a map of `map` of scalars, with the errors of its entry's `value`.
 fn value_of(map: &MapDesc, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
-    Scalar::from_py(
-        map.value,
-        &format!("{}.value", map.entry),
-        &map.value_type,
-        value,
-    )
+    Scalar::from_py(map.value, &map.value_name, &map.value_type, value)
 }
 
 /// The entries of a map read for a copy, of the messages of the map, which the copy copies with
@@ -1105,6 +1267,7 @@ pub(crate) struct MapEntries {
 }
 
 impl MapEntries {
+    /// Copies of the entries, a step of `budget` for each entry and for each message copied.
     fn copy_entries(
         self,
         py: Python<'_>,
@@ -1112,6 +1275,7 @@ impl MapEntries {
     ) -> PyResult<Vec<(Scalar, MapValue)>> {
         let mut copies = Vec::with_capacity(self.entries.len());
         for (key, value) in self.entries {
+            budget.step(py)?;
             let value = match value {
                 MapValue::Scalar(v) => MapValue::Scalar(v),
                 MapValue::Message(m) => {
@@ -1130,7 +1294,7 @@ impl MapEntries {
         Ok(MapContainer {
             field_name,
             map,
-            entries: self.copy_entries(py, budget)?,
+            entries: Entries::of_distinct(self.copy_entries(py, budget)?),
             owner: None,
         })
     }
@@ -1148,7 +1312,7 @@ pub struct MapContainer {
     /// borrow of the map held.
     pub(crate) map: Arc<MapDesc>,
     /// The entries, in the order of their insertion.
-    pub(crate) entries: Vec<(Scalar, MapValue)>,
+    pub(crate) entries: Entries,
     owner: Owner,
 }
 
@@ -1157,7 +1321,7 @@ impl MapContainer {
         MapContainer {
             field_name,
             map,
-            entries: Vec::new(),
+            entries: Entries::default(),
             owner,
         }
     }
@@ -1176,10 +1340,6 @@ impl MapContainer {
         slf.borrow().map.clone()
     }
 
-    fn find(&self, key: &Scalar) -> Option<usize> {
-        self.entries.iter().position(|(k, _)| k == key)
-    }
-
     fn reify(slf: &Bound<'_, Self>) -> PyResult<()> {
         let owner = owner_of(slf.py(), &slf.borrow().owner);
         touch(slf.py(), &owner)
@@ -1188,13 +1348,7 @@ impl MapContainer {
     /// Set the value of `key`, replacing the one it has, which it gives back (to drop once the
     /// map is no longer borrowed).
     pub(crate) fn insert(&mut self, key: Scalar, value: MapValue) -> Option<MapValue> {
-        match self.find(&key) {
-            Some(at) => Some(std::mem::replace(&mut self.entries[at].1, value)),
-            None => {
-                self.entries.push((key, value));
-                None
-            }
-        }
+        self.entries.insert(key, value)
     }
 
     fn value_to_py(py: Python<'_>, value: &MapValue) -> PyResult<Py<PyAny>> {
@@ -1207,8 +1361,9 @@ impl MapContainer {
     /// The value of `key` in the map, if it has one.
     fn lookup(slf: &Bound<'_, Self>, key: &Scalar) -> PyResult<Option<Py<PyAny>>> {
         let me = slf.borrow();
-        me.find(key)
-            .map(|at| Self::value_to_py(slf.py(), &me.entries[at].1))
+        me.entries
+            .get(key)
+            .map(|value| Self::value_to_py(slf.py(), value))
             .transpose()
     }
 
@@ -1242,8 +1397,8 @@ impl MapContainer {
         Self::merge_entries(py, target, entries, &ConversionBudget::full())
     }
 
-    /// Set `entries` in `target`, of copies of their messages, a step of `budget` for each
-    /// message copied.
+    /// Set `entries` in `target`, of copies of their messages, a step of `budget` for each entry
+    /// and for each message copied.
     pub(crate) fn merge_entries(
         py: Python<'_>,
         target: &Bound<'_, Self>,
@@ -1251,13 +1406,12 @@ impl MapContainer {
         budget: &ConversionBudget,
     ) -> PyResult<()> {
         let copies = entries.copy_entries(py, budget)?;
-        let _replaced: Vec<MapValue> = {
-            let mut t = target.borrow_mut();
-            copies
-                .into_iter()
-                .filter_map(|(k, v)| t.insert(k, v))
-                .collect()
-        };
+        target.borrow_mut().entries.reserve(copies.len());
+        for (key, value) in copies {
+            budget.step(py)?;
+            // The value that the entry replaces is dropped once the map is no longer borrowed.
+            let _replaced = target.borrow_mut().insert(key, value);
+        }
         Ok(())
     }
 
@@ -1274,11 +1428,11 @@ impl MapContainer {
         if x.entries.len() != y.entries.len() {
             return Ok(false);
         }
-        for (key, value) in &x.entries {
-            let Some(at) = y.find(key) else {
+        for (key, value) in x.entries.iter() {
+            let Some(other) = y.entries.get(key) else {
                 return Ok(false);
             };
-            let equal = match (value, &y.entries[at].1) {
+            let equal = match (value, other) {
                 (MapValue::Scalar(v), MapValue::Scalar(w)) => v == w,
                 (MapValue::Message(m), MapValue::Message(n)) => {
                     content_eq(py, m.bind(py), n.bind(py))?
@@ -1293,19 +1447,23 @@ impl MapContainer {
     }
 
     /// Set the items of `mapping` in `target`, as the constructor of a message takes a map field:
-    /// a message value may be a message or a mapping of its fields.
+    /// a message value may be a message or a mapping of its fields. Each item is a step of
+    /// `budget`, the budget of the constructor, as is each message that it copies or builds.
     pub(crate) fn update_from(
         py: Python<'_>,
         target: &Bound<'_, Self>,
         mapping: &Bound<'_, PyAny>,
+        budget: &ConversionBudget,
     ) -> PyResult<()> {
         let map = Self::map_of(target);
         let items = mapping.call_method0("items")?;
         for item in items.try_iter()? {
-            let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
+            let item = item?;
+            budget.step(py)?;
+            let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item.extract()?;
             let key = key_of(&map, &key)?;
             let value = if map.value == Kind::Message {
-                MapValue::Message(message_from_value(py, &map.value_type, &value)?.unbind())
+                MapValue::Message(message_from_value(py, &map.value_type, &value, budget)?.unbind())
             } else {
                 MapValue::Scalar(value_of(&map, &value)?)
             };
@@ -1331,17 +1489,17 @@ impl MapContainer {
         };
         let mut me = slf.borrow_mut();
         // The value of the key, if Python code that making the value ran has set one.
-        if let Some(at) = me.find(&key) {
-            return Self::value_to_py(py, &me.entries[at].1);
+        if let Some(held) = me.entries.get(&key) {
+            return Self::value_to_py(py, held);
         }
         let out = Self::value_to_py(py, &value)?;
-        me.entries.push((key, value));
+        me.entries.insert(key, value);
         Ok(out)
     }
 
     fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let dict = PyDict::new(py);
-        for (key, value) in &self.entries {
+        for (key, value) in self.entries.iter() {
             dict.set_item(key.to_py(py)?, Self::value_to_py(py, value)?)?;
         }
         Ok(dict)
@@ -1383,19 +1541,16 @@ impl MapContainer {
         Self::reify(slf)?;
         let key = key_of(&Self::map_of(slf), key)?;
         // The entry removed is dropped once the map is no longer borrowed.
-        let _removed = {
-            let mut me = slf.borrow_mut();
-            let at = me
-                .find(&key)
-                .ok_or_else(|| PyKeyError::new_err("Key not present in map"))?;
-            me.entries.remove(at)
-        };
-        Ok(())
+        let removed = slf.borrow_mut().entries.remove(&key);
+        match removed {
+            Some(_) => Ok(()),
+            None => Err(PyKeyError::new_err("Key not present in map")),
+        }
     }
 
     fn __contains__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         let key = key_of(&Self::map_of(slf), key)?;
-        Ok(slf.borrow().find(&key).is_some())
+        Ok(slf.borrow().entries.get(&key).is_some())
     }
 
     fn __len__(&self) -> usize {
@@ -1446,7 +1601,7 @@ impl MapContainer {
 
     fn popitem<'py>(slf: &Bound<'py, Self>) -> PyResult<(Bound<'py, PyAny>, Py<PyAny>)> {
         let py = slf.py();
-        let key = match slf.borrow().entries.first() {
+        let key = match slf.borrow().entries.iter().next() {
             Some((key, _)) => key.clone(),
             None => return Err(PyKeyError::new_err(())),
         };
@@ -1488,7 +1643,9 @@ impl MapContainer {
     }
 
     /// As `MutableMapping.update`: the items of a mapping, of an object with `keys`, or of an
-    /// iterable of pairs, then the keyword arguments.
+    /// iterable of pairs, then the keyword arguments. Each item is a step of an interrupt budget,
+    /// as upb's `update` (`MutableMapping`'s, in Python) lets another thread run and a signal
+    /// interrupt it.
     #[pyo3(signature = (other=None, /, **kwargs))]
     fn update(
         slf: &Bound<'_, Self>,
@@ -1496,34 +1653,41 @@ impl MapContainer {
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
         let py = slf.py();
+        let budget = ConversionBudget::full();
         if let Some(other) = other {
             let mapping = py.import("collections.abc")?.getattr("Mapping")?;
             if other.is_instance(&mapping)? {
                 for key in other.try_iter()? {
                     let key = key?;
+                    budget.step(py)?;
                     Self::__setitem__(slf, &key, &other.get_item(&key)?)?;
                 }
             } else if other.hasattr("keys")? {
                 for key in other.call_method0("keys")?.try_iter()? {
                     let key = key?;
+                    budget.step(py)?;
                     Self::__setitem__(slf, &key, &other.get_item(&key)?)?;
                 }
             } else {
                 for pair in other.try_iter()? {
-                    let (key, value) = unpack_pair(&pair?)?;
+                    let pair = pair?;
+                    budget.step(py)?;
+                    let (key, value) = unpack_pair(&pair)?;
                     Self::__setitem__(slf, &key, &value)?;
                 }
             }
         }
         if let Some(kwargs) = kwargs {
             for (key, value) in kwargs.iter() {
+                budget.step(py)?;
                 Self::__setitem__(slf, &key, &value)?;
             }
         }
         Ok(())
     }
 
-    /// As upb's: the entries of another map, or the pairs of an iterable; never a dict.
+    /// As upb's: the entries of another map, or the pairs of an iterable; never a dict. Each
+    /// entry is a step of an interrupt budget.
     #[pyo3(name = "MergeFrom")]
     fn merge_from(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
@@ -1535,8 +1699,11 @@ impl MapContainer {
             return Self::merge(py, slf, other);
         }
         let map = Self::map_of(slf);
+        let budget = ConversionBudget::full();
         for pair in other.try_iter()? {
-            let (key, value) = unpack_pair(&pair?)?;
+            let pair = pair?;
+            budget.step(py)?;
+            let (key, value) = unpack_pair(&pair)?;
             if map.value == Kind::Message {
                 // upb converts the value as a scalar, which a message is not.
                 key_of(&map, &key)?;
@@ -1628,5 +1795,82 @@ impl MessageMapContainer {
             )));
         }
         MapContainer::get_or_insert(slf.as_super(), &args.get_item(0)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scalar(value: &MapValue) -> &Scalar {
+        match value {
+            MapValue::Scalar(v) => v,
+            MapValue::Message(_) => unreachable!("the tests set scalars"),
+        }
+    }
+
+    fn listed(entries: &Entries) -> Vec<(Scalar, Scalar)> {
+        entries
+            .iter()
+            .map(|(k, v)| (k.clone(), scalar(v).clone()))
+            .collect()
+    }
+
+    /// The entries of a map keep the order in which their keys were inserted, as a dict does, and
+    /// find each key, through removals: random operations on a few keys, which come and go, agree
+    /// with a list of the entries in their order, and the holes of the removed entries are never
+    /// more than the entries, so the iteration and the room of a map stay of its entries.
+    #[test]
+    fn entries_keep_the_order_of_insertion_through_removals() {
+        let mut entries = Entries::default();
+        let mut order: Vec<(Scalar, Scalar)> = Vec::new();
+        // A linear congruential generator, of a fixed seed.
+        let mut state = 7u64;
+        let mut next = move |bound: u64| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) % bound
+        };
+        for step in 0..20_000i64 {
+            let key = Scalar::Str(format!("k{}", next(32)));
+            let value = Scalar::I64(step);
+            if next(10) < 6 {
+                let replaced = entries.insert(key.clone(), MapValue::Scalar(value.clone()));
+                match order.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, held)) => {
+                        assert_eq!(replaced.as_ref().map(scalar), Some(&*held));
+                        *held = value;
+                    }
+                    None => {
+                        assert!(replaced.is_none());
+                        order.push((key, value));
+                    }
+                }
+            } else {
+                let removed = entries.remove(&key);
+                let at = order.iter().position(|(k, _)| *k == key);
+                let removed = removed.map(|(k, v)| (k, scalar(&v).clone()));
+                assert_eq!(removed, at.map(|at| order.remove(at)));
+            }
+            assert_eq!(listed(&entries), order, "step {step}");
+            assert_eq!(entries.len(), order.len());
+            assert!(entries.slots.len() <= 2 * entries.len(), "step {step}");
+            for (key, value) in &order {
+                assert_eq!(entries.get(key).map(scalar), Some(value));
+            }
+        }
+        // The entries of a map, of distinct keys, as a copy takes them.
+        let copied = Entries::of_distinct(
+            order
+                .iter()
+                .map(|(k, v)| (k.clone(), MapValue::Scalar(v.clone())))
+                .collect(),
+        );
+        assert_eq!(listed(&copied), order);
+        assert!(order
+            .iter()
+            .all(|(k, v)| copied.get(k).map(scalar) == Some(v)));
+        assert!(copied.get(&Scalar::Str("missing".to_string())).is_none());
     }
 }
