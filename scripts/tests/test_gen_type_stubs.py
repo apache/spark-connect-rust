@@ -404,6 +404,40 @@ class Schema:
         ):
             gen.check_identity_decorators(tree.src)
 
+    def test_keeps_the_private_names_of_the_dropins_module(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/reader.py",
+            """
+            from typing import Dict
+
+            _registry: Dict[str, int] = {}
+
+            def _helper(x: int) -> int:
+                return x
+
+            def _unused(x: int) -> int:
+                return x
+
+            def read(x: int) -> int:
+                return x
+            """,
+        )
+        # The drop-in's module has _helper and _registry at run time, of its own source (not
+        # of its stub), so the stub declares them; _unused, which it does not have, is dropped.
+        tree.write(
+            tree.repo,
+            "python/pyspark/sql/reader.py",
+            "from pyspark._pyspark import _helper, read\n_registry = {}\n",
+        )
+        stub = body(tree.generate(["pyspark.sql.reader"])[Path("python/pyspark/sql/reader.pyi")])
+        self.assertEqual(
+            stub,
+            "\nfrom typing import Dict\n\n_registry: Dict[str, int]\n\n"
+            "def _helper(x: int) -> int: ...\ndef read(x: int) -> int: ...\n",
+        )
+
     def test_extras_add_the_names_of_the_dropin(self):
         tree = Tree(self)
         tree.write(

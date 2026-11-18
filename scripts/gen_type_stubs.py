@@ -48,8 +48,10 @@ official ``pyspark-client``, where these modules are annotated Python. In detail
     ``(f: FuncT) -> FuncT``, which ``IDENTITY_DECORATORS`` lists and which the generator checks
     in PySpark's source: they change no type and are dropped. Any other decorator is an error.
   * The implementation of an overloaded function is dropped, as stubs declare only overloads.
-  * A module-level function, class or constant whose name is private is kept only when the
-    stub refers to it; a member of a class is always kept.
+  * A module-level function, class or constant whose name is private is kept when the stub
+    refers to it, or when the source of the drop-in's module binds it at run time, as PySpark's
+    module does (``_parse_datatype_string`` of ``pyspark.sql.types``); a member of a class is
+    always kept.
   * An import is kept when the stub refers to its name. A name that PySpark's module imports
     from ``pyspark`` at run time, under its own name, is an attribute of PySpark's module, which
     a type checker of PySpark's source lets a user import from it: the stub re-exports it
@@ -895,15 +897,21 @@ def _module_imports(module_name: str, tree: ast.Module) -> dict[str, str]:
     return imports
 
 
-def prune(stmts: list[ast.stmt], sites: list[ImportSite], extra_refs: set[str]):
+def prune(
+    stmts: list[ast.stmt],
+    sites: list[ImportSite],
+    extra_refs: set[str],
+    runtime: frozenset[str] = frozenset(),
+):
     """The statements of the stub: the public declarations, the private ones that they refer
-    to, and the imports that they need or that the stub re-exports."""
+    to or that the drop-in's module has at run time (`runtime`), and the imports that they need
+    or that the stub re-exports."""
 
     def needed(stmt: ast.stmt) -> bool:
         if isinstance(stmt, (ast.Import, ast.ImportFrom)):
             return False  # decided below, per name
         names = bound_names(stmt)
-        return any(not _is_private(n) for n in names) or not names
+        return any(not _is_private(n) or n in runtime for n in names) or not names
 
     kept = [s for s in stmts if needed(s)]
     candidates = [
@@ -1238,6 +1246,16 @@ class DropIn:
         names = self.provides_all(module)
         return names is None or name in names
 
+    def runtime_names(self, module: str) -> frozenset[str]:
+        """The names that the source of the drop-in's `module` (not its stub) binds at its top
+        level, under any condition: names of it at run time. None of a module of no source."""
+        base = self.root / Path(*module.split("."))
+        for path in (base / "__init__.py", base.with_suffix(".py")):
+            if path.is_file():
+                top = _top_level(ast.parse(path.read_text()).body)
+                return frozenset().union(*(bound_names(s) for s in top))
+        return frozenset()
+
 
 def resolve_reexports(stubs: dict[str, Stub], dropin: DropIn) -> None:
     """Re-export each reexportable import of a stub that the drop-in has, to a fixed point (a
@@ -1255,10 +1273,10 @@ def resolve_reexports(stubs: dict[str, Stub], dropin: DropIn) -> None:
                     changed = True
 
 
-def render_stub(stub: Stub, tag: str) -> str:
-    """The text of `stub`."""
+def render_stub(stub: Stub, tag: str, runtime: frozenset[str] = frozenset()) -> str:
+    """The text of `stub`, whose module of the drop-in binds the names `runtime` at run time."""
     extra_refs = referenced_names(stub.extra_stmts)
-    kept, refs = prune(stub.stmts, stub.sites, extra_refs)
+    kept, refs = prune(stub.stmts, stub.sites, extra_refs, runtime)
     check_references(
         stub.module, kept + stub.extra_stmts, refs - extra_refs, source_bindings(stub.tree.body)
     )
@@ -1283,9 +1301,12 @@ def generate(root: Path, pyspark_src: str, log=print) -> dict[Path, str]:
     check_identity_decorators(src)
     tag = tracked_tag(root)
     stubs = {module: transform(src, module) for module in STUB_MODULES}
-    resolve_reexports(stubs, DropIn(root, stubs))
+    dropin = DropIn(root, stubs)
+    resolve_reexports(stubs, dropin)
     outputs = {
-        PACKAGE_ROOT / stub.source.with_suffix(".pyi"): render_stub(stub, tag)
+        PACKAGE_ROOT / stub.source.with_suffix(".pyi"): render_stub(
+            stub, tag, dropin.runtime_names(stub.module)
+        )
         for stub in stubs.values()
     }
     log(f"Generated {len(outputs)} stubs from PySpark {tag}")

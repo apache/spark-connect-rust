@@ -28,6 +28,8 @@ from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkRuntimeE
 from pyspark.sql.connect._typing import ColumnOrName, DataTypeOrString, UserDefinedFunctionLike
 from pyspark.sql.connect.session import SparkSession
 
+def _create_udf(f: Callable[..., Any], returnType: 'DataTypeOrString', evalType: int, name: Optional[str]=None, deterministic: bool=True) -> 'UserDefinedFunctionLike': ...
+
 class UserDefinedFunction:
     def __init__(self, func: Callable[..., Any], returnType: 'DataTypeOrString'=StringType(), name: Optional[str]=None, evalType: int=PythonEvalType.SQL_BATCHED_UDF, deterministic: bool=True):
         if not callable(func):

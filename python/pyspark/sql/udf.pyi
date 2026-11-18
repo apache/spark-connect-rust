@@ -31,6 +31,9 @@ from pyspark.sql.session import SparkSession
 
 __all__ = ['UDFRegistration']
 
+def _create_udf(f: Callable[..., Any], returnType: 'DataTypeOrString', evalType: int, name: Optional[str]=None, deterministic: bool=True) -> 'UserDefinedFunctionLike': ...
+def _create_py_udf(f: Callable[..., Any], returnType: 'DataTypeOrString', useArrow: Optional[bool]=None) -> 'UserDefinedFunctionLike': ...
+
 class UserDefinedFunction:
     def __init__(self, func: Callable[..., Any], returnType: 'DataTypeOrString'=StringType(), name: Optional[str]=None, evalType: int=PythonEvalType.SQL_BATCHED_UDF, deterministic: bool=True):
         if not callable(func):
