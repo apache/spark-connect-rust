@@ -69,6 +69,12 @@ VENDORED_FILES=(
   "sql/connect/resource/__init__.py"
   "sql/connect/resource/profile.py"
 
+  # The packages of the Avro and Protobuf functions and of the streaming classes of PySpark
+  # Connect, which re-export none of the names of their modules, as PySpark's.
+  "sql/connect/avro/__init__.py"
+  "sql/connect/protobuf/__init__.py"
+  "sql/connect/streaming/__init__.py"
+
   # The Arrow C stream of a DataFrame, of DataFrame.__arrow_c_stream__.
   "sql/interchange.py"
 

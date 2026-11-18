@@ -212,10 +212,13 @@ history, and update via `git subtree pull`.
 Rigorously classify before touching anything (diff our dir vs the version tag):
 - **Rust-backed shims — KEEP OURS** (anything importing `pyspark._pyspark`, or an
   adapter): `sql/*` top-level, `ml/connect/*`, `sql/streaming/{query,readwriter}.py`,
-  `resource/profile.py`, `errors/*`, `pyspark/__init__.py`, `util.py` (Connect-only
-  trim), `storagelevel.py`, `serializers.py` (fork-adapted — verify).
+  `errors/*`, `pyspark/__init__.py`, `util.py` (Connect-only trim), `storagelevel.py`.
 - **Pure upstream — VENDOR via subtree**: `cloudpickle`, `pandas` (see caveat),
-  `_globals.py`, `loose_version.py`, and audit for more.
+  `_globals.py`, `loose_version.py`, `serializers.py`, `resource/*` and
+  `sql/connect/resource/*` (PySpark's resource profiles, whose profile id the connect
+  `ResourceProfile` creates through `SparkSession.client`), and audit for more. A directory of
+  shims can hold vendored files too, such as most of `errors/*` and `sql/session.py`:
+  `VENDORED_FILES` of `scripts/check_vendored_upstream.sh` lists every vendored file.
 
 Subtree conversion (serial, needs a **clean working tree**, one dir at a time):
 ```

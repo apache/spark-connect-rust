@@ -119,6 +119,24 @@ def test_connect_resource_profile_module_offline(mock_connect):
     assert connect_profile.id == 7 and connect_profile._remote_profile.task_resources["cpus"].amount == 2
 
 
+def test_the_resource_classes_are_pysparks_alone():
+    # As PySpark's, the resource profiles and requests are the classes of the modules of
+    # pyspark.resource, vendored as they are. The extension has no classes of these names, which
+    # no module exported and which claimed to be of pyspark.resource.profile.
+    import importlib
+
+    import pyspark._pyspark as native
+    import pyspark.resource as resource
+
+    for name in (
+        "ResourceProfile", "ResourceProfileBuilder", "ExecutorResourceRequests", "TaskResourceRequests"
+    ):
+        assert not hasattr(native, name), name
+        cls = getattr(resource, name)
+        assert cls.__module__ in ("pyspark.resource.profile", "pyspark.resource.requests"), name
+        assert getattr(importlib.import_module(cls.__module__), name) is cls
+
+
 def test_create_dataframe_input_names_offline():
     # Keep the fixture's active session out of this process's offline tests.
     import subprocess
@@ -13423,6 +13441,32 @@ def test_connect_shim_imports():
     from pyspark.sql.connect.functions.builtin import _invoke_function_over_columns
 
     assert repr(_invoke_function_over_columns("pandas_product", F.col("x"))) == "Column<'pandas_product(x)'>"
+
+
+def test_the_connect_avro_protobuf_and_streaming_packages_are_pysparks():
+    # As PySpark's, pyspark.sql.connect.avro, protobuf and streaming are the packages of their
+    # modules only, vendored as they are, which re-export none of their names: the functions are
+    # those of their `functions` modules, and the streaming classes those of `query` and
+    # `readwriter`.
+    import importlib
+    import types
+
+    for name, absent, module, present in [
+        ("pyspark.sql.connect.avro", "from_avro", "functions", "from_avro"),
+        ("pyspark.sql.connect.protobuf", "to_protobuf", "functions", "to_protobuf"),
+        ("pyspark.sql.connect.streaming", "StreamingQuery", "query", "StreamingQuery"),
+        ("pyspark.sql.connect.streaming", "DataStreamReader", "readwriter", "DataStreamReader"),
+    ]:
+        package = importlib.import_module(name)
+        assert not hasattr(package, "__all__"), name
+        own = [
+            key for key, value in vars(package).items()
+            if not key.startswith("_") and not isinstance(value, types.ModuleType)
+        ]
+        assert own == [], (name, own)
+        with pytest.raises(ImportError):
+            exec(f"from {name} import {absent}", {})
+        assert hasattr(importlib.import_module(f"{name}.{module}"), present)
 
 
 def test_module_namespaces_of_the_official_doctests_as_pyspark():

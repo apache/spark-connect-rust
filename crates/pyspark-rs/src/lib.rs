@@ -40,7 +40,6 @@ mod pyarrow_import;
 mod readwriter;
 mod reduce;
 
-mod resource;
 mod row;
 mod session;
 mod stat;
@@ -68,9 +67,6 @@ use datasource::PyDataSourceRegistration;
 use group::{PyCoGroupedData, PyGroupedData};
 pub(crate) use options::{coerce_option_value, str_argument, str_text};
 use readwriter::PyDataFrameReader;
-use resource::{
-    PyExecutorResourceRequests, PyResourceProfile, PyResourceProfileBuilder, PyTaskResourceRequests,
-};
 use session::{PyHook, PySparkSession, PySparkSessionBuilder};
 use stat::PyStatFunctions;
 use streaming::{
@@ -193,12 +189,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStreamingQuery>()?;
     m.add_class::<PyStreamingQueryManager>()?;
     m.add_class::<PyListenerEventStream>()?;
-
-    // Resource profile classes
-    m.add_class::<PyExecutorResourceRequests>()?;
-    m.add_class::<PyTaskResourceRequests>()?;
-    m.add_class::<PyResourceProfileBuilder>()?;
-    m.add_class::<PyResourceProfile>()?;
 
     // Data source and profiler classes
     m.add_class::<PyDataSourceRegistration>()?;

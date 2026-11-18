@@ -14,32 +14,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-"""Compatibility shim for pyspark.sql.connect.streaming: re-exports streaming classes from pyspark.sql.streaming."""
-
-try:
-    from pyspark.sql.streaming import (
-        StreamingQuery,
-        StreamingQueryManager,
-        DataStreamReader,
-        DataStreamWriter,
-        StreamingQueryListener,
-        StatefulProcessor,
-        StatefulProcessorHandle,
-        TwsTester,
-    )
-    from pyspark.errors import StreamingQueryException
-    __all__ = [
-        "StreamingQuery",
-        "StreamingQueryManager",
-        "DataStreamReader",
-        "DataStreamWriter",
-        "StreamingQueryListener",
-        "StatefulProcessor",
-        "StatefulProcessorHandle",
-        "TwsTester",
-        "StreamingQueryException",
-    ]
-except ImportError:
-    # Guard if streaming dependencies not available
-    __all__ = []
