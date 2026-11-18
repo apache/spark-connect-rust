@@ -237,11 +237,15 @@ impl Writer<'_> {
 
 /// upb's order of the keys of a map in its text format (`_upb_mapsorter_cmpstr`): of two strings
 /// that differ in a byte of their common length, the one of the greater byte first, else the
-/// shorter first; of numbers and bools, the lesser first.
+/// shorter first; of numbers and bools, the lesser first, where upb compares the bits of signed
+/// integers as unsigned ones, so that a negative key comes after the others (`0, 1, 100, -5,
+/// -1`).
 fn upb_text_key_order(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
     match (a, b) {
         (Scalar::Str(x), Scalar::Str(y)) => upb_bytes_order(x.as_bytes(), y.as_bytes()),
         (Scalar::Bytes(x), Scalar::Bytes(y)) => upb_bytes_order(x, y),
+        (Scalar::I32(x), Scalar::I32(y)) => (*x as u32).cmp(&(*y as u32)),
+        (Scalar::I64(x), Scalar::I64(y)) => (*x as u64).cmp(&(*y as u64)),
         _ => key_order(a, b),
     }
 }

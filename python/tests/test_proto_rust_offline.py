@@ -28,6 +28,7 @@ are the bytes of the files that Apache Spark's generated modules add. The runtim
 errors of protobuf 7, which a few of protobuf 6 differ from.
 """
 
+import collections
 import collections.abc as abc
 import copy
 import datetime
@@ -1425,6 +1426,345 @@ def test_operations_on_maps_of_many_keys_take_no_scan_of_their_keys(upb):
     assert merged == built and list(merged.named_arguments) == list(parsed.named_arguments)
 
 
+def _protobuf_class(full_name):
+    """protobuf's class of the type ``full_name`` of its default pool, which ``message_factory``
+    gives, as a module that keeps protobuf's classes (Delta Lake's ``base_pb2``) has: a class of
+    the type besides the runtime's, whose maps are protobuf's."""
+    from google.protobuf import descriptor_pool, message_factory
+
+    return message_factory.GetMessageClass(
+        descriptor_pool.Default().FindMessageTypeByName(full_name)
+    )
+
+
+class _KeysOnly:
+    """An object of ``keys`` and ``__getitem__`` that is not a mapping, which ``update`` takes by
+    its keys."""
+
+    def __init__(self, items):
+        self.items = dict(items)
+
+    def keys(self):
+        return list(self.items)
+
+    def __getitem__(self, key):
+        return self.items[key]
+
+
+class _MissingValues(abc.Mapping):
+    """A mapping of ``keys`` whose values cannot be read."""
+
+    def __init__(self, keys):
+        self.keys_ = list(keys)
+
+    def __iter__(self):
+        return iter(self.keys_)
+
+    def __len__(self):
+        return len(self.keys_)
+
+    def __getitem__(self, key):
+        raise KeyError(key)
+
+
+def test_merge_from_of_a_map_takes_its_argument_as_upbs(upb):
+    # upb's MergeFrom of a map refuses a dict. Of a map of scalars, it takes any other argument as
+    # `update` (MutableMapping's) does: the items of a mapping (a map of either runtime, protobuf's
+    # map of a message of protobuf's class of the type, MappingProxyType, UserDict), of an object
+    # with `keys`, or the pairs of an iterable, each key and value converted, with its errors. Of a
+    # map of messages, it reads the keys of the iteration of the argument, converts each, reads
+    # its value, then copies it (CopyFrom) into the message of the key, made if the map has none,
+    # or sets the message's fields of a dict. The runtime took the iteration of any argument but
+    # its own maps as pairs, so a map of 2-character keys merged {"ab": "zz"} as {"a": "b"}, and
+    # took the entries of its own maps of other types as they were, so a map held keys and values
+    # of other types (a message in a map of strings, an Expression in a map of Literals).
+    import types
+
+    def scalar_cases(new, protobufs):
+        source = new("spark.connect.Read.DataSource")
+        return {
+            "the same map": source(options={"ab": "zz"}).options,
+            "a map of strings of another field": new("spark.connect.WithColumnsRenamed")(
+                rename_columns_map={"ab": "zz", "cd": "yy"}
+            ).rename_columns_map,
+            "protobuf's map of the type": protobufs("spark.connect.Read.DataSource")(
+                options={"ab": "zz", "cd": "yy"}
+            ).options,
+            "a map of messages": new("spark.connect.SQL")(args={"ab": {"integer": 1}}).args,
+            "MappingProxyType": types.MappingProxyType({"ab": "zz", "cd": "yy"}),
+            "MappingProxyType of a bad value": types.MappingProxyType({"ab": "zz", "cd": 5}),
+            "UserDict": collections.UserDict({"ab": "zz"}),
+            "an object with keys": _KeysOnly({"ab": "zz"}),
+            "pairs": [("ab", "zz"), ("cd", "yy")],
+            "pairs of a bad value": [("ab", "zz"), ("cd", 5)],
+            "triples": [("ab", "zz", "q")],
+            "a generator of pairs": (pair for pair in [("ab", "zz")]),
+            "a str": "ab",
+            "a keys view": {"ab": "zz"}.keys(),
+            "an int": 5,
+            "None": None,
+            "an empty list": [],
+            "a dict": {"ab": "zz"},
+            "an OrderedDict": collections.OrderedDict(ab="zz"),
+            # upb calls `update` of a tuple as of its items as arguments.
+            "a tuple of a pair": (("ab", "zz"),),
+            "a tuple of a mapping": (types.MappingProxyType({"ab": "zz"}),),
+            "an empty tuple": (),
+            "a tuple of two mappings": ({"ab": "zz"}, {"cd": "yy"}),
+        }
+
+    def message_cases(new, protobufs):
+        sql = new("spark.connect.SQL")
+        literal = new("spark.connect.Expression.Literal")
+        return {
+            "the same map": sql(args={"k": {"integer": 1}, "x": {"string": "s"}}).args,
+            "protobuf's map of the type": protobufs("spark.connect.SQL")(
+                args={"k": {"integer": 1}}
+            ).args,
+            "a map of messages of another type": sql(
+                named_arguments={"k": {"literal": {"integer": 1}}}
+            ).named_arguments,
+            "a map of strings": new("spark.connect.Read.DataSource")(options={"k": "v"}).options,
+            "MappingProxyType of messages": types.MappingProxyType({"k": literal(integer=1)}),
+            "MappingProxyType of dicts": types.MappingProxyType({"k": {"integer": 1}}),
+            "a dict onto an entry": types.MappingProxyType({"x": {"integer": 1}}),
+            "UserDict of messages": collections.UserDict({"k": literal(integer=1)}),
+            "a value of None": types.MappingProxyType({"k": None}),
+            "a dict of no such field": types.MappingProxyType({"k": {"nope": 1}}),
+            "values that cannot be read": _MissingValues(["k"]),
+            "a list of keys": ["k"],
+            "pairs": [("k", literal(integer=1))],
+            "a str": "ab",
+            "an int": 5,
+            "None": None,
+            "an empty list": [],
+            "a dict": {"k": literal(integer=1)},
+            "a tuple of a mapping": (types.MappingProxyType({"k": literal(integer=1)}),),
+        }
+
+    def run(new, protobufs, kind, label):
+        if kind == "scalar":
+            target = new("spark.connect.Read.DataSource")(options={"x": "1"})
+            container = target.options
+            argument = scalar_cases(new, protobufs)[label]
+        else:
+            target = new("spark.connect.SQL")(args={"x": {"long": 9}})
+            target.named_arguments["e"].common.origin.python_origin.fragment = "f"
+            container = target.args
+            argument = message_cases(new, protobufs)[label]
+        outcome = _outcome(lambda: container.MergeFrom(argument))
+        return outcome, target
+
+    for kind, labels in (
+        ("scalar", scalar_cases(ours, _protobuf_class)),
+        ("message", message_cases(ours, _protobuf_class)),
+    ):
+        for label in labels:
+            # upb's class of the type is protobuf's class of the type for upb.
+            real_outcome, real = run(upb, upb, kind, label)
+            mine_outcome, mine = run(ours, _protobuf_class, kind, label)
+            assert mine_outcome == real_outcome, (kind, label)
+            assert mine.SerializeToString() == real.SerializeToString(deterministic=True), (
+                kind,
+                label,
+            )
+            assert str(mine) == str(real), (kind, label)
+
+    # A dict sets the fields of the message of its key as a constructor's mapping does, keeping
+    # the fields that it does not set, where a message replaces it.
+    mine = ours("spark.connect.SQL")()
+    mine.named_arguments["e"].common.origin.python_origin.fragment = "f"
+    mine.named_arguments.MergeFrom(types.MappingProxyType({"e": {"literal": {"integer": 1}}}))
+    assert mine.named_arguments["e"].common.origin.python_origin.fragment == "f"
+    assert mine.named_arguments["e"].literal.integer == 1
+
+    # The message of a key that the map has stays the message of the key, of its new fields, as
+    # upb's CopyFrom of the value into it keeps it, where a MergeFrom of the message replaces it.
+    def kept(new, argument_of, merge_message=False):
+        sql = new("spark.connect.SQL")(args={"k": {"integer": 1}})
+        held = sql.args["k"]
+        if merge_message:
+            sql.MergeFrom(new("spark.connect.SQL")(args={"k": {"string": "s"}}))
+        else:
+            sql.args.MergeFrom(argument_of(new, sql))
+        return held is sql.args["k"], str(held), str(sql.args["k"])
+
+    def of_the_type(new, sql):
+        return new("spark.connect.SQL")(args={"k": {"string": "s"}}).args
+
+    def of_a_message(new, sql):
+        return types.MappingProxyType({"k": new("spark.connect.Expression.Literal")(string="s")})
+
+    def of_a_dict(new, sql):
+        return types.MappingProxyType({"k": {"string": "s"}})
+
+    def itself(new, sql):
+        return sql.args
+
+    for label, argument_of, merge_message in [
+        ("a map of the type", of_the_type, False),
+        ("a mapping of a message", of_a_message, False),
+        ("a mapping of a dict", of_a_dict, False),
+        ("the map itself", itself, False),
+        ("MergeFrom of the message", None, True),
+    ]:
+        assert kept(ours, argument_of, merge_message) == kept(upb, argument_of, merge_message), label
+
+
+def test_update_of_a_map_takes_its_arguments_as_upbs(upb):
+    # upb's update of a map is MutableMapping's, of at most one positional argument, which it
+    # iterates when it is neither a mapping nor of `keys`: None is the error of its iteration.
+    # The runtime took None for no argument, and refused a second one in PyO3's words.
+    cases = {
+        "None": lambda m: m.update(None),
+        "nothing": lambda m: m.update(),
+        "two arguments": lambda m: m.update({}, {}),
+        "a keyword other": lambda m: m.update(other="v"),
+        "a mapping and keywords": lambda m: m.update({"a": "b"}, c="d"),
+        "pairs": lambda m: m.update([("a", "b")]),
+        "an int": lambda m: m.update(5),
+    }
+    for label, update in cases.items():
+        outcomes = []
+        for new in (upb, ours):
+            message = new("spark.connect.Read.DataSource")(options={"x": "1"})
+            outcomes.append((_outcome(lambda: update(message.options)), sorted(message.options.items())))
+        assert outcomes[0] == outcomes[1], label
+
+
+def _iterate_while(container, operation):
+    """What a step of an iteration of `container` gives after `operation` ran between its first
+    two steps: the outcome of the operation, then the keys of the rest of the iteration, or the
+    error of its step."""
+    iterator = iter(container)
+    next(iterator)
+    done = _outcome(operation)
+    return done, _outcome(lambda: list(iterator))
+
+
+def test_maps_changed_during_their_iteration_fail_it_as_upbs(upb):
+    # upb's map takes a new version at the start of each method that may change its keys, even
+    # one that then fails or changes nothing, but a set of a key that the map has: the next step of
+    # an iteration of the map in progress, of its keys, values or items, then raises
+    # `RuntimeError: Map modified during iteration.`. The runtime iterated a copy of the keys, so
+    # `items()` and `values()` read the value of a key that the loop had removed, which inserted
+    # it again, of the default value, in the message that it then serialized.
+    def scalar(message):
+        return message.options
+
+    def messages(message):
+        return message.args
+
+    operations = {
+        "set of a key it has": (scalar, lambda m: m.options.__setitem__("k0", "x")),
+        "set of a new key": (scalar, lambda m: m.options.__setitem__("new", "x")),
+        "set of a bad value": (scalar, lambda m: m.options.__setitem__("k0", 5)),
+        "set of a bad key": (scalar, lambda m: m.options.__setitem__(5, "x")),
+        "del": (scalar, lambda m: m.options.__delitem__("k1")),
+        "del of a missing key": (scalar, lambda m: m.options.__delitem__("zz")),
+        "del of a bad key": (scalar, lambda m: m.options.__delitem__(5)),
+        "read of a key it has": (scalar, lambda m: m.options["k1"]),
+        "read of a missing key": (scalar, lambda m: m.options["zz"]),
+        "read of a bad key": (scalar, lambda m: m.options[5]),
+        "get": (scalar, lambda m: (m.options.get("zz"), m.options.get("k1"))),
+        "in": (scalar, lambda m: ("zz" in m.options, "k1" in m.options)),
+        "len, ==, str": (scalar, lambda m: (len(m.options), m.options == {}, str(m))),
+        "clear": (scalar, lambda m: m.options.clear()),
+        "pop": (scalar, lambda m: m.options.pop("k1")),
+        "pop of a missing key": (scalar, lambda m: m.options.pop("zz", None)),
+        "pop of a bad key": (scalar, lambda m: m.options.pop(5, None)),
+        "popitem": (scalar, lambda m: m.options.popitem()),
+        "setdefault of a key it has": (scalar, lambda m: m.options.setdefault("k1", "q")),
+        "setdefault of a new key": (scalar, lambda m: m.options.setdefault("zz", "q")),
+        "setdefault of no value": (scalar, lambda m: m.options.setdefault("k1")),
+        "update of keys it has": (scalar, lambda m: m.options.update({"k1": "q"})),
+        "update of a new key": (scalar, lambda m: m.options.update({"zz": "q"})),
+        "update of a bad value": (scalar, lambda m: m.options.update({"k1": 5})),
+        "update of nothing": (scalar, lambda m: m.options.update({})),
+        "MergeFrom of keys it has": (scalar, lambda m: m.options.MergeFrom([("k1", "q")])),
+        "MergeFrom of nothing": (scalar, lambda m: m.options.MergeFrom([])),
+        "MergeFrom of a dict": (scalar, lambda m: m.options.MergeFrom({})),
+        "ClearField of the map": (scalar, lambda m: m.ClearField("options")),
+        "ClearField of another field": (scalar, lambda m: m.ClearField("format")),
+        "Clear of the message": (scalar, lambda m: m.Clear()),
+        "MergeFrom of the message": (
+            scalar,
+            lambda m: m.MergeFrom(type(m)(options={"n": "v"})),
+        ),
+        "a parse into the message": (
+            scalar,
+            lambda m: m.MergeFromString(type(m)(options={"n": "v"}).SerializeToString()),
+        ),
+        "read of a message it has": (messages, lambda m: m.args["k1"]),
+        "read of a missing message": (messages, lambda m: m.args["zz"]),
+        "get_or_create of a key it has": (messages, lambda m: m.args.get_or_create("k1")),
+        "get_or_create of a new key": (messages, lambda m: m.args.get_or_create("zz")),
+        "get_or_create of a bad key": (messages, lambda m: m.args.get_or_create(5)),
+        "a change of a message": (messages, lambda m: setattr(m.args["k1"], "integer", 5)),
+        "set of a message": (
+            messages,
+            lambda m: m.args.__setitem__("k1", type(m.args["k1"])()),
+        ),
+        "del of a message": (messages, lambda m: m.args.__delitem__("k1")),
+        "MergeFrom of a map": (messages, lambda m: m.args.MergeFrom(type(m)(args={"k1": {}}).args)),
+        "ClearField of a map of messages": (messages, lambda m: m.ClearField("args")),
+    }
+
+    def build(new, container):
+        if container is scalar:
+            return new("spark.connect.Read.DataSource")(
+                options={"k0": "v0", "k1": "v1", "k2": "v2"}
+            )
+        return new("spark.connect.SQL")(
+            args={"k0": {"integer": 0}, "k1": {"integer": 1}, "k2": {"integer": 2}}
+        )
+
+    # An iteration of a map whose message adds a key goes on: upb's reads the new key or not, of
+    # the order of its hash table, where the runtime's reads it, as the last.
+    adding = {"MergeFrom of the message", "a parse into the message"}
+    for label, (container, operation) in operations.items():
+        results = []
+        for new in (upb, ours):
+            message = build(new, container)
+            done, rest = _iterate_while(container(message), lambda: operation(message))
+            # The keys of upb's iteration are of the order of its hash table: their number.
+            if rest[0] == "ok":
+                rest = ("ok",) if label in adding else ("ok", len(rest[1]))
+            results.append((done[0], rest))
+        assert results[0] == results[1], label
+
+    # items() and values() of a loop that removes a key that it has not read yet stop at the next
+    # step, and the message keeps no entry of the key.
+    for view in ("items", "values"):
+        for new in (upb, ours):
+            message = build(new, scalar)
+            iterator = iter(getattr(message.options, view)())
+            next(iterator)
+            del message.options["k1"]
+            del message.options["k2"]
+            with pytest.raises(RuntimeError, match="^Map modified during iteration[.]$"):
+                next(iterator)
+            assert sorted(message.options) == ["k0"], (view, new)
+    # A change before the first step fails it, and so does one after the last.
+    for new in (upb, ours):
+        options = build(new, scalar).options
+        iterator = iter(options)
+        options["n"] = "x"
+        with pytest.raises(RuntimeError, match="^Map modified during iteration[.]$"):
+            next(iterator)
+        iterator = iter(options)
+        assert len(list(iterator)) == 4 and iter(iterator) is iterator
+        options["m"] = "x"
+        with pytest.raises(RuntimeError, match="^Map modified during iteration[.]$"):
+            next(iterator)
+    # An iteration with no change reads the keys of the map in their order, of a map of messages
+    # too, and values() and items() give their values.
+    options = build(ours, scalar).options
+    assert list(options) == ["k0", "k1", "k2"] and list(options.values()) == ["v0", "v1", "v2"]
+    arguments = build(ours, messages).args
+    assert [(k, v.integer) for k, v in arguments.items()] == [("k0", 0), ("k1", 1), ("k2", 2)]
+
+
 _UNSET_CHILD_OPERATIONS = {
     "SerializeToString": lambda c: c.SerializeToString(),
     "ListFields": lambda c: c.ListFields(),
@@ -1458,6 +1798,7 @@ _UNSET_CHILD_OPERATIONS = {
     "map bad key": lambda c: c.data_source.options[1],
     "map delitem": lambda c: c.data_source.options.__delitem__("k"),
     "map setdefault": lambda c: c.data_source.options.setdefault("k"),
+    "map setdefault bad key": lambda c: c.data_source.options.setdefault(1, "v"),
     "map MergeFrom dict": lambda c: c.data_source.options.MergeFrom({}),
     "map clear": lambda c: c.data_source.options.clear(),
 }
@@ -3562,3 +3903,108 @@ def test_example_plugins_are_messages_of_the_runtime(upb):
     assert plugin.SerializeToString() == real_plugin.SerializeToString()
     assert expression.SerializeToString() == real_expression.SerializeToString()
     assert str(plugin) == str(real_plugin)
+
+
+_INTEGER_MAPS = "tests/intmaps/maps.proto"
+
+
+def _integer_maps(upb):
+    """The class of the runtime and upb's class of ``tests.intmaps.M``, a message of a plugin's file
+    (which imports Spark Connect's relations.proto) of maps of each integer type of key, of bool
+    keys and of string keys, to strings: the protos of Spark Connect have maps of string keys only.
+    The runtime's class is that of the module that protoc generates of the file, which the hook
+    gives the runtime's classes; upb's is of a pool of its own, as ``_upb_classes_of`` makes
+    them."""
+    from google.protobuf import descriptor_pb2, descriptor_pool
+
+    field = descriptor_pb2.FieldDescriptorProto
+    file = descriptor_pb2.FileDescriptorProto(
+        name=_INTEGER_MAPS,
+        package="tests.intmaps",
+        dependency=["spark/connect/relations.proto"],
+        syntax="proto3",
+    )
+    message = file.message_type.add(name="M")
+    maps = [
+        ("i32", field.TYPE_INT32, field.TYPE_STRING),
+        ("i64", field.TYPE_INT64, field.TYPE_STRING),
+        ("u32", field.TYPE_UINT32, field.TYPE_STRING),
+        ("u64", field.TYPE_UINT64, field.TYPE_STRING),
+        ("s32", field.TYPE_SINT32, field.TYPE_STRING),
+        ("sf64", field.TYPE_SFIXED64, field.TYPE_STRING),
+        ("b", field.TYPE_BOOL, field.TYPE_STRING),
+        ("s", field.TYPE_STRING, field.TYPE_STRING),
+    ]
+    for number, (name, key_type, value_type) in enumerate(maps, 1):
+        entry = message.nested_type.add(name=name.capitalize() + "Entry")
+        entry.options.map_entry = True
+        entry.field.add(name="key", number=1, type=key_type, label=field.LABEL_OPTIONAL)
+        entry.field.add(name="value", number=2, type=value_type, label=field.LABEL_OPTIONAL)
+        message.field.add(
+            name=name,
+            number=number,
+            type=field.TYPE_MESSAGE,
+            label=field.LABEL_REPEATED,
+            type_name=f".tests.intmaps.M.{entry.name}",
+        )
+    message.field.add(
+        name="input",
+        number=len(maps) + 1,
+        type=field.TYPE_MESSAGE,
+        label=field.LABEL_OPTIONAL,
+        type_name=".spark.connect.Relation",
+    )
+    serialized = file.SerializeToString()
+    pool = descriptor_pool.Default()
+    try:
+        added = pool.FindFileByName(_INTEGER_MAPS)
+    except KeyError:
+        added = pool.AddSerializedFile(serialized)
+    mine = _build_generated_module(added)["M"]
+    assert issubclass(mine, _pyspark.ProtoMessage)
+    real = _upb_classes_of([(serialized, "tests.intmaps.maps_pb2")])["tests.intmaps.M"]
+    return mine, real
+
+
+def test_maps_of_integer_keys_merge_serialize_and_print_as_upbs(upb):
+    # The protos of Spark Connect have maps of string keys only, so a plugin's file has the maps of
+    # the other types of keys. (The test comes after those that compare each class of the runtime
+    # with upb's, as the file adds its classes to the runtime's.) Their MergeFrom converts the keys
+    # of a map of another type, of either runtime, as upb's does, with its errors. upb orders the
+    # keys of a map of a signed integer type of their bits as unsigned numbers, so a negative key
+    # comes after the others: of its deterministic serialization (the order of the runtime's
+    # serialization) and of its text (str()). The runtime ordered them as signed numbers. protobuf's
+    # text_format sorts them itself, as signed numbers, of either runtime.
+    from google.protobuf import text_format
+
+    mine_class, real_class = _integer_maps(upb)
+    for source_field, key in (("u32", 4), ("i64", 4), ("i64", 2**40), ("b", True), ("s", "k")):
+        outcomes = []
+        for cls in (real_class, mine_class):
+            target, source = cls(i32={1: "x"}), cls()
+            getattr(source, source_field)[key] = "q"
+            outcome = _outcome(lambda: target.i32.MergeFrom(getattr(source, source_field)))
+            outcomes.append(
+                (outcome, sorted(target.i32.items()), target.SerializeToString(deterministic=True))
+            )
+        assert outcomes[0] == outcomes[1], (source_field, key)
+    keys = {
+        "i32": [3, -5, 1, 100, 0, -1, -(2**31), 2**31 - 1],
+        "i64": [3, 2**40, 1, -7, 0, -(2**63), 2**63 - 1],
+        "s32": [3, -5, 1, 0, -1],
+        "sf64": [3, -5, 1, 0, -(2**63)],
+        "u32": [3, 2**31, 1, 0, 2**32 - 1],
+        "u64": [3, 2**63, 1, 0, 2**64 - 1],
+        "b": [True, False],
+    }
+    real, mine = real_class(), mine_class()
+    for field, values in keys.items():
+        for value in values:
+            for message in (real, mine):
+                getattr(message, field)[value] = f"v{value}"
+    assert mine.SerializeToString(deterministic=True) == real.SerializeToString(deterministic=True)
+    assert mine.SerializeToString() == real.SerializeToString(deterministic=True)
+    assert mine.ByteSize() == real.ByteSize()
+    assert str(mine) == str(real) and repr(mine) == repr(real)
+    assert text_format.MessageToString(mine) == text_format.MessageToString(real)
+    assert mine_class.FromString(real.SerializeToString()) == mine

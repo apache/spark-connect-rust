@@ -24,14 +24,13 @@ use hashbrown::HashTable;
 use pyo3::basic::CompareOp;
 use pyo3::exceptions::{
     PyAttributeError, PyFutureWarning, PyIndexError, PyKeyError, PyNotImplementedError,
-    PyTypeError, PyValueError,
+    PyRuntimeError, PyTypeError, PyValueError,
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::pyclass_init::PyClassInitializer;
 use pyo3::types::{
-    PyBytes, PyDict, PyInt, PyIterator, PyList, PySlice, PyTuple, PyType, PyWeakrefMethods,
-    PyWeakrefReference,
+    PyBytes, PyDict, PyInt, PyList, PySlice, PyTuple, PyType, PyWeakrefMethods, PyWeakrefReference,
 };
 use pyo3::IntoPyObjectExt;
 
@@ -1169,6 +1168,18 @@ impl Entries {
         self.slots[self.first..].iter().flatten()
     }
 
+    /// The key of the first entry at the position `at` or after it, with its position: an
+    /// iteration of the entries as they are at each step, whose positions stay while the map keeps
+    /// its keys (a removal, which may move them, takes a new version of the map).
+    pub(crate) fn key_at_or_after(&self, at: usize) -> Option<(usize, &Scalar)> {
+        let start = at.max(self.first);
+        self.slots
+            .get(start..)?
+            .iter()
+            .enumerate()
+            .find_map(|(i, slot)| slot.as_ref().map(|(key, _)| (start + i, key)))
+    }
+
     /// Whether the entry at `at`, a position of `positions`, is of `key`.
     fn is_at(slots: &[Option<(Scalar, MapValue)>], at: usize, key: &Scalar) -> bool {
         matches!(&slots[at], Some((held, _)) if held == key)
@@ -1296,6 +1307,7 @@ impl MapEntries {
             map,
             entries: Entries::of_distinct(self.copy_entries(py, budget)?),
             owner: None,
+            version: 0,
         })
     }
 }
@@ -1314,6 +1326,11 @@ pub struct MapContainer {
     /// The entries, in the order of their insertion.
     pub(crate) entries: Entries,
     owner: Owner,
+    /// The version of the map, as upb's: a new one at the start of each method of the map that
+    /// may change its keys, even one that then fails or changes nothing, but a set of a key that
+    /// the map has (see [`MapContainer::new_version`]). An iteration of the map (a [`MapIterator`])
+    /// fails at its next step once the version is not the one that it started of.
+    version: u64,
 }
 
 impl MapContainer {
@@ -1323,6 +1340,33 @@ impl MapContainer {
             map,
             entries: Entries::default(),
             owner,
+            version: 0,
+        }
+    }
+
+    /// A new version of the map, as upb's map takes one at the start of each method that may
+    /// change its keys (`EnsureReified`): an iteration of the map in progress then fails at its
+    /// next step. The version before, which [`MapContainer::keep_version`] restores.
+    pub(crate) fn new_version(&mut self) -> u64 {
+        let before = self.version;
+        self.version = before.wrapping_add(1);
+        before
+    }
+
+    /// The version `before` again, after a set that replaced the value of a key that the map
+    /// has, of which upb's map takes back the new version: when nothing took another since.
+    fn keep_version(&mut self, before: u64) {
+        if self.version == before.wrapping_add(1) {
+            self.version = before;
+        }
+    }
+
+    /// The full name of the map field, which upb's errors name: of the message that holds the
+    /// entry type (`spark.connect.SQL.named_arguments` of `spark.connect.SQL.NamedArgumentsEntry`).
+    fn full_field_name(&self) -> String {
+        match self.map.entry.rsplit_once('.') {
+            Some((message, _)) => format!("{message}.{}", self.field_name),
+            None => self.field_name.clone(),
         }
     }
 
@@ -1385,16 +1429,6 @@ impl MapContainer {
                 })
                 .collect(),
         }
-    }
-
-    /// Set the entries of `source` in `target`, of copies of its messages.
-    pub(crate) fn merge(
-        py: Python<'_>,
-        target: &Bound<'_, Self>,
-        source: &Bound<'_, Self>,
-    ) -> PyResult<()> {
-        let entries = source.borrow().entries_for_copy(py);
-        Self::merge_entries(py, target, entries, &ConversionBudget::full())
     }
 
     /// Set `entries` in `target`, of copies of their messages, a step of `budget` for each entry
@@ -1522,9 +1556,10 @@ impl MapContainer {
 
     /// Set `item` as the message of `key` in `target`, a map of messages, as upb's
     /// `InitMapAttributes` sets the item of a key: a dict sets the fields of the message of the key
-    /// (made if the map has none), a message of the type of the map's values is copied in place of
-    /// it, and anything else goes to the `CopyFrom` of the message of the key, which raises its
-    /// error of a value that is not a message of the type.
+    /// (made if the map has none), a message of the type of the map's values is copied into the
+    /// message that the map has for the key, or inserted as a copy when it has none, and anything
+    /// else goes to the `CopyFrom` of the message of the key, which raises its error of a value
+    /// that is not a message of the type.
     fn set_message_of_key(
         py: Python<'_>,
         target: &Bound<'_, Self>,
@@ -1541,6 +1576,19 @@ impl MapContainer {
         }
         if let Ok(message) = item.cast::<PyMessage>() {
             if message.borrow().desc.full_name == Self::map_of(target).value_type {
+                // A message that the map has for the key takes the copy in place, as upb's
+                // `CopyFrom` of it does, so that it stays the message of the key: after a
+                // `MergeFrom` of the map, `x = map[key]` from before has the new fields. (The map
+                // of a constructor has none.)
+                let held = match target.borrow().entries.get(&key) {
+                    Some(MapValue::Message(held)) => Some(held.clone_ref(py)),
+                    _ => None,
+                };
+                if let Some(held) = held {
+                    py.get_type::<PyMessage>()
+                        .call_method1("CopyFrom", (held, item))?;
+                    return Ok(());
+                }
                 let copy = duplicate_with(py, message, budget)?;
                 // The value that the copy replaces is dropped once the map is no longer borrowed.
                 let _replaced = target
@@ -1572,6 +1620,48 @@ impl MapContainer {
         Ok(message)
     }
 
+    /// `update` of the positional argument `other`, if it has one, and of `kwargs`, as
+    /// `MutableMapping.update` sets them. Each item is a step of an interrupt budget, as upb's
+    /// `update` (`MutableMapping`'s, in Python) lets another thread run and a signal interrupt it.
+    fn update_with(
+        slf: &Bound<'_, Self>,
+        other: Option<&Bound<'_, PyAny>>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let py = slf.py();
+        let budget = ConversionBudget::full();
+        if let Some(other) = other {
+            let mapping = py.import("collections.abc")?.getattr("Mapping")?;
+            if other.is_instance(&mapping)? {
+                for key in other.try_iter()? {
+                    let key = key?;
+                    budget.step(py)?;
+                    Self::__setitem__(slf, &key, &other.get_item(&key)?)?;
+                }
+            } else if other.hasattr("keys")? {
+                for key in other.call_method0("keys")?.try_iter()? {
+                    let key = key?;
+                    budget.step(py)?;
+                    Self::__setitem__(slf, &key, &other.get_item(&key)?)?;
+                }
+            } else {
+                for pair in other.try_iter()? {
+                    let pair = pair?;
+                    budget.step(py)?;
+                    let (key, value) = unpack_pair(&pair)?;
+                    Self::__setitem__(slf, &key, &value)?;
+                }
+            }
+        }
+        if let Some(kwargs) = kwargs {
+            for (key, value) in kwargs.iter() {
+                budget.step(py)?;
+                Self::__setitem__(slf, &key, &value)?;
+            }
+        }
+        Ok(())
+    }
+
     /// The value of `key`, inserting the default of the value type (a new message, of a message
     /// map) when the map has none, as upb's `map[key]` does.
     fn get_or_insert(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -1582,6 +1672,7 @@ impl MapContainer {
             return Ok(value);
         }
         Self::reify(slf)?;
+        slf.borrow_mut().new_version();
         let value = if map.value == Kind::Message {
             MapValue::Message(new_instance(py, &map.value_type)?.unbind())
         } else {
@@ -1604,15 +1695,6 @@ impl MapContainer {
         }
         Ok(dict)
     }
-
-    fn keys_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
-        let keys = self
-            .entries
-            .iter()
-            .map(|(k, _)| k.to_py(py))
-            .collect::<PyResult<Vec<_>>>()?;
-        PyList::new(py, keys)
-    }
 }
 
 #[pymethods]
@@ -1627,18 +1709,23 @@ impl MapContainer {
         value: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
         Self::reify(slf)?;
+        let before = slf.borrow_mut().new_version();
         let map = Self::map_of(slf);
         let key = key_of(&map, key)?;
         if map.value == Kind::Message {
             return Err(PyValueError::new_err("Message objects may not be assigned"));
         }
         let value = MapValue::Scalar(value_of(&map, value)?);
-        let _replaced = slf.borrow_mut().insert(key, value);
+        let replaced = slf.borrow_mut().insert(key, value);
+        if replaced.is_some() {
+            slf.borrow_mut().keep_version(before);
+        }
         Ok(())
     }
 
     fn __delitem__(slf: &Bound<'_, Self>, key: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
+        slf.borrow_mut().new_version();
         let key = key_of(&Self::map_of(slf), key)?;
         // The entry removed is dropped once the map is no longer borrowed.
         let removed = slf.borrow_mut().entries.remove(&key);
@@ -1657,8 +1744,15 @@ impl MapContainer {
         self.entries.len()
     }
 
-    fn __iter__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyIterator>> {
-        self.keys_list(py)?.as_any().try_iter()
+    /// As upb's: an iterator of the keys of the map as it is at each step, which fails once the
+    /// map takes a new version, so that it reads no key that a removal took meanwhile (which
+    /// `items()` and `values()` would insert again, of the default value, by reading its value).
+    fn __iter__(slf: &Bound<'_, Self>) -> MapIterator {
+        MapIterator {
+            map: slf.clone().unbind(),
+            at: 0,
+            version: slf.borrow().version,
+        }
     }
 
     /// The keys, values and items, as the views of `collections.abc.Mapping` give them, as
@@ -1728,6 +1822,9 @@ impl MapContainer {
                 "The value for scalar map setdefault must be set.",
             ));
         };
+        // As upb's, of a key that the map has, or of one that it cannot hold, too.
+        Self::reify(slf)?;
+        slf.borrow_mut().new_version();
         if let Some(value) = Self::lookup(slf, &key_of(&map, key)?)? {
             return Ok(value);
         }
@@ -1737,83 +1834,49 @@ impl MapContainer {
 
     fn clear(slf: &Bound<'_, Self>) -> PyResult<()> {
         Self::reify(slf)?;
+        slf.borrow_mut().new_version();
         // The entries are dropped once the map is no longer borrowed.
         let _entries = std::mem::take(&mut slf.borrow_mut().entries);
         Ok(())
     }
 
-    /// As `MutableMapping.update`: the items of a mapping, of an object with `keys`, or of an
-    /// iterable of pairs, then the keyword arguments. Each item is a step of an interrupt budget,
-    /// as upb's `update` (`MutableMapping`'s, in Python) lets another thread run and a signal
-    /// interrupt it.
-    #[pyo3(signature = (other=None, /, **kwargs))]
+    /// As `MutableMapping.update`, which upb's maps have: of at most one positional argument, the
+    /// items of a mapping, of an object with `keys`, or of an iterable of pairs (so `None`, which
+    /// is not iterable, is the error of its iteration), then the keyword arguments.
+    #[pyo3(signature = (*args, **kwargs))]
     fn update(
         slf: &Bound<'_, Self>,
-        other: Option<&Bound<'_, PyAny>>,
+        args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<()> {
-        let py = slf.py();
-        let budget = ConversionBudget::full();
-        if let Some(other) = other {
-            let mapping = py.import("collections.abc")?.getattr("Mapping")?;
-            if other.is_instance(&mapping)? {
-                for key in other.try_iter()? {
-                    let key = key?;
-                    budget.step(py)?;
-                    Self::__setitem__(slf, &key, &other.get_item(&key)?)?;
-                }
-            } else if other.hasattr("keys")? {
-                for key in other.call_method0("keys")?.try_iter()? {
-                    let key = key?;
-                    budget.step(py)?;
-                    Self::__setitem__(slf, &key, &other.get_item(&key)?)?;
-                }
-            } else {
-                for pair in other.try_iter()? {
-                    let pair = pair?;
-                    budget.step(py)?;
-                    let (key, value) = unpack_pair(&pair)?;
-                    Self::__setitem__(slf, &key, &value)?;
-                }
-            }
+        if args.len() > 1 {
+            return Err(PyTypeError::new_err(format!(
+                "MutableMapping.update() takes from 1 to 2 positional arguments but {} were given",
+                args.len() + 1
+            )));
         }
-        if let Some(kwargs) = kwargs {
-            for (key, value) in kwargs.iter() {
-                budget.step(py)?;
-                Self::__setitem__(slf, &key, &value)?;
-            }
-        }
-        Ok(())
+        Self::update_with(slf, args.iter().next().as_ref(), kwargs)
     }
 
-    /// As upb's: the entries of another map, or the pairs of an iterable; never a dict. Each
-    /// entry is a step of an interrupt budget.
+    /// As upb's, which refuses a dict and takes any other argument as its `InitMapAttributes`
+    /// takes the value of a map field of a constructor ([`MapContainer::update_from`]): a map of
+    /// scalars through `MutableMapping.update` (of the arguments of a tuple, as upb calls it), so
+    /// of the items of a mapping, such as `protobuf`'s map of a message of `protobuf`'s class of the
+    /// type (`scan.table.options.MergeFrom(base_pb2.Table(...).options)`), or of the pairs of an
+    /// iterable; a map of messages of the keys that the argument iterates, each of its value
+    /// copied into the message of the key. The entries of a map of other types are converted, with
+    /// upb's errors. upb's map takes a new version first, so an iteration of the map in progress
+    /// fails, even of an argument that it refuses. Each entry is a step of an interrupt budget.
     #[pyo3(name = "MergeFrom")]
     fn merge_from(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         Self::reify(slf)?;
+        slf.borrow_mut().new_version();
         if other.cast::<PyDict>().is_ok() {
             return Err(PyAttributeError::new_err("Merging of dict is not allowed"));
         }
-        if let Ok(other) = other.cast::<MapContainer>() {
-            return Self::merge(py, slf, other);
-        }
-        let map = Self::map_of(slf);
-        let budget = ConversionBudget::full();
-        for pair in other.try_iter()? {
-            let pair = pair?;
-            budget.step(py)?;
-            let (key, value) = unpack_pair(&pair)?;
-            if map.value == Kind::Message {
-                // upb converts the value as a scalar, which a message is not.
-                key_of(&map, &key)?;
-                return Err(PyTypeError::new_err(
-                    "bad argument type for built-in operation",
-                ));
-            }
-            Self::__setitem__(slf, &key, &value)?;
-        }
-        Ok(())
+        let field = slf.borrow().full_field_name();
+        Self::update_from(py, slf, other, &field, &ConversionBudget::full())
     }
 
     /// The class of the entry messages of the map, as upb's `GetEntryClass`.
@@ -1860,6 +1923,37 @@ impl MapContainer {
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(self.to_dict(py)?.repr()?.to_string())
+    }
+}
+
+/// The iterator of the keys of a map, as upb's `MapIterator`: it reads the entries of the map as
+/// they are at each step, and fails with upb's `RuntimeError` at each step once the map has taken
+/// a new version since it was made, as a method of the map that may change its keys takes one.
+#[pyclass(module = "pyspark.sql.connect.proto", name = "MapIterator")]
+pub struct MapIterator {
+    map: Py<MapContainer>,
+    /// The position of the next entry to read.
+    at: usize,
+    /// The version of the map that the iteration is of.
+    version: u64,
+}
+
+#[pymethods]
+impl MapIterator {
+    fn __iter__(slf: PyRef<'_, Self>) -> PyRef<'_, Self> {
+        slf
+    }
+
+    fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let map = self.map.bind(py).try_borrow()?;
+        if map.version != self.version {
+            return Err(PyRuntimeError::new_err("Map modified during iteration."));
+        }
+        let Some((at, key)) = map.entries.key_at_or_after(self.at) else {
+            return Ok(None);
+        };
+        self.at = at + 1;
+        key.to_py(py).map(Some)
     }
 }
 
@@ -1954,6 +2048,14 @@ mod tests {
                 assert_eq!(removed, at.map(|at| order.remove(at)));
             }
             assert_eq!(listed(&entries), order, "step {step}");
+            // The iteration of a map by positions, as its iterator reads it, gives the same keys.
+            let mut at = 0;
+            let mut keys = Vec::new();
+            while let Some((found, key)) = entries.key_at_or_after(at) {
+                keys.push(key.clone());
+                at = found + 1;
+            }
+            assert!(keys.iter().eq(order.iter().map(|(k, _)| k)), "step {step}");
             assert_eq!(entries.len(), order.len());
             assert!(entries.slots.len() <= 2 * entries.len(), "step {step}");
             for (key, value) in &order {
