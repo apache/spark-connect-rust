@@ -21477,6 +21477,111 @@ def _local_rows_relation_of(service, df):
     return pa.ipc.open_stream(local[1][0]).read_all(), json.loads(local[2][0])
 
 
+class _ScaleUDT(T.UserDefinedType):
+    """A UserDefinedType of a parameter of a default, which its JSON does not hold."""
+
+    def __init__(self, scale=1):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return T.LongType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj * self.scale
+
+    def deserialize(self, datum):
+        return datum // self.scale
+
+
+class _OffsetUDT(T.UserDefinedType):
+    """A UserDefinedType whose constructor needs its parameter."""
+
+    def __init__(self, offset):
+        self.offset = offset
+
+    @classmethod
+    def sqlType(cls):
+        return T.LongType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj + self.offset
+
+    def deserialize(self, datum):
+        return datum - self.offset
+
+
+class _ScaledPairUDT(T.UserDefinedType):
+    """A UserDefinedType whose SQL type holds another one, of a parameter."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.StructType([
+            T.StructField("left", _ScaleUDT(3)), T.StructField("right", T.LongType()),
+        ])
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return (obj[0], obj[1])
+
+    def deserialize(self, datum):
+        return (datum[0], datum[1])
+
+
+def test_local_rows_are_serialized_by_the_udt_objects_of_the_schema_as_pysparks(mock_connect):
+    # As PySpark's converters of local rows (`udt = dataType` of LocalDataToArrowConversion), which
+    # serialize each value with the type object that the schema holds: two UDTs of one class and
+    # other parameters, in a field, an array, a map's keys or values, a struct, or the SQL type of
+    # another UDT, serialize with their own parameters, and a UDT whose constructor needs its
+    # parameter serializes too. The drop-in made an instance of the class of each, which gave the
+    # values of the default parameters and raised the TypeError of a needed one. The values are
+    # those of official PySpark 4.3.0's LocalDataToArrowConversion.
+    pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
+    schema = T.StructType([
+        T.StructField("a", _ScaleUDT(2)),
+        T.StructField("b", _ScaleUDT(10)),
+        T.StructField("c", T.ArrayType(_ScaleUDT(10))),
+        T.StructField("d", T.MapType(T.StringType(), _ScaleUDT(2))),
+        T.StructField("e", T.StructType([
+            T.StructField("x", _ScaleUDT(3)), T.StructField("y", _OffsetUDT(100)),
+        ])),
+        T.StructField("f", T.MapType(_ScaleUDT(5), T.StringType())),
+        T.StructField("g", _OffsetUDT(7)),
+        T.StructField("h", _ScaledPairUDT()),
+    ])
+    data = [
+        (3, 4, [5, None], {"k": 6}, (7, 1), {2: "v"}, 1, (4, 9)),
+        (None, -1, [], {}, Row(x=None, y=-100), {}, None, None),
+    ]
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(data, schema))
+    assert table.to_pylist() == [
+        {"a": 6, "b": 40, "c": [50, None], "d": [("k", 12)], "e": {"x": 21, "y": 101},
+         "f": [(10, "v")], "g": 8, "h": {"left": 12, "right": 9}},
+        {"a": None, "b": -10, "c": [], "d": [], "e": {"x": None, "y": 0}, "f": [], "g": None,
+         "h": None},
+    ]
+    # Dict rows take their values by name, of the same types.
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        [{"b": 4, "a": 3}], T.StructType([schema["a"], schema["b"]])))
+    assert table.to_pylist() == [{"a": 6, "b": 40}]
+    # A pandas DataFrame goes through PySpark's own conversion, of the same values.
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame(
+        pd.DataFrame({"a": [3], "b": [4]}), T.StructType([schema["a"], schema["b"]])))
+    assert table.to_pylist() == [{"a": 6, "b": 40}]
+
+
 def test_numpy_arrays_in_array_fields_convert_as_pyspark(mock_connect):
     # As PySpark: an array whose elements need no converter (numbers and bools) is taken as
     # PyArrow takes it, so a NumPy array is an array of its values. An array whose elements

@@ -1236,7 +1236,8 @@ pub(crate) fn bytes_of(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<u8>>> {
 /// - Any other value, a dict too, is "not a sequence": an iterator, a generator, a frozenset,
 ///   a `dict_keys` or a `dict_items`.
 ///
-/// Its errors, as those of its elements, wait for the converters of the other columns.
+/// Its errors, as those of its elements, wait for the converters of the other columns. Its
+/// elements hold no user-defined type, which needs a converter, so they have no [`UdtObjects`].
 fn arrow_list(
     obj: &Bound<'_, PyAny>,
     dt: &DataType,
@@ -1250,13 +1251,27 @@ fn arrow_list(
     // A list and a tuple, the values of most rows, are read first: neither is a NumPy array.
     if let Ok(list) = obj.cast::<PyList>() {
         for item in list.iter() {
-            items.push(convert(&item, element_type, contains_null, late, budget)?);
+            items.push(convert(
+                &item,
+                element_type,
+                None,
+                contains_null,
+                late,
+                budget,
+            )?);
         }
         return Ok(Value::List(items));
     }
     if let Ok(tuple) = obj.cast::<PyTuple>() {
         for item in tuple.iter() {
-            items.push(convert(&item, element_type, contains_null, late, budget)?);
+            items.push(convert(
+                &item,
+                element_type,
+                None,
+                contains_null,
+                late,
+                budget,
+            )?);
         }
         return Ok(Value::List(items));
     }
@@ -1290,13 +1305,27 @@ fn arrow_list(
                 Bound::from_owned_ptr_or_err(py, pyo3::ffi::PySequence_GetItem(obj.as_ptr(), index))
             };
             match item {
-                Ok(item) => items.push(convert(&item, element_type, contains_null, late, budget)?),
+                Ok(item) => items.push(convert(
+                    &item,
+                    element_type,
+                    None,
+                    contains_null,
+                    late,
+                    budget,
+                )?),
                 Err(err) => return Ok(late.defer(|| Err(err))),
             }
         }
     } else if obj.is_instance_of::<PySet>() || obj.is_instance_of::<PyDictValues>() {
         for item in obj.try_iter()? {
-            items.push(convert(&item?, element_type, contains_null, late, budget)?);
+            items.push(convert(
+                &item?,
+                element_type,
+                None,
+                contains_null,
+                late,
+                budget,
+            )?);
         }
     } else {
         return Ok(late.defer(|| {
@@ -1362,11 +1391,101 @@ fn arrow_type_text(dt: &DataType) -> Option<String> {
     })
 }
 
-/// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it. Each
-/// value, also of an array, a map or a struct, is a step of `budget`.
-pub(crate) fn convert(
-    obj: &Bound<'_, PyAny>,
+/// The user-defined type objects of a schema that the client was given, at the places of the
+/// user-defined types of its core type: PySpark's converter of a user-defined type serializes each
+/// value with the type object that the schema holds (`udt = dataType` of
+/// `LocalDataToArrowConversion._create_converter`), of its own parameters, which the JSON of the
+/// core type does not keep.
+pub(crate) enum UdtObjects<'py> {
+    /// No user-defined type below.
+    None,
+    /// A user-defined type, and the objects of its `sqlType()`.
+    Udt(Bound<'py, PyAny>, Box<UdtObjects<'py>>),
+    /// The objects of the fields of a struct, in their order.
+    Struct(Vec<UdtObjects<'py>>),
+    /// The objects of the element type of an array.
+    Array(Box<UdtObjects<'py>>),
+    /// The objects of the key type and of the value type of a map.
+    Map(Box<UdtObjects<'py>>, Box<UdtObjects<'py>>),
+}
+
+impl<'py> UdtObjects<'py> {
+    /// The objects of the type object `obj`, of the core type `dt`, as PySpark's converters read
+    /// them: of the `dataType` of each of its `fields`, its `elementType`, its `keyType` and
+    /// `valueType`, and of the `sqlType()` of a user-defined type that holds another.
+    pub(crate) fn of(obj: &Bound<'py, PyAny>, dt: &DataType) -> PyResult<Self> {
+        let py = obj.py();
+        if !crate::types::has_udt(dt) {
+            return Ok(Self::None);
+        }
+        Ok(match dt {
+            DataType::Udt { sql_type, .. } => {
+                let sql = match sql_type {
+                    Some(sql_type) if crate::types::has_udt(sql_type) => {
+                        Self::of(&obj.call_method0(intern!(py, "sqlType"))?, sql_type)?
+                    }
+                    _ => Self::None,
+                };
+                Self::Udt(obj.clone(), Box::new(sql))
+            }
+            DataType::Struct { fields } => {
+                let objects = obj.getattr(intern!(py, "fields"))?;
+                let mut children = Vec::with_capacity(fields.len());
+                for (field, object) in fields.iter().zip(objects.try_iter()?) {
+                    let data_type = object?.getattr(intern!(py, "dataType"))?;
+                    children.push(Self::of(&data_type, &field.data_type)?);
+                }
+                Self::Struct(children)
+            }
+            DataType::Array { element_type, .. } => Self::Array(Box::new(Self::of(
+                &obj.getattr(intern!(py, "elementType"))?,
+                element_type,
+            )?)),
+            DataType::Map {
+                key_type,
+                value_type,
+                ..
+            } => Self::Map(
+                Box::new(Self::of(&obj.getattr(intern!(py, "keyType"))?, key_type)?),
+                Box::new(Self::of(
+                    &obj.getattr(intern!(py, "valueType"))?,
+                    value_type,
+                )?),
+            ),
+            _ => Self::None,
+        })
+    }
+
+    /// The objects of the field `index` of a struct.
+    pub(crate) fn field(&self, index: usize) -> Option<&Self> {
+        match self {
+            Self::Struct(fields) => fields.get(index),
+            _ => None,
+        }
+    }
+
+    fn element(&self) -> Option<&Self> {
+        match self {
+            Self::Array(element) => Some(element),
+            _ => None,
+        }
+    }
+
+    fn key_and_value(&self) -> (Option<&Self>, Option<&Self>) {
+        match self {
+            Self::Map(key, value) => (Some(key), Some(value)),
+            _ => (None, None),
+        }
+    }
+}
+
+/// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it, with the
+/// user-defined type objects `objects` of `dt`, if the schema was given. Each value, also of an
+/// array, a map or a struct, is a step of `budget`.
+pub(crate) fn convert<'py>(
+    obj: &Bound<'py, PyAny>,
     dt: &DataType,
+    objects: Option<&UdtObjects<'py>>,
     nullable: bool,
     late: &mut Late,
     budget: &ConversionBudget,
@@ -1390,7 +1509,7 @@ pub(crate) fn convert(
                 obj.str()?
             ),
         )),
-        DataType::Struct { fields } => convert_struct(obj, fields, late, budget),
+        DataType::Struct { fields } => convert_struct(obj, fields, objects, late, budget),
         DataType::Array {
             element_type,
             contains_null,
@@ -1406,9 +1525,17 @@ pub(crate) fn convert(
             {
                 return Err(assertion());
             }
+            let element = objects.and_then(UdtObjects::element);
             let mut items = Vec::with_capacity(obj.len().unwrap_or(0));
             for item in obj.try_iter()? {
-                items.push(convert(&item?, element_type, *contains_null, late, budget)?);
+                items.push(convert(
+                    &item?,
+                    element_type,
+                    element,
+                    *contains_null,
+                    late,
+                    budget,
+                )?);
             }
             Ok(Value::List(items))
         }
@@ -1418,11 +1545,21 @@ pub(crate) fn convert(
             value_contains_null,
         } => {
             let dict = obj.cast::<PyDict>().map_err(|_| assertion())?;
+            let (key_objects, value_objects) = objects
+                .map(UdtObjects::key_and_value)
+                .unwrap_or((None, None));
             let mut entries = Vec::with_capacity(dict.len());
             for (key, value) in dict.iter() {
                 entries.push((
-                    convert(&key, key_type, false, late, budget)?,
-                    convert(&value, value_type, *value_contains_null, late, budget)?,
+                    convert(&key, key_type, key_objects, false, late, budget)?,
+                    convert(
+                        &value,
+                        value_type,
+                        value_objects,
+                        *value_contains_null,
+                        late,
+                        budget,
+                    )?,
                 ));
             }
             Ok(Value::Map(entries))
@@ -1549,20 +1686,27 @@ pub(crate) fn convert(
             }
         }
         // As PySpark's converter of a user-defined type: the value serialized by the UDT, and
-        // converted as its SQL type.
+        // converted as its SQL type. The UDT is the object of the schema that was given, as
+        // PySpark's; of an inferred schema, that of the value.
         DataType::Udt {
             sql_type: Some(sql_type),
             python_class,
             serialized_python_class,
             ..
         } => {
-            let udt = udt_of(
-                obj,
-                python_class.as_deref(),
-                serialized_python_class.as_deref(),
-            )?;
+            let (udt, sql_objects) = match objects {
+                Some(UdtObjects::Udt(udt, sql_objects)) => (udt.clone(), Some(&**sql_objects)),
+                _ => (
+                    udt_of(
+                        obj,
+                        python_class.as_deref(),
+                        serialized_python_class.as_deref(),
+                    )?,
+                    None,
+                ),
+            };
             let serialized = udt.call_method1(intern!(py, "serialize"), (obj,))?;
-            convert(&serialized, sql_type, nullable, late, budget)
+            convert(&serialized, sql_type, sql_objects, nullable, late, budget)
         }
         _ => Err(unsupported(obj)?),
     }
@@ -1800,9 +1944,10 @@ fn arrow_binary(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
     }
 }
 
-/// The user-defined type of a column whose class is `python_class`, to serialize `obj`: that of
-/// the value, as PySpark infers a UDT by `__UDT__`, when it is of the class; else an instance
-/// of the class, which the type sends cloudpickled for a class of `__main__`.
+/// The user-defined type of a column whose class is `python_class`, to serialize `obj`, where the
+/// conversion has no object of the schema (see [`UdtObjects`]), as of a schema that the client
+/// inferred: that of the value, as PySpark infers a UDT by `__UDT__`, when it is of the class;
+/// else an instance of the class, which the type sends cloudpickled for a class of `__main__`.
 fn udt_of<'py>(
     obj: &Bound<'py, PyAny>,
     python_class: Option<&str>,
@@ -1964,9 +2109,10 @@ fn values_by_position<'py>(
 
 /// A struct value, as PySpark converts one: a tuple or a Row by position, a dict by name,
 /// and another object by the names of its `__dict__`.
-fn convert_struct(
-    obj: &Bound<'_, PyAny>,
+fn convert_struct<'py>(
+    obj: &Bound<'py, PyAny>,
     fields: &[StructField],
+    objects: Option<&UdtObjects<'py>>,
     late: &mut Late,
     budget: &ConversionBudget,
 ) -> PyResult<Value> {
@@ -1985,12 +2131,13 @@ fn convert_struct(
             obj.str()?
         )));
     };
-    struct_of(&values, fields, late, budget)
+    struct_of(&values, fields, objects, late, budget)
 }
 
-fn struct_of(
-    values: &[Bound<'_, PyAny>],
+fn struct_of<'py>(
+    values: &[Bound<'py, PyAny>],
     fields: &[StructField],
+    objects: Option<&UdtObjects<'py>>,
     late: &mut Late,
     budget: &ConversionBudget,
 ) -> PyResult<Value> {
@@ -1998,7 +2145,11 @@ fn struct_of(
     let values = values
         .iter()
         .zip(fields)
-        .map(|(value, f)| convert(value, &f.data_type, f.nullable, late, budget))
+        .enumerate()
+        .map(|(index, (value, f))| {
+            let field_objects = objects.and_then(|objects| objects.field(index));
+            convert(value, &f.data_type, field_objects, f.nullable, late, budget)
+        })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Value::Struct(StructValue::new(names, values)))
 }

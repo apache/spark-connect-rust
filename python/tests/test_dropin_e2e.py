@@ -46,6 +46,7 @@ from pyspark.sql.types import (
     StructField,
     StructType,
     TimestampType,
+    UserDefinedType,
 )
 
 
@@ -4848,6 +4849,41 @@ df = spark.range(2).select(F.udf(lambda i: Point(i, i + 1), PointUDT(10.0))("id"
 assert df.collect() == [Row(p=Point(0.0, 10.0)), Row(p=Point(10.0, 20.0))]
 assert df.select(F.to_json(F.struct("p"))).collect()[1][0] == '{"p":[10.0,20.0]}'
 """, remote], check=True)
+
+
+class _ScaleUDT(UserDefinedType):
+    """A UserDefinedType of a parameter, which its JSON does not hold."""
+
+    def __init__(self, scale=1):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return LongType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj * self.scale
+
+    def deserialize(self, datum):
+        return datum // self.scale
+
+
+def test_local_rows_are_serialized_by_the_udt_objects_of_the_schema_as_pyspark(session):
+    # As official PySpark 4.3.0, which serializes each value of local rows with the UDT object
+    # that the schema holds: two UDTs of one class and other parameters keep their own, in a
+    # field, an array and a map, as the values that the server stores show.
+    schema = StructType([
+        StructField("a", _ScaleUDT(2)),
+        StructField("b", _ScaleUDT(10)),
+        StructField("c", ArrayType(_ScaleUDT(10))),
+        StructField("d", MapType(StringType(), _ScaleUDT(2))),
+    ])
+    df = session.createDataFrame([(3, 4, [5], {"k": 6})], schema)
+    assert df.toArrow().to_pylist() == [{"a": 6, "b": 40, "c": [50], "d": [("k", 12)]}]
 
 
 def test_create_dataframe_schema_keeps_metadata_edited_in_place(session):
