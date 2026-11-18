@@ -26,18 +26,20 @@ use pyo3::exceptions::{
 };
 use pyo3::ffi;
 use pyo3::prelude::*;
+use pyo3::pyclass_init::PyClassInitializer;
 use pyo3::types::{
-    PyDict, PyInt, PyIterator, PyList, PySlice, PyTuple, PyType, PyWeakrefMethods,
+    PyBytes, PyDict, PyInt, PyIterator, PyList, PySlice, PyTuple, PyType, PyWeakrefMethods,
     PyWeakrefReference,
 };
 use pyo3::IntoPyObjectExt;
 
 use super::message::{
-    content_eq, duplicate, mark_present, message_from_value, new_instance, registered_class,
-    PyMessage,
+    content_eq, duplicate, duplicate_with, mark_present, message_from_value, new_instance,
+    registered_class, MessageClass, PyMessage,
 };
 use super::pool::{Kind, MapDesc};
 use super::scalar::Scalar;
+use crate::interrupt::ConversionBudget;
 
 /// The message that holds a container, weakly.
 pub(crate) type Owner = Option<Py<PyWeakrefReference>>;
@@ -290,15 +292,15 @@ fn unpack_pair<'py>(pair: &Bound<'py, PyAny>) -> PyResult<(Bound<'py, PyAny>, Bo
     }
 }
 
-/// A message of the type `full_name` with the fields of `value`, as `append` and `insert` of upb
-/// take one: a new message that merges `value`, a message of the same type.
+/// A message of `class` with the fields of `value`, as `append` and `insert` of upb take one: a
+/// new message that merges `value`, a message of the same type.
 fn message_copy<'py>(
     py: Python<'py>,
-    full_name: &str,
+    class: &MessageClass,
     value: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyMessage>> {
-    let message = new_instance(py, full_name)?;
-    message.call_method1("MergeFrom", (value,))?;
+    let message = class.new_message(py)?;
+    PyMessage::merge_from(&message, value)?;
     Ok(message)
 }
 
@@ -328,6 +330,50 @@ impl ScalarField {
     fn convert(&self, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
         Scalar::from_py(self.kind, &self.name, &self.enum_type, value)
     }
+}
+
+/// The values of a container of scalars for its numpy array: the native bytes of the values of
+/// a numeric field and the name of their dtype, or the values of a string or bytes field.
+enum ArrayValues {
+    Native(Vec<u8>, &'static str),
+    Strings(Vec<Py<PyAny>>),
+    Bytes(Vec<Py<PyAny>>),
+}
+
+/// The `dtype` that `__array__` is given, if it is given (None too), of its arguments as upb's
+/// takes them: a `dtype` and a `copy`, by position or by name.
+fn array_dtype_argument<'py>(
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let given = args.len() + kwargs.map_or(0, |k| k.len());
+    if given > 2 {
+        return Err(PyTypeError::new_err(format!(
+            "function takes at most 2 arguments ({given} given)"
+        )));
+    }
+    let mut dtype = args.get_item(0).ok();
+    for (key, value) in kwargs.iter().flat_map(|k| k.iter()) {
+        let key = key.str()?.to_string();
+        let position = match key.as_str() {
+            "dtype" => 1,
+            "copy" => 2,
+            _ => {
+                return Err(PyTypeError::new_err(format!(
+                    "'{key}' is an invalid keyword argument for this function"
+                )))
+            }
+        };
+        if args.len() >= position {
+            return Err(PyTypeError::new_err(format!(
+                "argument for function given by name ('{key}') and position ({position})"
+            )));
+        }
+        if position == 1 {
+            dtype = Some(value);
+        }
+    }
+    Ok(dtype)
 }
 
 /// Make the `count` items of `items` from `start` `given` items, as upb's assignment of a slice
@@ -411,6 +457,59 @@ impl RepeatedScalar {
             .map(|v| v.to_py(py))
             .collect::<PyResult<Vec<_>>>()?;
         PyList::new(py, values)
+    }
+
+    /// The values for the numpy array of `__array__`, of the dtype of the field.
+    fn array_values(&self, py: Python<'_>) -> PyResult<ArrayValues> {
+        fn native<const N: usize>(
+            items: &[Scalar],
+            dtype: &'static str,
+            bytes: impl Fn(&Scalar) -> [u8; N],
+        ) -> ArrayValues {
+            let mut out = Vec::with_capacity(items.len() * N);
+            for item in items {
+                out.extend_from_slice(&bytes(item));
+            }
+            ArrayValues::Native(out, dtype)
+        }
+        let items = &self.items;
+        Ok(match self.field.kind {
+            Kind::Double => native(items, "float64", |v| match v {
+                Scalar::F64(v) => v.to_ne_bytes(),
+                _ => [0; 8],
+            }),
+            Kind::Float => native(items, "float32", |v| match v {
+                Scalar::F32(v) => v.to_ne_bytes(),
+                _ => [0; 4],
+            }),
+            Kind::Int64 | Kind::SInt64 | Kind::SFixed64 => native(items, "int64", |v| match v {
+                Scalar::I64(v) => v.to_ne_bytes(),
+                _ => [0; 8],
+            }),
+            Kind::UInt64 | Kind::Fixed64 => native(items, "uint64", |v| match v {
+                Scalar::U64(v) => v.to_ne_bytes(),
+                _ => [0; 8],
+            }),
+            Kind::Int32 | Kind::SInt32 | Kind::SFixed32 => native(items, "int32", |v| match v {
+                Scalar::I32(v) => v.to_ne_bytes(),
+                _ => [0; 4],
+            }),
+            Kind::UInt32 | Kind::Fixed32 => native(items, "uint32", |v| match v {
+                Scalar::U32(v) => v.to_ne_bytes(),
+                _ => [0; 4],
+            }),
+            Kind::Enum => native(items, "int32", |v| match v {
+                Scalar::Enum(v) => v.to_ne_bytes(),
+                _ => [0; 4],
+            }),
+            Kind::Bool => native(items, "bool", |v| [matches!(v, Scalar::Bool(true)) as u8]),
+            Kind::String => {
+                ArrayValues::Strings(items.iter().map(|v| v.to_py(py)).collect::<PyResult<_>>()?)
+            }
+            Kind::Bytes | Kind::Message => {
+                ArrayValues::Bytes(items.iter().map(|v| v.to_py(py)).collect::<PyResult<_>>()?)
+            }
+        })
     }
 
     /// Set the message of the container in its parent, as upb's methods that may change a
@@ -597,6 +696,46 @@ impl RepeatedScalar {
         Err(pickle_error(py))
     }
 
+    /// The values as a numpy array, as upb's `__array__` gives them: an array of the type of the
+    /// field (`int32`, `int64`, `uint32` or `uint64` of an integer, `float64` of a double,
+    /// `float32` of a float, `bool`, `int32` of an enum, `S` of bytes and `str` of strings), cast
+    /// to `numpy.dtype(dtype)` when `dtype` is given (None too, which is `float64`). `copy` is
+    /// taken and not read: the array is always a new one. The values of a numeric field go into
+    /// the array at once, not as a Python object each.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __array__<'py>(
+        slf: &Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let dtype = array_dtype_argument(args, kwargs)?;
+        let values = slf.borrow().array_values(py)?;
+        let numpy = py.import("numpy")?;
+        let dtype = match dtype {
+            Some(dtype) => Some(numpy.getattr("dtype")?.call1((dtype,))?),
+            None => None,
+        };
+        // As upb's: the values of a numeric field are cast from an array of their type, those of
+        // a string or bytes field converted from their list.
+        let (values, field_dtype) = match values {
+            ArrayValues::Native(bytes, field_dtype) => {
+                let array = numpy
+                    .call_method1("frombuffer", (PyBytes::new(py, &bytes), field_dtype))?
+                    .call_method0("copy")?;
+                return match dtype {
+                    Some(dtype) => array.call_method1("astype", (dtype,)),
+                    None => Ok(array),
+                };
+            }
+            ArrayValues::Strings(values) => {
+                (values, py.get_type::<pyo3::types::PyString>().into_any())
+            }
+            ArrayValues::Bytes(values) => (values, "S".into_pyobject(py)?.into_any()),
+        };
+        numpy.call_method1("array", (values, dtype.unwrap_or(field_dtype)))
+    }
+
     fn __len__(&self) -> usize {
         self.items.len()
     }
@@ -694,15 +833,16 @@ fn sort_kwargs<'py>(
     name = "RepeatedCompositeContainer"
 )]
 pub struct RepeatedComposite {
-    pub(crate) message_type: String,
+    /// The class of the messages of the container, which makes its new ones.
+    pub(crate) class: MessageClass,
     pub(crate) items: Vec<Py<PyMessage>>,
     owner: Owner,
 }
 
 impl RepeatedComposite {
-    pub(crate) fn new(message_type: String, items: Vec<Py<PyMessage>>, owner: Owner) -> Self {
+    pub(crate) fn new(class: MessageClass, items: Vec<Py<PyMessage>>, owner: Owner) -> Self {
         RepeatedComposite {
-            message_type,
+            class,
             items,
             owner,
         }
@@ -720,15 +860,21 @@ impl RepeatedComposite {
 
 #[pymethods]
 impl RepeatedComposite {
-    #[pyo3(signature = (**kwargs))]
+    /// As upb's: a new message of the fields of `kwargs`, appended; a positional argument is the
+    /// error of a constructor's.
+    #[pyo3(signature = (*args, **kwargs))]
     fn add<'py>(
         slf: &Bound<'py, Self>,
+        args: &Bound<'py, PyTuple>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyMessage>> {
         let py = slf.py();
+        if !args.is_empty() {
+            return Err(PyTypeError::new_err("No positional arguments allowed"));
+        }
         Self::reify(slf)?;
-        let message_type = slf.borrow().message_type.clone();
-        let child = new_instance(py, &message_type)?;
+        let class = slf.borrow().class.clone_ref(py);
+        let child = class.new_message(py)?;
         if let Some(kwargs) = kwargs {
             child.borrow_mut().init_from_mapping(py, kwargs.as_any())?;
         }
@@ -736,17 +882,20 @@ impl RepeatedComposite {
         Ok(child)
     }
 
-    /// As upb's: a new message, appended, then merged with `value`, so that a message of another
-    /// type leaves the new message (empty) in the container.
-    fn append(slf: &Bound<'_, Self>, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    /// As upb's: a new message, appended, then merged with `value` and returned, so that a message
+    /// of another type leaves the new message (empty) in the container.
+    fn append<'py>(
+        slf: &Bound<'py, Self>,
+        value: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyMessage>> {
         let py = slf.py();
         Self::reify(slf)?;
         verify_message(value)?;
-        let message_type = slf.borrow().message_type.clone();
-        let child = new_instance(py, &message_type)?;
+        let class = slf.borrow().class.clone_ref(py);
+        let child = class.new_message(py)?;
         slf.borrow_mut().items.push(child.clone().unbind());
-        child.call_method1("MergeFrom", (value,))?;
-        Ok(())
+        PyMessage::merge_from(&child, value)?;
+        Ok(child)
     }
 
     /// As upb's: each value of the iterator of `elem_seq` appended as it comes, so a failure
@@ -764,14 +913,11 @@ impl RepeatedComposite {
     fn insert(slf: &Bound<'_, Self>, key: isize, value: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         Self::reify(slf)?;
-        let (message_type, at) = {
+        let (class, at) = {
             let me = slf.borrow();
-            (
-                me.message_type.clone(),
-                insert_position(key, me.items.len()),
-            )
+            (me.class.clone_ref(py), insert_position(key, me.items.len()))
         };
-        let copy = message_copy(py, &message_type, value)?;
+        let copy = message_copy(py, &class, value)?;
         let mut me = slf.borrow_mut();
         let at = at.min(me.items.len());
         me.items.insert(at, copy.unbind());
@@ -858,7 +1004,7 @@ impl RepeatedComposite {
             .map(|m| duplicate(py, m.bind(py)).map(Bound::unbind))
             .collect::<PyResult<Vec<_>>>()?;
         Ok(RepeatedComposite::new(
-            self.message_type.clone(),
+            self.class.clone_ref(py),
             items,
             None,
         ))
@@ -950,7 +1096,52 @@ fn value_of(map: &MapDesc, value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     )
 }
 
-#[pyclass(mapping, module = "pyspark.sql.connect.proto", name = "MapContainer")]
+/// The entries of a map read for a copy, of the messages of the map, which the copy copies with
+/// no borrow of the map held.
+pub(crate) struct MapEntries {
+    field_name: String,
+    map: Arc<MapDesc>,
+    entries: Vec<(Scalar, MapValue)>,
+}
+
+impl MapEntries {
+    fn copy_entries(
+        self,
+        py: Python<'_>,
+        budget: &ConversionBudget,
+    ) -> PyResult<Vec<(Scalar, MapValue)>> {
+        let mut copies = Vec::with_capacity(self.entries.len());
+        for (key, value) in self.entries {
+            let value = match value {
+                MapValue::Scalar(v) => MapValue::Scalar(v),
+                MapValue::Message(m) => {
+                    MapValue::Message(duplicate_with(py, m.bind(py), budget)?.unbind())
+                }
+            };
+            copies.push((key, value));
+        }
+        Ok(copies)
+    }
+
+    /// A map of copies of the entries, held by no message yet.
+    pub(crate) fn copy(self, py: Python<'_>, budget: &ConversionBudget) -> PyResult<MapContainer> {
+        let field_name = self.field_name.clone();
+        let map = self.map.clone();
+        Ok(MapContainer {
+            field_name,
+            map,
+            entries: self.copy_entries(py, budget)?,
+            owner: None,
+        })
+    }
+}
+
+#[pyclass(
+    mapping,
+    subclass,
+    module = "pyspark.sql.connect.proto",
+    name = "MapContainer"
+)]
 pub struct MapContainer {
     field_name: String,
     /// The key and value of the map, which its methods convert keys and values for, with no
@@ -969,6 +1160,16 @@ impl MapContainer {
             entries: Vec::new(),
             owner,
         }
+    }
+
+    /// The Python object of `map`: a `MessageMapContainer` of a map of messages, which has
+    /// `get_or_create` as upb's of the same name has, else a `MapContainer`.
+    pub(crate) fn into_object(self, py: Python<'_>) -> PyResult<Py<MapContainer>> {
+        if self.map.value != Kind::Message {
+            return Py::new(py, self);
+        }
+        let init = PyClassInitializer::from(self).add_subclass(MessageMapContainer);
+        Ok(Bound::new(py, init)?.into_super().unbind())
     }
 
     fn map_of(slf: &Bound<'_, Self>) -> Arc<MapDesc> {
@@ -1011,26 +1212,24 @@ impl MapContainer {
             .transpose()
     }
 
-    fn copy_value(py: Python<'_>, value: &MapValue) -> PyResult<MapValue> {
-        Ok(match value {
-            MapValue::Scalar(v) => MapValue::Scalar(v.clone()),
-            MapValue::Message(m) => MapValue::Message(duplicate(py, m.bind(py))?.unbind()),
-        })
-    }
-
-    /// A copy of the map, of copies of its messages, held by no message yet.
-    pub(crate) fn copy(&self, py: Python<'_>) -> PyResult<MapContainer> {
-        let entries = self
-            .entries
-            .iter()
-            .map(|(k, v)| Ok((k.clone(), Self::copy_value(py, v)?)))
-            .collect::<PyResult<Vec<_>>>()?;
-        Ok(MapContainer {
+    /// The entries of the map, read for a copy: their keys and scalars copied, and their messages,
+    /// which [`MapEntries::copy`] copies once the map is no longer borrowed.
+    pub(crate) fn entries_for_copy(&self, py: Python<'_>) -> MapEntries {
+        MapEntries {
             field_name: self.field_name.clone(),
             map: self.map.clone(),
-            entries,
-            owner: None,
-        })
+            entries: self
+                .entries
+                .iter()
+                .map(|(k, v)| {
+                    let value = match v {
+                        MapValue::Scalar(v) => MapValue::Scalar(v.clone()),
+                        MapValue::Message(m) => MapValue::Message(m.clone_ref(py)),
+                    };
+                    (k.clone(), value)
+                })
+                .collect(),
+        }
     }
 
     /// Set the entries of `source` in `target`, of copies of its messages.
@@ -1039,13 +1238,19 @@ impl MapContainer {
         target: &Bound<'_, Self>,
         source: &Bound<'_, Self>,
     ) -> PyResult<()> {
-        let copies = {
-            let s = source.borrow();
-            s.entries
-                .iter()
-                .map(|(k, v)| Ok((k.clone(), Self::copy_value(py, v)?)))
-                .collect::<PyResult<Vec<_>>>()?
-        };
+        let entries = source.borrow().entries_for_copy(py);
+        Self::merge_entries(py, target, entries, &ConversionBudget::full())
+    }
+
+    /// Set `entries` in `target`, of copies of their messages, a step of `budget` for each
+    /// message copied.
+    pub(crate) fn merge_entries(
+        py: Python<'_>,
+        target: &Bound<'_, Self>,
+        entries: MapEntries,
+        budget: &ConversionBudget,
+    ) -> PyResult<()> {
+        let copies = entries.copy_entries(py, budget)?;
         let _replaced: Vec<MapValue> = {
             let mut t = target.borrow_mut();
             copies
@@ -1388,5 +1593,40 @@ impl MapContainer {
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         Ok(self.to_dict(py)?.repr()?.to_string())
+    }
+}
+
+/// The map of a map field of messages, as upb's `MessageMapContainer`: a `MapContainer` with
+/// `get_or_create`.
+#[pyclass(
+    extends = MapContainer,
+    mapping,
+    module = "pyspark.sql.connect.proto",
+    name = "MessageMapContainer"
+)]
+pub struct MessageMapContainer;
+
+#[pymethods]
+impl MessageMapContainer {
+    /// The value of `key`, inserted as a new message if the map has none, as `map[key]` gives it,
+    /// with upb's errors of its one argument.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn get_or_create(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        if kwargs.is_some_and(|k| !k.is_empty()) {
+            return Err(PyTypeError::new_err(
+                "MessageMapContainer.get_or_create() takes no keyword arguments",
+            ));
+        }
+        if args.len() != 1 {
+            return Err(PyTypeError::new_err(format!(
+                "MessageMapContainer.get_or_create() takes exactly one argument ({} given)",
+                args.len()
+            )));
+        }
+        MapContainer::get_or_insert(slf.as_super(), &args.get_item(0)?)
     }
 }

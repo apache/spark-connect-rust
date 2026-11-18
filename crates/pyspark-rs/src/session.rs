@@ -3295,23 +3295,32 @@ impl PySparkSession {
 
     /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
     /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
-    /// `ExecutePlanResponse`: for the `execute_command` of `client`.
+    /// `ExecutePlanResponse`: for the `execute_command` of `client`. The command is decoded, and
+    /// the responses encoded, with the GIL released, as the execution waits: a command or a
+    /// response of many values (the vocabulary of a model) takes as long as it is large.
     fn _execute_command<'py>(
         &self,
         py: Python<'py>,
         command: &[u8],
     ) -> PyResult<Vec<Bound<'py, pyo3::types::PyBytes>>> {
         use prost::Message;
-        let command = spark_connect_proto::Command::decode(command)
+        let command = py
+            .detach(|| spark_connect_proto::Command::decode(command))
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let responses = interruptible(py, &self.session, || {
             self.session
                 .execute_command_proto(command)
+                .map(|responses| {
+                    responses
+                        .iter()
+                        .map(|response| response.encode_to_vec())
+                        .collect::<Vec<_>>()
+                })
                 .map_err(Box::new)
         })?;
         Ok(responses
             .iter()
-            .map(|response| pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
+            .map(|response| pyo3::types::PyBytes::new(py, response))
             .collect())
     }
 

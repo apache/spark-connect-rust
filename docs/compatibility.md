@@ -1183,8 +1183,14 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
 (`pyspark.sql.connect.proto.base_pb2`, ..., and `example_plugins_pb2`, of Spark's example plugin).
 `protobuf`'s `json_format` and `text_format` print and parse its messages. The differences:
 
-- its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`, and
-  it has one map container type where upb has a scalar one and a message one;
+- its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`: its
+  classes are of the metaclass `type`, not upb's `MessageMeta`, and can be subclassed, which upb
+  refuses, and its map of scalars is a `MapContainer`, where upb's is a `ScalarMapContainer`, of
+  which its map of messages, a `MessageMapContainer` as upb's, is a subclass;
+- the pool of its descriptors (`DESCRIPTOR.file.pool`) is its own, of the files of the protos of
+  Spark Connect and of the plugins' files that the drop-in adds to it (see below), not
+  `protobuf`'s default pool: it finds their descriptors as upb's does, but has no `Add`,
+  `AddSerializedFile` or `SetFeatureSetDefaults`, so Python code adds no file to it;
 - it parses, prints and builds (of nested dicts) messages of any depth, where upb refuses to
   parse more than 100 nested messages, its constructor overflows the stack of a thread from
   thousands of nested dicts, and `text_format` exceeds Python's recursion limit;
@@ -1194,6 +1200,25 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   end the process;
 - the iteration order of a map is the order of insertion, where upb's is that of its hash table.
   Serialization and the text format write the entries in upb's order of the keys;
+- a varint that the end of the data, or of its packed field, cuts short fails the parse without a
+  value, where upb reads the bytes after it (of the next field, or zeros past the end of the data)
+  into a value that it keeps;
+- it makes a Python object of each message that it parses or copies, where upb makes one when the
+  message is read, so the parse, the copy and the release of a message of many messages take
+  several times as long as upb's (0.25 s for the parse of a million messages, upb's 0.04 s). The
+  parse, the copies (the constructor, `CopyFrom` and `copy.deepcopy`) and the merges (`MergeFrom`)
+  let another thread take the GIL, and a signal interrupt them with the exception of its handler,
+  every 1,024 messages, where upb holds the GIL until they end, so another thread can use a
+  message that one of them reads meanwhile. `SerializeToString` and the release of a message hold
+  the GIL until they end: 0.07 s for a million messages, where upb's take 0.04 s and 2 ms. The
+  messages that the runtime makes, of a parse, a copy or a read of an unset field, are not
+  tracked by the garbage collector (`gc.is_tracked`), as they make no reference cycles, so that a
+  collection does not go through the messages of a large message;
+- the pickle of a message of a nested type names its class, which loads without `protobuf`,
+  where upb's names protobuf's `_InternalConstructMessage` of the full name of its type, which
+  loads where `protobuf` is installed (as a message of the runtime, whose classes of the protos of
+  Spark Connect are those of protobuf's default symbol database; those of a plugin's files stay
+  `protobuf`'s there, as below);
 - `GetOptions()` of a descriptor gives `protobuf`'s `descriptor_pb2` options, as upb's does, so
   it needs `protobuf`.
 
