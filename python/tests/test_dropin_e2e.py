@@ -4586,34 +4586,36 @@ def test_pandas_frames_of_duplicate_nested_field_names_are_created_as_pyspark(se
 
 
 
+class _PairUDT(UserDefinedType):
+    """A UserDefinedType of pairs, of this module, of which a schema of the server makes a new
+    object, as `UserDefinedType.fromJson` imports it."""
+
+    @classmethod
+    def sqlType(cls):
+        return ArrayType(DoubleType(), False)
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return [obj[0], obj[1]]
+
+    def deserialize(self, datum):
+        return (datum[0], datum[1])
+
+    def __eq__(self, other):
+        return isinstance(other, _PairUDT)
+
+    def __hash__(self):
+        return 1
+
+
 def test_maps_with_user_defined_keys_collect_their_deserialized_keys_as_pyspark(session):
     # As PySpark: the keys of a map of a user-defined type are deserialized, at the top level,
     # in a struct, in an array and in the value of a map, for collect, toLocalIterator, head,
     # first and take.
-    from pyspark.sql.types import UserDefinedType
-
-    class PairUDT(UserDefinedType):
-        @classmethod
-        def sqlType(cls):
-            return ArrayType(DoubleType(), False)
-
-        @classmethod
-        def module(cls):
-            return __name__
-
-        def serialize(self, obj):
-            return [obj[0], obj[1]]
-
-        def deserialize(self, datum):
-            return (datum[0], datum[1])
-
-        def __eq__(self, other):
-            return isinstance(other, PairUDT)
-
-        def __hash__(self):
-            return 1
-
-    pair = PairUDT()
+    pair = _PairUDT()
     schema = StructType([
         StructField("m", MapType(pair, IntegerType())),
         StructField("s", StructType([StructField("k", MapType(pair, StringType()))])),
@@ -4638,6 +4640,90 @@ def test_maps_with_user_defined_keys_collect_their_deserialized_keys_as_pyspark(
     # A list key is unhashable, as in PySpark, also in a map with user-defined keys.
     with pytest.raises(TypeError, match="unhashable"):
         session.sql("SELECT map(array(1), 'x') AS m").collect()
+
+
+class _MarkedPointUDT(UserDefinedType):
+    """A UserDefinedType of points, of this module, which `UserDefinedType.fromJson` imports."""
+
+    @classmethod
+    def sqlType(cls):
+        return ArrayType(DoubleType(), False)
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return [obj[0], obj[1]]
+
+    def deserialize(self, datum):
+        return (datum[0], datum[1])
+
+
+class _ArgPointUDT(_MarkedPointUDT):
+    """A UserDefinedType of a parameter, which `UserDefinedType.fromJson` does not give, as it
+    calls the class of no arguments."""
+
+    def __init__(self, scale):
+        self.scale = scale
+
+
+def test_schemas_of_the_server_make_new_user_defined_type_objects_as_pyspark(session):
+    # As official PySpark 4.3.0's conversion of the types of the server, whose
+    # UserDefinedType.fromJson makes a new object of the class of each user-defined type: the
+    # schema of a DataFrame holds neither the object that the client was given nor the one that
+    # it made last of its JSON, nor their attributes, and of a class whose __init__ takes
+    # arguments, its schema, its dtypes and its rows raise the TypeError of fromJson. The client's
+    # own types keep their objects.
+    marked = _MarkedPointUDT()
+    marked.marker = "made"
+    df = session.createDataFrame([((1.0, 2.0),)], StructType([StructField("p", marked)]))
+    udt = df.schema["p"].dataType
+    assert type(udt) is _MarkedPointUDT and udt is not marked and not hasattr(udt, "marker")
+    assert df.schema["p"].dataType is not udt
+    later = _MarkedPointUDT()
+    later.marker = "later"
+    ArrayType(later)
+    assert not hasattr(df.schema["p"].dataType, "marker")
+    assert df.dtypes == [("p", "udt")]
+    assert df.collect() == [Row(p=(1.0, 2.0))]
+    with_arguments = session.createDataFrame(
+        [((1.0, 2.0),)], StructType([StructField("p", _ArgPointUDT(2))])
+    )
+    for request in (lambda: with_arguments.schema, lambda: with_arguments.dtypes,
+                    with_arguments.collect):
+        with pytest.raises(TypeError, match="missing 1 required positional argument"):
+            request()
+    own = StructType([StructField("p", marked)])
+    assert own["p"].dataType is marked and ArrayType(marked).elementType is marked
+
+
+def test_uses_of_the_json_of_a_type_of_a_user_defined_type_of_no_json_raise_its_error(session):
+    # As official PySpark 4.3.0, whose struct, array and map of a UserDefinedType whose module()
+    # is not implemented are made (see test_dropin_types_columns_offline.py): the uses that read
+    # their JSON raise the NOT_IMPLEMENTED of the type's jsonValue(), by the first request, and a
+    # UDF that of its sqlType(); DataFrame.to keeps the schema as it was given.
+    from pyspark.errors import PySparkNotImplementedError
+
+    array = ArrayType(UserDefinedType())
+    schema = StructType([StructField("a", UserDefinedType())])
+    df = session.range(1)
+    strings = session.range(1).selectExpr("'{}' AS v")
+    assert df.to(schema).columns == ["a"]
+    for request, feature in [
+        (lambda: df.select(F.col("id").cast(array)).schema, "module()"),
+        (lambda: df.select(F.col("id").try_cast(schema)).collect(), "module()"),
+        (lambda: df.to(schema).collect(), "module()"),
+        (lambda: df.select(F.from_json(F.lit("{}"), schema)).schema, "module()"),
+        (lambda: session.read.schema(schema).json(strings).schema, "module()"),
+        (lambda: session.catalog.createTable("t_udt_of_no_json", schema=schema), "module()"),
+        (lambda: session.udf.registerJavaFunction("f_udt_of_no_json", "x.Y", array), "module()"),
+        (lambda: session.createDataFrame([], schema).collect(), "module()"),
+        (lambda: df.select(F.udf(lambda x: x, array)("id")).schema, "sqlType()"),
+    ]:
+        with pytest.raises(PySparkNotImplementedError) as e:
+            request()
+        assert e.value.getMessageParameters() == {"feature": feature}
 
 
 def test_maps_keep_their_entries_in_order_with_keys_of_their_type(session):

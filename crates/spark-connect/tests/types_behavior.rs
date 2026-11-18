@@ -51,8 +51,9 @@ fn simple_string_matches_pyspark() {
 
 #[test]
 fn simple_string_of_the_ml_udts_matches_pyspark() {
-    // PySpark's VectorUDT and MatrixUDT name their simple strings, as a schema of ML features
-    // prints them. Another UDT keeps "udt".
+    // PySpark's VectorUDT and MatrixUDT, of pyspark.ml.linalg and of pyspark.mllib.linalg, name
+    // their simple strings, as a schema of ML features prints them and a cast shows them.
+    // Another UDT keeps "udt".
     use spark_connect::types::StructField;
     let udt = |python_class: Option<&str>| DataType::Udt {
         type_str: "udt".to_string(),
@@ -63,6 +64,15 @@ fn simple_string_of_the_ml_udts_matches_pyspark() {
     };
     assert_eq!(s(&udt(Some("pyspark.ml.linalg.VectorUDT"))), "vector");
     assert_eq!(s(&udt(Some("pyspark.ml.linalg.MatrixUDT"))), "matrix");
+    assert_eq!(s(&udt(Some("pyspark.mllib.linalg.VectorUDT"))), "vector");
+    assert_eq!(s(&udt(Some("pyspark.mllib.linalg.MatrixUDT"))), "matrix");
+    assert_eq!(
+        s(&DataType::Array {
+            element_type: Box::new(udt(Some("pyspark.mllib.linalg.VectorUDT"))),
+            contains_null: true,
+        }),
+        "array<vector>"
+    );
     assert_eq!(
         s(&udt(Some("pyspark.testing.sqlutils.ExamplePointUDT"))),
         "udt"

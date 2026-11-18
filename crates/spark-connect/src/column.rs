@@ -7,8 +7,8 @@ use std::ops::{Add, BitAnd, BitOr, Div, Mul, Not, Rem, Sub};
 use spark_connect_proto as proto;
 
 use crate::expression::{
-    Alias, CaseWhen, Cast, CastEvalMode, Expression, ExpressionNode, ExtractValue, FrameBoundary,
-    LiteralExpression, SortOrder, UpdateFieldsExpr, WindowExpressionWrapper,
+    Alias, CaseWhen, Cast, CastEvalMode, CastTarget, Expression, ExpressionNode, ExtractValue,
+    FrameBoundary, LiteralExpression, SortOrder, UpdateFieldsExpr, WindowExpressionWrapper,
 };
 use crate::types::DataType;
 use crate::window::WindowSpec;
@@ -99,6 +99,25 @@ impl Column {
                 Cast::new(self.expr, to_type).with_eval_mode(CastEvalMode::Try),
             ))
             .into(),
+        }
+    }
+
+    /// [`Column::cast`] of `to_type`, or [`Column::try_cast`] of it if `try_`, which the render of
+    /// the cast shows as the simple string `shown` (see [`CastTarget::Shown`]), as the Python
+    /// client's of a type object whose `simpleString()` the core's type does not tell. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn cast_shown(self, to_type: DataType, shown: &str, try_: bool) -> Column {
+        let mut cast = Cast {
+            child: self.expr,
+            target: CastTarget::Shown(to_type, shown.to_string()),
+            eval_mode: None,
+        };
+        if try_ {
+            cast = cast.with_eval_mode(CastEvalMode::Try);
+        }
+        Column {
+            expr: ExpressionNode::Cast(Box::new(cast)).into(),
         }
     }
 
@@ -835,6 +854,30 @@ mod tests {
             collation: "UTF8_BINARY".to_string(),
         });
         assert!(matches!(casted.expr.node(), ExpressionNode::Cast(_)));
+    }
+
+    #[test]
+    fn cast_shown_renders_its_shown_type_and_sends_its_type() {
+        // As the Python client's cast of a type object whose `simpleString()` the core's type does
+        // not tell, which PySpark's `CastExpression.__repr__` shows in upper case: the plan is
+        // that of the cast of the type.
+        let udt = DataType::Udt {
+            type_str: "udt".to_string(),
+            jvm_class: None,
+            python_class: Some("m.ScaleUDT".to_string()),
+            serialized_python_class: None,
+            sql_type: Some(Box::new(DataType::Double)),
+        };
+        for (try_, name) in [(false, "CAST"), (true, "TRY_CAST")] {
+            let shown = col("x").cast_shown(udt.clone(), "scale2", try_);
+            assert_eq!(shown.expr.render(), format!("{name}(x AS SCALE2)"));
+            let plain = match try_ {
+                false => col("x").cast(udt.clone()),
+                true => col("x").try_cast(udt.clone()),
+            };
+            assert_eq!(plain.expr.render(), format!("{name}(x AS UDT)"));
+            assert_eq!(shown.expr.to_proto(), plain.expr.to_proto());
+        }
     }
 
     #[test]

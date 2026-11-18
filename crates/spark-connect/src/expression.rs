@@ -970,7 +970,7 @@ impl Expression {
             ExpressionNode::Cast(cast) => {
                 let type_str = match &cast.target {
                     CastTarget::Type(dt) => dt.simple_string(),
-                    CastTarget::TypeStr(s) => s.clone(),
+                    CastTarget::TypeStr(s) | CastTarget::Shown(_, s) => s.clone(),
                 }
                 .to_uppercase();
                 let name = if cast.eval_mode == Some(CastEvalMode::Try) {
@@ -1741,6 +1741,12 @@ pub struct Cast {
 pub enum CastTarget {
     Type(DataType),
     TypeStr(String),
+    /// A structured `DataType`, which the cast sends as [`CastTarget::Type`] does, and which its
+    /// render shows as the simple string `shown`: PySpark's `CastExpression.__repr__` shows the
+    /// `simpleString()` of the type object, which the core's type does not tell of a Python
+    /// type, such as a user-defined type of its own `simpleString()`. Not a stable API.
+    #[doc(hidden)]
+    Shown(DataType, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1778,7 +1784,9 @@ impl Cast {
         let mut cast = proto::expression::Cast::default();
         cast.expr = Some(Box::new(self.child.to_proto()));
         cast.cast_to_type = Some(match &self.target {
-            CastTarget::Type(dt) => proto::expression::cast::CastToType::Type(dt.to_proto()),
+            CastTarget::Type(dt) | CastTarget::Shown(dt, _) => {
+                proto::expression::cast::CastToType::Type(dt.to_proto())
+            }
             CastTarget::TypeStr(s) => proto::expression::cast::CastToType::TypeStr(s.clone()),
         });
 

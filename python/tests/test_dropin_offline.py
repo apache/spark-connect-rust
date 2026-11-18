@@ -5200,6 +5200,26 @@ def test_user_defined_types_are_named_by_their_classes_as_pyspark():
     assert struct.fields[0].simpleString() == "v:vector"
 
 
+def test_casts_to_the_linalg_types_show_their_simple_strings_as_pyspark():
+    # As PySpark's CastExpression.__repr__, of the simpleString() of the type in upper case: the
+    # VectorUDT and MatrixUDT of pyspark.mllib.linalg are `vector` and `matrix`, as those of
+    # pyspark.ml.linalg, also in an array, a map or a struct.
+    from pyspark.ml import linalg as ml
+    from pyspark.mllib import linalg as mllib
+    from pyspark.sql import functions as F
+
+    for linalg in (ml, mllib):
+        for data_type, shown in [
+            (linalg.VectorUDT(), "VECTOR"),
+            (linalg.MatrixUDT(), "MATRIX"),
+            (T.ArrayType(linalg.VectorUDT()), "ARRAY<VECTOR>"),
+            (T.MapType(T.StringType(), linalg.MatrixUDT()), "MAP<STRING,MATRIX>"),
+            (T.StructType([T.StructField("v", linalg.VectorUDT())]), "STRUCT<V:VECTOR>"),
+        ]:
+            assert repr(F.col("x").cast(data_type)) == f"Column<'CAST(x AS {shown})'>"
+            assert repr(F.col("x").try_cast(data_type)) == f"Column<'TRY_CAST(x AS {shown})'>"
+
+
 class _DayPointUDT(T.UserDefinedType):
     @classmethod
     def sqlType(cls):

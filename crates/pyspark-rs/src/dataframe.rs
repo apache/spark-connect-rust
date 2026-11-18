@@ -188,7 +188,7 @@ impl PyDataFrame {
                 .unbind();
         }
         let schema = match &schema {
-            Some(schema) => crate::types::data_type_to_py(py, schema)?,
+            Some(schema) => crate::types::schema_to_py(py, schema)?,
             None => py.None(),
         };
         let (metrics, observed) = match self.dataframe.execution_info() {
@@ -2726,8 +2726,8 @@ impl PyDataFrame {
         // it, which that conversion (`pyspark_types_to_proto_types`) does not take either.
         let mut unsendable = None;
         if !schema.is_instance_of::<pyo3::types::PyString>() {
-            if let Ok(dt) = crate::types::py_to_data_type(schema) {
-                match crate::types::unsendable_field_repr(schema, &dt)? {
+            match crate::types::py_to_data_type(schema) {
+                Ok(dt) => match crate::types::unsendable_field_repr(schema, &dt)? {
                     None => {
                         let reader = crate::udf_command::data_type_pickler(schema.clone().unbind());
                         let mut result =
@@ -2736,7 +2736,23 @@ impl PyDataFrame {
                         return Ok(result);
                     }
                     Some(field) => unsendable = Some(field),
+                },
+                // A type that does not lower now, such as a struct of a `UserDefinedType` whose
+                // `module()` is not implemented, which a type keeps as it is: PySpark's conversion
+                // of the plan raises its error at each request (see `crate::types::lenient_type`),
+                // as `PlanArgs::raised` takes it.
+                Err(err) if schema.is_instance_of::<crate::types::PyDataType>() => {
+                    let mut args = crate::plan_args::PlanArgs::new();
+                    if args.raised(schema.py(), err).is_ok() {
+                        if let Some(error) = args.error() {
+                            let error = error.clone();
+                            let mut result = PyDataFrame::new(self.dataframe.unbuildable(error));
+                            result.schema_object = Some(schema.clone().unbind());
+                            return Ok(result);
+                        }
+                    }
                 }
+                Err(_) => {}
             }
         }
         let operation = match unsendable {
@@ -3263,7 +3279,7 @@ impl PyDataFrame {
             .call_method1("_table_as_received", (table,))?
             .unbind();
         let schema = match &schema {
-            Some(schema) => crate::types::data_type_to_py(py, schema)?,
+            Some(schema) => crate::types::schema_to_py(py, schema)?,
             None => py.None(),
         };
         Ok((table, schema))
@@ -3480,10 +3496,11 @@ impl PyDataFrame {
     #[getter]
     fn schema(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         // As PySpark's loads of `_cached_schema_serialized`, of the schema that the copy or the
-        // unpickle of which this DataFrame is made requested.
+        // unpickle of which this DataFrame is made requested, which the server gave: of a new
+        // object of each user-defined type (see `schema_to_py`).
         if let Some(schema) = slf.borrow().copy_schema() {
             check_schema_conversion(slf.py(), Some(&schema))?;
-            return crate::types::data_type_to_py(slf.py(), &schema);
+            return crate::types::schema_to_py(slf.py(), &schema);
         }
         Self::property_schema(slf)?.schema(slf.py())
     }
@@ -3795,10 +3812,12 @@ impl PyDataFrame {
                         .bind(py)
                         .hasattr("is_mock_session")?
                 {
-                    // `self._schema`: the schema that it keeps as a Python object, as it is.
+                    // `self._schema`: the schema that it keeps as a Python object, as it is, or
+                    // that of the server, of a new object of each user-defined type (see
+                    // `schema_to_py`).
                     let schema = match self.own_schema(py)? {
                         PropertySchema::Object(schema) => schema.unbind(),
-                        PropertySchema::Core(schema) => crate::types::data_type_to_py(py, &schema)?,
+                        PropertySchema::Core(schema) => crate::types::schema_to_py(py, &schema)?,
                     };
                     let verified = py
                         .import("pyspark.sql.connect.types")?
@@ -6984,7 +7003,9 @@ fn udt_field_converters(
     let Some(schema) = schema.filter(|schema| crate::types::has_converted_values(schema)) else {
         return Ok(None);
     };
-    let schema = crate::types::data_type_to_py(py, schema)?;
+    // As PySpark's, which converts the rows of the schema of the server, of a new object of each
+    // user-defined type (see `schema_to_py`).
+    let schema = crate::types::schema_to_py(py, schema)?;
     let converters = py
         .import("pyspark.sql.types")?
         .call_method1("_udt_field_converters", (schema,))?;
@@ -7249,11 +7270,12 @@ enum PropertySchema<'py> {
 }
 
 impl<'py> PropertySchema<'py> {
-    /// As PySpark's `schema`: the type object of the schema of the server, or a deep copy of the
-    /// object, as PySpark's `copy.deepcopy` of its `_schema`.
+    /// As PySpark's `schema`: the type object of the schema of the server, of a new object of each
+    /// user-defined type (see `schema_to_py`), or a deep copy of the object, as PySpark's
+    /// `copy.deepcopy` of its `_schema`.
     fn schema(self, py: Python<'py>) -> PyResult<Py<PyAny>> {
         match self {
-            PropertySchema::Core(schema) => crate::types::data_type_to_py(py, &schema),
+            PropertySchema::Core(schema) => crate::types::schema_to_py(py, &schema),
             PropertySchema::Object(schema) => Ok(py
                 .import("copy")?
                 .call_method1("deepcopy", (schema,))?
@@ -7279,14 +7301,22 @@ impl<'py> PropertySchema<'py> {
     }
 
     /// As PySpark's `dtypes`, of the `simpleString()` of the type of each field: of a user-defined
-    /// type, such as `vector`, which only its Python class knows.
+    /// type, such as `vector`, which only its Python class knows, of a new object of it, as
+    /// PySpark's `dtypes` reads its `_schema` (see `schema_to_py`).
     fn dtypes(self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         match self {
             PropertySchema::Core(spark_connect::types::DataType::Struct { fields }) => {
                 let pairs = fields
                     .into_iter()
                     .map(|field| {
-                        let name = crate::types::simple_string_with_udts(py, &field.data_type)?;
+                        let name = if crate::types::has_udt(&field.data_type) {
+                            crate::types::schema_to_py(py, &field.data_type)?
+                                .bind(py)
+                                .call_method0("simpleString")?
+                                .extract()?
+                        } else {
+                            crate::types::simple_string_with_udts(py, &field.data_type)?
+                        };
                         Ok((field.name, name))
                     })
                     .collect::<PyResult<Vec<(String, String)>>>()?;

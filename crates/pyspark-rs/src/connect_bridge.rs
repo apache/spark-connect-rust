@@ -51,5 +51,5 @@ pub fn _data_type_of_proto(py: Python<'_>, data_type: &[u8]) -> PyResult<Py<PyAn
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
     let data_type = DataType::from_proto(&data_type).to_pyerr()?;
     crate::dataframe::check_schema_conversion(py, Some(&data_type))?;
-    crate::types::data_type_to_py(py, &data_type)
+    crate::types::schema_to_py(py, &data_type)
 }

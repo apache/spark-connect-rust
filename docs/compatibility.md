@@ -1973,7 +1973,18 @@ string that does not parse raises a `ValueError` and another value, None include
 where PySpark keeps the value as it is given, which its repr shows (`ArrayType(string, True)`) and
 its `json()` fails of. A set `srid` of a spatial type is of its JSON too, where PySpark's JSON
 stays that of the CRS of its constructor. The parameters are not entries of the `__dict__` of a
-type, so `vars(t)` is empty, where PySpark's has them.
+type, so `vars(t)` is empty, where PySpark's has them. The type objects that an `ArrayType`, a
+`MapType`, a `StructField` and a `StructType` are given, by their constructors, `add` and the
+setters, are kept as they are, as PySpark's keep them, so a `UserDefinedType` whose `module()` or
+`sqlType()` is not implemented, such as `UserDefinedType()` itself, makes them: their repr,
+`simpleString`, `needConversion`, `==`, hash, copies, pickles, tree string, `names`, `add` and
+`toNullable` are PySpark's, of the objects. A use that reads the JSON of the type raises the
+`NOT_IMPLEMENTED` of its `jsonValue()` then, as PySpark's does: `json()`, the plans of a cast,
+`DataFrame.to`, `from_json`, a table, a Java UDF and a UDTF, a reader's schema and the relation of
+data of no rows. `toInternal` and `fromInternal` raise the errors of the type's own methods. A cast
+to one is made and shows its `simpleString()`, as PySpark's Column, and raises its error at each
+request. `createDataFrame` of local rows or of a pandas DataFrame of one raises the error of its
+`jsonValue()`, where PySpark's converters raise that of its `sqlType()` or `serialize`.
 
 The abstract classes of the types, `DataType`, `AtomicType`, `NumericType`, `IntegralType`,
 `FractionalType`, `DatetimeType`, `AnyTimeType`, `SpatialType` and `AnsiIntervalType`, make types
@@ -1986,11 +1997,15 @@ the types it is made of. It compares it, and names it in its `simpleString` and 
 object that it holds, as PySpark's does, rather than by its JSON: so two types of the same JSON, of
 one class and different `__dict__`s or of two classes of one `typeName`, stay apart in the types
 that hold them, as `UserDefinedType`s of other parameters do, and `toNullable()` keeps them as they
-are. A struct, array or map made of core types, such as one of `fromJson`, holds the user-defined
-type of its JSON that a type was last made of, if one was. `IntegralType()` is one instance, as
-PySpark's `DataTypeSingleton` makes it, and so is each Python subclass of it, of an instance of its
-own, and a Python subclass of the other classes, such as a `UserDefinedType` of parameters, takes
-the arguments of its `__init__`.
+are. The schema of a DataFrame and of its rows, as the server gives it, holds a new object of each
+user-defined type, as PySpark's `UserDefinedType.fromJson` makes it of its class, and so does
+`fromJson`: not the object that the client was given, nor of its attributes, and a class whose
+`__init__` takes arguments raises its `TypeError` there, as in PySpark. A struct, array or map that
+the client makes of core types, without the objects of a user, holds the user-defined type of its
+JSON that a type was last made of, if one was. `IntegralType()` is one instance, as PySpark's
+`DataTypeSingleton` makes it, and so is each Python subclass of it, of an instance of its own, and a
+Python subclass of the other classes, such as a `UserDefinedType` of parameters, takes the arguments
+of its `__init__`.
 
 Neither client has a proto or an Arrow type of such a type, also of one nested in another or in the
 `sqlType()` of a user-defined type. A plan of one raises the `UNSUPPORTED_OPERATION` of PySpark's
@@ -2063,7 +2078,10 @@ read it by `isinstance`, and the methods of its class are PySpark's, of the meth
   a `DecimalType` of a subclass, is PySpark's own, byte for byte, and the types that a type holds
   pickle as the class's own do (see above);
 - a subclass of a singleton type has an instance of its own, as PySpark's `DataTypeSingleton` makes
-  it, and takes no arguments.
+  it, and takes no arguments;
+- the Column of a `cast` or `try_cast` to it renders its `simpleString()`, as PySpark's
+  (`CAST(id AS SUB)`), and so does one to a user-defined type of its own `simpleString()`
+  (`CAST(id AS SCALE2)`), also in an array, a map or a struct, while the plan is of the core type.
 
 What differs:
 - The parameters are not entries of the `__dict__` of the type, as for the class's own types
@@ -2094,9 +2112,6 @@ What differs:
   would only bring back that failure; of data of no rows it sends the `json()` of the object, as
   PySpark. The readers, `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the
   `json()` of the object, as PySpark's.
-- The Column of a `cast` or `try_cast` to a type of a subclass renders the `simpleString` of the
-  core type of its class (`CAST(id AS BOOLEAN)`), where PySpark's renders that of the object
-  (`CAST(id AS SUB)`). The plans are the same.
 
 The metadata of a field is the dict that it was given, which `==` compares as Python compares
 dicts, as PySpark compares the `__dict__`s of its fields, also in a struct and in the types that

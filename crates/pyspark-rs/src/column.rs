@@ -1336,12 +1336,35 @@ fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyR
     let error = match crate::plan_args::unsupported_type_error(data_type)? {
         Some(error) => error,
         None => {
-            let parsed = crate::types::py_to_data_type(data_type)?;
+            let py = data_type.py();
+            let parsed = match crate::types::py_to_data_type(data_type) {
+                Ok(parsed) => parsed,
+                // A type that does not lower now, such as an array of a `UserDefinedType` whose
+                // `module()` is not implemented, which PySpark's plan raises the error of at each
+                // request, as its repr shows its `simpleString()` (see
+                // `crate::types::lenient_type`).
+                Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+                    match crate::errors::pyspark_class_error(py, &err)? {
+                        Some(error) => {
+                            args.record(error);
+                            let text: String = data_type.call_method0("simpleString")?.extract()?;
+                            return Ok(PyColumn::new(args.column_after(unparsed(&text))));
+                        }
+                        None => return Err(err),
+                    }
+                }
+                Err(err) => return Err(err),
+            };
             let Some(field) = crate::types::unsendable_field_repr(data_type, &parsed)? else {
-                return Ok(PyColumn::new(match try_ {
-                    false => column.clone().cast(parsed),
-                    true => column.clone().try_cast(parsed),
-                }));
+                // As PySpark's repr, of the `simpleString()` of the type object, which the core's
+                // type does not tell of a user-defined type or of a type of a Python subclass.
+                return Ok(PyColumn::new(
+                    match crate::types::shown_simple_string(data_type, &parsed)? {
+                        Some(shown) => column.clone().cast_shown(parsed, &shown, try_),
+                        None if try_ => column.clone().try_cast(parsed),
+                        None => column.clone().cast(parsed),
+                    },
+                ));
             };
             spark_connect_core::error::SparkError::classed(
                 spark_connect_core::error::SparkErrorKind::ValueError,
