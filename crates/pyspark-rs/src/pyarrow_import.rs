@@ -76,6 +76,12 @@ pub(crate) fn create_dataframe(
     ))?;
     let normalized = result.get_item(0)?;
     let schema = result.get_item(1)?;
+    // A type of its class only, such as `AtomicType()`, as the schema: PySpark's relation of the
+    // table is of the `json()` of the type, which the server cannot parse.
+    if crate::types::is_class_type(&schema)? {
+        let json = schema.call_method0("json")?.extract()?;
+        return crate::session::schema_text_dataframe(session, json);
+    }
     let spark_schema = if schema.is_none() {
         None
     } else {

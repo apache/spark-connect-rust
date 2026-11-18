@@ -143,15 +143,23 @@ fn pyfunc_make_udtf(
     let col_args = udf_arguments(args, named_args, true)?;
     // Connect leaves DDL parsing and validation to the server. In particular,
     // do not use py_to_data_type's eager DDL parser for string return types.
+    // As PySpark's `PythonUDTF.to_plan`, which converts the return type when it builds the plan,
+    // after the arguments: a type that `pyspark_types_to_proto_types` has no proto of, a
+    // `StructField` as a type or a type of its class only such as `AtomicType()`, also nested in
+    // the return type, fails each request of the DataFrame with its `UNSUPPORTED_OPERATION`.
+    let mut plan_args = crate::plan_args::PlanArgs::new();
     let rt = return_type
-        .map(|value| {
+        .map(|value| -> PyResult<spark_connect::types::DataType> {
             if let Ok(ddl) = value.extract::<String>() {
-                Ok(spark_connect::types::DataType::Unparsed {
+                return Ok(spark_connect::types::DataType::Unparsed {
                     data_type_string: ddl,
-                })
-            } else {
-                crate::types::py_to_data_type(value)
+                });
             }
+            let data_type = crate::types::py_to_data_type(value)?;
+            if let Some(error) = crate::types::unsendable_type_error(value, &data_type)? {
+                plan_args.record(error);
+            }
+            Ok(data_type)
         })
         .transpose()?;
     let tvf = session.session.tvf();
@@ -175,7 +183,7 @@ fn pyfunc_make_udtf(
             deterministic,
         ),
     };
-    Ok(PyDataFrame::new(df))
+    Ok(PyDataFrame::new(plan_args.plan(df)))
 }
 
 /// Register all SQL functions into the Python functions module.

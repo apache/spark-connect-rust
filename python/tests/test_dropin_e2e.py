@@ -6182,3 +6182,44 @@ def test_the_schema_of_a_vector_column_has_the_sql_type_of_its_udt_as_pysparks(s
     assert session.createDataFrame([], df.schema).schema.simpleString() == (
         "struct<v:vector,a:array<vector>>"
     )
+
+
+def test_create_dataframe_of_a_type_of_its_class_only_sends_its_json_as_pyspark(session):
+    # As official PySpark 4.3.0: data of no rows, and a NumPy array or a pyarrow Table, of a type
+    # of its class only as its single type make a relation of the JSON of the type, which the
+    # server fails to parse at the first request.
+    import numpy as np
+    import pandas as pd
+    from pyspark.errors import ParseException
+    from pyspark.sql.types import NumericType
+
+    for data in (
+        [],
+        (),
+        pd.DataFrame({"a": pd.Series([], dtype="int64")}),
+        np.array([1]),
+        np.array([], dtype="int64"),
+        pa.table({"a": [1]}),
+        pa.table({"a": pa.array([], type=pa.int64())}),
+    ):
+        df = session.createDataFrame(data, NumericType())
+        with pytest.raises(ParseException) as e:
+            df.collect()
+        assert e.value.getCondition() == "PARSE_SYNTAX_ERROR"
+        assert e.value.getMessageParameters() == {"error": "'\"numeric\"'", "hint": ""}
+
+
+def test_a_table_of_a_nested_abstract_type_is_not_created_as_pyspark(session):
+    # As official PySpark 4.3.0's `CreateTable` plan, which has no proto of the base DataType(),
+    # nested too: createTable raises its UNSUPPORTED_OPERATION and creates no table, where the
+    # drop-in created one of a void column.
+    from pyspark.sql.types import DataType
+
+    table = "abstract_type_table"
+    session.sql(f"DROP TABLE IF EXISTS {table}").collect()
+    schema = StructType([StructField("a", ArrayType(DataType()))])
+    with pytest.raises(PySparkValueError) as e:
+        session.catalog.createTable(table, schema=schema, source="parquet")
+    assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+    assert e.value.getMessageParameters() == {"operation": "data type DataType()"}
+    assert not session.catalog.tableExists(table)

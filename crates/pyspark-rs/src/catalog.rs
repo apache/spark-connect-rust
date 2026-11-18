@@ -73,23 +73,32 @@ fn check_extra_positional(
     )))
 }
 
-/// The schema of `createTable`, a StructType, as PySpark's, else `NOT_EXPECTED_TYPE`.
-fn table_schema(
-    schema: Option<&Bound<'_, PyAny>>,
-) -> PyResult<Option<spark_connect::types::DataType>> {
+/// The schema of `createTable`, a StructType, as PySpark's, else `NOT_EXPECTED_TYPE`. Its proto
+/// is made later, in the order of PySpark's `CreateTable` plan (see [`table_schema_proto`]).
+fn table_schema<'a, 'py>(
+    schema: Option<&'a Bound<'py, PyAny>>,
+) -> PyResult<Option<&'a Bound<'py, PyAny>>> {
     let Some(schema) = schema.filter(|schema| !schema.is_none()) else {
         return Ok(None);
     };
-    if let Ok(st) = schema.extract::<PyRef<'_, crate::types::PyStructType>>() {
-        return Ok(Some(spark_connect::types::DataType::Struct {
-            fields: st.current_fields(schema.py())?,
-        }));
+    if schema.is_instance_of::<crate::types::PyStructType>() {
+        return Ok(Some(schema));
     }
     Err(crate::errors::not_expected_type(
         schema,
         "schema",
         "struct type",
     ))
+}
+
+/// The core type of the StructType `schema` of `createTable`, of its fields as they are now, as
+/// PySpark's `CreateTable` plan converts it with `pyspark_types_to_proto_types`: a type of a
+/// field that has no proto, a `StructField` as a type or a type of its class only such as
+/// `AtomicType()`, also nested, raises its `UNSUPPORTED_OPERATION`.
+fn table_schema_proto(
+    schema: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<spark_connect::types::DataType>> {
+    schema.map(crate::types::py_to_proto_data_type).transpose()
 }
 
 /// The NamedTuple of `pyspark.sql.catalog` of a result of the catalog, as PySpark's `Catalog`
@@ -529,12 +538,13 @@ impl PyCatalog {
         crate::options::check_keyword_keys(options)?;
         check_extra_positional("Catalog.createTable", 5, extra)?;
         let schema = table_schema(schema)?;
-        // In the order of PySpark's `CreateTable` plan, after its check of the schema, and
-        // before the options.
+        // In the order of PySpark's `CreateTable` plan, after its check of the schema: the name,
+        // the path, the source and the description, then the schema, and the options.
         let tableName = crate::str_argument(tableName)?;
         let path = path.map(crate::str_argument).transpose()?;
         let source = source.map(crate::str_argument).transpose()?;
         let description = description.map(crate::str_argument).transpose()?;
+        let schema = table_schema_proto(schema)?;
         let options = crate::options::str_kwargs_skip_none(options)?;
         interruptible(py, self.catalog.spark_session(), || {
             self.catalog

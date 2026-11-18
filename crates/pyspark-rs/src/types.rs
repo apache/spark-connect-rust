@@ -119,7 +119,7 @@ pub struct PyDataType {
 /// core types. Such a type is the base `DataType`, an abstract class such as `AtomicType`, or a
 /// Python subclass of them, which PySpark's methods of the base `DataType` make: its `typeName`,
 /// `simpleString` and `jsonValue` are the name of its class, without `Type` and in lower case.
-fn is_class_type(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+pub(crate) fn is_class_type(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     match obj.cast::<PyDataType>() {
         Ok(data_type) if data_type.borrow().inner.is_none() => {
             Ok(!is_udt(obj)? && !is_unparsed(obj)?)
@@ -732,6 +732,23 @@ pub(crate) fn unsendable_field_repr(
     nested
         .map(|field| field.repr().and_then(|text| text.extract::<String>()))
         .transpose()
+}
+
+/// The `UNSUPPORTED_OPERATION` that PySpark's `pyspark_types_to_proto_types` raises of the type
+/// object `obj` of `data_type`, of the first type in it that it has no proto of (see
+/// [`unsendable_field_repr`]), as the error of a plan that a request raises when it builds the
+/// plan ([`crate::plan_args::PlanArgs::record`]); None if it has a proto of each.
+pub(crate) fn unsendable_type_error(
+    obj: &Bound<'_, PyAny>,
+    data_type: &DataType,
+) -> PyResult<Option<spark_connect_core::error::SparkError>> {
+    Ok(unsendable_field_repr(obj, data_type)?.map(|shown| {
+        spark_connect_core::error::SparkError::classed(
+            spark_connect_core::error::SparkErrorKind::ValueError,
+            "UNSUPPORTED_OPERATION",
+            &[("operation", &format!("data type {shown}"))],
+        )
+    }))
 }
 
 /// The first `StructField` that is a type of `data_type`, in the depth-first order of its fields,

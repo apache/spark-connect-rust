@@ -1622,6 +1622,10 @@ impl PySparkSession {
             ));
         }
         if data.len()? == 0 {
+            // As PySpark, a relation of the `json()` of a type of its class only.
+            if let Some(json) = class_type_json(&spec) {
+                return schema_text_dataframe(&self.session, json.to_string());
+            }
             return self.create_from_local(
                 py,
                 PyList::empty(py).as_any(),
@@ -1671,6 +1675,11 @@ impl PySparkSession {
             .call1((data, names))?;
         if let Some(expected) = num_cols.filter(|&expected| expected != width) {
             return Err(axis_length_mismatch(expected));
+        }
+        // A type of its class only, of which PySpark's relation of the array is of the `json()`,
+        // which the server cannot parse.
+        if let Some(DataType::Unparsed { data_type_string }) = &schema {
+            return schema_text_dataframe(&self.session, data_type_string.clone());
         }
         let batches = crate::pyarrow_import::table_batches(&table)?;
         let df = interruptible(py, &self.session, || {
@@ -2315,6 +2324,36 @@ struct LocalChecks<'py> {
     nested: Option<Bound<'py, PyAny>>,
 }
 
+/// The `json()` of the type of its class only, such as `AtomicType()`, of an atomic `spec`, which
+/// the core holds as the unparsed text of the JSON (see `crate::types::py_to_data_type`): an
+/// atomic type of a DDL string is the server's, and an `UnparsedDataType` is not atomic.
+fn class_type_json(spec: &Spec) -> Option<&str> {
+    match spec {
+        Spec::Atomic(DataType::Unparsed { data_type_string }) => Some(data_type_string),
+        _ => None,
+    }
+}
+
+/// The DataFrame of a local relation of no data whose schema is the text `json`, as PySpark's
+/// `createDataFrame` sends the `json()` of a schema that the core does not write as it is, such as
+/// that of a type of its class only, `"atomic"`: the server parses the text.
+pub(crate) fn schema_text_dataframe(
+    session: &spark_connect::session::SparkSession,
+    json: String,
+) -> PyResult<PyDataFrame> {
+    let relation = spark_connect_proto::Relation {
+        rel_type: Some(spark_connect_proto::relation::RelType::LocalRelation(
+            spark_connect_proto::LocalRelation {
+                data: None,
+                schema: Some(json),
+            },
+        )),
+        ..Default::default()
+    };
+    let df = spark_connect::DataFrame::from_relation(session.clone(), relation, None);
+    Ok(PyDataFrame::new(df.to_pyerr()?))
+}
+
 /// The schema argument of `createDataFrame`: None, a list or tuple of names, or a struct or
 /// atomic type, given as a type or a DDL string. Other types raise `NOT_EXPECTED_TYPE`.
 fn schema_spec(
@@ -2354,6 +2393,24 @@ fn schema_spec(
             && !schema.is_instance_of::<crate::types::PyDataType>())
     {
         return Err(not_expected(&crate::infer::type_name(schema)?));
+    }
+    // A type object is read by its class, as PySpark's `isinstance(schema, (AtomicType,
+    // StructType))`: so a type of its class only, of no core type, is atomic as `AtomicType()` is
+    // and not expected as `DataType()` is, named by its class. The type of a DDL string is that
+    // of the server, of the class that the core type names.
+    if !schema.is_instance_of::<pyo3::types::PyString>() {
+        let data_type = crate::types::py_to_data_type(schema)?;
+        return match data_type {
+            DataType::Struct { fields }
+                if schema.is_instance_of::<crate::types::PyStructType>() =>
+            {
+                Ok(Spec::Struct(fields))
+            }
+            atomic if schema.is_instance_of::<crate::types::PyAtomicType>() => {
+                Ok(Spec::Atomic(atomic))
+            }
+            _ => Err(not_expected(&crate::infer::type_name(schema)?)),
+        };
     }
     Ok(match crate::types::schema_data_type(py, session, schema)? {
         DataType::Struct { fields } => Spec::Struct(fields),
@@ -2523,24 +2580,25 @@ impl PySparkSession {
         // the schema as it is, which the server cannot parse, so the relation carries that text.
         if data.is_instance_of::<PyList>() && data.len()? == 0 {
             if let Some(json) = crate::types::raw_struct_json(schema)? {
-                let relation = spark_connect_proto::Relation {
-                    rel_type: Some(spark_connect_proto::relation::RelType::LocalRelation(
-                        spark_connect_proto::LocalRelation {
-                            data: None,
-                            schema: Some(json),
-                        },
-                    )),
-                    ..Default::default()
-                };
-                let df =
-                    spark_connect::DataFrame::from_relation(self.session.clone(), relation, None);
-                return Ok(PyDataFrame::new(df.to_pyerr()?));
+                return schema_text_dataframe(&self.session, json);
             }
         }
         let spec = schema_spec(py, &self.session, schema)?;
         if is_loaded_instance(py, data, "numpy", "ndarray")? {
             return self.create_from_ndarray(py, data, spec);
         }
+        // A type of its class only, such as `AtomicType()`, as the type of the single column: as
+        // PySpark, data of no rows is a relation of the `json()` of the type, which the server
+        // cannot parse, and the rows of other data have no Arrow type of it.
+        let class_type = match (schema, class_type_json(&spec)) {
+            (Some(schema), Some(json)) => {
+                if data.len().is_ok_and(|n| n == 0) {
+                    return schema_text_dataframe(&self.session, json.to_string());
+                }
+                Some(schema)
+            }
+            _ => None,
+        };
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             // As PySpark's createDataFrame, which reads every setting of its conversions in one
             // request before it converts a pandas DataFrame that is not empty.
@@ -2807,9 +2865,17 @@ impl PySparkSession {
                 }
             }
         }
-        // The checks of the schema that PySpark's conversion of non-empty local rows makes.
+        // The checks of the schema that PySpark's conversion of non-empty local rows makes, also
+        // of rows of no length, such as an iterator's, which the conversion takes apart first.
+        if let Some(class_type) = class_type {
+            let checks = LocalChecks {
+                non_bool_nullable: false,
+                nested: Some(class_type.clone()),
+            };
+            return self.create_from_local(py, data, spec, checks, options);
+        }
         let checks = match schema.filter(|s| s.is_instance_of::<crate::types::PyStructType>()) {
-            Some(schema) if data.len().is_ok_and(|n| n > 0) => LocalChecks {
+            Some(schema) if !data.len().is_ok_and(|n| n == 0) => LocalChecks {
                 non_bool_nullable: crate::types::has_non_bool_converter_flag(py, schema)?,
                 nested: match &spec {
                     Spec::Struct(fields) => crate::types::nested_python_type_in(
@@ -3072,8 +3138,11 @@ impl PySparkSession {
                     data_type_string: ddl.extract()?,
                 })
             }
+            // Of the proto of `pyspark_types_to_proto_types`, which raises `UNSUPPORTED_OPERATION`
+            // of a type that it has no proto of, also nested: a `StructField` as a type, or a
+            // type of its class only such as `AtomicType()`.
             Some(data_type) if data_type.is_instance_of::<crate::types::PyDataType>() => {
-                Some(crate::types::py_to_data_type(data_type)?)
+                Some(crate::types::py_to_proto_data_type(data_type)?)
             }
             Some(other) => {
                 // Of the str of the type as it is, a lone surrogate too, as PySpark formats it.
@@ -3145,14 +3214,16 @@ impl PySparkSession {
         deterministic: bool,
     ) -> PyResult<()> {
         // As PySpark's `register_udtf`, which sets the name in the string field of its command
-        // first, as protobuf converts it: bytes of UTF-8 too.
+        // first, as protobuf converts it: bytes of UTF-8 too. Its `PythonUDTF.to_plan` converts the
+        // return type after it: a type that `pyspark_types_to_proto_types` has no proto of, also
+        // nested, raises its `UNSUPPORTED_OPERATION`.
         let name = crate::str_argument(name)?;
         let return_type = return_type
             .map(|value| match value.extract::<String>() {
                 Ok(ddl) => Ok(DataType::Unparsed {
                     data_type_string: ddl,
                 }),
-                Err(_) => crate::types::py_to_data_type(value),
+                Err(_) => crate::types::py_to_proto_data_type(value),
             })
             .transpose()?;
         interruptible(py, &self.session, || {
