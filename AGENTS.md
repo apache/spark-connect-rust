@@ -467,9 +467,12 @@ For every method matching a pyspark name:
 
   The vendored `pyspark.ml.connect` modules (`base.py`, `feature.py`, ...) stay byte-identical to
   PySpark's.
-- **Row materialization:** `crates/pyspark-rs/src/row.py` embeds PySpark's Python `Row(tuple)`
-  class, exported as `pyspark._pyspark.Row` and re-exported by `pyspark.sql.types`,
-  `pyspark.sql`, and `pyspark`. Embedding avoids importing the partially initialized
+- **Row materialization:** `crates/pyspark-rs/src/row.py` embeds a port of PySpark's Python
+  `Row(tuple)` class, exported as `pyspark._pyspark.Row` and re-exported by `pyspark.sql.types`,
+  `pyspark.sql`, and `pyspark`. The port has PySpark's methods, values and errors, but neither its
+  annotations nor the `@overload`s of `__new__` (so `inspect.signature(Row.asDict)` is
+  `(self, recursive=False)`), and it imports the errors and `_create_row` in its methods.
+  Embedding avoids importing the partially initialized
   `pyspark.sql.types` shim while the extension loads. Rust eagerly builds tuple values
   through `tuple.__new__` on the public `Row` class; collected rows share a mutable `__fields__`
   list across the result, and iterator rows share top-level names within each Arrow
@@ -477,7 +480,7 @@ For every method matching a pyspark name:
   iterator batches, while distinct sibling paths keep separate lists.
   Nested local-input Rows follow the tuple inference paths; named Rows expose `__fields__`.
 - **Value classes:** `crates/pyspark-rs/src/values.py` embeds PySpark's plain classes
-  `VariantVal`, `Geometry` and `Geography` the same way, exported by `pyspark._pyspark`, so
+  `VariantVal`, `Geometry` and `Geography`, annotated, exported by `pyspark._pyspark`, so
   their attributes are the instance attributes of PySpark's, as given, and they pickle as plain
   classes into the server's Python workers. Keep them plain Python classes rather than
   `#[pyclass(dict)]` types, so that their instances and pickles are PySpark's own.

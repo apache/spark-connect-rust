@@ -96,8 +96,9 @@ _PLAN_COMPRESSION_THRESHOLD = b"spark.connect.session.planCompression.threshold"
 
 
 @contextmanager
-def _dataframe(batches, *, protocol, payloads=None, calls=None):
-    """Serve Arrow results using the repository's protobuf message definitions."""
+def _dataframe(batches, *, protocol, payloads=None, calls=None, settings=None):
+    """Serve Arrow results using the repository's protobuf message definitions, with the
+    configuration `settings` over the defaults below."""
     if payloads is None:
         payloads = []
         for batch in batches:
@@ -145,23 +146,24 @@ def _dataframe(batches, *, protocol, payloads=None, calls=None):
         if calls is not None:
             calls["config"] = calls.get("config", 0) + 1
         request = protocol("ConfigRequest").FromString(request)
-        settings = {
+        values = {
             "spark.sql.session.timeZone": "UTC",
             "spark.sql.execution.pandas.structHandlingMode": "legacy",
             "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
+            **(settings or {}),
         }
         operation = request.operation.WhichOneof("op_type")
         if operation == "get_with_default":
             pairs = []
             for pair in request.operation.get_with_default.pairs:
                 default = pair.value if pair.HasField("value") else None
-                value = settings.get(pair.key, default)
+                value = values.get(pair.key, default)
                 pairs.append(dict(key=pair.key, **({"value": value} if value is not None else {})))
         else:
             if operation != "get":
                 context.abort(grpc.StatusCode.UNIMPLEMENTED,
                               f"unexpected Config operation {operation}")
-            pairs = [dict(key=key, value=settings[key]) for key in request.operation.get.keys]
+            pairs = [dict(key=key, value=values[key]) for key in request.operation.get.keys]
         return protocol(
             "ConfigResponse",
             session_id=request.session_id,
@@ -459,6 +461,118 @@ def test_to_pandas_uses_the_same_handoff(protocol):
         actual = frame.toPandas()
     pd.testing.assert_frame_equal(actual, expected)
     assert calls == {"config": 1, "execute": 1}
+
+
+@pytest.mark.parametrize("self_destruct", ["false", "true"])
+@pytest.mark.parametrize("columns", [2, 0])
+def test_to_pandas_copies_each_column_of_each_batch_with_self_destruct(
+    protocol, monkeypatch, self_destruct, columns
+):
+    # As SparkConnectClient._execute_and_fetch with selfDestruct: each column of each batch, of an
+    # empty batch too, is copied into its own allocation before the conversion, which then frees
+    # the columns as it converts them; so a result without columns has no rows, as a copied batch
+    # without columns has none. Without selfDestruct, nothing is copied.
+    if columns:
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([1, None, 3]), pa.array(["a", None, "c"])], names=["i", "s"]
+        )
+    else:
+        batch = pa.RecordBatch.from_struct_array(pa.array([{}] * 3, type=pa.struct([])))
+    batches = [batch.slice(0, 2), batch.slice(2, 0), batch.slice(2, 1)]
+    from pyspark.sql.pandas.conversion import _convert_arrow_table_to_pandas
+    from pyspark.sql.pandas.types import from_arrow_schema
+
+    table = pa.Table.from_batches(batches)
+    if self_destruct == "true" and not columns:
+        table = table.slice(0, 0)
+    expected = _convert_arrow_table_to_pandas(
+        arrow_table=table,
+        schema=from_arrow_schema(table.schema, prefer_timestamp_ntz=True),
+        timezone="UTC",
+        struct_handling_mode="legacy",
+        date_as_object=False,
+        self_destruct=False,
+    )
+    copied = []
+    concat_arrays = pa.concat_arrays
+
+    def record(arrays, *args, **kwargs):
+        copied.append([len(array) for array in arrays])
+        return concat_arrays(arrays, *args, **kwargs)
+
+    monkeypatch.setattr(pa, "concat_arrays", record)
+    settings = {"spark.sql.execution.arrow.pyspark.selfDestruct.enabled": self_destruct}
+    with _dataframe(protocol=protocol, batches=batches, settings=settings) as (frame, _):
+        actual = frame.toPandas()
+    pd.testing.assert_frame_equal(actual, expected)
+    if self_destruct == "true":
+        assert copied == [[2]] * columns + [[0]] * columns + [[1]] * columns
+    else:
+        assert copied == []
+
+
+def test_to_table_has_the_metadata_that_pyspark_reads_of_a_spark_server(protocol):
+    # As PySpark's `_to_table` of the stream of a Spark server, which writes the metadata of the
+    # schema and of each field, an empty one where there is none: PyArrow reads it as {}, of the
+    # nested fields too, and the keys of the metadata of a field in the order of the server, which
+    # the batches that the client decodes do not keep. The columns and their chunks are of the
+    # types of the schema, and the values and chunks are those of the batches.
+    wkb = pa.field(
+        "wkb", pa.binary(), nullable=False, metadata={b"srid": b"0", b"geometry": b"true"}
+    )
+    spatial = pa.struct([pa.field("srid", pa.int32(), nullable=False), wkb])
+    pairs = pa.map_(pa.int32(), pa.struct([pa.field("x", pa.int32())]))
+    items = pa.list_(pa.field("element", pa.struct([pa.field("y", pa.int64())])))
+    time_field = pa.field(
+        "t",
+        pa.time64("ns"),
+        metadata={b"SPARK::time::precision": b"6", b"SPARK::metadata::json": b"{}"},
+    )
+    schema = pa.schema(
+        [pa.field("g", spatial), pa.field("m", pairs), pa.field("l", items), time_field,
+         pa.field("i", pa.int32())]
+    )
+    batch = pa.RecordBatch.from_arrays(
+        [
+            pa.array([{"srid": 0, "wkb": b"\x01"}, None], type=spatial),
+            pa.array([[(1, {"x": 1})], None], type=pairs),
+            pa.array([[{"y": 2}], []], type=items),
+            pa.array([1, None], type=pa.time64("ns")),
+            pa.array([3, 4], type=pa.int32()),
+        ],
+        schema=schema,
+    )
+    batches = [batch.slice(0, 1), batch.slice(1, 0), batch.slice(1, 1)]
+    with _dataframe(protocol=protocol, batches=batches) as (frame, _):
+        table, _ = frame._to_table()
+
+    def nested(data_type):
+        if pa.types.is_struct(data_type):
+            fields = [data_type.field(index) for index in range(data_type.num_fields)]
+        elif pa.types.is_map(data_type):
+            fields = [data_type.key_field, data_type.item_field]
+        elif pa.types.is_list(data_type):
+            fields = [data_type.value_field]
+        else:
+            return []
+        return [(field.name, field.metadata and list(field.metadata.items()), nested(field.type))
+                for field in fields]
+
+    assert table.schema.metadata == {}
+    assert [(field.name, list(field.metadata.items()), nested(field.type))
+            for field in table.schema] == [
+        ("g", [], [("srid", {}, []), ("wkb", [(b"geometry", b"true"), (b"srid", b"0")], [])]),
+        ("m", [], [("key", {}, []), ("value", {}, [("x", {}, [])])]),
+        ("l", [], [("element", {}, [("y", {}, [])])]),
+        ("t", [(b"SPARK::metadata::json", b"{}"), (b"SPARK::time::precision", b"6")], []),
+        ("i", [], []),
+    ]
+    for index, field in enumerate(table.schema):
+        column = table.column(index)
+        assert nested(column.type) == nested(field.type)
+        assert [nested(chunk.type) for chunk in column.chunks] == [nested(field.type)] * 3
+        assert [len(chunk) for chunk in column.chunks] == [1, 0, 1]
+    assert table.equals(pa.Table.from_batches(batches), check_metadata=True)
 
 
 @pytest.mark.parametrize(

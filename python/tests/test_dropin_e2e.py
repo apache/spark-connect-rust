@@ -1910,6 +1910,23 @@ def test_execution_info_is_that_of_each_dataframe_as_pyspark(session):
         assert df.executionInfo.operation_id != a.executionInfo.operation_id
 
 
+def test_execution_info_is_one_object_until_another_execution_as_pyspark(session):
+    # As PySpark's executionInfo, the _execution_info that the last execution of the DataFrame
+    # set: one object, of one CollectedMetrics, with the attributes set on it, until another
+    # execution of the DataFrame replaces it, which an action of a derived DataFrame does not.
+    df = session.range(3)
+    df.collect()
+    info = df.executionInfo
+    assert df.executionInfo is info and df.executionInfo.metrics is info.metrics
+    info.custom = 1
+    df.take(1)
+    assert df.executionInfo is info and df.executionInfo.custom == 1
+    df.toArrow()
+    again = df.executionInfo
+    assert again is not info and again.operation_id != info.operation_id
+    assert df.executionInfo is again and not hasattr(again, "custom")
+
+
 def test_registered_udtfs_are_called_from_sql_as_pyspark(session):
     # As PySpark's spark.udtf.register: the server knows the UDTF by its name.
     @F.udtf(returnType="x int")
@@ -3003,6 +3020,28 @@ def test_binary_values_of_collected_rows_follow_binary_as_bytes_as_pyspark(sessi
     assert types(next(df.toLocalIterator())) == [bytes] * 4
 
 
+def test_spatial_values_have_bytes_wkb_whatever_binary_as_bytes_as_pyspark(session):
+    # As PySpark's converters of the spatial types, which make a Geometry or a Geography of the
+    # bytes of the WKB of its Arrow struct: spark.sql.execution.pyspark.binaryAsBytes=false makes
+    # the binary values of the rows bytearray, not the WKB of their spatial values.
+    wkb = "0101000000000000000000f03f0000000000000040"
+    df = session.sql(
+        f"SELECT st_geomfromwkb(x'{wkb}') AS g, st_geogfromwkb(x'{wkb}') AS h, "
+        f"array(st_geomfromwkb(x'{wkb}')) AS a, x'01' AS b"
+    )
+    key = "spark.sql.execution.pyspark.binaryAsBytes"
+    try:
+        session.conf.set(key, "false")
+        for row in (df.collect()[0], next(df.toLocalIterator()),
+                    next(df.toLocalIterator(prefetchPartitions=True))):
+            values = (row.g, row.h, row.a[0])
+            assert [type(value.getBytes()) for value in values] == [bytes] * 3
+            assert [value.getBytes() for value in values] == [bytes.fromhex(wkb)] * 3
+            assert type(row.b) is bytearray
+    finally:
+        session.conf.unset(key)
+
+
 
 
 def test_with_metadata_and_pivot_of_a_missing_column_are_dataframe_errors_as_pyspark(session):
@@ -4046,6 +4085,63 @@ def test_to_pandas_converts_the_columns_as_pyspark(session):
         assert local["ts"][0] == pd.Timestamp("2024-01-02 03:04:05")
     finally:
         session.conf.unset("spark.sql.session.timeZone")
+
+
+def test_to_pandas_with_self_destruct_copies_the_batches_first_as_pyspark(session):
+    # As PySpark's SparkConnectClient.to_pandas with selfDestruct, which copies each column of
+    # each batch into its own allocation before the conversion: a year-month interval column, of
+    # which PyArrow has no Python array, raises the KeyError of the copy, also of an empty result,
+    # where the conversion raises ArrowNotImplementedError without it; a result without columns has
+    # no rows; and the other frames are the same.
+    key = "spark.sql.execution.arrow.pyspark.selfDestruct.enabled"
+    interval = "SELECT INTERVAL '1-2' YEAR TO MONTH AS a"
+    try:
+        session.conf.set(key, "true")
+        for sql in (interval, interval + " WHERE false"):
+            with pytest.raises(KeyError):
+                session.sql(sql).toPandas()
+        assert session.range(3).select().toPandas().shape == (0, 0)
+        assert session.range(0, 5, 1, 2).toPandas()["id"].tolist() == [0, 1, 2, 3, 4]
+        session.conf.set(key, "false")
+        with pytest.raises(pa.ArrowNotImplementedError):
+            session.sql(interval).toPandas()
+        assert session.range(3).select().toPandas().shape == (3, 0)
+    finally:
+        session.conf.unset(key)
+
+
+def test_to_table_has_the_metadata_that_the_server_sends_as_pyspark(session):
+    # As PySpark's `_to_table`, of the Arrow IPC stream of the server: the schema and each field
+    # without metadata, nested ones too, have {}, and the keys of the metadata of a field are in
+    # the order that the server writes them.
+    wkb = "x'0101000000000000000000f03f0000000000000040'"
+    df = session.sql(
+        f"SELECT st_geomfromwkb({wkb}) AS g, st_geogfromwkb({wkb}) AS h, parse_json('1') AS v, "
+        "map(1, named_struct('x', 1)) AS m, array(named_struct('y', 2)) AS l, "
+        "TIME'01:02:03' AS t, 3 AS i"
+    ).withMetadata("i", {"k": "v"}).withMetadata("t", {"k": "v"})
+    table, schema = df._to_table()
+    fields = table.schema
+    assert fields.metadata == {}
+    assert [fields.field(name).metadata for name in ("g", "h", "v", "m", "l")] == [{}] * 5
+    for name, kind, srid in (("g", b"geometry", b"0"), ("h", b"geography", b"4326")):
+        spatial = fields.field(name).type
+        assert spatial.field("srid").metadata == {}
+        assert list(spatial.field("wkb").metadata.items()) == [(kind, b"true"), (b"srid", srid)]
+    variant = fields.field("v").type
+    assert variant.field("value").metadata == {}
+    assert variant.field("metadata").metadata == {b"variant": b"true"}
+    pairs, items = fields.field("m").type, fields.field("l").type
+    assert pairs.key_field.metadata == {} and pairs.item_field.metadata == {}
+    assert pairs.item_field.type.field("x").metadata == {}
+    assert items.value_field.metadata == {} and items.value_field.type.field("y").metadata == {}
+    assert list(fields.field("t").metadata) == [b"SPARK::metadata::json", b"SPARK::time::precision"]
+    assert list(fields.field("i").metadata) == [b"SPARK::metadata::json"]
+    # The columns and their chunks are of the types of the schema.
+    for spatial in (table.column("g").type, table.column("g").chunk(0).type):
+        assert list(spatial.field("wkb").metadata) == [b"geometry", b"srid"]
+        assert spatial.field("srid").metadata == {}
+    assert schema.fieldNames() == ["g", "h", "v", "m", "l", "t", "i"]
 
 
 def test_na_and_stat_functions_are_of_their_dataframe_as_pyspark(session):

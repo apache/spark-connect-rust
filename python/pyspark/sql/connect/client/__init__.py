@@ -606,6 +606,71 @@ class ConfigResult:
         )
 
 
+def _self_destruct_table(table: Any) -> Any:
+    """``table``, of the record batches of a result, each a chunk of its columns, with each column
+    of each batch copied into its own allocation, as ``SparkConnectClient._execute_and_fetch``
+    copies the batches of ``to_pandas`` with ``self_destruct``, which frees memory column-wise
+    where Arrow record batches are oriented row-wise. So it raises what PyArrow raises of a column
+    that it cannot copy, as the ``KeyError`` of a year-month interval column, and a result without
+    columns has no rows, as a copied batch without columns has none."""
+    import pyarrow as pa
+
+    columns = table.columns
+    results = []
+    for chunk in range(columns[0].num_chunks if columns else 0):
+        results.append(
+            pa.RecordBatch.from_arrays(
+                # This call actually reallocates the array
+                [pa.concat_arrays([column.chunk(chunk)]) for column in columns],
+                schema=table.schema,
+            )
+        )
+    return pa.Table.from_batches(results, schema=table.schema)
+
+
+def _table_as_received(table: Any) -> Any:
+    """``table``, of the record batches of a result that the Rust client decodes, with the metadata
+    that PySpark's client reads of the Arrow IPC stream of a Spark server, as its ``_to_table``
+    gives it. The server writes the metadata of the schema and of each field, nested ones too, an
+    empty one where there is none, which PyArrow reads as ``{}``, and the keys of the metadata of
+    a field in byte order (``geometry`` or ``geography`` before ``srid``,
+    ``SPARK::metadata::json`` before a precision); the decoded batches keep neither, as no
+    metadata is None there and its keys are in no order. The cast shares the buffers of the
+    columns, whose chunks it keeps."""
+    import pyarrow as pa
+
+    def metadata_of(metadata: Any) -> dict:
+        return dict(sorted((metadata or {}).items()))
+
+    def field_of(field: Any) -> Any:
+        return pa.field(
+            field.name, type_of(field.type), field.nullable, metadata=metadata_of(field.metadata)
+        )
+
+    def type_of(data_type: Any) -> Any:
+        if pa.types.is_struct(data_type):
+            return pa.struct([field_of(data_type.field(i)) for i in range(data_type.num_fields)])
+        if pa.types.is_map(data_type):
+            return pa.map_(
+                field_of(data_type.key_field),
+                field_of(data_type.item_field),
+                data_type.keys_sorted,
+            )
+        if pa.types.is_large_list(data_type):
+            return pa.large_list(field_of(data_type.value_field))
+        if pa.types.is_list(data_type):
+            return pa.list_(field_of(data_type.value_field))
+        return data_type
+
+    metadata = metadata_of(table.schema.metadata)
+    if table.num_columns == 0:
+        # A cast, or a replacement of the schema's metadata, would lose the rows of a table
+        # without columns, which its batches keep.
+        schema = table.schema.with_metadata(metadata)
+        return pa.Table.from_batches(table.to_batches(), schema=schema)
+    return table.cast(pa.schema([field_of(field) for field in table.schema], metadata=metadata))
+
+
 def _to_pandas(
     table: Any,
     schema: Any,

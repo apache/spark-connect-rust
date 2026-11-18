@@ -329,3 +329,37 @@ class TestBinaryConfiguration:
         _results(service, batch, schema)
         with pytest.raises(TypeError, match="unhashable type: 'bytearray'"):
             _action(spark.range(1), method)[0].m
+
+    @pytest.mark.parametrize("method", ["collect", "iterator", "prefetch"])
+    def test_spatial_values_have_bytes_wkb_as_pyspark(self, mock_connect, method):
+        # As PySpark's converters of the spatial types, which make a Geometry or a Geography of
+        # the bytes of the `wkb` of its Arrow struct: binaryAsBytes=false makes the binary values
+        # of the rows bytearray, not the WKB of their spatial values, in an array and a map too.
+        pa = pytest.importorskip("pyarrow")
+        spark, service = mock_connect
+        service.confs = {_BINARY_CONF: "false"}
+        spatial = pa.struct([("srid", pa.int32()), ("wkb", pa.binary())])
+        batch = pa.RecordBatch.from_arrays([
+            pa.array([{"srid": 4326, "wkb": b"\x01g"}], type=spatial),
+            pa.array([{"srid": 4326, "wkb": b"\x01h"}], type=spatial),
+            pa.array([[{"srid": 4326, "wkb": b"\x01a"}]], type=pa.list_(spatial)),
+            pa.array(
+                [[("k", {"srid": 4326, "wkb": b"\x01m"})]], type=pa.map_(pa.string(), spatial)
+            ),
+            pa.array([b"b"], type=pa.binary()),
+        ], names=["g", "h", "a", "m", "b"])
+        schema = T.StructType([
+            T.StructField("g", T.GeometryType(4326)),
+            T.StructField("h", T.GeographyType(4326)),
+            T.StructField("a", T.ArrayType(T.GeometryType(4326))),
+            T.StructField("m", T.MapType(T.StringType(), T.GeographyType(4326))),
+            T.StructField("b", T.BinaryType()),
+        ])
+        _results(service, batch, schema)
+        (row,) = _action(spark.range(1), method)
+        values = [row.g, row.h, row.a[0], row.m["k"]]
+        assert [type(value) for value in values] == [T.Geometry, T.Geography] * 2
+        assert [value.getBytes() for value in values] == [b"\x01g", b"\x01h", b"\x01a", b"\x01m"]
+        assert [type(value.getBytes()) for value in values] == [bytes] * 4
+        assert [value.getSrid() for value in values] == [4326] * 4
+        assert type(row.b) is bytearray and row.b == b"b"

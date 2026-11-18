@@ -52,6 +52,11 @@ pub struct PyDataFrame {
     /// then. A schema that is not a DataType fails the DataFrame at each action, as its plan does
     /// not build.
     schema_object: Option<Py<PyAny>>,
+    /// The `ExecutionInfo` that `executionInfo` made, with the information of the execution of
+    /// the core that it is of: PySpark keeps the one object of the last execution of a DataFrame
+    /// (`_execution_info`), which each access returns until another execution replaces it.
+    execution_info_object:
+        std::sync::Mutex<Option<(spark_connect::session::ExecutionInfo, Py<PyAny>)>>,
 }
 
 /// The answer kept in `cell`, else that of `ask`, which is kept unless it fails, as
@@ -140,7 +145,15 @@ impl PyDataFrame {
                 .map_err(Box::new)
         })?;
         check_schema_conversion(py, schema.as_ref())?;
-        let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
+        let mut table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
+        // As SparkConnectClient._execute_and_fetch with self_destruct, which copies each column
+        // of each batch into its own allocation before the conversion, with its errors.
+        if settings[2].as_deref() == Some("true") {
+            table = py
+                .import("pyspark.sql.connect.client")?
+                .call_method1("_self_destruct_table", (table,))?
+                .unbind();
+        }
         let schema = match &schema {
             Some(schema) => crate::types::data_type_to_py(py, schema)?,
             None => py.None(),
@@ -229,6 +242,7 @@ impl PyDataFrame {
             is_empty: std::sync::OnceLock::new(),
             input_files: std::sync::OnceLock::new(),
             schema_object: None,
+            execution_info_object: std::sync::Mutex::new(None),
         }
     }
 
@@ -851,6 +865,13 @@ impl PyDataFrame {
         if let Some(schema) = &self.schema_object {
             visit.call(schema)?;
         }
+        // The ExecutionInfo of `executionInfo`, which may keep this DataFrame, as an attribute
+        // that a user sets on it. Its lock is held only while no Python code runs.
+        if let Ok(kept) = self.execution_info_object.try_lock() {
+            if let Some((_, info)) = kept.as_ref() {
+                visit.call(info)?;
+            }
+        }
         Ok(())
     }
 
@@ -862,6 +883,12 @@ impl PyDataFrame {
             self.plan_holders = crate::gc::Holders::new();
             self.dataframe.clear_plan();
             self.schema_object = None;
+            let kept = self
+                .execution_info_object
+                .get_mut()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            drop(kept);
         }
     }
 
@@ -3120,7 +3147,9 @@ impl PyDataFrame {
     /// The `pyarrow.Table` of the result as the server sends it, uncast, and the schema that the
     /// server sends with it, a `StructType`, or None: PySpark Connect's private `_to_table`, of
     /// which its `toArrow` is made. A result without batches raises the `AssertionError` of its
-    /// `assert table is not None`; a Spark server sends at least one batch.
+    /// `assert table is not None`; a Spark server sends at least one batch. The metadata of the
+    /// schema and of the fields of the table are those that PySpark reads of the server's stream
+    /// (`pyspark.sql.connect.client._table_as_received`).
     fn _to_table(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
@@ -3131,6 +3160,10 @@ impl PyDataFrame {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
+        let table = py
+            .import("pyspark.sql.connect.client")?
+            .call_method1("_table_as_received", (table,))?
+            .unbind();
         let schema = match &schema {
             Some(schema) => crate::types::data_type_to_py(py, schema)?,
             None => py.None(),
@@ -3254,21 +3287,47 @@ impl PyDataFrame {
 
     /// Execution info from the most recent action, as a `pyspark.sql.metrics.ExecutionInfo`
     /// (plan metrics, observed-metric flows, and the ExecutePlan `operation_id`). Mirrors
-    /// `DataFrame.executionInfo`; `None` before any action ran.
+    /// `DataFrame.executionInfo`; `None` before any action ran. As PySpark's, which returns the
+    /// `_execution_info` that the last execution of the DataFrame set, it is one object until
+    /// another execution replaces it: the one that the first access after an execution makes.
     #[getter]
     #[pyo3(name = "executionInfo")]
     fn execution_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let Ok(info) = self.dataframe.execution_info() else {
             return Ok(py.None());
         };
+        // The lock is not held while Python code runs, which may read this property again.
+        let kept_of = |info: &spark_connect::session::ExecutionInfo| {
+            let kept = self
+                .execution_info_object
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match kept.as_ref() {
+                Some((of, object)) if same_execution(of, info) => Some(object.clone_ref(py)),
+                _ => None,
+            }
+        };
+        if let Some(object) = kept_of(&info) {
+            return Ok(object);
+        }
         let metrics_mod = py.import("pyspark.sql.metrics")?;
         let (plan_metrics, observed) = execution_metrics(py, &info)?;
-        let ei = metrics_mod.getattr("ExecutionInfo")?.call1((
-            plan_metrics,
-            observed,
-            info.operation_id.clone(),
-        ))?;
-        Ok(ei.unbind())
+        let ei = metrics_mod
+            .getattr("ExecutionInfo")?
+            .call1((plan_metrics, observed, info.operation_id.clone()))?
+            .unbind();
+        // Another thread may have made one of the same execution meanwhile, which is kept.
+        if let Some(object) = kept_of(&info) {
+            return Ok(object);
+        }
+        let replaced = self
+            .execution_info_object
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .replace((info, ei.clone_ref(py)));
+        // Released after the lock, as a finalizer of the replaced object may run Python code.
+        drop(replaced);
+        Ok(ei)
     }
 
     /// Convert to a pandas-on-Spark DataFrame, as PySpark's `DataFrame.pandas_api`: of the
@@ -7584,6 +7643,24 @@ pub(crate) fn execution_metrics<'py>(
     Ok((plan_metrics, observed))
 }
 
+/// Whether `a` and `b` are the information of one execution, of which `executionInfo` gives one
+/// object: of the same operation, which the core makes for each execution, with the same metrics
+/// and observed metrics. An observed metric of a NaN, which is not equal to itself, compares by
+/// its encoding.
+fn same_execution(
+    a: &spark_connect::session::ExecutionInfo,
+    b: &spark_connect::session::ExecutionInfo,
+) -> bool {
+    use prost::Message;
+    a.operation_id == b.operation_id
+        && a.metrics == b.metrics
+        && a.observed_metrics.len() == b.observed_metrics.len()
+        && a.observed_metrics
+            .iter()
+            .zip(&b.observed_metrics)
+            .all(|(x, y)| x == y || x.encode_to_vec() == y.encode_to_vec())
+}
+
 /// Convert an observed-metric literal to a Python value, as the metrics of an Observation.
 /// Mirrors `LiteralExpression._to_value`: the kinds it decodes map to the same Python values,
 /// and for any other kind (which the reference rejects with `UNSUPPORTED_LITERAL`, and which
@@ -7798,4 +7875,45 @@ pub(crate) fn literal_text(
             .extract()
     };
     text().unwrap_or_else(|_| format!("{literal:?}"))
+}
+
+#[cfg(test)]
+mod execution_info_tests {
+    use super::same_execution;
+    use spark_connect::session::ExecutionInfo;
+    use spark_connect_proto::execute_plan_response::{Metrics, ObservedMetrics};
+    use spark_connect_proto::expression::literal::LiteralType;
+    use spark_connect_proto::expression::Literal;
+
+    fn info(operation_id: &str, value: f64) -> ExecutionInfo {
+        ExecutionInfo {
+            metrics: Some(Metrics::default()),
+            observed_metrics: vec![ObservedMetrics {
+                name: "metric".to_string(),
+                values: vec![Literal {
+                    literal_type: Some(LiteralType::Double(value)),
+                    ..Default::default()
+                }],
+                keys: vec!["value".to_string()],
+                ..Default::default()
+            }],
+            operation_id: Some(operation_id.to_string()),
+        }
+    }
+
+    #[test]
+    fn the_information_of_one_execution_is_the_same_with_a_nan_observed_too() {
+        assert!(same_execution(&info("a", 1.0), &info("a", 1.0)));
+        assert!(same_execution(&info("a", f64::NAN), &info("a", f64::NAN)));
+    }
+
+    #[test]
+    fn another_operation_or_other_metrics_are_of_another_execution() {
+        assert!(!same_execution(&info("a", 1.0), &info("b", 1.0)));
+        assert!(!same_execution(&info("a", 1.0), &info("a", 2.0)));
+        assert!(!same_execution(&info("a", 1.0), &ExecutionInfo::default()));
+        let mut without_metrics = info("a", 1.0);
+        without_metrics.metrics = None;
+        assert!(!same_execution(&info("a", 1.0), &without_metrics));
+    }
 }
