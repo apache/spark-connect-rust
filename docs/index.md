@@ -46,7 +46,9 @@ package for the Python world.
 <div class="sc-card" markdown>
 ### Native Rust API
 A synchronous `spark_connect` crate that mirrors PySpark's DataFrame, Column,
-functions, SQL, streaming, and catalog surface.
+functions, SQL, streaming, and catalog surface, but for the APIs that need Python
+itself: of Python functions, pandas or Python's implicit session (see
+[Compatibility](compatibility.md#what-drop-in-means)).
 </div>
 
 <div class="sc-card" markdown>
