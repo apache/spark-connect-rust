@@ -553,6 +553,30 @@ class Reader(object):  # type: ignore[misc]
         with self.assertRaisesRegex(gen.GeneratorError, r"DROPPED names that .* lacks: \['Gone'\]"):
             tree.generate(["pyspark.sql.reader"], dropped={"pyspark.sql.reader": {"Gone"}})
 
+    def test_a_factory_of_identity_decorators_is_checked_in_pyspark(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/__init__.py",
+            """
+            from typing import Any, Callable, TypeVar, Union
+
+            _F = TypeVar("_F", bound=Callable)
+
+            def since(version: Union[str, float]) -> Callable[[_F], _F]: ...
+
+            def until(version: str) -> Callable[..., Any]: ...
+            """,
+        )
+        # since("2.4.0") returns a decorator that returns what it takes, as PySpark annotates it.
+        with mock.patch.object(gen, "IDENTITY_DECORATORS", frozenset({"pyspark.since"})):
+            gen.check_identity_decorators(tree.src)
+        with (
+            mock.patch.object(gen, "IDENTITY_DECORATORS", frozenset({"pyspark.until"})),
+            self.assertRaisesRegex(gen.GeneratorError, "not annotated as returning what it takes"),
+        ):
+            gen.check_identity_decorators(tree.src)
+
     def test_extras_add_the_names_of_the_dropin(self):
         tree = Tree(self)
         tree.write(

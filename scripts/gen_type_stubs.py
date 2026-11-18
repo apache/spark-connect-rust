@@ -165,6 +165,10 @@ STUB_MODULES = (
     "pyspark.sql.connect.window",
     "pyspark.sql.connect.streaming.query",
     "pyspark.sql.connect.streaming.readwriter",
+    # The native registration of the data sources of a Connect session (spark.dataSource), and
+    # the native statistics of pyspark.ml.
+    "pyspark.sql.connect.datasource",
+    "pyspark.ml.stat",
 )
 
 # The decorators that a type checker applies: kept as they are. A decorator of the module
@@ -196,6 +200,7 @@ _PROPERTY_ACCESSOR = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*\.(setter|getter|delete
 # annotated with the same type variable, or ``Type[T]`` for a class decorator.
 IDENTITY_DECORATORS = frozenset(
     {
+        "pyspark.since",
         "pyspark.errors.utils._with_origin",
         "pyspark.errors.utils.with_origin_to_class",
         "pyspark.sql.utils.dispatch_col_method",
@@ -681,10 +686,27 @@ def resolve_import(module: str, import_from: ast.ImportFrom) -> str:
 # ---------------------------------------------------------------------------------------
 
 
+def _identity_callable(returns, type_vars: set[str]) -> bool:
+    """Whether `returns` is ``Callable[[T], T]`` for a type variable ``T`` of `type_vars`: what a
+    factory of identity decorators returns (``since("2.4.0")``)."""
+    return (
+        isinstance(returns, ast.Subscript)
+        and _dotted(returns.value) in ("Callable", "typing.Callable")
+        and isinstance(returns.slice, ast.Tuple)
+        and len(returns.slice.elts) == 2
+        and isinstance(returns.slice.elts[0], ast.List)
+        and len(returns.slice.elts[0].elts) == 1
+        and isinstance(returns.slice.elts[0].elts[0], ast.Name)
+        and returns.slice.elts[0].elts[0].id in type_vars
+        and ast.dump(returns.slice.elts[0].elts[0]) == ast.dump(returns.slice.elts[1])
+    )
+
+
 def check_identity_decorators(pyspark_src: Path) -> None:
     """Each decorator of IDENTITY_DECORATORS returns what it takes, as PySpark annotates it:
     its first (or only) signature is ``(f: T, ...) -> T`` or ``(cls: Type[T], ...) -> Type[T]``
-    for a type variable ``T`` of its module."""
+    for a type variable ``T`` of its module, or it is a factory of such decorators, of a
+    signature ``(...) -> Callable[[T], T]``."""
     for qualified in sorted(IDENTITY_DECORATORS):
         module, _, name = qualified.rpartition(".")
         tree = ast.parse((pyspark_src / source_path(pyspark_src, module)).read_text())
@@ -717,7 +739,7 @@ def check_identity_decorators(pyspark_src: Path) -> None:
                 )
             )
         )
-        if not identity:
+        if not identity and not _identity_callable(returns, type_vars):
             raise GeneratorError(
                 f"{qualified}: not annotated as returning what it takes; keep it in the stubs "
                 "(KEPT_DECORATORS) instead of IDENTITY_DECORATORS"
