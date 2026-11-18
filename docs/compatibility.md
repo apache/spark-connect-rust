@@ -1779,7 +1779,11 @@ relation of the plan as a node of its own plans, which it numbers from the count
 IDs of its sessions, and the plans of `pyspark.sql.connect.plan` number theirs from `1 << 48`,
 past the core's, so that the two never give a relation the same ID. So the relation that it sends
 and the columns of its `df["name"]` have the client's plan ID, and its `_plan` is the plan of that
-relation, not `plan`, as PySpark's is.
+relation, not `plan`, as PySpark's is. It is made of the relation that `plan.plan(session.client)`
+gives when it is made, so a plan that fails to build raises there, where PySpark's DataFrame keeps
+the plan and builds it at its first request: `DataFrame(df._plan, spark)`, also of a subclass of
+the DataFrame, of a DataFrame of a UDF that does not pickle, or of a read of an option that UTF-8
+cannot encode, raises the error of its build at once.
 
 ## SparkSession.client
 
@@ -2389,7 +2393,10 @@ is gone the exit waits on that request's retries, as PySpark's does, so the exit
 long as those retries. A signal ends that wait, as it ends PySpark's, whose cleanup catches
 `Exception` only: the `KeyboardInterrupt` of Ctrl-C is raised out of the exit hook, which
 `atexit` reports before it runs the next one, and the session is then neither released nor
-closed. A stopped session sends nothing at exit.
+closed. A stopped session sends nothing at exit. PySpark 4.3.0 does not exit at all while a
+session other than its default one is left open to the end, such as one of `newSession()` or of
+`SparkSession(connection=...)`: its `SparkSession.__del__` closes the client in the teardown of the
+interpreter, whose grpcio `Channel.close()` waits forever. The drop-in exits.
 Nor does a session that the program dropped, of which no object is left: neither the session
 nor a DataFrame, reader, writer, catalog, stream or ML object of it. PySpark's session object
 closes its client when it is freed, and the exit sends nothing for a closed client. The drop-in
@@ -2677,13 +2684,13 @@ does, is reported by neither, so that no reference is counted twice: a cycle thr
 only when it is broken, where PySpark collects it. A stream writer holds its DataFrame, where
 PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed by the collector,
 where PySpark frees it with its last reference. The functions of `foreachBatch` and `foreach` are
-kept as their pickles, as PySpark's stream writer keeps them, so a function that keeps its writer is
-freed with its last reference, and a copy or a pickle of the writer carries the pickle of the call.
-The registration of `dataSource` reports its session, and the builder of
-`pyspark.sql.connect.session.SparkSession` its channel builder and its hook factories, as PySpark's
-plain objects hold them, so a session that keeps its `dataSource`, or a channel builder or a hook
-factory that keeps its builder, is collected. One that a copy of the builder shares is reported by
-neither, so a cycle through it is freed only when it is broken.
+kept as their pickles, as PySpark's stream writer keeps them, so a function that keeps its writer
+is freed with its last reference, and a copy or a pickle of the writer carries the pickle of the
+call. The registration of `dataSource` reports its session, and the builder of
+`pyspark.sql.connect.session.SparkSession` its channel builder and the list of its hook factories,
+which its shallow copies share, as PySpark's plain objects hold them, so a session that keeps its
+`dataSource`, or a channel builder or a hook factory that keeps its builder or a copy of it, is
+collected.
 
 The condition and the assignments of a clause of `mergeInto` are pickled when the clause is added,
 which raises there, as PySpark's, and again when the merge runs, whose request carries the later
@@ -2701,9 +2708,11 @@ SparkSession, its `conf`, `catalog`, `read`, `readStream`, `streams`, `udf`, `ud
 `dataSource`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
 `mergeInto` and its clauses, `na`, `stat`, `groupBy`, `cogroup`, `asTable` and the WindowSpec of
 its windows, and an `Observation`. So are `SparkSession.Hook`, nested in the session class, and
-the classes of `pyspark.sql.connect.client` (its channel builders, `PlanObservedMetrics`,
-`SparkConnectClient`, `RpcDeadlines`, `AnalyzeResult` and `ConfigResult`), which are of
-`pyspark.sql.connect.client.core`.
+the classes that `pyspark.sql.connect.client` names, which are of `pyspark.sql.connect.client.core`:
+its channel builders, `SparkConnectClient` and `RpcDeadlines`, which PySpark's module names too, of
+the `__all__` of its `core`, and `PlanObservedMetrics`, `AnalyzeResult` and `ConfigResult`, classes
+of PySpark's `core` that only the drop-in's module names, with its own helpers and the names that
+it imports, as the drop-in's client is that module.
 The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` and
 `partitioning`), and so are those of `pyspark.sql.connect.avro.functions` and
 `pyspark.sql.connect.protobuf.functions`: they are not those of `pyspark.sql.functions`,
@@ -2742,27 +2751,37 @@ by registration, so the MRO of a DataFrame is its native class and `object`, and
 `pyspark.sql.Column` names the concrete class.
 
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
-the DataFrame, `Observation`, `DataFrameReader` and `DataStreamReader`, which construct of their
-PySpark arguments (`DataFrameReader(spark)`), also a subclass of an `__init__` of its own, and whose
-setters, copies and pickles are of the subclass; `SparkSession.Hook`, `StorageLevel` and
-`PythonEvalType`; and the `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window`, of
-static methods and of PySpark's class attributes, `_PRECEDING_THRESHOLD` and `_FOLLOWING_THRESHOLD`
-among them, and the `_spec` of the Connect class, which a subclass has too: `Window()`, also of a
-subclass, makes an object of no state, as PySpark's, which takes attributes and weak references and
-pickles as a plain object; and the data types, from `StringType` and `DecimalType` to `ArrayType`,
-`StructField` and `StructType` (see above). A reader is made of a session, which one of the
-arguments of its constructor must be, where PySpark's `__init__` keeps any `client`: without a
-session the TypeError is of the missing `client`, or of the argument that is not a session, also
-where PySpark's subclass raises the error of the other arguments of its `__init__`. So a reader that
-PySpark pickled, which unpickles of its class without arguments, raises that TypeError in the
-drop-in, where the drop-in's pickle of a reader loads in PySpark, of its class, as PySpark's own do:
-where the session of its ID is active.
+the DataFrame, `Observation`, `SparkSession`, `Catalog`, `DataSourceRegistration`,
+`DataFrameReader` and `DataStreamReader`, which construct of their PySpark arguments
+(`SparkSession(connection=...)`, `Catalog(spark)`, `DataFrameReader(spark)`), also a subclass of an
+`__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
+session, which are the active session of its ID, as PySpark's);
+`SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the `Window` of `pyspark.sql.window`
+and of `pyspark.sql.connect.window`, of static methods and of PySpark's class attributes,
+`_PRECEDING_THRESHOLD` and `_FOLLOWING_THRESHOLD` among them, and the `_spec` of the Connect class,
+which a subclass has too: `Window()`, also of a subclass, makes an object of no state, as PySpark's,
+which takes attributes and weak references and pickles as a plain object; and the data types, from
+`StringType` and `DecimalType` to `ArrayType`, `StructField` and `StructType` (see above). A
+session of a subclass is the session that its DataFrames, readers and catalogs give back, as in
+PySpark. The `__init__` of the class gives an object its session, as PySpark's `__init__` sets it:
+the session of a new client, of `SparkSession(connection, userId=None, hook_factories=None)`, and
+the session of its argument for the others, which must be a session, where PySpark's keeps any
+object until it is used, which raises its `AttributeError` then. Until it runs, as for a subclass
+whose `__init__` does not call it, a session, a reader or a catalog is of a session of no server,
+whose requests raise `NO_ACTIVE_SESSION`, where PySpark's raise the `AttributeError` of `_client`
+or `_sparkSession` (a reader or a catalog is of the first session among the arguments of a
+subclass, if any, which then works), and a registration has no `sparkSession`, as PySpark's. So a
+pickle of PySpark, which makes an object of its class without arguments and then sets its
+`__dict__`, loads in the drop-in: a reader, of the `_client`, `_format`, `_schema` and `_options`
+(and `_source_name`) of its state, which it sets as its setters do, a catalog of its
+`_sparkSession` and a registration of its `sparkSession`; and the drop-in's pickles of them load in
+PySpark, of their classes, as PySpark's own do: where the session of their ID is active.
 The other native classes cannot be subclassed
-(`TypeError: type 'Catalog' is not an acceptable base type`), as their objects are of the state of
-the Rust core. `SparkSession(connection=...)`, `Catalog(spark)` and `DataSourceRegistration(spark)`
-construct as PySpark's; the others do not construct either
-(`TypeError: cannot create '...' instances`), as PySpark's constructors take the Python objects of
-its client, which the drop-in does not have:
+(`TypeError: type 'Column' is not an acceptable base type`), and do not construct
+(`TypeError: cannot create '...' instances`): their objects are made of the state of the Rust core,
+a plan, an expression or a query, which the arguments of PySpark's constructors, the Python objects
+of its client, do not give, as the drop-in does not have them, so a subclass would have no
+`__init__` to call:
 - `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
   are the Rust core's.
 - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` take the
@@ -2824,10 +2843,12 @@ attributes that are set on them through copies and pickles, as PySpark's copy an
 they copy the object at all. Where PySpark's fail, the drop-in's fail with the same errors, such as
 the `AttributeError` of the creator of the session of a plain pickle of `spark.streams`, and the
 `TypeError` of its lock of a deep copy and of cloudpickle. Their `__dict__` holds only those
-attributes, where PySpark's holds the state of the object too, as the `_options` of a builder: so a
-shallow copy of a builder has options of its own, where PySpark's shares its `_options` dict.
-`pyspark.sql.SparkSession.builder` is PySpark's own class, whose `__dict__` holds its `_options`,
-which a shallow copy shares, as in PySpark.
+attributes, where PySpark's holds the state of the object too, as the `_options` of a builder. A
+shallow copy of the builder of `pyspark.sql.connect.session.SparkSession` shares its options and
+its hook factories all the same, as PySpark's copy shares its `_options` dict and its
+`_hook_factories` list: a `remote`, a `config` or a `_registerHook` of either one is seen by both,
+while a `channelBuilder` sets the channel builder of the one that it is called on, as it rebinds an
+attribute of PySpark's.
 
 A table name that is neither a str nor bytes, and bytes that are not UTF-8, give a DataFrame of
 `read.table`, `readStream.table` and `changes`, whose plan raises protobuf's `TypeError` or the
@@ -2838,7 +2859,14 @@ rejects it as an invalid Spark Connect URL, as PySpark's `create` does for its `
 `None`, given as `remote(None)`, `remote(location=None)` or `config("spark.remote", None)`, is
 kept as None: `create` and `getOrCreate` fail PySpark's assertion, unless a session exists, which
 `getOrCreate` returns. A later `remote` replaces it. A `remote()` without an argument is
-`sc://localhost`, as in PySpark's Connect builder.
+`sc://localhost`, as in PySpark's Connect builder. The locks are PySpark's: `getOrCreate` holds
+`SparkSession._lock` from its lookup to the options that it sets, `create` to make its session the
+default one, and `stop()` throughout, and the builder holds `SparkSession.Builder._lock` in
+`config`, `remote`, `appName`, `channelBuilder` and `_registerHook`, and while it sets the options
+of a session. Each is a class attribute, an `RLock`, read at each call, so a thread of the program
+that holds one holds off the calls of the other threads that take it, and a signal ends the wait
+for it. As PySpark's, `getOrCreate` sets the options of a session that it creates twice, in
+`create` and again.
 
 The client honors the HTTP proxy of the environment (`grpc_proxy`, `https_proxy`, `http_proxy`,
 `no_grpc_proxy`, `no_proxy`) with grpcio's rules, see [HTTP Proxies](configuration.md#http-proxies),

@@ -13030,7 +13030,9 @@ def test_cycles_through_the_sessions_and_builders_of_their_objects_are_collected
     # As PySpark's DataSourceRegistration, a plain object that holds its session, and its session
     # builder, which holds its channel builder and its hook factories: a session that keeps its
     # dataSource, or a copy or a new registration of it, is freed by the garbage collector, and so
-    # is a channel builder or a hook factory that keeps its builder.
+    # is a channel builder or a hook factory that keeps its builder, or the builder and its shallow
+    # copies, which share the list of its hook factories. A hook factory that a builder shares
+    # with a copy that is still reachable is kept, and makes the hook of the copy's session.
     import copy
     import gc
     import weakref
@@ -13057,15 +13059,47 @@ def test_cycles_through_the_sessions_and_builders_of_their_objects_are_collected
         channel.job = job
         return ConnectSession.builder.channelBuilder(channel)
 
+    def with_copy(builder):
+        return builder, copy.copy(builder)
+
     for make in (channel_builder,
                  lambda job: ConnectSession.builder._registerHook(lambda session: job),
-                 lambda job: ConnectSession.Builder()._registerHook(lambda session: job)):
+                 lambda job: ConnectSession.Builder()._registerHook(lambda session: job),
+                 lambda job: with_copy(channel_builder(job)),
+                 lambda job: with_copy(ConnectSession.builder._registerHook(lambda session: job)),
+                 lambda job: copy.copy(ConnectSession.builder._registerHook(lambda session: job)),
+                 lambda job: with_copy(ConnectSession.builder)[1]._registerHook(
+                     lambda session: job)):
         job = Job()
         job.held = make(job)
         freed = weakref.ref(job)
         del job
         gc.collect()
         assert freed() is None
+
+    made = []
+
+    class Factory:
+        def __init__(self, job):
+            self.job = job
+
+        def __call__(self, session):
+            made.append(session)
+            return ConnectSession.Hook()
+
+    job = Job()
+    job.held = ConnectSession.builder.remote(service.remote)._registerHook(Factory(job))
+    kept = copy.copy(job.held)
+    freed = weakref.ref(job)
+    del job
+    gc.collect()
+    assert freed() is not None
+    session = kept.create()
+    try:
+        assert made == [session]
+    finally:
+        session.release_session_on_close = False
+        session.stop()
 
 
 def test_stream_writers_keep_the_pickles_of_their_functions_as_pyspark(mock_connect):
@@ -22030,6 +22064,31 @@ def test_arrow_input_explicit_schema_matching_width(schema, values):
     assert names is None
 
 
+def test_logical_plans_give_the_plans_of_their_relations_of_to_proto_as_pyspark(
+    mock_connect, capsys
+):
+    # As PySpark's LogicalPlan.to_proto(session, debug=False): the Plan of the relation of
+    # plan(session) as its root, which debug prints. A DataFrame's _plan gives the Plan of the
+    # placeholder of its relation, which its plan(session) gives.
+    import inspect
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.plan import LogicalPlan, Range
+
+    spark, _ = mock_connect
+    assert list(inspect.signature(LogicalPlan.to_proto).parameters) == ["self", "session", "debug"]
+    assert inspect.signature(LogicalPlan.to_proto).parameters["debug"].default is False
+    plan = Range(0, 3, 1)
+    proto = plan.to_proto(spark.client)
+    assert isinstance(proto, pb2.Plan) and proto.WhichOneof("op_type") == "root"
+    assert proto.root == plan.plan(spark.client)
+    assert capsys.readouterr().out == ""
+    assert plan.to_proto(spark.client, debug=True) == proto
+    assert capsys.readouterr().out == f"{proto}\n"
+    df = spark.range(3)
+    assert df._plan.to_proto(spark.client).root == df._plan.plan(spark.client)
+
+
 def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_connect):
     # As PySpark's pyspark.ml, which builds its plans over the relation of a DataFrame without
     # parsing it: a DataFrame of 120 chained withColumn calls is nested deeper than a protobuf
@@ -22201,16 +22260,29 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
     # grouped data, the cogroups, the table arguments, the window specifications, the null and
     # statistics functions, the merge clauses, the stream writers, the data source registrations
     # and the session builders, and their copies, the rows of toLocalIterator, the expressions
-    # of Columns and table arguments, and their copies, and the array, map, field and struct
-    # types, which a schema of the server makes too.
+    # of Columns and table arguments, and their copies, the array, map, field and struct types,
+    # which a schema of the server makes too, and the sessions, the catalogs and the registrations
+    # of a Python subclass, which keeps its __dict__, and the objects that an unpickle makes
+    # without arguments.
     import copy
     import gc
 
     from pyspark.sql import Window
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.catalog import Catalog
     from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.datasource import DataSourceRegistration
     from pyspark.sql.connect.session import SparkSession as ConnectSession
     from pyspark.sql.observation import Observation
+
+    class SubSession(ConnectSession):
+        pass
+
+    class SubCatalog(Catalog):
+        pass
+
+    class SubRegistration(DataSourceRegistration):
+        pass
 
     spark, _ = mock_connect
     df = spark.range(1)
@@ -22250,6 +22322,12 @@ def test_objects_traversed_while_they_are_created_do_not_crash(mock_connect):
         lambda: copy.deepcopy(kv), lambda: T.StructField("a", T.DecimalType(10, 2)),
         lambda: copy.deepcopy(field), lambda: T.StructType([T.StructField("a", T.LongType())]),
         lambda: copy.deepcopy(struct), lambda: struct.toNullable(), lambda: df.schema,
+        lambda: ConnectSession.__new__(ConnectSession), lambda: SubSession.__new__(SubSession),
+        lambda: Catalog(spark), lambda: SubCatalog(spark), lambda: copy.copy(SubCatalog(spark)),
+        lambda: SubRegistration(spark), lambda: copy.copy(SubRegistration(spark)),
+        lambda: DataSourceRegistration.__new__(DataSourceRegistration),
+        lambda: type(reader).__new__(type(reader)),
+        lambda: type(stream_reader).__new__(type(stream_reader)),
     ]
     thresholds = gc.get_threshold()
     gc.collect()
@@ -29173,6 +29251,124 @@ def test_a_stop_from_a_signal_handler_while_stop_releases_runs_within_it_as_pysp
     assert spark.is_stopped
 
 
+def test_the_session_and_builder_locks_are_held_where_pyspark_holds_them(mock_connect):
+    # As PySpark's SparkSession._lock, an RLock that getOrCreate holds from its lookup to the
+    # options that it sets, _set_default_and_active_session (and so create) while it sets the
+    # default session, and stop all the while, and its SparkSession.Builder._lock, another RLock,
+    # that config, remote, appName, channelBuilder, _registerHook and the setting of the options
+    # of a session hold. They are class attributes, read at each call, so the lock that a program
+    # sets is the one held, as `with` holds it, of its __enter__ and its __exit__, which is given
+    # the exception that ends the block. A getOrCreate that creates a session holds both twice,
+    # as it sets the options in create and then again, which two requests send.
+    import threading
+
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, service = mock_connect
+
+    class Recording:
+        def __init__(self):
+            self.lock = threading.RLock()
+            self.log = []
+
+        def __enter__(self):
+            self.log.append("enter")
+            return self.lock.__enter__()
+
+        def __exit__(self, *exc):
+            self.log.append("exit" if exc[0] is None else exc[0].__name__)
+            return self.lock.__exit__(*exc)
+
+    assert type(ConnectSession._lock) is type(threading.RLock())
+    assert type(ConnectSession.Builder._lock) is type(threading.RLock())
+    assert ConnectSession.Builder._lock is not ConnectSession._lock
+    assert ConnectSession.builder._lock is ConnectSession.Builder._lock
+    session_lock, builder_lock = Recording(), Recording()
+
+    def held(call):
+        session_lock.log.clear()
+        builder_lock.log.clear()
+        try:
+            call()
+        except Exception:
+            pass
+        return session_lock.log[:], builder_lock.log[:]
+
+    builder = ConnectSession.builder
+    sessions = []
+    try:
+        ConnectSession._lock, ConnectSession.Builder._lock = session_lock, builder_lock
+        both = ["enter", "exit"]
+        for call in (lambda: builder.remote(service.remote), lambda: builder.config("k", "v"),
+                     lambda: builder.config(map={"k": "w"}), lambda: builder.appName("a"),
+                     lambda: builder._registerHook(lambda session: ConnectSession.Hook()),
+                     lambda: ConnectSession.builder.channelBuilder(
+                         DefaultChannelBuilder(service.remote))):
+            assert held(call) == ([], both)
+        assert held(lambda: builder.master("m")) == ([], [])
+        assert held(lambda: sessions.append(builder.getOrCreate())) == (both, both)
+        assert held(lambda: sessions.append(builder.create())) == (both, both)
+        assert held(sessions[-1].stop) == (both, [])
+        assert held(spark.stop) == (both, [])
+        sets = len(service.set_confs)
+        assert held(lambda: sessions.append(builder.getOrCreate())) == (
+            ["enter", "enter", "exit", "exit"], both + both)
+        options = [("k", "w"), ("spark.app.name", "a")]
+        assert [pairs for pairs, _ in service.set_confs[sets:]] == [options, options]
+        assert held(lambda: ConnectSession._set_default_and_active_session(spark)) == (both, [])
+        failing = ConnectSession.builder.config("k\ud800", "v")
+        assert held(failing.getOrCreate) == (
+            ["enter", "UnicodeEncodeError"], ["enter", "UnicodeEncodeError"])
+        assert held(ConnectSession.builder.create) == ([], [])
+        assert held(lambda: sessions[-1].newSession()) == ([], [])
+        # A lock that is not a context manager fails as `with` does.
+        ConnectSession._lock = None
+        with pytest.raises(TypeError, match="^'NoneType' object does not support the context "
+                                            "manager protocol$"):
+            builder.getOrCreate()
+    finally:
+        ConnectSession._lock, ConnectSession.Builder._lock = session_lock.lock, builder_lock.lock
+        for session in sessions:
+            session.release_session_on_close = False
+            session.stop()
+
+
+def test_a_thread_that_holds_the_session_lock_holds_off_the_builders_and_stops_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's SparkSession._lock, which a thread of the program may hold: getOrCreate, create
+    # and stop of another thread wait for it, without the GIL, and run once it is released.
+    import threading
+
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, service = mock_connect
+    other = ConnectSession.builder.remote(service.remote).create()
+    calls = {
+        "getOrCreate": lambda: ConnectSession.builder.remote(service.remote).getOrCreate(),
+        "create": lambda: ConnectSession.builder.remote(service.remote).create(),
+        "stop": other.stop,
+    }
+    made = []
+    for name, call in calls.items():
+        done = threading.Event()
+
+        def run(call=call):
+            made.append(call())
+            done.set()
+
+        with ConnectSession._lock:
+            thread = threading.Thread(target=run, daemon=True)
+            thread.start()
+            assert not done.wait(0.5), f"{name} did not wait for the lock"
+        assert done.wait(5), f"{name} did not run once the lock was released"
+        thread.join(5)
+    assert made[0] is spark and made[2] is None and other.is_stopped
+    made[1].release_session_on_close = False
+    made[1].stop()
+
+
 def test_get_or_create_waits_for_a_stop_in_progress_and_creates_a_new_session_as_pyspark(
     mock_connect,
 ):
@@ -34063,6 +34259,115 @@ def test_reader_and_stream_writer_attributes_survive_copy_and_pickle(mock_connec
         assert cloudpickle.loads(cloudpickle.dumps(obj)).foo == [1, 2]
 
 
+def test_sessions_catalogs_and_registrations_subclass_as_pyspark(mock_connect):
+    # As PySpark Connect's SparkSession, Catalog and DataSourceRegistration, plain classes: a
+    # subclass constructs of the arguments of its own __init__, which calls that of the class of
+    # PySpark's arguments. A session of a subclass is of the user of its arguments, neither the
+    # default nor the active session, and the session that its DataFrames, readers and catalogs
+    # give back; a catalog and a registration of a subclass copy, deep-copy and pickle
+    # (cloudpickle, of the active session) of their class, with their attributes. A call without
+    # the arguments of the class raises CPython's TypeError, named after its __init__.
+    import copy
+    import gc
+    import inspect
+    import weakref
+
+    import cloudpickle
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.catalog import Catalog
+    from pyspark.sql.connect.datasource import DataSourceRegistration
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, service = mock_connect
+
+    class Tagged(ConnectSession):
+        def __init__(self, tag, connection):
+            super().__init__(connection, userId="tagged")
+            self.tag = tag
+
+    class Plain(ConnectSession):
+        pass
+
+    assert list(inspect.signature(ConnectSession).parameters) == [
+        "connection", "userId", "hook_factories"]
+    for cls in (ConnectSession, Plain):
+        with pytest.raises(TypeError) as excinfo:
+            cls()
+        assert str(excinfo.value) == (
+            "SparkSession.__init__() missing 1 required positional argument: 'connection'")
+    sessions = [Tagged("t", service.remote), Plain(connection=service.remote, userId="plain")]
+    try:
+        for session, cls, user in zip(sessions, (Tagged, Plain), ("tagged", "plain")):
+            assert type(session) is cls and session is not ConnectSession.getActiveSession()
+            assert ConnectSession._default_session is not session
+            df = session.range(1)
+            assert df.sparkSession is session and session.read._client is session
+            assert session.catalog._sparkSession is session
+            assert session.dataSource.sparkSession is session
+            df.collect()
+            sent = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+            assert sent.user_context.user_id == user
+        assert sessions[0].tag == "t"
+    finally:
+        for session in sessions:
+            session.release_session_on_close = False
+            session.stop()
+
+    # A session whose __init__ never ran has no client: its requests raise NO_ACTIVE_SESSION, as
+    # those of a stopped session do, where PySpark's raise the AttributeError of its _client.
+    class Unconnected(ConnectSession):
+        def __init__(self, tag):
+            self.tag = tag
+
+    unconnected = Unconnected("u")
+    assert unconnected.is_stopped and unconnected.tag == "u"
+    with pytest.raises(SparkConnectException) as raised:
+        unconnected.range(1).collect()
+    assert raised.value.getCondition() == "NO_ACTIVE_SESSION"
+
+    class SubCatalog(Catalog):
+        def __init__(self, x, session):
+            super().__init__(session)
+            self.x = x
+
+    class SubRegistration(DataSourceRegistration):
+        def __init__(self, session, *, x):
+            super().__init__(session)
+            self.x = x
+
+    assert list(inspect.signature(Catalog).parameters) == ["sparkSession"]
+    assert list(inspect.signature(DataSourceRegistration).parameters) == ["sparkSession"]
+    for cls in (Catalog, DataSourceRegistration):
+        with pytest.raises(TypeError) as excinfo:
+            cls()
+        assert str(excinfo.value) == (
+            f"{cls.__name__}.__init__() missing 1 required positional argument: 'sparkSession'")
+    for obj in (SubCatalog(1, spark), SubCatalog(x=1, session=spark),
+                SubRegistration(spark, x=1)):
+        for copied in (obj, copy.copy(obj), copy.deepcopy(obj),
+                       pickle.loads(cloudpickle.dumps(obj))):
+            assert type(copied) is type(obj) and copied.x == 1
+            if isinstance(copied, Catalog):
+                assert copied._sparkSession is spark
+            else:
+                assert copied.sparkSession is spark
+    # A registration whose __init__ never ran has no session, as PySpark's.
+    with pytest.raises(AttributeError, match="has no attribute 'sparkSession'"):
+        DataSourceRegistration.__new__(DataSourceRegistration).sparkSession
+    with pytest.raises(AttributeError, match="has no attribute 'sparkSession'"):
+        DataSourceRegistration.__new__(DataSourceRegistration).register(object)
+    # A cycle through the __dict__ of an object of a subclass is collected, as PySpark's.
+    for make in (lambda: Plain(service.remote), lambda: SubCatalog(1, spark),
+                 lambda: SubRegistration(spark, x=1)):
+        obj = make()
+        obj.me = obj
+        freed = weakref.ref(obj)
+        del obj
+        gc.collect()
+        assert freed() is None
+
+
 from pyspark.sql.connect.readwriter import DataFrameReader as _ConnectReader  # noqa: E402
 from pyspark.sql.connect.streaming.readwriter import (  # noqa: E402
     DataStreamReader as _ConnectStreamReader,
@@ -34118,6 +34423,72 @@ def test_readers_construct_of_a_session_and_subclass_as_pyspark(mock_connect, su
     assert type(pickle.loads(cloudpickle.dumps(base(spark)))) is base
     reader.__init__(spark)
     assert reader._format is None and reader._options == {} and reader.extra is None
+
+
+def test_pyspark_pickles_of_readers_catalogs_and_registrations_load_as_pyspark(mock_connect):
+    # As PySpark's pickle of its plain objects, the class and the state of its __dict__, which an
+    # unpickle sets on the object that the class makes without arguments: a reader of PySpark is
+    # of its _client, _format, _schema and _options (and the _source_name of a stream reader),
+    # which it takes as its setters do, a catalog of its _sparkSession and a registration of its
+    # sparkSession, and the other entries are their attributes. Its session unpickles as the
+    # active session of its ID, as PySpark's does (cloudpickle, of the creator of the session).
+    import copyreg
+
+    import cloudpickle
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.catalog import Catalog
+    from pyspark.sql.connect.datasource import DataSourceRegistration
+    from pyspark.sql.connect.readwriter import DataFrameReader
+    from pyspark.sql.connect.streaming.readwriter import DataStreamReader
+
+    spark, service = mock_connect
+
+    class PySparkObject:
+        # PySpark's object of `cls` of the __dict__ `state`, whose pickle is that of a plain
+        # object: `copyreg.__newobj__` of its class, which pickle checks against `__class__`,
+        # and its __dict__.
+        def __init__(self, cls, state):
+            self.cls, self.state = cls, state
+
+        @property
+        def __class__(self):
+            return self.cls
+
+        def __reduce__(self):
+            return copyreg.__newobj__, (self.cls,), self.state
+
+    def loaded(cls, **state):
+        return pickle.loads(cloudpickle.dumps(PySparkObject(cls, state)))
+
+    reader = loaded(DataFrameReader, _client=spark, _format="csv", _schema="a INT",
+                    _options={"k": "v", "n": None}, extra=[1])
+    assert type(reader) is DataFrameReader and reader._client is spark
+    assert (reader._format, reader._schema, reader._options) == ("csv", "a INT", {"k": "v"})
+    assert reader.extra == [1]
+    reader.load("p").collect()
+    # ExecutePlanRequest.plan=3, Plan.root=1, Relation.read=4, Read.data_source=2:
+    # DataSource.format=1, schema=2, options=3 and paths=4.
+    read = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root.read
+    source = read.data_source
+    assert (source.format, source.schema, dict(source.options), list(source.paths)) == (
+        "csv", "a INT", {"k": "v"}, ["p"])
+    stream = loaded(DataStreamReader, _format="rate", _schema="", _client=spark,
+                    _options={"rowsPerSecond": "5"}, _source_name="src_1")
+    assert type(stream) is DataStreamReader and stream._client is spark
+    assert (stream._format, stream._schema, stream._options, stream._source_name) == (
+        "rate", "", {"rowsPerSecond": "5"}, "src_1")
+    catalog = loaded(Catalog, _sparkSession=spark, extra=2)
+    assert type(catalog) is Catalog and catalog._sparkSession is spark and catalog.extra == 2
+    registration = loaded(DataSourceRegistration, sparkSession=spark)
+    assert type(registration) is DataSourceRegistration and registration.sparkSession is spark
+    assert vars(registration) == {}
+    # Without an active session, the session of the pickle raises NO_ACTIVE_SESSION, as
+    # PySpark's.
+    pickled = cloudpickle.dumps(PySparkObject(DataFrameReader, {"_client": spark, "_options": {}}))
+    spark.stop()
+    with pytest.raises(Exception) as raised:
+        pickle.loads(pickled)
+    assert raised.value.getCondition() == "NO_ACTIVE_SESSION"
 
 
 def test_a_reader_subclass_pickle_is_of_its_class_on_a_worker_as_pyspark(monkeypatch):
@@ -34519,6 +34890,69 @@ def test_plain_pickles_name_the_session_creator_as_pyspark(mock_connect):
     for obj in (spark, spark.read, spark.range(1).groupBy("id")):
         with pytest.raises(AttributeError, match=re.escape(message)):
             pickle.dumps(obj)
+
+
+def test_shallow_copies_of_a_builder_share_its_options_and_hooks_as_pyspark(mock_connect):
+    # As PySpark's copy.copy of its builder, a plain object whose __dict__ the copy shares: the
+    # copy shares the _options dict and the _hook_factories list, so a remote, a config or a
+    # _registerHook of either one is seen by both, and a copy of a copy shares them too. Its
+    # channel builder is an attribute, which a channelBuilder of either one rebinds on that one
+    # alone. A deep copy and a pickle have options of their own.
+    import copy
+
+    import cloudpickle
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    _, service = mock_connect
+    made = []
+
+    def factory(name):
+        def make(session):
+            made.append(name)
+            return ConnectSession.Hook()
+        return make
+
+    def created(builder):
+        # The pairs that the session that the builder creates is given, and its hooks.
+        sets = len(service.set_confs)
+        made.clear()
+        session = builder.create()
+        session.release_session_on_close = False
+        session.stop()
+        return [pair for pairs, _ in service.set_confs[sets:] for pair in pairs], list(made)
+
+    def assert_no_url(builder):
+        with pytest.raises(PySparkValueError) as error:
+            builder.create()
+        assert error.value.getCondition() == "SESSION_NEED_CONN_STR_OR_BUILDER"
+
+    builder = ConnectSession.builder
+    copied = copy.copy(builder)
+    copied.remote(service.remote).config("k1", "v1")._registerHook(factory("copy"))
+    builder.config("k2", "v2")._registerHook(factory("builder"))
+    expected = ([("k1", "v1"), ("k2", "v2")], ["copy", "builder"])
+    assert created(builder) == expected and created(copied) == expected
+    copy.copy(copied).config("k3", "v3")
+    assert created(builder)[0] == [("k1", "v1"), ("k2", "v2"), ("k3", "v3")]
+    for independent in (copy.deepcopy(builder), cloudpickle.loads(cloudpickle.dumps(builder))):
+        independent.config("k4", "v4")
+        assert ("k4", "v4") not in created(builder)[0]
+
+    builder = ConnectSession.builder
+    copied = copy.copy(builder)
+    copied.channelBuilder(DefaultChannelBuilder(service.remote))
+    assert_no_url(builder)
+    assert created(copied) == ([], [])
+    # A copy of a builder of a channel builder has it too, and a remote of either one is both
+    # builders' URL, which neither can take with a channel builder.
+    builder = ConnectSession.builder.channelBuilder(DefaultChannelBuilder(service.remote))
+    copied = copy.copy(builder)
+    assert created(copied) == ([], [])
+    copied.remote(service.remote)
+    assert_no_url(builder)
+    assert_no_url(copied)
 
 
 def test_session_builders_copy_and_pickle_as_pyspark(mock_connect):
