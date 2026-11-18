@@ -363,6 +363,29 @@ fn python_observation<'py>(
     same.then_some(python)
 }
 
+/// The Python Observation of `observation`, a state that the plan of a DataFrame holds, as the
+/// Observation that PySpark's plan holds itself: the one of [`keep_handle`] while it is alive,
+/// else a new Observation of the state, whose `get` the actions of the plan set as they set the
+/// state, and which later reads give back while it is alive.
+pub(crate) fn python_observation_of<'py>(
+    py: Python<'py>,
+    observation: &Observation,
+) -> PyResult<Bound<'py, PyObservation>> {
+    if let Some(python) = python_observation(py, observation) {
+        return Ok(python);
+    }
+    let python = Bound::new(
+        py,
+        PyObservation {
+            inner: observation.clone(),
+            restored: Restored::default(),
+            unencodable_name: None,
+        },
+    )?;
+    keep_handle(&python)?;
+    Ok(python)
+}
+
 /// The copy of `observation`, an Observation of the plan of a DataFrame that `copy.deepcopy`
 /// copies with `memo`, as PySpark's deep copy of a plan copies the Observation that it holds,
 /// with the memo of the call: the deep copy of its Python Observation in `memo`, the copy that

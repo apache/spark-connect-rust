@@ -1077,6 +1077,26 @@ impl PyDataFrame {
             .unbind())
     }
 
+    /// The Observations of the plan of this DataFrame by their names, as PySpark Connect's
+    /// `LogicalPlan.observations` of its `DataFrame._plan`, which its DataFrame gives the
+    /// executions of `SparkSession.client` (`client.to_table(plan, df._plan.observations)`): those
+    /// of `observe` on this DataFrame and on the inputs that PySpark's plans hold as their child,
+    /// both sides of a join and of a set operation, and those of the DataFrames under a plan of
+    /// Python (`DataFrame(plan, session)`), such as a `SubqueryAlias`, in the order of PySpark's
+    /// dict. A DataFrame observed by a name has none, as in PySpark.
+    fn _observations<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let observations = PyDict::new(py);
+        // The core gives them in the reverse of the order of PySpark's dict, which merges the
+        // Observations of a plan after those of its inputs (see `DataFrame::observations`).
+        for (_, observation) in self.dataframe.observations().into_iter().rev() {
+            let python = crate::observation::python_observation_of(py, &observation)?;
+            // As PySpark's key, `str(observation._name)`, of a name that UTF-8 cannot encode too.
+            let name = python.getattr(pyo3::intern!(py, "_name"))?.str()?;
+            observations.set_item(name, python)?;
+        }
+        Ok(observations)
+    }
+
     /// Select columns (accepts Column objects or string names).
     #[pyo3(signature = (*cols))]
     fn select(&self, _py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
