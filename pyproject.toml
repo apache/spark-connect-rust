@@ -283,6 +283,7 @@ extend-exclude = [
     "python/pyspark/sql/internal.py",
     "python/pyspark/sql/profiler.py",
     "python/pyspark/sql/metrics.py",
+    "python/pyspark/sql/streaming/__init__.py",
     "python/pyspark/sql/streaming/tws_tester.py",
     "python/pyspark/sql/streaming/listener.py",
     "python/pyspark/streaming/__init__.py",

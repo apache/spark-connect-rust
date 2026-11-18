@@ -17,4 +17,9 @@
 """Rust-backed PandasCogroupedOps under the official import path."""
 from pyspark._pyspark import PandasCogroupedOps
 
+# As PySpark's module imports them, so that `import pyspark.sql` loads
+# pyspark.sql.streaming.state too, a name of the package pyspark.sql.streaming there.
+from pyspark.sql.streaming.state import GroupStateTimeout  # noqa: F401
+from pyspark.sql.streaming.stateful_processor import StatefulProcessor  # noqa: F401
+
 __all__ = ["PandasCogroupedOps"]
