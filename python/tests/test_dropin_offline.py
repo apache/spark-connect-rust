@@ -4630,12 +4630,154 @@ def test_the_output_types_of_udfs_are_converted_when_their_plans_are_built_as_py
             assert len(service.recorded_order) == requests
 
 
+class _ReturnTypeHandler:
+    def eval(self, x):
+        yield (x,)
+
+
+def _udtf_return_type_cases():
+    # The DataFrame of each path that builds the plan of a call of a UDTF of the return type
+    # `schema`, given at the call, and the PythonUDTF of that call in the root of a request.
+    from pyspark.sql import functions as F
+    from pyspark.sql.functions import arrow_udtf, lit, udtf
+
+    class Rows:
+        def eval(self, row):
+            yield (row["id"],)
+
+    class Tables:
+        def eval(self, x):
+            import pyarrow as pa
+
+            yield pa.table({"id": [x]})
+
+    def call(root):
+        return root.common_inline_user_defined_table_function.python_udtf
+
+    return {
+        "call": (lambda spark, schema: udtf(_ReturnTypeHandler, returnType=schema)(lit(1)), call),
+        "asDeterministic": (
+            lambda spark, schema: udtf(_ReturnTypeHandler, returnType=schema).asDeterministic()(
+                lit(1)),
+            call),
+        "useArrow": (
+            lambda spark, schema: udtf(_ReturnTypeHandler, returnType=schema, useArrow=True)(
+                lit(1)),
+            call),
+        "arrow_udtf": (lambda spark, schema: arrow_udtf(Tables, returnType=schema)(lit(1)), call),
+        "lateralJoin": (
+            lambda spark, schema: spark.range(1).lateralJoin(
+                udtf(_ReturnTypeHandler, returnType=schema)(F.col("id").outer())),
+            lambda root: call(root.lateral_join.right)),
+        "table argument": (
+            lambda spark, schema: udtf(Rows, returnType=schema)(spark.range(1).asTable()),
+            lambda root: call(root.with_relations.root)),
+        "in a table argument": (
+            lambda spark, schema: udtf(Rows, returnType="id long")(
+                udtf(_ReturnTypeHandler, returnType=schema)(lit(1)).asTable()),
+            lambda root: call(root.with_relations.references[0])),
+    }
+
+
+@pytest.mark.parametrize("case", list(_udtf_return_type_cases()))
+def test_the_return_types_of_udtfs_are_converted_when_their_plans_are_built_as_pyspark(
+    mock_connect, case
+):
+    # As PySpark's PythonUDTF.to_plan, which converts the return type of the type object that the
+    # PythonUDTF of a call keeps each time it builds a plan of the call, and then pickles the
+    # handler class: a StructType changed in place after the call is the type that a request
+    # sends, as it is then, on each path that builds the plan of the call, with the handler.
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.connect.proto import base_pb2
+    from pyspark.sql.connect.types import pyspark_types_to_proto_types
+
+    spark, service = mock_connect
+    make, udtf_of = _udtf_return_type_cases()[case]
+    schema = T.StructType([T.StructField("id", T.LongType())])
+    frame = make(spark, schema)
+    for change in (lambda: None, lambda: schema.add("x", T.StringType())):
+        change()
+        frame.explain()
+        # AnalyzePlanRequest.explain of the plan of the DataFrame.
+        root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
+        udtf = udtf_of(root)
+        assert udtf.return_type == pyspark_types_to_proto_types(schema)
+        assert isinstance(CloudPickleSerializer().loads(udtf.command), type)
+
+
+def test_udtf_calls_keep_the_return_type_object_of_the_call_as_pyspark(mock_connect):
+    # As PySpark's UDTF call, whose PythonUDTF keeps the handler class and the return type object
+    # of the UDTF at the call, a str as an UnparsedDataType, as its __init__ makes it: a returnType
+    # or a func set on the UDTF after the call is not that of the call, and a str set as the
+    # returnType before the call is sent unparsed. A copy of the DataFrame shares the type object,
+    # so its requests send the type as it is then; a deep copy and a pickle, as PySpark's copy and
+    # pickle of the plan, copy it, so they send it as it was when they were made. The registration
+    # converts the type once, when it is called, as PySpark's builds its command then.
+    import copy
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.connect.proto import base_pb2
+    from pyspark.sql.connect.types import UnparsedDataType, pyspark_types_to_proto_types
+    from pyspark.sql.functions import lit, udtf
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+
+    class Other:
+        def eval(self, x):
+            yield (x,)
+
+    def sent(df):
+        # AnalyzePlanRequest.explain of the plan of the DataFrame, of the UDTF at its root.
+        df.explain()
+        root = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).explain.plan.root
+        return root.common_inline_user_defined_table_function.python_udtf
+
+    def struct(*names):
+        return T.StructType([T.StructField(name, T.LongType()) for name in names])
+
+    called = udtf(_ReturnTypeHandler, returnType="id long")
+    called.returnType = "id long, x long"
+    assert sent(called(lit(1))).return_type == pyspark_types_to_proto_types(
+        UnparsedDataType("id long, x long"))
+    schema = struct("id")
+    called = udtf(_ReturnTypeHandler, returnType=schema)
+    df = called(lit(1))
+    called.returnType = struct("other")
+    called.func = Other
+    udtf_sent = sent(df)
+    assert udtf_sent.return_type == pyspark_types_to_proto_types(struct("id"))
+    assert serializer.loads(udtf_sent.command).__name__ == "_ReturnTypeHandler"
+    for make, shares in (
+        (copy.copy, True),
+        (copy.deepcopy, False),
+        (lambda df: serializer.loads(serializer.dumps(df)), False),
+    ):
+        schema = struct("id")
+        df = udtf(_ReturnTypeHandler, returnType=schema)(lit(1))
+        made = make(df)
+        schema.add("x", T.LongType())
+        expected = struct("id", "x") if shares else struct("id")
+        assert sent(made).return_type == pyspark_types_to_proto_types(expected)
+        assert sent(df).return_type == pyspark_types_to_proto_types(struct("id", "x"))
+    schema = struct("id")
+    registered = udtf(_ReturnTypeHandler, returnType=schema)
+    schema.add("x", T.LongType())
+    spark.udtf.register("registered", registered)
+    schema.add("y", T.LongType())
+    # ExecutePlanRequest.plan.command.register_table_function, of the registration.
+    command = base_pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.command
+    assert command.register_table_function.python_udtf.return_type == (
+        pyspark_types_to_proto_types(struct("id", "x")))
+
+
 def test_udtf_handlers_are_pickled_when_plans_are_built_as_pyspark(mock_connect, tmp_path):
     # As PySpark Connect's PythonUDTF.to_plan: the handler is pickled each time a request builds
     # a plan of the UDTF, so the call of a handler that does not pickle gives a DataFrame, and
     # each request of it, in a lateral join too, raises a PySparkPicklingError of
     # UDTF_SERIALIZATION_ERROR of its PicklingError, with no request sent. The registration, a
-    # command, pickles the handler when it is called, and raises there.
+    # command, pickles the handler when it is called, and raises there. The error names the
+    # class as the PythonUDTF of the call, or of the registration, read its name then.
     from pyspark.errors import PySparkPicklingError
     from pyspark.sql.functions import udtf
 
@@ -4668,6 +4810,15 @@ def test_udtf_handlers_are_pickled_when_plans_are_built_as_pyspark(mock_connect,
                 "serializable.",
             }
             assert type(error.value.__context__) is pickle.PicklingError
+        Unpicklable.func.__name__ = "Renamed"
+        for use, name in (
+            (lambda: df.schema, "Unpicklable"),
+            (lambda: Unpicklable().schema, "Renamed"),
+            (lambda: spark.udtf.register("unpicklable", Unpicklable), "Renamed"),
+        ):
+            with pytest.raises(PySparkPicklingError) as error:
+                use()
+            assert error.value.getMessageParameters()["name"] == name
         assert (len(service.analyze_requests), len(service.execute_requests)) == sent
     finally:
         file_obj.close()
@@ -4679,9 +4830,10 @@ def test_udtf_return_types_are_converted_when_plans_are_built_as_pyspark(mock_co
     # pyspark_types_to_proto_types when it builds the plan: the call gives a DataFrame, and each
     # request of it raises UNSUPPORTED_OPERATION of the str of the value as it is then, or the
     # error of that str, after the errors of the arguments and of their UDFs and before the
-    # handler is pickled. The registration, a command, sets the name and then converts the type
-    # before it pickles the handler. The errors are those of official pyspark-client 4.3.0, and
-    # no request is sent.
+    # handler is pickled; so does a valid type that is changed after the call to one that does
+    # not convert. The registration, a command, sets the name and then converts the type before
+    # it pickles the handler. The errors are those of official pyspark-client 4.3.0, and no
+    # request is sent.
     import threading
 
     from pyspark.errors import PySparkPicklingError, PySparkValueError
@@ -4743,6 +4895,10 @@ def test_udtf_return_types_are_converted_when_plans_are_built_as_pyspark(mock_co
     ):
         unsupported(lambda: udtf(Unpicklable, returnType=value)(lit(1)).schema, operation)
         unsupported(lambda: spark.udtf.register("f", udtf(Unpicklable, returnType=value)), operation)
+    schema = T.StructType([T.StructField("a", T.LongType())])
+    df = udtf(Unpicklable, returnType=schema)(lit(1))
+    schema.add("b", T.AtomicType())
+    unsupported(lambda: df.schema, "data type AtomicType()")
     for name, raised in ((5, TypeError), ("f\ud800", UnicodeEncodeError), (b"\xff", UnicodeDecodeError)):
         with pytest.raises(raised):
             spark.udtf.register(name, udtf(Unpicklable, returnType=5))

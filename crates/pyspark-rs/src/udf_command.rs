@@ -17,20 +17,21 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 use spark_connect::udf::{CommandPickler, PicklerCopies};
 
-/// The command of a UDF or UDTF as the shims give it: the bytes of its pickle, which are sent as
-/// they are, or the pickler of a function of no arguments that returns them, which a request calls
-/// each time it builds the plan.
+/// The command of a UDTF as the shims give it: the bytes of its pickle, which are sent as they
+/// are, or the pickler of a function of no arguments that returns the `PythonUDTF` message of its
+/// return type and its command, which a request calls each time it builds the plan.
 pub(crate) enum UdfCommand {
     Pickled(Vec<u8>),
     AtBuild(CommandPickler),
 }
 
 impl UdfCommand {
-    /// The command of `command`: bytes, or a function that pickles the command.
+    /// The command of `command`: bytes, or a function that converts the return type and pickles
+    /// the command (see [`udtf_pickler`]).
     pub(crate) fn of(command: &Bound<'_, PyAny>) -> UdfCommand {
         match command.cast::<PyBytes>() {
             Ok(bytes) => UdfCommand::Pickled(bytes.as_bytes().to_vec()),
-            Err(_) => UdfCommand::AtBuild(function_pickler(command.clone().unbind())),
+            Err(_) => UdfCommand::AtBuild(udtf_pickler(command.clone().unbind())),
         }
     }
 }
@@ -45,8 +46,9 @@ struct PythonCommand {
 /// What the object of a [`PythonCommand`] is.
 #[derive(Clone, Copy)]
 enum CommandKind {
-    /// A Python function of no arguments that returns the command.
-    Calls,
+    /// A Python function of no arguments that returns the `PythonUDTF` message of the return
+    /// type and the command of a UDTF, as the shim's `_udtf_command` builds it.
+    Udtf,
     /// The `(func, output_type)` of a UDF, which `CloudPickleSerializer().dumps` pickles, after
     /// the conversion of the `output_type` that the request sends with it, as PySpark's
     /// `PythonUDF.to_plan` does.
@@ -59,22 +61,22 @@ impl PythonCommand {
     /// The pickler of this command.
     fn pickler(self) -> CommandPickler {
         match self.kind {
-            CommandKind::Calls | CommandKind::DataType => {
-                CommandPickler::new(self, PythonCommand::pickle)
+            CommandKind::DataType => CommandPickler::new(self, PythonCommand::pickle),
+            CommandKind::Udtf | CommandKind::Udf => {
+                CommandPickler::with_output_type(self, PythonCommand::pickle)
             }
-            CommandKind::Udf => CommandPickler::with_output_type(self, PythonCommand::pickle),
         }
     }
 
-    /// The command, which the function returns, or, of a UDF, the `PythonUdf` message of its
-    /// output type, converted first, and of the pickle of the object, as PySpark's
+    /// Of a UDTF, the `PythonUdtf` message that the function returns; of a UDF, the `PythonUdf`
+    /// message of its output type, converted first, and of the pickle of the object, as PySpark's
     /// `PythonUDF.to_plan` converts `pyspark_types_to_proto_types(output_type)` before it pickles
     /// `(func, output_type)`, of the type as it is then; of a data type, its message.
     fn pickle(&self) -> spark_connect_core::error::Result<Vec<u8>> {
         Python::attach(|py| {
             let object = self.object.bind(py);
             match self.kind {
-                CommandKind::Calls => command_of(&object.call0()?),
+                CommandKind::Udtf => command_of(&object.call0()?),
                 CommandKind::Udf => {
                     use prost::Message;
                     let output_type =
@@ -99,13 +101,17 @@ impl PythonCommand {
     }
 }
 
-/// The pickler of `pickle`, a Python function of no arguments that returns the command, as the
-/// shims pickle the function of a UDF with `CloudPickleSerializer().dumps`, and that of a UDTF as
-/// `PythonUDTF.to_plan` does, of its error `UDTF_SERIALIZATION_ERROR`.
-fn function_pickler(pickle: Py<PyAny>) -> CommandPickler {
+/// The pickler of `udtf`, a Python function of no arguments that returns the `PythonUDTF`
+/// message of the return type and the command of a UDTF, as PySpark's `PythonUDTF.to_plan`
+/// builds them each time it builds the plan, of the type object that the call kept: the return
+/// type that the request sends is that of the object then, so a `StructType` changed in place
+/// after the call is sent as it is changed, and a type that `pyspark_types_to_proto_types` does
+/// not convert fails the request with its error, before the handler class is pickled, whose
+/// error `UDTF_SERIALIZATION_ERROR` comes next.
+fn udtf_pickler(udtf: Py<PyAny>) -> CommandPickler {
     PythonCommand {
-        object: pickle,
-        kind: CommandKind::Calls,
+        object: udtf,
+        kind: CommandKind::Udtf,
     }
     .pickler()
 }

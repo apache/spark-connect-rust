@@ -2040,9 +2040,10 @@ that holds it, as PySpark's `PythonUDF.to_plan` and `PythonUDTF.to_plan` pickle 
 the function reads, changed after the function was applied and before an action, is the value that
 the action runs with, and so for each later action. The output type of a UDF and of a map or
 group-map function is converted then too, of the type object that PySpark's `PythonUDF` keeps, as
-are the output schema of `transformWithState` and `transformWithStateInPandas` and the schema of
-`DataFrame.to`: a `StructType` changed in place after the call, as by `add` or by a field renamed,
-is the type that the request sends, and that the pickled command carries, as it is then. A type
+are the return type of a UDTF, of the object that its `PythonUDTF` keeps, the output schema of
+`transformWithState` and `transformWithStateInPandas` and the schema of `DataFrame.to`: a
+`StructType` changed in place after the call, as by `add` or by a field renamed, is the type that
+the request sends, and that the pickled command of a UDF carries, as it is then. A type
 that the conversion does not take, such as `AtomicType()` or a `StructField` as a type, fails the
 requests with its `UNSUPPORTED_OPERATION`, not the call, where the eval type of the UDF does not
 refuse it at the call, as the Arrow and pandas ones do with `NOT_IMPLEMENTED`. A function that does
@@ -2054,19 +2055,26 @@ builds the plan, the initial state of `transformWithState` before its function a
 a UDTF before its handler, and the first error of the build, of a pickling or of a value that the
 plan does not take, such as a str above, is raised. The return type of a UDTF is converted after
 its arguments and before its handler is pickled, as PySpark's `PythonUDTF.to_plan` converts it with
-`pyspark_types_to_proto_types`: a value that is neither a DataType nor a str, such as 5, is kept
-by the UDTF as it is, and each request of a call of it raises `UNSUPPORTED_OPERATION` of
-`data type 5`, of the str of the value when the request is built, or the error of that str; so does
-a type that has no proto, such as `AtomicType()`. `spark.udf.register` and `spark.udtf.register`
-are commands, which pickle the function when they are called, as PySpark's do; `spark.udtf.register`
-and `spark.client.register_udtf` set the name and convert the return type first, and the latter
-reads the `__name__` of the handler class before them, as PySpark's `PythonUDTF` does. A copy of a
-Column, a DataFrame, grouped data or a table argument holds the functions, which the requests of
-the copy pickle, as PySpark's:
+`pyspark_types_to_proto_types`, of the `PythonUDTF` that the call made: of the return type object
+and the handler class of the UDTF at the call, a str as its `UnparsedDataType`, and of the
+`__name__` of the class then, which `UDTF_SERIALIZATION_ERROR` names; so a `returnType` or a `func`
+set on the UDTF after the call is not that of the call. A value that is neither a DataType nor a
+str, such as 5, is kept by the UDTF as it is, and each request of a call of it raises
+`UNSUPPORTED_OPERATION` of `data type 5`, of the str of the value when the request is built, or the
+error of that str; so does a type that has no proto, such as `AtomicType()`, also one that a type
+changed after the call holds. `spark.udf.register` and `spark.udtf.register` are commands, which
+pickle the function when they are called, as PySpark's do; `spark.udtf.register` and
+`spark.client.register_udtf` set the name and convert the return type first, as it is then, and the
+latter reads the `__name__` of the handler class before them, as PySpark's `PythonUDTF` does. A
+copy of a Column, a DataFrame, grouped data or a table argument holds the functions, which the
+requests of the copy pickle, as PySpark's:
 `copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo` of the call, so a
 function, a lambda or a closure is the function itself, and a callable object, a bound method or a
 `functools.partial` is a copy, which the copies of one call share, as the two Columns of a UDF of
-`copy.deepcopy([c1, c2])` do. A request warns once of a window of no partitions, as PySpark's,
+`copy.deepcopy([c1, c2])` do. `copy.copy` shares the output type of a UDF and the return type of a
+UDTF too, and `copy.deepcopy` copies them, as PySpark's copy of the plan does: a type changed in
+place after a deep copy is not that of the copy, nor one changed after a pickle that of the
+unpickled DataFrame. A request warns once of a window of no partitions, as PySpark's,
 though the drop-in builds the plan of a request twice when it has such functions, as it pickles
 them between the two builds: so where a function that does not pickle comes before such a window
 in the build, the drop-in warns of the window before it raises the error of the pickling, where
