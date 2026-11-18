@@ -4001,24 +4001,12 @@ impl PySparkSession {
         )))
     }
 
-    // Reference: emptyDataFrame(schema) -> createDataFrame([], schema). We accept an
-    // optional schema (a permissive superset): with a schema we build a typed empty frame
-    // via createDataFrame; without one we return the core's schema-less empty frame.
-    #[pyo3(name = "emptyDataFrame", signature = (schema=None))]
-    fn empty_data_frame(
-        &self,
-        py: Python<'_>,
-        schema: Option<&Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
-        match schema {
-            Some(s) => {
-                let empty = PyList::empty(py);
-                self.createDataFrame(py, empty.as_any(), Some(s), None, None)
-            }
-            None => Ok(PyDataFrame::new(
-                self.session.empty_data_frame().to_pyerr()?,
-            )),
-        }
+    /// `SparkSession.emptyDataFrame(schema)`, as PySpark's: `createDataFrame([], schema)` of the
+    /// required schema, a type or a DDL string, with its errors, such as the
+    /// `CANNOT_INFER_EMPTY_SCHEMA` of None.
+    #[pyo3(name = "emptyDataFrame")]
+    fn empty_data_frame(&self, py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        self.createDataFrame(py, PyList::empty(py).as_any(), Some(schema), None, None)
     }
 
     #[pyo3(name = "interruptAll")]

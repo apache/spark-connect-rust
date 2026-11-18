@@ -3968,6 +3968,41 @@ def test_the_session_and_its_stream_manager_have_pysparks_public_names(mock_conn
     assert isinstance(spark.session_id, str)
 
 
+def test_empty_dataframe_takes_a_schema_as_pysparks(mock_connect):
+    # As PySpark's `emptyDataFrame(self, schema)`, which is `createDataFrame([], schema)`: the
+    # schema is required, None raises the CANNOT_INFER_EMPTY_SCHEMA of empty data before any
+    # request, and a schema sends the relation of no rows of `createDataFrame([], schema)`.
+    import inspect
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    parameters = inspect.signature(spark.emptyDataFrame).parameters
+    assert list(parameters) == ["schema"]
+    assert parameters["schema"].default is inspect.Parameter.empty
+    sent =(len(service.execute_requests), len(service.analyze_requests))
+    with pytest.raises(TypeError) as missing:
+        spark.emptyDataFrame()
+    assert str(missing.value) == (
+        "SparkSession.emptyDataFrame() missing 1 required positional argument: 'schema'"
+    )
+    with pytest.raises(PySparkValueError) as error:
+        spark.emptyDataFrame(None)
+    assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+    def local_relation(df):
+        df.collect()
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root.local_relation
+
+    schema = T.StructType([T.StructField("id", T.LongType())])
+    for given in (schema, "id long"):
+        relation = local_relation(spark.emptyDataFrame(schema=given))
+        assert relation == local_relation(spark.createDataFrame([], given))
+        assert not relation.HasField("data") and json.loads(relation.schema) == schema.jsonValue()
+
+
 def test_session_constructor_and_its_flags_as_pyspark_connect():
     import threading
 
