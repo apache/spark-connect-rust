@@ -1539,6 +1539,17 @@ class SparkConnectClient:
         _, properties, _ = self.execute_command(command)
         return properties["get_resources_command_result"]
 
+    def _create_profile(self, profile: Any) -> int:
+        """Create ``profile``, a ``spark.connect.ResourceProfile``, on the server, as
+        SparkConnectClient's: the profile ID that the server gives it. The ResourceProfile of
+        pyspark.sql.connect.resource.profile creates its profile with it."""
+        import pyspark.sql.connect.proto as pb2
+
+        command = pb2.Command()
+        command.create_resource_profile_command.profile.CopyFrom(profile)
+        _, properties, _ = self.execute_command(command)
+        return properties["create_resource_profile_command_result"]
+
     def _delete_ml_cache(self, cache_ids: list[str], evict_only: bool = False) -> list[str]:
         """Delete the cached objects of ``cache_ids`` on the server, as SparkConnectClient's: the
         IDs deleted, or none if it fails."""

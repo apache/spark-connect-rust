@@ -70,13 +70,53 @@ def test_connect_expressions_distributed_sequence_id_and_lambda_names_offline():
     assert UnresolvedNamedLambdaVariable.fresh_var_name("z") == "z_2"
 
 
-def test_connect_resource_profile_module_offline():
-    # PySpark Connect's module of ResourceProfile, which the client packages ship; the profile id
-    # that `ResourceProfile.id` gives is the server's, as PySpark's is.
+def test_connect_resource_profile_module_offline(mock_connect):
+    # As PySpark's, pyspark.resource.ResourceProfile (of `_java_resource_profile` first) is not
+    # the ResourceProfile of pyspark.sql.connect.resource.profile (of `exec_req` and `task_req`),
+    # which creates the profile on the server with a CreateResourceProfileCommand of
+    # SparkSession.client (`_create_profile`). Its id is the server's, kept after the first read.
+    import inspect
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.resource import (
+        ExecutorResourceRequests,
+        ResourceProfileBuilder,
+        TaskResourceRequests,
+    )
     from pyspark.resource import ResourceProfile as ClientResourceProfile
     from pyspark.sql.connect.resource.profile import ResourceProfile
 
-    assert ResourceProfile is ClientResourceProfile
+    assert ResourceProfile is not ClientResourceProfile
+    assert list(inspect.signature(ClientResourceProfile).parameters) == [
+        "_java_resource_profile", "_exec_req", "_task_req"
+    ]
+    assert list(inspect.signature(ResourceProfile).parameters) == ["exec_req", "task_req"]
+
+    spark, service = mock_connect
+    service.execute_payload = pb2.ExecutePlanResponse(
+        create_resource_profile_command_result=pb2.CreateResourceProfileCommandResult(profile_id=7)
+    ).SerializeToString()
+    executors = ExecutorResourceRequests().cores(2).resource("gpu", 1, "find_gpus.sh", "nvidia")
+    profile = ResourceProfileBuilder().require(executors).require(TaskResourceRequests().cpus(1)).build
+    sent = len(service.execute_requests)
+    assert profile.id == 7 and profile.id == 7
+    assert len(service.execute_requests) == sent + 1
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    created = request.plan.command.create_resource_profile_command.profile
+    assert dict(created.executor_resources) == {
+        # PySpark sets the optional discovery_script and vendor of every request.
+        "cores": pb2.ExecutorResourceRequest(
+            resource_name="cores", amount=2, discovery_script="", vendor=""
+        ),
+        "gpu": pb2.ExecutorResourceRequest(
+            resource_name="gpu", amount=1, discovery_script="find_gpus.sh", vendor="nvidia"
+        ),
+    }
+    assert dict(created.task_resources) == {
+        "cpus": pb2.TaskResourceRequest(resource_name="cpus", amount=1.0)
+    }
+    connect_profile = ResourceProfile(task_req={"cpus": TaskResourceRequests().cpus(2).requests["cpus"]})
+    assert connect_profile.id == 7 and connect_profile._remote_profile.task_resources["cpus"].amount == 2
 
 
 def test_create_dataframe_input_names_offline():
@@ -13136,6 +13176,58 @@ def test_connect_shim_imports():
     from pyspark.sql.connect.functions.builtin import _invoke_function_over_columns
 
     assert repr(_invoke_function_over_columns("pandas_product", F.col("x"))) == "Column<'pandas_product(x)'>"
+
+
+def test_module_namespaces_of_the_official_doctests_as_pyspark():
+    # As PySpark's: the official doctests of PySpark Connect take the namespace of a module as
+    # their globals (the `_test()` of each module), and their examples use these names of it.
+    import subprocess
+    import sys
+
+    import pyspark
+    import pyspark.sql.catalog
+    import pyspark.sql.connect.catalog
+    import pyspark.sql.connect.functions.builtin
+    import pyspark.sql.dataframe
+    from pyspark import is_remote_only
+    from pyspark.sql.types import Row, StructType
+    from pyspark.storagelevel import StorageLevel
+
+    assert is_remote_only() is True
+    dataframe = pyspark.sql.dataframe
+    assert (dataframe.Row, dataframe.StorageLevel, dataframe.StructType) == (
+        Row, StorageLevel, StructType
+    )
+    assert pyspark.sql.catalog.StorageLevel is StorageLevel
+    assert pyspark.sql.connect.catalog.StorageLevel is StorageLevel
+    assert pyspark.sql.connect.functions.builtin.sys is sys
+    # The doctests of the stream reader and writer take the namespace of the connect reader's
+    # module, which PySpark's module of them imports.
+    code = (
+        "import pyspark.sql.connect.streaming.readwriter, pyspark.sql.connect as connect; "
+        "print(connect.readwriter.__name__)"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert result.stdout.strip() == "pyspark.sql.connect.readwriter", result.stderr
+
+
+def test_special_lengths_of_the_messages_of_spark_as_pyspark():
+    # As PySpark's SpecialLengths, of the init message that pyspark.messages reads: the
+    # vendored SparkSocketMessageReceiver reads it before the data.
+    import io
+    import struct
+
+    from pyspark.messages.socket.spark_socket_message_receiver import SparkSocketMessageReceiver
+    from pyspark.serializers import SpecialLengths
+    from pyspark.sql.worker.utils import SpecialLengths as WorkerSpecialLengths
+
+    assert SpecialLengths.START_OF_INIT_MESSAGE == -8 and WorkerSpecialLengths is SpecialLengths
+    receiver = SparkSocketMessageReceiver(
+        io.BytesIO(struct.pack("!ii", -8, 4) + b"init" + struct.pack("!i", -4))
+    )
+    assert bytes(receiver.get_init_message().read(4)) == b"init"
+    receiver.get_data_stream()
+    receiver.get_finish_signal_from_stream()
 
 
 def test_module_level_names_as_pyspark(monkeypatch):

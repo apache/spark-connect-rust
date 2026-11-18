@@ -59,6 +59,16 @@ VENDORED_FILES=(
   "conf.py"
   "taskcontext.py"
 
+  # The serializers of pyspark, and its resource profiles, whose profile id the ResourceProfile
+  # of pyspark.sql.connect.resource.profile creates on the server through SparkSession.client.
+  "serializers.py"
+  "resource/__init__.py"
+  "resource/information.py"
+  "resource/profile.py"
+  "resource/requests.py"
+  "sql/connect/resource/__init__.py"
+  "sql/connect/resource/profile.py"
+
   # The Arrow C stream of a DataFrame, of DataFrame.__arrow_c_stream__.
   "sql/interchange.py"
 

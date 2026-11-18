@@ -16,6 +16,8 @@ __engine__: str = "rust"  # native Rust core via tonic -- not grpcio/py4j
 from functools import wraps
 from typing import cast, Any, Callable, TypeVar, Union
 
+from pyspark.util import is_remote_only
+
 # As the PySpark client's, of a Connect-only client: the names of pyspark but those of the
 # classic SparkContext (RDD, SparkContext, SparkFiles, ...), which need a JVM.
 from pyspark.conf import SparkConf

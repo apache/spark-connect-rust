@@ -15,6 +15,9 @@
 # limitations under the License.
 #
 """DataStreamReader / DataStreamWriter under the connect import path."""
+# As PySpark Connect's module, which imports pyspark.sql.connect.readwriter: the official doctests
+# of the stream reader and writer take that module's namespace as their globals.
+import pyspark.sql.connect.readwriter  # noqa: F401
 from pyspark.sql.streaming.readwriter import DataStreamReader, DataStreamWriter
 
 __all__ = ["DataStreamReader", "DataStreamWriter"]

@@ -24,6 +24,9 @@ from typing import NamedTuple, Optional
 
 from pyspark._pyspark import Catalog
 
+# Of PySpark's pyspark.sql.catalog, whose examples use it (Catalog.cacheTable).
+from pyspark.storagelevel import StorageLevel  # noqa: F401
+
 
 class CatalogMetadata(NamedTuple):
     name: str

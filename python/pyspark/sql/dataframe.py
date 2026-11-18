@@ -44,6 +44,11 @@ from pyspark._pyspark import (
     DataFrame as _NativeDataFrame,
 )
 
+# Of PySpark's pyspark.sql.dataframe, whose namespace the official doctests of the DataFrame take
+# as their globals (pyspark.sql.connect.dataframe._test), and whose examples use these names.
+from pyspark.sql.types import Row, StructType  # noqa: F401
+from pyspark.storagelevel import StorageLevel  # noqa: F401
+
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
 
 _public_dataframe = None
