@@ -142,6 +142,13 @@ class _DataFramePlan(LogicalPlan):
     def plan(self, session: Any) -> "proto.Relation":
         return proto.Relation.FromString(self._df._relation_placeholder())
 
+    @property
+    def observations(self) -> dict[str, Any]:
+        # As PySpark's plan of a DataFrame, whose ``observations`` are the Observations of its
+        # plan by their names, which the DataFrame gives the executions of the client, and so do
+        # the plans over it, such as a ``SubqueryAlias``: those of the core's plan.
+        return self._df._observations()
+
 
 class Read(LogicalPlan):
     def __init__(

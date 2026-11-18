@@ -1424,6 +1424,14 @@ is, and so is one that the message of an extension changes (`plan.common.plan_id
 rejects them with `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation.
 Delta Lake's plans hold neither.
 
+The `observations` of a DataFrame's plan (`df._plan.observations`) are the Observations of the
+DataFrame by their names, as PySpark's `LogicalPlan.observations`: those of `observe` on it and on
+its inputs, both sides of a join and of a set operation, in the order of PySpark's dict, but not a
+DataFrame observed by a name. A plan of `pyspark.sql.connect.plan` over it, such as
+`SubqueryAlias(df._plan, "s")`, has them too, and an execution of the client that is given them
+(`client.to_table(plan, df._plan.observations)`) sets them, as PySpark's DataFrame gives them to
+its client.
+
 The errors of the RPCs that PySpark's client leaves to grpc, those of `clone` (and
 `SparkSession.cloneSession`) and of `copy_from_local_to_fs` (and `SparkSession.copyFromLocalToFs`),
 which raise grpc's `RpcError` there (`_InactiveRpcError`), are converted as those of the other

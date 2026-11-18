@@ -329,6 +329,36 @@ def test_client_sends_the_relations_of_dataframes_under_the_plans_it_is_given_as
     assert properties["checkpoint_command_result"].count() == 5
 
 
+def test_the_plans_of_dataframes_give_the_client_their_observations_as_pyspark(session):
+    # As PySpark Connect's DataFrame._plan, whose observations are the Observations of the plan
+    # by their names, which its DataFrame gives the executions of its client: an execution of
+    # SparkConnectClient that is given them sets them, also those of a SubqueryAlias of
+    # pyspark.sql.connect.plan over the plan.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import Observation
+    from pyspark.sql.connect.plan import SubqueryAlias
+
+    client = session.client
+    first, second = Observation("first"), Observation("second")
+    df = session.range(3).observe(first, F.count(F.lit(1)).alias("n"))
+    df = df.observe(second, F.max("id").alias("m"))
+    observations = df._plan.observations
+    assert list(observations) == ["first", "second"] and observations["first"] is first
+    plan = pb2.Plan()
+    plan.root.CopyFrom(df._plan.plan(client))
+    client.to_table(plan, observations)
+    assert (first.get, second.get) == ({"n": 3}, {"m": 2})
+
+    aliased = Observation("aliased")
+    observed = session.range(5).observe(aliased, F.count(F.lit(1)).alias("n"))
+    alias = SubqueryAlias(observed._plan, "s")
+    assert list(alias.observations) == ["aliased"]
+    plan = pb2.Plan()
+    plan.root.CopyFrom(alias.plan(client))
+    frame, _ = client.to_pandas(plan, alias.observations)
+    assert len(frame) == 5 and aliased.get == {"n": 5}
+
+
 def test_client_of_a_connection_string_as_pyspark(session):
     # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
     # of the plans that it is given, built without a DataFrame, whose executions may be not

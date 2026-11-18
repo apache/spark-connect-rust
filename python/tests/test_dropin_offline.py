@@ -21157,6 +21157,65 @@ def test_plans_and_commands_built_in_python_send_the_relations_of_their_datafram
     assert (left.get, right.get) == ({"c": 3}, {"c": 5})
 
 
+def test_the_plans_of_dataframes_have_their_observations_as_pyspark(mock_connect):
+    # As PySpark Connect's DataFrame._plan, whose LogicalPlan.observations its DataFrame gives the
+    # executions of its client: the Observations of the plan by their names, those of observe on
+    # it and on its inputs, both sides of a join and of a union, in the order of PySpark's dict,
+    # but not a DataFrame observed by a name. A plan of pyspark.sql.connect.plan over it, such as
+    # a SubqueryAlias, and a DataFrame of such a plan have them too, and an execution of the
+    # client that is given them sets them, as SparkConnectClient.to_table sets them.
+    import gc
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SQL, SubqueryAlias
+
+    spark, service = mock_connect
+    client = spark.client
+    first, second, other = Observation("a"), Observation("b"), Observation("c")
+    count = F.count(F.lit(1)).alias("n")
+    source = spark.range(3)
+    assert source._plan.observations == {}
+    observed = source.observe(first, count).observe("named", count).observe(second, count)
+    observations = observed._plan.observations
+    assert list(observations) == ["a", "b"]
+    assert observations["a"] is first and observations["b"] is second
+    right = spark.range(5).observe(other, count)
+    assert list(observed.join(right)._plan.observations) == ["a", "b", "c"]
+    assert list(right.union(observed)._plan.observations) == ["c", "a", "b"]
+    assert list(observed.filter("id > 0").limit(1)._plan.observations) == ["a", "b"]
+    alias = SubqueryAlias(observed._plan, "s")
+    assert list(alias.observations.items()) == list(observations.items())
+    assert list(DataFrame(alias, spark)._plan.observations.items()) == list(observations.items())
+    # The views of SQL are its references, not its child, as in PySpark.
+    assert SQL("SELECT * FROM v", views=[SubqueryAlias(observed._plan, "v")]).observations == {}
+
+    # An Observation that only the plan holds any more is given back as one of its state.
+    dropped = spark.range(3).observe(Observation("d"), count)
+    gc.collect()
+    held = dropped._plan.observations["d"]
+    assert type(held) is type(first) and held._name == "d"
+    assert dropped._plan.observations["d"] is held
+
+    observation = Observation("o")
+    single = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, metrics = _count_batch_and_observed_metrics(service, single)
+    service.execute_payload = batch + metrics("o", varint_field(7, 3), "c")
+    plan = pb2.Plan()
+    plan.root.CopyFrom(single._plan.plan(client))
+    client.to_table(plan, {})
+    assert observation.get == {}
+    client.to_table(plan, single._plan.observations)
+    assert observation.get == {"c": 3}
+    batch, metrics = _count_batch_and_observed_metrics(service, dropped)
+    service.execute_payload = batch + metrics("d", varint_field(7, 3), "n")
+    plan.root.CopyFrom(dropped._plan.plan(client))
+    client.to_table(plan, dropped._plan.observations)
+    assert held.get == {"n": 3}
+
+
 def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):
     # As PySpark's DataFrame, a Python object: a cycle through a DataFrame of a Python plan, whose
     # plan keeps an object that keeps the DataFrame (as a pyspark.ml model keeps its summary's
