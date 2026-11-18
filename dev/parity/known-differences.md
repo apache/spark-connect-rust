@@ -10,8 +10,13 @@ difference is intentional or tracked for a fix.
   PySpark's pandas conversion zips the DataFrame's columns with the schema's fields. With
   fewer fields than columns it silently drops the extra columns, and with more fields it
   raises PyArrow's `ArrowInvalid`. This client raises `AXIS_LENGTH_MISMATCH` for both
-  rather than drop data.
-- **pandas DataFrames without PyArrow** (intentional optional-dependency fallback). As in
+  rather than drop data. Of more fields both clients fail, and only the class of the error
+  differs: `AXIS_LENGTH_MISMATCH` is PySpark's own error for local rows and for a list of names
+  of another width than the data.
+- **pandas DataFrames without PyArrow** (intentional optional-dependency fallback; PySpark
+  Connect makes no session without PyArrow, whose `check_dependencies` raises
+  `PACKAGE_NOT_INSTALLED`, so this path and the entries below that are of it extend the drop-in
+  and do not differ from a setup that PySpark supports). As in
   PySpark, every pandas DataFrame, of any class (a subclass such as GeoPandas' `GeoDataFrame`)
   and of any arrays (a third-party extension array such as BigQuery's `db_dtypes`), converts
   with PySpark's conversion of each column to Arrow, in the session time zone, which PySpark
@@ -26,10 +31,18 @@ difference is intentional or tracked for a fix.
   truncated without the error of a safe cast, and its errors are its own. This fallback covers
   unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
   fails during import. The row path also converts a frame, with PyArrow, when the type names
-  that the conversion and the importer resolve are rebound, or the classes of the struct of
-  the schema customized (`accepts_pandas_schema`).
+  that the conversion and the importer resolve are rebound, or when the class of the struct of
+  the schema, or of one of its fields, overrides how the conversion reads it: its `fields`,
+  `names` or iteration, a field's `name`, `dataType`, `nullable` or `metadata`, or
+  `__getattribute__` or `__class__` (`accepts_pandas_schema`). The conversion would read the
+  override, and the importer the native type. A Python subclass of `StructType` or
+  `StructField` that overrides none of these takes PySpark's conversion, as in PySpark, with the
+  JSON of its core types, where PySpark sends its `json()`, which names a struct of a subclass by
+  its `typeName()` and which the server then fails to parse (see the types of
+  `docs/compatibility.md`). So does a name that holds a NUL, at any depth, whose table the
+  importer reads of its IPC stream, as the C data interface holds names as C strings.
 - **Nested pandas Decimal inference and failures** (intentional; related change:
-  SPARK-60696).
+  SPARK-60696; of the row path without PyArrow, which PySpark Connect does not have, see above).
 
   - **Inferred precision and scale.** On the native row path, without PyArrow, inferred nested
     Decimal fields keep precision 38 and the greatest observed scale; PySpark infers the
@@ -54,7 +67,8 @@ difference is intentional or tracked for a fix.
     frames use PySpark's Arrow conversion and raise its errors. Both paths reject an
     explicit-schema value that does not fit before a relation is sent.
 - **Multiple invalid pandas columns with an explicit Decimal field** (intentional,
-  SPARK-60696). On the native row path, without PyArrow, Decimal exactness is checked before
+  SPARK-60696; of the row path without PyArrow, which PySpark Connect does not have, see above).
+  On the native row path, without PyArrow, Decimal exactness is checked before
   the encoder converts other fields. If an earlier non-Decimal column and a later Decimal
   column are both invalid, this client reports the Decimal column first; PySpark reports the
   first invalid column in schema order. Both reject the input before a relation is sent.
@@ -72,7 +86,8 @@ difference is intentional or tracked for a fix.
   resolution, its class takes precedence even when the public `decimal.Decimal` is the
   pure-Python class. Values of that pure-Python class are then not recognized as
   Decimals: local-row Decimal conversion raises `AssertionError` and inference raises
-  `CANNOT_INFER_TYPE_FOR_FIELD`, while the native row path of pandas input, without PyArrow,
+  `CANNOT_INFER_TYPE_FOR_FIELD`, while the native row path of pandas input, without PyArrow
+  (which PySpark Connect does not have, see above),
   without a schema or with names only reads them as doubles through `__float__`, potentially
   losing precision. Pandas frames on the Arrow path convert them as PySpark does.
   Quantization also uses a quantum of the selected C class, even when the public alias is
@@ -93,7 +108,8 @@ difference is intentional or tracked for a fix.
   `UnknownTimeZoneError`, or, without pytz, PyArrow's `ArrowInvalid` ("The zoneinfo module or
   pytz package must be installed."). This client's conversion of the rows reads no zone of the
   session: it returns the instant in the local time zone of the client, as both clients do of a
-  zone that Python knows. `toArrow` and `toPandas` give the same values in both.
+  zone that Python knows. `toArrow` gives the same table in both, and `toPandas` raises the same
+  `UnknownTimeZoneError` in both.
   So a timestamp whose wall clock in the session time zone is outside the years 1 to 9999 of
   Python's `datetime`, and in the local time zone is not, differs too: PySpark's localization in
   the session time zone raises Python's `OverflowError` ("date value out of range"), where this
@@ -108,13 +124,20 @@ difference is intentional or tracked for a fix.
 - **A `StructField` of a name or a metadata str that UTF-8 cannot encode** (intentional; the types
   of the core hold their names and metadata as UTF-8 and JSON). Its constructor raises the
   `UnicodeEncodeError` of the str, of a lone surrogate, where PySpark's builds the field, whose
-  `json()`, `simpleString()`, `==` and pickle work, and whose uses fail later: PySpark's `udf` of a
-  return type of such a name, and its `createDataFrame` of local rows of one, fail at the call, as
-  they make the pyarrow field of the name (the `_check_return_type` of the UDF); the DataFrames of
-  `to`, `from_json` and a cast of such a type, and of `createDataFrame` of a metadata str of one,
-  are made, and fail at the first request that sends the type, with protobuf's
-  `UnicodeEncodeError` of a name, or with the server's error of the string of a lone surrogate
-  (`Unpaired surrogate`) of the JSON in which `json.dumps` escapes it.
+  `json()`, `simpleString()`, `==` and pickle work. Of such a name, PySpark's uses of the field:
+  - `createDataFrame` of local rows, or of a pandas DataFrame or a pyarrow Table of rows, and a
+    UDF of such a return type, raise the `UnicodeEncodeError` at the call;
+  - a cast fails with protobuf's `UnicodeEncodeError` at the first request, and so does `to`,
+    whose cached schema needs no request, at the first request that builds its plan;
+  - the schemas of `createDataFrame` and `emptyDataFrame` of no rows, of a NumPy array, of a
+    reader's or a stream reader's schema, and of `from_json`, are the server's, which reads the
+    JSON in which `json.dumps` escapes the surrogate, and names the field with a `?` in its
+    place (`a?b`); collecting their rows fails on the server, which cannot write the name in the
+    Arrow schema of the results (`Unpaired surrogate at index 1 of 3`, of the driver or of a
+    task).
+
+  Of such a metadata str, each of these DataFrames is made and has its schema, and collecting
+  the rows of a batch one fails on the server so.
 - **The removal of the relation of a dropped checkpoint, and the deletion of a dropped model**
   (intentional; a drop does not wait). As PySpark's `CachedRemoteRelation.__del__`, the drop of
   the last DataFrame of a checkpoint sends one ExecutePlan of the removal, which is not
@@ -136,7 +159,9 @@ difference is intentional or tracked for a fix.
   session, which does not hold it, and stays in its own session's until that session ends, and a
   model dropped on a thread of no active session is not deleted.
 - **An exception of the `&` of a join's list of conditions that is not of a class that the plan
-  carries** (intentional; a plan of the core carries an error, not a Python object). Python's
+  carries** (intentional; a plan of the core carries the errors of these classes, not any Python
+  exception: it could hold a Python callback that raises it, as the plans of UDFs and of `to` hold
+  functions of Python, which the error of an operand's `&` is not worth). Python's
   `AttributeError`, `TypeError`, `ValueError` and `OverflowError`, and PySpark's error classes,
   such as the `PySparkAttributeError` of a Row, fail the plan when it is built, as in PySpark.
   Another, such as a `KeyError` that the `__getattr__` of an operand raises, is raised by `join`
@@ -144,9 +169,9 @@ difference is intentional or tracked for a fix.
 - **`toArrow` and `toPandas` of a string that is not valid UTF-8** (intentional). PySpark's
   `toArrow` returns a table whose string column holds the invalid bytes, which pyarrow's
   full validation rejects, and its `toPandas` raises pyarrow's `ArrowException`. This
-  client does not return invalid Arrow data: both raise a `PySparkRuntimeError` of the
-  Arrow decode. `collect` raises PySpark's `UnicodeDecodeError` for the bytes of the first
-  invalid string (the Rust API's `collect` returns `SparkErrorKind::UnicodeDecode`).
+  client does not return invalid Arrow data: both raise the `UnicodeDecodeError` of the bytes
+  of the first invalid string, as its `collect` does, which is PySpark's error of `collect` (the
+  Rust API's `collect` returns `SparkErrorKind::UnicodeDecode`).
 - **A plan of 747 to about 990 levels** (intentional; the stack guard of the client). A plan
   deeper than `MAX_PLAN_DEPTH`, 746 levels with the plans of its subqueries, raises the client's
   `RecursionError` ("a plan may be at most 746 levels") before any request. PySpark's
@@ -155,6 +180,15 @@ difference is intentional or tracked for a fix.
   the server fails the plans that PySpark sends with gRPC `UNKNOWN` ("Application error processing
   RPC"), as it fails any plan of about 510 levels or more. Both clients fail; only the error
   differs.
+- **A batch reader's option of None** (intentional; PySpark's plan of a table sets the None that
+  its plan of a format drops, which makes its DataFrame fail where the same option works with
+  `load`). An option of None removes the option, as PySpark's `load()` and readers of a format
+  leave it out of their plan. So the DataFrames of `read.option("k", None).table(name)` and
+  `changes(name)` run without it, where PySpark's plan of them sets the None, which fails their
+  requests with protobuf's `TypeError: bad argument type for built-in operation`. `_options`
+  holds the options of the reader of str keys and values: it shows no option of None (`{}`,
+  where PySpark's shows `{'k': None}`), nor a key that is not a str (`{1: 'v'}` in PySpark), which
+  fails at the same call as in PySpark (see `docs/compatibility.md`).
 
 - **What a plan build does for a pickle or a deep copy** (intentional; DESIGN). A pickled
   DataFrame, Column or table argument, and a deep copy of a DataFrame that is copied into another
@@ -174,7 +208,8 @@ difference is intentional or tracked for a fix.
   `pyspark.sql.connect.expressions` and of its line 1126, as PySpark's, in the file of the
   drop-in's module, which ends before the line, so it shows no source line.
 
-- **Public base and native MRO.** `pyspark.sql.DataFrame` is implemented as a
+- **Public base and native MRO** (intentional; a PyO3 class cannot have a Python class as its
+  base, so the public base can only be a virtual one). `pyspark.sql.DataFrame` is implemented as a
   Python base/factory, allowing subclasses such as
   `pyspark.testing.mlutils.MockDataset` to allocate their own Python state with
   `object.__new__`. The concrete class remains
@@ -195,46 +230,68 @@ difference is intentional or tracked for a fix.
   official-only Python process without importing the native extension. This does
   not establish portability of instances, explicit user metaclasses or server UDFs.
 
-- **Public class mutation and dispatch.** Public-base method and property calls
-  look up the concrete implementation at call time, including concrete-class
-  patches made after import. Assigning or deleting user extensions directly on the
-  public class also updates the native class, so added helpers and overridden
-  methods reach existing native frames;
-  assignments on Python subclasses remain local to those subclasses.
-  Deleting an initial public method or property removes its public-base exposure
-  and restores the concrete implementation that preceded a public override, while
-  preserving any later independent concrete patch. Deleting an added
-  helper removes the forwarded helper; deleting a temporary extension that shadows
-  a native-only attribute restores that native attribute.
-  Class layout, constructor, import/ABC metadata and instance attribute protocols
-  `__getattribute__`, `__setattr__` and `__delattr__` stay on the public base. Those
-  protocols follow ordinary Python inheritance on independent subclasses; virtual
-  native membership does not inherit them.
+- **Public class mutation and dispatch.** The native class stands for PySpark's Connect
+  DataFrame, a subclass of the public base that defines every public name of the base itself
+  but `__arrow_c_stream__`, so a patch of the public base reaches native frames where it reaches
+  PySpark's:
+  - a patch of a name that PySpark's Connect DataFrame defines, such as `DataFrame.count = f`,
+    `DataFrame.show = f`, a property of `columns` or `DataFrame.__getattr__ = f`, does not reach
+    native frames, whose `df.count()` stays the native one; an explicit `DataFrame.count(df)`
+    calls `f`. The public base's own `DataFrame.count` calls, as PySpark's
+    `dispatch_df_method`, the concrete class's method at the call, also a patch of it
+    (`pyspark.sql.connect.dataframe.DataFrame.count = g`);
+  - a patch of another name, such as a new helper, `__arrow_c_stream__` or a name of `object`
+    (`__eq__`, `__reduce_ex__`), reaches native frames, unless the concrete class has a patch of
+    its own of the name, which hides it, as an attribute of PySpark's Connect class does. Of
+    `_plan`, `_session` and the other attributes that PySpark's frames set on themselves, only a
+    data descriptor, such as a property, reaches them;
+  - a chain of wrappers of the public attribute and of the concrete class's ends at the
+    implementation, and not at a wrapper again: the base's own of `__arrow_c_stream__`, which the
+    native class's original stands for, and of the other names the concrete class's;
+  - deleting or undoing a patch of the base restores the native attribute that it replaced, and
+    keeps a patch that the concrete class made since; deleting the base's own
+    `__arrow_c_stream__` removes it from native frames, as PySpark's lose it.
 
-- **Attribute resolution.** Explicit public `__getattr__` calls use the native
-  column resolver, including existing attribute names, unsupported JVM names, and
-  dunder/legacy column validation. While a user override of public `__getattr__`
-  is active, native frames use generic Python attribute lookup before calling that
-  hook. Undo restores the saved native lookup entry and prior hook state, including
-  absence of a native `__getattr__` entry. Importing the public base does not alter
-  the native lookup entries. The native-only private method
-  `_get_column_by_attribute` bridges explicit public lookup to the Rust resolver;
+  What differs: a patch that reaches native frames is in the `__dict__` of the native class,
+  where PySpark's Connect class inherits it, so deleting a patch of the concrete class leaves
+  native frames without the name, where PySpark's see the base's attribute again. Class
+  layout, constructor, import/ABC metadata and the instance attribute protocols
+  `__getattribute__`, `__setattr__` and `__delattr__` stay on the public base, where PySpark's
+  Connect frames, whose class defines none of the three, see a patch of them. Those protocols
+  follow ordinary Python inheritance on independent subclasses, and assignments on Python
+  subclasses remain local to those subclasses.
+
+- **Attribute resolution.** Explicit public `__getattr__` calls use the native column resolver,
+  as PySpark's dispatch to the `__getattr__` of its Connect class, including existing attribute
+  names, unsupported JVM names, and dunder/legacy column validation. A patch of the public
+  `__getattr__` reaches independent Python subclasses only, as in PySpark, and importing the
+  public base does not alter the native lookup entries. The native class has no `__getattr__`
+  in its `__dict__` (intentional; PyO3 resolves a missing attribute in the lookup slot of the
+  type): `pyspark.sql.connect.dataframe.DataFrame.__getattr__` raises `AttributeError`, where
+  PySpark's is its function, and a patch of it on the concrete class runs only for the names
+  whose resolution raises `AttributeError`, a dunder name that is not a column or a JVM
+  attribute such as `_jdf`, where PySpark's runs for every missing attribute. The native-only
+  private method `_get_column_by_attribute` bridges explicit public lookup to the Rust resolver;
   it is an intentional extra name in concrete-class introspection and completion.
 
 - **Independent Python subclasses and construction.** Python subclasses override
-  operations for their own data model. As in PySpark, inherited public properties
-  read `None`, while native-dispatched methods,
+  operations for their own data model. As in PySpark, the public properties, of empty bodies,
+  read `None`, also of a native frame read through the base (`DataFrame.columns.fget(df)`),
+  while native-dispatched methods,
   including `repr`, `dir`, and missing-attribute `__getattr__`, raise
   `NOT_IMPLEMENTED` on independent Python data. Consequently, `hasattr` for an
   unknown name also raises that exception, including on `MockDataset`.
   The official undecorated empty methods `checkpoint`, `localCheckpoint`,
-  `lateralJoin`, `nearestByJoin`, `toPandas`, `asTable`, `scalar` and `exists` return
-  `None` after argument binding. The inherited `__arrow_c_stream__` uses the
+  `lateralJoin`, `nearestByJoin`, `toPandas`, `asTable`, `scalar` and `exists` are PySpark's,
+  of its parameters, which CPython binds with its own errors: called through the public base
+  they return `None`, of a native frame too (`DataFrame.toPandas(df)`), as in PySpark. The
+  inherited `__arrow_c_stream__` uses the
   generic `SparkArrowCStreamer` helper with the independent frame and requested
   schema, as on the official public base.
   Internal `_session` and `_plan` remain ordinary instance state on those subclasses.
-  `is_cached` is an annotation and assignable instance state, as on the official
-  public base. Concrete getters for these names are not installed as public
+  The public base has PySpark's annotations, of `is_cached` and of the private attributes of
+  its frames, which make no attributes: `is_cached` is assignable instance state, as on the
+  official public base. Concrete getters for these names are not installed as public
   properties.
   A public-base subclass that inherits the factory's `__new__` receives a plain
   concrete frame, and its own `__init__` is not called. Define `__new__` using
@@ -242,8 +299,18 @@ difference is intentional or tracked for a fix.
   `pyspark.sql.connect.dataframe.DataFrame` for native-backed subclass behavior.
   A direct native subclass must use the native constructor to initialize its Rust
   payload; `object.__new__` cannot safely allocate that payload.
+  The factory takes the Connect constructor's `(plan, session)` (intentional; PySpark's makes a
+  classic DataFrame of `(jdf, sql_ctx)`, which pyspark-client cannot make): so
+  `pyspark.sql.DataFrame(plan, session)` and a subclass that inherits its `__new__` give a native
+  frame, where PySpark's raise `ModuleNotFoundError: No module named 'pyspark.sql.classic'`, and
+  of no arguments the `TypeError` names `plan` and `session`, where PySpark's names `jdf` and
+  `sql_ctx`.
 
-- **Validation status.** All 22 subclass cases passed in the native offline suite.
+- **Validation status.** The differences of the public base that remain are those above: the
+  native MRO, the metaclass, the patches that the native class holds, the native lookup of
+  attributes and the factory. The methods of the base that dispatch to the native class have
+  its signatures, of no annotations and of a positional-only `self`
+  (`inspect.signature(DataFrame.select)` is `(self, /, *cols)`), and its docstrings.
   The unchanged official pipeline, tuning and one-vs-rest selection passed on both
   the official and native high-level clients with `PYTHONHASHSEED=0`: 16 passed and
   four upstream-disabled GC tests skipped on each client. This includes
@@ -254,9 +321,7 @@ difference is intentional or tracked for a fix.
   randomization makes differ per process: a run of another seed draws other folds. Of
   the same seeds, both clients split alike and fail alike (12 seeds of a CrossValidator
   and a TrainValidationSplit of a RandomForestClassifier gave the same metrics, and the
-  same error of a one-class fold, on both). API inspection records the public-base and
-  concrete-class differences; inherited signature and annotation differences remain.
-  These results do not establish complete DataFrame or ML parity.
+  same error of a one-class fold, on both).
 
 ## UDFs
 

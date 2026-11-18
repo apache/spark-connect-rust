@@ -17,9 +17,11 @@
 
 //! PyArrow Table input through arrow-rs's owned C Stream importer.
 
-use arrow::pyarrow::{FromPyArrow, Table};
+use arrow::ipc::reader::StreamReader;
+use arrow::pyarrow::{FromPyArrow, PyArrowException, Table};
 use arrow::record_batch::RecordBatch;
 use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use spark_connect::session::SparkSession;
 
 use crate::dataframe::PyDataFrame;
@@ -27,14 +29,64 @@ use crate::dataframe::PyDataFrame;
 /// The record batches of a pyarrow table, at least one, so that a table without rows keeps its
 /// schema, as PySpark's IPC stream does, for the relation to carry it.
 pub(crate) fn table_batches(table: &Bound<'_, PyAny>) -> PyResult<Vec<RecordBatch>> {
-    // PyArrow 10 readers support _export_to_c, even without PyCapsules.
-    let (mut batches, arrow_schema) =
-        Table::from_pyarrow_bound(&table.call_method0("to_reader")?)?.into_inner();
+    let py = table.py();
+    let (mut batches, arrow_schema) = if holds_nul_name(py, &table.getattr("schema")?)? {
+        // The Arrow C data interface holds each name as a C string, which ends at its first NUL:
+        // such a table is read of its IPC stream, which holds the names whole, as the stream of
+        // PySpark's createDataFrame does.
+        let pa = py.import("pyarrow")?;
+        let sink = pa.call_method0("BufferOutputStream")?;
+        let writer = pa
+            .getattr("ipc")?
+            .call_method1("new_stream", (&sink, table.getattr("schema")?))?;
+        writer.call_method1("write_table", (table,))?;
+        writer.call_method0("close")?;
+        let stream = sink.call_method0("getvalue")?.call_method0("to_pybytes")?;
+        let arrow_error =
+            |error: arrow::error::ArrowError| PyArrowException::new_err(error.to_string());
+        let reader = StreamReader::try_new(stream.cast::<PyBytes>()?.as_bytes(), None)
+            .map_err(arrow_error)?;
+        let arrow_schema = reader.schema();
+        let batches = reader.collect::<Result<Vec<_>, _>>().map_err(arrow_error)?;
+        (batches, arrow_schema)
+    } else {
+        // PyArrow 10 readers support _export_to_c, even without PyCapsules.
+        Table::from_pyarrow_bound(&table.call_method0("to_reader")?)?.into_inner()
+    };
     // A cast drops the rows of a zero-column table, leaving no batches.
     if batches.is_empty() {
         batches.push(RecordBatch::new_empty(arrow_schema));
     }
     Ok(batches)
+}
+
+/// Whether the name of a field of the pyarrow `schema`, at any depth, holds a NUL: of a field of a
+/// struct, a list, a map, a union or a run-end encoded type, also within the values of a dictionary
+/// or the storage of an extension type.
+fn holds_nul_name(py: Python<'_>, schema: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let pa = py.import("pyarrow")?;
+    let dictionary = pa.getattr("DictionaryType")?;
+    let extension = pa.getattr("BaseExtensionType")?;
+    let mut fields = schema.try_iter()?.collect::<PyResult<Vec<_>>>()?;
+    while let Some(field) = fields.pop() {
+        if field.getattr("name")?.extract::<String>()?.contains('\0') {
+            return Ok(true);
+        }
+        let mut data_type = field.getattr("type")?;
+        loop {
+            data_type = if data_type.is_instance(&dictionary)? {
+                data_type.getattr("value_type")?
+            } else if data_type.is_instance(&extension)? {
+                data_type.getattr("storage_type")?
+            } else {
+                break;
+            };
+        }
+        for i in 0..data_type.getattr("num_fields")?.extract::<usize>()? {
+            fields.push(data_type.call_method1("field", (i,))?);
+        }
+    }
+    Ok(false)
 }
 
 /// A DataFrame of the pyarrow Table `table`. `options` are the settings that the caller's
@@ -47,6 +99,19 @@ pub(crate) fn create_dataframe(
     schema: Option<&Bound<'_, PyAny>>,
     options: Option<&spark_connect::ArrowInputOptions>,
 ) -> PyResult<PyDataFrame> {
+    // As PySpark's createDataFrame, which first encodes each name of a list that is not a str, of
+    // which most values raise the `AttributeError` of `encode`, before it reads any setting.
+    if let Some(names) = schema.filter(|schema| {
+        schema.is_instance_of::<pyo3::types::PyList>()
+            || schema.is_instance_of::<pyo3::types::PyTuple>()
+    }) {
+        for name in names.try_iter()? {
+            let name = name?;
+            if !name.is_instance_of::<pyo3::types::PyString>() {
+                name.call_method1("encode", ("utf-8",))?;
+            }
+        }
+    }
     let helper = py.import("pyspark.sql._arrow_input")?;
     // Resolve DDL with the same converter as the existing local-data path.
     let schema = match schema {
@@ -87,7 +152,19 @@ pub(crate) fn create_dataframe(
     } else {
         Some(crate::types::py_to_data_type(&schema)?)
     };
-    let names: Option<Vec<String>> = result.get_item(2)?.extract()?;
+    // As PySpark's createDataFrame, which applies the names with `toDF`, of whose plan a str that
+    // UTF-8 cannot encode fails the requests (`data_name`).
+    let mut at_build = crate::plan_args::PlanArgs::new();
+    let names = result.get_item(2)?;
+    let names = if names.is_none() {
+        None
+    } else {
+        let mut converted = Vec::new();
+        for name in names.try_iter()? {
+            converted.push(crate::session::data_name(&name?, Some(&mut at_build))?);
+        }
+        Some(converted)
+    };
     let batches = if empty {
         Vec::new()
     } else {
@@ -102,7 +179,7 @@ pub(crate) fn create_dataframe(
     // As in PySpark, column names are applied with toDF only when there are any.
     let dataframe = match names {
         Some(names) if !names.is_empty() => {
-            dataframe.to_df(names.iter().map(String::as_str).collect::<Vec<_>>())
+            at_build.plan(dataframe.to_df(names.iter().map(String::as_str).collect::<Vec<_>>()))
         }
         _ => dataframe,
     };

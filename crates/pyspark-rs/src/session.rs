@@ -1737,6 +1737,7 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         spec: &Spec,
         options: Option<&spark_connect::ArrowInputOptions>,
+        at_build: &mut crate::plan_args::PlanArgs,
     ) -> PyResult<Option<PyDataFrame>> {
         let names = match spec {
             Spec::None => None,
@@ -1760,11 +1761,7 @@ impl PySparkSession {
             None => {
                 let mut labels = Vec::with_capacity(width);
                 for label in data.getattr("columns")?.try_iter()? {
-                    let label = label?;
-                    labels.push(match label.cast::<pyo3::types::PyString>() {
-                        Ok(label) => label.to_cow()?.into_owned(),
-                        Err(_) => label.str()?.to_cow()?.into_owned(),
-                    });
+                    labels.push(label_name(&label?, at_build)?);
                 }
                 if labels.is_empty() {
                     return Err(crate::column::raise_pyspark(
@@ -1806,7 +1803,8 @@ impl PySparkSession {
         Ok(Some(PyDataFrame::new(if columns.is_empty() {
             df
         } else {
-            df.to_df(columns.iter().map(String::as_str).collect::<Vec<_>>())
+            std::mem::take(at_build)
+                .plan(df.to_df(columns.iter().map(String::as_str).collect::<Vec<_>>()))
         })))
     }
 
@@ -1916,6 +1914,7 @@ impl PySparkSession {
         data: &Bound<'_, PyAny>,
         spec: Spec,
         options: Option<spark_connect::ArrowInputOptions>,
+        mut at_build: crate::plan_args::PlanArgs,
     ) -> PyResult<PyDataFrame> {
         // As PySpark, which has no Arrow type of an atomic schema of a frame of rows, and reads
         // none of them.
@@ -1937,9 +1936,15 @@ impl PySparkSession {
         // Without a struct schema, PySpark infers the Arrow type of each column, which has
         // no int64 for a Python int beyond the 64-bit range.
         let inferred = !matches!(spec, Spec::Struct(_));
+        // The labels of the columns, which name them without a schema, as PySpark's `toDF` does
+        // (`label_name`), and which errors of a column name otherwise, as they are.
         let mut columns = Vec::new();
         for label in data.getattr("columns")?.try_iter()? {
-            columns.push(label?.str()?.extract::<String>()?);
+            let label = label?;
+            columns.push(match spec {
+                Spec::None => label_name(&label, &mut at_build)?,
+                _ => crate::plan_args::rendered(label.str()?.as_any())?,
+            });
         }
         // The dtype of each column, which types a column without values, as Arrow does.
         let mut dtypes = Vec::new();
@@ -2154,7 +2159,7 @@ impl PySparkSession {
         })?;
         Ok(PyDataFrame::new(match names {
             Some(names) if !names.is_empty() => {
-                df.to_df(names.iter().map(String::as_str).collect::<Vec<_>>())
+                at_build.plan(df.to_df(names.iter().map(String::as_str).collect::<Vec<_>>()))
             }
             _ => df,
         }))
@@ -2302,12 +2307,46 @@ pub(crate) fn schema_text_dataframe(
     Ok(PyDataFrame::new(df.to_pyerr()?))
 }
 
+/// A name of `createDataFrame`, as PySpark's `_cols` takes it: a str as it is, and another value
+/// encoded, which most values cannot be. PySpark's `toDF` sets the names in its plan when a request
+/// builds it: so, of the names of a pandas DataFrame or of an Arrow table, which it applies with
+/// `toDF` (`at_build`), a str that UTF-8 cannot encode fails the requests of the DataFrame, and
+/// not the call. Other data names its rows by them as it converts them, where it fails at the call.
+pub(crate) fn data_name(
+    name: &Bound<'_, PyAny>,
+    at_build: Option<&mut crate::plan_args::PlanArgs>,
+) -> PyResult<String> {
+    match name.cast::<pyo3::types::PyString>() {
+        Ok(text) => match at_build {
+            Some(args) => args.str(name),
+            None => Ok(text.to_cow()?.into_owned()),
+        },
+        // PySpark encodes a name that is not a string, which most values cannot do.
+        Err(_) => Ok(name.call_method1("encode", ("utf-8",))?.str()?.to_string()),
+    }
+}
+
+/// The name of a column of a pandas DataFrame, as PySpark's `_cols` takes its label: as it is, a
+/// str, or as its `str()`, which `toDF` sets in the plan when a request builds it (`data_name`).
+fn label_name(
+    label: &Bound<'_, PyAny>,
+    at_build: &mut crate::plan_args::PlanArgs,
+) -> PyResult<String> {
+    if label.is_instance_of::<pyo3::types::PyString>() {
+        return at_build.str(label);
+    }
+    at_build.str(label.str()?.as_any())
+}
+
 /// The schema argument of `createDataFrame`: None, a list or tuple of names, or a struct or
-/// atomic type, given as a type or a DDL string. Other types raise `NOT_EXPECTED_TYPE`.
+/// atomic type, given as a type or a DDL string. Other types raise `NOT_EXPECTED_TYPE`. The names
+/// of a list are converted as `data_name` converts them, of `at_build` for those of a pandas
+/// DataFrame.
 fn schema_spec(
     py: Python<'_>,
     session: &spark_connect::session::SparkSession,
     schema: Option<&Bound<'_, PyAny>>,
+    mut at_build: Option<&mut crate::plan_args::PlanArgs>,
 ) -> PyResult<Spec> {
     let Some(schema) = schema.filter(|s| !s.is_none()) else {
         return Ok(Spec::None);
@@ -2327,12 +2366,7 @@ fn schema_spec(
     if schema.is_instance_of::<PyList>() || schema.is_instance_of::<pyo3::types::PyTuple>() {
         let mut names = Vec::new();
         for name in schema.try_iter()? {
-            let name = name?;
-            names.push(match name.cast::<pyo3::types::PyString>() {
-                Ok(name) => name.to_cow()?.into_owned(),
-                // PySpark encodes a name that is not a string, which most values cannot do.
-                Err(_) => name.call_method1("encode", ("utf-8",))?.str()?.to_string(),
-            });
+            names.push(data_name(&name?, at_build.as_deref_mut())?);
         }
         return Ok(Spec::Names(names));
     }
@@ -2538,7 +2572,11 @@ impl PySparkSession {
                 return schema_text_dataframe(&self.session, json);
             }
         }
-        let spec = schema_spec(py, &self.session, schema)?;
+        // The names that PySpark applies with `toDF` to a pandas DataFrame, of which a str that
+        // UTF-8 cannot encode fails its requests (`data_name`).
+        let pandas = is_loaded_instance(py, data, "pandas", "DataFrame")?;
+        let mut names = crate::plan_args::PlanArgs::new();
+        let spec = schema_spec(py, &self.session, schema, pandas.then_some(&mut names))?;
         if is_loaded_instance(py, data, "numpy", "ndarray")? {
             return self.create_from_ndarray(py, data, spec);
         }
@@ -2550,7 +2588,7 @@ impl PySparkSession {
                 return schema_text_dataframe(&self.session, json.to_string());
             }
         }
-        if is_loaded_instance(py, data, "pandas", "DataFrame")? {
+        if pandas {
             // As PySpark's createDataFrame, which reads every setting of its conversions in one
             // request before it converts a pandas DataFrame that is not empty.
             let options = if data.len()? > 0 {
@@ -2568,7 +2606,7 @@ impl PySparkSession {
                 .call0()?
                 .is_truthy()?
             {
-                return self.create_from_pandas(py, data, spec, options);
+                return self.create_from_pandas(py, data, spec, options, names);
             }
             // Guarded integer columns share the existing Arrow importer. Schema validation above
             // keeps its ordering, and the frames that the fast paths decline take PySpark's
@@ -2785,11 +2823,11 @@ impl PySparkSession {
                 }
             }
             if let Some(frame) =
-                self.create_from_pandas_inferred(py, data, &spec, options.as_ref())?
+                self.create_from_pandas_inferred(py, data, &spec, options.as_ref(), &mut names)?
             {
                 return Ok(frame);
             }
-            return self.create_from_pandas(py, data, spec, options);
+            return self.create_from_pandas(py, data, spec, options, names);
         }
         // As PySpark's createDataFrame, which reads every setting of its conversions in one
         // request before it converts local data that is not empty, also data of no length,
