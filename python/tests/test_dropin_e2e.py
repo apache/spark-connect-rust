@@ -292,6 +292,43 @@ def test_client_caches_bytes_like_artifacts_as_pyspark(session):
     assert client.cache_artifact(memoryview(b"four")) == hashlib.sha256(b"four").hexdigest()
 
 
+def test_client_sends_the_relations_of_dataframes_under_the_plans_it_is_given_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient, of the plans and the commands that it is given over
+    # the plans of DataFrames (`df._plan.plan(client)`): the server receives their relations under
+    # any relation and as the relation of a command.
+    import pyspark.sql.connect.proto as pb2
+
+    client = session.client
+    df = session.range(5)
+    other = session.range(3)
+    plan = pb2.Plan()
+    plan.root.limit.input.CopyFrom(df._plan.plan(client))
+    plan.root.limit.limit = 2
+    assert client.to_table(plan, {})[0].to_pydict() == {"id": [0, 1]}
+    assert client.schema(plan).simpleString() == "struct<id:bigint>"
+    plan = pb2.Plan()
+    plan.root.join.left.CopyFrom(df._plan.plan(client))
+    plan.root.join.right.CopyFrom(other._plan.plan(client))
+    plan.root.join.join_type = pb2.Join.JoinType.JOIN_TYPE_CROSS
+    assert client.to_table(plan, {})[0].num_rows == 15
+
+    command = pb2.Command()
+    command.create_dataframe_view.input.CopyFrom(df._plan.plan(client))
+    command.create_dataframe_view.name = "client_relations_view"
+    command.create_dataframe_view.replace = True
+    client.execute_command(command)
+    try:
+        assert session.sql("SELECT count(*) AS n FROM client_relations_view").first().n == 5
+    finally:
+        session.catalog.dropTempView("client_relations_view")
+    command = pb2.Command()
+    command.checkpoint_command.relation.CopyFrom(df._plan.plan(client))
+    command.checkpoint_command.local = True
+    command.checkpoint_command.eager = True
+    _, properties, _ = client.execute_command(command)
+    assert properties["checkpoint_command_result"].count() == 5
+
+
 def test_client_of_a_connection_string_as_pyspark(session):
     # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
     # of the plans that it is given, built without a DataFrame, whose executions may be not

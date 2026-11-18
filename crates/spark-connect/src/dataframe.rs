@@ -6874,6 +6874,38 @@ mod plan_construction_tests {
         };
         let aliased = DataFrame::from_relation(spark.clone(), alias, None).unwrap();
         assert_observations(&aliased, &[("m", &model_input)]);
+        // A Join built in Python over the placeholders of two DataFrames, whose observations are
+        // those of both sides, the right side's of a name, as PySpark's `Join.observations`; a
+        // CoGroupMap's are those of its input only, as PySpark's.
+        let other_input = Observation::new("m");
+        let other = observe(&base, &other_input);
+        let (left_only, right_only) = (Observation::new("l"), Observation::new("r"));
+        let (left_side, right_side) = (observe(&input, &left_only), observe(&other, &right_only));
+        let join = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Join(Box::new(proto::Join {
+                left: Some(Box::new(left_side.placeholder_relation())),
+                right: Some(Box::new(right_side.placeholder_relation())),
+                ..Default::default()
+            }))),
+        };
+        let joined = DataFrame::from_relation(spark.clone(), join, None).unwrap();
+        assert_observations(
+            &joined,
+            &[("l", &left_only), ("m", &other_input), ("r", &right_only)],
+        );
+        let cogroup = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::CoGroupMap(Box::new(
+                proto::CoGroupMap {
+                    input: Some(Box::new(input.placeholder_relation())),
+                    other: Some(Box::new(right_side.placeholder_relation())),
+                    ..Default::default()
+                },
+            ))),
+        };
+        let cogrouped = DataFrame::from_relation(spark.clone(), cogroup, None).unwrap();
+        assert_observations(&cogrouped, &[("m", &model_input)]);
         // A copy, of a relation that the session sent, while the DataFrame it was of is alive:
         // copies of its Observations, as PySpark's unpickled plan has.
         let copied = DataFrame::from_sent_relation(spark.clone(), input.to_relation().unwrap());

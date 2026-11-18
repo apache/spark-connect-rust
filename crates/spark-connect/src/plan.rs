@@ -848,54 +848,165 @@ pub(crate) fn placeholder_relation(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) 
     }
 }
 
-/// The Observations of the DataFrame whose placeholder `relation`, a relation of `pyspark.ml` or
-/// a `SubqueryAlias` of `pyspark.sql.connect.plan`, holds as its child: the relation itself, or
-/// the input of a transform, the dataset of a model summary, the root of a `WithRelations` or the
-/// input of a `SubqueryAlias`, and so on down, as PySpark's `TransformerRelation`,
-/// `AttributeRelation`, `WithRelations` and `SubqueryAlias` collect the `observations` of their
-/// child (see [`LogicalPlan::observations`]). Taken before the placeholders are replaced, which
-/// then no longer name their DataFrames.
+/// The Observations of the DataFrames whose placeholders `relation`, a relation built in Python, holds
+/// under it, as PySpark's `LogicalPlan.observations` collects them: those of the child of a
+/// relation (its input; the input of a transform or the dataset of a model summary of
+/// `pyspark.ml`; the root of a `WithRelations`), and so on down, and those of both sides of a
+/// `Join`, an `AsOfJoin`, a `LateralJoin`, a `NearestByJoin`, a `Zip` and a `SetOperation`, whose
+/// right side's override the left side's of the same name, as PySpark's `{**left, **right}` of
+/// them. Taken before the placeholders are replaced, which then no longer name their DataFrames.
 pub(crate) fn child_observations(
     relation: &proto::Relation,
 ) -> Vec<(String, crate::observation::Observation)> {
-    let mut relation = relation;
-    loop {
-        let child = match &relation.rel_type {
-            Some(proto::relation::RelType::Extension(any))
-                if any.type_url == PLACEHOLDER_TYPE_URL =>
-            {
-                let target = <[u8; 8]>::try_from(any.value.as_slice())
-                    .ok()
-                    .and_then(|marker| placeholder_target(i64::from_le_bytes(marker)));
-                return target
-                    .map(|(node, _)| node.observations())
-                    .unwrap_or_default();
+    use proto::relation::RelType;
+    let of = |relation: Option<&proto::Relation>| {
+        relation.map_or_else(Vec::new, |relation| {
+            crate::expression::with_stack_for_a_level(|| child_observations(relation))
+        })
+    };
+    let (left, right) = match &relation.rel_type {
+        Some(RelType::Extension(any)) if any.type_url == PLACEHOLDER_TYPE_URL => {
+            let target = <[u8; 8]>::try_from(any.value.as_slice())
+                .ok()
+                .and_then(|marker| placeholder_target(i64::from_le_bytes(marker)));
+            return target
+                .map(|(node, _)| node.observations())
+                .unwrap_or_default();
+        }
+        Some(RelType::MlRelation(ml)) => match &ml.ml_type {
+            Some(proto::ml_relation::MlType::Transform(transform)) => {
+                return of(transform.input.as_deref())
             }
-            Some(proto::relation::RelType::MlRelation(ml)) => match &ml.ml_type {
-                Some(proto::ml_relation::MlType::Transform(transform)) => {
-                    transform.input.as_deref()
-                }
-                _ => ml.model_summary_dataset.as_deref(),
-            },
-            Some(proto::relation::RelType::WithRelations(with)) => with.root.as_deref(),
-            Some(proto::relation::RelType::SubqueryAlias(alias)) => alias.input.as_deref(),
-            _ => None,
-        };
-        match child {
-            Some(child) => relation = child,
-            None => return Vec::new(),
+            _ => return of(ml.model_summary_dataset.as_deref()),
+        },
+        Some(RelType::WithRelations(with)) => return of(with.root.as_deref()),
+        Some(RelType::Join(join)) => (join.left.as_deref(), join.right.as_deref()),
+        Some(RelType::AsOfJoin(join)) => (join.left.as_deref(), join.right.as_deref()),
+        Some(RelType::LateralJoin(join)) => (join.left.as_deref(), join.right.as_deref()),
+        Some(RelType::NearestByJoin(join)) => (join.left.as_deref(), join.right.as_deref()),
+        Some(RelType::Zip(zip)) => (zip.left.as_deref(), zip.right.as_deref()),
+        Some(RelType::SetOp(set_op)) => {
+            (set_op.left_input.as_deref(), set_op.right_input.as_deref())
+        }
+        // The child of the other relations is their first input, as PySpark's `GroupMap` and
+        // `CoGroupMap` collect the observations of their input only.
+        _ => return of(relation_inputs(relation).into_iter().next()),
+    };
+    let mut observations = of(left);
+    for (name, observation) in of(right) {
+        match observations.iter_mut().find(|(seen, _)| *seen == name) {
+            Some(slot) => slot.1 = observation,
+            None => observations.push((name, observation)),
         }
     }
+    observations
 }
 
-/// Replace the placeholders of `relation` by the relations of their DataFrames, and of the
-/// relations that the plans of `pyspark.ml` take as input (their `ml_relation`, `with_relations`
-/// and fetched arguments), of the inputs of the `SubqueryAlias` of `pyspark.sql.connect.plan` (and
-/// so of the views of its `SQL`, the references of a `with_relations`), and of the messages of
-/// the extensions of a plugin there (see [`resolve_extension`]). Each replacement is the relation
-/// of a DataFrame of the core, which has no placeholder. A placeholder under a relation of another
-/// type, which a plan that Python builds of its own relations can hold, such as one of a plugin or
-/// one that `SparkSession.client` is given, is sent as it is.
+/// The inputs of a relation of each type of Spark Connect that holds relations, in the order of
+/// its fields, for [`relation_inputs`] and [`relation_inputs_mut`]: the input of a relation of one
+/// input, both sides of a join, a set operation or a zip, the input and the initial input of a
+/// `GroupMap`, both inputs of a `CoGroupMap`, and the root and the references of a
+/// `WithRelations`. An `MlRelation`, whose fetched arguments are a level of their own, and an
+/// extension, whose message the core does not know, are none of them, nor is a relation of no
+/// input.
+macro_rules! relation_inputs_of {
+    ($rel_type:expr, $deref:ident, $iter:ident) => {
+        match $rel_type {
+            Some(RelType::Project(r)) => vec![r.input.$deref()],
+            Some(RelType::Filter(r)) => vec![r.input.$deref()],
+            Some(RelType::Join(r)) => vec![r.left.$deref(), r.right.$deref()],
+            Some(RelType::SetOp(r)) => vec![r.left_input.$deref(), r.right_input.$deref()],
+            Some(RelType::Sort(r)) => vec![r.input.$deref()],
+            Some(RelType::Limit(r)) => vec![r.input.$deref()],
+            Some(RelType::Aggregate(r)) => vec![r.input.$deref()],
+            Some(RelType::Sample(r)) => vec![r.input.$deref()],
+            Some(RelType::Offset(r)) => vec![r.input.$deref()],
+            Some(RelType::Deduplicate(r)) => vec![r.input.$deref()],
+            Some(RelType::SubqueryAlias(r)) => vec![r.input.$deref()],
+            Some(RelType::Repartition(r)) => vec![r.input.$deref()],
+            Some(RelType::ToDf(r)) => vec![r.input.$deref()],
+            Some(RelType::WithColumnsRenamed(r)) => vec![r.input.$deref()],
+            Some(RelType::ShowString(r)) => vec![r.input.$deref()],
+            Some(RelType::Drop(r)) => vec![r.input.$deref()],
+            Some(RelType::Tail(r)) => vec![r.input.$deref()],
+            Some(RelType::WithColumns(r)) => vec![r.input.$deref()],
+            Some(RelType::Hint(r)) => vec![r.input.$deref()],
+            Some(RelType::Unpivot(r)) => vec![r.input.$deref()],
+            Some(RelType::ToSchema(r)) => vec![r.input.$deref()],
+            Some(RelType::RepartitionByExpression(r)) => vec![r.input.$deref()],
+            Some(RelType::MapPartitions(r)) => vec![r.input.$deref()],
+            Some(RelType::CollectMetrics(r)) => vec![r.input.$deref()],
+            Some(RelType::Parse(r)) => vec![r.input.$deref()],
+            Some(RelType::GroupMap(r)) => vec![r.input.$deref(), r.initial_input.$deref()],
+            Some(RelType::CoGroupMap(r)) => vec![r.input.$deref(), r.other.$deref()],
+            Some(RelType::WithWatermark(r)) => vec![r.input.$deref()],
+            Some(RelType::ApplyInPandasWithState(r)) => vec![r.input.$deref()],
+            Some(RelType::HtmlString(r)) => vec![r.input.$deref()],
+            Some(RelType::AsOfJoin(r)) => vec![r.left.$deref(), r.right.$deref()],
+            Some(RelType::WithRelations(r)) => std::iter::once(r.root.$deref())
+                .chain(r.references.$iter().map(Some))
+                .collect(),
+            Some(RelType::Transpose(r)) => vec![r.input.$deref()],
+            Some(RelType::LateralJoin(r)) => vec![r.left.$deref(), r.right.$deref()],
+            Some(RelType::NearestByJoin(r)) => vec![r.left.$deref(), r.right.$deref()],
+            Some(RelType::Zip(r)) => vec![r.left.$deref(), r.right.$deref()],
+            Some(RelType::FillNa(r)) => vec![r.input.$deref()],
+            Some(RelType::DropNa(r)) => vec![r.input.$deref()],
+            Some(RelType::Replace(r)) => vec![r.input.$deref()],
+            Some(RelType::Summary(r)) => vec![r.input.$deref()],
+            Some(RelType::Crosstab(r)) => vec![r.input.$deref()],
+            Some(RelType::Describe(r)) => vec![r.input.$deref()],
+            Some(RelType::Cov(r)) => vec![r.input.$deref()],
+            Some(RelType::Corr(r)) => vec![r.input.$deref()],
+            Some(RelType::ApproxQuantile(r)) => vec![r.input.$deref()],
+            Some(RelType::FreqItems(r)) => vec![r.input.$deref()],
+            Some(RelType::SampleBy(r)) => vec![r.input.$deref()],
+            Some(
+                RelType::Read(_)
+                | RelType::Sql(_)
+                | RelType::LocalRelation(_)
+                | RelType::Range(_)
+                | RelType::CachedLocalRelation(_)
+                | RelType::CachedRemoteRelation(_)
+                | RelType::CommonInlineUserDefinedTableFunction(_)
+                | RelType::CommonInlineUserDefinedDataSource(_)
+                | RelType::UnresolvedTableValuedFunction(_)
+                | RelType::ChunkedCachedLocalRelation(_)
+                | RelType::RelationChanges(_)
+                | RelType::Catalog(_)
+                | RelType::MlRelation(_)
+                | RelType::Extension(_)
+                | RelType::Unknown(_),
+            )
+            | None => Vec::new(),
+        }
+    };
+}
+
+/// The inputs of `relation` (see [`relation_inputs_of`]).
+fn relation_inputs(relation: &proto::Relation) -> Vec<&proto::Relation> {
+    use proto::relation::RelType;
+    let inputs: Vec<Option<&proto::Relation>> =
+        relation_inputs_of!(&relation.rel_type, as_deref, iter);
+    inputs.into_iter().flatten().collect()
+}
+
+/// The inputs of `relation` (see [`relation_inputs_of`]), to replace the placeholders under them.
+fn relation_inputs_mut(relation: &mut proto::Relation) -> Vec<&mut proto::Relation> {
+    use proto::relation::RelType;
+    let inputs: Vec<Option<&mut proto::Relation>> =
+        relation_inputs_of!(&mut relation.rel_type, as_deref_mut, iter_mut);
+    inputs.into_iter().flatten().collect()
+}
+
+/// Replace the placeholders of `relation`, a relation built in Python, by the relations of their
+/// DataFrames, wherever PySpark's plan would hold the relation of such a DataFrame: `relation`
+/// itself, the inputs of every relation of Spark Connect under it (see [`relation_inputs_of`]),
+/// those of the relations of `pyspark.ml` (an `ml_relation`'s inputs and fetched arguments), and
+/// the messages of the extensions of a plugin there (see [`resolve_extension`]). Each replacement
+/// is the relation of a DataFrame of the core, which has no placeholder. An expression holds no
+/// relation, as a subquery refers to its plan by its ID in a `with_relations`, so the core does not
+/// look into expressions, nor into the extension of one.
 pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
     resolve_relation_at(relation, 1).map(|_| ())
 }
@@ -930,7 +1041,7 @@ fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<u
     }
     let mut deepest = level;
     let mut below = |relation: &mut proto::Relation| -> Result<()> {
-        // Aliases over aliases are as deep as the Python plan that builds them.
+        // Relations over relations are as deep as the Python plan that builds them.
         let levels =
             crate::expression::with_stack_for_a_level(|| resolve_relation_at(relation, level + 1))?;
         deepest = deepest.max(levels);
@@ -953,24 +1064,16 @@ fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<u
                 None => {}
             }
         }
-        Some(proto::relation::RelType::WithRelations(with)) => {
-            if let Some(root) = with.root.as_mut() {
-                below(root)?;
-            }
-            for reference in with.references.iter_mut() {
-                below(reference)?;
-            }
-        }
-        // As PySpark's SubqueryAlias of pyspark.sql.connect.plan, over the plan of a DataFrame
-        // (`SubqueryAlias(df._plan, "s")` and the views of its SQL), which Delta Lake's
-        // `DeltaTable.alias` builds over its own plans.
-        Some(proto::relation::RelType::SubqueryAlias(alias)) => {
-            if let Some(input) = alias.input.as_mut() {
+        Some(proto::relation::RelType::Extension(extension)) => resolve_extension(extension)?,
+        // Every input of a relation of Spark Connect, as PySpark's plans hold the relations of
+        // their children's DataFrames: those of `pyspark.sql.connect.plan` (a `SubqueryAlias`
+        // and the views of a `SQL`, references of a `WithRelations`), of a plugin (Delta Lake's
+        // `DeltaTable.alias`) and of the messages that `SparkSession.client` is given.
+        _ => {
+            for input in relation_inputs_mut(relation) {
                 below(input)?;
             }
         }
-        Some(proto::relation::RelType::Extension(extension)) => resolve_extension(extension)?,
-        _ => {}
     }
     Ok(deepest)
 }
@@ -1080,13 +1183,43 @@ fn resolve_encoded(encoded: &[u8]) -> Result<Option<Vec<u8>>> {
     Ok(replaced.then_some(resolved))
 }
 
-/// Replace the placeholders of the relations of the ML command `command`, and of the message
-/// of the extension of a plugin's command, as `resolve_relation`.
+/// Replace the placeholders of the relations of `command`, a command built in Python, as
+/// `resolve_relation`: the relation of a command that holds one, as PySpark's commands hold the
+/// relations of their DataFrames (the input of a write, of a view, of a stream or of a SQL
+/// statement, the relation of a checkpoint, the source of a `MERGE INTO`, the relation of a
+/// pipeline's flow), the datasets and the fetched arguments of the ML commands, and the message of
+/// the extension of a plugin's command.
 pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
-    if let Some(proto::command::CommandType::Extension(extension)) = command.command_type.as_mut() {
-        return resolve_extension(extension);
+    use proto::command::CommandType;
+    use proto::pipeline_command::define_flow::Details;
+    use proto::pipeline_command::CommandType as PipelineCommandType;
+    let relation = match command.command_type.as_mut() {
+        Some(CommandType::Extension(extension)) => return resolve_extension(extension),
+        Some(CommandType::MlCommand(_)) => None,
+        Some(CommandType::WriteOperation(write)) => write.input.as_mut(),
+        Some(CommandType::CreateDataframeView(view)) => view.input.as_mut(),
+        Some(CommandType::WriteOperationV2(write)) => write.input.as_mut(),
+        Some(CommandType::SqlCommand(sql)) => sql.input.as_mut(),
+        Some(CommandType::WriteStreamOperationStart(write)) => write.input.as_mut(),
+        Some(CommandType::CheckpointCommand(checkpoint)) => checkpoint.relation.as_mut(),
+        Some(CommandType::MergeIntoTableCommand(merge)) => merge.source_table_plan.as_mut(),
+        Some(CommandType::PipelineCommand(pipeline)) => match pipeline.command_type.as_mut() {
+            Some(PipelineCommandType::DefineFlow(flow)) => match flow.details.as_mut() {
+                Some(Details::RelationFlowDetails(details)) => details.relation.as_mut(),
+                _ => None,
+            },
+            Some(PipelineCommandType::DefineFlowQueryFunctionResult(result)) => {
+                result.relation.as_mut()
+            }
+            Some(PipelineCommandType::Extension(extension)) => return resolve_extension(extension),
+            _ => None,
+        },
+        _ => return Ok(()),
+    };
+    if let Some(relation) = relation {
+        return resolve_relation(relation);
     }
-    let Some(proto::command::CommandType::MlCommand(ml)) = command.command_type.as_mut() else {
+    let Some(CommandType::MlCommand(ml)) = command.command_type.as_mut() else {
         return Ok(());
     };
     let dataset = match ml.command.as_mut() {
@@ -4513,8 +4646,8 @@ mod placeholder_tests {
         resolve_relation(&mut plan).unwrap();
         assert_eq!(plan, alias(extension_of(&plugin(&relation))));
 
-        // A placeholder under a relation of another type, as a plan that Python builds of its own
-        // relations holds one, is left as it is.
+        // And under a relation of another type, as a plan that Python builds of its own relations
+        // holds one.
         let limit = |input: proto::Relation| proto::Relation {
             common: None,
             rel_type: Some(proto::relation::RelType::Limit(Box::new(proto::Limit {
@@ -4523,8 +4656,192 @@ mod placeholder_tests {
             }))),
         };
         let mut plan = alias(limit(shallow.clone()));
-        resolve_relation(&mut plan).unwrap();
-        assert_eq!(plan, alias(limit(shallow)));
+        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 2 + levels);
+        assert_eq!(plan, alias(limit(relation)));
+    }
+
+    /// `rel_type` as a relation of no common.
+    fn relation_of(rel_type: proto::relation::RelType) -> proto::Relation {
+        proto::Relation {
+            common: None,
+            rel_type: Some(rel_type),
+        }
+    }
+
+    /// Relations of each shape of input of Spark Connect over `input` and `other`: one input, two
+    /// sides, and the extra input of a group map and of a cogroup map.
+    fn relations_over(input: &proto::Relation, other: &proto::Relation) -> Vec<proto::Relation> {
+        use proto::relation::RelType;
+        let boxed = |relation: &proto::Relation| Some(Box::new(relation.clone()));
+        vec![
+            relation_of(RelType::Project(Box::new(proto::Project {
+                input: boxed(input),
+                expressions: Vec::new(),
+            }))),
+            relation_of(RelType::Filter(Box::new(proto::Filter {
+                input: boxed(input),
+                condition: None,
+            }))),
+            relation_of(RelType::Join(Box::new(proto::Join {
+                left: boxed(input),
+                right: boxed(other),
+                ..Default::default()
+            }))),
+            relation_of(RelType::SetOp(Box::new(proto::SetOperation {
+                left_input: boxed(input),
+                right_input: boxed(other),
+                ..Default::default()
+            }))),
+            relation_of(RelType::Aggregate(Box::new(proto::Aggregate {
+                input: boxed(input),
+                ..Default::default()
+            }))),
+            relation_of(RelType::Sort(Box::new(proto::Sort {
+                input: boxed(input),
+                ..Default::default()
+            }))),
+            relation_of(RelType::GroupMap(Box::new(proto::GroupMap {
+                input: boxed(input),
+                initial_input: boxed(other),
+                ..Default::default()
+            }))),
+            relation_of(RelType::CoGroupMap(Box::new(proto::CoGroupMap {
+                input: boxed(input),
+                other: boxed(other),
+                ..Default::default()
+            }))),
+            relation_of(RelType::AsOfJoin(Box::new(proto::AsOfJoin {
+                left: boxed(input),
+                right: boxed(other),
+                ..Default::default()
+            }))),
+            relation_of(RelType::LateralJoin(Box::new(proto::LateralJoin {
+                left: boxed(input),
+                right: boxed(other),
+                ..Default::default()
+            }))),
+            relation_of(RelType::Zip(Box::new(proto::Zip {
+                left: boxed(input),
+                right: boxed(other),
+            }))),
+            relation_of(RelType::CollectMetrics(Box::new(proto::CollectMetrics {
+                input: boxed(input),
+                ..Default::default()
+            }))),
+            relation_of(RelType::Describe(Box::new(proto::StatDescribe {
+                input: boxed(input),
+                cols: Vec::new(),
+            }))),
+            relation_of(RelType::WithRelations(Box::new(proto::WithRelations {
+                root: boxed(input),
+                references: vec![other.clone()],
+            }))),
+        ]
+    }
+
+    #[test]
+    fn placeholders_resolve_under_every_input_of_the_relations_of_spark_connect() {
+        // As PySpark's plans hold the relations of their DataFrames under any relation, such as
+        // the plans that `SparkSession.client` is given: each input of each shape, a level below
+        // its relation.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let other_node = Arc::new(range(0, 5, 1));
+        let (relation, levels) = relation_with_ids_and_levels(&node, &ids).unwrap();
+        let other = relation_with_ids(&other_node, &ids).unwrap();
+        let (shallow, shallow_other) = (placeholder(&node, &ids), placeholder(&other_node, &ids));
+        let plans = relations_over(&shallow, &shallow_other);
+        let expected = relations_over(&relation, &other);
+        assert_eq!(plans.len(), expected.len());
+        for (mut plan, expected) in plans.into_iter().zip(expected) {
+            assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 1 + levels);
+            assert_eq!(plan, expected);
+        }
+        // And down a chain of them, of its levels.
+        let limit = |input: proto::Relation| {
+            relation_of(proto::relation::RelType::Limit(Box::new(proto::Limit {
+                input: Some(Box::new(input)),
+                limit: 1,
+            })))
+        };
+        let mut plan = limit(limit(limit(shallow)));
+        assert_eq!(resolve_relation_levels(&mut plan).unwrap(), 3 + levels);
+        assert_eq!(plan, limit(limit(limit(relation))));
+    }
+
+    #[test]
+    fn placeholders_resolve_in_the_relations_of_commands() {
+        // As PySpark's commands hold the relations of their DataFrames: of a write, a view, a
+        // stream, a SQL statement, a checkpoint, a MERGE INTO and a pipeline's flow.
+        use proto::command::CommandType;
+        use proto::pipeline_command::{
+            define_flow, CommandType as Pipeline, DefineFlow, DefineFlowQueryFunctionResult,
+        };
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids).unwrap();
+        let shallow = placeholder(&node, &ids);
+        let commands = |input: &proto::Relation| {
+            let input = Some(input.clone());
+            let pipeline = |command: Pipeline| {
+                CommandType::PipelineCommand(proto::PipelineCommand {
+                    command_type: Some(command),
+                })
+            };
+            vec![
+                CommandType::WriteOperation(proto::WriteOperation {
+                    input: input.clone(),
+                    ..Default::default()
+                }),
+                CommandType::CreateDataframeView(proto::CreateDataFrameViewCommand {
+                    input: input.clone(),
+                    ..Default::default()
+                }),
+                CommandType::WriteOperationV2(proto::WriteOperationV2 {
+                    input: input.clone(),
+                    ..Default::default()
+                }),
+                CommandType::SqlCommand(proto::SqlCommand {
+                    input: input.clone(),
+                    ..Default::default()
+                }),
+                CommandType::WriteStreamOperationStart(proto::WriteStreamOperationStart {
+                    input: input.clone(),
+                    ..Default::default()
+                }),
+                CommandType::CheckpointCommand(proto::CheckpointCommand {
+                    relation: input.clone(),
+                    ..Default::default()
+                }),
+                CommandType::MergeIntoTableCommand(proto::MergeIntoTableCommand {
+                    source_table_plan: input.clone(),
+                    ..Default::default()
+                }),
+                pipeline(Pipeline::DefineFlow(DefineFlow {
+                    details: Some(define_flow::Details::RelationFlowDetails(
+                        define_flow::WriteRelationFlowDetails {
+                            relation: input.clone(),
+                        },
+                    )),
+                    ..Default::default()
+                })),
+                pipeline(Pipeline::DefineFlowQueryFunctionResult(
+                    DefineFlowQueryFunctionResult {
+                        relation: input,
+                        ..Default::default()
+                    },
+                )),
+            ]
+        };
+        let (sent, expected) = (commands(&shallow), commands(&relation));
+        assert_eq!(sent.len(), expected.len());
+        for (command_type, expected) in sent.into_iter().zip(expected) {
+            let mut command = proto::Command {
+                command_type: Some(command_type),
+            };
+            resolve_command(&mut command).unwrap();
+            assert_eq!(command.command_type, Some(expected));
+        }
     }
 
     #[test]
