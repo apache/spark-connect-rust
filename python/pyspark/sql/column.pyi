@@ -18,9 +18,8 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import overload, Any, Callable, Union
-from pyspark.sql.tvf_argument import TableValuedFunctionArgument as TableValuedFunctionArgument
-from pyspark.sql.types import DataType as DataType
-from pyspark.errors import PySparkValueError as PySparkValueError
+from pyspark.sql.tvf_argument import TableValuedFunctionArgument
+from pyspark.sql.types import DataType
 from pyspark.sql._typing import LiteralType, DecimalLiteral, DateTimeLiteral
 from pyspark.sql.window import WindowSpec
 

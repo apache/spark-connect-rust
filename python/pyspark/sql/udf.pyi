@@ -20,10 +20,9 @@
 import warnings
 from typing import Callable, Any, Optional, Union
 from pyspark.util import PythonEvalType as PythonEvalType
-from pyspark.sql.column import Column as Column
+from pyspark.sql.column import Column
 from pyspark.sql.types import DataType as DataType, StringType as StringType, StructType as StructType, _parse_datatype_string
 from pyspark.sql.pandas.types import to_arrow_type as to_arrow_type
-from pyspark.sql.pandas.utils import require_minimum_pandas_version as require_minimum_pandas_version, require_minimum_pyarrow_version as require_minimum_pyarrow_version
 from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkNotImplementedError as PySparkNotImplementedError, PySparkRuntimeError as PySparkRuntimeError
 from py4j.java_gateway import JavaObject
 from pyspark.sql._typing import DataTypeOrString, ColumnOrName, UserDefinedFunctionLike

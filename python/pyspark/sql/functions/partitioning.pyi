@@ -18,8 +18,7 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Union
-from pyspark.errors import PySparkTypeError as PySparkTypeError
-from pyspark.sql.column import Column as Column
+from pyspark.sql.column import Column
 from pyspark.sql._typing import ColumnOrName
 
 def years(col: 'ColumnOrName') -> Column: ...

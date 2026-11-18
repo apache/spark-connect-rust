@@ -18,11 +18,10 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Any, Callable, Dict, NamedTuple, List, Optional
-from pyspark.errors import PySparkTypeError as PySparkTypeError
 from pyspark.storagelevel import StorageLevel as StorageLevel
-from pyspark.sql.dataframe import DataFrame as DataFrame
-from pyspark.sql.session import SparkSession as SparkSession
-from pyspark.sql.types import StructType as StructType
+from pyspark.sql.dataframe import DataFrame
+from pyspark.sql.session import SparkSession
+from pyspark.sql.types import StructType
 from pyspark.sql._typing import UserDefinedFunctionLike
 from pyspark.sql._typing import DataTypeOrString
 

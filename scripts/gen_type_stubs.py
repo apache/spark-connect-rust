@@ -55,10 +55,14 @@ official ``pyspark-client``, where these modules are annotated Python. In detail
   * An import is kept when the stub refers to its name. A name that PySpark's module imports
     from ``pyspark`` at run time, under its own name, is an attribute of PySpark's module, which
     a type checker of PySpark's source lets a user import from it: the stub re-exports it
-    (``from m import X as X``) when the drop-in's module ``m`` has it, as its source or its stub
-    declares it. The imports under ``TYPE_CHECKING`` and those of other packages are not
-    re-exported. A name that a stub imports from a module of pyspark must be one that the
-    drop-in has, but those of ``UNRESOLVED_IMPORTS``, which say why they are not.
+    (``from m import X as X``) when the drop-in's module of the stub has it at run time too, as
+    the source of that module binds it (or, when its source does not tell, as for the modules of
+    functions that copy their functions, when ``m`` has it), but those of ``DROPPED``. The
+    imports under ``TYPE_CHECKING`` and those of other packages are not re-exported. A name that
+    a stub imports from a module of pyspark must be one that the drop-in has, but those of
+    ``UNRESOLVED_IMPORTS``, which say why they are not.
+  * ``DROPPED`` leaves out the plumbing of PySpark's modules that the drop-in does not have and no
+    annotation needs, such as the py4j converters of ``pyspark.sql.types``.
   * PySpark's ``# type: ignore`` comments stay on the line of their statement, those of the
     lines of a signature that ast.unparse prints on one line merged.
 
@@ -298,6 +302,9 @@ _CONNECT = (
 UNRESOLVED_IMPORTS = {
     "pyspark.core.context.SparkContext": _CLASSIC,
     "pyspark.core.rdd.RDD": _CLASSIC,
+    # PySpark's streaming readers and writers import it from its readwriter for the bodies of
+    # their option methods, which the stubs keep; the drop-in's readwriter has no to_str.
+    "pyspark.sql.readwriter.to_str": "a helper that only the kept bodies of methods call",
     "pyspark.sql.utils.StringConcat": (
         "the helper of the private tree strings of PySpark's classic types, which the drop-in's "
         "native types build in Rust"
@@ -311,6 +318,41 @@ UNRESOLVED_IMPORTS = {
     "pyspark.sql.connect.plan.WriteOperation": _CONNECT,
     "pyspark.sql.connect.plan.WriteOperationV2": _CONNECT,
     "pyspark.sql.connect.plan.WriteStreamOperation": _CONNECT,
+}
+
+# The names of PySpark's modules, and members of their classes ("Class.member"), that the
+# stubs leave out: plumbing of classic PySpark (its JVM gateway) or of PySpark Connect (its
+# plan builders) that PySpark's module exposes under a public name and the drop-in does not
+# have, which no annotation needs. python/tests/test_type_stubs_offline.py checks that every
+# name that a stub declares exists at the drop-in's run time, but those it lists as types only.
+DROPPED = {
+    # The input converters of py4j that classic PySpark registers with its JVM gateway.
+    "pyspark.sql.types": {
+        "DateConverter",
+        "DatetimeConverter",
+        "DatetimeNTZConverter",
+        "DayTimeIntervalTypeConverter",
+        "NumpyArrayConverter",
+        "NumpyScalarConverter",
+        "TimeConverter",
+    },
+    # The manager of the checkpoints of classic PySpark's JVM, not in PySpark's __all__, which
+    # only the private SparkSession._streamingCheckpointManager returns.
+    "pyspark.sql.streaming.query": {"StreamingCheckpointManager"},
+    # The builder of the relation of PySpark Connect's TableArg, which the drop-in builds in
+    # Rust.
+    "pyspark.sql.connect.table_arg": {"TableArg.to_plan"},
+    # The module that pyspark/sql/functions.py makes of the five partition transforms, and the
+    # modules of the Connect functions, which copy the functions of pyspark.sql.functions: they
+    # do not import what PySpark's modules import, whose names they do not have at run time.
+    "pyspark.sql.functions.partitioning": {"Column", "PySparkTypeError"},
+    "pyspark.sql.connect.functions": {"should_test_connect"},
+    "pyspark.sql.connect.functions.builtin": {
+        "Expression",
+        "LiteralExpression",
+        "UnresolvedNamedLambdaVariable",
+    },
+    "pyspark.sql.connect.functions.partitioning": {"Column", "PySparkTypeError"},
 }
 
 # The line of the header of each stub that marks it as generated.
@@ -604,6 +646,8 @@ class ImportSite:
     type_checking: bool
     # Whether the stub re-exports the name: decided by `resolve_reexports`.
     reexported: bool = False
+    # Whether DROPPED leaves the name out of the module's stub.
+    dropped: bool = False
 
     @property
     def name(self) -> str:
@@ -991,6 +1035,24 @@ def prune(
     return out, refs
 
 
+def _calls_globals(stmt: ast.stmt) -> bool:
+    """Whether `stmt`, a statement of the top level of a module, calls globals() there, not in
+    the bodies of its functions and classes: it may write the names of the module."""
+    if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return False
+    stack: list[ast.AST] = [stmt]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Call) and _dotted(node.func) == "globals":
+            return True
+        stack += [
+            child
+            for child in ast.iter_child_nodes(node)
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        ]
+    return False
+
+
 def _top_level(stmts: list[ast.stmt]) -> list[ast.stmt]:
     """The statements of a module that run at its top level, under any condition: those of its
     ``if``, ``try``, ``with`` and ``for`` blocks too, not those of its classes and functions."""
@@ -1217,6 +1279,39 @@ class Stub:
         return [s.stmt.module for s in self.sites if s.alias.name == "*"]
 
 
+def _drop(module: str, stmts: list[ast.stmt], sites: list[ImportSite]) -> list[ast.stmt]:
+    """`stmts` without the names of DROPPED of `module`, whose imports are not re-exported."""
+    names = DROPPED.get(module, set())
+    found: set[str] = set()
+
+    def keep(stmt: ast.stmt, prefix: str) -> bool:
+        bound = {f"{prefix}{n}" for n in bound_names(stmt)}
+        if bound and bound <= names and not isinstance(stmt, (ast.Import, ast.ImportFrom)):
+            found.update(bound)
+            return False
+        return True
+
+    def body(stmts: list[ast.stmt], prefix: str) -> list[ast.stmt]:
+        out = []
+        for stmt in stmts:
+            if not keep(stmt, prefix):
+                continue
+            if isinstance(stmt, ast.ClassDef):
+                stmt.body = body(stmt.body, f"{prefix}{stmt.name}.") or [copy.deepcopy(_ELLIPSIS)]
+            out.append(stmt)
+        return out
+
+    stmts = body(stmts, "")
+    for site in sites:
+        if site.name in names:
+            site.dropped = True
+            found.add(site.name)
+    missing = sorted(names - found)
+    if missing:
+        raise GeneratorError(f"{module}: DROPPED names that PySpark's module lacks: {missing}")
+    return stmts
+
+
 def transform(pyspark_src: Path, module: str) -> Stub:
     """The stub statements of PySpark's module `module`, and its extra."""
     relative = source_path(pyspark_src, module)
@@ -1234,6 +1329,7 @@ def transform(pyspark_src: Path, module: str) -> Stub:
     unused = sorted(set(ATTRIBUTE_TYPES.get(module, {})) - transformer.attribute_types_used)
     if unused:
         raise GeneratorError(f"{module}: ATTRIBUTE_TYPES of no class of PySpark's module: {unused}")
+    stmts = _drop(module, stmts, transformer.import_sites)
     sites = transformer.import_sites
     extra = EXTRAS.get(module)
     extra_stmts: list[ast.stmt] = []
@@ -1321,6 +1417,29 @@ class DropIn:
         names = self.provides_all(module)
         return names is None or name in names
 
+    def runtime_complete(self, module: str, seen: frozenset[str] = frozenset()):
+        """The names that the drop-in's `module` has at run time, of its source (not its stub),
+        or None when its source does not tell: it has none, writes its globals(), or star-imports
+        a module whose source does not tell."""
+        base = self.root / Path(*module.split("."))
+        for path in (base / "__init__.py", base.with_suffix(".py")):
+            if path.is_file():
+                break
+        else:
+            return None
+        tree = ast.parse(path.read_text())
+        top = _top_level(tree.body)
+        if module in seen or any(_calls_globals(stmt) for stmt in top):
+            return None
+        names = set().union(*(bound_names(s) for s in top))
+        for stmt in top:
+            if isinstance(stmt, ast.ImportFrom) and any(a.name == "*" for a in stmt.names):
+                starred = self.runtime_complete(stmt.module or "", seen | {module})
+                if starred is None:
+                    return None
+                names |= {n for n in starred if not n.startswith("_")}
+        return frozenset(names)
+
     def runtime_names(self, module: str) -> frozenset[str]:
         """The names that the source of the drop-in's `module` (not its stub) binds at its top
         level, under any condition: names of it at run time. None of a module of no source."""
@@ -1334,10 +1453,14 @@ class DropIn:
 
 def resolve_reexports(stubs: dict[str, Stub], dropin: DropIn) -> None:
     """Re-export each reexportable import of a stub that the drop-in has, to a fixed point (a
-    stub re-exports the names that other stubs re-export)."""
+    stub re-exports the names that other stubs re-export), and that the drop-in's module of the
+    stub has at run time, as far as its source tells."""
     for stub in stubs.values():
+        runtime = dropin.runtime_complete(stub.module)
         for site in stub.sites:
-            site.reexported = site.reexportable
+            site.reexported = (
+                site.reexportable and not site.dropped and (runtime is None or site.name in runtime)
+            )
     changed = True
     while changed:
         changed = False

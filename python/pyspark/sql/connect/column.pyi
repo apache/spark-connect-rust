@@ -19,12 +19,10 @@
 
 from typing import Any, Callable, Union, Tuple
 from pyspark.sql.column import Column as ParentColumn
-from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkAttributeError as PySparkAttributeError, PySparkValueError as PySparkValueError
-from pyspark.sql.types import DataType as DataType
-from pyspark.sql.utils import enum_to_value as enum_to_value
+from pyspark.errors import PySparkTypeError
+from pyspark.sql.types import DataType
 import pyspark.sql.connect.proto as proto
-from pyspark.sql.connect.expressions import Expression as Expression, LiteralExpression as LiteralExpression
-from pyspark.errors.utils import with_origin_to_class as with_origin_to_class
+from pyspark.sql.connect.expressions import Expression
 from pyspark.sql.connect._typing import LiteralType, DateTimeLiteral, DecimalLiteral
 from pyspark.sql.connect.client import SparkConnectClient
 from pyspark.sql.connect.window import WindowSpec

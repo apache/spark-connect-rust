@@ -18,10 +18,10 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Callable, List, Optional, overload, Dict
-from pyspark.sql.column import Column as Column
-from pyspark.sql.session import SparkSession as SparkSession
-from pyspark.sql.dataframe import DataFrame as DataFrame
-from pyspark.sql.pandas.group_ops import PandasGroupedOpsMixin as PandasGroupedOpsMixin
+from pyspark.sql.column import Column
+from pyspark.sql.session import SparkSession
+from pyspark.sql.dataframe import DataFrame
+from pyspark.sql.pandas.group_ops import PandasGroupedOpsMixin
 from py4j.java_gateway import JavaObject
 from pyspark.sql._typing import LiteralType
 

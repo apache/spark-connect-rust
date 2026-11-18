@@ -15,10 +15,14 @@
 # limitations under the License.
 #
 """DataFrameReader / DataFrameWriter(V2) under the connect import path."""
-from pyspark.sql.readwriter import (
+# PathOrPaths and TupleOrListOfString: PySpark Connect's aliases of the types of the paths and
+# of the lists of column names, which are those of pyspark.sql.readwriter.
+from pyspark.sql.readwriter import (  # noqa: F401
     DataFrameReader,
     DataFrameWriter,
     DataFrameWriterV2,
+    PathOrPaths,
+    TupleOrListOfString,
 )
 
 __all__ = ["DataFrameReader", "DataFrameWriter", "DataFrameWriterV2"]

@@ -192,12 +192,15 @@ class Tree:
         (base / path).parent.mkdir(parents=True, exist_ok=True)
         (base / path).write_text(textwrap.dedent(text).lstrip("\n"))
 
-    def generate(self, modules, extras=None, attribute_types=None, unresolved_imports=None):
+    def generate(
+        self, modules, extras=None, attribute_types=None, unresolved_imports=None, dropped=None
+    ):
         with (
             mock.patch.object(gen, "STUB_MODULES", tuple(modules)),
             mock.patch.object(gen, "EXTRAS", extras or {}),
             mock.patch.object(gen, "ATTRIBUTE_TYPES", attribute_types or {}),
             mock.patch.object(gen, "UNRESOLVED_IMPORTS", unresolved_imports or {}),
+            mock.patch.object(gen, "DROPPED", dropped or {}),
             mock.patch.object(
                 gen, "IDENTITY_DECORATORS", frozenset({"pyspark.sql.utils.try_remote_functions"})
             ),
@@ -505,6 +508,50 @@ class Reader(object):  # type: ignore[misc]
         unresolved["pyspark.sql.utils.helper"] = "it has it"
         with self.assertRaisesRegex(gen.GeneratorError, r"has now: \['pyspark.sql.utils.helper'"):
             tree.generate(["pyspark.sql.reader"], unresolved_imports=unresolved)
+
+    def test_reexports_and_declares_only_what_the_dropins_module_has(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/reader.py",
+            """
+            from pyspark.sql.column import Column
+            from pyspark.sql.utils import helper
+
+            class Converter:
+                def convert(self, x: int) -> int: ...
+
+            class Reader:
+                def load(self, path: str) -> Column: ...
+
+                def to_plan(self) -> None: ...
+            """,
+        )
+        # The drop-in's module binds helper at run time, and calls globals() only in the body
+        # of a function, so its source tells its names: it does not import Column.
+        tree.write(
+            tree.repo,
+            "python/pyspark/sql/reader.py",
+            "from pyspark.sql.utils import helper\n"
+            "from pyspark._pyspark import Reader\n"
+            "def f():\n    return globals()\n",
+        )
+        dropped = {"pyspark.sql.reader": {"Converter", "Reader.to_plan"}}
+        stub = body(
+            tree.generate(["pyspark.sql.reader"], dropped=dropped)[
+                Path("python/pyspark/sql/reader.pyi")
+            ]
+        )
+        # Column, which load() needs, is imported, not re-exported; helper is re-exported. The
+        # converter and Reader.to_plan, PySpark's plumbing, are left out.
+        self.assertEqual(
+            stub,
+            "\nfrom pyspark.sql.column import Column\n"
+            "from pyspark.sql.utils import helper as helper\n\n"
+            "class Reader:\n    def load(self, path: str) -> Column: ...\n",
+        )
+        with self.assertRaisesRegex(gen.GeneratorError, r"DROPPED names that .* lacks: \['Gone'\]"):
+            tree.generate(["pyspark.sql.reader"], dropped={"pyspark.sql.reader": {"Gone"}})
 
     def test_extras_add_the_names_of_the_dropin(self):
         tree = Tree(self)

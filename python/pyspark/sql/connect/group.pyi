@@ -18,13 +18,10 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Dict, List, Sequence, Union, Optional, overload
-from pyspark.util import PythonEvalType as PythonEvalType
-from pyspark.sql.pandas.typehints import infer_group_arrow_eval_type_from_func as infer_group_arrow_eval_type_from_func
-from pyspark.sql.types import NumericType as NumericType, StructType as StructType
-from pyspark.sql.column import Column as Column
+from pyspark.sql.types import StructType
+from pyspark.sql.column import Column
 from pyspark.sql.connect.functions import builtin as F
-from pyspark.errors import PySparkNotImplementedError as PySparkNotImplementedError, PySparkTypeError as PySparkTypeError
-from pyspark.sql.streaming.stateful_processor import StatefulProcessor as StatefulProcessor
+from pyspark.sql.streaming.stateful_processor import StatefulProcessor
 from pyspark.sql.connect._typing import LiteralType, PandasGroupedMapFunction, GroupedMapPandasUserDefinedFunction, PandasCogroupedMapFunction, ArrowCogroupedMapFunction, ArrowGroupedMapFunction, PandasGroupedMapFunctionWithState
 from pyspark.sql.connect.dataframe import DataFrame
 

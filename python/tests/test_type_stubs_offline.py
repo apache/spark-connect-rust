@@ -14,6 +14,7 @@ of the interpreter as an installed package, whose own errors it does not report.
 import ast
 import importlib
 import importlib.util
+import inspect
 import os
 import pkgutil
 import re
@@ -53,6 +54,43 @@ PRIVATE_NAMES = {
     "pyspark.util": ["_parse_memory"],
 }
 
+# The names that the stubs declare and the drop-in does not have at run time, by design, with
+# the reason: what PySpark's annotations need of its classic-only API, which type checkers of
+# pyspark-client see as well and neither client has at run time, or of the classes that the
+# drop-in implements natively. Every other name of a stub exists at the drop-in's run time.
+_CLASSIC_ONLY = (
+    "classic only: PySpark defines it when not is_remote_only(), which type checkers of "
+    "pyspark-client see as well, and neither client has at run time"
+)
+TYPE_ONLY = {
+    "pyspark.sql.dataframe.DataFrame.rdd": _CLASSIC_ONLY,
+    "pyspark.sql.connect.dataframe.DataFrame.rdd": _CLASSIC_ONLY,
+    "pyspark.sql.group.dfapi": "the decorator of PySpark's GroupedData, which types its methods",
+    "pyspark.sql.group.df_varargs_api": "the decorator of PySpark's GroupedData, as dfapi",
+    "pyspark.sql.pandas.group_ops.PandasGroupedOpsMixin": (
+        "the base of PySpark's GroupedData, of its pandas and Arrow methods, which the drop-in's "
+        "native GroupedData has itself"
+    ),
+    "pyspark.sql.readwriter.OptionUtils": (
+        "the base of PySpark's readers and writers, of private members only; the drop-in's "
+        "readers and writers are native"
+    ),
+    "pyspark.sql.connect.readwriter.OptionUtils": "as pyspark.sql.readwriter.OptionUtils",
+    "pyspark.sql.types.DataTypeSingleton": (
+        "the metaclass of PySpark's atomic types, which types their constructors; the drop-in's "
+        "types are native"
+    ),
+    "pyspark.sql.types.T": "a type variable of PySpark's annotations of the module",
+    "pyspark.sql.types.U": "a type variable of PySpark's annotations of the module",
+    "pyspark.sql.connect.window.WindowFrame": (
+        "annotates the constructor of PySpark Connect's WindowSpec; the drop-in's is native"
+    ),
+    "pyspark.sql.connect.streaming.query.StreamingQueryListenerBus": (
+        "PySpark Connect's listener bus, which types the private _sqlb of its "
+        "StreamingQueryManager; the drop-in's bus is in Rust"
+    ),
+}
+
 # Instance attributes that PySpark's classes assign in their methods and declare nowhere else,
 # with the types that mypy reveals of them with the official pyspark-client 4.3.0.
 ATTRIBUTE_TYPES = {
@@ -84,14 +122,20 @@ def _stubbed_modules():
     return list(_stubs())
 
 
-def _instance_attributes():
-    """(module, class, attribute) of the public instance attributes of the classes of the stubs,
-    as the generator finds them in PySpark's classes: those that their methods assign, whose
-    bodies the stubs keep, and those that the generator declares (its ATTRIBUTE_TYPES)."""
+def _generator():
+    """scripts/gen_type_stubs.py, of whose AST helpers the tests read the stubs."""
     spec = importlib.util.spec_from_file_location("gen_type_stubs", GENERATOR)
     gen = importlib.util.module_from_spec(spec)
     sys.modules.setdefault(spec.name, gen)
     spec.loader.exec_module(gen)
+    return gen
+
+
+def _instance_attributes():
+    """(module, class, attribute) of the public instance attributes of the classes of the stubs,
+    as the generator finds them in PySpark's classes: those that their methods assign, whose
+    bodies the stubs keep, and those that the generator declares (its ATTRIBUTE_TYPES)."""
+    gen = _generator()
     found = []
     for module, stub in _stubs().items():
         declared = gen.ATTRIBUTE_TYPES.get(module, {})
@@ -266,6 +310,79 @@ def test_stubs_type_the_instance_attributes(user_mypy):
     assert [name for name, revealed_type in revealed.items() if revealed_type == "Any"] == []
     assert {name: revealed.get(name) for name in ATTRIBUTE_TYPES} == ATTRIBUTE_TYPES
     assert len(revealed) > 50
+
+
+def _stub_declarations(gen, tree):
+    """The public names that the stub `tree` declares: (class or None, name) of each name of its
+    module and of each member of its classes that exists on the class, not the declarations of
+    the attributes of its instances (`x: int` in a class body, the fields of a dataclass)."""
+
+    def names(body, cls):
+        out = set()
+        for stmt in body:
+            if isinstance(stmt, ast.If):
+                out |= names(stmt.body + stmt.orelse, cls)
+            elif isinstance(stmt, ast.AnnAssign):
+                annotation = ast.unparse(stmt.annotation)
+                instance = stmt.value is None and not annotation.startswith(("ClassVar", "'Class"))
+                dataclass = cls is not None and any(
+                    "dataclass" in ast.unparse(d) for d in cls.decorator_list
+                )
+                named_tuple = cls is not None and any(
+                    "NamedTuple" in ast.unparse(b) for b in cls.bases
+                )
+                if cls is None or named_tuple or not (instance or dataclass):
+                    out |= gen.bound_names(stmt)
+            elif isinstance(stmt, (ast.Import, ast.ImportFrom)):
+                out |= {a.asname for a in stmt.names if a.asname and a.asname == a.name}
+            else:
+                out |= gen.bound_names(stmt)
+        return {n for n in out if not n.startswith("_")}
+
+    found = {(None, name) for name in names(tree.body, None)}
+    for qualified, cls in gen._classes(tree.body):
+        found |= {(qualified, name) for name in names(cls.body, cls)}
+    return found
+
+
+def _has(gen, obj, name, module):
+    """Whether the run-time class or module `obj`, of the module `module`, has `name`: as an
+    attribute, or as an attribute of its instances that a method of one of its Python classes
+    assigns (`self.returnType = ...`), in the source of its module or of `module`."""
+    if hasattr(obj, name):
+        return True
+    for cls in getattr(obj, "__mro__", ()):
+        sources = []
+        for source_module in (sys.modules.get(cls.__module__), module):
+            try:
+                sources.append(inspect.getsource(source_module))
+            except (OSError, TypeError):
+                continue
+        for source in sources:
+            for node in ast.walk(ast.parse(source)):
+                if isinstance(node, ast.ClassDef) and node.name == cls.__name__:
+                    if any(name in gen.assigned_attributes(m) for m in gen._methods(node.body)):
+                        return True
+    return False
+
+
+def test_every_name_of_a_stub_exists_at_run_time():
+    # A stub replaces its module for a type checker, so a name that only the stub has, such as
+    # the py4j converters of PySpark's classic types, type-checks and then fails at run time
+    # (`from pyspark.sql.types import DateConverter` raised ImportError). The stubs declare what
+    # the drop-in has, but the names of TYPE_ONLY, which PySpark's annotations need.
+    gen = _generator()
+    missing = set()
+    for module, stub in _stubs().items():
+        runtime = importlib.import_module(module)
+        for cls, name in _stub_declarations(gen, ast.parse(stub.read_text())):
+            obj = runtime
+            for part in (cls.split(".") if cls else []):
+                obj = getattr(obj, part, None)
+            if obj is not None and not _has(gen, obj, name, runtime):
+                missing.add(f"{module}.{cls}.{name}" if cls else f"{module}.{name}")
+    assert sorted(missing - set(TYPE_ONLY)) == []
+    assert sorted(set(TYPE_ONLY) - missing) == []
 
 
 def test_vendored_pandas_udf_stub_has_distinct_overloads():
