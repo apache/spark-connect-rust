@@ -20984,6 +20984,75 @@ def test_subquery_aliases_of_python_plans_send_the_relations_of_their_dataframes
     assert observation.get == {"c": 3}
 
 
+def test_plans_and_commands_built_in_python_send_the_relations_of_their_dataframes(mock_connect):
+    # As PySpark's plans and commands over the plan of a DataFrame: the server receives the
+    # relation of the DataFrame, of which the plan holds a placeholder, under any relation built
+    # with pyspark.sql.connect.proto, such as those that SparkSession.client is given, both sides
+    # of a join included, and as the relation of a command. The Observations of the DataFrames of
+    # a DataFrame of such a plan are those that PySpark's plan collects: both sides of a join.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, service = mock_connect
+    client = spark.client
+    source = spark.range(3).withColumnRenamed("id", "k")
+    other = spark.range(5)
+    relation = pb2.Relation.FromString(source._relation_bytes())
+    other_relation = pb2.Relation.FromString(other._relation_bytes())
+
+    def sent():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan
+
+    plan = pb2.Plan()
+    plan.root.limit.input.project.input.CopyFrom(source._plan.plan(client))
+    plan.root.limit.limit = 2
+    list(client.to_table_as_iterator(plan, {}))
+    assert sent().root.limit.input.project.input == relation
+
+    plan = pb2.Plan()
+    plan.root.join.left.CopyFrom(source._plan.plan(client))
+    plan.root.join.right.CopyFrom(other._plan.plan(client))
+    list(client.to_table_as_iterator(plan, {}))
+    assert (sent().root.join.left, sent().root.join.right) == (relation, other_relation)
+
+    command = pb2.Command()
+    command.create_dataframe_view.input.CopyFrom(source._plan.plan(client))
+    command.create_dataframe_view.name = "v"
+    client.execute_command(command)
+    assert sent().command.create_dataframe_view.input == relation
+    command = pb2.Command()
+    command.write_operation.input.filter.input.CopyFrom(source._plan.plan(client))
+    command.write_operation.source = "noop"
+    client.execute_command(command)
+    assert sent().command.write_operation.input.filter.input == relation
+
+    class JoinPlan(LogicalPlan):
+        def __init__(self, left, right):
+            super().__init__(None)
+            self._left, self._right = left, right
+
+        def plan(self, session):
+            plan = self._create_proto_relation()
+            plan.join.left.CopyFrom(self._left.plan(session))
+            plan.join.right.CopyFrom(self._right.plan(session))
+            return plan
+
+    left, right = Observation("l"), Observation("r")
+    observed_left = source.observe(left, F.count(F.lit(1)).alias("c"))
+    observed_right = other.observe(right, F.count(F.lit(1)).alias("c"))
+    batch, left_metrics = _count_batch_and_observed_metrics(service, observed_left)
+    _, right_metrics = _count_batch_and_observed_metrics(service, observed_right)
+    service.execute_payload = (
+        batch + left_metrics("l", varint_field(7, 3), "c")
+        + right_metrics("r", varint_field(7, 5), "c")
+    )
+    assert DataFrame(JoinPlan(observed_left._plan, observed_right._plan), spark).count() == 3
+    assert (left.get, right.get) == ({"c": 3}, {"c": 5})
+
+
 def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):
     # As PySpark's DataFrame, a Python object: a cycle through a DataFrame of a Python plan, whose
     # plan keeps an object that keeps the DataFrame (as a pyspark.ml model keeps its summary's
