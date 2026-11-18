@@ -1636,6 +1636,15 @@ impl PyMessage {
                 None => me.field_index_of(&field_name)?,
             }
         };
+        // As upb's, whose map of the field takes a new version, so that an iteration of it in
+        // progress fails; the map itself keeps its entries, held by no message.
+        let map = match slf.borrow().slots.get(index) {
+            Some(Slot::Map(map)) => Some(map.clone_ref(py)),
+            _ => None,
+        };
+        if let Some(map) = map {
+            map.bind(py).borrow_mut().new_version();
+        }
         slf.borrow_mut().clear_index(py, index);
         Ok(())
     }

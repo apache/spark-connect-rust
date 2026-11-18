@@ -232,8 +232,9 @@ fn out_of_range_of(value: &Bound<'_, PyAny>) -> PyErr {
     PyValueError::new_err(format!("Value out of range: {repr}"))
 }
 
-/// The order of the keys of a map, in which its entries are written: upb's of its deterministic
-/// serialization (and protobuf's text format), of strings by their bytes, of numbers by value.
+/// The order of the keys of a map of Python's `sorted`, in which protobuf's `text_format` writes
+/// its entries: of strings by their bytes (as by their code points), of numbers by value. (upb's
+/// orders, of its text and its serialization, are those of `text.rs`.)
 pub(crate) fn key_order(a: &Scalar, b: &Scalar) -> std::cmp::Ordering {
     match (a, b) {
         (Scalar::Str(x), Scalar::Str(y)) => x.cmp(y),

@@ -1294,18 +1294,29 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   Spark Connect and of the plugins' files that the drop-in adds to it (see below), not
   `protobuf`'s default pool: it finds their descriptors as upb's does, but has no `Add`,
   `AddSerializedFile` or `SetFeatureSetDefaults`, so Python code adds no file to it;
-- it parses, prints and builds (of nested dicts) messages of any depth, where upb refuses to
-  parse more than 100 nested messages, its constructor overflows the stack of a thread from
-  thousands of nested dicts, and `text_format` exceeds Python's recursion limit;
+- it parses, copies, prints and builds messages of any depth, where upb refuses a message of more
+  than 100 nested messages wherever it reads one of its bytes: in the parse, the load of a pickle
+  and `Any.Unpack`, and where it copies a message by its bytes, in `MergeFrom`, `copy.copy`, the
+  `append`, `extend` and `insert` of a repeated field, and a constructor given the message of a
+  field or of a repeated field (`Plan(root=relation)`), though `CopyFrom`, `copy.deepcopy` and a
+  value of a map field of a constructor copy any depth. upb's constructor also overflows the stack
+  of a thread from thousands of nested dicts, and `text_format` exceeds Python's recursion limit;
 - where Python code that a method of a container runs (an `__index__`, an `__eq__`, an iterable)
   shortens the container, a read past its end raises `IndexError` and an insertion or a deletion
   takes the container as it is, where upb reads or writes past the end of its array, which can
   end the process;
-- the iteration order of a map is the order of insertion, where upb's is that of its hash table.
-  Serialization and the text format write the entries in upb's order of the keys;
-- a varint that the end of the data, or of its packed field, cuts short fails the parse without a
-  value, where upb reads the bytes after it (of the next field, or zeros past the end of the data)
-  into a value that it keeps;
+- the iteration order of a map is the order of insertion, where upb's is that of its hash table,
+  which changes from one process to another. The serialization of a map writes its entries in
+  the order of their keys of upb's deterministic serialization
+  (`SerializeToString(deterministic=True)`), with `deterministic` or without it, where upb's
+  serialization without it writes them in the order of its hash table; `str()` and `repr()` write
+  them in upb's order of the keys of its text, and `text_format` in its own, as of upb's messages.
+  upb's orders take the keys of a signed integer type as unsigned numbers, so that a negative key
+  comes after the others;
+- a varint that the end of the data, or of its packed field, cuts short fails the parse with a
+  `DecodeError`, as upb's parse fails, but the message keeps less of it: upb keeps a value of the
+  bytes that it read past the varint (of the next field, or zeros past the end of the data), and the
+  values of the packed field before it, where the runtime keeps neither;
 - it makes a Python object of each message that it parses or copies, where upb makes one when the
   message is read, so the parse, the copy and the release of a message of many messages take
   several times as long as upb's (0.3 s for the parse of a million messages, upb's 0.05 s, with
@@ -1320,10 +1331,12 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   value that is not a dict), so another thread can use a message that
   one of them reads meanwhile. `SerializeToString`, `==` of two messages of the runtime and the
   release of a message hold the GIL until they end, as upb's do: 0.07 s, 0.05 s and 0.07 s for a
-  million messages, where upb's take 0.04 s, 0.14 s and 2 ms. The messages that the runtime makes,
-  of a parse, a copy or a read of an unset field, are not tracked by the garbage collector
-  (`gc.is_tracked`), as they make no reference cycles, so that a collection does not go through the
-  messages of a large message;
+  million messages, where upb's take 0.04 s, 0.14 s and 2 ms. The messages that a parse or a copy
+  makes within the message that it parses or copies into, those of `copy.deepcopy`, and that of a
+  read of an unset field are not tracked by the garbage collector (`gc.is_tracked`), as they make
+  no reference cycles, so that a collection does not go through the messages of a large message;
+  the message of a constructor, of `FromString`, and that `ParseFromString` or `CopyFrom` fills, are
+  tracked;
 - the pickle of a message of a nested type names its class, which loads without `protobuf`,
   where upb's names protobuf's `_InternalConstructMessage` of the full name of its type, which
   loads where `protobuf` is installed once `pyspark.sql.connect.proto` is imported, as in PySpark,
@@ -1394,7 +1407,9 @@ and the rest of such a module is `protobuf`'s:
   classes, which take the package's messages only through bytes or dicts, whatever its file.
 
 The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their
-types as they are, and an `Any` of either packs and unpacks a message of either. A message of the
+types as they are, the `MergeFrom` of their maps takes the items of `protobuf`'s maps, as upb's
+takes those of any mapping but a dict, and an `Any` of either packs and unpacks a message of
+either. A message of the
 runtime equals (`==`, on either side) a message of `protobuf`'s of its type of `protobuf`'s default
 pool of the same contents, as upb's messages of its one class of a type do: the runtime parses the
 bytes of `protobuf`'s message to compare it, as a field of the runtime takes it, so `in`, `remove`
@@ -1637,7 +1652,9 @@ server is trusted, as SECURITY.md sets out, so this is not a bound on the respon
 
 The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested
 expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it
-sends the plan, where the drop-in sends it and the server fails it at its own limit of 100 levels.
+sends the plan, where the drop-in sends it and the server runs it up to its own limit of 1,024
+nested messages (`spark.connect.grpc.marshallerRecursionLimit`): from about 510 nested
+expressions, the server fails the request with `[Unknown error] Application error processing RPC`.
 A Column of 745 levels or more raises a `RecursionError` when it is pickled, of the drop-in's own
 message. PySpark's pickler raises one from about 600 levels, under Python's default recursion limit,
 so a Column of 600 to 744 levels pickles in the drop-in only. `copy.copy` and `copy.deepcopy` of a
