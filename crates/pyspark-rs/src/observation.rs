@@ -1,9 +1,11 @@
 //! PyO3 wrapper for `spark_connect::observation::Observation` (`pyspark.sql.Observation`).
 
+use std::sync::Arc;
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString, PyTuple};
 use spark_connect::expression::Expression;
-use spark_connect::observation::Observation;
+use spark_connect::observation::{MetricsMirror, Observation};
 use spark_connect::SparkSession;
 use spark_connect_core::error::{SparkError, SparkErrorKind};
 
@@ -136,11 +138,13 @@ impl PyObservation {
             .map(|name| PyString::new(py, &name).into_any().unbind())
     }
 
-    /// The observed metrics, as PySpark's `Observation.get`: a dict of the metrics that the
-    /// actions run so far observed, by their names, and empty before an action runs. The metrics
-    /// of an execution that PySpark's client does not convert (see [`check_observed_metrics`])
-    /// are never set, so these are those of the executions before it, as PySpark's.
-    /// An unpickled Observation gives back its `_error` and its `_result`, as PySpark's.
+    /// The observed metrics, as PySpark's `Observation.get`: its `_result`, the dict of the metrics
+    /// that the actions run so far observed, by their names, and empty before an action runs,
+    /// which is one dict, that the actions update in place, as PySpark's client updates it. The
+    /// metrics of an execution that PySpark's client does not convert (see
+    /// [`check_observed_metrics`]) are never set, so these are those of the executions before it,
+    /// as PySpark's. An unpickled Observation gives back its `_error` and its `_result`, as
+    /// PySpark's.
     #[getter]
     fn get<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         if let Some(error) = &self.restored.error {
@@ -149,8 +153,38 @@ impl PyObservation {
         if let Some(result) = &self.restored.result {
             return Ok(result.bind(py).clone());
         }
-        let metrics = self.inner.get().to_pyerr()?;
-        Ok(metrics_dict(py, metrics)?.into_any())
+        // The error of collecting the metrics, or NO_OBSERVE_BEFORE_GET of an unused observation.
+        self.inner.get().to_pyerr()?;
+        match result_dict(py, &self.inner)? {
+            Some(result) => Ok(result.into_any()),
+            None => Ok(PyDict::new(py).into_any()),
+        }
+    }
+
+    /// The result of the observation, as PySpark's `_result`: None before it is used, and then
+    /// the dict that `get` gives, which the actions that set its metrics update in place.
+    #[getter(_result)]
+    fn result<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
+        if let Some(result) = &self.restored.result {
+            return Ok(Some(result.bind(py).clone()));
+        }
+        Ok(result_dict(py, &self.inner)?.map(Bound::into_any))
+    }
+
+    /// The error of collecting the metrics, which the server reported, as PySpark's `_error`, or
+    /// None: the exception that `get` raises.
+    #[getter(_error)]
+    fn error<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        if let Some(error) = &self.restored.error {
+            return Some(error.bind(py).clone());
+        }
+        let (_, error) = self.inner.state();
+        error.map(|error| {
+            crate::errors::spark_error_to_py_exception(error)
+                .value(py)
+                .clone()
+                .into_any()
+        })
     }
 
     /// Observe the metrics of the Columns `exprs` on `df` with this observation, as PySpark's
@@ -230,6 +264,19 @@ impl PyObservation {
             }
         };
         copy.borrow_mut().restored = restored;
+        // As the deep copy of PySpark's `_result`, of the memo: a copy of the dict that `get` gave,
+        // with what was set on it, which the actions of this observation do not update. One that
+        // `get` did not give yet is made of the copied metrics when the copy's is read.
+        let result = slf.borrow().inner.metrics_mirror();
+        if let Some(result) = result.as_deref().and_then(mirrored_dict) {
+            let copied = deepcopy.call1((result.bind(py), memo))?;
+            if let Ok(copied) = copied.cast_into::<PyDict>() {
+                let mirror: Arc<dyn MetricsMirror> = Arc::new(PyMetricsMirror {
+                    dict: copied.unbind(),
+                });
+                let _ = copy.borrow().inner.set_metrics_mirror(mirror);
+            }
+        }
         copy_attributes(slf, &copy, Some(memo))?;
         Ok(copy)
     }
@@ -255,12 +302,10 @@ impl PyObservation {
     fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
         let py = slf.py();
         let this = slf.borrow();
-        let (metrics, error) = this.inner.state();
+        let (_, error) = this.inner.state();
         let result = match &this.restored.result {
             Some(result) => Some(result.bind(py).clone()),
-            None => metrics
-                .map(|metrics| metrics_dict(py, metrics).map(Bound::into_any))
-                .transpose()?,
+            None => result_dict(py, &this.inner)?.map(Bound::into_any),
         };
         let error = match &this.restored.error {
             Some(error) => Some(error.bind(py).clone()),
@@ -326,16 +371,73 @@ impl PyObservation {
     }
 }
 
-/// A dict of `metrics` by their names, as PySpark's `_result` of an Observation.
-fn metrics_dict(
-    py: Python<'_>,
-    metrics: Vec<(String, spark_connect_proto::expression::Literal)>,
-) -> PyResult<Bound<'_, PyDict>> {
-    let result = PyDict::new(py);
-    for (name, value) in metrics {
-        result.set_item(name, crate::dataframe::literal_to_py(py, &value, None)?)?;
+/// The result dict of a used Observation, as PySpark's `_result`: the dict that `get` gives,
+/// which the actions that set the metrics of the Observation update in place, as PySpark's client
+/// does, the shallow copies of the Observation sharing it.
+struct PyMetricsMirror {
+    dict: Py<PyDict>,
+}
+
+impl MetricsMirror for PyMetricsMirror {
+    fn update(&self, keys: &[String], values: &[spark_connect_proto::expression::Literal]) {
+        Python::attach(|py| {
+            // Of metrics that the check of the session found PySpark converts, before they were
+            // set (see `check_observed_metrics`).
+            let _ = set_metrics(py, self.dict.bind(py), keys.iter().zip(values));
+        });
     }
-    Ok(result)
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+/// The dict of `mirror`, of an Observation of this binding.
+fn mirrored_dict(mirror: &dyn MetricsMirror) -> Option<&Py<PyDict>> {
+    mirror
+        .as_any()
+        .downcast_ref::<PyMetricsMirror>()
+        .map(|mirror| &mirror.dict)
+}
+
+/// Set the metrics `metrics` in `dict` by their names, as PySpark's client updates the result of
+/// an Observation with them.
+fn set_metrics<'a>(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+    metrics: impl IntoIterator<Item = (&'a String, &'a spark_connect_proto::expression::Literal)>,
+) -> PyResult<()> {
+    for (name, value) in metrics {
+        dict.set_item(name, crate::dataframe::literal_to_py(py, value, None)?)?;
+    }
+    Ok(())
+}
+
+/// The result dict of `observation`, PySpark's `_result`, or None before it is used: the one that
+/// was made of it, else a new one of its metrics so far, which the actions update from now on.
+fn result_dict<'py>(
+    py: Python<'py>,
+    observation: &Observation,
+) -> PyResult<Option<Bound<'py, PyDict>>> {
+    if let Some(mirror) = observation.metrics_mirror() {
+        if let Some(dict) = mirrored_dict(mirror.as_ref()) {
+            return Ok(Some(dict.bind(py).clone()));
+        }
+    }
+    let dict = PyDict::new(py);
+    let made = Arc::new(PyMetricsMirror {
+        dict: dict.clone().unbind(),
+    });
+    let Some((mirror, metrics)) = observation.set_metrics_mirror(made) else {
+        return Ok(None);
+    };
+    if let Some(metrics) = metrics {
+        set_metrics(py, &dict, metrics.iter().map(|(name, value)| (name, value)))?;
+    }
+    Ok(Some(match mirrored_dict(mirror.as_ref()) {
+        Some(kept) => kept.bind(py).clone(),
+        None => dict,
+    }))
 }
 
 /// Keep a weak reference to `observation` on its state, by which the deep copy of a DataFrame
@@ -363,14 +465,39 @@ fn python_observation<'py>(
     same.then_some(python)
 }
 
+/// The Python Observation that `observation`, the clone of a state that a plan holds, keeps
+/// alive (see [`held_by_the_plan`]), if it still has this state.
+fn owner_observation<'py>(
+    py: Python<'py>,
+    observation: &Observation,
+) -> Option<Bound<'py, PyObservation>> {
+    let owner = observation.owner()?.downcast_ref::<Py<PyAny>>()?;
+    let python = owner.bind(py).cast::<PyObservation>().ok()?.clone();
+    let same = python.borrow().inner.same(observation);
+    same.then_some(python)
+}
+
+/// The clone of the state of `observation` that a plan holds, which keeps `observation` alive, as
+/// PySpark's plan holds the Observation itself: so the plan's Observations are the Python
+/// Observations, of their classes and attributes, and a DataFrame reports them to Python's
+/// garbage collector (`DataFrame::exclusive_observation_owners`).
+fn held_by_the_plan(observation: &Bound<'_, PyObservation>) -> Observation {
+    let owner: Arc<dyn std::any::Any + Send + Sync> =
+        Arc::new(observation.clone().into_any().unbind());
+    observation.borrow().inner.with_owner(owner)
+}
+
 /// The Python Observation of `observation`, a state that the plan of a DataFrame holds, as the
-/// Observation that PySpark's plan holds itself: the one of [`keep_handle`] while it is alive,
-/// else a new Observation of the state, whose `get` the actions of the plan set as they set the
-/// state, and which later reads give back while it is alive.
+/// Observation that PySpark's plan holds itself: the one that the plan keeps alive, or that of
+/// [`keep_handle`] while it is alive, else a new Observation of the state, whose `get` the actions
+/// of the plan set as they set the state, and which later reads give back while it is alive.
 pub(crate) fn python_observation_of<'py>(
     py: Python<'py>,
     observation: &Observation,
 ) -> PyResult<Bound<'py, PyObservation>> {
+    if let Some(python) = owner_observation(py, observation) {
+        return Ok(python);
+    }
     if let Some(python) = python_observation(py, observation) {
         return Ok(python);
     }
@@ -405,8 +532,9 @@ pub(crate) fn deep_copy_in(
     let copy = py
         .import("copy")?
         .call_method1(pyo3::intern!(py, "deepcopy"), (python, memo))?;
-    let copy = copy.extract::<PyRef<'_, PyObservation>>()?;
-    Ok(copy.inner.clone())
+    let copy = copy.cast_into::<PyObservation>()?;
+    // The copied plan holds the copy, as PySpark's copied plan holds the copied Observation.
+    Ok(held_by_the_plan(&copy))
 }
 
 /// Set the attributes of `observation` on `copy`, as `copy` sets the `__dict__` of the copy of a
@@ -454,13 +582,14 @@ pub(crate) fn observe(
         args.str(name.bind(py).as_any())?;
     }
     let args = args.before(&mut exprs);
-    let inner = observation.borrow().inner.clone();
+    let inner = held_by_the_plan(observation);
     // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once.
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
         df.observe_with_streaming(&inner, exprs, || frame.streaming_once())
     })?;
-    // The plan holds the state of the Observation, as PySpark's holds the Observation itself,
-    // which a deep copy of the plan copies with the memo of the call.
+    // The plan holds the Observation itself, as PySpark's does (see `held_by_the_plan`), which a
+    // deep copy of the plan copies with the memo of the call. The clones of its state that do not
+    // keep it alive find it by its weak reference.
     keep_handle(observation)?;
     Ok(PyDataFrame::new(args.plan(observed)))
 }

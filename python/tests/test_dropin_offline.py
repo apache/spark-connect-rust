@@ -21970,7 +21970,8 @@ def test_the_plans_of_dataframes_have_their_observations_as_pyspark(mock_connect
     # The views of SQL are its references, not its child, as in PySpark.
     assert SQL("SELECT * FROM v", views=[SubqueryAlias(observed._plan, "v")]).observations == {}
 
-    # An Observation that only the plan holds any more is given back as one of its state.
+    # An Observation that only the plan holds any more is that Observation, which the plan keeps
+    # alive, as PySpark's plan holds it.
     dropped = spark.range(3).observe(Observation("d"), count)
     gc.collect()
     held = dropped._plan.observations["d"]
@@ -21992,6 +21993,85 @@ def test_the_plans_of_dataframes_have_their_observations_as_pyspark(mock_connect
     plan.root.CopyFrom(dropped._plan.plan(client))
     client.to_table(plan, dropped._plan.observations)
     assert held.get == {"n": 3}
+
+
+def test_observations_are_pysparks_objects_of_a_live_result(mock_connect):
+    # As PySpark Connect's Observation, a plain object: `get` is its `_result`, one dict, which the
+    # executions that set its metrics update in place, so a dict read before an action has the
+    # metrics after it, what is set on it stays, and a shallow copy shares it, where a deep copy
+    # has a copy of it; `_result` is None before the Observation is used, and `_error` is None
+    # until the server reports an error. The plan of observe holds the Observation itself, as
+    # PySpark's CollectMetrics does, so its _plan.observations is that object, of its subclass and
+    # its attributes, once the program dropped it, and a cycle through it is collected. An
+    # execution of the client that is given an Observation that is not used for the name of the
+    # metrics raises PySpark's AssertionError, of no arguments, when they arrive.
+    import copy
+    import gc
+    import pickle
+    import weakref
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkAssertionError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation
+
+    spark, service = mock_connect
+    client = spark.client
+    observation = Observation("o")
+    assert observation._result is None and observation._error is None
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    held = observation.get
+    assert held == {} and observation.get is held and observation._result is held
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    service.execute_payload = batch + metrics("o", varint_field(7, 3), "c")
+    df.collect()
+    assert held == {"c": 3} and observation.get is held
+    held["extra"] = 1
+    shallow, deep = copy.copy(observation), copy.deepcopy(observation)
+    assert shallow.get is held and deep.get == held and deep.get is not held
+    unpickled = pickle.loads(pickle.dumps(observation))
+    assert unpickled.get == held and unpickled._result == held
+    service.execute_payload = batch + metrics("o", varint_field(7, 4), "c")
+    df.collect()
+    assert held == {"c": 4, "extra": 1} and shallow.get is held
+    assert deep.get == {"c": 3, "extra": 1}
+    assert observation._error is None
+
+    class Mine(Observation):
+        pass
+
+    mine = Mine("m")
+    mine.tag = "kept"
+    dropped = spark.range(3).observe(mine, F.count(F.lit(1)).alias("c"))
+    del mine
+    gc.collect()
+    (kept,) = dropped._plan.observations.values()
+    assert type(kept) is Mine and kept.tag == "kept"
+    assert dropped._plan.observations["m"] is kept
+
+    def cycle():
+        looped = Mine("cycle")
+        looped.frame = spark.range(3).observe(looped, F.count(F.lit(1)).alias("c"))
+        return weakref.ref(looped)
+
+    looped = cycle()
+    gc.collect()
+    assert looped() is None
+
+    plan = pb2.Plan()
+    plan.root.CopyFrom(df._plan.plan(client))
+    service.execute_payload = batch + metrics("o", varint_field(7, 5), "c")
+    unused = Observation("o")
+    with pytest.raises(AssertionError) as raised:
+        client.to_table(plan, {"o": unused})
+    assert type(raised.value) is AssertionError and raised.value.args == ()
+    assert isinstance(raised.value._operation_id, str)
+    assert unused._result is None
+    with pytest.raises(PySparkAssertionError, match="NO_OBSERVE_BEFORE_GET"):
+        unused.get
+    # The Observations of the plan are used, and an Observation of another name is not read.
+    client.to_table(plan, {"other": unused, **df._plan.observations})
+    assert held == {"c": 5, "extra": 1}
 
 
 def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):

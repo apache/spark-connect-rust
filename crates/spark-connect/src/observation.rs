@@ -16,17 +16,41 @@ use spark_connect_proto as proto;
 #[derive(Clone, Default)]
 pub struct Observation {
     state: Arc<Mutex<ObservationState>>,
+    /// What a binding of another language keeps alive with this clone of the observation (see
+    /// [`Observation::with_owner`]), which the other clones of its state do not hold.
+    owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
 
 /// The metrics of an observation, by their names, in order.
 type Metrics = Vec<(String, proto::expression::Literal)>;
+
+/// What a binding of another language keeps of the metrics of a used observation, such as the
+/// result dict of the Python client, which the observation tells of each update of its metrics,
+/// as PySpark's client updates the result dict of an Observation in place. The shallow copies of
+/// the observation share it with its metrics. Not a stable API.
+#[doc(hidden)]
+pub trait MetricsMirror: Send + Sync {
+    /// The metrics of the names `keys` were set to `values` by an action, in their order.
+    fn update(&self, keys: &[String], values: &[proto::expression::Literal]);
+
+    /// This mirror, by which the binding finds its own type.
+    fn as_any(&self) -> &dyn std::any::Any;
+}
+
+/// The metrics of a used observation, and the mirror of a binding of them, which its shallow
+/// copies share.
+#[derive(Default)]
+struct UsedMetrics {
+    metrics: Mutex<Metrics>,
+    mirror: std::sync::OnceLock<Arc<dyn MetricsMirror>>,
+}
 
 #[derive(Default)]
 struct ObservationState {
     name: Option<String>,
     /// None before the observation is used; then the metrics observed so far, which a shallow
     /// copy of the observation shares, as a copy of PySpark's shares its result dict.
-    result: Option<Arc<Mutex<Metrics>>>,
+    result: Option<Arc<UsedMetrics>>,
     /// The error of collecting the metrics, which the server reported.
     error: Option<SparkError>,
     /// What a binding of another language keeps for this observation (see
@@ -50,6 +74,7 @@ impl Observation {
                 name: Some(name.to_string()),
                 ..Default::default()
             })),
+            owner: None,
         }
     }
 
@@ -74,7 +99,7 @@ impl Observation {
             return Err(error.clone());
         }
         match &state.result {
-            Some(result) => Ok(lock_metrics(result).clone()),
+            Some(result) => Ok(lock_metrics(&result.metrics).clone()),
             None => Err(SparkError::classed(
                 SparkErrorKind::AssertionError,
                 "NO_OBSERVE_BEFORE_GET",
@@ -97,8 +122,69 @@ impl Observation {
         let result = state
             .result
             .as_ref()
-            .map(|result| lock_metrics(result).clone());
+            .map(|result| lock_metrics(&result.metrics).clone());
         (result, state.error.clone())
+    }
+
+    /// Whether the observation is used, as PySpark's Observation once its `_result` is not None.
+    pub(crate) fn is_used(&self) -> bool {
+        self.lock().result.is_some()
+    }
+
+    /// The mirror of the metrics of this observation that a binding set (see
+    /// [`Observation::set_metrics_mirror`]), if any. Not a stable API.
+    #[doc(hidden)]
+    pub fn metrics_mirror(&self) -> Option<Arc<dyn MetricsMirror>> {
+        let result = self.lock().result.clone()?;
+        result.mirror.get().cloned()
+    }
+
+    /// Make `mirror` the mirror of the metrics of this used observation (see [`MetricsMirror`]),
+    /// unless a binding set one already: the mirror that it has then, and, if it is `mirror`, the
+    /// metrics set so far, which the caller fills it with, as each update after it is told to it.
+    /// None before the observation is used. No lock of the observation is held while the caller
+    /// fills the mirror, or while a mirror is told of an update, so either may take a lock of its
+    /// own. Not a stable API.
+    #[doc(hidden)]
+    #[allow(clippy::type_complexity)]
+    pub fn set_metrics_mirror(
+        &self,
+        mirror: Arc<dyn MetricsMirror>,
+    ) -> Option<(
+        Arc<dyn MetricsMirror>,
+        Option<Vec<(String, proto::expression::Literal)>>,
+    )> {
+        let result = self.lock().result.clone()?;
+        // Set under the lock of the metrics, so that an update is either in the metrics given to
+        // the caller or told to the mirror.
+        let (kept, metrics, rejected) = {
+            let metrics = lock_metrics(&result.metrics);
+            match result.mirror.set(mirror) {
+                Ok(()) => (result.mirror.get().cloned(), Some(metrics.clone()), None),
+                Err(rejected) => (result.mirror.get().cloned(), None, Some(rejected)),
+            }
+        };
+        // Dropped once the lock is released, as the drop of a mirror may run code of the binding.
+        drop(rejected);
+        kept.map(|kept| (kept, metrics))
+    }
+
+    /// A clone of this observation that keeps `owner` alive while it is, as the plan of an
+    /// `observe` of the Python client holds the Python Observation, which PySpark's plan holds
+    /// itself: the other clones of its state, and its copies, do not hold it. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_owner(&self, owner: Arc<dyn std::any::Any + Send + Sync>) -> Observation {
+        Observation {
+            state: Arc::clone(&self.state),
+            owner: Some(owner),
+        }
+    }
+
+    /// The owner that this clone of the observation keeps alive (see
+    /// [`Observation::with_owner`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn owner(&self) -> Option<&Arc<dyn std::any::Any + Send + Sync>> {
+        self.owner.as_ref()
     }
 
     /// Whether `self` and `other` are the same observation, of which one is a clone.
@@ -115,13 +201,16 @@ impl Observation {
         Observation {
             state: Arc::new(Mutex::new(ObservationState {
                 name: state.name.clone(),
-                result: state
-                    .result
-                    .as_ref()
-                    .map(|result| Arc::new(Mutex::new(lock_metrics(result).clone()))),
+                result: state.result.as_ref().map(|result| {
+                    Arc::new(UsedMetrics {
+                        metrics: Mutex::new(lock_metrics(&result.metrics).clone()),
+                        mirror: Default::default(),
+                    })
+                }),
                 error: state.error.clone(),
                 handle: None,
             })),
+            owner: None,
         }
     }
 
@@ -156,6 +245,7 @@ impl Observation {
                 error: state.error.clone(),
                 handle: None,
             })),
+            owner: None,
         }
     }
 
@@ -185,16 +275,22 @@ impl Observation {
     /// Set the metrics that an action observed, as PySpark's client updates the result of
     /// the observation with them: a metric replaces the value of a metric of its name.
     pub(crate) fn update(&self, keys: &[String], values: &[proto::expression::Literal]) {
-        let state = self.lock();
-        let Some(result) = &state.result else {
+        let Some(result) = self.lock().result.clone() else {
             return;
         };
-        let mut result = lock_metrics(result);
-        for (key, value) in keys.iter().zip(values) {
-            match result.iter_mut().find(|(name, _)| name == key) {
-                Some((_, existing)) => *existing = value.clone(),
-                None => result.push((key.clone(), value.clone())),
+        {
+            let mut metrics = lock_metrics(&result.metrics);
+            for (key, value) in keys.iter().zip(values) {
+                match metrics.iter_mut().find(|(name, _)| name == key) {
+                    Some((_, existing)) => *existing = value.clone(),
+                    None => metrics.push((key.clone(), value.clone())),
+                }
             }
+        }
+        // Told once the locks are released, as a mirror may take a lock of its own, such as the
+        // GIL of Python, under which a thread may want the locks of the observation.
+        if let Some(mirror) = result.mirror.get() {
+            mirror.update(keys, values);
         }
     }
 
@@ -208,7 +304,7 @@ impl Observation {
     }
 }
 
-/// The lock of `metrics`, which is taken while the state of the observation is locked, never
+/// The lock of `metrics`, which may be taken while the state of the observation is locked, never
 /// the other way around.
 fn lock_metrics(metrics: &Mutex<Metrics>) -> MutexGuard<'_, Metrics> {
     metrics.lock().unwrap_or_else(|e| e.into_inner())
@@ -363,6 +459,82 @@ mod tests {
         assert_eq!(names(&copy), vec!["a", "b"]);
         let failed = obs.shallow_copy().get().unwrap_err();
         assert!(failed.message().contains("failed"));
+    }
+
+    /// A mirror that records what it is told, as the result dict of a binding.
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<String>>);
+
+    impl MetricsMirror for Recorded {
+        fn update(&self, keys: &[String], _values: &[proto::expression::Literal]) {
+            self.0.lock().unwrap().extend(keys.iter().cloned());
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn recorded(mirror: &Arc<dyn MetricsMirror>) -> Vec<String> {
+        let recorded = mirror.as_any().downcast_ref::<Recorded>().unwrap();
+        recorded.0.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn a_mirror_is_set_once_of_the_metrics_and_told_of_each_update() {
+        // An unused observation has no mirror, as PySpark's has no result dict before `_on`.
+        let obs = Observation::new("m");
+        assert!(!obs.is_used());
+        let first: Arc<dyn MetricsMirror> = Arc::new(Recorded::default());
+        assert!(obs.set_metrics_mirror(Arc::clone(&first)).is_none());
+        obs.start();
+        assert!(obs.is_used());
+        obs.update(&["a".to_string()], &[long(1)]);
+        assert!(obs.metrics_mirror().is_none());
+
+        // It is set once, with the metrics so far, which the caller fills it with: a second one is
+        // not set, and the first is given back, without metrics.
+        let (mirror, metrics) = obs.set_metrics_mirror(Arc::clone(&first)).unwrap();
+        assert!(Arc::ptr_eq(&mirror, &first));
+        let names: Vec<String> = metrics.unwrap().into_iter().map(|(name, _)| name).collect();
+        assert_eq!(names, vec!["a"]);
+        let second: Arc<dyn MetricsMirror> = Arc::new(Recorded::default());
+        let (again, none) = obs.set_metrics_mirror(Arc::clone(&second)).unwrap();
+        assert!(Arc::ptr_eq(&again, &first) && none.is_none());
+        assert_eq!(Arc::strong_count(&second), 1);
+        assert!(Arc::ptr_eq(&obs.metrics_mirror().unwrap(), &first));
+
+        // Each update is told to it, after the metrics are set, also through a clone, and a
+        // shallow copy shares it, as PySpark's copy shares its result dict; a detached copy does
+        // not.
+        obs.update(&["b".to_string(), "c".to_string()], &[long(2), long(3)]);
+        obs.clone().update(&["a".to_string()], &[long(4)]);
+        assert_eq!(recorded(&mirror), vec!["b", "c", "a"]);
+        let shallow = obs.shallow_copy();
+        assert!(Arc::ptr_eq(&mirror, &shallow.metrics_mirror().unwrap()));
+        let detached = obs.detached();
+        assert!(detached.metrics_mirror().is_none());
+        detached.update(&["d".to_string()], &[long(5)]);
+        assert_eq!(recorded(&mirror), vec!["b", "c", "a"]);
+        assert_eq!(detached.get().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn an_owner_is_kept_by_its_clone_and_its_clones_only() {
+        // The owner of a binding, as the Python Observation that the plan of an `observe` holds:
+        // the clone that has it shares the state, and its own clones have it, but not the
+        // observation it was made of, nor a copy.
+        let obs = Observation::new("o");
+        let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new("python");
+        let held = obs.with_owner(Arc::clone(&owner));
+        assert!(held.same(&obs));
+        assert!(obs.owner().is_none());
+        assert!(Arc::ptr_eq(held.owner().unwrap(), &owner));
+        assert!(Arc::ptr_eq(held.clone().owner().unwrap(), &owner));
+        assert!(held.detached().owner().is_none());
+        assert!(held.shallow_copy().owner().is_none());
+        drop(held);
+        assert_eq!(Arc::strong_count(&owner), 1);
     }
 
     #[test]

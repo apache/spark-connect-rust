@@ -360,6 +360,54 @@ def test_the_plans_of_dataframes_give_the_client_their_observations_as_pyspark(s
     assert len(frame) == 5 and aliased.get == {"n": 5}
 
 
+def test_observations_are_pysparks_objects_of_a_live_result(session):
+    # As PySpark Connect's Observation: `get` is its `_result`, one dict, which the executions
+    # update in place, also through a shallow copy; the plan of observe holds the Observation
+    # itself, of its subclass and its attributes, once the program dropped it; and an execution of
+    # the client that is given an Observation that is not used for the name of the metrics raises
+    # PySpark's AssertionError, of no arguments.
+    import copy
+    import gc
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.observation import Observation
+
+    observation = Observation("live_result")
+    assert observation._result is None and observation._error is None
+    df = session.range(3).observe(observation, F.count(F.lit(1)).alias("n"))
+    held = observation.get
+    assert held == {} and observation.get is held and observation._result is held
+    df.collect()
+    assert held == {"n": 3}
+    held["extra"] = 1
+    shallow = copy.copy(observation)
+    df.collect()
+    assert observation.get is held and shallow.get is held
+    assert held == {"n": 3, "extra": 1}
+
+    class Mine(Observation):
+        pass
+
+    mine = Mine("live_mine")
+    mine.tag = "kept"
+    dropped = session.range(2).observe(mine, F.count(F.lit(1)).alias("n"))
+    del mine
+    gc.collect()
+    (kept,) = dropped._plan.observations.values()
+    assert type(kept) is Mine and kept.tag == "kept"
+    dropped.collect()
+    assert kept.get == {"n": 2}
+
+    plan = pb2.Plan()
+    plan.root.CopyFrom(df._plan.plan(session.client))
+    unused = Observation("live_result")
+    with pytest.raises(AssertionError) as raised:
+        session.client.to_table(plan, {"live_result": unused})
+    assert type(raised.value) is AssertionError and raised.value.args == ()
+    assert isinstance(raised.value._operation_id, str)
+    assert unused._result is None
+
+
 def test_client_of_a_connection_string_as_pyspark(session):
     # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
     # of the plans that it is given, built without a DataFrame, whose executions may be not

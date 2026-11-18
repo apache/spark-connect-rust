@@ -80,6 +80,7 @@ fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {
         SparkErrorKind::BuiltinOverflowError => "OverflowError",
         SparkErrorKind::BuiltinRuntimeError => "RuntimeError",
         SparkErrorKind::BuiltinAttributeError => "AttributeError",
+        SparkErrorKind::BuiltinAssertionError => "AssertionError",
         SparkErrorKind::ValueError => "PySparkValueError",
         SparkErrorKind::BuiltinValueError => "ValueError",
         SparkErrorKind::TypeError => "PySparkTypeError",
@@ -381,6 +382,20 @@ pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
     if err.kind == SparkErrorKind::BuiltinAttributeError {
         // A builtin, as PySpark's plan raises it for an argument that lacks a method it calls.
         return exceptions::PyAttributeError::new_err(err.message());
+    }
+    if err.kind == SparkErrorKind::BuiltinAssertionError {
+        // A builtin, as a bare `assert` of PySpark's client raises it, of no arguments, and of
+        // the operation ID of the execution, which its `_handle_error` sets.
+        let message = err.message();
+        let error = if message.is_empty() {
+            exceptions::PyAssertionError::new_err(())
+        } else {
+            exceptions::PyAssertionError::new_err(message)
+        };
+        Python::attach(|py| {
+            stamp_operation_id(error.value(py).as_any(), err.operation_id.as_deref())
+        });
+        return error;
     }
     if let Some(value) = err.invalid_utf8_value() {
         return unicode_decode_error(&value, &err);

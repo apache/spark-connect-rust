@@ -306,6 +306,9 @@ pub enum SparkErrorKind {
     /// ``AttributeError``, a Python builtin: an argument that lacks a method that the reference
     /// client calls when it builds the plan of a request, such as the `to_plan` of a join's `on`.
     BuiltinAttributeError,
+    /// ``AssertionError``, a Python builtin: an assertion of the reference client that fails, such
+    /// as that the Observation that an execution is given of the name of observed metrics is used.
+    BuiltinAssertionError,
     /// ``pyspark.errors.exceptions.base.SparkRuntimeException``
     SparkRuntime,
     /// ``pyspark.errors.exceptions.base.SparkUpgradeException``
@@ -404,6 +407,14 @@ impl SparkError {
     pub fn builtin_attribute(message: impl Into<String>) -> Self {
         let mut error = Self::value_msg(message);
         error.kind = SparkErrorKind::BuiltinAttributeError;
+        error
+    }
+
+    /// Create a `BuiltinAssertionError`-kind error of no message: the `AssertionError` of a bare
+    /// `assert` of the reference client, which it lets out of an execution.
+    pub fn builtin_assertion() -> Self {
+        let mut error = Self::value_msg("");
+        error.kind = SparkErrorKind::BuiltinAssertionError;
         error
     }
 
@@ -1229,6 +1240,17 @@ mod tests {
         assert_eq!(err.operation_id.as_deref(), Some("op-123"));
         let from_status = SparkError::from_grpc_status(Status::internal("x"));
         assert_eq!(from_status.operation_id, None);
+    }
+
+    #[test]
+    fn a_builtin_assertion_has_no_message_and_keeps_its_operation_id() {
+        // As the AssertionError of a bare `assert` of PySpark's client, which its `_handle_error`
+        // raises with the operation ID of the execution.
+        let err = SparkError::builtin_assertion().with_operation_id("op-1");
+        assert_eq!(err.kind, SparkErrorKind::BuiltinAssertionError);
+        assert_eq!(err.message(), "");
+        assert_eq!(err.get_condition(), None);
+        assert_eq!(err.operation_id.as_deref(), Some("op-1"));
     }
 
     #[test]
