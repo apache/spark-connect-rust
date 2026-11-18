@@ -831,7 +831,9 @@ impl PyDataFrame {
     /// keeps `model.transform(dataset)`, whose plan keeps the model, is released then. So are the
     /// functions of its UDFs, which a request pickles when it builds the plan, as the plan of
     /// PySpark keeps them: a function may keep the DataFrame, as a bound method of an object that
-    /// keeps it does. The objects of the plan that its grouped data, its writers and its other
+    /// keeps it does. So are the Python Observations of its `observe`, which its plan holds, as
+    /// PySpark's plan holds them, and which may keep it too. The objects of the plan that its
+    /// grouped data, its writers and its other
     /// objects that keep it share are reported here too, as these report this DataFrame, as
     /// PySpark's report the DataFrame or its plan (see [`crate::gc::Holders`]).
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
@@ -840,6 +842,13 @@ impl PyDataFrame {
         }
         let holders = self.plan_holders.count();
         for owner in self.dataframe.exclusive_relation_owners(holders) {
+            if let Some(object) = owner.downcast_ref::<Py<PyAny>>() {
+                visit.call(object)?;
+            }
+        }
+        // The Python Observations that the plan holds, as PySpark's plan holds them, which may
+        // keep this DataFrame.
+        for owner in self.dataframe.exclusive_observation_owners(holders) {
             if let Some(object) = owner.downcast_ref::<Py<PyAny>>() {
                 visit.call(object)?;
             }

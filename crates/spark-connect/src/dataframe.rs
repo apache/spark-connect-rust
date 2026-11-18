@@ -1445,6 +1445,54 @@ impl DataFrame {
         crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
     }
 
+    /// The owners of the Observations of the plan of this DataFrame (see
+    /// [`Observation::with_owner`](crate::observation::Observation::with_owner)) that it keeps
+    /// alive with the clones of it of which the caller answers, `holders` holders of its plan with
+    /// this DataFrame, as [`DataFrame::exclusive_relation_owners`] counts them: every `Arc` below
+    /// its plan down to the node of such an Observation is held once, and so is the owner. A
+    /// Python wrapper reports them to Python's garbage collector, as the Python Observation that
+    /// the plan of an `observe` holds, as PySpark's plan does, may keep the DataFrame. An owner
+    /// that another plan or clone shares is not returned, so that the collector does not count a
+    /// reference twice. Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_observation_owners(
+        &self,
+        holders: usize,
+    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        let mut owners = Vec::new();
+        if Arc::strong_count(&self.plan) != holders {
+            return owners;
+        }
+        let mut pending: Vec<&LogicalPlan> = vec![self.plan.as_ref()];
+        while let Some(plan) = pending.pop() {
+            let held: Vec<&crate::observation::Observation> = match plan {
+                LogicalPlan::Observe {
+                    observation: Some(observation),
+                    ..
+                } => vec![observation],
+                LogicalPlan::Raw { observations, .. } => observations
+                    .iter()
+                    .map(|(_, observation)| observation)
+                    .collect(),
+                _ => Vec::new(),
+            };
+            for observation in held {
+                if let Some(owner) = observation.owner() {
+                    if Arc::strong_count(owner) == 1 {
+                        owners.push(owner.as_ref());
+                    }
+                }
+            }
+            pending.extend(
+                plan.inputs()
+                    .into_iter()
+                    .filter(|input| Arc::strong_count(input) == 1)
+                    .map(|input| input.as_ref()),
+            );
+        }
+        owners
+    }
+
     /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
     /// keeps alive with the clones of it of which the caller answers, `holders` holders of its
     /// plan with this DataFrame, as [`DataFrame::exclusive_pickler_objects`] counts them: every
@@ -3499,7 +3547,10 @@ fn capture_execution(
 /// of the UDF profilers, go to the handler of the session. The check of the session
 /// ([`SparkSession::set_observation_metrics_check`]) checks the metrics of an Observation before
 /// they are set: its error is returned, and neither those metrics nor the ones after them are
-/// set, as PySpark's client raises when it converts them.
+/// set, as PySpark's client raises when it converts them. Before that, the metrics of an
+/// Observation that is not used, which `observations` may hold when the caller gives them, as
+/// the `observations` of `SparkConnectClient.to_table`, are the `AssertionError` of PySpark's
+/// client, which asserts that the result of the Observation is not None.
 fn set_observations(
     session: &SparkSession,
     observations: &[(String, crate::observation::Observation)],
@@ -3525,6 +3576,9 @@ fn set_observations(
                 .accumulate(std::slice::from_ref(observed)),
             None => {
                 if let Some(observation) = observation {
+                    if !observation.is_used() {
+                        return Err(SparkError::builtin_assertion());
+                    }
                     if let Some(check) = &check {
                         check(observed)?;
                     }
@@ -6932,6 +6986,99 @@ mod plan_construction_tests {
         );
         // That a streaming DataFrame is not observed, which the server tells, the live tests
         // check.
+    }
+
+    /// As PySpark's client, which asserts that the result of the Observation of the name of the
+    /// observed metrics is not None before it converts them: an Observation that is not used,
+    /// which the caller of `SparkConnectClient.to_table` may give, is the `AssertionError` of the
+    /// execution, of its operation ID, before the check of the metrics, and the metrics after it
+    /// are not set. The error of collecting the metrics is set on it all the same, as PySpark's.
+    #[test]
+    fn the_metrics_of_an_unused_observation_are_pysparks_assertion_error() {
+        use crate::observation::Observation;
+        use proto::expression::literal::LiteralType;
+        let spark = session();
+        let observed = |name: &str| proto::execute_plan_response::ObservedMetrics {
+            name: name.to_string(),
+            values: vec![proto::expression::Literal {
+                literal_type: Some(LiteralType::Long(1)),
+                ..Default::default()
+            }],
+            keys: vec!["c".to_string()],
+            ..Default::default()
+        };
+        let (unused, used) = (Observation::new("u"), Observation::new("v"));
+        used.start();
+        let observations = vec![
+            ("u".to_string(), unused.clone()),
+            ("v".to_string(), used.clone()),
+        ];
+        spark.set_observation_metrics_check(|_| panic!("checked after the assertion"));
+        let mut resp = proto::ExecutePlanResponse {
+            operation_id: "op-1".to_string(),
+            observed_metrics: vec![observed("u"), observed("v")],
+            ..Default::default()
+        };
+        let mut info = ExecutionInfo::default();
+        let err = capture_execution(&mut resp, &mut info, &spark, &observations).unwrap_err();
+        assert_eq!(
+            err.kind,
+            spark_connect_core::error::SparkErrorKind::BuiltinAssertionError
+        );
+        assert_eq!(err.operation_id.as_deref(), Some("op-1"));
+        assert!(used.get().unwrap().is_empty());
+        assert!(!unused.is_used());
+
+        let mut failed = observed("u");
+        failed.root_error_idx = Some(0);
+        resp.observed_metrics = vec![failed];
+        capture_execution(&mut resp, &mut info, &spark, &observations).unwrap();
+        assert_eq!(
+            unused.get().unwrap_err().message(),
+            "Observation error: invalid root_error_idx"
+        );
+    }
+
+    /// The owners of the Observations that only one DataFrame keeps are the ones that a Python
+    /// wrapper reports to the garbage collector, as for the owners of its relations: an owner of
+    /// a plan that another DataFrame shares, or that another clone of the Observation holds too, is
+    /// reported by none, and a cleared plan keeps none.
+    #[test]
+    fn exclusive_observation_owners_are_those_only_this_dataframe_keeps() {
+        use crate::observation::Observation;
+        let spark = session();
+        let observation = Observation::new("o").with_owner(Arc::new(7u8));
+        let count = vec![crate::functions::count(crate::column::lit(1))
+            .expression()
+            .clone()];
+        let name = observation.name_to_observe().unwrap();
+        let observed = spark
+            .range(3)
+            .unwrap()
+            .observed_with(&observation, name, count);
+        // The clone that the plan holds and this one share the owner, so neither reports it.
+        assert!(observed.exclusive_observation_owners(1).is_empty());
+        drop(observation);
+        let owners = observed.exclusive_observation_owners(1);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+
+        let derived = observed.filter(crate::functions::col("id").gt(crate::column::lit(0)));
+        assert!(observed.exclusive_observation_owners(1).is_empty());
+        assert!(derived.exclusive_observation_owners(1).is_empty());
+        drop(observed);
+        assert_eq!(derived.exclusive_observation_owners(1).len(), 1);
+        let copy = derived.clone();
+        assert!(derived.exclusive_observation_owners(1).is_empty());
+        assert_eq!(derived.exclusive_observation_owners(2).len(), 1);
+        drop(copy);
+        // The Observations of the plan that `observations` gives are clones that share the owner.
+        let held = derived.observations();
+        assert!(derived.exclusive_observation_owners(1).is_empty());
+        drop(held);
+        let mut derived = derived;
+        derived.clear_plan();
+        assert!(derived.exclusive_observation_owners(1).is_empty());
     }
 
     /// As PySpark's `LogicalPlan.observations`: the Observations along the children of a plan,

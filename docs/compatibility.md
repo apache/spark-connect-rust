@@ -1492,10 +1492,20 @@ Delta Lake's plans hold neither.
 The `observations` of a DataFrame's plan (`df._plan.observations`) are the Observations of the
 DataFrame by their names, as PySpark's `LogicalPlan.observations`: those of `observe` on it and on
 its inputs, both sides of a join and of a set operation, in the order of PySpark's dict, but not a
-DataFrame observed by a name. A plan of `pyspark.sql.connect.plan` over it, such as
-`SubqueryAlias(df._plan, "s")`, has them too, and an execution of the client that is given them
-(`client.to_table(plan, df._plan.observations)`) sets them, as PySpark's DataFrame gives them to
-its client.
+DataFrame observed by a name. Each is the object that `observe` was given, of its class and its
+attributes, which the plan holds, as PySpark's plan does, also once the program dropped it. A plan
+of `pyspark.sql.connect.plan` over it, such as `SubqueryAlias(df._plan, "s")`, has them too, and an
+execution of the client that is given them (`client.to_table(plan, df._plan.observations)`) sets
+them, as PySpark's DataFrame gives them to its client. An Observation that is not used, given for
+the name of metrics that the plan observes (`client.to_table(plan, {"x": Observation("x")})`),
+fails the execution with PySpark's `AssertionError` when those metrics arrive.
+
+As PySpark's, the `get` of an Observation is its `_result`, one dict, which the executions that set
+its metrics update in place: a dict read before an action has the metrics once the action ran, what
+is set on it stays, and a `copy.copy` of the Observation shares it. `_result` is None before the
+Observation is used, and `_error` is the error that `get` raises, a new exception of it at each read
+where PySpark's is the one that its client set. The three are attributes of the class, not of the
+instance, so `vars()` of an Observation does not show them, and they cannot be set.
 
 The errors of the RPCs that PySpark's client leaves to grpc, those of `clone` (and
 `SparkSession.cloneSession`) and of `copy_from_local_to_fs` (and `SparkSession.copyFromLocalToFs`),
