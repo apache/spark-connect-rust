@@ -1362,6 +1362,14 @@ a `WithRelations`; as the relation of a command that is neither an ML command no
 such as a `WriteOperation`, a `CreateDataFrameView` or a `CheckpointCommand`; and in the extension
 of an expression.
 
+The errors of the RPCs that PySpark's client leaves to grpc, those of `clone` (and
+`SparkSession.cloneSession`) and of `copy_from_local_to_fs` (and `SparkSession.copyFromLocalToFs`),
+which raise grpc's `RpcError` there (`_InactiveRpcError`), are converted as those of the other
+RPCs: they are the exception of their error class, such as `UnknownException` or
+`UnsupportedOperationException`, as the drop-in has no grpc. `global_user_context_extensions` is
+the list attribute of PySpark's client, whose changes, and a list that it is set to, the requests
+of all the threads carry.
+
 `get_tags` returns a copy of the tags of the thread, where PySpark returns the set that its client
 keeps, which the later changes of the tags change too. The official tests of the client
 (`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable iterator of

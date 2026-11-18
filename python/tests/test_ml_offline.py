@@ -2797,6 +2797,62 @@ def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
     assert list(request.user_context.extensions) == []
 
 
+def test_global_user_context_extensions_are_a_list_that_the_requests_take_as_pyspark(ml_mock):
+    # As PySpark Connect's SparkConnectClient, whose global_user_context_extensions is a list
+    # attribute of the client, of the IDs and the Any that add_global_user_context_extension
+    # appends, which its requests read: a change of the list, or a list that it is set to, is
+    # what the requests carry. Its copies and pickles are plain lists.
+    import copy
+
+    from pyspark.sql.connect.client import SparkConnectClient
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = ml_mock
+    client = spark.client
+
+    def packed(graph_id):
+        extension = Any()
+        extension.Pack(pb2.PipelineAnalysisContext(dataflow_graph_id=graph_id))
+        return extension
+
+    def sent():
+        command = pb2.Command()
+        command.ml_command.clean_cache.SetInParent()
+        client.execute_command(command)
+        return list(_last_request_but_deletes(service).user_context.extensions)
+
+    assert not hasattr(SparkConnectClient, "global_user_context_extensions")
+    assert "global_user_context_extensions" in vars(client)
+    first = packed("first")
+    first_id = client.add_global_user_context_extension(first)
+    extensions = client.global_user_context_extensions
+    assert extensions == [(first_id, first)] and extensions[0][1] is first
+    assert isinstance(extensions, list) and client.global_user_context_extensions is extensions
+    assert sent() == [first]
+
+    extensions.append(("global_appended", packed("appended")))
+    assert sent() == [first, packed("appended")]
+    del extensions[0]
+    assert sent() == [packed("appended")]
+    client.global_user_context_extensions = [("global_set", packed("set"))]
+    assert sent() == [packed("set")]
+    assert client.global_user_context_extensions is not extensions
+    assert type(copy.copy(client.global_user_context_extensions)) is list
+    copied = copy.deepcopy(client.global_user_context_extensions)
+    assert type(copied) is list and copied == [("global_set", packed("set"))]
+    # A pickle names a plain list (the Any of the Rust runtime of the list does not pickle).
+    assert client.global_user_context_extensions.__reduce_ex__(2)[0] is list
+
+    # Removing a global extension rebinds the list, as PySpark's, which a list read before keeps.
+    before = client.global_user_context_extensions
+    client.remove_user_context_extension("global_set")
+    assert client.global_user_context_extensions == [] and before == [("global_set", packed("set"))]
+    assert sent() == []
+    client.add_global_user_context_extension(packed("again"))
+    client.clear_user_context_extensions()
+    assert client.global_user_context_extensions == [] and sent() == []
+
+
 def test_pipeline_analysis_context_is_an_extension_of_its_block_as_pyspark(ml_mock):
     # As official PySpark 4.3.0's add_pipeline_analysis_context: the PipelineAnalysisContext of
     # the requests of its block, of the current thread.

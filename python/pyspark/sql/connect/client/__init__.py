@@ -733,7 +733,22 @@ class SparkConnectClient:
         self._builder = builder
         # The state of the current thread of the session, as SparkConnectClient's thread_local.
         self.thread_local = _ThreadLocalOfClient(session)
+        # The global user context extensions, as SparkConnectClient's list of them, of those that
+        # the session has: its changes, and a list that the attribute is set to, are the
+        # session's (see __setattr__).
+        extensions = _extensions_of(session._user_context_extensions(True))
+        extensions = _GlobalUserContextExtensions(session, extensions)
+        object.__setattr__(self, "global_user_context_extensions", extensions)
         self.global_user_context_extensions_lock = threading.Lock()
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        # As PySpark's client, whose requests read its `global_user_context_extensions`, a list
+        # that its methods and a caller may change or rebind: the session takes the extensions of
+        # the list that the attribute is set to.
+        if name == "global_user_context_extensions" and "_session" in self.__dict__:
+            value = _GlobalUserContextExtensions(self._session, value)
+            value._sync()
+        object.__setattr__(self, name, value)
 
     def __copy__(self) -> "SparkConnectClient":
         # As copy.copy of PySpark's client, a plain object: a client of the same attributes.
@@ -748,11 +763,6 @@ class SparkConnectClient:
         import threading
 
         return (type(self), (threading.local(),))
-
-    @property
-    def global_user_context_extensions(self) -> list[Any]:
-        """The global user context extensions, as SparkConnectClient's: of their IDs."""
-        return _extensions_of(self._session._user_context_extensions(True))
 
     @property
     def host(self) -> str:
@@ -1276,17 +1286,30 @@ class SparkConnectClient:
 
     def add_global_user_context_extension(self, extension: Any) -> str:
         """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests of
-        all the threads, as SparkConnectClient's: its ID."""
-        return self._session._add_user_context_extension(extension.SerializeToString(), True)
+        all the threads, as SparkConnectClient's: its ID, of the extension that its
+        ``global_user_context_extensions`` list holds."""
+        extension_id = "global_" + str(uuid.uuid4())
+        with self.global_user_context_extensions_lock:
+            self.global_user_context_extensions.append((extension_id, extension))
+        return extension_id
 
     def remove_user_context_extension(self, extension_id: str) -> None:
-        """Remove the user context extension of ``extension_id``, as SparkConnectClient's."""
-        self._session._remove_user_context_extension(extension_id)
+        """Remove the user context extension of ``extension_id``, as SparkConnectClient's: a
+        global one rebinds ``global_user_context_extensions`` to a list without it."""
+        if extension_id.find("threadlocal_") == 0:
+            self._session._remove_user_context_extension(extension_id)
+        elif extension_id.find("global_") == 0:
+            with self.global_user_context_extensions_lock:
+                self.global_user_context_extensions = list(
+                    filter(lambda ex: ex[0] != extension_id, self.global_user_context_extensions)
+                )
 
     def clear_user_context_extensions(self) -> None:
         """Remove the user context extensions of the current thread and the global ones, as
-        SparkConnectClient's."""
+        SparkConnectClient's: ``global_user_context_extensions`` is a new, empty list."""
         self._session._clear_user_context_extensions()
+        with self.global_user_context_extensions_lock:
+            self.global_user_context_extensions = list()
 
     def add_tag(self, tag: str) -> None:
         """Add ``tag`` to the tags of the current thread, which the executions that it starts
@@ -1345,6 +1368,8 @@ class SparkConnectClient:
         if isinstance(return_type, str):
             output_type = self._session._parse_ddl(return_type)
             assert isinstance(output_type, DataType)
+        else:
+            _check_data_type(return_type)
         from pyspark.serializers import CloudPickleSerializer
 
         self._session._registerPythonUdf(
@@ -1372,6 +1397,8 @@ class SparkConnectClient:
         from pyspark.serializers import CloudPickleSerializer
         from pyspark.sql.connect.utils import get_python_ver
 
+        if return_type is not None and not isinstance(return_type, str):
+            _check_data_type(return_type)
         udtf_name = function.__name__
         try:
             command = CloudPickleSerializer().dumps(function)
@@ -1427,15 +1454,28 @@ class SparkConnectClient:
         self._session.copyFromLocalToFs(local_path, dest_path)
 
     def cache_artifact(self, blob: bytes) -> str:
-        """Cache ``blob`` as an artifact of the session, as SparkConnectClient's
-        ``cache_artifact``: its SHA-256 hash, of which it is uploaded unless the server has it."""
-        return self._session._cache_artifacts([blob])[0]
+        """Cache ``blob``, a bytes-like object, as an artifact of the session, as
+        SparkConnectClient's ``cache_artifact``: its SHA-256 hash, of which it is uploaded unless
+        the server has it."""
+        return self.cache_artifacts([blob])[0]
 
     def cache_artifacts(self, blobs: list[bytes]) -> list[str]:
-        """Cache ``blobs`` as artifacts of the session, as SparkConnectClient's
-        ``cache_artifacts``: their SHA-256 hashes, in order, of which those that the server does
-        not have are uploaded, once each, in one request."""
-        return self._session._cache_artifacts(list(blobs))
+        """Cache ``blobs``, bytes-like objects, as artifacts of the session, as
+        SparkConnectClient's ``cache_artifacts``: their SHA-256 hashes, in order, of which those
+        that the server does not have are uploaded, once each, in one request. As PySpark's
+        ``ArtifactManager``, the hashes of ``hashlib`` come first, so a blob that is not
+        bytes-like raises its ``TypeError`` before anything is sent."""
+        import hashlib
+
+        blobs = list(blobs)
+        for blob in blobs:
+            hashlib.sha256(blob)
+        return self._session._cache_artifacts(
+            [
+                blob if isinstance(blob, (bytes, bytearray)) else bytes(memoryview(blob))
+                for blob in blobs
+            ]
+        )
 
     def newSession(self) -> "SparkConnectClient":
         """A client of a new session of the same connection, as SparkConnectClient's
@@ -1629,6 +1669,63 @@ class SparkConnectClient:
         return properties["ml_command_result"].param.long
 
 
+class _GlobalUserContextExtensions(list):
+    """The global user context extensions of a client, as the list of PySpark's
+    ``SparkConnectClient.global_user_context_extensions``, of their IDs and their
+    ``google.protobuf.Any``: a list whose changes the session of the client takes, so that the
+    requests of all its threads carry them, as PySpark's requests read the list. Its copies and its
+    pickles are plain lists."""
+
+    def __init__(self, session: Any, extensions: Iterable[Any] = ()) -> None:
+        super().__init__(extensions)
+        self._session = session
+
+    def _sync(self) -> None:
+        self._session._set_global_user_context_extensions(
+            [(extension_id, extension.SerializeToString()) for extension_id, extension in self]
+        )
+
+    def __reduce_ex__(self, protocol: Any) -> Any:
+        return (list, (list(self),))
+
+    def __copy__(self) -> list[Any]:
+        return list(self)
+
+    def __deepcopy__(self, memo: Any) -> list[Any]:
+        return copy.deepcopy(list(self), memo)
+
+
+def _synced(name: str) -> Any:
+    # A method of a list that changes it, after which the session takes the extensions.
+    method = getattr(list, name)
+
+    def synced(self: _GlobalUserContextExtensions, *args: Any, **kwargs: Any) -> Any:
+        result = method(self, *args, **kwargs)
+        self._sync()
+        return result
+
+    synced.__name__ = synced.__qualname__ = name
+    return synced
+
+
+for _name in (
+    "append",
+    "extend",
+    "insert",
+    "remove",
+    "pop",
+    "clear",
+    "sort",
+    "reverse",
+    "__setitem__",
+    "__delitem__",
+    "__iadd__",
+    "__imul__",
+):
+    setattr(_GlobalUserContextExtensions, _name, _synced(_name))
+del _name
+
+
 def _extensions_of(extensions: Any) -> list[Any]:
     # The user context extensions of the Rust transport, as SparkConnectClient keeps them: the
     # ID and the google.protobuf.Any of each, of the Any of pyspark.sql.connect.proto's runtime.
@@ -1671,6 +1768,17 @@ def _client_of(session: Any) -> "SparkConnectClient":
         client = SparkConnectClient._of_session(session)
         _CLIENTS[session.session_id] = client
     return client
+
+
+def _check_data_type(data_type: Any) -> None:
+    """Raise PySpark's ``UNSUPPORTED_OPERATION`` of ``data_type`` unless it is a ``DataType``, as
+    ``pyspark_types_to_proto_types`` raises it for the return type of a UDF or a UDTF that is
+    neither a ``DataType`` nor a DDL string."""
+    if not isinstance(data_type, DataType):
+        raise PySparkValueError(
+            errorClass="UNSUPPORTED_OPERATION",
+            messageParameters={"operation": f"data type {data_type}"},
+        )
 
 
 def _hook_factory(hook: Any) -> Any:

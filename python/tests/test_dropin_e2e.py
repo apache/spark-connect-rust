@@ -280,6 +280,18 @@ def test_client_runs_the_plans_and_commands_it_is_given_as_pyspark(session):
         client.clear_tags()
 
 
+def test_client_caches_bytes_like_artifacts_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient, whose ArtifactManager hashes and uploads any
+    # bytes-like blob: their SHA-256 hashes, in order.
+    import array
+    import hashlib
+
+    client = session.client
+    blobs = [b"one", memoryview(b"two"), bytearray(b"three"), array.array("i", [1, 2])]
+    assert client.cache_artifacts(blobs) == [hashlib.sha256(blob).hexdigest() for blob in blobs]
+    assert client.cache_artifact(memoryview(b"four")) == hashlib.sha256(b"four").hexdigest()
+
+
 def test_client_of_a_connection_string_as_pyspark(session):
     # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
     # of the plans that it is given, built without a DataFrame, whose executions may be not

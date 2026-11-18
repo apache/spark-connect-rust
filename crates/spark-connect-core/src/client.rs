@@ -1172,6 +1172,16 @@ impl SparkConnectClient {
         id
     }
 
+    /// Replace the global user context extensions with `extensions`, of their IDs, in their order,
+    /// as PySpark's requests take the list of `global_user_context_extensions` of a client, which
+    /// its caller may change or rebind.
+    pub fn set_global_user_context_extensions(&self, extensions: Vec<(String, prost_types::Any)>) {
+        self.user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .global = extensions;
+    }
+
     /// Remove the extension of `extension_id`, one of the current thread or a global one, as
     /// PySpark's `remove_user_context_extension`.
     pub fn remove_user_context_extension(&self, extension_id: &str) {
@@ -1254,11 +1264,19 @@ impl SparkConnectClient {
         );
     }
 
-    /// Override the retry policy applied to this client's RPCs.
+    /// Replace the retry policy of this client's RPCs, which its clones share: a clone of the
+    /// client (`Clone`) retries under the policy that this sets, and this client under the one
+    /// that a clone sets, from their next calls on (see
+    /// [`SparkConnectClient::replace_retry_policy`]). A client of a new session
+    /// ([`SparkConnectClient::with_new_session_id`], `clone_session`) starts with the default
+    /// policy, as PySpark's `newSession` and `clone` do, and so does not share it. To give one
+    /// client a policy of its own, connect it ([`SparkConnectClient::connect`]) rather than
+    /// cloning another.
     ///
     /// The transport-injection stub sets this to [`RetryPolicy::no_retries`] so it behaves
     /// like the single-shot grpcio stub the reference client expects (which does its own
-    /// retrying on top); see that constructor for why double-retrying is wrong there.
+    /// retrying on top); see that constructor for why double-retrying is wrong there. The stub
+    /// connects a client of its own, so the policy is not shared with any other.
     pub fn set_retry_policy(&mut self, policy: RetryPolicy) {
         self.replace_retry_policy(policy);
     }

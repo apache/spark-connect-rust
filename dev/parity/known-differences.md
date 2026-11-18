@@ -304,6 +304,21 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   (`ExecutePlanResponseReattachableIterator`) is not provided: `disable_reattachable_execute`
   and `enable_reattachable_execute` set the executions of the transport not reattachable or
   reattachable.
+- **Errors that PySpark's client leaves to grpc** (intentional; the transport is native).
+  PySpark's `SparkConnectClient.clone` and its `ArtifactManager`'s copy to the file system
+  (`copy_from_local_to_fs`, and so `SparkSession.cloneSession` and `copyFromLocalToFs`) raise
+  the error of the server as grpc's `RpcError` (`_InactiveRpcError`), which they do not convert.
+  The drop-in converts it as the errors of its other RPCs: `clone("not-a-uuid")` raises the
+  `UnknownException` of `INVALID_CLONE_SESSION_REQUEST.TARGET_SESSION_ID_FORMAT`, and a copy to
+  a local path that the server refuses the `UnsupportedOperationException` of
+  `_LEGACY_ERROR_TEMP_3161`.
+- **The retry policy of the clones of a core client** (intentional; Rust API). The retry policy
+  of `spark_connect_core::SparkConnectClient` is shared by its clones (`Clone`), as PySpark's
+  `set_retry_policies` replaces the policies of a client that is in use: `set_retry_policy` of a
+  clone changes the policy of the client it was cloned of too. A client of a new session
+  (`with_new_session_id`, `clone_session`, and so `SparkSession::new_session` and
+  `clone_session` of the Rust API) has the default policy, as PySpark's `newSession` and `clone`
+  do, and not the policy of the client it was made of.
 - **`SparkConnectClient.get_tags`** (intentional). A copy of the tags of the thread, where
   PySpark returns the set that its client keeps, which its later changes change too, as
   `SparkSession.getTags` does.
