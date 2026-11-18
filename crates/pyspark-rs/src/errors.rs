@@ -2,7 +2,7 @@
 
 use pyo3::exceptions;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 use spark_connect_core::error::{ServerErrorInfo, SparkError, SparkErrorKind};
 
 /// Raise a `pyspark.errors` exception (`class_name`) carrying the given `error_class`
@@ -464,12 +464,46 @@ fn classed_exception<'py>(
     let py = exc_class.py();
     let parameters = PyDict::new(py);
     for (key, value) in err.get_message_parameters().unwrap_or_default() {
-        parameters.set_item(key, value).ok()?;
+        parameters.set_item(key, param_value(py, &value)).ok()?;
     }
     let kwargs = PyDict::new(py);
     kwargs.set_item("errorClass", error_class).ok()?;
     kwargs.set_item("messageParameters", parameters).ok()?;
     exc_class.call((), Some(&kwargs)).ok()
+}
+
+/// The text of a message parameter of an error of the core that the binding makes of `value`, a
+/// Python str, which the exception of the error has as it is ([`param_value`]): its text, or, for
+/// a str that UTF-8 cannot encode, such as one of a lone surrogate, which a Rust string cannot
+/// hold, a NUL and the hex of its UTF-32 little-endian bytes. A str that starts with a NUL is held
+/// so too, so that its text is not taken for such bytes.
+pub(crate) fn str_param(value: &Bound<'_, PyString>) -> PyResult<String> {
+    if let Ok(text) = value.to_cow() {
+        if !text.starts_with('\0') {
+            return Ok(text.into_owned());
+        }
+    }
+    let utf32le = value.call_method1("encode", ("utf-32-le", "surrogatepass"))?;
+    let mut text = String::from('\0');
+    for byte in utf32le.cast::<PyBytes>()?.as_bytes() {
+        text.push_str(&format!("{byte:02x}"));
+    }
+    Ok(text)
+}
+
+/// The Python str of `text`, the text of a message parameter of an error of the core: the str of
+/// the bytes that [`str_param`] holds, or else the text as it is.
+fn param_value<'py>(py: Python<'py>, text: &str) -> Bound<'py, PyAny> {
+    let held = text.strip_prefix('\0').and_then(|hex| {
+        let bytes = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
+            .collect::<Option<Vec<u8>>>()?;
+        PyBytes::new(py, &bytes)
+            .call_method1("decode", ("utf-32-le", "surrogatepass"))
+            .ok()
+    });
+    held.unwrap_or_else(|| PyString::new(py, text).into_any())
 }
 
 /// The error that raises `err` again, an exception of one of PySpark's error classes, such as

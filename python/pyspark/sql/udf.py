@@ -22,6 +22,7 @@ Mirrors pyspark.sql.connect.udf and pyspark.sql.functions.udf/pandas_udf.
 
 import functools
 import sys
+import uuid
 import warnings
 from typing import Callable, Optional, Any, Union
 
@@ -616,9 +617,12 @@ class UDFRegistration:
         eval_type: int = PythonEvalType.SQL_BATCHED_UDF,
         deterministic: bool = True,
     ) -> None:
-        # As PySpark's SparkConnectClient.register_udf: the PythonUDF command is the pickled
-        # (function, return type), of a DDL string as the server of the session parses it, as
-        # its PythonUDF parses the str that it is given when it builds the command.
+        # As PySpark's SparkConnectClient.register_udf: a function of no name is registered as
+        # `fun_` and a random hex, and the PythonUDF command is the pickled (function, return
+        # type), of a DDL string as the server of the session parses it, as its PythonUDF parses
+        # the str that it is given when it builds the command.
+        if name is None:
+            name = f"fun_{uuid.uuid4().hex}"
         if isinstance(return_type, str):
             return_type = self.sparkSession._parse_ddl(return_type)
         self.sparkSession._registerPythonUdf(

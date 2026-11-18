@@ -252,11 +252,11 @@ impl PySparkSessionBuilder {
         Ok(slf)
     }
 
-    /// `master` - the option `spark.master`, as PySpark Connect's builder sets: a session of
-    /// Spark Connect does not take it.
-    fn master<'py>(mut slf: PyRefMut<'py, Self>, master: &str) -> PyResult<PyRefMut<'py, Self>> {
-        slf.set_option("spark.master", master.to_string());
-        Ok(slf)
+    /// `master`, which PySpark Connect's builder takes and ignores, of any value: a session of
+    /// Spark Connect has no master.
+    fn master<'py>(slf: PyRefMut<'py, Self>, master: &Bound<'_, PyAny>) -> PyRefMut<'py, Self> {
+        let _ = master;
+        slf
     }
 
     /// `_registerHook` - register a factory of a `SparkSession.Hook`, as PySpark's builder: a
@@ -1026,6 +1026,16 @@ pub struct PySharedTags(spark_connect::session::SharedTags);
     frozen
 )]
 pub struct PySharedUserContextExtensions(spark_connect_core::client::SharedUserContextExtensions);
+
+/// The tag of `interruptTag` or the ID of `interruptOperation`, as PySpark's `_interrupt_request`
+/// takes it: it asserts that it is not None, and sets it in the string field of its request, as
+/// protobuf converts it, so bytes of UTF-8 are taken, and another value is a `TypeError`.
+fn interrupted_id(id: &Bound<'_, PyAny>) -> PyResult<String> {
+    if id.is_none() {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    crate::str_argument(id)
+}
 
 /// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
 fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<SessionTag> {
@@ -2892,19 +2902,28 @@ impl PySparkSession {
     }
 
     /// As PySpark Connect's: the attributes of the JVM of a classic session raise
-    /// `JVM_ATTRIBUTE_NOT_SUPPORTED`, and the others are not attributes.
-    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<Py<PyAny>> {
-        if ["_jsc", "_jconf", "_jvm", "_jsparkSession", "sparkContext"].contains(&name) {
-            return Err(crate::column::raise_pyspark(
-                py,
-                "PySparkAttributeError",
-                "JVM_ATTRIBUTE_NOT_SUPPORTED",
-                &[("attr_name", name)],
-            ));
+    /// `JVM_ATTRIBUTE_NOT_SUPPORTED`, and the others are not attributes, of the `AttributeError`
+    /// of `object.__getattribute__`, which names the attribute as it is, a lone surrogate too.
+    fn __getattr__(
+        slf: &Bound<'_, Self>,
+        name: &Bound<'_, pyo3::types::PyString>,
+    ) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        for jvm_name in ["_jsc", "_jconf", "_jvm", "_jsparkSession", "sparkContext"] {
+            if name.as_any().eq(jvm_name)? {
+                return Err(crate::column::raise_pyspark(
+                    py,
+                    "PySparkAttributeError",
+                    "JVM_ATTRIBUTE_NOT_SUPPORTED",
+                    &[("attr_name", jvm_name)],
+                ));
+            }
         }
-        Err(pyo3::exceptions::PyAttributeError::new_err(format!(
-            "'SparkSession' object has no attribute '{name}'"
-        )))
+        Ok(py
+            .import("builtins")?
+            .getattr("object")?
+            .call_method1("__getattribute__", (slf, name))?
+            .unbind())
     }
 
     /// DataFrameReader for batch reads (`spark.read`).
@@ -3037,11 +3056,15 @@ impl PySparkSession {
     fn register_java_function_py(
         &self,
         py: Python<'_>,
-        name: &str,
-        java_class_name: &str,
+        name: &Bound<'_, PyAny>,
+        java_class_name: &Bound<'_, PyAny>,
         return_type: Option<&Bound<'_, PyAny>>,
         aggregate: bool,
     ) -> PyResult<()> {
+        // As PySpark's `register_java`, which sets the name and then the class name in the string
+        // fields of its command, as protobuf converts them: bytes of UTF-8 too.
+        let name = crate::str_argument(name)?;
+        let java_class_name = crate::str_argument(java_class_name)?;
         let return_type = match return_type {
             None => None,
             Some(ddl) if ddl.is_instance_of::<pyo3::types::PyString>() => {
@@ -3053,17 +3076,19 @@ impl PySparkSession {
                 Some(crate::types::py_to_data_type(data_type)?)
             }
             Some(other) => {
-                return Err(crate::column::raise_pyspark(
+                // Of the str of the type as it is, a lone surrogate too, as PySpark formats it.
+                let operation = pyo3::types::PyString::new(py, "data type ").add(other.str()?)?;
+                return Err(crate::errors::raise_pyspark_of(
                     py,
                     "PySparkValueError",
                     "UNSUPPORTED_OPERATION",
-                    &[("operation", &format!("data type {}", other.str()?))],
-                ))
+                    &[("operation", &operation)],
+                ));
             }
         };
         interruptible(py, &self.session, || {
             self.session
-                .register_java_function_with(name, java_class_name, return_type, aggregate)
+                .register_java_function_with(&name, &java_class_name, return_type, aggregate)
                 .map_err(Box::new)
         })
     }
@@ -3078,17 +3103,20 @@ impl PySparkSession {
     fn register_python_udf_py(
         &self,
         py: Python<'_>,
-        name: &str,
+        name: &Bound<'_, PyAny>,
         return_type: &Bound<'_, PyAny>,
         eval_type: i32,
         command: Vec<u8>,
         python_ver: String,
         deterministic: bool,
     ) -> PyResult<()> {
+        // As PySpark's `register_udf`, which sets the name in the string field of its command
+        // first, as protobuf converts it: bytes of UTF-8 too.
+        let name = crate::str_argument(name)?;
         let return_data_type = crate::types::py_to_proto_data_type(return_type)?;
         let payload = PythonUDFPayload::new(return_data_type, eval_type, command, python_ver);
         let udf_expr = CommonInlineUserDefinedFunctionExpression::new(
-            name.to_string(),
+            name,
             deterministic,
             Vec::new(),
             payload,
@@ -3109,13 +3137,16 @@ impl PySparkSession {
     fn register_python_udtf_py(
         &self,
         py: Python<'_>,
-        name: &str,
+        name: &Bound<'_, PyAny>,
         return_type: Option<&Bound<'_, PyAny>>,
         eval_type: i32,
         command: Vec<u8>,
         python_ver: String,
         deterministic: bool,
     ) -> PyResult<()> {
+        // As PySpark's `register_udtf`, which sets the name in the string field of its command
+        // first, as protobuf converts it: bytes of UTF-8 too.
+        let name = crate::str_argument(name)?;
         let return_type = return_type
             .map(|value| match value.extract::<String>() {
                 Ok(ddl) => Ok(DataType::Unparsed {
@@ -3126,7 +3157,7 @@ impl PySparkSession {
             .transpose()?;
         interruptible(py, &self.session, || {
             self.session.register_table_function(
-                name,
+                &name,
                 return_type.as_ref(),
                 eval_type,
                 &command,
@@ -3575,17 +3606,26 @@ impl PySparkSession {
         })
     }
 
+    /// Interrupt the operations of the tag `tag`, as PySpark's, whose request asserts a tag that
+    /// is not None and sets it in its string field, as protobuf converts it: bytes of UTF-8 too.
     #[pyo3(name = "interruptTag")]
-    fn interrupt_tag(&self, py: Python<'_>, tag: &str) -> PyResult<Vec<String>> {
+    fn interrupt_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
+        let tag = interrupted_id(tag)?;
         interruptible(py, &self.session, || {
-            self.session.interrupt_tag(tag).map_err(Box::new)
+            self.session.interrupt_tag(&tag).map_err(Box::new)
         })
     }
 
+    /// Interrupt the operation `op_id`, as [`PySparkSession::interrupt_tag`] takes its tag.
     #[pyo3(name = "interruptOperation")]
-    fn interrupt_operation(&self, py: Python<'_>, op_id: &str) -> PyResult<Vec<String>> {
+    fn interrupt_operation(
+        &self,
+        py: Python<'_>,
+        op_id: &Bound<'_, PyAny>,
+    ) -> PyResult<Vec<String>> {
+        let op_id = interrupted_id(op_id)?;
         interruptible(py, &self.session, || {
-            self.session.interrupt_operation(op_id)
+            self.session.interrupt_operation(&op_id)
         })
     }
 

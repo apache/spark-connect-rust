@@ -233,6 +233,18 @@ stable API: the pickling of the command of a UDF or UDTF of the Python client, w
 calls each time it builds the plan, as PySpark pickles the function then. Code that constructs
 the struct or the variant directly sets it to `None`. `PythonUDFPayload::new` and
 `TableValuedFunction::udtf` are unchanged: a command of bytes is sent as it is.
+`LogicalPlan::MapPartitions` adds a `profile_id_reader` field, which is not a stable API either:
+the reader of the id of the resource profile of the Python client's `mapInPandas` and
+`mapInArrow`, which a request calls when it builds the plan, as PySpark reads `profile.id` then.
+Code that constructs the variant directly sets it to `None`; `profile_id` is sent as before.
+
+`GroupedData::transform_with_state` takes the output schema of its `TransformWithStateInfo`, as
+`transform_with_state_in_pandas` does, where it sent the return type of its function: PySpark's
+`transformWithState` sends `outputStructType` as it is given, a DDL string as an unparsed type,
+which the server parses. The `update` and `insert` of the clauses of `MergeIntoWriter` take
+`impl IntoIterator<Item = (K, Column)>` of `K: Into<String>`, so a `HashMap<String, Column>` is
+passed as before, and the merge sends the assignments in their order, as PySpark sends those of
+`assignments.items()`: a `Vec` or a `BTreeMap` keeps an order, and a `HashMap` sends its own.
 
 ## Native ML objects: fetch, summaries, save and load (Rust API)
 
@@ -1458,8 +1470,14 @@ request that carries it, which is not always the call that takes it. The error i
   that their plans set as they are given, such as the alias of `alias`, the names of
   `withColumn(s)Renamed`, `withMetadata`, `toDF`, `drop`, `dropDuplicates`, `withWatermark`,
   `unpivot`, `describe`, `summary`, `crosstab`, `freqItems` and the NA functions, a hint, the
-  name of `observe`, the names of a using join, and the functions of `agg` of a dict, and the
-  name of an `Observation`, which fails the DataFrames that it observes;
+  name of `observe`, the names of a using join, the name of `zipWithIndex`, the functions of `agg`
+  of a dict, the output mode and the timeout of `applyInPandasWithState`, and the output mode, the
+  time mode and the event-time column of `transformWithStateInPandas` and `transformWithState`,
+  and the name of an `Observation`, which fails the DataFrames that it observes;
+- the schema of `from_avro` and `to_avro`, and the message name and the descriptor set of
+  `from_protobuf` and `to_protobuf`, are literals, as PySpark's `lit` of them, which PySpark does
+  not check otherwise: such a str fails each DataFrame of the Column, and a message name of
+  another type, such as 5, bytes or None, is the server's error of the function;
 - a tag of `addTag` fails each execution that the thread starts, as its request is built after its
   plan, until `removeTag` removes it; a request without tags, such as that of `df.schema`, is sent.
   `getTags` gives the tag as it is;
@@ -1468,9 +1486,30 @@ request that carries it, which is not always the call that takes it. The error i
   goes.
 
 Such a str is not one of the modes of `explain`, of the `how` of `dropna`, of the join types of
-`join` and `lateralJoin`, nor a column of `sum`, `avg`, `min` and `max` of grouped data: they raise
-PySpark's `VALUE_NOT_ALLOWED`, `UNSUPPORTED_JOIN_TYPE` and `NOT_NUMERIC_COLUMNS`, of the str as it
-is. `explain` builds the plan first, so the error of a plan that fails to build comes first.
+`join` and `lateralJoin`, of the modes, directions and join types of `nearestByJoin`, nor a column
+of `sum`, `avg`, `min` and `max` of grouped data: they raise PySpark's `VALUE_NOT_ALLOWED`,
+`UNSUPPORTED_JOIN_TYPE`, the `NEAREST_BY_JOIN` errors and `NOT_NUMERIC_COLUMNS`, of the str as it
+is. So is the `UNSUPPORTED_OPERATION` of `to` and of a cast of such a str, or of another object
+whose str has a lone surrogate. `nearestByJoin` reads the `lower()` of its mode, direction and join
+type, as PySpark's, so an object without one raises its `AttributeError`, bytes as a join type the
+`TypeError` of `replace`, and bytes as a mode or a direction its error, of the bytes as they are.
+Such a str is no name of `readStream.name`, which raises `INVALID_STREAMING_SOURCE_NAME` of it, as
+PySpark's `re.match(r"^[a-zA-Z0-9_]+$", name)` does not match it; that pattern matches a name of
+a final newline, which the server refuses. A Column's attribute of such a name is the field of that
+name, as `col[name]`, so `hasattr` of it is True, and a session's raises the `AttributeError` of
+`object.__getattribute__`, so `hasattr` of it is False, as in PySpark. `explain` builds the plan
+first, so the error of a plan that fails to build comes first.
+
+The commands that PySpark sends when they are called set their names as protobuf converts them,
+at the call: `registerJavaFunction` and `registerJavaUDAF` (the name, then the class), the
+`register` of `spark.udf` of a UDF and of `spark.udtf`, `interruptTag` and `interruptOperation`
+take bytes of UTF-8, and raise protobuf's `TypeError` "bad argument type for built-in operation"
+of another value; `interruptTag(None)` and `interruptOperation(None)` raise the `AssertionError` of
+PySpark's request. The `register` of a plain function names the function of its UDF first, so a
+name that is not a str raises the `TypeError` of `__name__`, as PySpark's. A function registered
+of the name None is registered as `fun_` and a random hex, as PySpark's client does, and `register`
+returns its UDF. `SparkSession.builder.master` of Spark Connect takes any value and does nothing,
+as PySpark Connect's.
 
 So it is for the other values that a plan sets as they are given, which protobuf converts when it
 builds the plan: a string field takes bytes of UTF-8, such as `alias(b"q")`, and refuses another
@@ -1499,6 +1538,24 @@ where PySpark's cloudpickle pickles it, of a copy that raises the error at its r
 hint, `dropDuplicates`, `observe`, `filter`, `sort`, `sortWithinPartitions` and the repartitions of
 such a value keep the cached schema of the DataFrame that they are of, as PySpark copies it, so
 their `schema` is known without a request, and their other requests raise the error.
+
+The `barrier` of `mapInPandas` and `mapInArrow` is a protobuf bool, which their plan sets once it
+pickled the function, when it is built: an int is taken, as `barrier=1`, and another value, such
+as `"x"`, None or a float, fails each request with the `TypeError` of protobuf, and not the call.
+The DataFrame keeps its schema, of the schema that it is given, as PySpark's `_map_partitions`
+caches it. The plan reads `profile.id` of its resource profile after that, so the profile is
+created on the server by the first request that builds the plan, such as `collect`, and not by the
+call nor by `schema`, as in PySpark; a profile without an `id`, such as a str, fails the requests
+with that `AttributeError`, and the id of a request whose flag fails is not read.
+
+A merge builder keeps its condition and the conditions of its clauses as they are given, as
+PySpark's: `mergeInto(table, 5)` and `whenMatched(5)` raise nothing, the clause's action raises the
+`AttributeError` of the `to_plan` that 5 lacks, and so does the merge of a condition of `mergeInto`.
+An action builds its assignments as PySpark's `_build_merge_action`, in the order of
+`assignments.items()`, in which the merge sends them, and raises their errors in that order, before
+those of the condition: a key that is not a str, bytes too, is the bare `AssertionError` of
+PySpark's `expr`, a value that is not a Column the `AttributeError` of its `to_plan`, and an
+object that is not a mapping the `AttributeError` of its `items`.
 
 A str that a later call unsets or replaces is no longer in the request, in the same cases as in
 PySpark. A stream reader's option of None leaves its option as it was, as PySpark's does. An option
