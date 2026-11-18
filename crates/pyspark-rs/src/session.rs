@@ -46,6 +46,9 @@ pub struct PySparkSessionBuilder {
     /// that is not a str or a str that UTF-8 cannot encode, or a value that cannot be encoded.
     /// `getOrCreate` fails with the first of them, as PySpark's `_set_all` does.
     unencodable: crate::options::UnencodableOptions,
+    /// Set once the value is written, as `__traverse__` reads `hook_factories`, which is not
+    /// valid while the builder object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PySparkSessionBuilder {
@@ -56,6 +59,7 @@ impl PySparkSessionBuilder {
             hook_factories: Vec::new(),
             channel_builder: None,
             unencodable: Default::default(),
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 }
@@ -133,6 +137,31 @@ impl PySparkSessionBuilder {
         )?;
         let reduced = crate::reduce::state_reduce(py, "builder_reduce", args)?;
         crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
+    }
+
+    /// As PySpark's builder, a Python object that holds its channel builder and its hook
+    /// factories (`_channel_builder` and `_hook_factories`), which Python's garbage collector
+    /// sees: they are reported, so a reference cycle through one, such as a channel builder or a
+    /// hook factory that keeps the builder, is freed. One that a copy of the builder shares is
+    /// reported by neither, so that its reference is not counted twice. Nothing of a builder
+    /// object that is being created.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        for object in self.channel_builder.iter().chain(&self.hook_factories) {
+            if std::sync::Arc::strong_count(object) == 1 {
+                visit.call(&**object)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the builder drops
+    /// its channel builder and its hook factories.
+    fn __clear__(&mut self) {
+        self.channel_builder = None;
+        self.hook_factories.clear();
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).

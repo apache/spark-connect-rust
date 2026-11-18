@@ -22,11 +22,17 @@ use crate::session::PySparkSession;
 )]
 pub struct PyDataSourceRegistration {
     pub(crate) session: Py<PySparkSession>,
+    /// Set once the value is written, as `__traverse__` reads `session`, which is not valid while
+    /// the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyDataSourceRegistration {
     pub fn new(session: Py<PySparkSession>) -> Self {
-        PyDataSourceRegistration { session }
+        PyDataSourceRegistration {
+            session,
+            gc_ready: crate::gc::GcReady::new(),
+        }
     }
 }
 
@@ -63,6 +69,16 @@ impl PyDataSourceRegistration {
     #[getter(sparkSession)]
     fn spark_session(&self, py: Python<'_>) -> Py<PySparkSession> {
         self.session.clone_ref(py)
+    }
+
+    /// As PySpark's registration, a Python object that holds its session, which Python's garbage
+    /// collector sees: the session is reported, so a reference cycle through it, such as a session
+    /// that keeps its `dataSource`, is freed. Nothing of a registration that is being created.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.session)
     }
 
     /// Register a custom data source class.

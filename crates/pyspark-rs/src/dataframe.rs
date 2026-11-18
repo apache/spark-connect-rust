@@ -3052,13 +3052,14 @@ impl PyDataFrame {
         text_signature = "($self, prefetchPartitions=False)"
     )]
     fn to_local_iterator<'py>(
-        &self,
-        py: Python<'py>,
+        slf: &Bound<'py, Self>,
         prefetchPartitions: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         // Any value, as PySpark Connect's, which ignores it.
         let _ = prefetchPartitions;
-        let rows = PyLocalRowIterator::new(self.dataframe.clone());
+        let py = slf.py();
+        // The rows hold this DataFrame, as PySpark's generator holds `self` until it ends.
+        let rows = PyLocalRowIterator::new(slf);
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_local_rows")?
             .call1((rows,))
@@ -7190,7 +7191,13 @@ fn rows_to_py(
 /// of `toLocalIterator` yields from. Implements `__iter__`, `__next__` and `close`.
 #[pyclass(name = "LocalRowIterator", module = "pyspark.sql.dataframe")]
 pub struct PyLocalRowIterator {
+    /// The share of the holders of the plan of `frame`, of which `dataframe` is a clone, dropped
+    /// before it (see [`crate::gc::Holders`]).
+    frame_share: crate::gc::Share,
     dataframe: DataFrame,
+    /// The DataFrame of `toLocalIterator`, as the generator of PySpark's holds `self` until it
+    /// ends: the generator of the drop-in holds this iterator until then.
+    frame: Py<PyDataFrame>,
     /// The execution of the rows once its plan is built, which the first row sends.
     prepared: Option<PreparedExecution>,
     /// The rows of the execution, which the first row starts, as PySpark's generator does.
@@ -7213,9 +7220,16 @@ pub struct PyLocalRowIterator {
 }
 
 impl PyLocalRowIterator {
-    pub fn new(dataframe: DataFrame) -> Self {
+    /// The rows of the DataFrame `frame`, of a clone of its plan.
+    pub fn new(frame: &Bound<'_, PyDataFrame>) -> Self {
+        let dataframe = frame.borrow().dataframe.clone();
+        let frame = frame.clone().unbind();
+        let frame_share =
+            PyDataFrame::plan_share(&frame, |of_frame| dataframe.shares_plan_with(of_frame));
         PyLocalRowIterator {
+            frame_share,
             dataframe,
+            frame,
             prepared: None,
             iterator: None,
             finished: false,
@@ -7380,6 +7394,25 @@ impl PyLocalRowIterator {
                 result
             }
         }
+    }
+
+    /// As the generator of PySpark's `toLocalIterator`, which holds its DataFrame, a Python object
+    /// that Python's garbage collector sees: the DataFrame is reported, which reports the objects
+    /// of the plan that the two share, such as the functions of its UDFs (see
+    /// [`crate::gc::Holders`]). So a reference cycle through the rows and a function of the plan,
+    /// such as a bound method of an object that keeps the rows, is freed. The iterator has no
+    /// `__dict__`: it is tracked when it is allocated, and its value is written before any
+    /// allocation that could start a collection, so no [`crate::gc::GcReady`] is needed.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        visit.call(&self.frame)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the iterator drops
+    /// its clone of the plan, after its share of it.
+    fn __clear__(&mut self) {
+        self.frame_share = crate::gc::Share::none();
+        self.prepared = None;
+        self.dataframe.clear_plan();
     }
 }
 

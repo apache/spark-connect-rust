@@ -262,15 +262,18 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   whose command carries the second pickle; PySpark's carries the first.
 - **Garbage collection** (tracked). A DataFrame or a Column reports the functions of its UDFs that
   it alone holds to Python's garbage collector, and so do grouped data and their cogroups, a table
-  argument, a window specification, the writers, `na`, `stat`, and a merge builder and its clauses,
-  of the Columns and the plans that they hold. Those that hold their DataFrame report it, which
-  reports the functions of the plan that they share (`crate::gc::Holders`). A function that a
-  Column and a DataFrame of it share, or two DataFrames, or a DataFrame and a table argument of
-  it, which holds the plan and not the DataFrame, is reported by none, so that no reference is
-  counted twice: a reference cycle through it, such as through a bound method of an object that
-  keeps both the Column and the DataFrame, is not collected, where PySpark collects it. A stream
-  writer holds its DataFrame, where PySpark's holds the plan, so a DataFrame that keeps its stream
-  writer is freed by the collector rather than at its last reference.
+  argument, a window specification, the writers, `na`, `stat`, a merge builder and its clauses,
+  and the rows of `toLocalIterator`, of the Columns and the plans that they hold. Those that hold
+  their DataFrame report it, which reports the functions of the plan that they share
+  (`crate::gc::Holders`). A function that a Column and a DataFrame of it share, or two DataFrames,
+  or a DataFrame and a table argument of it, which holds the plan and not the DataFrame, is
+  reported by none, so that no reference is counted twice: a reference cycle through it, such as
+  through a bound method of an object that keeps both the Column and the DataFrame, is not
+  collected, where PySpark collects it. A stream writer holds its DataFrame, where PySpark's holds
+  the plan, so a DataFrame that keeps its stream writer is freed by the collector rather than at
+  its last reference. The session builder reports its channel builder and its hook factories, but
+  not one that a copy of it shares, so a cycle through one of those is not collected while the
+  builder and its copy live, where PySpark collects it.
 
 ## Session and client (Connect)
 
