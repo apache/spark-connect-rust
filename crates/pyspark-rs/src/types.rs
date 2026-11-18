@@ -1584,7 +1584,8 @@ fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
             return Ok(false);
         }
     }
-    if py_to_data_type(a)? != py_to_data_type(b)? {
+    // The metadata of the fields are compared as Python's `==` compares the dicts of PySpark.
+    if !py_to_data_type(a)?.eq_as_python(&py_to_data_type(b)?) {
         return Ok(false);
     }
     // The `hasPrecisionInfo` of a decimal is an attribute of PySpark's `__dict__` too.
@@ -3498,7 +3499,12 @@ impl PyStructField {
         let Ok(o) = other.cast::<PyStructField>() else {
             return Ok(false);
         };
-        if slf.borrow().current_field(py)? != o.borrow().current_field(py)? {
+        // Of the metadata as Python's `==` compares the dict of PySpark's field.
+        if !slf
+            .borrow()
+            .current_field(py)?
+            .eq_as_python(&o.borrow().current_field(py)?)
+        {
             return Ok(false);
         }
         // The flags as they were given are compared as PySpark's `__dict__` does.

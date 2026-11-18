@@ -124,10 +124,6 @@ difference is intentional or tracked for a fix.
   first request that sends the type, with protobuf's `UnicodeEncodeError` of a name, or with the
   server's error of the string of a lone surrogate (`Unpaired surrogate`) of the JSON in which
   `json.dumps` escapes it.
-- **The pickle of a DataFrame whose plan fails to build** (tracked). `pickle` and cloudpickle of a
-  DataFrame of a value that its plan does not take, such as `df.alias("a\ud800")` or
-  `df.limit(2.0)`, raise the error of the plan, as the pickle holds the relation; PySpark's
-  cloudpickle pickles its plan, whose copy raises the error at its requests.
 - **The removal of the relation of a dropped checkpoint** (intentional; a drop does not wait).
   As PySpark's `CachedRemoteRelation.__del__`, the drop of the last DataFrame of a checkpoint
   sends one ExecutePlan of the removal, which is not reattachable and goes to no hook, with the
