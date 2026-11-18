@@ -1211,6 +1211,101 @@ pub struct PySharedTags(spark_connect::session::SharedTags);
 )]
 pub struct PySharedUserContextExtensions(spark_connect_core::client::SharedUserContextExtensions);
 
+#[pymethods]
+impl PySharedTags {
+    /// Replace the tags of this set with `tags`, which the requests of the threads that have it
+    /// carry from now on, as a change of the set of PySpark's `thread_local.tags`.
+    fn _replace(&self, tags: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
+        self.0.replace(core_tags(&tags)?);
+        Ok(())
+    }
+
+    /// The tags of this set, as the strs that they are of.
+    fn _tags<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+        self.0
+            .tags()
+            .into_iter()
+            .map(|tag| match tag {
+                spark_connect::session::Tag::Text(text) => {
+                    Ok(pyo3::types::PyString::new(py, &text).into_any())
+                }
+                spark_connect::session::Tag::Unencodable(utf32le) => {
+                    pyo3::types::PyBytes::new(py, &utf32le)
+                        .call_method1("decode", ("utf-32-le", "surrogatepass"))
+                }
+            })
+            .collect()
+    }
+}
+
+#[pymethods]
+impl PySharedUserContextExtensions {
+    /// Replace the extensions of this list with `extensions`, which the requests of the threads
+    /// that have it carry from now on, as a change of the list of PySpark's
+    /// `thread_local.user_context_extensions`.
+    fn _replace(&self, extensions: Vec<(String, Vec<u8>)>) -> PyResult<()> {
+        self.0.replace(decoded_extensions(extensions)?);
+        Ok(())
+    }
+
+    /// The extensions of this list, their IDs and the bytes of each `google.protobuf.Any`.
+    fn _extensions<'py>(&self, py: Python<'py>) -> Vec<(String, Bound<'py, pyo3::types::PyBytes>)> {
+        use prost::Message;
+        self.0
+            .snapshot()
+            .into_iter()
+            .map(|(id, extension)| {
+                (
+                    id,
+                    pyo3::types::PyBytes::new(py, &extension.encode_to_vec()),
+                )
+            })
+            .collect()
+    }
+}
+
+/// The `google.protobuf.Any` of each of `extensions`, of its ID and its bytes.
+fn decoded_extensions(
+    extensions: Vec<(String, Vec<u8>)>,
+) -> PyResult<Vec<(String, prost_types::Any)>> {
+    use prost::Message;
+    extensions
+        .into_iter()
+        .map(|(id, extension)| {
+            prost_types::Any::decode(extension.as_slice())
+                .map(|extension| (id, extension))
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+        })
+        .collect()
+}
+
+/// The core tags of `tags`, the elements of the set of PySpark's `thread_local.tags`, as the
+/// requests carry them: a str of its text, or of the UTF-32 bytes of a str that UTF-8 cannot
+/// encode, with which each request fails, as PySpark's; bytes of their UTF-8; and the `TypeError`
+/// of the protobuf string field of the tags of a request for another object, which PySpark raises
+/// when it builds a request, and the drop-in when the set changes.
+fn core_tags(tags: &[Bound<'_, PyAny>]) -> PyResult<Vec<spark_connect::session::Tag>> {
+    tags.iter()
+        .map(|tag| {
+            if let Ok(text) = tag.cast::<pyo3::types::PyString>() {
+                return Ok(match text.to_cow() {
+                    Ok(text) => spark_connect::session::Tag::Text(text.into_owned()),
+                    Err(_) => {
+                        let utf32le =
+                            text.call_method1("encode", ("utf-32-le", "surrogatepass"))?;
+                        spark_connect::session::Tag::Unencodable(
+                            utf32le.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec(),
+                        )
+                    }
+                });
+            }
+            Ok(spark_connect::session::Tag::Text(
+                crate::options::str_argument(tag)?,
+            ))
+        })
+        .collect()
+}
+
 /// The tag of `interruptTag` or the ID of `interruptOperation`, as PySpark's `_interrupt_request`
 /// takes it: it asserts that it is not None, and sets it in the string field of its request, as
 /// protobuf converts it, so bytes of UTF-8 are taken, and another value is a `TypeError`.
@@ -1219,46 +1314,6 @@ fn interrupted_id(id: &Bound<'_, PyAny>) -> PyResult<String> {
         return Err(pyo3::exceptions::PyAssertionError::new_err(()));
     }
     crate::str_argument(id)
-}
-
-/// A tag of `addTag` or `removeTag`: `CANNOT_BE_NONE` for None, as PySpark Connect's.
-fn tag_of(py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<SessionTag> {
-    if tag.is_none() {
-        return Err(crate::column::raise_pyspark(
-            py,
-            "PySparkValueError",
-            "CANNOT_BE_NONE",
-            &[("arg_name", "Spark Connect tag")],
-        ));
-    }
-    // As PySpark's `"," in tag`, which raises the `TypeError` of an object that is not a str,
-    // such as an int or bytes, before the checks of the tag; and of the set of the tags, which
-    // refuses one that is not hashable, such as a list.
-    tag.contains(",")?;
-    let tag = if let Ok(text) = tag.cast::<pyo3::types::PyString>() {
-        text
-    } else {
-        tag.hash()?;
-        return Ok(SessionTag::Text(tag.extract()?));
-    };
-    let Ok(text) = tag.to_cow() else {
-        // A str that UTF-8 cannot encode, which PySpark keeps, and which fails the requests that
-        // carry it. Its rendering has a comma if the str does, and is not empty.
-        let utf32le = tag.call_method1("encode", ("utf-32-le", "surrogatepass"))?;
-        let rendered = crate::plan_args::rendered(tag.as_any())?;
-        SparkSession::check_tag(&rendered).to_pyerr()?;
-        return Ok(SessionTag::Unencodable(
-            utf32le.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec(),
-        ));
-    };
-    Ok(SessionTag::Text(text.into_owned()))
-}
-
-/// A tag of `addTag` and `removeTag`: its text, or the UTF-32 bytes of a str that UTF-8 cannot
-/// encode, which the core keeps (see `SparkSession::add_unencodable_tag`).
-enum SessionTag {
-    Text(String),
-    Unencodable(Vec<u8>),
 }
 
 #[pyclass(
@@ -2907,25 +2962,28 @@ impl PySparkSession {
     }
 
     /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
-    /// of PySpark Connect's: `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a scheme,
-    /// an `AssertionError` for a local path that is not a file, and for a destination that is
-    /// not an absolute path. The local path is what PySpark's `Path(local_path).absolute()` takes,
-    /// a str or an `os.PathLike` such as a `pathlib.Path`, of its errors otherwise, and the file
-    /// of the str of that absolute path is uploaded, as PySpark's `LocalFile` reads it. The
-    /// destination is a str.
+    /// of PySpark Connect's: those of `urlparse` of the destination, such as the AttributeError
+    /// of a `pathlib.Path`, and `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a
+    /// scheme, and then those of its client's `copy_from_local_to_fs`: an `AssertionError` for a
+    /// local path that is not a file, and for a destination that is not an absolute path, and the
+    /// `TypeError` of a destination that is not a str. The local path is what PySpark's
+    /// `Path(local_path).absolute()` takes, a str or an `os.PathLike` such as a `pathlib.Path`, of
+    /// its errors otherwise, and the file of the str of that absolute path is uploaded, as
+    /// PySpark's `LocalFile` reads it.
     #[pyo3(name = "copyFromLocalToFs")]
     fn copy_from_local_to_fs(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         local_path: &Bound<'_, PyAny>,
-        dest_path: &str,
+        dest_path: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        let scheme: String = py
+        let py = slf.py();
+        // As PySpark's, which parses the destination first, of the errors of `urlparse`, such as
+        // the AttributeError of a `pathlib.Path`, and then copies the file with its client.
+        let scheme = py
             .import("urllib.parse")?
             .call_method1("urlparse", (dest_path,))?
-            .getattr("scheme")?
-            .extract()?;
-        if !scheme.is_empty() {
+            .getattr("scheme")?;
+        if scheme.is_truthy()? {
             return Err(crate::column::raise_pyspark(
                 py,
                 "PySparkValueError",
@@ -2933,32 +2991,22 @@ impl PySparkSession {
                 &[("arg_name", "dest_path")],
             ));
         }
-        let absolute = py
-            .import("pathlib")?
-            .getattr("Path")?
-            .call1((local_path,))?
-            .call_method0("absolute")?;
-        let is_file: bool = absolute.call_method0("is_file")?.extract()?;
-        if !is_file {
-            return Err(pyo3::exceptions::PyAssertionError::new_err(
-                "local path must be a file path.",
-            ));
-        }
-        let is_absolute: bool = py
-            .import("pathlib")?
-            .getattr("Path")?
-            .call1((dest_path,))?
-            .call_method0("is_absolute")?
-            .extract()?;
-        if !is_absolute {
-            return Err(pyo3::exceptions::PyAssertionError::new_err(
-                "destination FS path must be an absolute path.",
-            ));
-        }
-        let local_path: String = absolute.str()?.extract()?;
+        Self::client(slf)?.call_method1(py, "copy_from_local_to_fs", (local_path, dest_path))?;
+        Ok(())
+    }
+
+    /// Upload the local file of `local_path`, an absolute path, to `dest_path`, an absolute path
+    /// of the file system of the server, for the `copy_from_local_to_fs` of `client`, which
+    /// checks them as PySpark's ArtifactManager does.
+    fn _copy_from_local_to_fs(
+        &self,
+        py: Python<'_>,
+        local_path: String,
+        dest_path: String,
+    ) -> PyResult<()> {
         interruptible(py, &self.session, || {
             self.session
-                .copy_from_local_to_fs(&local_path, dest_path)
+                .copy_from_local_to_fs(&local_path, &dest_path)
                 .map_err(Box::new)
         })
     }
@@ -3226,7 +3274,7 @@ impl PySparkSession {
         py: Python<'_>,
         name: &Bound<'_, PyAny>,
         return_type: Option<&Bound<'_, PyAny>>,
-        eval_type: i32,
+        eval_type: &Bound<'_, PyAny>,
         command: &Bound<'_, PyAny>,
         python_ver: String,
         deterministic: bool,
@@ -3235,7 +3283,8 @@ impl PySparkSession {
         // first, as protobuf converts it: bytes of UTF-8 too. Its `PythonUDTF.to_plan` converts the
         // return type after it (see `udtf_return_type`), which raises the `UNSUPPORTED_OPERATION`
         // of a value that is not a DataType and of a type that `pyspark_types_to_proto_types` has
-        // no proto of, also nested, and then pickles the handler class, whose error comes last.
+        // no proto of, also nested, then sets the eval type in the int32 field of its PythonUDTF,
+        // of protobuf's errors, and then pickles the handler class, whose error comes last.
         let name = crate::str_argument(name)?;
         let return_type = match return_type {
             None => None,
@@ -3244,6 +3293,12 @@ impl PySparkSession {
                     .ok_or_else(|| crate::types::not_a_type_error(value))?,
             ),
         };
+        let udtf = py
+            .import("pyspark.sql.connect.proto")?
+            .getattr("PythonUDTF")?
+            .call0()?;
+        udtf.setattr("eval_type", eval_type)?;
+        let eval_type: i32 = udtf.getattr("eval_type")?.extract()?;
         let command: Vec<u8> = if command.is_callable() {
             command.call0()?.extract()?
         } else {
@@ -3261,24 +3316,9 @@ impl PySparkSession {
         })
     }
 
-    /// Add the extension of the bytes of a `google.protobuf.Any`, `extension`, to the user context
-    /// of the requests of this session: of all the threads, if `is_global`, else of the current
-    /// thread. Its ID: for the user context extensions of `client`.
-    fn _add_user_context_extension(&self, extension: &[u8], is_global: bool) -> PyResult<String> {
-        use prost::Message;
-        let extension = prost_types::Any::decode(extension)
-            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        Ok(if is_global {
-            self.session.add_global_user_context_extension(extension)
-        } else {
-            self.session
-                .add_threadlocal_user_context_extension(extension)
-        })
-    }
-
     /// The user context extensions of this session, the global ones if `is_global`, else those
-    /// of the current thread, as their IDs and the bytes of each `google.protobuf.Any`: for
-    /// `client`.
+    /// of the current thread, as their IDs and the bytes of each `google.protobuf.Any`: for the
+    /// global list of `client` when it is made.
     fn _user_context_extensions<'py>(
         &self,
         py: Python<'py>,
@@ -3308,28 +3348,9 @@ impl PySparkSession {
         &self,
         extensions: Vec<(String, Vec<u8>)>,
     ) -> PyResult<()> {
-        use prost::Message;
-        let extensions = extensions
-            .into_iter()
-            .map(|(id, extension)| {
-                prost_types::Any::decode(extension.as_slice())
-                    .map(|extension| (id, extension))
-                    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
-        self.session.set_global_user_context_extensions(extensions);
+        self.session
+            .set_global_user_context_extensions(decoded_extensions(extensions)?);
         Ok(())
-    }
-
-    /// Remove the user context extension of `extension_id`, for `client`.
-    fn _remove_user_context_extension(&self, extension_id: &str) {
-        self.session.remove_user_context_extension(extension_id);
-    }
-
-    /// Remove the user context extensions of the current thread and the global ones, for
-    /// `client`.
-    fn _clear_user_context_extensions(&self) {
-        self.session.clear_user_context_extensions();
     }
 
     /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
@@ -3669,6 +3690,64 @@ impl PySparkSession {
         self.session.set_server_session_id(id);
     }
 
+    /// The session ID that the requests of the session carry, as PySpark's
+    /// `SparkConnectClient._session_id`: the session's, unless `_set_client_session_id` set
+    /// another.
+    fn _client_session_id(&self) -> String {
+        self.session.client_session_id()
+    }
+
+    /// Make the requests of the session carry `session_id`, as a set of PySpark's
+    /// `SparkConnectClient._session_id`, which its requests read, of the error of the string
+    /// field of their session ID for a value that is not a str: the session's `session_id` stays,
+    /// and the requests of the artifacts carry it, as those of PySpark's ArtifactManager.
+    fn _set_client_session_id(&self, session_id: &Bound<'_, PyAny>) -> PyResult<()> {
+        self.session
+            .set_client_session_id(crate::str_argument(session_id)?);
+        Ok(())
+    }
+
+    /// The connection string of the channel builder of the session, as PySpark's
+    /// `SparkConnectClient._builder` is of: `sc://` and its endpoint, of its parameters, each
+    /// value percent-encoded, as `DefaultChannelBuilder` decodes them.
+    fn _connection_string(&self) -> String {
+        let builder = self.session.channel_builder();
+        let mut url = format!("sc://{}/", builder.endpoint());
+        for (key, value) in builder.params() {
+            url.push(';');
+            url.push_str(key);
+            url.push('=');
+            url.push_str(&quote_param(value));
+        }
+        url
+    }
+
+    /// The user of the requests of the session, as PySpark's `SparkConnectClient._user_id`.
+    fn _user_id(&self) -> Option<String> {
+        self.session.user_id().map(str::to_string)
+    }
+
+    /// Open the session again, as PySpark's `SparkConnectClient._closed = False`.
+    fn _reopen(&self) {
+        self.session.reopen()
+    }
+
+    /// The bytes of the response of the server to `request`, the bytes of a `GetStatusRequest`
+    /// that `client` builds, as PySpark's `_get_operation_statuses` sends it.
+    fn _get_status<'py>(
+        &self,
+        py: Python<'py>,
+        request: &[u8],
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        use prost::Message;
+        let request = spark_connect_proto::GetStatusRequest::decode(request)
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        let response = interruptible(py, &self.session, || {
+            self.session.get_status_proto(request).map_err(Box::new)
+        })?;
+        Ok(pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
+    }
+
     /// The execution hook base class, reached as `SparkSession.Hook` (mirrors pyspark).
     #[classattr]
     #[allow(non_snake_case)]
@@ -3875,29 +3954,19 @@ impl PySparkSession {
         })
     }
 
-    /// Add a tag of the current thread, with the errors of PySpark Connect's tags: `CANNOT_BE_NONE`
-    /// for None, and those of [`SparkSession::check_tag`].
+    /// Add a tag of the current thread, as PySpark Connect's `addTag`, which its client adds to
+    /// the set of its `thread_local.tags` (`client.add_tag`), of the errors of PySpark's.
     #[pyo3(name = "addTag")]
-    fn add_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
-        match tag_of(py, tag)? {
-            SessionTag::Text(tag) => self.session.add_tag(&tag).to_pyerr(),
-            SessionTag::Unencodable(utf32le) => {
-                self.session.add_unencodable_tag(utf32le);
-                Ok(())
-            }
-        }
+    fn add_tag(slf: &Bound<'_, Self>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
+        Self::client(slf)?.call_method1(slf.py(), "add_tag", (tag,))?;
+        Ok(())
     }
 
-    /// Remove a tag of the current thread, with the errors of `addTag`, as PySpark Connect's.
+    /// Remove a tag of the current thread, as PySpark Connect's `removeTag`, of its client
+    /// (`client.remove_tag`).
     #[pyo3(name = "removeTag")]
-    fn remove_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
-        match tag_of(py, tag)? {
-            SessionTag::Text(tag) => {
-                SparkSession::check_tag(&tag).to_pyerr()?;
-                self.session.remove_tag(&tag);
-            }
-            SessionTag::Unencodable(utf32le) => self.session.remove_unencodable_tag(&utf32le),
-        }
+    fn remove_tag(slf: &Bound<'_, Self>, tag: &Bound<'_, PyAny>) -> PyResult<()> {
+        Self::client(slf)?.call_method1(slf.py(), "remove_tag", (tag,))?;
         Ok(())
     }
 
@@ -3920,23 +3989,20 @@ impl PySparkSession {
         })
     }
 
-    /// The tags of the current thread, a set, as PySpark's `getTags`.
+    /// The tags of the current thread, as PySpark Connect's `getTags`: the set of the
+    /// `thread_local.tags` of its client (`client.get_tags`), which the later changes of the tags
+    /// change too.
     #[pyo3(name = "getTags")]
-    fn get_tags<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PySet>> {
-        let tags = pyo3::types::PySet::new(py, self.session.get_tags())?;
-        // A tag that UTF-8 cannot encode, as it was given.
-        for utf32le in self.session.unencodable_tags() {
-            tags.add(
-                pyo3::types::PyBytes::new(py, &utf32le)
-                    .call_method1("decode", ("utf-32-le", "surrogatepass"))?,
-            )?;
-        }
-        Ok(tags)
+    fn get_tags(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Self::client(slf)?.call_method0(slf.py(), "get_tags")
     }
 
+    /// Remove the tags of the current thread, as PySpark Connect's `clearTags`, of its client
+    /// (`client.clear_tags`), which gives the thread a new empty set.
     #[pyo3(name = "clearTags")]
-    fn clear_tags(&self) {
-        self.session.clear_tags()
+    fn clear_tags(slf: &Bound<'_, Self>) -> PyResult<()> {
+        Self::client(slf)?.call_method0(slf.py(), "clear_tags")?;
+        Ok(())
     }
 
     /// A copy of the tags of the current thread, which `pyspark.util.inheritable_thread_target`
@@ -3966,6 +4032,48 @@ impl PySparkSession {
     fn _share_thread_user_context_extensions(&self, extensions: &PySharedUserContextExtensions) {
         self.session
             .share_threadlocal_user_context_extensions(&extensions.0)
+    }
+
+    /// A set of the tags `tags`, which no thread has yet, for a set of the `thread_local.tags` of
+    /// `client`.
+    fn _new_tags(&self, tags: Vec<Bound<'_, PyAny>>) -> PyResult<PySharedTags> {
+        Ok(PySharedTags(spark_connect::session::SharedTags::new(
+            core_tags(&tags)?,
+        )))
+    }
+
+    /// A list of `extensions`, their IDs and the bytes of each `google.protobuf.Any`, which no
+    /// thread has yet, for a list of the `thread_local.user_context_extensions` of `client`.
+    fn _new_user_context_extensions(
+        &self,
+        extensions: Vec<(String, Vec<u8>)>,
+    ) -> PyResult<PySharedUserContextExtensions> {
+        Ok(PySharedUserContextExtensions(
+            spark_connect_core::client::SharedUserContextExtensions::new(decoded_extensions(
+                extensions,
+            )?),
+        ))
+    }
+
+    /// Keep `refresh`, a function of no arguments, which a call of this session calls before it
+    /// sends requests (see `crate::interrupt::refresh_user_context`): for `client`, which
+    /// serializes the `google.protobuf.Any` messages of its lists of user context extensions
+    /// again then, as PySpark serializes them when it builds each request.
+    fn _set_user_context_refresh(&self, refresh: Py<PyAny>) {
+        self.session
+            .set_user_context_refresher(Some(std::sync::Arc::new(refresh)));
+    }
+
+    /// Forget the tags of the current thread, which has none from now on, for a
+    /// `thread_local.tags` of `client` that is deleted.
+    fn _clear_thread_tags(&self) {
+        self.session.clear_tags()
+    }
+
+    /// Forget the user context extensions of the current thread, for a
+    /// `thread_local.user_context_extensions` of `client` that is deleted.
+    fn _clear_thread_user_context_extensions(&self) {
+        self.session.clear_threadlocal_user_context_extensions()
     }
 
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's

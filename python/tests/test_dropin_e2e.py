@@ -426,6 +426,163 @@ def test_observations_are_pysparks_objects_of_a_live_result(session):
     assert unused._result is None
 
 
+def test_client_state_is_one_per_session_and_its_thread_local_a_threading_local_as_pyspark(
+    session,
+):
+    # As PySpark Connect's SparkConnectClient: the attributes of the client of a session are its
+    # own, and its thread_local is a threading.local whose tags and user context extensions exist
+    # once a thread uses them, are the set and the list that the requests of the thread carry,
+    # also as they change, and are of that thread only. The extensions are serialized for each
+    # request, so one changed in place is sent as it is.
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client import SparkConnectClient
+
+    try:
+        from google.protobuf.any_pb2 import Any
+    except ImportError:
+        from pyspark.sql.connect.proto._rust import Any
+
+    session.client.state_of_the_test = 1
+    assert session.client.state_of_the_test == 1
+    held = session.client.global_user_context_extensions
+    assert session.client.global_user_context_extensions_lock is (
+        session.client.global_user_context_extensions_lock
+    )
+
+    seen = []
+
+    class Hook:
+        def on_execute_plan(self, request):
+            seen.append(
+                (
+                    sorted(request.tags),
+                    [(e.type_url, e.value) for e in request.user_context.extensions],
+                )
+            )
+            return request
+
+    client = SparkConnectClient(os.environ["SPARK_REMOTE"], session_hooks=[Hook()])
+
+    def run():
+        plan = pb2.Plan()
+        plan.root.range.end = 1
+        plan.root.range.step = 1
+        client.to_table(plan, {})
+        return seen[-1]
+
+    local = client.thread_local
+    assert not hasattr(local, "tags") and not hasattr(local, "user_context_extensions")
+    first = Any(type_url="type.googleapis.com/t1", value=b"1")
+    client.add_threadlocal_user_context_extension(first)
+    extensions = local.user_context_extensions
+    assert extensions[0][1] is first and local.user_context_extensions is extensions
+    extensions.append(("threadlocal_x", Any(type_url="type.googleapis.com/t2", value=b"2")))
+    assert run() == ([], [("type.googleapis.com/t1", b"1"), ("type.googleapis.com/t2", b"2")])
+    first.value = b"changed"
+    assert run()[1][0] == ("type.googleapis.com/t1", b"changed")
+    client.add_tag("a")
+    assert local.tags is client.get_tags()
+    local.tags.add("b")
+    assert run()[0] == ["a", "b"]
+    found = {}
+
+    def other():
+        found["tags"] = hasattr(local, "tags")
+        found["extensions"] = hasattr(local, "user_context_extensions")
+
+    thread = threading.Thread(target=other)
+    thread.start()
+    thread.join()
+    assert found == {"tags": False, "extensions": False}
+
+    shared = Any(type_url="type.googleapis.com/g1", value=b"g")
+    client.add_global_user_context_extension(shared)
+    shared.value = b"changed"
+    assert run()[1][0] == ("type.googleapis.com/g1", b"changed")
+    client.close()
+    del session.client.state_of_the_test
+    assert held is session.client.global_user_context_extensions
+
+
+def test_client_registrations_and_executions_take_their_arguments_as_pyspark(session):
+    # As PySpark Connect's register_udf, which sets the name and `deterministic` in its command
+    # before the server parses a DDL return type, and the eval type after it, and its executions,
+    # which read their `observations` only when observed metrics arrive.
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import ParseException
+    from pyspark.sql.connect.observation import Observation
+
+    client = session.client
+    lock = threading.Lock()
+
+    def unpicklable(x):
+        return lock
+
+    with pytest.raises(TypeError, match="cannot be interpreted as an integer"):
+        client.register_udf(unpicklable, "not a type ###", deterministic="x")
+    with pytest.raises(ParseException):
+        client.register_udf(unpicklable, "not a type ###", eval_type="x")
+    with pytest.raises(TypeError, match="cannot be interpreted as an integer"):
+        client.register_udf(unpicklable, "int", eval_type="x")
+
+    observation = Observation("client_observations")
+    observed = session.range(3).observe(observation, F.count(F.lit(1)).alias("n"))
+    plan = pb2.Plan()
+    plan.root.CopyFrom(observed._plan.plan(client))
+    assert client.to_table(plan, [])[0].num_rows == 3
+    for call in (
+        lambda: client.to_table(plan, None),
+        lambda: client.to_pandas(plan, None),
+        lambda: list(client.to_table_as_iterator(plan, None)),
+    ):
+        with pytest.raises(TypeError, match="argument of type 'NoneType' is not iterable"):
+            call()
+    plain_frame = session.range(2)
+    plain = pb2.Plan()
+    plain.root.CopyFrom(plain_frame._plan.plan(client))
+    assert client.to_table(plain, None)[0].num_rows == 2
+    assert len(client.to_pandas(plain, None)[0]) == 2
+
+
+def test_client_members_that_pysparks_tests_read_as_pyspark(session):
+    # As PySpark Connect's SparkConnectClient: _get_operation_statuses is the GetStatus RPC of the
+    # session, of the operations asked of; a set of _session_id makes the requests carry another
+    # session ID, so the response of another server-side session closes the session, as
+    # test_connect_session's test_reset_when_server_and_client_sessionids_mismatch relies on; and
+    # _closed reopens a session that it closed.
+    import uuid
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    remote = os.environ["SPARK_REMOTE"]
+    other = ConnectSession.builder.remote(remote).create()
+    client = other.client
+    other.range(3).collect()
+    statuses = client._get_operation_statuses()
+    assert type(statuses).__name__ == "GetStatusResponse"
+    assert statuses.session_id == other.session_id
+    unknown = "00000000-0000-4000-8000-000000000000"
+    (status,) = client._get_operation_statuses([unknown]).operation_statuses
+    assert status.operation_id == unknown
+    assert client._builder.endpoint == remote[len("sc://") :].split("/")[0]
+
+    client._closed = True
+    with pytest.raises(SparkConnectException):
+        other.range(1).count()
+    client._closed = False
+    assert other.range(1).count() == 1 and not other.is_stopped
+
+    client._session_id = str(uuid.uuid4())
+    with pytest.raises(SparkConnectException):
+        other.range(3).collect()
+    assert other.is_stopped
+
+
 def test_client_of_a_connection_string_as_pyspark(session):
     # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
     # of the plans that it is given, built without a DataFrame, whose executions may be not

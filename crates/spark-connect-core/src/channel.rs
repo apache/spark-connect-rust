@@ -170,6 +170,19 @@ impl ChannelBuilder {
         self.params.insert(key.to_string(), value.to_string());
     }
 
+    /// Remove the parameter `key`, as PySpark's `newSession` pops the session ID of the channel
+    /// builder of its client.
+    pub fn remove(&mut self, key: &str) {
+        self.params.remove(key);
+    }
+
+    /// The parameters of the connection, by their keys, in their order.
+    pub fn params(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.params
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+    }
+
     /// `host:port` endpoint used to dial the gRPC channel.
     pub fn endpoint(&self) -> String {
         format!("{}:{}", self.host, self.port)

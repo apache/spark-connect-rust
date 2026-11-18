@@ -1646,19 +1646,39 @@ client does:
   messages that the server sent, of their `repr`, which `pairs` and `flows` convert as
   `LiteralExpression._to_value` does, raising its `UNSUPPORTED_LITERAL` when they are read;
 - the registrations of `register_udf`, `register_udtf`, `register_java` and
-  `register_data_source`, the artifacts of `add_artifacts`, `copy_from_local_to_fs`,
-  `cache_artifact` and `cache_artifacts`, with the checks of PySpark's client rather than those of
-  `SparkSession.addArtifacts` and `copyFromLocalToFs`, the tags, the interrupts, `token`, `host`,
-  and the clients of `newSession` and `clone`.
+  `register_data_source`, which set their arguments in the fields of their commands, convert the
+  return type and pickle the function in the order of PySpark's, of protobuf's errors for a value
+  that a field does not take (an int is a bool, a bool is not an int), the artifacts of
+  `add_artifacts`, `copy_from_local_to_fs`, `cache_artifact` and `cache_artifacts`, with the
+  checks of PySpark's client rather than those of `SparkSession.addArtifacts` and
+  `copyFromLocalToFs`, the tags, the interrupts, `token`, `host`, and the clients of `newSession`
+  and `clone`. `spark.udf.register`, `registerJavaFunction` and `registerJavaUDAF` register
+  through the client, as PySpark's do. The executions read their `observations` as PySpark's: of
+  an object that is not a dict, such as None or an empty list, they set none, and of one that is
+  not a container, such as None, they raise the `TypeError` of `in` when observed metrics arrive.
 
 `SparkConnectClient(connection, user_id=None, ...)` takes the arguments of PySpark's: it makes a
 client of a session of its own of the connection string or the `ChannelBuilder` `connection`, which
 is neither the default nor the active session. Its `retry_policy`, `use_reattachable_execute`,
 `session_hooks`, `allow_arrow_batch_chunking`, `preferred_arrow_chunk_size`, `rpc_deadlines`
-(`pyspark.sql.connect.client.RpcDeadlines`, of which the transport has no GetStatus RPC) and
+(`pyspark.sql.connect.client.RpcDeadlines`) and
 `max_retry_exception_elapsed_time` are those of the transport. A `channel_options` of a connection
 string raises `NOT_IMPLEMENTED`, as `DefaultChannelBuilder` does: the Rust transport opens the
 channel; as PySpark's, the client of a `ChannelBuilder` does not read it.
+
+The members of PySpark's client that its tests and some libraries read are there too. `_builder`
+is the channel builder of the connection, a `DefaultChannelBuilder` of the session's connection
+string for `spark.client` (of its `endpoint`, `userAgent` and parameters), and the one given for a
+client made of one. `_session_id` is the session ID that the requests carry, which a set changes
+for them, as PySpark's, so the next response of another server-side session than the one that the
+client observed closes the session, while the session's `session_id` stays, and so does that of the
+requests of the artifacts, as PySpark's ArtifactManager keeps the ID that the client was built
+with; `_server_session_id` is the server-side one. `_closed` closes the session when it is set to True and opens it again
+when it is set to False. `_user_id` is the user of the requests, `_use_reattachable_execute`
+whether the executions are reattachable, and `_get_operation_statuses` the statuses of the
+operations of the session, of a GetStatus RPC under the `get_status` deadline. The differences
+that remain are in `dev/parity/known-differences.md` ("Client session ID", "`_closed`" and
+"`_user_id`").
 
 The retry policies of `get_retry_policies` and `set_retry_policies` are PySpark's own
 (`pyspark.sql.connect.client.retries`, vendored from v4.3.0, which needs `grpcio`,
@@ -1736,17 +1756,30 @@ The errors of the RPCs that PySpark's client leaves to grpc, those of `clone` (a
 `SparkSession.cloneSession`) and of `copy_from_local_to_fs` (and `SparkSession.copyFromLocalToFs`),
 which raise grpc's `RpcError` there (`_InactiveRpcError`), are converted as those of the other
 RPCs: they are the exception of their error class, such as `UnknownException` or
-`UnsupportedOperationException`, as the drop-in has no grpc. `global_user_context_extensions` is
-the list attribute of PySpark's client, whose changes, and a list that it is set to, the requests
-of all the threads carry.
+`UnsupportedOperationException`, as the drop-in has no grpc.
 
-`get_tags`, as `SparkSession.getTags`, returns a copy of the tags of the thread, where PySpark
-returns the set that its client keeps, which the later changes of the tags change too: the tags
-are those of the core session, which its requests read, and not a Python set. The official tests of
-the client (`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable
-iterator of PySpark's client, which the drop-in does not have; those of its retries
-(`test_connect_retry.py`) and of `pyspark.errors.exceptions.connect.convert_exception`
-(`test_connect_errors_conversion.py`) pass.
+The clients of a session share their attributes, as PySpark's session has one client: an
+attribute that is set on `spark.client` is there the next time, and so are its lock and its
+`global_user_context_extensions`, the list attribute of PySpark's client, whose changes, and a list
+that it is set to, the requests of all the threads carry, while a list that it is no longer set to
+is not read. The `thread_local` of the client is a `threading.local`, as PySpark's: its `tags` and
+`user_context_extensions` exist once a thread uses them, and are the set and the list that the
+requests of the thread carry, as they change or are set, as the tags of `SparkSession.addTag` and
+`getTags` are; another attribute that a thread sets is its own. A thread of
+`inheritable_thread_target` shares the copies of the attributes of the thread that decorated its
+function, as PySpark's does. The extensions are serialized again before each call that sends
+requests, so a `google.protobuf.Any` of the lists that is changed in place is sent as it is, as
+PySpark serializes them when it builds each request. The classes of these differ:
+`thread_local` is a subclass of `threading.local`, and the set of its tags, the list of its
+extensions and the global list are subclasses of `set` and `list`, of a plain `repr`, whose copies
+and pickles are a plain set and plain lists; a set of tags refuses an object that is neither a str
+nor bytes when it is added, of the `TypeError` that PySpark raises when it builds a request of it.
+A `copy.copy` of the client has the attributes of its session, but a list that the copy's
+attribute is set to is not one that the requests carry. The official tests of the client
+(`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable iterator of
+PySpark's client, which the drop-in does not have; those of its retries (`test_connect_retry.py`)
+and of `pyspark.errors.exceptions.connect.convert_exception` (`test_connect_errors_conversion.py`)
+pass.
 
 ## Spark Declarative Pipelines CLI
 

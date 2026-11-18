@@ -392,7 +392,7 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   read when they are set. The transport classifies the failures as `DefaultPolicy.can_retry`
   does, so a policy of its own `can_retry` or `to_state`, and a backoff, jitter or delay that
   is not a whole number of milliseconds, raise `NOT_IMPLEMENTED`. `RpcDeadlines` sets the
-  deadlines of the transport, which has no GetStatus RPC (`get_status`). `client.reattach`
+  deadlines of the transport, `get_status` that of `_get_operation_statuses`. `client.reattach`
   (`ExecutePlanResponseReattachableIterator`) is not provided: `disable_reattachable_execute`
   and `enable_reattachable_execute` set the executions of the transport not reattachable or
   reattachable.
@@ -442,10 +442,13 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   ...`), the failure that ends its retries (`Given up on retrying. error: ...`) and each gRPC
   failure that it converts (`GRPC Error received`), which the transport, whose retries and errors
   are its own, does not.
-- **`SparkConnectClient.get_tags`** (intentional). A copy of the tags of the thread, where
-  PySpark returns the set that its client keeps, which its later changes change too, as
-  `SparkSession.getTags` does, of which the drop-in returns a copy too: the tags are those of the
-  core session, which its requests read, and not a Python set.
+- **`SparkConnectClient.thread_local`** (intentional). A subclass of `threading.local`, of
+  subclasses of `set` and `list` for its tags and its user context extensions, which keep the Rust
+  transport's lists of them in step, where PySpark's is a `threading.local` of a plain set and
+  list. The global list of the extensions is a subclass of `list` too. A set of tags refuses an
+  object that is neither a str nor bytes when it is added, where PySpark's raises the `TypeError`
+  of the field of the tags when it builds a request. A list that the attribute of a `copy.copy` of
+  a client is set to is not one that the requests of the session carry.
 - **Plans of a DataFrame's relation** (intentional; DESIGN). `df._plan.plan(client)` is a
   placeholder that holds the DataFrame's relation, which the core builds at the call, as
   PySpark's `plan` does, with its pickles, warnings and errors: the core builds the relation, and
@@ -483,12 +486,19 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   `SparkConnectClient._proto_to_string` renders any message, including a deep one built in
   Python, as PySpark's does. Plan logging of a deep DataFrame therefore does not reach the
   recursion handling that the test `test_recursion_handling_for_plan_logging` exercises.
-- **Client session ID** (not provided). `SparkConnectClient._session_id` is not exposed and
-  is not settable; the session ID belongs to the Rust core. `_server_session_id` is
-  exposed and settable, as PySpark's, and a changed value closes the session.
-- **`_closed`** (tracked). Reading `_closed` gives the session's stopped state. Setting it
-  to True closes the session, as a test's stand-in for the client's close. Setting it to
-  False does not reopen a closed session.
+- **Client session ID** (intentional). `SparkConnectClient._session_id` is the session ID that
+  the requests carry, which a set changes for them, as PySpark's, so the next response of
+  another server-side session closes the session; `_server_session_id` is exposed and settable,
+  as PySpark's, and a changed value closes the session. A value that is not a str raises the
+  `TypeError` of the string field of the session ID of the requests when it is set, where
+  PySpark raises it when it builds the next request.
+- **`_closed`** (intentional). Reading `_closed` gives the session's stopped state. Setting it
+  to True closes the session, and setting it to False opens it again, as PySpark's. After
+  `close()` or `stop()`, which close PySpark's channel too, PySpark's requests still fail once
+  `_closed` is False, with grpc's `ValueError: Cannot invoke RPC: Channel closed!`, where the
+  drop-in's are sent again.
+- **`_user_id`** (intentional). It is read-only, where PySpark's is an attribute that a set
+  changes for the requests.
 - **The exit of a dropped session in a reference cycle** (intentional). PySpark's
   `SparkSession.__del__` closes the client of a session object that is freed, and the exit hook
   of a closed client sends nothing; the drop-in's exit hook holds its session weakly, so a

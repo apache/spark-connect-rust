@@ -2942,17 +2942,18 @@ def test_user_context_extensions_are_sent_as_pyspark(ml_mock):
     analysis = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
     assert list(analysis.user_context.extensions) == [packed("global"), packed("local")]
 
-    # Another thread has the global extensions only.
+    # Another thread has the global extensions only, and no list of its own until it adds one:
+    # PySpark's thread_local, a threading.local, has no user_context_extensions there.
     seen = []
 
     def other():
-        seen.append(client.thread_local.user_context_extensions)
+        seen.append(hasattr(client.thread_local, "user_context_extensions"))
         client.execute_command(command)
 
     thread = threading.Thread(target=other)
     thread.start()
     thread.join()
-    assert seen == [[]]
+    assert seen == [False]
     request = _last_request_but_deletes(service)
     assert list(request.user_context.extensions) == [packed("global")]
 
