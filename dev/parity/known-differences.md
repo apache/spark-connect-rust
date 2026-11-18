@@ -428,3 +428,26 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
     `Timestamp`, keeps `protobuf`'s classes, which take the package's messages only through bytes
     or dicts, as before. So does a module that builds before `pyspark.sql.connect.proto` is
     imported, as only one that imports another copy of Spark's generated modules can.
+
+## Type checking (the stubs of `scripts/gen_type_stubs.py`)
+
+mypy and pyright type an application as with `pyspark-client` (see `docs/compatibility.md`), but:
+
+- **Imports of PySpark's modules** (intentional). A name that a module of PySpark imports, such as
+  `DataFrame` of `pyspark.sql.catalog`, is an attribute of the module, which mypy takes by default
+  with `pyspark-client`. The stubs declare it only when the drop-in's module has it at run time, so
+  that it is an error, as `from pyspark.sql.catalog import DataFrame` fails with the drop-in.
+  pyright reports it as a private import with `pyspark-client` too.
+- **Names that only PySpark's annotations need** (intentional). `TYPE_ONLY` of
+  `python/tests/test_type_stubs_offline.py` lists the names that the stubs declare and the drop-in
+  does not have, with their reasons: the classic-only `DataFrame.rdd`, as type checkers of
+  `pyspark-client` see it, and the bases, metaclass, decorators and internal classes of PySpark's
+  classes that the drop-in implements natively.
+- **`SparkSession.client` and `SQLContext`** (intentional; the drop-in's own classes). The client
+  has PySpark Connect's public API, of the class `pyspark.sql.connect.client.SparkConnectClient`,
+  whose parameters of protobuf messages are `Any`, as the drop-in's protobuf runtime is native;
+  `SQLContext` takes and returns `Any` in more places than PySpark's.
+- **The internals of PySpark Connect** (intentional). The private attributes of the Connect
+  classes that PySpark annotates with its plans, expressions and protobuf messages
+  (`MergeIntoWriter._matched_actions`, `DataFrameWriter._write`, ...) are `Any`, as the drop-in
+  builds them in Rust (`UNRESOLVED_IMPORTS` of the generator).

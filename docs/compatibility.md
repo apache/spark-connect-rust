@@ -1460,18 +1460,36 @@ parameters, as PySpark's does.
 
 Type checkers and editors see PySpark's API, as with `pyspark-client`. The package is marked typed
 as PySpark's is (`py.typed`), and the modules whose classes are native or whose functions are made
-at import time, such as `pyspark.sql.functions`, `pyspark.sql.dataframe` and `pyspark.sql.types`,
-have stubs (`.pyi`) of PySpark 4.3.0's modules, with their annotations and overloads, which
-`scripts/gen_type_stubs.py` generates. So mypy and pyright type an application as they do with
-`pyspark-client`, but for the classes of modules that the drop-in implements in another way: the
-client of `SparkSession.client` (`pyspark.sql.connect.client`), `SQLContext`, and the internal
-expressions and protobuf messages of PySpark Connect, which annotate a few internal constructors.
-The stubs declare only the names that the drop-in's modules have at run time. A name that a module
-of PySpark imports, which mypy takes for an attribute of the module by default, is re-exported when
-the drop-in's module has it too, such as `F.partitioning` and `F.PandasUDFType`, which pyright, and
-mypy with `--no-implicit-reexport`, then do not report as they do with `pyspark-client`. One that
-the drop-in's module does not have, such as `pyspark.sql.catalog.DataFrame`, is an error, where mypy
-takes it with `pyspark-client` by default, as it fails at run time.
+at import time, such as `pyspark.sql.functions`, `pyspark.sql.dataframe`, `pyspark.sql.types`,
+`pyspark.sql.connect.datasource` and `pyspark.ml.stat`, have stubs (`.pyi`) of PySpark 4.3.0's
+modules, with their annotations, their overloads and the attributes that their classes assign in
+their methods, which `scripts/gen_type_stubs.py` generates. So mypy and pyright type an
+application as they do with `pyspark-client`, which `python/tests/test_type_stubs_offline.py`
+checks with both. The differences:
+
+- The stubs declare only the names that the drop-in's modules have at run time. A name that a
+  module of PySpark imports, which mypy takes for an attribute of the module by default, is
+  re-exported when the drop-in's module has it too, such as `F.partitioning` and
+  `F.PandasUDFType`, which pyright, and mypy with `--no-implicit-reexport`, then do not report as
+  they do with `pyspark-client`. One that the drop-in's module does not have, such as
+  `pyspark.sql.catalog.DataFrame`, is an error, where mypy takes it with `pyspark-client` by
+  default, as it fails at run time. So is the plumbing of PySpark's modules that the drop-in does
+  not have, such as the py4j converters of `pyspark.sql.types`.
+- A few names that PySpark's annotations need are declared, which the drop-in does not have at run
+  time: `DataFrame.rdd`, which PySpark defines when not `is_remote_only()`, so that type checkers
+  of `pyspark-client` see it too, and neither client has it; and the bases, the metaclass and the
+  decorators of PySpark's classes that the drop-in implements natively, such as `OptionUtils` of
+  the readers and writers, `PandasGroupedOpsMixin` of `GroupedData`, `DataTypeSingleton` of the
+  atomic types and `dfapi` (`TYPE_ONLY` of the test lists them with their reasons).
+- The classes that the drop-in implements in another way: the client of `SparkSession.client` has
+  the public API of PySpark Connect's `SparkConnectClient`, whose class is
+  `pyspark.sql.connect.client.SparkConnectClient` rather than `pyspark.sql.connect.client.core`'s
+  and whose parameters of protobuf messages are `Any`; `SQLContext`; and the internal expressions,
+  plans and protobuf messages of PySpark Connect, which annotate private attributes and a few
+  internal constructors.
+- The names that only the drop-in has, such as `Trigger` of `pyspark.sql.streaming.readwriter` and
+  `FrameBound` of `pyspark.sql.window`, are typed with the drop-in and are errors with
+  `pyspark-client`, as at run time.
 
 PySpark's `pyspark.sql.functions` is a package of the modules `builtin` and `partitioning`, where
 the drop-in's is a module, with the stubs of the three in the directory `pyspark/sql/functions/`,
