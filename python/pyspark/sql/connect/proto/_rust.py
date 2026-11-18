@@ -48,7 +48,6 @@ from typing import Optional, Union
 from pyspark import _pyspark
 
 Message = _pyspark.ProtoMessage
-DecodeError = _pyspark.ProtoDecodeError
 RepeatedScalarContainer = _pyspark.ProtoRepeatedScalarContainer
 RepeatedCompositeContainer = _pyspark.ProtoRepeatedCompositeContainer
 MapContainer = _pyspark.ProtoMapContainer
@@ -60,6 +59,28 @@ collections.abc.MutableSequence.register(RepeatedCompositeContainer)
 collections.abc.MutableMapping.register(MapContainer)
 
 __all__ = ["Message", "DecodeError", "EnumTypeWrapper", "install", "add_pipeline_analysis_context"]
+
+
+def _decode_error_bases() -> tuple[type, ...]:
+    """The bases of ``DecodeError``: the runtime's ``ProtoDecodeError`` and, where protobuf
+    imports, protobuf's ``google.protobuf.message.DecodeError``, which upb raises."""
+    try:
+        from google.protobuf.message import DecodeError as protobuf_decode_error
+    except Exception:  # pragma: no cover  # noqa: BLE001 - no protobuf, or one that fails
+        return (_pyspark.ProtoDecodeError,)
+    return (_pyspark.ProtoDecodeError, protobuf_decode_error)
+
+
+class DecodeError(*_decode_error_bases()):  # type: ignore[misc]
+    """The error of a parse of a message that fails (``ParseFromString``, ``MergeFromString``,
+    ``FromString`` and the load of its pickle), of upb's message: ``Error parsing message with type
+    'spark.connect.Plan': Wire format was corrupt``. Where protobuf imports, it is a subclass of
+    protobuf's ``google.protobuf.message.DecodeError``, the class of upb's error, so that ``except
+    DecodeError`` of protobuf catches it, as it catches upb's; without protobuf, of the runtime's
+    ``ProtoDecodeError`` only. The runtime raises this class, which pickles by its name here."""
+
+
+_pyspark._proto_set_decode_error(DecodeError)
 
 
 class EnumTypeWrapper:

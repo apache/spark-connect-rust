@@ -19,8 +19,11 @@ pub(crate) mod pool;
 mod scalar;
 mod text;
 
-use pyo3::exceptions::PyValueError;
+use std::sync::Mutex;
+
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
+use pyo3::types::PyType;
 
 pyo3::create_exception!(
     pyspark.sql.connect.proto,
@@ -28,6 +31,46 @@ pyo3::create_exception!(
     pyo3::exceptions::PyException,
     "The error of parsing a protocol message, as protobuf's `google.protobuf.message.DecodeError`."
 );
+
+/// The class of the error of a parse that fails, which `_proto_set_decode_error` set:
+/// `pyspark.sql.connect.proto._rust.DecodeError`, a subclass of [`DecodeError`] and, where
+/// protobuf imports, of protobuf's `google.protobuf.message.DecodeError`, which upb raises, so
+/// that `except google.protobuf.message.DecodeError` catches it.
+static DECODE_ERROR_CLASS: Mutex<Option<Py<PyType>>> = Mutex::new(None);
+
+/// Set the class of the error of a parse that fails, a subclass of `ProtoDecodeError` (see
+/// [`decode_error_of`]), in place of the one set before.
+#[pyfunction]
+fn _proto_set_decode_error(class: &Bound<'_, PyType>) -> PyResult<()> {
+    if !class.is_subclass_of::<DecodeError>()? {
+        return Err(PyTypeError::new_err(format!(
+            "{} is not a subclass of ProtoDecodeError",
+            class.str()?
+        )));
+    }
+    let previous = DECODE_ERROR_CLASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .replace(class.clone().unbind());
+    // Released once the class is no longer locked.
+    drop(previous);
+    Ok(())
+}
+
+/// The error of a parse that fails, of upb's `message`: of the class that
+/// `_proto_set_decode_error` set, else (before `pyspark.sql.connect.proto` sets it) of
+/// [`DecodeError`].
+pub(crate) fn decode_error_of(py: Python<'_>, message: String) -> PyErr {
+    let class = DECODE_ERROR_CLASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|class| class.clone_ref(py));
+    match class {
+        Some(class) => PyErr::from_type(class.into_bound(py), (message,)),
+        None => DecodeError::new_err(message),
+    }
+}
 
 /// Run `f`, one level of a recursion over a message, on a stack with room for it: deeply nested
 /// plans recurse once per level, and a new segment of stack is taken when this one runs low.
@@ -183,6 +226,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<descriptors::PyDescriptorPool>(),
     )?;
     m.add("ProtoDecodeError", py.get_type::<DecodeError>())?;
+    m.add_function(wrap_pyfunction!(_proto_set_decode_error, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_files, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_register_files, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_descriptor, m)?)?;

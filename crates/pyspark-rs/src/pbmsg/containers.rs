@@ -36,8 +36,8 @@ use pyo3::types::{
 use pyo3::IntoPyObjectExt;
 
 use super::message::{
-    content_eq, duplicate_with, mark_present, message_from_value, new_instance, registered_class,
-    MessageClass, PyMessage,
+    content_eq, duplicate_with, mark_present, new_instance, registered_class, MessageClass,
+    PyMessage,
 };
 use super::pool::{Kind, MapDesc};
 use super::scalar::Scalar;
@@ -1446,30 +1446,130 @@ impl MapContainer {
         Ok(true)
     }
 
-    /// Set the items of `mapping` in `target`, as the constructor of a message takes a map field:
-    /// a message value may be a message or a mapping of its fields. Each item is a step of
-    /// `budget`, the budget of the constructor, as is each message that it copies or builds.
+    /// Set `value` in `target`, as upb's `InitMapAttributes` takes the value of the map field
+    /// `field` (its full name) of the constructor of a message:
+    ///
+    /// - A map of scalars takes it as upb's `update` does, which is `MutableMapping.update`, run in
+    ///   Python: the items of a mapping or of an object with `keys`, else the pairs of an
+    ///   iterable (`[("a", "b")]`, `["ab"]`, `[]`), with Python's errors of a pair of another
+    ///   shape (`ValueError: not enough values to unpack (expected 2, got 1)`), as its version
+    ///   words them. Its loop lets other threads run, and signals interrupt it, as upb's does. A
+    ///   tuple is the arguments of the call, as upb's `PyObject_CallMethod(map, "update", "O",
+    ///   value)` makes it: `({"a": "b"},)` updates of the dict, and `(("a", "b"),)` of the pairs
+    ///   of `("a", "b")`, which are not pairs.
+    /// - A map of messages takes the keys that `value` iterates, each of `value[key]`, so a
+    ///   mapping, but not pairs (`value[key]` of a list is a `TypeError`): a dict sets the fields
+    ///   of the message of the key (made if the map has none), and anything else is copied into
+    ///   that message as its `CopyFrom` takes it, of its errors. The error of a key that the map
+    ///   refuses is raised over that of reading its value, as upb reads the value first.
+    ///
+    /// The items of a dict (not of a subclass, whose methods `MutableMapping.update` and upb would
+    /// run) are read here, as those loops read them, in their order. Each item of a dict, and each
+    /// key of a map of messages, is a step of `budget`, the budget of the constructor, as is each
+    /// message that it copies or builds.
     pub(crate) fn update_from(
         py: Python<'_>,
         target: &Bound<'_, Self>,
-        mapping: &Bound<'_, PyAny>,
+        value: &Bound<'_, PyAny>,
+        field: &str,
         budget: &ConversionBudget,
     ) -> PyResult<()> {
+        static MUTABLE_MAPPING_UPDATE: pyo3::sync::PyOnceLock<Py<PyAny>> =
+            pyo3::sync::PyOnceLock::new();
         let map = Self::map_of(target);
-        let items = mapping.call_method0("items")?;
-        for item in items.try_iter()? {
-            let item = item?;
+        if value.is_exact_instance_of::<PyDict>() {
+            // The view's iteration raises Python's error of a dict that changes size meanwhile.
+            for item in value.call_method0("items")?.try_iter()? {
+                let (key, item): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item?.extract()?;
+                budget.step(py)?;
+                let key = key_of(&map, &key)?;
+                if map.value == Kind::Message {
+                    Self::set_message_of_key(py, target, key, item, budget)?;
+                } else {
+                    // As `map[key] = item` sets it, but for setting its message in a parent, which
+                    // the message that the constructor makes has none of.
+                    let item = MapValue::Scalar(value_of(&map, &item)?);
+                    let _replaced = target.borrow_mut().insert(key, item);
+                }
+            }
+            return Ok(());
+        }
+        if map.value != Kind::Message {
+            let update = MUTABLE_MAPPING_UPDATE.get_or_try_init(py, || -> PyResult<_> {
+                let mutable_mapping = py.import("collections.abc")?.getattr("MutableMapping")?;
+                Ok(mutable_mapping.getattr("update")?.unbind())
+            })?;
+            let mut args = vec![target.as_any().clone()];
+            match value.cast::<PyTuple>() {
+                Ok(tuple) => args.extend(tuple.iter()),
+                Err(_) => args.push(value.clone()),
+            }
+            update.bind(py).call1(PyTuple::new(py, args)?)?;
+            return Ok(());
+        }
+        let keys = value.try_iter().map_err(|_| {
+            PyTypeError::new_err(format!("Argument for field {field} is not iterable"))
+        })?;
+        for key in keys {
+            let key = key?;
             budget.step(py)?;
-            let (key, value): (Bound<'_, PyAny>, Bound<'_, PyAny>) = item.extract()?;
+            let item = value.get_item(&key);
             let key = key_of(&map, &key)?;
-            let value = if map.value == Kind::Message {
-                MapValue::Message(message_from_value(py, &map.value_type, &value, budget)?.unbind())
-            } else {
-                MapValue::Scalar(value_of(&map, &value)?)
-            };
-            let _replaced = target.borrow_mut().insert(key, value);
+            Self::set_message_of_key(py, target, key, item?, budget)?;
         }
         Ok(())
+    }
+
+    /// Set `item` as the message of `key` in `target`, a map of messages, as upb's
+    /// `InitMapAttributes` sets the item of a key: a dict sets the fields of the message of the key
+    /// (made if the map has none), a message of the type of the map's values is copied in place of
+    /// it, and anything else goes to the `CopyFrom` of the message of the key, which raises its
+    /// error of a value that is not a message of the type.
+    fn set_message_of_key(
+        py: Python<'_>,
+        target: &Bound<'_, Self>,
+        key: Scalar,
+        item: Bound<'_, PyAny>,
+        budget: &ConversionBudget,
+    ) -> PyResult<()> {
+        if let Ok(fields) = item.cast::<PyDict>() {
+            let message = Self::message_of_key(py, target, key)?;
+            message
+                .borrow_mut()
+                .init_from_mapping_with(py, fields.as_any(), budget)?;
+            return Ok(());
+        }
+        if let Ok(message) = item.cast::<PyMessage>() {
+            if message.borrow().desc.full_name == Self::map_of(target).value_type {
+                let copy = duplicate_with(py, message, budget)?;
+                // The value that the copy replaces is dropped once the map is no longer borrowed.
+                let _replaced = target
+                    .borrow_mut()
+                    .insert(key, MapValue::Message(copy.unbind()));
+                return Ok(());
+            }
+        }
+        let message = Self::message_of_key(py, target, key)?;
+        py.get_type::<PyMessage>()
+            .call_method1("CopyFrom", (message, item))?;
+        Ok(())
+    }
+
+    /// The message of `key` in `target`, a map of messages, inserted as a new message when the
+    /// map has none, as upb's `map[key]` gives it.
+    fn message_of_key<'py>(
+        py: Python<'py>,
+        target: &Bound<'py, Self>,
+        key: Scalar,
+    ) -> PyResult<Bound<'py, PyMessage>> {
+        if let Some(MapValue::Message(message)) = target.borrow().entries.get(&key) {
+            return Ok(message.bind(py).clone());
+        }
+        let message = new_instance(py, &Self::map_of(target).value_type)?;
+        let _replaced = target
+            .borrow_mut()
+            .insert(key, MapValue::Message(message.clone().unbind()));
+        Ok(message)
     }
 
     /// The value of `key`, inserting the default of the value type (a new message, of a message
