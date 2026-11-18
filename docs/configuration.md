@@ -99,7 +99,8 @@ grpcio:
 
 - Only the lowercase names are read; `HTTPS_PROXY` and `NO_PROXY` are not.
 - Only an `http://` proxy is supported. Another scheme (`https://`, `socks5://`), a value
-  without a scheme or an empty one connects directly, with a warning for an invalid value.
+  without a scheme or an empty one connects directly. An invalid value is logged as an error of
+  each session, whatever its host (see [Errors on stderr](#errors-on-stderr)).
 - The user and password of the proxy URI, percent-decoded, are sent as
   `Proxy-Authorization: Basic`. A proxy without a port is on port 443.
 - A `no_proxy` entry matches the host itself or its subdomains (`example.com` and
@@ -109,7 +110,13 @@ grpcio:
 Unlike grpcio, a loopback host (`localhost` and the names under `.localhost`, `127.0.0.0/8`,
 `[::1]`, and IPv4-mapped loopback addresses) is never proxied: its traffic need not leave the
 machine, and a token is sent to `localhost` without TLS. A proxy address with an invalid host or
-port is an error when the session is created.
+port is an error when a session of a host that the proxy applies to is created, where grpcio makes
+the session and fails its requests, as it cannot resolve the address, or takes a port past 65535
+modulo 65536 and connects to that port: the error names the variable at once, rather than requests
+that fail later or a connection to a port that was not given. As in grpcio, which resolves the
+address of the proxy only for a host that it proxies, a host that `no_proxy` lists, as a loopback
+host, connects directly whatever that address. A value that is not UTF-8 is not used, and the
+client connects directly, where grpcio reads its bytes.
 
 ## TLS Root Certificates
 
@@ -121,6 +128,30 @@ certificates are trusted instead, such as the CA of a corporate proxy that inspe
 export GRPC_DEFAULT_SSL_ROOTS_FILE_PATH=/etc/ssl/corporate-ca.pem
 ```
 
-The file replaces the other roots rather than adding to them. If it cannot be read or is empty,
-the client warns and uses the system's roots. grpcio's default roots are its own bundle, not the
-system's, so a CA that is only in the system's trust store is trusted here but not by PySpark.
+The file replaces the other roots rather than adding to them. As in grpcio, the variable and the
+file are read once, when the first TLS session of the process is made, and an empty file is as no
+file. A file that cannot be read is logged as an error (see [Errors on stderr](#errors-on-stderr)),
+and the client uses the system's roots. grpcio's default roots are its own bundle, not the
+system's, so a CA that is only in the system's trust store is trusted here but not by PySpark, and
+a system without roots fails every TLS session when it is made (`Failed to configure TLS`), where
+PySpark's bundle works. The client takes the system's store rather than a bundle of its own as it
+holds the CAs that the administrator of the machine installs, and is kept up to date with the
+system rather than with the releases of the client.
+
+## Errors on stderr
+
+PySpark's own code says nothing of a proxy variable that is not a proxy, or of a roots file that
+cannot be read: gRPC's C core, in grpcio, logs them to stderr as errors. The client logs them
+there as lines of the same form, which name the Rust source of the call, where grpcio's name its
+own:
+
+```text
+E1118 16:53:41.241267 4026384 http_proxy_mapper.cc:159] 'https' scheme not supported in proxy URI
+E1118 17:37:31.168823  299507 proxy.rs:100] the 'https' scheme of the proxy URI is not supported in https_proxy; not using a proxy
+```
+
+As in grpcio, a proxy variable is logged for each session that is connected, and the roots file
+once, when it is read; a session of `newSession()` or `cloneSession()` shares the connection of its
+session and logs nothing, where PySpark's makes a channel of its own, which logs again. Nothing
+is logged when `GRPC_VERBOSITY` is `NONE` as the client is imported, as grpcio reads it when it
+initializes. The Rust API gives these errors to `tracing`, as warnings.

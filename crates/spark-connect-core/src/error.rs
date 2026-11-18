@@ -580,7 +580,7 @@ impl SparkError {
     /// if it has one, else the text of grpcio's error of the call, `str()` of its `RpcError`, of
     /// the class of `call`.
     pub fn from_grpc_status_of(status: Status, call: GrpcCall) -> Self {
-        let message = status.message().to_string();
+        let message = crate::client::status_details(&status);
         let code = crate::retries::grpc_python_code(&status);
         let details = status.details().to_vec();
         let (mut err, pyspark_message) = if code == tonic::Code::DeadlineExceeded {

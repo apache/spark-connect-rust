@@ -378,7 +378,9 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   transport reads `SPARK_CONNECT_USER_AGENT` when a session is made of a connection string, and
   the sessions of `newSession` and `cloneSession` take the user agent of the session they are
   made of, where PySpark's requests read the variable each time, those of these sessions too:
-  the transport does not read the environment of the process while Python threads may change it.
+  the core builds the requests without Python, on the threads of its runtime too, which do not
+  wait for the GIL, so it reads the variable of the environment of the process when a session is
+  made, rather than `os.environ` for each request.
   The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.
@@ -422,7 +424,22 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   itself, as a refused connection or a failed DNS lookup, they are tonic's message, such as
   `tcp connect error` and `UNAVAILABLE:tcp connect error`, where grpcio's are such as
   `failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:1: Failed to connect
-  to remote host: Connection refused`.
+  to remote host: Connection refused`. Of a connection whose server sends no settings by the
+  connect deadline, they are grpcio's last error, `connection attempt timed out before receiving
+  SETTINGS frame`, without the `failed to connect to all addresses; last error: UNKNOWN:
+  <address>: ` before it.
+- **The connections and the logs of the transport** (intentional; the transport is native). The
+  `CONNECT` request of a proxy has only the `Host` and `Proxy-Authorization` headers, where
+  grpcio's has `User-Agent: grpc-httpcli/0.0` too. The addresses of a proxy are tried in turn
+  within the one connect deadline of 20 s, so that one that does not answer holds the next ones,
+  where grpcio starts the next one 250 ms after the previous, each with a deadline of its own. A
+  TLS channel trusts the system's store, where grpcio's trusts its own bundle, so that a system
+  without roots fails every TLS session when it is made (`Failed to configure TLS`), where
+  PySpark's connects (see `docs/configuration.md`). With `SPARK_CONNECT_LOG_LEVEL=debug`,
+  PySpark's client also logs its `RpcDeadlines` when it is made (`Spark Connect RPC deadlines:
+  ...`), the failure that ends its retries (`Given up on retrying. error: ...`) and each gRPC
+  failure that it converts (`GRPC Error received`), which the transport, whose retries and errors
+  are its own, does not.
 - **`SparkConnectClient.get_tags`** (intentional). A copy of the tags of the thread, where
   PySpark returns the set that its client keeps, which its later changes change too, as
   `SparkSession.getTags` does.

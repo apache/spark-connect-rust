@@ -25030,6 +25030,51 @@ def test_client_config_sends_the_operation_it_is_given_as_pyspark(mock_connect):
         client.config(pb2.ConfigRequest())
 
 
+def test_channel_errors_are_logged_to_stderr_as_grpcio_logs_them(capfd, monkeypatch):
+    # As grpcio, whose C core logs a proxy variable that is not an HTTP proxy as an error, on
+    # stderr, for each channel that it makes, whatever its host, which is all that PySpark's
+    # client shows of it: `E<month><day> <time> <thread> <file>:<line>] <message>`, of the Rust
+    # source of the call here, on the thread of the session. A session of newSession shares the
+    # connection of its session, which is not made again. A GRPC_VERBOSITY of NONE when the
+    # client is imported silences them, as grpcio reads it when it initializes.
+    import subprocess
+    import sys
+    import threading
+
+    if os.environ.get("GRPC_VERBOSITY", "").upper() == "NONE":
+        pytest.skip("GRPC_VERBOSITY=NONE silences the errors of the channels")
+    for name in ("grpc_proxy", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("https_proxy", "socks5://proxy.example:1080")
+    capfd.readouterr()
+    spark = SparkSession.builder.remote("sc://localhost:1").create()
+    spark.newSession()
+    logged = capfd.readouterr().err
+    message = (
+        "the 'socks5' scheme of the proxy URI is not supported in https_proxy; not using a proxy"
+    )
+    thread = threading.get_native_id()
+    line = rf"E\d{{4}} \d\d:\d\d:\d\d\.\d{{6}} {thread:7d} proxy\.rs:\d+\] {re.escape(message)}\n"
+    assert re.fullmatch(line, logged), logged
+    spark.client.set_retry_policies([])
+    spark.stop()
+    silenced = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pyspark.sql.connect.session import SparkSession\n"
+            "spark = SparkSession.builder.remote('sc://localhost:1').create()\n"
+            "spark.client.set_retry_policies([])\n"
+            "spark.stop()",
+        ],
+        env={**os.environ, "GRPC_VERBOSITY": "none"},
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert (silenced.returncode, silenced.stderr) == (0, "")
+
+
 def test_spent_retries_warn_where_pyspark_warns(caplog):
     # As PySpark's `Retrying._wait`, which warns `[RETRIES_EXCEEDED]` once the retries of a
     # failure that a policy retries are spent, before it raises the failure: a UserWarning of the
