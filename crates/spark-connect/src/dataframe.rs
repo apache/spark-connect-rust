@@ -3150,9 +3150,31 @@ impl DataFrame {
     ///
     /// Mirrors `pyspark.sql.connect.dataframe.DataFrame.to` (a `ToSchema` relation).
     pub fn to(&self, schema: DataType) -> DataFrame {
+        self.to_with_reader(schema, None)
+    }
+
+    /// As [`DataFrame::to`], of a schema that `reader` gives each time a request builds the plan,
+    /// as PySpark's `ToSchema` converts the type object of its schema then (see
+    /// `LogicalPlan::ToSchema`); `schema` is the schema at the call, which the DataFrame caches.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn to_read_at_build(
+        &self,
+        schema: DataType,
+        reader: crate::udf::CommandPickler,
+    ) -> DataFrame {
+        self.to_with_reader(schema, Some(reader))
+    }
+
+    fn to_with_reader(
+        &self,
+        schema: DataType,
+        schema_reader: Option<crate::udf::CommandPickler>,
+    ) -> DataFrame {
         let plan = LogicalPlan::ToSchema {
             input: Arc::clone(&self.plan),
             schema: schema.clone(),
+            schema_reader,
         };
         Self::new_with_schema(self.session.clone(), plan, Some(schema))
     }

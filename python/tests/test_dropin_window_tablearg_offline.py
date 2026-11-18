@@ -158,6 +158,55 @@ def test_table_arg_deepcopy_keeps_user_attributes(spark):
     assert deep.foo is not table.foo
 
 
+def test_window_objects_and_members_are_those_of_pyspark():
+    # As PySpark's Window, a plain class of static methods and of the thresholds of the frames,
+    # and PySpark Connect's subclass of `_spec`: its objects, also of a subclass, have no state,
+    # take attributes and weak references, pickle as plain objects and take no arguments, as
+    # `object.__new__` makes them; and as PySpark Connect's WindowSpec, whose `_partitionSpec`,
+    # `_orderSpec` and `_frame` are the expressions of its partitioning and its ordering, which
+    # show as PySpark's, and its WindowFrame. `pyspark.sql.window.__all__` is PySpark's.
+    import sys
+    import weakref
+
+    import pyspark.sql.window as window_module
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.window import Window as ConnectWindow
+    from pyspark.sql.connect.window import WindowFrame
+
+    assert window_module.__all__ == ["Window", "WindowSpec"]
+    assert Window._PRECEDING_THRESHOLD == max(-sys.maxsize, -(1 << 63))
+    assert Window._FOLLOWING_THRESHOLD == min(sys.maxsize, (1 << 63) - 1)
+    assert repr(ConnectWindow._spec) == "WindowSpec()"
+    for cls in (Window, ConnectWindow):
+        window = cls()
+        assert type(window) is cls and vars(window) == {}
+        window.note = 1
+        assert weakref.ref(window)() is window
+        copied = pickle.loads(pickle.dumps(window))
+        assert type(copied) is cls and copied.note == 1
+        assert repr(window).startswith(f"<{cls.__module__}.Window object at 0x")
+        with pytest.raises(TypeError, match=r"^Window\(\) takes no arguments$"):
+            cls(5)
+
+    class Sub(Window):
+        def __init__(self, x):
+            self.x = x
+
+    assert Sub(5).x == 5
+    assert repr(Sub.partitionBy("a")) == "WindowSpec(PartitionBy(a))"
+    spec = Window.partitionBy(F.col("x") + 1, "y").orderBy(F.col("z").desc(), "q")
+    spec = spec.rowsBetween(-1, 1)
+    assert repr(spec._partitionSpec) == "[+(x, 1), y]"
+    assert repr(spec._orderSpec) == "[z DESC NULLS LAST, q ASC NULLS FIRST]"
+    assert type(spec._frame) is WindowFrame
+    assert (spec._frame._isRowFrame, spec._frame._start, spec._frame._end) == (True, -1, 1)
+    assert repr(spec._frame) == "WindowFrame(ROW_FRAME, -1, 1)"
+    ranged = Window.rangeBetween(Window.unboundedPreceding, 5)._frame
+    assert repr(ranged) == "WindowFrame(RANGE_FRAME, -9223372036854775808, 5)"
+    assert Window.partitionBy("a")._frame is None
+    assert Window.partitionBy("a")._orderSpec == []
+
+
 def test_window_copy_and_pickle_keep_user_attributes():
     window = Window.partitionBy("id")
     window.foo = 5

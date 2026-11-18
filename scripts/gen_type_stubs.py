@@ -267,8 +267,9 @@ EXTRAS = {
         "from pyspark.sql.streaming.listener import QueryStartedEvent as QueryStartedEvent\n"
         "from pyspark.sql.streaming.listener import QueryTerminatedEvent as QueryTerminatedEvent\n"
     ),
-    # The native classes of the frame bounds and of the triggers.
-    "pyspark.sql.window": Extra("class FrameBound: ...\n", ("FrameBound",)),
+    # The native classes of the frame bounds, which PySpark's `__all__` does not list as the
+    # drop-in's does not, and of the triggers.
+    "pyspark.sql.window": Extra("class FrameBound: ...\n"),
     "pyspark.sql.streaming.readwriter": Extra(
         "class Trigger:\n"
         "    @staticmethod\n"

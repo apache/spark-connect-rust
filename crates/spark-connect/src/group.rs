@@ -1269,6 +1269,76 @@ mod tests {
     }
 
     #[test]
+    fn transform_with_state_sends_the_output_type_that_its_function_converts_at_the_build() {
+        use crate::udf::{eval_type, CommandPickler, PythonUDFPayload};
+        use prost::Message;
+        use spark_connect_proto::relation::RelType;
+        use std::sync::{Arc, Mutex};
+
+        // As PySpark's `BaseTransformWithStateInPySpark.plan`, which converts the output schema
+        // and the output type of the function of the one object that it keeps when it builds the
+        // plan: of a function whose pickler converts its type then, the output schema that is its
+        // type at the call is the type of the build, and a DDL string stays as it is given.
+        let spark = session();
+        let grouped = spark
+            .range(10)
+            .unwrap()
+            .group_by(vec![crate::column::col("id")]);
+        let at_call = DataType::from_ddl("id long").unwrap();
+        let current = Arc::new(Mutex::new(at_call.clone()));
+        let function = |current: &Arc<Mutex<DataType>>| {
+            let pickler = CommandPickler::with_output_type(Arc::clone(current), |current| {
+                Ok(spark_connect_proto::PythonUdf {
+                    output_type: Some(current.lock().unwrap().to_proto()),
+                    ..Default::default()
+                }
+                .encode_to_vec())
+            });
+            CommonInlineUserDefinedFunctionExpression::new(
+                "count".to_string(),
+                true,
+                vec![],
+                PythonUDFPayload::pickled_at_build(
+                    DataType::from_ddl("id long").unwrap(),
+                    eval_type::SQL_TRANSFORM_WITH_STATE_PYTHON_ROW_UDF,
+                    pickler,
+                    "3.12".to_string(),
+                ),
+            )
+        };
+        let info_of = |df: &DataFrame| {
+            let Some(RelType::GroupMap(group_map)) = df.plan.to_proto().rel_type else {
+                panic!("expected a GroupMap relation");
+            };
+            group_map.transform_with_state_info.unwrap().output_schema
+        };
+        let typed = grouped.transform_with_state(
+            function(&current),
+            at_call.clone(),
+            "Update",
+            "None",
+            Some(""),
+            None,
+        );
+        let unparsed = DataType::Unparsed {
+            data_type_string: "id long".to_string(),
+        };
+        let given = grouped.transform_with_state(
+            function(&current),
+            unparsed.clone(),
+            "Update",
+            "None",
+            Some(""),
+            None,
+        );
+        assert_eq!(info_of(&typed), Some(at_call.to_proto()));
+        let changed = DataType::from_ddl("id long, c long").unwrap();
+        *current.lock().unwrap() = changed.clone();
+        assert_eq!(info_of(&typed), Some(changed.to_proto()));
+        assert_eq!(info_of(&given), Some(unparsed.to_proto()));
+    }
+
+    #[test]
     fn group_count_plan() {
         let spark = session();
         let df = spark.range(10).unwrap();

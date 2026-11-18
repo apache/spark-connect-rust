@@ -52,7 +52,10 @@ impl PyTableValuedFunction {
 
     /// Each argument is taken by its `int()`, as PySpark's `spark.tvf.range` takes them, which
     /// is `spark.range`.
-    #[pyo3(signature = (start, end=None, step=crate::session::RangeStep::Omitted, numPartitions=None))]
+    #[pyo3(
+        signature = (start, end=None, step=crate::session::RangeStep::Omitted, numPartitions=None),
+        text_signature = "($self, start, end=None, step=1, numPartitions=None)"
+    )]
     #[allow(non_snake_case)]
     fn range(
         &self,

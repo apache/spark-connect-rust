@@ -2328,7 +2328,10 @@ impl PySparkSession {
     /// Mirrors `pyspark.sql.SparkSession.range(start, end=None, step=1, numPartitions=None)`:
     /// called with a single positional arg it means `range(0, start)`.
     /// Each argument is taken by its `int()`, as PySpark's `range` takes them.
-    #[pyo3(signature = (start, end=None, step=RangeStep::Omitted, numPartitions=None))]
+    #[pyo3(
+        signature = (start, end=None, step=RangeStep::Omitted, numPartitions=None),
+        text_signature = "($self, start, end=None, step=1, numPartitions=None)"
+    )]
     #[allow(non_snake_case)]
     fn range(
         &self,

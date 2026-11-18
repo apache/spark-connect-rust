@@ -35,29 +35,64 @@ impl UdfCommand {
     }
 }
 
-/// The object of the pickler of a command of the binding: a Python function of no arguments that
-/// returns the command, or an object that `CloudPickleSerializer().dumps` pickles, which the
-/// garbage collector sees through the DataFrame or the Column that holds it, and which a deep copy
-/// of them copies.
+/// The object of the pickler of a command of the binding, which the garbage collector sees
+/// through the DataFrame or the Column that holds it, and which a deep copy of them copies.
 struct PythonCommand {
     object: Py<PyAny>,
-    calls: bool,
+    kind: CommandKind,
+}
+
+/// What the object of a [`PythonCommand`] is.
+#[derive(Clone, Copy)]
+enum CommandKind {
+    /// A Python function of no arguments that returns the command.
+    Calls,
+    /// The `(func, output_type)` of a UDF, which `CloudPickleSerializer().dumps` pickles, after
+    /// the conversion of the `output_type` that the request sends with it, as PySpark's
+    /// `PythonUDF.to_plan` does.
+    Udf,
+    /// A data type, which is converted to its `spark.connect.DataType`.
+    DataType,
 }
 
 impl PythonCommand {
     /// The pickler of this command.
     fn pickler(self) -> CommandPickler {
-        CommandPickler::new(self, PythonCommand::pickle)
+        match self.kind {
+            CommandKind::Calls | CommandKind::DataType => {
+                CommandPickler::new(self, PythonCommand::pickle)
+            }
+            CommandKind::Udf => CommandPickler::with_output_type(self, PythonCommand::pickle),
+        }
     }
 
-    /// The command, which the function returns, or the pickle of the object.
+    /// The command, which the function returns, or, of a UDF, the `PythonUdf` message of its
+    /// output type, converted first, and of the pickle of the object, as PySpark's
+    /// `PythonUDF.to_plan` converts `pyspark_types_to_proto_types(output_type)` before it pickles
+    /// `(func, output_type)`, of the type as it is then; of a data type, its message.
     fn pickle(&self) -> spark_connect_core::error::Result<Vec<u8>> {
         Python::attach(|py| {
             let object = self.object.bind(py);
-            if self.calls {
-                command_of(&object.call0()?)
-            } else {
-                crate::dataframe::py_cloudpickle(py, object)
+            match self.kind {
+                CommandKind::Calls => command_of(&object.call0()?),
+                CommandKind::Udf => {
+                    use prost::Message;
+                    let output_type =
+                        crate::types::py_to_proto_data_type(&object.get_item(1)?)?.to_proto();
+                    let command = crate::dataframe::py_cloudpickle(py, object)?;
+                    Ok(spark_connect_proto::PythonUdf {
+                        output_type: Some(output_type),
+                        command: command.into(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec())
+                }
+                CommandKind::DataType => {
+                    use prost::Message;
+                    Ok(crate::types::py_to_proto_data_type(object)?
+                        .to_proto()
+                        .encode_to_vec())
+                }
             }
         })
         .map_err(crate::errors::callback_error)
@@ -70,17 +105,35 @@ impl PythonCommand {
 fn function_pickler(pickle: Py<PyAny>) -> CommandPickler {
     PythonCommand {
         object: pickle,
-        calls: true,
+        kind: CommandKind::Calls,
     }
     .pickler()
 }
 
-/// The pickler of `object`, which a request pickles with `CloudPickleSerializer().dumps`, as
-/// PySpark's `PythonUDF.to_plan` pickles the `(func, output_type)` of a map or group-map function.
-pub(crate) fn object_pickler(object: Py<PyAny>) -> CommandPickler {
+/// The pickler of `udf`, the `(func, output_type)` of a UDF, of a pandas or Arrow UDF or of a map
+/// or group-map function, which a request converts and pickles each time it builds the plan, as
+/// PySpark's `PythonUDF.to_plan` does of the `output_type` and the function that it keeps: the
+/// output type that the request sends is that of `output_type` then, which the command carries
+/// too, so a `StructType` changed in place after the call is sent as it is changed, and a type
+/// that `pyspark_types_to_proto_types` has no proto of fails the request with its
+/// `UNSUPPORTED_OPERATION`, before the function is pickled.
+pub(crate) fn udf_pickler(udf: Py<PyAny>) -> CommandPickler {
     PythonCommand {
-        object,
-        calls: false,
+        object: udf,
+        kind: CommandKind::Udf,
+    }
+    .pickler()
+}
+
+/// The reader of `data_type`, a type object, which a request converts to its
+/// `spark.connect.DataType` each time it builds the plan, as PySpark's `ToSchema` converts the
+/// schema of `DataFrame.to` then: a `StructType` changed in place after the call is sent as it is
+/// then, and a type that `pyspark_types_to_proto_types` has no proto of fails the request with its
+/// `UNSUPPORTED_OPERATION`.
+pub(crate) fn data_type_pickler(data_type: Py<PyAny>) -> CommandPickler {
+    PythonCommand {
+        object: data_type,
+        kind: CommandKind::DataType,
     }
     .pickler()
 }
@@ -108,7 +161,7 @@ pub(crate) fn deep_copied_picklers(
         let object = deepcopy.call1((command.object.bind(py), memo))?;
         let copy = PythonCommand {
             object: object.unbind(),
-            calls: command.calls,
+            kind: command.kind,
         };
         copies.insert(&pickler, copy.pickler());
     }

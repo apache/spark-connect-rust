@@ -1975,7 +1975,7 @@ impl PyStreamingQuery {
 
     /// Print the plan of the query with Python's `print`, as PySpark's
     /// `StreamingQuery.explain(extended=False)`.
-    #[pyo3(signature = (extended=ProtoBool(None)))]
+    #[pyo3(signature = (extended=ProtoBool(None)), text_signature = "($self, extended=False)")]
     fn explain(&self, py: Python<'_>, extended: ProtoBool) -> PyResult<()> {
         let extended = extended.value(py)?;
         let plan = interruptible(py, &self.inner.spark_session(), || {
