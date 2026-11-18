@@ -17,6 +17,8 @@ one.
 
 ## Rust migration for the 4.3 line
 
+These are the changes for Rust users from v4.2.0 to v4.3.0.
+
 `Value` and `LiteralExpression` add a `DayTimeInterval(i64)` variant for signed
 microseconds. Downstream exhaustive matches on these public enums must handle
 the new variant. A collected map keeps its keys typed: `Value::Map` is a `Vec<(Value, Value)>` of
@@ -193,11 +195,6 @@ or `INTERVAL MONTH`, which the server cannot narrow the Arrow interval to). Down
 matches on these enums must handle the new variant. The Python client still raises
 `NOT_IMPLEMENTED` when it collects a year-month interval, as PySpark does.
 
-`LiteralExpression` adds a hidden `ByteArray { value, rendered }` variant, the literal of a Python
-`bytearray`, which the Python client makes: it is sent as a `Binary` literal of `value`, and its
-`render` is `rendered`, `bytearray(b'...')`, as PySpark renders a bytearray. It is not a stable API;
-downstream exhaustive matches on `LiteralExpression` must handle it, or have a wildcard arm.
-
 `DataFrame::repartition_by_range` and `repartition_by_range_opt` return a `Result`.
 As PySpark's `repartitionByRange`, a partition count that is not positive is
 `VALUE_NOT_POSITIVE` and an empty column list `CANNOT_BE_EMPTY`. Before, the server
@@ -224,30 +221,171 @@ two runs, were equal. For reproducible values, use the `_with_seed` variants
 
 `DataFrameWriter::clear_bucket_by` is added: it unsets the bucketing of a writer, so that
 its write sends none, as PySpark's `bucketBy` of a count that is not positive, the last
-`bucketBy` winning. `bucket_by` of a count that is not positive does the same, as PySpark's
-`WriteOperation` sends the bucketing only of a count above 0; it sent the count, which the server
-refused.
+`bucketBy` winning. `bucket_by` is unchanged and sends the count it is given.
 
-`StatFunctions::corr` takes the `method` of PySpark's `corr(col1, col2, method=None)`: `None` and
-`""` are `"pearson"`, which the request sends, and another method is `VALUE_NOT_ALLOWED`;
-`LogicalPlan::StatCorr` adds its `method` field. `DataFrame::col("*")` is the star of the
-DataFrame, as PySpark's `df["*"]`. `functions::reduce` sends the function `reduce`, as PySpark's,
-where it sent `aggregate`, and `reduce_with_finish` is added. `DataFrame::unpersist_opt` takes an
-optional `blocking`, of which `None` sends none, as PySpark's `unpersist(None)`.
-`SparkSession::create_dataframe_from_arrow` of batches of no rows and a schema sends the schema
-alone, as PySpark's empty data, where it sent the batches, which the server failed to cast to a
-schema of other columns. Without a schema, it sends batches of no rows with their Arrow schema,
-where PySpark's `createDataFrame` of empty data, of a table too, raises `CANNOT_INFER_EMPTY_SCHEMA`
-before it reads the schema of the table, as the Python client does: the batches carry their
-schema, so there is none to infer.
-`PythonUDFPayload::function` makes the payload of the function of a
-streaming `foreach` or `foreachBatch` sink, which, as PySpark's, sends the command and the Python
-version of a payload only, and not its output type and eval type. A window frame sends a bound of
-0 as the current row, and a start of `Preceding(i64::MAX)` or before and an end of
-`Following(i64::MAX)` or after as unbounded, as PySpark's `rowsBetween` and `rangeBetween` of
-`-sys.maxsize` and `sys.maxsize`; an unbounded bound on the other side of the frame is the literal
-of its int, and an offset of a row frame beyond an int fails the request with `VALUE_NOT_BETWEEN`,
-where the server refused it.
+`DataFrame::persist` takes `impl Into<Option<StorageLevel>>`, so a `StorageLevel` is passed
+as before. `None` sends no storage level, as PySpark's `persist(None)`, and the server then
+caches at its `spark.sql.defaultCacheStorageLevel`. `cache` is unchanged and persists at
+`MEMORY_AND_DISK_DESER`.
+
+`DataType::from_json` reads the spatial types as the JSON reader of Spark does: a bare
+`geometry` or `geography` is of SRID 4326, `geography(<algorithm>)` is of the CRS `OGC:CRS84`, a
+CRS is of the form `<authority>:<code>`, and an algorithm other than `SPHERICAL` is
+`ST_INVALID_ALGORITHM_VALUE`. It no longer takes `geometry(<srid>)`, `geometry(any)` and their
+`geography` forms, which are of the DDL, not of the JSON, of Spark. `DataType::from_ddl` takes a
+number or `any` as an SRID, as the DDL parser of Spark does, and no longer takes such forms as
+`geometry(+5)`, `geometry(SRID:ANY)` or `geography(4326, SPHERICAL)`.
+
+## Rust migration for the 4.4 line (unreleased)
+
+These are the changes for Rust users after v4.3.0, on `master`, which ship in 4.4.0.
+
+`SparkErrorKind` adds `BuiltinAttributeError` and `BuiltinAssertionError`, Python's `AttributeError`
+and `AssertionError` as PySpark's client raises them, which `SparkError::builtin_attribute` and
+`SparkError::builtin_assertion` make. `SparkErrorKind` is not `#[non_exhaustive]`, so an exhaustive
+match of it must handle them.
+
+`LiteralExpression` adds a hidden `ByteArray { value, rendered }` variant, the literal of a Python
+`bytearray`, which the Python client makes: it is sent as a `Binary` literal of `value`, and its
+`render` is `rendered`, `bytearray(b'...')`, as PySpark renders a bytearray. It is not a stable API;
+downstream exhaustive matches on `LiteralExpression` must handle it, or have a wildcard arm.
+
+`ExpressionNode` adds a hidden `PlanBuildOrigin` variant, an expression that the Python client makes
+when it builds a plan, such as the `&` of the conditions of a join of a list of Columns, so that its
+origin is of that time, as PySpark makes it then. `CastTarget` adds a hidden
+`Shown(DataType, String)` variant, a cast that sends its type as `CastTarget::Type` does and renders
+as the given string, the `simpleString()` of the Python type object, as PySpark's
+`CastExpression.__repr__` renders it. Neither is a stable API; downstream exhaustive matches on
+`ExpressionNode` and `CastTarget` must handle them, or have a wildcard arm.
+
+`GroupedData::transform_with_state` takes the output schema of its `TransformWithStateInfo`, as
+`transform_with_state_in_pandas` does, where it sent the return type of its function: PySpark's
+`transformWithState` sends `outputStructType` as it is given, a DDL string as an unparsed type,
+which the server parses. The `update` and `insert` of the clauses of `MergeIntoWriter` take
+`impl IntoIterator<Item = (K, Column)>` of `K: Into<String>`, so a `HashMap<String, Column>` is
+passed as before, and the merge sends the assignments in their order, as PySpark sends those of
+`assignments.items()`: a `Vec` or a `BTreeMap` keeps an order, and a `HashMap` sends its own.
+
+`Params::sendable` serializes the params as a fit, a transform, an evaluation and a save send them,
+as PySpark's `serialize_ml_params`: of the error of a value that PySpark cannot send, before any
+request. `Params::extend_from` sets the params of another `Params` over them, as a copy of PySpark
+of a param map sets its values. `Params::set_param_int_array` sends a list of ints as PySpark's
+literal of it, of the type of its first element, where it sent a `long` array when an element did
+not fit 32 bits. `PredictionModel::num_features` and `VectorIndexerModel::category_maps` of an int
+out of the range of an `i32` are an error, where they truncated it, and a grid int beyond a long,
+such as a whole float `1e20` of an int param, is PySpark's `VALUE_NOT_BETWEEN`, where it saturated
+to `i64::MAX`. `OneVsRest::max_label` returns the `Value` of the largest label, of which the fit
+takes Python's `int()`, where it returned an `Option<f64>`; `OneVsRest::fit_classes` takes the
+weight column of the fit, and returns the binary training set of each class with the model;
+`OneVsRest::check_required_params` is removed, as the fit raises PySpark's errors in PySpark's
+order; and `OneVsRestModel` adds `new` and `set_classifier`, and its `apply_param_map` applies the
+map to each of its models too, as PySpark's `OneVsRestModel.copy` copies them (see
+[Native OneVsRest](#native-onevsrest)). `Model::fit_warning` and `MlRef::fit_warning` give the
+warning that the server sends with the model of a fit, and
+`SparkSession::set_ml_fit_warning_handler` sets the handler that each fit calls with it (see
+[Native ML objects](#native-ml-objects-fetch-summaries-save-and-load-rust-api)).
+
+`RetryPolicy` adds a `retries_failures` field, true by default: a policy of false retries no
+failure, as the retry policies of PySpark's client of no `DefaultPolicy` retry none, and
+`RetryPolicy::no_retries` is such a policy. A struct expression of `RetryPolicy` that names every
+field adds it, or takes the others of `..RetryPolicy::default()`. The core tells the listener of
+`retries::set_listener` (a `RetriesListener`, not a stable API) when the retries of a failure that
+a policy retries are spent, where PySpark's `Retrying` warns `[RETRIES_EXCEEDED]`, and its error is
+the error of the call. The listener is one of the process, for the calls of every client: the
+Python binding sets it, to warn from the thread of the call. `SparkError` adds a hidden
+`pyspark_message`, the message of PySpark's exception of a gRPC failure whose status carries no
+error of the server, which the Python binding raises: the text of grpcio's error of the call, as
+PySpark's `_handle_rpc_error` raises it. The message of the error of the Rust API is still the
+description of the code in brackets and the message of the status. A struct expression of
+`SparkError` that names every field adds it, or takes the others of an error of its constructors,
+such as `..SparkError::connect_msg(message)`. `SparkError::from_grpc_status_of` converts the status
+of a call of a stream of responses (`GrpcCall::ServerStreaming`, of grpcio's
+`_MultiThreadedRendezvous`).
+
+`SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
+before a plan is sent, as PySpark's client reads them when it builds its first plan: before the
+request of a relation (`to_proto`), which then observes the server-side session ID of the response
+of the read, and after the request of a command (`execute_command`), so the first command of a
+session observes none. `SparkConnectClient::execute_plan_reattachable_uncompressed` sends a plan
+as it is, neither compressed nor after that read, as PySpark's registrations of functions, table
+functions, data sources and Java functions set their command in the plan of their request, which
+the registrations of the core do.
+
+`SparkSession` adds the settings of PySpark's client: `retry_policy` and `set_retry_policy`, as
+PySpark's `get_retry_policies` and `set_retry_policies`; `reattachable_execute` and
+`set_reattachable_execute`, as its `enable_reattachable_execute` and `disable_reattachable_execute`;
+`token_parameter`, the `token` parameter of the connection string; and
+`set_global_user_context_extensions`, which replaces the global user context extensions, as a change
+of PySpark's `global_user_context_extensions`. `SparkConnectClient` adds them too (it had
+`set_retry_policy`), with `replace_retry_policy`, which sets the policy of a client in use, and
+`result_chunking` and `set_result_chunking`, the result chunking of its executions, a
+`ResultChunking` of PySpark's `allow_arrow_batch_chunking` and `preferred_arrow_chunk_size`, which
+by default allows chunks of no preferred size, as before. The clones of a client share its retry
+policy, where each clone had a policy of its own, and the client of a new session, of
+`SparkConnectClient::with_new_session_id`, has the default policy and chunking, as PySpark's
+`newSession` and `clone`, where it kept the policy of the client. An execution that is not
+reattachable, as `ExecutePlanResponseReattachableIterator::not_reattachable` makes its iterator, is
+one `ExecutePlan`, sent again from the start when its stream fails in a way that the retry policy
+retries, and never released, as PySpark's. `SparkSession::cache_artifacts` caches blobs as artifacts
+of their SHA-256 hashes, as PySpark's `SparkConnectClient.cache_artifacts`, and
+`SparkSession::add_artifacts_of_flags` adds files as PySpark's `SparkConnectClient.add_artifacts`
+names them by its flags.
+
+A connection has grpcio's connect deadline, 20 s from its start, which its TCP connection, the
+tunnel of a proxy, its TLS handshake and, of a plaintext connection, the HTTP/2 settings that the
+server sends first share: one that does not complete in it fails with `UNAVAILABLE`, which the retry
+policy retries. Before, a direct connection bounded its TCP connection only, by 10 s, so a TLS
+handshake that the server never answered held a call until its deadline, and a plaintext server that
+never answered until the keepalive of the connection (see
+[What "drop-in" means](#what-drop-in-means) for what stays different from grpcio). The user agent is
+sent as the client type of the requests only, as PySpark sends it, and the HTTP `user-agent` header
+is tonic's own, so a user agent of a control character connects, where its connection failed. A user
+agent longer than 2048 characters after URL escaping, and a `SPARK_CONNECT_USER_AGENT` that is not
+UTF-8, are the error of each request that carries the user agent, as PySpark's `userAgent` raises
+them when a request is built, where the first failed the connection of the session and the second
+sent `_SPARK_CONNECT_PYTHON` in its place. A tab, CR or LF in the connection string is removed, as
+`urllib.parse.urlsplit` removes them, where it failed. The `session_id` of the connection string is
+checked as PySpark's `uuid.UUID(session_id, version=4)` checks it, of Python's messages, and is sent
+as it is given, where it was checked as a UUID of the uuid crate, of the origin `invalid UUID`. A
+retry policy of no `max_backoff_ms` keeps its initial backoff, as PySpark's does, where its backoff
+grew by its multiplier.
+
+`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` and its file are read once in a process, when its first TLS
+session is made, as grpcio reads them, where each client read them when it connected, and an empty
+file is as no file, without a warning. An invalid proxy address of the environment fails only the
+sessions of the hosts that the proxy applies to, as grpcio connects the others directly, where it
+failed the sessions of every host. The errors of a channel that grpcio logs, of a proxy variable
+that is not a proxy and of a roots file that cannot be read, also go to the listener of
+`grpc_log::set_listener` (a `grpc_log::Listener`, not a stable API), as they go to `tracing`; the
+Python client writes them to stderr, as grpcio does.
+
+`PythonUDFPayload` and `LogicalPlan::CommonInlineUdtf` add a `pickler` field, which is not a
+stable API: the pickling of the command of a UDF or UDTF of the Python client, which a request
+calls each time it builds the plan, as PySpark pickles the function then. Code that constructs
+the struct or the variant directly sets it to `None`. `PythonUDFPayload::new` and
+`TableValuedFunction::udtf` are unchanged: a command of bytes is sent as it is.
+`LogicalPlan::MapPartitions` adds a `profile_id_reader` field, which is not a stable API either:
+the reader of the id of the resource profile of the Python client's `mapInPandas` and
+`mapInArrow`, which a request calls when it builds the plan, as PySpark reads `profile.id` then.
+Code that constructs the variant directly sets it to `None`; `profile_id` is sent as before.
+`LogicalPlan::ToSchema` adds a `schema_reader` field, which is not a stable API either: the reader
+of the schema of the Python client's `DataFrame.to`, which a request calls when it builds the plan,
+as PySpark converts the schema object then. Code that constructs the variant directly sets it to
+`None`; `DataFrame::to` sends its schema as before.
+
+`CoGroupedData::input_columns` is removed. It gave the columns of both sides for the arguments of
+the function of a cogroup, but that function binds no columns, as PySpark's `CoGroupMap` builds it:
+it takes the whole cogroups, so the inputs need no analysis.
+`GroupedData::apply_in_pandas_with_state_with_schemas` sends the output and the state schemas as the
+strings that it is given, DDL or JSON, which the server parses, as PySpark sends a schema given as a
+string; `apply_in_pandas_with_state` sends the JSON of its types, as before.
+`LogicalPlan::ApplyInPandasWithState` holds the two schemas as these strings: its `output_schema`
+and `state_schema` are `String`s, where they were `DataType`s. `Value::calendar_interval_parts`
+reads the months, days and nanoseconds of a collected calendar interval back from its text, and
+`Value::calendar_interval` makes that value of the parts. `LocalRowIterator::next_decoded` takes the
+next row of the batch that the iterator holds without fetching another, and
+`LocalRowIterator::has_received_batch` tells whether a record batch of the result has arrived, also
+one without rows.
 
 These raise PySpark's errors where the request was sent before: the requests of the DataFrame of a
 `lateral_join` of another join type than an inner, a left outer or a cross join raise
@@ -283,87 +421,102 @@ the requests of its DataFrame raise `MIXED_TYPE_REPLACEMENT` unless the values t
 replacements that are not null are all booleans, all strings or all numbers, of which a boolean is
 one too, as a Python bool is an int. `NaFunctions::replace_literals` does the same.
 
+`DataFrameWriter::bucket_by` of a count that is not positive does as `clear_bucket_by` does, as
+PySpark's `WriteOperation` sends the bucketing only of a count above 0; it sent the count, which the
+server refused.
+
+`StatFunctions::corr` takes the `method` of PySpark's `corr(col1, col2, method=None)`: `None` and
+`""` are `"pearson"`, which the request sends, and another method is `VALUE_NOT_ALLOWED`;
+`LogicalPlan::StatCorr` adds its `method` field. `DataFrame::col("*")` is the star of the
+DataFrame, as PySpark's `df["*"]`. `functions::reduce` sends the function `reduce`, as PySpark's,
+where it sent `aggregate`, and `reduce_with_finish` is added. `DataFrame::unpersist_opt` takes an
+optional `blocking`, of which `None` sends none, as PySpark's `unpersist(None)`.
+`SparkSession::create_dataframe_from_arrow` of batches of no rows and a schema sends the schema
+alone, as PySpark's empty data, where it sent the batches, which the server failed to cast to a
+schema of other columns. Without a schema, it sends batches of no rows with their Arrow schema,
+where PySpark's `createDataFrame` of empty data, of a table too, raises `CANNOT_INFER_EMPTY_SCHEMA`
+before it reads the schema of the table, as the Python client does: the batches carry their
+schema, so there is none to infer.
+`PythonUDFPayload::function` makes the payload of the function of a
+streaming `foreach` or `foreachBatch` sink, which, as PySpark's, sends the command and the Python
+version of a payload only, and not its output type and eval type. A window frame sends a bound of
+0 as the current row, and a start of `Preceding(i64::MAX)` or before and an end of
+`Following(i64::MAX)` or after as unbounded, as PySpark's `rowsBetween` and `rangeBetween` of
+`-sys.maxsize` and `sys.maxsize`; an unbounded bound on the other side of the frame is the literal
+of its int, and an offset of a row frame beyond an int fails the request with `VALUE_NOT_BETWEEN`,
+where the server refused it.
+
+`spark_connect::col` (`column::col`) of `"*"` or `"t.*"` is a star, as `functions::col` was, as
+PySpark's `col`, and so are the names `"*"` and `"t.*"` that the methods take as Columns, by
+`From<&str>` and `From<String>`, such as `select(["*"])`, where they were attributes of those names,
+which the server failed with `UNRESOLVED_COLUMN`. `WindowSpec::partition_by` and
+`WindowSpec::order_by` replace the partitioning or the ordering of the spec with their columns, as
+PySpark's and Spark's do, where they appended them to those of the spec. The three-argument
+`variant_set` and `try_variant_set` send `create_if_missing` of `true`, and the `tuple_union_*`
+functions `lgNomEntries` of 12 and `mode` of `"sum"`, the defaults that PySpark sends, where they
+sent no such argument.
+
+`DataFrameReader::text` and `DataStreamReader::text` set the option `wholetext` to false, also over
+an earlier one, as PySpark's `text` of its `wholetext=False`, so that they read lines, and a read
+without a schema sends an empty one, as PySpark's readers do, which the server takes as none.
+`DataFrameWriter::mode("errorifexists")` fails the write with `UNSUPPORTED_OPERATION` before it
+sends anything, as PySpark Connect's `WriteOperation` does, where it wrote with
+`SAVE_MODE_ERROR_IF_EXISTS`: `SaveMode::from_str` no longer takes `errorifexists`.
+`Catalog::create_external_table` and `create_external_table_with` send a `CreateTable`, of a
+`description` option as the description of the table, as PySpark's `createExternalTable` calls
+`createTable`, where they sent a `CreateExternalTable`. The scalar operations of `Catalog`, such as
+`current_database`, `table_exists`, `cache_table` and `drop_temp_view`, run as the execution of the
+DataFrame of their plan, of its plan ID and of the tags of the thread, as PySpark's
+`_execute_and_fetch` runs them, where they sent their relation without them.
+`DataFrameReader::parse` of a JSON schema of a type that PySpark's `StructType.fromJson` does not
+read, such as `null`, `calendarinterval` or `unparsed(...)`, gives a DataFrame whose requests raise
+PySpark's `CANNOT_PARSE_DATATYPE`, or `UNSUPPORTED_DATA_TYPE` of an object of another type than an
+array, a map, a struct and a UDT, and send nothing, as PySpark's `Parse` plan raises them when it is
+built.
+
+`SparkSession::create_dataframe` and `create_dataframe_from_columns` read the settings of the
+session in one request, once they have converted the rows, as `create_dataframe_from_arrow` does, so
+that a row that does not convert fails without a request, and upload their data when its size
+reaches the server's `spark.sql.session.localRelationCacheThreshold`, as PySpark does, where data
+below 64 KiB stayed inline. When `spark.sql.execution.arrow.useLargeVarTypes` is `true`, they send
+the strings and binaries of the schema as `large_string` and `large_binary`, as PySpark does, and
+the size that each path of local data compares with the threshold is that of pyarrow's `nbytes`, so
+that a relation is inline or uploaded as PySpark's is. `create_dataframe_from_columns` of no rows
+sends the schema alone, as PySpark's empty data, where it sent a Config request and Arrow data.
+
+The deletion of a native ML model that is dropped is built on the thread that drops it, of its tags
+and user context extensions, and sent reattachable through the hooks, as PySpark's
+`_delete_ml_cache`, where a worker of the runtime built it without them. The removal of the cached
+relation of a checkpoint that is dropped is one execution that is not reattachable, with no hooks
+and no `ReleaseExecute`, as PySpark's `__del__` sends it, where it was reattachable and released.
+The registration of the listener bus carries the tags of the session, as PySpark's
+`execute_command_as_iterator`. The subqueries and table arguments of a DataFrame of another session
+resolve, as their references are of the plan IDs of their own session, as PySpark's, where they
+failed with `Missing relation in WithRelations`.
+
 `DataFrameWriter::jdbc` and `DataStreamReader::xml` are added, as PySpark's `jdbc` of a writer and
 `xml` of a stream reader, and so are the `approx_quantile`, `corr`, `cov`, `crosstab`,
 `freq_items` and `sample_by` of `DataFrame`, which PySpark's DataFrame has besides `stat`, the
 `fill_value` and `fill_map` of `NaFunctions`, of the values of `fillna_value` and `fillna_map`,
-and `Column::outer` and `Column::transform`. `SparkErrorKind` adds `BuiltinAttributeError`.
+and `Column::outer` and `Column::transform`.
 
-`DataFrame::persist` takes `impl Into<Option<StorageLevel>>`, so a `StorageLevel` is passed
-as before. `None` sends no storage level, as PySpark's `persist(None)`, and the server then
-caches at its `spark.sql.defaultCacheStorageLevel`. `cache` is unchanged and persists at
-`MEMORY_AND_DISK_DESER`.
-
-`DataType::from_json` reads the spatial types as the JSON reader of Spark does: a bare
-`geometry` or `geography` is of SRID 4326, `geography(<algorithm>)` is of the CRS `OGC:CRS84`, a
-CRS is of the form `<authority>:<code>`, and an algorithm other than `SPHERICAL` is
-`ST_INVALID_ALGORITHM_VALUE`. It no longer takes `geometry(<srid>)`, `geometry(any)` and their
-`geography` forms, which are of the DDL, not of the JSON, of Spark. `DataType::from_ddl` takes a
-number or `any` as an SRID, as the DDL parser of Spark does, and no longer takes such forms as
-`geometry(+5)`, `geometry(SRID:ANY)` or `geography(4326, SPHERICAL)`.
-
-`CoGroupedData::input_columns` is removed. It gave the columns of both sides for the arguments
-of the function of a cogroup, but that function binds no columns, as PySpark's `CoGroupMap`
-builds it: it takes the whole cogroups, so the inputs need no analysis.
-`GroupedData::apply_in_pandas_with_state_with_schemas` sends the output and the state schemas
-as the strings that it is given, DDL or JSON, which the server parses, as PySpark sends a
-schema given as a string; `apply_in_pandas_with_state` sends the JSON of its types, as before.
-`Value::calendar_interval_parts` reads the months, days and nanoseconds of a collected calendar
-interval back from its text. `LocalRowIterator::next_decoded` takes the next row of the batch
-that the iterator holds without fetching another, and `LocalRowIterator::has_received_batch`
-tells whether a record batch of the result has arrived, also one without rows.
-`SparkConnectClient::read_plan_compression` reads the plan compression settings of the server
-before a plan is sent, as PySpark's client reads them when it builds its first plan: before the
-request of a relation (`to_proto`), which then observes the server-side session ID of the response
-of the read, and after the request of a command (`execute_command`), so the first command of a
-session observes none. `SparkConnectClient::execute_plan_reattachable_uncompressed` sends a plan
-as it is, neither compressed nor after that read, as PySpark's registrations of functions, table
-functions, data sources and Java functions set their command in the plan of their request, which
-the registrations of the core do.
-
-`RetryPolicy` adds a `retries_failures` field, true by default: a policy of false retries no
-failure, as the retry policies of PySpark's client of no `DefaultPolicy` retry none, and
-`RetryPolicy::no_retries` is such a policy. A struct expression of `RetryPolicy` that names every
-field adds it, or takes the others of `..RetryPolicy::default()`. The core tells the listener of
-`retries::set_listener` (a `RetriesListener`, not a stable API) when the retries of a failure that
-a policy retries are spent, where PySpark's `Retrying` warns `[RETRIES_EXCEEDED]`, and its error is
-the error of the call. The listener is one of the process, for the calls of every client: the
-Python binding sets it, to warn from the thread of the call. `SparkError` adds a hidden
-`pyspark_message`, the message of PySpark's exception of a gRPC failure whose status carries no
-error of the server, which the Python binding raises: the text of grpcio's error of the call, as
-PySpark's `_handle_rpc_error` raises it. The message of the error of the Rust API is still the
-description of the code in brackets and the message of the status. A struct expression of
-`SparkError` that names every field adds it, or takes the others of an error of its constructors,
-such as `..SparkError::connect_msg(message)`. `SparkError::from_grpc_status_of` converts the status
-of a call of a stream of responses (`GrpcCall::ServerStreaming`, of grpcio's
-`_MultiThreadedRendezvous`).
-
-`PythonUDFPayload` and `LogicalPlan::CommonInlineUdtf` add a `pickler` field, which is not a
-stable API: the pickling of the command of a UDF or UDTF of the Python client, which a request
-calls each time it builds the plan, as PySpark pickles the function then. Code that constructs
-the struct or the variant directly sets it to `None`. `PythonUDFPayload::new` and
-`TableValuedFunction::udtf` are unchanged: a command of bytes is sent as it is.
-`LogicalPlan::MapPartitions` adds a `profile_id_reader` field, which is not a stable API either:
-the reader of the id of the resource profile of the Python client's `mapInPandas` and
-`mapInArrow`, which a request calls when it builds the plan, as PySpark reads `profile.id` then.
-Code that constructs the variant directly sets it to `None`; `profile_id` is sent as before.
-`LogicalPlan::ToSchema` adds a `schema_reader` field, which is not a stable API either: the reader
-of the schema of the Python client's `DataFrame.to`, which a request calls when it builds the plan,
-as PySpark converts the schema object then. Code that constructs the variant directly sets it to
-`None`; `DataFrame::to` sends its schema as before.
-
-`GroupedData::transform_with_state` takes the output schema of its `TransformWithStateInfo`, as
-`transform_with_state_in_pandas` does, where it sent the return type of its function: PySpark's
-`transformWithState` sends `outputStructType` as it is given, a DDL string as an unparsed type,
-which the server parses. The `update` and `insert` of the clauses of `MergeIntoWriter` take
-`impl IntoIterator<Item = (K, Column)>` of `K: Into<String>`, so a `HashMap<String, Column>` is
-passed as before, and the merge sends the assignments in their order, as PySpark sends those of
-`assignments.items()`: a `Vec` or a `BTreeMap` keeps an order, and a `HashMap` sends its own.
+`TableArg::is_partitioned` tells whether `partition_by` or `with_single_partition` has partitioned a
+table argument, as PySpark's `TableArg._is_partitioned`. `DataType::class_name` is the name of
+PySpark's class of a type, `type(dt).__name__`, such as `LongType`, by which PySpark's errors name
+it, and `DataType::simple_string` of the `VectorUDT` and `MatrixUDT` of `pyspark.mllib.linalg` is
+`vector` and `matrix`, as of those of `pyspark.ml.linalg`, where it was `udt`.
 
 `functions` adds a form of each optional argument of a PySpark function that had none, which sends
 PySpark's request, such as `to_date_with_format`, `first_with_ignore_nulls`,
 `from_json_with_options` (of name and value pairs) and `make_interval_with_parts` (of an `Option`
 of each part).
+
+The core also adds doc-hidden items that the Python client uses, which are not a stable API, such as
+the `plan_build` module of a `PlanBuildListener` of the process, `WeakSparkSession`,
+`TableArg::relation_with_levels`, `SparkSession::add_unencodable_tag`, of a tag that UTF-8 cannot
+encode, and `StreamingQuery::await_termination_ms` and
+`StreamingQueryManager::await_any_termination_ms`; and doc-hidden methods of v4.3.0 change their
+arguments, such as `DataFrame::exclusive_relation_owners`.
 
 ## Native ML objects: fetch, summaries, save and load (Rust API)
 
@@ -1804,7 +1957,19 @@ test suite is the authoritative gate.
 From Python, `pyspark-client-rust` replaces the `pyspark-client` package: same
 `import pyspark`, same public API, same server - see [Installation](installation.md).
 Use it exactly like [PySpark](https://spark.apache.org/docs/latest/api/python/).
-The native [Rust API](dataframes.md) mirrors the same surface.
+
+The native [Rust API](dataframes.md) mirrors the same surface, but for the APIs that need Python
+itself: the functions and classes of Python, which the server runs in Python, that `udf`, `udtf`
+and `arrow_udtf` of `pyspark.sql.functions`, `udf.register`, `udtf.register`,
+`dataSource.register`, `Catalog.registerFunction` and `GroupedData.apply` take, where the Rust API
+takes their commands as Python pickled them, as `SparkSession::register_function`,
+`register_data_source` and `GroupedData::apply_in_pandas` do, and has UDFs of its own in
+[WebAssembly](udfs.md); pandas, of `toPandas`, `pandas_api` and `plot`, where the Rust API gives
+Arrow record batches (`DataFrame::collect_record_batches`); and Python's implicit session, of
+`SparkSession.active` and `getActiveSession`, where a Rust program passes its session. A
+`SparkSession.Hook` is a closure in the Rust API (`SparkSession::set_execute_plan_hook`), and
+`SparkSession.client`, which PySpark gives for tests, is the core crate's `SparkConnectClient`,
+which a session does not expose.
 
 Three differences come with being a different package with a native core. The distribution is
 `pyspark-client-rust`, so `importlib.metadata.version("pyspark-client")` raises
