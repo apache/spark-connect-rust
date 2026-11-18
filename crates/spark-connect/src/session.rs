@@ -473,7 +473,7 @@ impl SparkSession {
         &self,
         request: proto::ExecutePlanRequest,
     ) -> Result<ExecutionStream> {
-        self.execute_plan_with_handlers(request, self.progress_handlers())
+        self.execute_plan_with_handlers(request, self.progress_handlers(), true)
     }
 
     /// As [`execute_plan`](Self::execute_plan), but the progress of the execution, and its done
@@ -483,13 +483,27 @@ impl SparkSession {
         &self,
         request: proto::ExecutePlanRequest,
     ) -> Result<ExecutionStream> {
-        self.execute_plan_with_handlers(request, ProgressHandlers::default())
+        self.execute_plan_with_handlers(request, ProgressHandlers::default(), true)
     }
 
+    /// As [`execute_plan_unreported`](Self::execute_plan_unreported), for a registration of
+    /// PySpark's `_execute`, of a function, a table function, a data source or a Java function,
+    /// whose command PySpark sets in the plan of its request as it is: neither compressed nor of
+    /// the lookup of the plan compression of the session.
+    pub(crate) fn execute_registration(
+        &self,
+        request: proto::ExecutePlanRequest,
+    ) -> Result<ExecutionStream> {
+        self.execute_plan_with_handlers(request, ProgressHandlers::default(), false)
+    }
+
+    /// The execution of `request`, whose progress reaches `handlers`, and whose plan is
+    /// compressed when `compressed`.
     fn execute_plan_with_handlers(
         &self,
         mut request: proto::ExecutePlanRequest,
         handlers: ProgressHandlers,
+        compressed: bool,
     ) -> Result<ExecutionStream> {
         let operation_id = request
             .operation_id
@@ -500,7 +514,13 @@ impl SparkSession {
         let mut progress = ProgressTracker::with_handlers(handlers, Some(operation_id));
         // An execution that fails to start ends too: the error of the done call is its error, as
         // the `Progress` of PySpark wraps its request.
-        let stream = match block_on(self.client().execute_plan_reattachable(request)) {
+        let client = self.client();
+        let started = if compressed {
+            block_on(client.execute_plan_reattachable(request))
+        } else {
+            block_on(client.execute_plan_reattachable_uncompressed(request))
+        };
+        let stream = match started {
             Ok(stream) => stream,
             Err(error) => return Err(progress.finish_after(error)),
         };
@@ -1142,7 +1162,7 @@ impl SparkSession {
         fun.deterministic = false;
         fun.function =
             Some(proto::common_inline_user_defined_function::Function::JavaUdf(java_udf));
-        crate::dataframe::execute_command_unreported(
+        crate::dataframe::execute_registration(
             self,
             proto::command::CommandType::RegisterFunction(fun),
         )?;
@@ -1598,7 +1618,7 @@ impl SparkSession {
     ) -> Result<()> {
         // An argument of the function is serialized as a request serializes its expressions.
         let function = crate::expression::with_expression_depth_bound(|| udf.to_proto())?;
-        crate::dataframe::execute_command_unreported(
+        crate::dataframe::execute_registration(
             self,
             proto::command::CommandType::RegisterFunction(function),
         )
@@ -1628,7 +1648,7 @@ impl SparkSession {
             (command, None),
             python_ver,
         );
-        crate::dataframe::execute_command_unreported(
+        crate::dataframe::execute_registration(
             self,
             proto::command::CommandType::RegisterTableFunction(function),
         )
@@ -1678,7 +1698,7 @@ impl SparkSession {
         &self,
         data_source: crate::datasource::CommonInlineUserDefinedDataSourceExpression,
     ) -> Result<()> {
-        crate::dataframe::execute_command_unreported(
+        crate::dataframe::execute_registration(
             self,
             proto::command::CommandType::RegisterDataSource(data_source.to_proto()),
         )

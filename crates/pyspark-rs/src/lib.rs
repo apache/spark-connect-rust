@@ -108,6 +108,7 @@ pub(crate) fn encode_on_grown_stack<M: prost::Message + Send>(message: M) -> Vec
 #[pymodule(gil_used = false)]
 fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     origin::listen_to_plan_builds();
+    client::warn_of_spent_retries();
     m.add_class::<PySparkSession>()?;
     m.add_function(wrap_pyfunction!(session::_close_sessions_at_exit, m)?)?;
     m.add_function(wrap_pyfunction!(session::_refuse_releases, m)?)?;

@@ -34,6 +34,13 @@ pub struct RetryPolicy {
     /// Defaults to 1 hour. Set to None to disable the ceiling. Not applied to the retries of a
     /// policy, as the reference's `RetryPolicyState` does not.
     pub max_retry_exception_elapsed_time_ms: Option<u64>,
+    /// Whether the policy retries the failures that [`RetryPolicy::can_retry`] names, as PySpark's
+    /// `DefaultPolicy`, rather than none, as the retry policies of PySpark's client do when none
+    /// of them is a `DefaultPolicy`, whose base `RetryPolicy.can_retry` retries nothing. A failure
+    /// that no policy retries is the error of its call at once, where one that the policy retries
+    /// is its error once its retries are spent, of which PySpark's `Retrying` warns (see
+    /// [`RetriesListener`]). True by default.
+    pub retries_failures: bool,
 }
 
 impl Default for RetryPolicy {
@@ -51,20 +58,23 @@ impl Default for RetryPolicy {
             max_retry_exception_elapsed_time_ms: Some(
                 DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME * 1000,
             ),
+            retries_failures: true,
         }
     }
 }
 
 impl RetryPolicy {
-    /// A policy that performs a single attempt with no retries.
+    /// A policy that performs a single attempt with no retries: it retries no failure.
     ///
     /// Used by the transport-injection stub, which is a drop-in for the grpcio stub: the
     /// reference client layers its own `GrpcRetryHandler` (configured by the client-side
     /// retry policy) on top, so retrying here too would double-retry and ignore that
-    /// policy - e.g. a `max_retries=0` client would still see our 15-retry backoff.
+    /// policy - e.g. a `max_retries=0` client would still see our 15-retry backoff. As grpcio's
+    /// stub, its failures are not retries that are spent, so the stub does not warn of them.
     pub fn no_retries() -> Self {
         Self {
             max_retries: Some(0),
+            retries_failures: false,
             ..Self::default()
         }
     }
@@ -75,8 +85,12 @@ impl RetryPolicy {
     /// grpc-python gives the failure (see [`grpc_python_code`]): retry transient `UNAVAILABLE`,
     /// and `INTERNAL` errors whose message carries `INVALID_CURSOR.DISCONNECTED` (a mid-stream
     /// cursor drop resumed via reattach). Any failure with a `RetryInfo` detail is retried too,
-    /// whatever its code, as the server asks for it.
+    /// whatever its code, as the server asks for it. A policy that retries no failure
+    /// ([`RetryPolicy::retries_failures`]) retries none of them.
     pub fn can_retry(&self, status: &tonic::Status) -> bool {
+        if !self.retries_failures {
+            return false;
+        }
         let transient = match grpc_python_code(status) {
             tonic::Code::Unavailable => true,
             tonic::Code::Internal => cursor_disconnected(status),
@@ -322,9 +336,11 @@ pub(crate) struct Retrying {
 pub(crate) enum Backoff {
     /// The wait before the retry is over: the attempt is made again.
     Retry,
-    /// The policy cannot retry the failure, or its retries are spent: the failure is the error
-    /// of the call.
+    /// The policy cannot retry the failure: the failure is the error of the call.
     GiveUp,
+    /// The policy retries the failure, but its retries are spent: the failure is the error of the
+    /// call, once the [`RetriesListener`] is told of it, as PySpark's `Retrying` warns of it.
+    Exceeded,
     /// A signal that the wait of the caller takes ended the wait before the retry, which is not
     /// made (see [`crate::runtime::until_abort`]).
     Aborted,
@@ -357,7 +373,7 @@ impl Retrying {
             return Backoff::GiveUp;
         }
         let Some(wait_ms) = self.state.next_attempt(retry_delay_ms(status)) else {
-            return Backoff::GiveUp;
+            return Backoff::Exceeded;
         };
         let wait = tokio::time::sleep(std::time::Duration::from_millis(wait_ms));
         if !self.ends_with_abort {
@@ -389,8 +405,11 @@ impl Retrying {
 #[derive(Debug)]
 pub(crate) enum RetryError<E> {
     /// A failed RPC. From an attempt, it is retried when the policy allows; from [`retrying`],
-    /// the policy could not retry it, or its retries are spent.
+    /// the policy could not retry it.
     Status(tonic::Status),
+    /// A failed RPC that the policy retries, whose retries are spent ([`Backoff::Exceeded`]).
+    /// Only from [`retrying`].
+    Exceeded(tonic::Status),
     /// An error that is not retried: of an attempt, or of the check before a retry.
     Aborted(E),
     /// A signal ended the wait before a retry ([`Backoff::Aborted`]). Only of retries
@@ -426,12 +445,77 @@ where
                 match retrying.backoff(&status).await {
                     Backoff::Retry => {}
                     Backoff::GiveUp => return Err(RetryError::Status(status)),
+                    Backoff::Exceeded => return Err(RetryError::Exceeded(status)),
                     Backoff::Aborted => return Err(RetryError::WaitAborted),
                 }
                 before_retry().map_err(RetryError::Aborted)?;
             }
             result => return result,
         }
+    }
+}
+
+/// Which retries of a call are spent, of which PySpark's `Retrying._wait` warns
+/// `[RETRIES_EXCEEDED]` before it raises the failure, with a `warnings.warn` of its own for each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetriesExceeded {
+    /// The retries of the policy that retries the failure.
+    Policy,
+    /// The retries at once of what PySpark raises as a `RetryException`, such as an execution
+    /// past its deadline, which ran for their elapsed time.
+    RetryException,
+}
+
+/// What a client of the core does when the retries of a call are spent, where PySpark's
+/// `Retrying._wait` warns `[RETRIES_EXCEEDED]` before it raises the failure: the Python binding
+/// warns as it does. The core tells it on the thread that polls the call, before it makes the
+/// error of the call: the caller's for a call of the synchronous API, and a thread of the runtime
+/// for a call that runs in the background, which no caller waits for. The releases of the results
+/// of executions and the executions of finalizers, which retry in the background, do not tell it.
+/// Without a listener, the retries end as they do. Not a stable API.
+pub trait RetriesListener: Send + Sync {
+    /// The retries of a call, which `exceeded` tells, are spent. An error is the error of the call
+    /// in place of its failure, which is then not converted, as PySpark raises the exception of
+    /// the warning (of a filter of `"error"`) out of `_wait` in place of the failure, and its
+    /// `_handle_error` raises an exception that is not of gRPC as it is.
+    fn retries_exceeded(&self, exceeded: RetriesExceeded) -> crate::error::Result<()>;
+
+    /// `error`, which may be an error of [`RetriesListener::retries_exceeded`], is caught where
+    /// PySpark's client catches the failure of a call with an `except Exception`, which catches the
+    /// exception of the warning too: the lookup of the plan compression, and the read of the conf
+    /// of the server's stack trace as an error is raised. What the listener keeps of an error of
+    /// its own is dropped.
+    fn caught(&self, error: crate::error::SparkError);
+}
+
+/// The listener of the process, which the calls of every client tell.
+static LISTENER: std::sync::RwLock<Option<std::sync::Arc<dyn RetriesListener>>> =
+    std::sync::RwLock::new(None);
+
+/// Set the listener of the spent retries of the calls of the process, or none.
+pub fn set_listener(listener: Option<std::sync::Arc<dyn RetriesListener>>) {
+    *LISTENER.write().unwrap_or_else(|e| e.into_inner()) = listener;
+}
+
+/// The listener of the process, if one is set.
+fn listener() -> Option<std::sync::Arc<dyn RetriesListener>> {
+    LISTENER.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Tell the listener of the process, if one is set, that the retries of a call that its caller
+/// waits for are spent: its error is the error of the call in place of the failure.
+pub(crate) fn retries_exceeded(exceeded: RetriesExceeded) -> crate::error::Result<()> {
+    match listener() {
+        Some(listener) => listener.retries_exceeded(exceeded),
+        None => Ok(()),
+    }
+}
+
+/// Give `error`, which the client catches, to the listener of the process, if one is set (see
+/// [`RetriesListener::caught`]).
+pub(crate) fn caught(error: crate::error::SparkError) {
+    if let Some(listener) = listener() {
+        listener.caught(error);
     }
 }
 
@@ -475,6 +559,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -502,6 +587,7 @@ mod tests {
             recognize_server_retry_delay: true,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
         let waits = |policy: RetryPolicy, delays: &[Option<u64>]| {
             let mut state = RetryPolicyState::new(policy);
@@ -573,6 +659,7 @@ mod tests {
         // so the very first next_attempt() already returns None.
         let policy = RetryPolicy::no_retries();
         assert_eq!(policy.max_retries, Some(0));
+        assert!(!policy.retries_failures);
         let mut state = RetryPolicyState::new(policy);
         assert_eq!(state.next_attempt(None), None);
     }
@@ -591,6 +678,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
         let mut state = RetryPolicyState::new(policy);
         let w = state.next_attempt(None).expect("first retry allowed");
@@ -616,6 +704,7 @@ mod tests {
             recognize_server_retry_delay: true,
             max_server_retry_delay_ms: Some(5_000),
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
         let mut state = RetryPolicyState::new(policy);
         // Server asks for 2s; that exceeds the 100ms base backoff, so it wins.
@@ -642,6 +731,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -662,6 +752,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -683,6 +774,7 @@ mod tests {
             recognize_server_retry_delay: true,
             max_server_retry_delay_ms: Some(500),
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -849,6 +941,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -874,6 +967,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: Some(0),
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -894,6 +988,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: Some(1),
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -917,6 +1012,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: Some(u64::MAX),
+            retries_failures: true,
         };
 
         let mut state = RetryPolicyState::new(policy);
@@ -1258,6 +1354,7 @@ mod tests {
             recognize_server_retry_delay: false,
             max_server_retry_delay_ms: None,
             max_retry_exception_elapsed_time_ms: None,
+            retries_failures: true,
         }
     }
 
@@ -1331,15 +1428,22 @@ mod tests {
             Err(RetryError::Status(tonic::Status::unavailable("the last"))),
             Ok(1),
         ];
-        // Two retries: three attempts.
+        // Two retries: three attempts, whose retries are spent, as PySpark's `Retrying` warns.
         let (result, attempts, checks) = retry_over(&quick_policy(2), outcomes).await;
         match result {
-            Err(RetryError::Status(status)) => assert_eq!(status.message(), "the last"),
+            Err(RetryError::Exceeded(status)) => assert_eq!(status.message(), "the last"),
             other => panic!("{other:?}"),
         }
         assert_eq!((attempts, checks), (3, 2));
 
-        // No retries: the failure of the only attempt.
+        // No retries of a policy that retries the failure, as `DefaultPolicy(max_retries=0)`:
+        // the failure of the only attempt, whose retries are spent.
+        let (result, attempts, checks) =
+            retry_over(&quick_policy(0), vec![unavailable(), Ok(1)]).await;
+        assert!(matches!(result, Err(RetryError::Exceeded(_))), "{result:?}");
+        assert_eq!((attempts, checks), (1, 0));
+        // A policy that retries no failure, as no policy of PySpark's client that is a
+        // `DefaultPolicy`: the failure of the only attempt, which is not retried.
         let (result, attempts, checks) =
             retry_over(&RetryPolicy::no_retries(), vec![unavailable(), Ok(1)]).await;
         assert!(matches!(result, Err(RetryError::Status(_))), "{result:?}");
@@ -1411,7 +1515,7 @@ mod tests {
         assert!(started.elapsed() >= std::time::Duration::from_millis(40));
         // The retries are spent: no retry. (How long that takes is not asserted: a loaded runner
         // can deschedule the thread for longer than any bound.)
-        assert_eq!(retrying.backoff(&status).await, Backoff::GiveUp);
+        assert_eq!(retrying.backoff(&status).await, Backoff::Exceeded);
     }
 
     #[tokio::test]
@@ -1424,7 +1528,17 @@ mod tests {
         // The one retry of the policy is still there.
         let down = tonic::Status::unavailable("down");
         assert_eq!(retrying.backoff(&down).await, Backoff::Retry);
+        assert_eq!(retrying.backoff(&down).await, Backoff::Exceeded);
+        // A failure that the policy does not retry is not one whose retries are spent, also once
+        // they are.
+        assert_eq!(retrying.backoff(&missing).await, Backoff::GiveUp);
+        // A policy that retries no failure retries none of those that a policy retries.
+        let mut retrying = Retrying::new(&RetryPolicy {
+            retries_failures: false,
+            ..quick_policy(1)
+        });
         assert_eq!(retrying.backoff(&down).await, Backoff::GiveUp);
+        assert!(!RetryPolicy::no_retries().can_retry(&down));
     }
 
     /// A policy whose one backoff, of a minute, a test does not wait out.

@@ -3290,14 +3290,26 @@ pub(crate) fn execute_command_collect(
     execute_command_with_info(session, command_type, &[]).map(|(responses, _)| responses)
 }
 
-/// Like `execute_command_collect`, for a command that PySpark runs without a `Progress` (its
-/// `_execute`, of the registrations of functions, table functions and data sources): the
+/// Like `execute_command_collect`, for a command that PySpark runs without a `Progress`: the
 /// progress of its execution, and its done call, does not reach the progress handlers.
 pub(crate) fn execute_command_unreported(
     session: &SparkSession,
     command_type: proto::command::CommandType,
 ) -> Result<()> {
-    execute_command_reporting(session, command_type, false, &[]).map(|_| ())
+    execute_command_reporting(session, command_type, CommandExecution::Unreported, &[]).map(|_| ())
+}
+
+/// Like `execute_command_unreported`, for a registration of PySpark's `_execute`, of a function, a
+/// table function, a data source or a Java function, whose command PySpark sets in the plan of
+/// its request as it is (`register_udf`, `register_udtf`, `register_data_source` and
+/// `register_java`): neither compressed, nor of the lookup of the plan compression of the
+/// session.
+pub(crate) fn execute_registration(
+    session: &SparkSession,
+    command_type: proto::command::CommandType,
+) -> Result<()> {
+    execute_command_reporting(session, command_type, CommandExecution::Registration, &[])
+        .map(|_| ())
 }
 
 /// Like `execute_command_collect`, and also returns the information of the execution, which
@@ -3310,15 +3322,32 @@ pub(crate) fn execute_command_with_info(
     command_type: proto::command::CommandType,
     observations: &[(String, crate::observation::Observation)],
 ) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
-    execute_command_reporting(session, command_type, true, observations)
+    execute_command_reporting(
+        session,
+        command_type,
+        CommandExecution::Reported,
+        observations,
+    )
 }
 
-/// The command `command_type`, executed with its progress for the progress handlers when
-/// `reported`, whose observed metrics set `observations`.
+/// How a command is executed.
+#[derive(Clone, Copy)]
+enum CommandExecution {
+    /// With its progress for the progress handlers.
+    Reported,
+    /// Without its progress.
+    Unreported,
+    /// As a registration of PySpark's `_execute`: without its progress, and of its command sent
+    /// as it is, uncompressed.
+    Registration,
+}
+
+/// The command `command_type`, executed as `execution` says, whose observed metrics set
+/// `observations`.
 fn execute_command_reporting(
     session: &SparkSession,
     command_type: proto::command::CommandType,
-    reported: bool,
+    execution: CommandExecution,
     observations: &[(String, crate::observation::Observation)],
 ) -> Result<(Vec<proto::ExecutePlanResponse>, ExecutionInfo)> {
     let mut command = proto::Command::default();
@@ -3333,10 +3362,10 @@ fn execute_command_reporting(
     request.tags = session.tags()?;
     request.plan = Some(plan);
 
-    let mut stream = if reported {
-        session.execute_plan(request)?
-    } else {
-        session.execute_plan_unreported(request)?
+    let mut stream = match execution {
+        CommandExecution::Reported => session.execute_plan(request)?,
+        CommandExecution::Unreported => session.execute_plan_unreported(request)?,
+        CommandExecution::Registration => session.execute_registration(request)?,
     };
     // Drain the response stream so the command runs to completion server-side,
     // capturing any metrics/progress emitted along the way.

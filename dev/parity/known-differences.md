@@ -284,9 +284,10 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
   properties and `userAgent` read the parameters as PySpark does, but `userAgent` reports
   PySpark's `python/<version>` where the transport sends `python/rust` as the client type. The
-  transport reads `SPARK_CONNECT_USER_AGENT` once, when the session is made, where PySpark's
-  requests read it each time: it does not read the environment of the process while Python
-  threads may change it.
+  transport reads `SPARK_CONNECT_USER_AGENT` when a session is made of a connection string, and
+  the sessions of `newSession` and `cloneSession` take the user agent of the session they are
+  made of, where PySpark's requests read the variable each time, those of these sessions too:
+  the transport does not read the environment of the process while Python threads may change it.
   The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.
@@ -307,7 +308,8 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   The drop-in converts it as the errors of its other RPCs: `clone("not-a-uuid")` raises the
   `UnknownException` of `INVALID_CLONE_SESSION_REQUEST.TARGET_SESSION_ID_FORMAT`, and a copy to
   a local path that the server refuses the `UnsupportedOperationException` of
-  `_LEGACY_ERROR_TEMP_3161`.
+  `_LEGACY_ERROR_TEMP_3161`. With a user agent that is too long, they raise the
+  `SparkConnectException` of the request of the error's details.
 - **The retry policy of the clones of a core client** (intentional; Rust API). The retry policy
   of `spark_connect_core::SparkConnectClient` is shared by its clones (`Clone`), as PySpark's
   `set_retry_policies` replaces the policies of a client that is in use: `set_retry_policy` of a
@@ -315,6 +317,21 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   (`with_new_session_id`, `clone_session`, and so `SparkSession::new_session` and
   `clone_session` of the Rust API) has the default policy, as PySpark's `newSession` and `clone`
   do, and not the policy of the client it was made of.
+- **The warning of spent retries of the requests sent in the background** (intentional; the
+  transport is native). A request that no caller waits for, which the transport sends from its
+  own threads, does not warn `[RETRIES_EXCEEDED]` when its retries are spent, where PySpark's
+  `Retrying` warns from the thread that sends it: the releases of the results of an execution
+  (`ReleaseExecute`), the removal of the relation of a dropped checkpoint, the release of the
+  cached objects of the native ML classes, and the interrupt of the execution of a signal. The
+  threads of the transport are not threads of Python, and do not wait for the GIL.
+- **The details of a failure that the client detects** (intentional; the transport is native).
+  The message of a gRPC failure of no error of the server is the text of grpcio's error of the
+  call, as PySpark's, whose details and `debug_error_string` are those of gRPC's C core in
+  PySpark. Of a status of the server, they are the same; of a failure that the client detects
+  itself, as a refused connection or a failed DNS lookup, they are tonic's message, such as
+  `tcp connect error` and `UNAVAILABLE:tcp connect error`, where grpcio's are such as
+  `failed to connect to all addresses; last error: UNKNOWN: ipv4:127.0.0.1:1: Failed to connect
+  to remote host: Connection refused`.
 - **`SparkConnectClient.get_tags`** (intentional). A copy of the tags of the thread, where
   PySpark returns the set that its client keeps, which its later changes change too, as
   `SparkSession.getTags` does.

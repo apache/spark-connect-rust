@@ -29,10 +29,12 @@ use crate::artifact::{
     FileArtifact, NamedArtifact,
 };
 use crate::channel::{is_secret_param, ChannelBuilder, GRPC_MAX_MESSAGE_LENGTH_DEFAULT};
-use crate::error::{Result, SparkError, SparkErrorKind};
+use crate::error::{GrpcCall, Result, SparkError, SparkErrorKind};
 use crate::proxy::{HttpProxy, ProxyEnv};
 use crate::reattach::ExecutePlanResponseReattachableIterator;
-use crate::retries::{retrying, unknown_operation, Backoff, RetryError, RetryPolicy, Retrying};
+use crate::retries::{
+    retrying, unknown_operation, Backoff, RetriesExceeded, RetryError, RetryPolicy, Retrying,
+};
 use crate::thread_entries::forget_when_thread_ends;
 
 /// How long [`wait_ready`] waits for the lazy gRPC channel to take a call before surfacing a
@@ -1040,11 +1042,11 @@ impl SparkConnectClient {
         Ok(())
     }
 
-    /// A gRPC failure as a [`SparkError`], which closes the client when the server reports that
-    /// the session changed, and disables its plan compression when the server cannot parse a
-    /// plan, as PySpark's `_handle_rpc_error` does.
-    fn grpc_error(&self, status: tonic::Status) -> SparkError {
-        let error = SparkError::from_grpc_status(status);
+    /// The gRPC failure of a call of the kind `call` as a [`SparkError`], which closes the client
+    /// when the server reports that the session changed, and disables its plan compression when
+    /// the server cannot parse a plan, as PySpark's `_handle_rpc_error` does.
+    fn grpc_error(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
+        let error = SparkError::from_grpc_status_of(status, call);
         let condition = error.get_condition();
         if self.session_tracking && condition.as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED") {
             self.close();
@@ -1381,9 +1383,13 @@ impl SparkConnectClient {
                 _ => PlanCompression::Disabled,
             },
             Err(error) => {
+                let aborted = is_wait_aborted(&error);
+                // As PySpark's `except Exception` of the lookup, which catches its failure, and the
+                // exception of the warning of its retries once they are spent.
+                crate::retries::caught(error);
                 // An aborted lookup is not the answer of the server: nothing is kept, so the
                 // lookup is made again by the next plan.
-                if is_wait_aborted(&error) {
+                if aborted {
                     return PlanCompression::Disabled;
                 }
                 PlanCompression::Disabled
@@ -1413,6 +1419,54 @@ impl SparkConnectClient {
         }
     }
 
+    /// `request`, the request of an execution, as PySpark's client sends it: of its client type,
+    /// its result chunking options, its user context, the server-side session ID that it
+    /// observes, its plan compressed as the plan compression of this client asks when
+    /// `compressed`, and as the hook of the executions, if any, returns it.
+    ///
+    /// PySpark builds the plan of a relation, with the lookup of the plan compression of its
+    /// first plan, before the request (`to_proto`), which then observes the server-side session
+    /// ID that the response of the lookup gives. It builds the request of a command before it sets
+    /// the command in its plan (`execute_command`), so the request of the first command of a
+    /// session observes none. A plan that is not `compressed` is set as it is, without the lookup,
+    /// as the registrations of PySpark's `_execute` set their command.
+    async fn execution_request(
+        &self,
+        mut request: ExecutePlanRequest,
+        compressed: bool,
+    ) -> Result<ExecutePlanRequest> {
+        self.fill_client_type(&mut request.client_type)?;
+        self.ensure_open()?;
+        add_result_chunking_option(&mut request, self.result_chunking);
+        // The caller has extended the user context with the extensions of its thread.
+        self.fill_user_context(&mut request.user_context);
+        let of_a_relation = matches!(
+            request.plan.as_ref().and_then(|plan| plan.op_type.as_ref()),
+            Some(PlanOpType::Root(_))
+        );
+        if !of_a_relation {
+            self.observe_on(&mut request.client_observed_server_side_session_id);
+        }
+        if compressed {
+            if let Some(plan) = request.plan.as_mut() {
+                self.compress_plan(plan).await;
+            }
+        }
+        if of_a_relation {
+            self.observe_on(&mut request.client_observed_server_side_session_id);
+        }
+        let request = if compressed {
+            self.hooked_and_compressed(request).await?
+        } else {
+            self.hooked(request)?
+        };
+        // As PySpark reads its `_stub` once the plan is built and the hooks ran: the lookup of
+        // the plan compression of the first plan closes the client when it sees that the server
+        // restarted, and then the execution raises NO_ACTIVE_SESSION and sends nothing.
+        self.ensure_open()?;
+        Ok(request)
+    }
+
     /// Execute a plan and return a stream of responses.
     ///
     /// The request allows the server to chunk an Arrow batch too large for one message, so a
@@ -1424,27 +1478,15 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
-        self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open()?;
-        add_result_chunking_option(&mut request, self.result_chunking);
         self.extend_user_context(&mut request.user_context);
-        self.fill_user_context(&mut request.user_context);
-        if let Some(plan) = request.plan.as_mut() {
-            self.compress_plan(plan).await;
-        }
-        // After the lookup of the plan compression of the first plan, whose response gives the
-        // server-side session ID, as PySpark builds the plan before the request.
-        self.observe_on(&mut request.client_observed_server_side_session_id);
-        let request = self.hooked_and_compressed(request).await?;
-        // As PySpark reads its `_stub` once the plan is built and the hooks ran: the lookup of
-        // the plan compression of the first plan closes the client when it sees that the server
-        // restarted, and then the execution raises NO_ACTIVE_SESSION and sends nothing.
-        self.ensure_open()?;
+        let request = self.execution_request(request, true).await?;
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().execute_plan(req).await {
             Ok(response) => Ok(response.into_inner()),
-            Err(status) => Err(self.error_from_status(status).await),
+            Err(status) => Err(self
+                .error_from_status_of(status, GrpcCall::ServerStreaming)
+                .await),
         }
     }
 
@@ -1505,7 +1547,9 @@ impl SparkConnectClient {
         self._attach_metadata(&mut req);
         match self.stub.clone().reattach_execute(req).await {
             Ok(response) => Ok(response.into_inner()),
-            Err(status) => Err(self.error_from_status(status).await),
+            Err(status) => Err(self
+                .error_from_status_of(status, GrpcCall::ServerStreaming)
+                .await),
         }
     }
 
@@ -1608,54 +1652,80 @@ impl SparkConnectClient {
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
         let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
-        self.with_retry_in(&mut retries, op).await
+        self.with_retry_in(&mut retries, GrpcCall::Unary, op).await
     }
 
-    /// As [`Self::with_retry`], whose attempts are those of `retries`, which the caller keeps
-    /// for the wait that follows the call (see [`ReattachableResponseStream`]).
-    async fn with_retry_in<T, Fut, F>(&self, retries: &mut Retrying, mut op: F) -> Result<T>
+    /// As [`Self::with_retry`], of a call of the kind `call`, whose attempts are those of
+    /// `retries`, which the caller keeps for the wait that follows the call (see
+    /// [`ReattachableResponseStream`]).
+    async fn with_retry_in<T, Fut, F>(
+        &self,
+        retries: &mut Retrying,
+        call: GrpcCall,
+        op: F,
+    ) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let attempts = self.retried(retries, op).await;
+        self.result_of_attempts(attempts, call).await
+    }
+
+    /// The attempts of the RPC closure `op` under `retries`, as [`Self::with_retry_in`] makes
+    /// them, which end with the failure as it is.
+    async fn retried<T, Fut, F>(
+        &self,
+        retries: &mut Retrying,
+        mut op: F,
+    ) -> std::result::Result<T, RetryError<SparkError>>
     where
         F: FnMut() -> Fut,
         Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
     {
         use futures::FutureExt;
-        self.with_attempts_in(retries, || {
+        self.attempts_in(retries, || {
             // An attempt that is not answered ends with the signal that a wait of the caller
             // takes, as PySpark's blocked call does. A combinator rather than an async block that
             // awaits the call: such a block keeps the future of the call twice, as what it
             // captures and as what it awaits, and that future, of the state of a gRPC call, is
             // large enough that the extra copy overflows the stack of a test thread or of a
-            // Python thread of 512 KiB.
-            crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, op()).map(|attempt| {
-                match attempt {
-                    Some(result) => result.map_err(RetryError::Status),
-                    None => Err(RetryError::Aborted(wait_aborted())),
-                }
-            })
+            // Python thread of 512 KiB. Boxed, so that the layers of the retries above it hold a
+            // pointer to it rather than the future itself, each of which a debug build reserves
+            // again in the frame that polls it.
+            Box::pin(
+                crate::runtime::until_abort(crate::runtime::ABORT_RETRIES, op()).map(|attempt| {
+                    match attempt {
+                        Some(result) => result.map_err(RetryError::Status),
+                        None => Err(RetryError::Aborted(wait_aborted())),
+                    }
+                }),
+            )
         })
         .await
     }
 
-    /// Makes the attempts of a call of this client under its retry policy (see [`retrying`]),
-    /// and gives the failed RPC that ends them as the error of the server. An attempt may fail
-    /// with an error that is not a failed RPC, which is not retried. The backoff before a retry
-    /// ends with a signal that the wait of the caller takes, as the sleep of PySpark's
-    /// `Retrying` does.
+    /// Makes the attempts of a call of one response of this client under its retry policy (see
+    /// [`retrying`]), and gives the failed RPC that ends them as the error of the server. An
+    /// attempt may fail with an error that is not a failed RPC, which is not retried. The backoff
+    /// before a retry ends with a signal that the wait of the caller takes, as the sleep of
+    /// PySpark's `Retrying` does.
     async fn with_attempts<T, Fut>(&self, attempt: impl FnMut() -> Fut) -> Result<T>
     where
         Fut: std::future::Future<Output = std::result::Result<T, RetryError<SparkError>>>,
     {
         let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
-        self.with_attempts_in(&mut retries, attempt).await
+        let attempts = self.attempts_in(&mut retries, attempt).await;
+        self.result_of_attempts(attempts, GrpcCall::Unary).await
     }
 
-    /// As [`Self::with_attempts`], whose attempts are those of `retries` (see
-    /// [`Self::with_retry_in`]).
-    async fn with_attempts_in<T, Fut>(
+    /// The attempts of a call of this client under `retries` (see [`retrying`]), which end with
+    /// the failure as it is.
+    async fn attempts_in<T, Fut>(
         &self,
         retries: &mut Retrying,
         attempt: impl FnMut() -> Fut,
-    ) -> Result<T>
+    ) -> std::result::Result<T, RetryError<SparkError>>
     where
         Fut: std::future::Future<Output = std::result::Result<T, RetryError<SparkError>>>,
     {
@@ -1663,11 +1733,43 @@ impl SparkConnectClient {
         // (its session stopped while the call waited), the retry raises NO_ACTIVE_SESSION and
         // sends nothing.
         let still_open = || self.ensure_open();
-        match retrying(retries, still_open, attempt).await {
+        retrying(retries, still_open, attempt).await
+    }
+
+    /// The result of the attempts of a call of the kind `call`: the failed RPC that ends them is
+    /// the error of the server (see [`Self::exceeded_error`] for the failure of retries that are
+    /// spent).
+    async fn result_of_attempts<T>(
+        &self,
+        attempts: std::result::Result<T, RetryError<SparkError>>,
+        call: GrpcCall,
+    ) -> Result<T> {
+        match attempts {
             Ok(value) => Ok(value),
-            Err(RetryError::Status(status)) => Err(self.error_from_status(status).await),
+            Err(RetryError::Status(status)) => Err(self.error_from_status_of(status, call).await),
+            Err(RetryError::Exceeded(status)) => Err(self
+                .exceeded_error(status, RetriesExceeded::Policy, call)
+                .await),
             Err(RetryError::Aborted(error)) => Err(error),
             Err(RetryError::WaitAborted) => Err(wait_aborted()),
+        }
+    }
+
+    /// The error of a call of the kind `call` whose retries, which `exceeded` tells, are spent with
+    /// the failure `status`, as PySpark's `Retrying._wait` raises it: it warns that they are first,
+    /// as the listener of the retries of the process is told (see
+    /// [`crate::retries::RetriesListener`]). The error of the listener, if any, is the error in
+    /// place of the failure, which is not converted then: PySpark raises the exception of the
+    /// warning (of a filter of `"error"`), which its `_handle_error` raises as it is.
+    async fn exceeded_error(
+        &self,
+        status: tonic::Status,
+        exceeded: RetriesExceeded,
+        call: GrpcCall,
+    ) -> SparkError {
+        match crate::retries::retries_exceeded(exceeded) {
+            Ok(()) => self.error_from_status_of(status, call).await,
+            Err(error) => error,
         }
     }
 
@@ -1688,10 +1790,33 @@ impl SparkConnectClient {
     /// or of its stream, sends the `ExecutePlan` again, under the retries of the whole execution.
     pub async fn execute_plan_reattachable(
         &self,
+        request: ExecutePlanRequest,
+    ) -> Result<ReattachableResponseStream> {
+        self.execute_reattachable(request, true).await
+    }
+
+    /// As [`SparkConnectClient::execute_plan_reattachable`], for a request whose plan is sent as
+    /// it is, neither compressed nor with the lookup of the plan compression of the client, as
+    /// PySpark's registrations of functions, table functions, data sources and Java functions
+    /// (`register_udf`, `register_udtf`, `register_data_source` and `register_java`) set their
+    /// command in the plan of their request.
+    pub async fn execute_plan_reattachable_uncompressed(
+        &self,
+        request: ExecutePlanRequest,
+    ) -> Result<ReattachableResponseStream> {
+        self.execute_reattachable(request, false).await
+    }
+
+    /// The execution of `request` as a reattachable stream, of its plan compressed when
+    /// `compressed` (see [`SparkConnectClient::execute_plan_reattachable`]).
+    async fn execute_reattachable(
+        &self,
         mut request: ExecutePlanRequest,
+        compressed: bool,
     ) -> Result<ReattachableResponseStream> {
         self.extend_user_context(&mut request.user_context);
-        self.execute_plan_reattachable_in_context(request).await
+        self.execute_plan_reattachable_in_context(request, compressed)
+            .await
     }
 
     /// Run `request` as [`SparkConnectClient::execute_plan_reattachable`] runs it, without
@@ -1708,7 +1833,10 @@ impl SparkConnectClient {
         self.extend_user_context(&mut request.user_context);
         let client = self.clone();
         drop(crate::runtime::get_runtime().spawn(async move {
-            if let Ok(mut stream) = client.execute_plan_reattachable_in_context(request).await {
+            if let Ok(mut stream) = client
+                .execute_plan_reattachable_in_context(request, true)
+                .await
+            {
                 while let Ok(Some(_)) = stream.message().await {}
             }
         }));
@@ -1718,25 +1846,14 @@ impl SparkConnectClient {
     /// user context extensions of its thread already.
     async fn execute_plan_reattachable_in_context(
         &self,
-        mut request: ExecutePlanRequest,
+        request: ExecutePlanRequest,
+        compressed: bool,
     ) -> Result<ReattachableResponseStream> {
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context and the client type of this request, and the request of the hook, as
-        // PySpark's iterator is of the request that the hooks return.
-        self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open()?;
-        add_result_chunking_option(&mut request, self.result_chunking);
-        self.fill_user_context(&mut request.user_context);
-        if let Some(plan) = request.plan.as_mut() {
-            self.compress_plan(plan).await;
-        }
-        // After the lookup of the plan compression of the first plan, whose response gives the
-        // server-side session ID, as PySpark builds the plan before the request.
-        self.observe_on(&mut request.client_observed_server_side_session_id);
-        let request = self.hooked_and_compressed(request).await?;
-        // As in `execute_plan`: the lookup of the plan compression may have closed the client,
-        // and PySpark reads its `_stub` before it makes the iterator, so nothing is released.
-        self.ensure_open()?;
+        // PySpark's iterator is of the request that the hooks return. PySpark reads its `_stub`
+        // before it makes the iterator, so nothing is released of a closed client.
+        let request = self.execution_request(request, compressed).await?;
         let reattachable = self.reattachable_execute();
         let iter = if reattachable {
             ExecutePlanResponseReattachableIterator::new(request)
@@ -1761,18 +1878,22 @@ impl SparkConnectClient {
         let stream = {
             // The first RPC is a wait of the caller for the execution.
             let _waiting = inflight.waiting();
-            self.with_retry_in(&mut first_response_retries, || {
-                let request = clone_on_grown_stack(iter.request());
-                let mut req = with_deadline(Request::new(request), deadline);
-                self._attach_metadata(&mut req);
-                stream_deadline = stream_deadline_in(deadline);
-                let mut stub = self.stub.clone();
-                async move {
-                    within_deadline(deadline, stub.execute_plan(req))
-                        .await
-                        .map(Response::into_inner)
-                }
-            })
+            self.with_retry_in(
+                &mut first_response_retries,
+                GrpcCall::ServerStreaming,
+                || {
+                    let request = clone_on_grown_stack(iter.request());
+                    let mut req = with_deadline(Request::new(request), deadline);
+                    self._attach_metadata(&mut req);
+                    stream_deadline = stream_deadline_in(deadline);
+                    let mut stub = self.stub.clone();
+                    async move {
+                        within_deadline(deadline, stub.execute_plan(req))
+                            .await
+                            .map(Response::into_inner)
+                    }
+                },
+            )
             .await
         };
         let stream = match stream {
@@ -1833,18 +1954,37 @@ impl SparkConnectClient {
         let resp = within_deadline(deadline, self.stub.clone().fetch_error_details(req)).await;
         let response = resp
             .map(Response::into_inner)
-            .map_err(|status| self.grpc_error(status))?;
+            .map_err(|status| self.grpc_error(status, GrpcCall::Unary))?;
         self.verify_response(&response.session_id, &response.server_side_session_id)?;
         Ok(response)
     }
 
-    /// The error for a failed RPC, as `SparkConnectClient._handle_rpc_error` raises it. An
-    /// error that the server raised gets the details that `FetchErrorDetails` returns when the
-    /// server keeps them, and shows the server's stack trace when
+    /// The error for a failed RPC of one response, as `SparkConnectClient._handle_rpc_error`
+    /// raises it. An error that the server raised gets the details that `FetchErrorDetails`
+    /// returns when the server keeps them, and shows the server's stack trace when
     /// `spark.sql.connect.serverStacktrace.enabled` or `spark.sql.pyspark.jvmStacktrace.enabled`
     /// is true. As the error is raised either way, failing to read those is not.
     pub async fn error_from_status(&self, status: tonic::Status) -> SparkError {
-        let error = self.grpc_error(status);
+        self.error_from_status_of(status, GrpcCall::Unary).await
+    }
+
+    /// As [`SparkConnectClient::error_from_status`], for a failure of a call of the kind `call`,
+    /// which names the class of grpcio's error in the message of a status that the server did not
+    /// raise an error of (see [`SparkError::from_grpc_status_of`]).
+    async fn error_from_status_of(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
+        let error = self.grpc_error(status, call);
+        if error.server.is_none() {
+            return error;
+        }
+        // Boxed: the fetch of the details and the reads of the confs, which retry, would
+        // otherwise make the future of every call that converts its failure much larger, in a
+        // debug build past the stack of a thread that polls it.
+        Box::pin(self.server_error_with_details(error)).await
+    }
+
+    /// `error`, an error that the server raised, with its details and its stack trace, as
+    /// [`SparkConnectClient::error_from_status`] completes it.
+    async fn server_error_with_details(&self, error: SparkError) -> SparkError {
         let Some(server) = &error.server else {
             return error;
         };
@@ -1920,8 +2060,12 @@ impl SparkConnectClient {
         }
     }
 
-    /// The value of a config, or `None` if it cannot be read. Read once, while an error is
-    /// raised, so that a failure is neither retried nor raised.
+    /// The value of a config, or `None` if it cannot be read, as PySpark's
+    /// `_display_server_stack_trace` reads it while an error is raised: with `RuntimeConf.get`,
+    /// whose `config` retries it under the retry policy, and whose failure its `except Exception`
+    /// catches, with the exception of the warning of the retries once they are spent. A failure
+    /// is not converted, as PySpark's `_handle_error` raises an error of the handling of another
+    /// as it is.
     async fn conf_while_raising(&self, key: &str) -> Option<String> {
         use spark_connect_proto::config_request::{operation::OpType, Get, Operation};
         // PySpark reads the config through `_stub`, which raises NO_ACTIVE_SESSION once the
@@ -1929,7 +2073,7 @@ impl SparkConnectClient {
         if self.is_closed() {
             return None;
         }
-        let request = ConfigRequest {
+        let mut request = ConfigRequest {
             session_id: self.session_id.clone(),
             user_context: Some(UserContext {
                 user_id: self.user_id.clone().unwrap_or_default(),
@@ -1945,18 +2089,35 @@ impl SparkConnectClient {
             client_type: Some(self.client_type().ok()?),
             ..Default::default()
         };
-        let mut request = request;
         // As the request of PySpark's `RuntimeConf.get`, which carries the user context
-        // extensions, as every Config request.
+        // extensions, as every Config request, and which `config` builds before its retries.
         self.extend_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
-        let deadline = self.rpc_deadlines.config;
-        let mut req = with_deadline(Request::new(request), deadline);
-        self._attach_metadata(&mut req);
-        let response = within_deadline(deadline, self.stub.clone().config(req))
-            .await
-            .ok()?
-            .into_inner();
+        let request = &request;
+        let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
+        let attempts = self
+            .retried(&mut retries, || {
+                let deadline = self.rpc_deadlines.config;
+                let mut req = with_deadline(Request::new(request.clone()), deadline);
+                self._attach_metadata(&mut req);
+                let mut stub = self.stub.clone();
+                async move {
+                    within_deadline(deadline, stub.config(req))
+                        .await
+                        .map(Response::into_inner)
+                }
+            })
+            .await;
+        let response = match attempts {
+            Ok(response) => response,
+            Err(RetryError::Exceeded(_)) => {
+                if let Err(error) = crate::retries::retries_exceeded(RetriesExceeded::Policy) {
+                    crate::retries::caught(error);
+                }
+                return None;
+            }
+            Err(_) => return None,
+        };
         self.verify_response(&response.session_id, &response.server_side_session_id)
             .ok()?;
         response.pairs.into_iter().next()?.value
@@ -2823,7 +2984,7 @@ impl SparkConnectClient {
             .await;
             match released {
                 Ok(()) => {}
-                Err(RetryError::Status(status)) => tracing::warn!(
+                Err(RetryError::Status(status) | RetryError::Exceeded(status)) => tracing::warn!(
                     "ReleaseExecute of operation {} failed: {}",
                     request.operation_id,
                     status
@@ -2911,7 +3072,7 @@ impl SparkConnectClient {
                 }
             })
             .await;
-            if let Err(RetryError::Status(status)) = sent {
+            if let Err(RetryError::Status(status) | RetryError::Exceeded(status)) = sent {
                 tracing::warn!("ExecutePlan of operation {operation_id} failed: {status}");
             }
         };
@@ -2967,7 +3128,9 @@ impl ReattachableResponseStream {
             // The initial ExecutePlan passed its deadline, a RetryException that fails at once
             // when the bound of the retries has passed, as it has when the bound is 0.
             let status = tonic::Status::deadline_exceeded("Deadline Exceeded");
-            return Err(self.fail_with_status(status).await);
+            return Err(self
+                .fail_exceeded(status, RetriesExceeded::RetryException)
+                .await);
         }
         loop {
             let Some(stream) = self.stream.as_mut() else {
@@ -3026,7 +3189,9 @@ impl ReattachableResponseStream {
                         && !self.iter.is_completed().await =>
                 {
                     if !retrying.retry_at_once() {
-                        return Err(self.fail_with_status(status).await);
+                        return Err(self
+                            .fail_exceeded(status, RetriesExceeded::RetryException)
+                            .await);
                     }
                     self.stream = None;
                 }
@@ -3041,7 +3206,9 @@ impl ReattachableResponseStream {
                         return Err(self.fail(response_already_received(error_type)));
                     }
                     if !retrying.retry_at_once() {
-                        return Err(self.fail_with_status(status).await);
+                        return Err(self
+                            .fail_exceeded(status, RetriesExceeded::RetryException)
+                            .await);
                     }
                     self.execute_again = true;
                     self.stream = None;
@@ -3062,6 +3229,9 @@ impl ReattachableResponseStream {
                     match retrying.backoff(&status).await {
                         Backoff::Retry => {}
                         Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                        Backoff::Exceeded => {
+                            return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
+                        }
                         Backoff::Aborted => return Err(self.fail(wait_aborted())),
                     }
                     self.reattach(&mut retrying).await?;
@@ -3099,6 +3269,9 @@ impl ReattachableResponseStream {
                     Err(status) => match retrying.backoff(&status).await {
                         Backoff::Retry => {}
                         Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                        Backoff::Exceeded => {
+                            return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
+                        }
                         Backoff::Aborted => return Err(self.fail(wait_aborted())),
                     },
                 }
@@ -3131,6 +3304,9 @@ impl ReattachableResponseStream {
                 Err(status) => match retrying.backoff(&status).await {
                     Backoff::Retry => self.stream = None,
                     Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                    Backoff::Exceeded => {
+                        return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
+                    }
                     Backoff::Aborted => return Err(self.fail(wait_aborted())),
                 },
             }
@@ -3176,7 +3352,9 @@ impl ReattachableResponseStream {
                     return Err(self.fail(response_already_received(error_type)));
                 }
                 if !retrying.retry_at_once() {
-                    return Err(self.fail_with_status(status).await);
+                    return Err(self
+                        .fail_exceeded(status, RetriesExceeded::RetryException)
+                        .await);
                 }
                 self.execute_again = true;
                 continue;
@@ -3185,7 +3363,9 @@ impl ReattachableResponseStream {
                 // As the reference: a call past its deadline, whether it is sent again or
                 // reattached, is retried at once, the execution going on on the server.
                 if !retrying.retry_at_once() {
-                    return Err(self.fail_with_status(status).await);
+                    return Err(self
+                        .fail_exceeded(status, RetriesExceeded::RetryException)
+                        .await);
                 }
                 self.execute_again = false;
                 continue;
@@ -3193,6 +3373,9 @@ impl ReattachableResponseStream {
             match retrying.backoff(&status).await {
                 Backoff::Retry => continue,
                 Backoff::GiveUp => return Err(self.fail_with_status(status).await),
+                Backoff::Exceeded => {
+                    return Err(self.fail_exceeded(status, RetriesExceeded::Policy).await)
+                }
                 Backoff::Aborted => return Err(self.fail(wait_aborted())),
             }
         }
@@ -3234,7 +3417,25 @@ impl ReattachableResponseStream {
 
     /// Ends the stream with the error of `status`, as [`Self::fail`].
     async fn fail_with_status(&mut self, status: tonic::Status) -> SparkError {
-        let error = self.client.error_from_status(status).await;
+        let error = self
+            .client
+            .error_from_status_of(status, GrpcCall::ServerStreaming)
+            .await;
+        self.fail(error)
+    }
+
+    /// Ends the stream with the failure `status` of retries that are spent, which `exceeded`
+    /// tells, as [`Self::fail`]: with the error that [`SparkConnectClient::exceeded_error`] makes
+    /// of it, as PySpark's `Retrying` warns that they are before it raises the failure.
+    async fn fail_exceeded(
+        &mut self,
+        status: tonic::Status,
+        exceeded: RetriesExceeded,
+    ) -> SparkError {
+        let error = self
+            .client
+            .exceeded_error(status, exceeded, GrpcCall::ServerStreaming)
+            .await;
         self.fail(error)
     }
 
@@ -4076,6 +4277,202 @@ mod tests {
         assert_eq!(calls.calls.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
+    /// The listener of the spent retries of the tests, which records what the calls of each thread
+    /// tell it and the errors that they catch, and fails the calls of the threads that ask it to,
+    /// as the listener is of the process, which other tests share.
+    #[derive(Default)]
+    struct SpentRetries {
+        told: std::sync::Mutex<Vec<(std::thread::ThreadId, RetriesExceeded)>>,
+        caught: std::sync::Mutex<Vec<(std::thread::ThreadId, String)>>,
+        failing: std::sync::Mutex<std::collections::HashSet<std::thread::ThreadId>>,
+    }
+
+    impl crate::retries::RetriesListener for SpentRetries {
+        fn retries_exceeded(&self, exceeded: RetriesExceeded) -> Result<()> {
+            let thread = std::thread::current().id();
+            self.told.lock().unwrap().push((thread, exceeded));
+            if self.failing.lock().unwrap().contains(&thread) {
+                return Err(SparkError::value_msg("the warning"));
+            }
+            Ok(())
+        }
+
+        fn caught(&self, error: SparkError) {
+            let thread = std::thread::current().id();
+            self.caught.lock().unwrap().push((thread, error.message()));
+        }
+    }
+
+    impl SpentRetries {
+        /// The listener of the process, which the first call installs.
+        fn installed() -> &'static SpentRetries {
+            static LISTENER: std::sync::OnceLock<std::sync::Arc<SpentRetries>> =
+                std::sync::OnceLock::new();
+            LISTENER.get_or_init(|| {
+                let listener = std::sync::Arc::new(SpentRetries::default());
+                crate::retries::set_listener(Some(listener.clone()));
+                listener
+            })
+        }
+
+        /// What the calls of this thread told, and the messages of the errors that they caught,
+        /// which are forgotten.
+        fn take(&self) -> (Vec<RetriesExceeded>, Vec<String>) {
+            let thread = std::thread::current().id();
+            let mut told = self.told.lock().unwrap();
+            let mut caught = self.caught.lock().unwrap();
+            let ours = told.iter().filter(|(t, _)| *t == thread).map(|(_, e)| *e);
+            let ours_told = ours.collect();
+            let ours = caught
+                .iter()
+                .filter(|(t, _)| *t == thread)
+                .map(|(_, m)| m.clone());
+            let ours_caught = ours.collect();
+            told.retain(|(t, _)| *t != thread);
+            caught.retain(|(t, _)| *t != thread);
+            (ours_told, ours_caught)
+        }
+
+        /// Make the listener fail the calls of this thread, or not.
+        fn fail(&self, failing: bool) {
+            let thread = std::thread::current().id();
+            let mut threads = self.failing.lock().unwrap();
+            if failing {
+                threads.insert(thread);
+            } else {
+                threads.remove(&thread);
+            }
+        }
+    }
+
+    /// A client of an address that refuses its connections, of a retry policy of one quick retry.
+    async fn refused_client() -> SparkConnectClient {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}")).unwrap();
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        client.set_retry_policy(RetryPolicy {
+            max_retries: Some(1),
+            initial_backoff_ms: 1,
+            max_backoff_ms: Some(1),
+            ..RetryPolicy::default()
+        });
+        client
+    }
+
+    #[tokio::test]
+    async fn the_listener_is_told_of_the_spent_retries_of_a_call_where_pyspark_warns() {
+        // As PySpark's `Retrying._wait`, which warns `[RETRIES_EXCEEDED]` once the retries of a
+        // failure that a policy retries are spent, before it raises the failure, and not of a
+        // failure that no policy retries.
+        let listener = SpentRetries::installed();
+        let client = refused_client().await;
+        let error = client.interrupt_all().await.unwrap_err();
+        assert_eq!(error.grpc_code, Some(tonic::Code::Unavailable as i32));
+        assert!(
+            error
+                .message()
+                .starts_with("[The service is currently unavailable] "),
+            "{error:?}"
+        );
+        assert!(
+            error
+                .pyspark_message
+                .as_deref()
+                .is_some_and(|message| message
+                    .starts_with("<_InactiveRpcError of RPC that terminated with:\n")),
+            "{error:?}"
+        );
+        assert_eq!(listener.take(), (vec![RetriesExceeded::Policy], vec![]));
+        client.replace_retry_policy(RetryPolicy {
+            retries_failures: false,
+            ..client.retry_policy()
+        });
+        client.interrupt_all().await.unwrap_err();
+        assert_eq!(listener.take(), (vec![], vec![]));
+
+        // The error of the listener is that of the call, unconverted, as PySpark raises the
+        // exception of the warning of a filter of "error".
+        listener.fail(true);
+        let client = refused_client().await;
+        assert_eq!(
+            client.interrupt_all().await.unwrap_err().message(),
+            "the warning"
+        );
+        assert_eq!(listener.take(), (vec![RetriesExceeded::Policy], vec![]));
+        // The lookup of the plan compression of the first plan catches its error, as PySpark's
+        // `except Exception` does, and the listener is given it back. The execution is the call
+        // of the error then.
+        let relation = ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            plan: Some(Plan {
+                op_type: Some(PlanOpType::Root(Default::default())),
+            }),
+            ..Default::default()
+        };
+        let executed = client.execute_plan_reattachable(relation).await;
+        assert_eq!(executed.err().unwrap().message(), "the warning");
+        let spent = vec![RetriesExceeded::Policy, RetriesExceeded::Policy];
+        assert_eq!(listener.take(), (spent, vec!["the warning".to_string()]));
+        // So does the read of the conf of the stack trace of an error of the server, which
+        // PySpark's `_display_server_stack_trace` retries, and whose failure shows the trace.
+        assert_eq!(client.conf_while_raising("k").await, None);
+        assert!(client.display_server_stacktrace().await);
+        let spent = vec![RetriesExceeded::Policy; 2];
+        let caught = vec!["the warning".to_string(); 2];
+        assert_eq!(listener.take(), (spent, caught));
+        listener.fail(false);
+    }
+
+    #[tokio::test]
+    async fn the_listener_is_told_of_the_retries_at_once_that_ran_for_their_elapsed_time() {
+        // As PySpark's `Retrying._wait`, which warns `[RETRIES_EXCEEDED]` of the retries of a
+        // RetryException, such as of an execution past its deadline, once they ran for their
+        // elapsed time, and raises its cause.
+        let listener = SpentRetries::installed();
+        // A server that never answers.
+        let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = silent.local_addr().unwrap().port();
+        let held = tokio::spawn(async move {
+            let mut sockets = Vec::new();
+            while let Ok((socket, _)) = silent.accept().await {
+                sockets.push(socket);
+            }
+        });
+        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        let builder = ChannelBuilder::parse(&format!("sc://127.0.0.1:{port}")).unwrap();
+        let mut client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        client.set_rpc_deadlines(RpcDeadlines {
+            reattachable_execute_plan: Some(Duration::from_millis(50)),
+            ..RpcDeadlines::default()
+        });
+        client.set_retry_policy(RetryPolicy {
+            max_retry_exception_elapsed_time_ms: Some(0),
+            ..RetryPolicy::default()
+        });
+        // No lookup of the plan compression, which the server would not answer either.
+        *client.plan_compression.lock().unwrap() = PlanCompression::Disabled;
+        let command = ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            plan: Some(Plan {
+                op_type: Some(PlanOpType::Command(Default::default())),
+            }),
+            ..Default::default()
+        };
+        let mut stream = client.execute_plan_reattachable(command).await.unwrap();
+        let error = stream.message().await.unwrap_err();
+        held.abort();
+        assert_eq!(error.grpc_code, Some(tonic::Code::DeadlineExceeded as i32));
+        assert_eq!(
+            listener.take(),
+            (vec![RetriesExceeded::RetryException], vec![])
+        );
+    }
+
     #[tokio::test]
     async fn test_add_artifacts_request_structure() {
         let builder = ChannelBuilder::parse("sc://localhost").unwrap();
@@ -4672,6 +5069,112 @@ mod request_fields_tests {
                 "{op_type:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn the_request_of_the_first_command_observes_no_server_side_session_as_pyspark() {
+        // As PySpark's `execute_command`, which builds its request before it sets the command in
+        // its plan, with the lookup of the plan compression of the first plan: the request of the
+        // first command of a session observes no server-side session ID, which the response of
+        // the lookup gives, and the next one does. The plan of a relation is built before its
+        // request (`to_proto`), which then observes it (see the test below).
+        let (client, received, server) = recorded_client().await;
+        let command = || ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            plan: Some(Plan {
+                op_type: Some(PlanOpType::Command(Default::default())),
+            }),
+            ..Default::default()
+        };
+        let mut stream = client.execute_plan_reattachable(command()).await.unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        let mut stream = client.execute_plan(command()).await.unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        server.abort();
+        let requests = received.lock().unwrap().clone();
+        let observed: Vec<(&str, Option<String>)> = requests
+            .iter()
+            .filter(|(method, _)| method != "ReleaseExecute")
+            .map(|(method, bytes)| (method.as_str(), fields_of(method, bytes).1))
+            .collect();
+        let server_side = Some(SERVER_ID.to_string());
+        assert_eq!(
+            observed,
+            [
+                ("Config", None),
+                ("ExecutePlan", None),
+                ("ExecutePlan", server_side)
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_plan_sent_uncompressed_is_sent_as_it_is_without_the_lookup_as_pyspark() {
+        // As PySpark's registrations of `_execute`, which set their command in the plan of their
+        // request as it is: neither compressed, over the threshold too, nor of the lookup of the
+        // plan compression, which the next plan makes.
+        let (client, received, server) = recorded_client().await;
+        let large = || ExecutePlanRequest {
+            session_id: client.session_id().to_string(),
+            plan: Some(Plan {
+                op_type: Some(PlanOpType::Command(spark_connect_proto::Command {
+                    command_type: Some(spark_connect_proto::command::CommandType::Extension(
+                        prost_types::Any {
+                            type_url: "example.org/large".into(),
+                            value: vec![0; 64 * 1024],
+                        },
+                    )),
+                })),
+            }),
+            ..Default::default()
+        };
+        let executions = || -> Vec<(String, Option<PlanOpType>)> {
+            let requests = received.lock().unwrap().clone();
+            requests
+                .into_iter()
+                .filter(|(method, _)| method != "ReleaseExecute")
+                .map(|(method, bytes)| {
+                    let op_type = (method == "ExecutePlan")
+                        .then(|| ExecutePlanRequest::decode(bytes.as_slice()).unwrap())
+                        .and_then(|request| request.plan)
+                        .and_then(|plan| plan.op_type);
+                    (method, op_type)
+                })
+                .collect()
+        };
+        let mut stream = client
+            .execute_plan_reattachable_uncompressed(large())
+            .await
+            .unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        let sent = executions();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        assert_eq!(sent[0].0, "ExecutePlan");
+        assert!(matches!(sent[0].1, Some(PlanOpType::Command(_))));
+        assert_eq!(
+            *client.plan_compression.lock().unwrap(),
+            PlanCompression::Unknown
+        );
+        // Of a plan compression of the client too, which compresses the others.
+        *client.plan_compression.lock().unwrap() = PlanCompression::Zstd { threshold: 1000 };
+        for compressed in [false, true] {
+            let mut stream = if compressed {
+                client.execute_plan_reattachable(large()).await.unwrap()
+            } else {
+                client
+                    .execute_plan_reattachable_uncompressed(large())
+                    .await
+                    .unwrap()
+            };
+            while stream.message().await.unwrap().is_some() {}
+            let op_type = executions().pop().unwrap().1;
+            if compressed {
+                assert!(matches!(op_type, Some(PlanOpType::CompressedOperation(_))));
+            } else {
+                assert!(matches!(op_type, Some(PlanOpType::Command(_))));
+            }
+        }
+        server.abort();
     }
 
     #[tokio::test]

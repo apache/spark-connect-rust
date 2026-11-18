@@ -693,9 +693,14 @@ class TestStreamingListenerLifecycle:
 
     @pytest.mark.parametrize("release_failure", [False, True])
     def test_streaming_listener_stop_releases_without_a_listener_removal_rpc(
-        self, mock_connect, caplog, release_failure,
+        self, mock_connect, caplog, monkeypatch, release_failure,
     ):
+        from pyspark.sql.connect.logging import logger
+
         spark, service = mock_connect
+        # The logger of Spark Connect, of the failure of the release of stop(), as PySpark's, is
+        # disabled unless SPARK_CONNECT_LOG_LEVEL is set.
+        monkeypatch.setattr(logger, "disabled", False)
         service.listener_bus_enabled = True
         spark.streams.addListener(IdleListener())
         # An ordinary close would block/fail here; terminal stop must use only ReleaseSession.
@@ -703,20 +708,28 @@ class TestStreamingListenerLifecycle:
         service.listener_remove_failure = True
         service.release_session_failure = release_failure
         try:
-            with caplog.at_level("WARNING", logger="pyspark"):
+            with caplog.at_level("WARNING", logger=logger.name):
                 assert spark.stop() is None
             assert spark.is_stopped
             assert service.listener_removals == 0
             assert service.release_session_calls == 1
             assert spark.streams._sqlb._listener_bus == []
             assert service.wait_listener_streams_finished(1)
-            messages = [record.message for record in caplog.records if record.name == "pyspark"]
+            messages = [
+                record.message
+                for record in caplog.records
+                if record.name.startswith("pyspark")
+            ]
             if release_failure:
-                assert len(messages) == 1
-                assert messages[0].startswith(
-                    "session.stop(): Session could not be released. Error: "
-                )
-                assert messages[0].endswith("session release failed")
+                # Of the `str()` of grpcio's error of a status of no details, which PySpark's
+                # error of it gives, with the `$` of the f-string of PySpark's stop().
+                assert messages == [
+                    "session.stop(): Session could not be released. Error: $"
+                    "<_InactiveRpcError of RPC that terminated with:\n"
+                    "\tstatus = StatusCode.INVALID_ARGUMENT\n"
+                    '\tdetails = "session release failed"\n'
+                    '\tdebug_error_string = "INVALID_ARGUMENT:session release failed"\n>'
+                ]
             else:
                 assert messages == []
             spark.stop()

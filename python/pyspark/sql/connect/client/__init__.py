@@ -36,6 +36,7 @@ import platform
 import sys
 import urllib.parse
 import uuid
+import warnings
 import weakref
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, fields
@@ -1549,6 +1550,7 @@ class SparkConnectClient:
 
             parameters = self._session._retry_policy()
             parameters.pop("max_retry_exception_elapsed_time")
+            parameters.pop("retries_failures")
             policies = [DefaultPolicy(**parameters)]
             _RETRY_POLICIES[self._session] = policies
         return list(policies)
@@ -1816,9 +1818,10 @@ def _retry_parameters(policies: list[Any]) -> dict[str, Any]:
     """The parameters of ``policies`` that the Rust transport retries with, as PySpark's
     ``Retrying`` retries with them: a failure is retried by the first policy that can retry it, a
     ``DefaultPolicy`` of the failures that the transport retries, as a ``RetryPolicy`` can retry
-    none, so those of the first ``DefaultPolicy`` retry, and without one nothing is retried. A
-    policy of another ``can_retry``, of the failures that it retries, or of another ``to_state``,
-    of the waits of its retries, raises ``NOT_IMPLEMENTED``: the transport cannot call them."""
+    none, so those of the first ``DefaultPolicy`` retry, and without one no failure is retried,
+    nor are retries spent, of which ``Retrying`` warns. A policy of another ``can_retry``, of the
+    failures that it retries, or of another ``to_state``, of the waits of its retries, raises
+    ``NOT_IMPLEMENTED``: the transport cannot call them."""
     from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
 
     effective = None
@@ -1839,7 +1842,7 @@ def _retry_parameters(policies: list[Any]) -> dict[str, Any]:
         if effective is None and can_retry is DefaultPolicy.can_retry:
             effective = policy
     if effective is None:
-        return {"max_retries": 0}
+        return {"max_retries": 0, "retries_failures": False}
     max_retries = effective.max_retries
     if max_retries is not None:
         # As RetryPolicyState, which retries while the attempts are fewer than it.
@@ -1861,6 +1864,7 @@ def _retry_parameters(policies: list[Any]) -> dict[str, Any]:
             if max_server_retry_delay is None
             else _milliseconds("max_server_retry_delay", max_server_retry_delay)
         ),
+        "retries_failures": True,
     }
 
 
@@ -1890,3 +1894,66 @@ def _elapsed_time_bound(seconds: float) -> Optional[float]:
     if math.isinf(seconds) and seconds > 0:
         return None
     return max(float(seconds), 0.0)
+
+
+# The message of the warning of PySpark's `Retrying` once the retries of a call are spent, and the
+# module whose `Retrying._wait` warns it.
+_RETRIES_EXCEEDED = "[RETRIES_EXCEEDED] The maximum number of retries has been exceeded."
+_RETRIES_MODULE = __name__ + ".retries"
+# The registry of the warnings of that module that were shown: its own once it is imported, which
+# it imports grpc to be, and this one until then, which the module takes as its own.
+_RETRIES_WARNING_REGISTRY: dict[Any, Any] = {}
+
+
+@functools.cache
+def _retries_exceeded_locations() -> Optional[tuple[str, int, int]]:
+    """The file of pyspark.sql.connect.client.retries and the lines of the two ``warnings.warn``
+    calls of its ``Retrying._wait``: of the retries of a ``RetryException`` past their elapsed
+    time, then of a policy whose retries are spent. Read of the source of the module, which is not
+    imported, as it imports grpc. None for a module of no source."""
+    import importlib.util
+    import linecache
+
+    spec = importlib.util.find_spec(_RETRIES_MODULE)
+    if spec is None or spec.origin is None:
+        return None
+    call = f'warnings.warn("{_RETRIES_EXCEEDED}")'
+    lines = [
+        number
+        for number, line in enumerate(linecache.getlines(spec.origin), start=1)
+        if line.strip() == call
+    ]
+    if len(lines) != 2:
+        return None
+    return spec.origin, lines[0], lines[1]
+
+
+def _warn_retries_exceeded(retry_exception: bool) -> None:
+    """Warn as PySpark's ``Retrying._wait`` warns once the retries of a call are spent, before it
+    raises the failure, for the Rust transport, which calls this on the thread of the call: the
+    UserWarning ``[RETRIES_EXCEEDED]``, of the location that ``warnings.warn`` gives it there, the
+    line of the call in pyspark.sql.connect.client.retries, of that module and of its registry of
+    the warnings that it showed. So the filters of the module (``filterwarnings(...,
+    module="pyspark.sql.connect.client.retries")``) and the actions of a location (``"default"``,
+    ``"module"``) take it as they take PySpark's, and a filter of ``"error"`` raises it in place of
+    the failure. ``retry_exception`` is of the retries of a ``RetryException`` past their elapsed
+    time, else of a policy. Of a module of no source, the warning is of this function."""
+    locations = _retries_exceeded_locations()
+    if locations is None:
+        warnings.warn(_RETRIES_EXCEEDED)
+        return
+    filename, retry_exception_line, policy_line = locations
+    module = sys.modules.get(_RETRIES_MODULE)
+    registry = (
+        _RETRIES_WARNING_REGISTRY
+        if module is None
+        else vars(module).setdefault("__warningregistry__", _RETRIES_WARNING_REGISTRY)
+    )
+    warnings.warn_explicit(
+        _RETRIES_EXCEEDED,
+        UserWarning,
+        filename,
+        retry_exception_line if retry_exception else policy_line,
+        _RETRIES_MODULE,
+        registry,
+    )
