@@ -7,8 +7,10 @@
 //! `common` of their relations is here. PySpark runs every call at once, also the ones that return
 //! lists. Of the Rust calls, those that return a DataFrame are lazy: the plan of the call is the
 //! relation of that DataFrame, which it sends when it runs. The other calls run at once, against a
-//! loopback service that records the plans it is sent. A case that the golden lacks, or of which
-//! the Rust API sends other plans, fails the test.
+//! loopback service that records the requests it is sent. A case that the golden lacks, or of which
+//! the Rust API sends other plans, fails the test. As PySpark's `_execute_and_fetch`, which runs an
+//! operation as the execution of its DataFrame, each relation has a plan ID, which the golden
+//! clears, and each request the tags of the thread.
 
 use std::collections::{BTreeSet, HashMap};
 use std::convert::Infallible;
@@ -68,10 +70,10 @@ fn load_goldens() -> HashMap<String, Vec<proto::Relation>> {
 
 const SERVICE: &str = "/spark.connect.SparkConnectService/";
 
-/// The root relations of the plans that the service was sent, in order.
-type Sent = Arc<Mutex<Vec<proto::Relation>>>;
+/// The execution requests that the service was sent, in order.
+type Sent = Arc<Mutex<Vec<proto::ExecutePlanRequest>>>;
 
-/// A Spark Connect service that records the plan of each execution and answers it with no rows,
+/// A Spark Connect service that records the request of each execution and answers it with no rows,
 /// but `currentDatabase`, which it answers as a server of the default database does: `listViews`
 /// of a pattern reads it.
 #[derive(Clone)]
@@ -105,8 +107,7 @@ impl Service<http::Request<Body>> for Recorder {
     }
 }
 
-/// ExecutePlan: records the root relation of the plan, and completes, after the row of
-/// `currentDatabase`.
+/// ExecutePlan: records the request, and completes, after the row of `currentDatabase`.
 struct Execute(Sent);
 
 impl ServerStreamingService<Vec<u8>> for Execute {
@@ -135,8 +136,8 @@ impl ServerStreamingService<Vec<u8>> for Execute {
                     proto::execute_plan_response::ResponseType::ArrowBatch(row_of("default")),
                 )));
             }
-            self.0.lock().unwrap().push(root.clone());
         }
+        self.0.lock().unwrap().push(request.clone());
         frames.push(Ok(response(
             proto::execute_plan_response::ResponseType::ResultComplete(
                 proto::execute_plan_response::ResultComplete {},
@@ -502,16 +503,38 @@ fn catalog_calls_send_the_plans_of_official_pyspark() {
         .remote(&remote)
         .get_or_create()
         .unwrap();
+    // The calls run on this thread, whose tags their requests carry.
+    spark.add_tag("golden").unwrap();
     let catalog = spark.catalog();
     let mut failures = Vec::new();
+    let mut failed_cases = BTreeSet::new();
     for (name, call) in &cases {
+        let failures_before = failures.len();
         sent.lock().unwrap().clear();
         let dataframe = call(&catalog);
-        let mut plans = std::mem::take(&mut *sent.lock().unwrap());
+        let mut plans = Vec::new();
+        for request in std::mem::take(&mut *sent.lock().unwrap()) {
+            if request.tags != ["golden"] {
+                failures.push(format!("{name}: a request of the tags {:?}", request.tags));
+            }
+            match request.plan.and_then(|plan| plan.op_type) {
+                Some(proto::plan::OpType::Root(root)) => plans.push(root),
+                other => failures.push(format!("{name}: a plan of no root relation: {other:?}")),
+            }
+        }
         if let Some(dataframe) = dataframe {
             plans.push(dataframe.to_relation().unwrap());
         }
         for plan in &mut plans {
+            // As PySpark's `_create_proto_relation`, which gives every relation a plan ID.
+            if plan
+                .common
+                .as_ref()
+                .and_then(|common| common.plan_id)
+                .is_none()
+            {
+                failures.push(format!("{name}: a relation of no plan ID: {plan:?}"));
+            }
             plan.common = None;
         }
         let expected = &goldens[*name];
@@ -520,11 +543,14 @@ fn catalog_calls_send_the_plans_of_official_pyspark() {
                 "{name}: MISMATCH\n  expected: {expected:?}\n  actual:   {plans:?}"
             ));
         }
+        if failures.len() > failures_before {
+            failed_cases.insert(*name);
+        }
     }
     assert!(
         failures.is_empty(),
         "{} of {} golden catalog cases failed:\n{}",
-        failures.len(),
+        failed_cases.len(),
         cases.len(),
         failures.join("\n")
     );

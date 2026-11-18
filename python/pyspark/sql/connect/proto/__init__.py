@@ -26,9 +26,9 @@ The gRPC stubs of ``base_pb2_grpc`` are not exported: the Rust transport speaks 
 
 Where ``protobuf`` is installed, the files of the protos are added to its default descriptor
 pool too, as the generated modules add them, so that the modules that protoc generates of other
-protos that import them (those of a plugin, such as Delta Lake's) build. Their messages are
-protobuf's: a message field of theirs takes a message of this package through its bytes
-(``ParseFromString(message.SerializeToString())``) or a dict, not as it is.
+protos that import them (those of a plugin, such as Delta Lake's) build, and those modules get the
+classes of the runtime, whose message fields take the messages of this package as they are, as
+protobuf's take PySpark's.
 """
 from pyspark.sql.connect.proto import _rust
 

@@ -30,13 +30,15 @@ use spark_connect_proto as proto;
 
 use crate::errors::ResultExt;
 
-/// The bytes of the `spark.connect.DataType` of `data_type`, as the client sends the type.
+/// The bytes of the `spark.connect.DataType` of `data_type`, as the client sends the type: a type
+/// that PySpark's `pyspark_types_to_proto_types` has no proto of, a `StructField` or a type of
+/// its class only such as `AtomicType()`, raises its `UNSUPPORTED_OPERATION`.
 #[pyfunction]
 pub fn _data_type_proto<'py>(
     py: Python<'py>,
     data_type: &Bound<'py, PyAny>,
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let data_type = crate::types::py_to_data_type(data_type)?;
+    let data_type = crate::types::py_to_proto_data_type(data_type)?;
     Ok(PyBytes::new(py, &data_type.to_proto().encode_to_vec()))
 }
 

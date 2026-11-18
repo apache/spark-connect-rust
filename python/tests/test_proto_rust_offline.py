@@ -33,7 +33,9 @@ import copy
 import datetime
 import importlib
 import json
+import os
 import pathlib
+import pickle
 import random
 import subprocess
 import sys
@@ -51,40 +53,52 @@ from pyspark.sql.connect.proto import _rust
 _UPB_CLASSES = {}
 
 
+def _upb_classes_of(files):
+    """The classes of upb of the messages of ``files``, each its serialized file and the name of
+    its module, by full name, as the modules that protoc generates of the files make them with
+    protobuf's builder (of their module and qualified names, as Apache Spark's do). The files are
+    those of the protos and protobuf's own of the well-known types that they import, then
+    ``files``, in a pool of their own, so that no class that protobuf made before of the default
+    pool, of another name, stands in for one: the builder gives a file of another pool than the
+    default one protobuf's classes, which the drop-in leaves as they are."""
+    from google.protobuf import any_pb2, descriptor_pool, timestamp_pb2
+    from google.protobuf.internal import builder
+
+    pool = descriptor_pool.DescriptorPool()
+    spark_files = [(m.DESCRIPTOR.serialized_pb, m.__name__) for m in (any_pb2, timestamp_pb2)]
+    spark_files += [
+        (_pyspark._proto_file_descriptor(name).serialized_pb, _rust._module_name(name, package))
+        for name, package, _, _ in _pyspark._proto_files()
+        if package == "spark.connect"
+    ]
+    classes = {}
+
+    def add(cls):
+        classes[cls.DESCRIPTOR.full_name] = cls
+        for nested in cls.DESCRIPTOR.nested_types:
+            add(getattr(cls, nested.name))
+
+    for serialized, module_name in spark_files + list(files):
+        file = pool.AddSerializedFile(serialized)
+        namespace = {}
+        builder.BuildMessageAndEnumDescriptors(file, namespace)
+        builder.BuildTopDescriptorsAndMessages(file, module_name, namespace)
+        for name in file.message_types_by_name:
+            add(namespace[name])
+    return classes
+
+
 def _upb_classes():
-    """The class of a message of upb by full name, as the modules that protoc generates of the
-    protos make it (of its module and qualified names, as Apache Spark's do), or None without
-    protobuf of upb. The classes are of a pool of their own, of the files of the protos and of
-    protobuf's own of the well-known types, so that no class that protobuf made before of the
-    default pool, of another name, stands in for one."""
+    """The class of a message of upb by full name, of the protos (see ``_upb_classes_of``), or
+    None without protobuf of upb."""
     try:
-        from google.protobuf import any_pb2, descriptor_pool, timestamp_pb2
-        from google.protobuf.internal import api_implementation, builder
+        from google.protobuf.internal import api_implementation
     except ImportError:
         return None
     if api_implementation.Type() != "upb":
         return None
     if not _UPB_CLASSES:
-        pool = descriptor_pool.DescriptorPool()
-        files = [(m.DESCRIPTOR.serialized_pb, m.__name__) for m in (any_pb2, timestamp_pb2)]
-        files += [
-            (_pyspark._proto_file_descriptor(name).serialized_pb, _rust._module_name(name, package))
-            for name, package, _, _ in _pyspark._proto_files()
-            if package == "spark.connect"
-        ]
-
-        def add(cls):
-            _UPB_CLASSES[cls.DESCRIPTOR.full_name] = cls
-            for nested in cls.DESCRIPTOR.nested_types:
-                add(getattr(cls, nested.name))
-
-        for serialized, module_name in files:
-            file = pool.AddSerializedFile(serialized)
-            namespace = {}
-            builder.BuildMessageAndEnumDescriptors(file, namespace)
-            builder.BuildTopDescriptorsAndMessages(file, module_name, namespace)
-            for name in file.message_types_by_name:
-                add(namespace[name])
+        _UPB_CLASSES.update(_upb_classes_of([]))
     return _UPB_CLASSES.__getitem__
 
 
@@ -2005,10 +2019,343 @@ def test_json_and_text_formats_of_protobuf_take_the_messages(upb):
         assert parsed.SerializeToString() == bytes_of
 
 
-def test_modules_that_protoc_generates_of_protos_importing_spark_connects_build(upb):
+@pytest.fixture(scope="module")
+def plugin(upb):
+    """The generated modules of the plugin of the tests (``plugin_protos/plugin.proto``, which
+    imports the protos of Spark Connect, and ``plugin_protos/base.proto``, which does not, as
+    Delta Lake's ``delta/connect/relations.proto`` and ``base.proto``), and the class of upb of a
+    message of their files and of the protos by full name, of a pool of their own, as the classes
+    of the official client are upb's of the modules."""
+    try:
+        from google.protobuf import runtime_version
+    except ImportError:
+        runtime_version = None
+    if runtime_version is None or (runtime_version.MAJOR, runtime_version.MINOR) < (6, 33):
+        pytest.skip("the modules of plugin_protos, of protoc 33.0, need protobuf 6.33 or later")
+    from plugin_protos import base_pb2, plugin_pb2
+
+    classes = _upb_classes_of(
+        [(m.DESCRIPTOR.serialized_pb, m.__name__) for m in (base_pb2, plugin_pb2)]
+    )
+    return plugin_pb2, base_pb2, classes.__getitem__
+
+
+def _plugin_cases(cls, table):
+    """Messages of the plugin of the tests, of the classes of ``cls`` by full name, as Delta
+    Lake's plan code builds its relations: a relation and an expression of the protos copied and
+    merged into their fields, given to their constructors and to their containers and maps, a
+    message of ``table``, the class of ``thirdparty.Table`` (of base.proto), copied and merged into
+    a field of its type, and an ``Any`` of the protos that packs one."""
+    relation = cls("spark.connect.Relation")(sql={"query": "select 1"})
+    relation.common.plan_id = 7
+    condition = cls("spark.connect.Expression")(expression_string={"expression": "id > 1"})
+    delete = cls("thirdparty.DeleteFromTable")()
+    delete.target.CopyFrom(relation)
+    delete.condition.CopyFrom(condition)
+    built = cls("thirdparty.DeleteFromTable")(target=relation, condition=condition)
+    merged = cls("thirdparty.DeleteFromTable")()
+    merged.target.MergeFrom(relation)
+    merged.MergeFrom(built)
+    merge = cls("thirdparty.MergeIntoTable")(
+        source=relation, mode="MODE_UPSERT", defaults={"d": condition}
+    )
+    merge.target.CopyFrom(relation)
+    merge.condition.CopyFrom(condition)
+    assignment = cls("thirdparty.Assignment")(field=condition, value=condition)
+    action = merge.matched_actions.add(condition=condition)
+    action.update_action.assignments.extend([assignment])
+    action.update_action.assignments.append(assignment)
+    merge.matched_actions.add().delete_action.SetInParent()
+    merge.matched_actions.append(
+        cls("thirdparty.MergeIntoTable.Action")(update_action={"assignments": [assignment]})
+    )
+    merge.defaults["e"].CopyFrom(condition)
+    merge.with_schema_evolution = False
+    scan = cls("thirdparty.Scan")(table=table(path="/p", options={"k": "v"}))
+    scanned = cls("thirdparty.Scan")()
+    scanned.table.CopyFrom(table(name="t"))
+    scanned.table.MergeFrom(table(options={"k": "v"}))
+    wrapper = cls("thirdparty.PluginRelation")(merge_into_table=merge)
+    wrapper.scan.CopyFrom(scan)
+    extension = cls("spark.connect.Relation")()
+    extension.extension.Pack(delete)
+    return [delete, built, merged, merge, scan, scanned, wrapper, extension]
+
+
+def test_generated_modules_of_plugins_have_the_classes_of_the_runtime(plugin):
+    # The module that protoc generates of a plugin's file that imports the protos of Spark Connect
+    # has the classes of the runtime, of its module and qualified names, as protobuf's builder
+    # names them, and the runtime's wrappers of its enums; the module of its file that does not
+    # import them, as protobuf's own modules, keeps protobuf's classes.
+    from google.protobuf import message as protobuf_message
+    from google.protobuf import message_factory
+
+    plugin_pb2, base_pb2, _ = plugin
+    delete = plugin_pb2.DeleteFromTable
+    assert issubclass(delete, _pyspark.ProtoMessage)
+    assert delete is ours("thirdparty.DeleteFromTable")
+    assert delete.__module__ == "plugin_protos.plugin_pb2"
+    assert delete.__qualname__ == "DeleteFromTable"
+    update = plugin_pb2.MergeIntoTable.Action.UpdateAction
+    assert update.__qualname__ == "MergeIntoTable.Action.UpdateAction"
+    assert update.DESCRIPTOR.full_name == "thirdparty.MergeIntoTable.Action.UpdateAction"
+    assert isinstance(plugin_pb2.Mode, _rust.EnumTypeWrapper)
+    assert (plugin_pb2.Mode.Value("MODE_UPSERT"), plugin_pb2.MODE_INSERT) == (2, 1)
+    assert plugin_pb2.Mode.DESCRIPTOR is plugin_pb2.MergeIntoTable.DESCRIPTOR.fields_by_name[
+        "mode"
+    ].enum_type
+    assert not issubclass(base_pb2.Table, _pyspark.ProtoMessage)
+    assert issubclass(base_pb2.Table, protobuf_message.Message)
+
+    # The descriptors of the module stay protobuf's, which the generated code of protobuf's
+    # pure-Python implementation changes; those of the classes are the runtime's, of its pool.
+    assert plugin_pb2._DELETEFROMTABLE.full_name == "thirdparty.DeleteFromTable"
+    assert not isinstance(plugin_pb2._DELETEFROMTABLE, _pyspark.ProtoDescriptor)
+    assert not isinstance(plugin_pb2.DESCRIPTOR, _pyspark.ProtoFileDescriptor)
+    file = delete.DESCRIPTOR.file
+    assert isinstance(file, _pyspark.ProtoFileDescriptor)
+    assert (file.name, file.package) == ("plugin_protos/plugin.proto", "thirdparty")
+    assert file.serialized_pb == plugin_pb2.DESCRIPTOR.serialized_pb
+    assert [d.name for d in file.dependencies] == [
+        "spark/connect/relations.proto",
+        "spark/connect/expressions.proto",
+        "plugin_protos/base.proto",
+    ]
+    pool = proto.Relation.DESCRIPTOR.file.pool
+    assert pool.FindMessageTypeByName("thirdparty.DeleteFromTable") is delete.DESCRIPTOR
+    assert pool.FindFileContainingSymbol("thirdparty.MODE_UPSERT") is file
+    # As protobuf's builder made them first, protobuf's own lookups give protobuf's classes.
+    made = message_factory.GetMessageClass(plugin_pb2._DELETEFROMTABLE)
+    assert issubclass(made, protobuf_message.Message) and made is not delete
+    # One hook wraps the builder's own function, however many times the runtime installs it.
+    from google.protobuf.internal import builder
+
+    own = builder.BuildTopDescriptorsAndMessages._protobuf_build
+    assert own.__module__ == "google.protobuf.internal.builder"
+    _rust._hook_protobuf_builder()
+    assert builder.BuildTopDescriptorsAndMessages._protobuf_build is own
+
+    # A module of the file built again has the same classes, as upb's has.
+    assert importlib.reload(plugin_pb2).DeleteFromTable is delete
+    assert plugin_pb2.MergeIntoTable.Action.UpdateAction is update
+    # So has a module of a file of the protos, as a copy of Apache Spark's generated modules
+    # builds it of the file of the pool: the classes of the package.
+    module = _build_generated_module(_protobuf_file("spark/connect/example_plugins.proto"))
+    assert module["ExamplePluginRelation"] is ours("spark.connect.ExamplePluginRelation")
+
+
+def test_messages_of_plugins_take_the_messages_of_the_package_as_upbs(plugin):
+    # The messages of the module of a plugin take those of pyspark.sql.connect.proto as they are,
+    # as upb's take PySpark's of the official client, in CopyFrom, MergeFrom, their constructors,
+    # containers and maps (relation.delete_from_table.target.CopyFrom(plan) of Delta Lake's plan
+    # code), and a field of a type of a file that keeps protobuf's classes takes protobuf's
+    # messages of the type. The messages are upb's, of their bytes, text, JSON, pickles and Any.
+    from google.protobuf import json_format, text_format
+
+    plugin_pb2, base_pb2, upb = plugin
+    mine = _plugin_cases(ours, base_pb2.Table)
+    real = _plugin_cases(upb, upb("thirdparty.Table"))
+    for m, r in zip(mine, real):
+        assert m.SerializeToString() == r.SerializeToString(deterministic=True)
+        assert str(m) == str(r)
+        assert text_format.MessageToString(m) == text_format.MessageToString(r)
+        assert json_format.MessageToDict(m) == json_format.MessageToDict(r)
+        assert type(m).FromString(r.SerializeToString(deterministic=True)) == m
+        assert json_format.Parse(json_format.MessageToJson(r), type(m)()) == m
+        assert text_format.Parse(text_format.MessageToString(r), type(m)()) == m
+        assert pickle.loads(pickle.dumps(m)) == m and copy.deepcopy(m) == m
+
+    delete, built, _, merge, scan, _, _, extension = mine
+    assert type(delete.target) is proto.Relation and type(built.condition) is proto.Expression
+    assert isinstance(merge.defaults["d"], proto.Expression)
+    assert isinstance(merge.matched_actions[0], plugin_pb2.MergeIntoTable.Action)
+    unpacked = plugin_pb2.DeleteFromTable()
+    assert extension.extension.Unpack(unpacked) and unpacked == delete
+    assert extension.extension.TypeName() == "thirdparty.DeleteFromTable"
+    # The message of a field of a type of base.proto is of the runtime's class of the type, which
+    # takes protobuf's messages of it, not of the class of its module, which is protobuf's.
+    assert type(scan.table) is not base_pb2.Table
+    assert scan.table.DESCRIPTOR.full_name == "thirdparty.Table"
+    table = base_pb2.Table(path="/p", options={"k": "v"})
+    assert scan.table.SerializeToString() == table.SerializeToString(deterministic=True)
+
+    # The errors of a message of another type are upb's.
+    for make in [
+        lambda cls: cls("thirdparty.DeleteFromTable")().target.CopyFrom(
+            cls("spark.connect.Expression")()
+        ),
+        lambda cls: cls("thirdparty.DeleteFromTable")(target=cls("spark.connect.Expression")()),
+        lambda cls: cls("thirdparty.DeleteFromTable")(nope=1),
+        lambda cls: cls("thirdparty.MergeIntoTable")(mode="MODE_NONE"),
+        lambda cls: cls("thirdparty.MergeIntoTable")().matched_actions.append(
+            cls("thirdparty.Assignment")()
+        ),
+    ]:
+        assert _outcome(lambda: make(ours)) == _outcome(lambda: make(upb))
+
+
+def test_generated_modules_of_plugins_build_with_protobufs_pure_python_implementation(plugin):
+    # With protobuf's pure-Python implementation, whose generated code sets the serialized ranges
+    # and options of the module's descriptors (_DELETEFROMTABLE._serialized_start), which stay
+    # protobuf's, the module of the plugin has the classes of the runtime too, of upb's messages.
+    _, base_pb2, upb = plugin
+    script = textwrap.dedent(
+        """
+        import json, sys
+
+        sys.path.insert(0, "tests")
+        from google.protobuf.internal import api_implementation
+        from pyspark import _pyspark
+        from pyspark.sql.connect.proto import _rust
+        from plugin_protos import base_pb2, plugin_pb2
+        from tests.test_proto_rust_offline import _plugin_cases
+
+        cases = _plugin_cases(_rust._CLASSES.__getitem__, base_pb2.Table)
+        print(json.dumps({
+            "implementation": api_implementation.Type(),
+            "runtime": issubclass(plugin_pb2.DeleteFromTable, _pyspark.ProtoMessage),
+            "protobuf": not issubclass(base_pb2.Table, _pyspark.ProtoMessage),
+            "start": plugin_pb2._DELETEFROMTABLE._serialized_start,
+            "bytes": [case.SerializeToString().hex() for case in cases],
+        }))
+        """
+    )
+    root = pathlib.Path(__file__).resolve().parent.parent
+    env = dict(os.environ, PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION="python")
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(root),
+        env=env,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    assert out["implementation"] == "python" and out["runtime"] and out["protobuf"]
+    assert out["start"] > 0
+    real = _plugin_cases(upb, upb("thirdparty.Table"))
+    assert out["bytes"] == [r.SerializeToString(deterministic=True).hex() for r in real]
+
+
+def _add_plugin_file(name, dependencies, fields, syntax="proto3"):
+    """The file ``name`` of protobuf's default pool, as a generated module adds it, of one message
+    ``M`` of ``fields``, each its name and its message type, of the package of the file's stem."""
+    from google.protobuf import descriptor_pb2, descriptor_pool
+
+    pool = descriptor_pool.Default()
+    try:
+        return pool.FindFileByName(name)
+    except KeyError:
+        pass
+    package = "tests." + name.rsplit("/", 1)[-1][: -len(".proto")]
+    file = descriptor_pb2.FileDescriptorProto(
+        name=name, package=package, dependency=dependencies, syntax=syntax
+    )
+    message = file.message_type.add(name="M")
+    for number, (field, type_name) in enumerate(fields, 1):
+        message.field.add(
+            name=field,
+            number=number,
+            type=descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE,
+            label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+            type_name=type_name,
+        )
+    return pool.AddSerializedFile(file.SerializeToString())
+
+
+def _protobuf_file(name):
+    """The file ``name`` of protobuf's default pool."""
+    from google.protobuf import descriptor_pool
+
+    return descriptor_pool.Default().FindFileByName(name)
+
+
+def _build_generated_module(file):
+    """The globals of a module of ``file`` that protoc generates, as protobuf's builder builds
+    them."""
+    from google.protobuf.internal import builder
+
+    module = {}
+    builder.BuildMessageAndEnumDescriptors(file, module)
+    module_name = file.name[: -len(".proto")].replace("/", ".") + "_pb2"
+    builder.BuildTopDescriptorsAndMessages(file, module_name, module)
+    return module
+
+
+def test_generated_modules_of_plugins_build_in_threads_at_once(upb):
+    # The modules of plugins that threads build at once, as their imports do, have the classes of
+    # the runtime, and the message of a field of a type of a file that they all import, which
+    # imports no proto of Spark Connect, is of one class of the runtime of the type.
+    shared = _add_plugin_file("tests/threads/shared.proto", [], [])
+    files = [
+        _add_plugin_file(
+            f"tests/threads/plugin{i}.proto",
+            ["spark/connect/relations.proto", shared.name],
+            [("input", ".spark.connect.Relation"), ("shared", ".tests.shared.M")],
+        )
+        for i in range(8)
+    ]
+    barrier = threading.Barrier(len(files))
+    modules = [None] * len(files)
+
+    def build(i):
+        barrier.wait(timeout=60)
+        modules[i] = _build_generated_module(files[i])
+
+    threads = [threading.Thread(target=build, args=(i,)) for i in range(len(files))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    shared_classes = set()
+    for module in modules:
+        message = module["M"](input=proto.Relation(sql={"query": "q"}))
+        assert isinstance(message, _pyspark.ProtoMessage) and type(message.input) is proto.Relation
+        shared_classes.add(type(message.shared))
+    assert shared_classes == {ours("tests.shared.M")}
+
+
+def test_files_that_the_runtime_does_not_hold_keep_protobufs_classes(upb):
+    # A module of a file keeps protobuf's classes, as without the drop-in, when the file imports
+    # no proto of Spark Connect, when it is not proto3 (the runtime reads the fields of proto3,
+    # whose presence, defaults and packing are not those of proto2), when it imports a well-known
+    # type other than Any and Timestamp, whose protobuf classes have methods that the runtime's
+    # classes would lack (Duration, Struct, ...), and when it is of another pool than the default
+    # one (as _upb_classes_of builds the classes of upb of the protos).
+    from google.protobuf import duration_pb2
+    from google.protobuf import message as protobuf_message
+
+    assert duration_pb2.Duration.DESCRIPTOR.full_name == "google.protobuf.Duration"
+    relations = "spark/connect/relations.proto"
+    cases = [
+        _add_plugin_file("tests/keeps/no_spark.proto", [], []),
+        _add_plugin_file(
+            "tests/keeps/proto2.proto",
+            [relations],
+            [("input", ".spark.connect.Relation")],
+            syntax="proto2",
+        ),
+        _add_plugin_file(
+            "tests/keeps/duration.proto",
+            [relations, "google/protobuf/duration.proto"],
+            [("input", ".spark.connect.Relation"), ("timeout", ".google.protobuf.Duration")],
+        ),
+    ]
+    for file in cases:
+        cls = _build_generated_module(file)["M"]
+        assert issubclass(cls, protobuf_message.Message), file.name
+        assert not issubclass(cls, _pyspark.ProtoMessage), file.name
+        with pytest.raises(KeyError):
+            _pyspark._proto_message_descriptor(cls.DESCRIPTOR.full_name)
+    assert not issubclass(upb("spark.connect.Relation"), _pyspark.ProtoMessage)
+
+
+def test_protobufs_own_classes_of_a_plugins_file_take_the_messages_through_bytes(upb):
     # The files of the protos are in protobuf's default pool, as the generated modules add them,
     # so that a file of a plugin that imports them builds, as the module that protoc generates of
-    # it adds it (Delta Lake's do). Its messages are protobuf's, which take a message of
+    # it adds it (Delta Lake's do). A class that protobuf's message_factory makes of a message of
+    # such a file, rather than its generated module, is protobuf's, which takes a message of
     # pyspark.sql.connect.proto through its bytes or a dict (not as it is, which protobuf's
     # messages take of their own classes only), and which an Any of the package packs and unpacks.
     from google.protobuf import descriptor_pb2, descriptor_pool, message_factory

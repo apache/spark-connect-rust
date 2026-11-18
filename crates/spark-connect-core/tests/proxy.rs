@@ -141,6 +141,8 @@ enum Behavior {
     TunnelCoalesced(SocketAddr),
     /// Opens the tunnel to this address with this status line.
     TunnelWithStatus(SocketAddr, &'static str),
+    /// Opens the tunnel to this address once this time has passed since the CONNECT.
+    TunnelAfter(SocketAddr, Duration),
 }
 
 /// One CONNECT the proxy was asked.
@@ -257,6 +259,19 @@ async fn serve_connect(mut client: TcpStream, behavior: Behavior, seen: Arc<Mute
             answer.extend_from_slice(&greeting[..read]);
             client.write_all(&answer).await.unwrap();
             let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+        }
+        Behavior::TunnelAfter(upstream, delay) => {
+            seen.lock().unwrap().push(connect);
+            tokio::time::sleep(delay).await;
+            let mut upstream = TcpStream::connect(upstream).await.unwrap();
+            // The client may have given up the tunnel by now.
+            if client
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .is_ok()
+            {
+                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            }
         }
         Behavior::Tunnel(upstream) | Behavior::TunnelWithStatus(upstream, _) => {
             let status = match behavior {
@@ -506,9 +521,10 @@ async fn a_proxy_that_is_down_is_unavailable() {
 #[tokio::test]
 async fn a_proxy_that_never_answers_is_unavailable() {
     let env = EnvTurn::take().await;
-    // As grpcio, which retries it: UNAVAILABLE once the tunnel is not open in time, with an
-    // error that names the proxy, before the bound of the whole connection.
+    // As grpcio, which retries it: UNAVAILABLE once the tunnel is not open by the deadline of
+    // the connection, with an error that names the proxy.
     let proxy = Proxy::start(Behavior::Silent).await;
+    let start = Instant::now();
     let error = env
         .with(&[("https_proxy", &proxy.url())], async {
             let mut client = client(&format!(
@@ -530,6 +546,35 @@ async fn a_proxy_that_never_answers_is_unavailable() {
         error.to_string().contains("did not open the tunnel"),
         "{error}"
     );
+    // The tunnel has the whole deadline, as grpcio's 20 s.
+    let elapsed = start.elapsed();
+    assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
+    assert_eq!(proxy.connects().len(), 1);
+}
+
+#[tokio::test]
+async fn a_tunnel_that_opens_late_has_the_rest_of_the_connect_deadline() {
+    // As grpcio, whose tunnel shares the 20 s connect deadline of the connection with the TLS
+    // handshake: a proxy that opens the tunnel after 12 s connects the call.
+    let env = EnvTurn::take().await;
+    let server = spark_server().await;
+    let delay = Duration::from_secs(12);
+    let proxy = Proxy::start(Behavior::TunnelAfter(server.address, delay)).await;
+    let port = server.address.port();
+    let start = Instant::now();
+    env.with(&[("https_proxy", &proxy.url())], async {
+        let mut client = client(&format!("sc://spark.invalid:{port}/;session_id={SESSION}")).await;
+        client.set_retry_policy(RetryPolicy {
+            max_retries: Some(0),
+            ..RetryPolicy::default()
+        });
+        tokio::time::timeout(Duration::from_secs(40), client.config(config()))
+            .await
+            .expect("the connection is bounded")
+            .unwrap();
+    })
+    .await;
+    assert!(start.elapsed() >= delay);
     assert_eq!(proxy.connects().len(), 1);
 }
 
@@ -609,6 +654,82 @@ async fn a_tls_handshake_that_stalls_on_a_direct_connection_is_unavailable() {
     let elapsed = start.elapsed();
     assert!(elapsed >= Duration::from_secs(15), "{elapsed:?}");
     assert_eq!(*accepted.lock().unwrap(), 1);
+}
+
+/// A Spark server whose accept queue is full until `free_after`, and the task that serves it.
+/// Linux drops the SYN of a connection to a full queue, so a client connects with the first SYN
+/// that it sends again after that.
+#[cfg(target_os = "linux")]
+async fn spark_server_accepting_after(
+    free_after: Duration,
+) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+    let socket = tokio::net::TcpSocket::new_v4().unwrap();
+    socket.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    // A queue of one connection, which the filler takes.
+    let listener = socket.listen(0).unwrap();
+    let address = listener.local_addr().unwrap();
+    let filler = TcpStream::connect(address).await.unwrap();
+    let service = FakeService::new().unary("Config", ProstCodec::default, |_| Config);
+    let task = tokio::spawn(async move {
+        tokio::time::sleep(free_after).await;
+        drop(listener.accept().await.unwrap());
+        drop(filler);
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        tonic::transport::Server::builder()
+            .add_service(service)
+            .serve_with_incoming(incoming)
+            .await
+            .unwrap();
+    });
+    (address, task)
+}
+
+/// Whether the kernel sends the SYN of a connection again at 15 s, as its exponential backoff of
+/// the SYNs does (at 1, 3, 7 and 15 s). Linux 6.5 and later back the first SYNs off linearly
+/// (`tcp_syn_linear_timeouts`, 4 by default) and give a connection up at 11 s, before any
+/// deadline of the client.
+#[cfg(target_os = "linux")]
+fn kernel_sends_a_syn_at_15_s() -> bool {
+    let sysctl = |name: &str| {
+        std::fs::read_to_string(format!("/proc/sys/net/ipv4/{name}"))
+            .ok()
+            .and_then(|text| text.trim().parse::<u32>().ok())
+    };
+    sysctl("tcp_syn_linear_timeouts").unwrap_or(0) == 0
+        && sysctl("tcp_syn_retries").is_some_and(|retries| retries >= 4)
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn a_tcp_connection_has_the_whole_connect_deadline() {
+    // As grpcio, whose TCP connection shares the 20 s connect deadline of the connection with
+    // the handshakes: the server drops the SYNs of the client until 11 s, and the one that the
+    // client sends again at 15 s connects the call, past the 10 s that the TCP connection had
+    // alone before.
+    if !kernel_sends_a_syn_at_15_s() {
+        eprintln!("skipped: the kernel gives the connection up before 15 s");
+        return;
+    }
+    let env = EnvTurn::take().await;
+    let free_after = Duration::from_secs(11);
+    let (address, server) = spark_server_accepting_after(free_after).await;
+    let start = Instant::now();
+    env.with(&[], async {
+        let mut client = client(&format!("sc://{address}/;session_id={SESSION}")).await;
+        client.set_retry_policy(RetryPolicy {
+            max_retries: Some(0),
+            ..RetryPolicy::default()
+        });
+        tokio::time::timeout(Duration::from_secs(40), client.config(config()))
+            .await
+            .expect("the connection is bounded")
+            .unwrap();
+    })
+    .await;
+    server.abort();
+    assert!(start.elapsed() >= free_after);
 }
 
 #[tokio::test]

@@ -885,8 +885,8 @@ impl SparkSession {
 
     /// Create a DataFrame from columns, with the same encoding as local rows, and sent as
     /// [`Self::create_dataframe`] sends rows: of the server's local-relation settings, read once,
-    /// inline, or uploaded at the cache threshold. Callers must supply one column per struct
-    /// field.
+    /// inline, or uploaded at the cache threshold. Columns of no rows send the schema alone, with
+    /// no request, as no rows do. Callers must supply one column per struct field.
     pub fn create_dataframe_from_columns(
         &self,
         columns: Vec<arrow::array::ArrayRef>,
@@ -916,10 +916,18 @@ impl SparkSession {
         let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema)?);
         let row_count = columns.first().map_or(0, |column| column.len());
         let batch = columns_to_arrow_batch(columns, arrow_schema, row_count)?;
-        Ok(DataFrame::new(
-            self.clone(),
-            self.local_relation(batch, schema, options)?,
-        ))
+        // Columns of no rows are the schema alone, as `create_dataframe` sends no rows, and
+        // PySpark its empty data (`LocalRelation(table=None, schema)`), before it reads any
+        // setting: so no request reads them.
+        let plan = if batch.num_rows() == 0 {
+            LogicalPlan::LocalRelation {
+                schema: Some(schema),
+                data: None,
+            }
+        } else {
+            self.local_relation(batch, schema, options)?
+        };
+        Ok(DataFrame::new(self.clone(), plan))
     }
 
     /// Internal binding bridge for Arrow IPC already validated and encoded from
@@ -1151,14 +1159,21 @@ impl SparkSession {
     }
 
     /// Remove the cached remote relation `relation_id` on the server, as PySpark's
-    /// `CachedRemoteRelation.__del__` does when its DataFrame goes. Like `release_ml_objects`,
-    /// it does not wait for the server, and its errors are ignored. A stopped session is not
-    /// released: stopping it released its server state already, as PySpark skips a closed
-    /// client. Safe to call from `Drop`.
+    /// `CachedRemoteRelation.__del__` does when its DataFrame goes: one ExecutePlan, which is not
+    /// reattachable and goes to no hook, of the tags of the thread that drops the DataFrame, as
+    /// PySpark's request is of the thread of its finalizer (see
+    /// `SparkConnectClient::spawn_unary_execute_plan`). It does not wait for the server, so that
+    /// a drop never blocks, and its errors are ignored. A stopped session is not released:
+    /// stopping it released its server state already, as PySpark skips a closed client. Safe to
+    /// call from `Drop`.
     pub(crate) fn release_cached_remote_relation(&self, relation_id: String) {
         if self.is_stopped() {
             return;
         }
+        // A tag that UTF-8 cannot encode fails PySpark's request before it is sent.
+        let Ok(tags) = self.tags() else {
+            return;
+        };
         let command = proto::Command {
             command_type: Some(
                 proto::command::CommandType::RemoveCachedRemoteRelationCommand(
@@ -1168,7 +1183,15 @@ impl SparkSession {
                 ),
             ),
         };
-        self.execute_command_in_background(command);
+        let request = proto::ExecutePlanRequest {
+            session_id: self.client.session_id().to_string(),
+            tags,
+            plan: Some(proto::Plan {
+                op_type: Some(proto::plan::OpType::Command(command)),
+            }),
+            ..Default::default()
+        };
+        self.client.spawn_unary_execute_plan(request);
     }
 
     /// Execute `command` on the server without waiting for its responses, on the shared

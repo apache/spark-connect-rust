@@ -5254,21 +5254,41 @@ def test_create_raises_for_an_authority_that_urllib_rejects_as_pyspark():
     session.stop()
 
 
-def test_create_raises_for_a_too_long_user_agent_as_pyspark(monkeypatch):
-    # As PySpark's channel builder: a user agent of more than 2048 characters after the URL
-    # escaping raises a SparkConnectException of the message of the reference client.
+def test_a_too_long_user_agent_raises_at_each_request_as_pyspark(mock_connect, monkeypatch, caplog):
+    # As PySpark's `userAgent`, which its requests read when they are built: the session of a
+    # user agent of more than 2048 characters after the URL escaping is made, and each request
+    # that carries the user agent raises a SparkConnectException of the message of the reference
+    # client and is not sent. stop() logs that error, of the release of the session.
     from pyspark.errors.exceptions.connect import SparkConnectException
     from pyspark.sql import SparkSession
 
+    _, service = mock_connect
     monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
-    with pytest.raises(SparkConnectException) as error:
-        SparkSession.builder.remote("sc://localhost/;user_agent=" + "a" * 2049).create()
-    assert type(error.value) is SparkConnectException
-    assert str(error.value) == (
+    spark = SparkSession.builder.remote(service.remote + "/;user_agent=" + "a" * 2049).create()
+    message = (
         "'user_agent' parameter should not exceed 2048 characters after URL escaping, "
         "found 2049 characters."
     )
-    assert error.value.getCondition() is None
+    for request in [
+        lambda: spark.range(1).count(),
+        lambda: spark.conf.get("spark.sql.session.timeZone"),
+        lambda: spark.version,
+        spark.interruptAll,
+    ]:
+        with pytest.raises(SparkConnectException) as error:
+            request()
+        assert type(error.value) is SparkConnectException
+        assert str(error.value) == message
+        assert error.value.getCondition() is None
+    with caplog.at_level("WARNING", logger="pyspark"):
+        assert spark.stop() is None
+    assert spark.is_stopped
+    messages = [record.message for record in caplog.records if record.name == "pyspark"]
+    assert len(messages) == 1
+    assert messages[0].startswith("session.stop(): Session could not be released. Error: ")
+    assert message in messages[0]
+    session_id = spark.session_id.encode()
+    assert not any(session_id in request for _, request in service.recorded_order)
 
 
 def test_the_plan_of_a_dataframe_that_a_hook_puts_in_is_compressed_as_pyspark(mock_connect):
@@ -20154,6 +20174,46 @@ def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_conne
         DataFrame(Gone(None), spark)
 
 
+def test_plans_of_plugins_send_the_relations_of_their_dataframes_in_their_extensions(
+    mock_connect,
+):
+    # As PySpark's plugins send them, such as Delta Lake's merge, whose plan is the extension of
+    # a relation of a message that holds the plan of its source DataFrame
+    # (relation.merge_into_table.source.CopyFrom(source._plan.plan(session))): the core replaces
+    # the placeholder of the DataFrame in the message, of a type that it does not know, so the
+    # server receives the relation of the DataFrame there. So does a plugin's command.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+    from pyspark.sql.connect.proto import example_plugins_pb2 as plugins
+
+    class PluginPlan(LogicalPlan):
+        # The plan of a plugin's relation over its input, as Spark's example plugin defines it.
+        def plan(self, session):
+            plan = self._create_proto_relation()
+            plugin = plugins.ExamplePluginRelation(custom_field="c")
+            plugin.input.subquery_alias.input.CopyFrom(self._child.plan(session))
+            plugin.input.subquery_alias.alias = "s"
+            plan.extension.Pack(plugin)
+            return plan
+
+    spark, service = mock_connect
+    source = spark.range(3).withColumnRenamed("id", "k")
+    relation = pb2.Relation.FromString(source._relation_bytes())
+    DataFrame(PluginPlan(source._plan), spark).collect()
+    sent = plugins.ExamplePluginRelation()
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert request.plan.root.extension.Unpack(sent)
+    assert sent.custom_field == "c" and sent.input.subquery_alias.alias == "s"
+    assert sent.input.subquery_alias.input == relation
+
+    command = pb2.Command()
+    command.extension.Pack(plugins.ExamplePluginRelation(input=source._plan.plan(spark.client)))
+    spark.client.execute_command(command)
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert request.plan.command.extension.Unpack(sent) and sent.input == relation
+
+
 def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mock_connect):
     # As PySpark's DataFrame, a Python object: a cycle through a DataFrame of a Python plan, whose
     # plan keeps an object that keeps the DataFrame (as a pyspark.ml model keeps its summary's
@@ -27271,9 +27331,10 @@ def test_reader_parses_a_dataframe_of_strings_as_pyspark(mock_connect, read, for
 
 
 def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
-    # As PySpark Connect's: a write of a mode other than append, overwrite, error (or
-    # errorifexists, which PySpark documents) and ignore raises UNSUPPORTED_OPERATION, of the
-    # last mode set; format(None) unsets the format; the reader raises JVM_ATTRIBUTE_NOT_SUPPORTED
+    # As PySpark Connect's: a write of a mode other than append, overwrite, error and ignore
+    # raises UNSUPPORTED_OPERATION, of the last mode set, before it sends anything, also of
+    # errorifexists, which its WriteOperation does not take, unlike classic PySpark's writer;
+    # format(None) unsets the format; the reader raises JVM_ATTRIBUTE_NOT_SUPPORTED
     # of _jreader, asserts the bounds of a JDBC column and refuses a schema in changes; and csv,
     # text and orc of None read without a path.
     from pyspark.errors import AnalysisException, PySparkAttributeError, PySparkValueError
@@ -27286,11 +27347,15 @@ def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
         (lambda: df.write.mode(" append").insertInto("t"), " append"),
         (lambda: df.write.parquet("p", mode=""), ""),
         (lambda: df.write.jdbc("jdbc:x", "t", mode="bad"), "bad"),
+        (lambda: df.write.mode("errorifexists").insertInto("t"), "errorifexists"),
+        (lambda: df.write.parquet("p", mode="ErrorIfExists"), "ErrorIfExists"),
     ]:
+        sent = len(service.execute_requests)
         with pytest.raises(PySparkValueError) as e:
             write()
         assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
         assert e.value.getMessageParameters() == {"operation": mode}
+        assert len(service.execute_requests) == sent
 
     def sent_write():
         # ExecutePlanRequest.plan=3, Plan.command=2, Command.write_operation=2.
@@ -27300,7 +27365,7 @@ def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
     # WriteOperation.source=2 and mode=5, of SAVE_MODE_APPEND=1 and SAVE_MODE_ERROR_IF_EXISTS=3.
     df.write.mode("bad").mode("APPEND").format("json").format(None).save("p")
     assert 2 not in sent_write() and sent_write()[5] == [1]
-    df.write.mode("errorifexists").insertInto("t")
+    df.write.mode("error").insertInto("t")
     assert sent_write()[5] == [3]
     df.write.jdbc("jdbc:x", "t", properties={"user": 1, "flag": True, "skip": None})
     # WriteOperation.options=9, of entries of key=1 and value=2.

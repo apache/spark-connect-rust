@@ -377,6 +377,8 @@ fn test_save_mode_conversions() {
     assert_eq!(SaveMode::from_str("overwrite"), Some(SaveMode::Overwrite));
     assert_eq!(SaveMode::from_str("error"), Some(SaveMode::ErrorIfExists));
     assert_eq!(SaveMode::from_str("ignore"), Some(SaveMode::Ignore));
+    // As PySpark Connect's WriteOperation, which raises UNSUPPORTED_OPERATION of any other mode.
+    assert_eq!(SaveMode::from_str("errorifexists"), None);
 }
 
 #[test]

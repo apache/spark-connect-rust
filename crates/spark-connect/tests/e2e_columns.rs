@@ -234,6 +234,28 @@ fn column_membership_conditional_window() {
         .unwrap();
 }
 
+/// As PySpark's `F.col`, `col("*")`, and the name `*` where an API takes a column, is the star of
+/// every column, and `t.*` that of the table `t`: a select, a count, a struct and its JSON read
+/// the columns as PySpark's do, where a reference of a column named `*` does not resolve.
+#[test]
+fn a_star_of_col_or_of_a_name_reads_every_column_as_pyspark() {
+    if !should_run() {
+        return;
+    }
+    let s = session();
+    let df = base(&s);
+    let names = vec!["id".to_string(), "name".to_string(), "val".to_string()];
+    assert_eq!(df.select(vec![col("*")]).columns().unwrap(), names);
+    assert_eq!(df.select(["*"]).collect().unwrap().len(), 3);
+    assert_eq!(i64s(&one(&df, f::count(col("*")))), vec![Some(3)]);
+    let first = df.filter(col("id").eq(lit(1)));
+    assert_eq!(
+        strs(&one(&first, f::to_json(f::r#struct(["*"])))),
+        vec![Some(r#"{"id":1,"name":"apple","val":10.0}"#.to_string())]
+    );
+    assert_eq!(df.alias("t").select(["t.*"]).columns().unwrap(), names);
+}
+
 #[test]
 fn column_struct_array_map_access() {
     if !should_run() {

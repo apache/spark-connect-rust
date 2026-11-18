@@ -1321,7 +1321,8 @@ impl PySparkSession {
             });
         }
         // As PySpark's converters, which assert the nullable flags of the schema, and have no
-        // Arrow type for a StructField as a type, after the rows are taken apart.
+        // Arrow type for a StructField as a type, nor for a type of its class only such as
+        // `AtomicType()`, after the rows are taken apart.
         if checks.non_bool_nullable {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
@@ -2801,12 +2802,11 @@ impl PySparkSession {
             Some(schema) if data.len().is_ok_and(|n| n > 0) => LocalChecks {
                 non_bool_nullable: crate::types::has_non_bool_converter_flag(py, schema)?,
                 nested: match &spec {
-                    Spec::Struct(fields) => crate::types::nested_field_in(
+                    Spec::Struct(fields) => crate::types::nested_python_type_in(
                         py,
                         &DataType::Struct {
                             fields: fields.clone(),
                         },
-                        i32::MAX,
                     )?,
                     _ => None,
                 },

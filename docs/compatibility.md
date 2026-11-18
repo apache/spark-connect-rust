@@ -1173,15 +1173,41 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
 Where `protobuf` is installed, the files of the protos of Spark Connect are added to its default
 descriptor pool, as the generated modules add them. The modules that protoc generates of other
 protos that import them (those of a plugin, such as Delta Lake's Connect client) then build, and
-`json_format` finds the types of an `Any`. The messages of such a module are `protobuf`'s, which
-take messages of their own classes only: their `CopyFrom`, `MergeFrom` and constructors raise
-`TypeError` for a message of `pyspark.sql.connect.proto`, which a field of theirs takes through its
-bytes (`plugin.input.ParseFromString(relation.SerializeToString())`) or a dict instead. PySpark's
-messages are of `protobuf`'s classes, so its plugins pass them as they are: Delta Lake 4.0's
-`DeltaTable.delete`, `update` and `merge` build their plans with `CopyFrom` of PySpark's
-messages, and raise that `TypeError` here. The other way, the messages of
-`pyspark.sql.connect.proto` take `protobuf`'s messages of their types as they are, and an `Any` of
-either packs and unpacks a message of either.
+`json_format` finds the types of an `Any`. Such a module, of a proto3 file that imports the protos
+of Spark Connect directly or through the files it imports, gets the classes of the runtime when
+`protobuf`'s builder builds it (the drop-in wraps `builder.BuildTopDescriptorsAndMessages`, which
+the generated modules call), and its files are added to the runtime's pool. So their message
+fields take the messages of `pyspark.sql.connect.proto` as they are, as `protobuf`'s messages of
+PySpark's plugins take PySpark's: Delta Lake 4.0's `DeltaTable.delete`, `update` and `merge` build
+their plans with `CopyFrom` of the package's messages, of the bytes, text and JSON of PySpark's,
+with either implementation of `protobuf`. The relation of a DataFrame that such a message takes
+(`df._plan.plan(session)`, as `merge` takes the plan of its source DataFrame) is a shallow
+placeholder of the relation of the DataFrame of this client, as in the plans of `pyspark.ml`: the
+core replaces it when the plan or the command reaches it, also in the message of an extension, of a
+type that it does not know, so the server receives the relation, as PySpark's plugins send it.
+Its classes are the runtime's, as those of the package (not `google.protobuf.message.Message`'s),
+and the rest of such a module is `protobuf`'s:
+
+- its `DESCRIPTOR` and the descriptors of its messages and enums (`_DELETEFROMTABLE`), whose
+  options and serialized ranges the generated code sets with `protobuf`'s pure-Python
+  implementation, and its extensions and services. `protobuf`'s own lookups of its types
+  (`message_factory.GetMessageClass`, `symbol_database`) give `protobuf`'s classes of them, which
+  the builder makes too, as without the drop-in; a class of those takes a message of the package
+  only through its bytes (`plugin.input.ParseFromString(relation.SerializeToString())`) or a dict;
+- a file that it imports that does not import the protos of Spark Connect (Delta Lake's
+  `delta/connect/base.proto`) keeps `protobuf`'s classes in its own module. A message field of the
+  runtime of one of its types takes `protobuf`'s messages of the type, by their full name and
+  bytes, and gives a message of the runtime's class of the type, which is not the module's class:
+  `isinstance(relation.scan.table, base_pb2.DeltaTable)` is false, and such a message pickles only
+  within the message that holds it;
+- a file that is not proto3 (of proto2 or of editions, whose presence, defaults and packing the
+  runtime does not read), or that imports one, or a well-known type other than `Any` and
+  `Timestamp` (`protobuf`'s classes of `Duration`, `Struct` and the others have methods that the
+  runtime's classes would lack), keeps `protobuf`'s classes, which take the package's messages
+  only through bytes or dicts.
+
+The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their
+types as they are, and an `Any` of either packs and unpacks a message of either.
 
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.
@@ -1252,6 +1278,9 @@ server raises has the frames of the user's code only, without those of PySpark's
 time, `pyspark.sql.SparkSession`, PySpark's own class, has PySpark's signatures and docstrings,
 while the functions of `pyspark.sql.functions` and the methods of the native classes, such as
 `DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
+The `__init__` of a native type of parameters, such as `ArrayType`, is a slot of its class, whose
+`inspect.signature` is CPython's `(self, /, *args, **kwargs)`; that of the class shows the
+parameters, as PySpark's does.
 
 Type checkers and editors see PySpark's API, as with `pyspark-client`. The package is marked typed
 as PySpark's is (`py.typed`), and the modules whose classes are native or whose functions are made
@@ -1293,11 +1322,12 @@ functions it copies, so they copy a Column of any depth, as PySpark's `copy.copy
 
 A few values that PySpark's client converts when it builds the plan, the drop-in converts when it
 builds the Column or the window: the frame bounds of `Window.rowsBetween` and `rangeBetween`, and a
-`StructField` given as the return type of a UDF. Their errors are PySpark's, raised at the call
+`StructField` or an abstract type such as `AtomicType()`, also one nested in the type, given as the
+return type of a UDF that is not Arrow-optimized. Their errors are PySpark's, raised at the call
 rather than when the plan is built. The type of `cast` and `try_cast` is converted when the plan is
-built, as in PySpark: a `StructField`, also one nested in the type, the base `DataType()` and a
-Python subclass of it make a Column that renders as the `simpleString` of the type, and whose plans
-raise PySpark's `UNSUPPORTED_OPERATION`.
+built, as in PySpark: a `StructField`, the base `DataType()`, an abstract type such as `AtomicType()`
+and a Python subclass of them, also one nested in the type, make a Column that renders as the
+`simpleString` of the type, and whose plans raise PySpark's `UNSUPPORTED_OPERATION`.
 
 `Column.alias` and `Column.name` raise PySpark's errors when PySpark's `ColumnAlias` raises them.
 At the call, they raise the metadata of several names (`ONLY_ALLOWED_FOR_SINGLE_COLUMN`) and other
@@ -1343,6 +1373,29 @@ have, raises the constructor's error, where PySpark keeps any value, of which it
 fail later. A set `srid` of a spatial type is of its JSON too, where PySpark's JSON stays that of
 the CRS of its constructor. The parameters are not entries of the `__dict__` of a type, so
 `vars(t)` is empty, where PySpark's has them.
+
+The abstract classes of the types, `DataType`, `AtomicType`, `NumericType`, `IntegralType`,
+`FractionalType`, `DatetimeType`, `AnyTimeType`, `SpatialType` and `AnsiIntervalType`, make types
+of their own, as PySpark's plain classes do. `AtomicType()` has the `typeName`, `simpleString` and
+`jsonValue` of its class, `atomic`, converts no values, and is equal to a type of its class and
+`__dict__` only. It pickles as its class and its `__dict__`: at the protocols 2 and up its pickle
+is PySpark's own, byte for byte, and PySpark loads the drop-in's at every protocol. The struct,
+array or map that holds it names it in its `simpleString`, JSON and tree string, and pickles of
+the types it is made of. `IntegralType()` is one instance, as PySpark's `DataTypeSingleton` makes
+it, and a Python subclass of these classes, such as a `UserDefinedType` of parameters, takes the
+arguments of its `__init__`. A Python subclass of `IntegralType` cannot be instantiated, where
+PySpark's `DataTypeSingleton` makes one instance of each subclass: the constructor of a native
+class either returns an object that exists or makes one of the class it is called for. Neither
+client has a proto or an Arrow type of such a type: a plan of one raises `UNSUPPORTED_OPERATION`,
+and local rows of one `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION`.
+
+PySpark's singleton types, from `NullType` and `IntegerType` to `CalendarIntervalType` and
+`IntegralType`, are classes of the metaclass `DataTypeSingleton`, which `type(IntegerType)` shows.
+The drop-in's are native classes, whose metaclass is `type`, and `pyspark.sql.types` has no
+`DataTypeSingleton`: PyO3 has no option of a metaclass of a class, and CPython refuses to assign
+the `__class__` of a class of `type` after it is made. Their constructors return the one instance
+and raise the `TypeError` of `DataTypeSingleton.__call__` for an argument, as PySpark's, and
+`inspect.signature` of the class shows no parameters.
 
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
@@ -1602,12 +1655,30 @@ with two differences: a loopback host is never proxied, where grpcio proxies `lo
 `no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
 cannot connect (and takes a port past 65535 modulo 65536).
 
-As in grpcio, a connection has 20 s, its connect deadline, to complete: the TCP connection and the
-TLS handshake, and the tunnel of a proxy. One that does not fails with `UNAVAILABLE`, which the
-retry policy retries. One difference remains: grpcio also waits at most 20 s for the server's
-HTTP/2 settings, while here a plaintext connection to a server that accepts it and never answers
-ends at the keepalive of the connection, 80 s by default (`grpc_keepalive_time_ms` and
-`grpc_keepalive_timeout_ms`), or at the deadline of the call without a keepalive.
+As in grpcio, a connection has 20 s, its connect deadline, to complete: one deadline from its
+start, which the TCP connection, the tunnel of a proxy and the TLS handshake share. One that does
+not complete fails with `UNAVAILABLE`, which the retry policy retries. Two differences remain.
+grpcio also waits at most 20 s for the server's HTTP/2 settings, while here a plaintext connection
+to a server that accepts it and never answers ends at the keepalive of the connection, 80 s by
+default (`grpc_keepalive_time_ms` and `grpc_keepalive_timeout_ms`), or at the deadline of the call
+without a keepalive. And for a host of several addresses, grpcio starts a connection to the next
+address 250 ms after the previous one while that one is not done, each with a deadline of its own,
+while here the TCP connections to the addresses of a family are tried in turn, each for an equal
+share of the 20 s, those to the other family from 300 ms on, and the TLS handshake is made on the
+first that connects.
+
+The user agent, `<user_agent> spark/4.3.0 os/<os> python/rust`, is sent as PySpark sends it: as
+the client type of the requests that PySpark builds with it, and not as a header. The `user-agent`
+header is the client library's own, `tonic/<version>` here and grpcio's in PySpark, such as
+`grpc-python/1.85.1 grpc-c/58.0.0 (linux; chttp2)`. A `user-agent` parameter of the connection
+string is checked as metadata and not sent, as grpcio replaces it with its own. So a user agent
+may hold any character, a control character included. As PySpark's `userAgent`, which its requests
+read when they are built, a user agent longer than 2048 characters after URL escaping, or a
+`SPARK_CONNECT_USER_AGENT` that is not UTF-8, is the error of each request that carries it, which
+is not sent: `SparkConnectException`, or the `UnicodeEncodeError` of `urllib.parse.quote`. The
+session is made all the same, its `stop()` logs the error as that of its release, and the requests
+that PySpark builds without the user agent, of the artifacts and of `CloneSession`, are sent. As
+`urllib.parse.urlsplit` does, a tab, CR or LF anywhere in the connection string is removed.
 
 For TLS roots, including `GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`, see
 [TLS Root Certificates](configuration.md#tls-root-certificates).

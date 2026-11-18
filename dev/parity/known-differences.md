@@ -120,6 +120,14 @@ difference is intentional or tracked for a fix.
   DataFrame of a value that its plan does not take, such as `df.alias("a\ud800")` or
   `df.limit(2.0)`, raise the error of the plan, as the pickle holds the relation; PySpark's
   cloudpickle pickles its plan, whose copy raises the error at its requests.
+- **The removal of the relation of a dropped checkpoint** (intentional; a drop does not wait).
+  As PySpark's `CachedRemoteRelation.__del__`, the drop of the last DataFrame of a checkpoint
+  sends one ExecutePlan of the removal, which is not reattachable and goes to no hook, with the
+  tags and the user context extensions of the thread that drops it. PySpark's finalizer waits
+  for the server; this client sends it without waiting, as a drop may run on a thread of the
+  transport's runtime, or in a finalizer that holds the GIL, which another thread may need to
+  read the responses of the same connection. The relation may still be on the server for a
+  moment after the drop.
 - **`schema` and `columns` of a join on a tuple** (intentional). As in PySpark, the plan fails with
   the `AttributeError` of `to_plan` of the tuple when it is built, and `schema`, a property, then
   gives a Column of the `__getattr__` of the DataFrame: of `schema`, where PySpark's is of
@@ -275,7 +283,10 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   and `metadata()`. The transport reads them as a `sc://` URL, so they apply. The gRPC
   channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
   properties and `userAgent` read the parameters as PySpark does, but `userAgent` reports
-  PySpark's `python/<version>` where the transport sends `python/rust` as the client type.
+  PySpark's `python/<version>` where the transport sends `python/rust` as the client type. The
+  transport reads `SPARK_CONNECT_USER_AGENT` once, when the session is made, where PySpark's
+  requests read it each time: it does not read the environment of the process while Python
+  threads may change it.
   The Rust channel applies the keepalive from the same parameters. A `channelOptions` argument raises
   `NOT_IMPLEMENTED` instead of being ignored. A subclass that overrides `userId` or
   `token` is not read by the transport, which uses the parameters.
@@ -320,3 +331,27 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   hook_factories=...)` makes a session that is neither default nor active, as PySpark's
   constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
   takes precedence, as PySpark's does.
+
+## `pyspark.sql.connect.proto` and plugins
+
+- **Generated modules of a plugin's protos** (intentional; DESIGN). A module that protoc
+  generates of a proto3 file that imports the protos of Spark Connect, directly or through the
+  files it imports (Delta Lake's `delta/connect/relations.proto` and `commands.proto`), gets the
+  classes of the drop-in's Rust protobuf runtime when `protobuf`'s builder builds it, so its
+  message fields take the messages of `pyspark.sql.connect.proto` as they are, as PySpark's
+  plugins take PySpark's, and the server receives the plans of Delta Lake 4.0's `delete`,
+  `update` and `merge` as PySpark sends them: the core replaces the shallow placeholder of the
+  relation of a DataFrame, which `DataFrame._plan.plan(session)` gives, in the message of an
+  extension too. What stays different (see `docs/compatibility.md`):
+  - its classes are the runtime's, not subclasses of `google.protobuf.message.Message`, while its
+    `DESCRIPTOR`, its `_*` descriptors, its extensions and services stay `protobuf`'s, and
+    `protobuf`'s `message_factory` and `symbol_database` give `protobuf`'s classes of its types;
+  - a file that it imports that does not import the protos of Spark Connect (Delta Lake's
+    `delta/connect/base.proto`) keeps `protobuf`'s classes. A field of the runtime of one of its
+    types takes `protobuf`'s messages of the type, and gives a message of the runtime's class of
+    the type, not of the module's class, which upb gives, so `isinstance` with the module's class
+    is false, and the message pickles only within the message that holds it;
+  - a file that is not proto3, or that imports one or a well-known type other than `Any` and
+    `Timestamp`, keeps `protobuf`'s classes, which take the package's messages only through bytes
+    or dicts, as before. So does a module that builds before `pyspark.sql.connect.proto` is
+    imported, as only one that imports another copy of Spark's generated modules can.

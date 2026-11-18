@@ -1244,8 +1244,8 @@ fn file_of_symbol(symbol: &str) -> Option<&'static str> {
         let member = m.by_name.contains_key(name) || m.oneof_by_name.contains_key(name);
         return (member || has_value(&m.nested_enums)).then_some(m.file.as_str());
     }
-    pool.files
-        .iter()
+    pool.all_files()
+        .into_iter()
         .find(|f| f.package == scope && has_value(&f.enums))
         .map(|f| f.name.as_str())
 }

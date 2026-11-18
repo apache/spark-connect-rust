@@ -35,10 +35,8 @@ use crate::reattach::ExecutePlanResponseReattachableIterator;
 use crate::retries::{retrying, unknown_operation, Backoff, RetryError, RetryPolicy, Retrying};
 use crate::thread_entries::forget_when_thread_ends;
 
-/// How long to wait for the lazy gRPC channel to become ready before surfacing a
-/// retriable `UNAVAILABLE`. tonic's lazy channel waits indefinitely for an unreachable
-/// or unresolvable host (unlike grpcio, which fails fast), so without this bound a call
-/// to a down server would hang forever instead of raising `UNAVAILABLE`.
+/// How long [`wait_ready`] waits for the lazy gRPC channel to take a call before surfacing a
+/// retriable `UNAVAILABLE`. The connection itself is bounded by [`CONNECT_TIMEOUT`].
 const READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Apply the keepalive of the connection string, as PySpark's channel options do (SPARK-58094):
@@ -79,21 +77,22 @@ fn ssl_roots_pem(path: Option<std::ffi::OsString>) -> Option<Vec<u8>> {
     None
 }
 
-/// How long a connection may take as a whole, as grpcio's 20 s connect deadline: the TCP
-/// connection and the TLS handshake of a direct connection, or the TCP connection to the proxy,
-/// the tunnel, and the TLS handshake inside it. It is longer than [`READY_TIMEOUT`], which bounds
-/// the TCP connection of a direct connection and the tunnel alone, so that a server or a proxy
-/// that does not answer is reported as that.
+/// The deadline of a connection, as grpcio's 20 s connect deadline: one deadline from the start
+/// of the connection, which its parts share, the TCP connection and the TLS handshake of a
+/// direct connection, or the TCP connection to the proxy, the tunnel, and the TLS handshake
+/// inside it. A connection that is not done by then fails with `UNAVAILABLE`, which is retried,
+/// as in grpcio.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A lazy channel to `endpoint`, connected directly.
 ///
-/// Two bounds apply, and either is `UNAVAILABLE` and retried, as in grpcio. The TCP connection
-/// is bounded by [`READY_TIMEOUT`]. tonic bounds the whole connection, the TLS handshake
-/// included, by [`CONNECT_TIMEOUT`] from outside the connector, which
-/// [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`. tonic's `connect_lazy` would
-/// bound only the TCP connection, so that a server that accepts it and never answers the TLS
-/// handshake would hold the call until its own deadline.
+/// tonic bounds the whole connection, the TLS handshake included, by [`CONNECT_TIMEOUT`] from
+/// outside the connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
+/// tonic's `connect_lazy` would bound only the TCP connection, so that a server that accepts it
+/// and never answers the TLS handshake would hold the call until its own deadline. The TCP
+/// connection has the same bound in the connector, which divides it among the addresses of the
+/// host that it tries in turn, so that an address that does not answer leaves time for the
+/// next one.
 fn connect_directly(endpoint: tonic::transport::Endpoint) -> Channel {
     // As tonic's own connector of an endpoint (`Endpoint::http_connector`), of the endpoint's
     // defaults: an `https` URI goes through it too (tonic negotiates TLS on its stream), and
@@ -101,7 +100,7 @@ fn connect_directly(endpoint: tonic::transport::Endpoint) -> Channel {
     let mut connector = HttpConnector::new();
     connector.enforce_http(false);
     connector.set_nodelay(true);
-    connector.set_connect_timeout(Some(READY_TIMEOUT));
+    connector.set_connect_timeout(Some(CONNECT_TIMEOUT));
     endpoint
         .connect_timeout(CONNECT_TIMEOUT)
         .connect_with_connector_lazy(connector)
@@ -110,10 +109,10 @@ fn connect_directly(endpoint: tonic::transport::Endpoint) -> Channel {
 /// A lazy channel to `endpoint` through an HTTP CONNECT tunnel of `proxy`. tonic negotiates
 /// TLS (for an `https` endpoint) inside the tunnel, with the endpoint's own server name.
 ///
-/// Two bounds apply, and either is `UNAVAILABLE` and retried, as in grpcio. The connector
-/// bounds the TCP connection to the proxy and the tunnel by [`READY_TIMEOUT`]. tonic bounds
-/// the whole connection, the TLS handshake included, by [`CONNECT_TIMEOUT`] from outside the
-/// connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
+/// tonic bounds the whole connection, the TLS handshake included, by [`CONNECT_TIMEOUT`] from
+/// outside the connector, which [`crate::retries::grpc_python_code`] reports as `UNAVAILABLE`.
+/// The connector bounds the TCP connection to the proxy and the tunnel by the same deadline
+/// (see [`ProxyConnector`]), so that a proxy that does not open the tunnel is reported as that.
 fn connect_through_proxy(endpoint: tonic::transport::Endpoint, proxy: HttpProxy) -> Channel {
     endpoint
         .connect_timeout(CONNECT_TIMEOUT)
@@ -124,6 +123,12 @@ fn connect_through_proxy(endpoint: tonic::transport::Endpoint, proxy: HttpProxy)
 const MAX_PROXY_RESPONSE: usize = 8192;
 
 /// Connects to the server of a URI through a CONNECT tunnel of the proxy.
+///
+/// The TCP connection to the proxy and the tunnel have the deadline of the connection,
+/// [`CONNECT_TIMEOUT`] from when tonic calls the connector, which it does before it starts its
+/// own bound of the whole connection: a proxy that does not open the tunnel in time fails the
+/// connection with an error that names it, at the deadline of the connection, as grpcio's tunnel
+/// shares the connect deadline with the TLS handshake.
 #[derive(Clone)]
 struct ProxyConnector(std::sync::Arc<HttpProxy>);
 
@@ -141,6 +146,9 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
 
     fn call(&mut self, uri: tonic::codegen::http::Uri) -> Self::Future {
         let proxy = self.0.clone();
+        // When tonic calls the connector, before it starts its own bound, rather than when the
+        // connection is first polled: the tunnel's deadline is then no later than tonic's.
+        let deadline = tokio::time::Instant::now() + CONNECT_TIMEOUT;
         Box::pin(async move {
             let host = uri.host().ok_or("the endpoint has no host")?;
             let default_port = if uri.scheme_str() == Some("https") {
@@ -149,7 +157,7 @@ impl tonic::codegen::Service<tonic::codegen::http::Uri> for ProxyConnector {
                 80
             };
             let port = uri.port_u16().unwrap_or(default_port);
-            match tokio::time::timeout(READY_TIMEOUT, open_tunnel(&proxy, host, port)).await {
+            match tokio::time::timeout_at(deadline, open_tunnel(&proxy, host, port)).await {
                 Ok(stream) => Ok(TokioIo::new(stream?)),
                 Err(_) => Err("the proxy did not open the tunnel in time".into()),
             }
@@ -203,6 +211,10 @@ async fn open_tunnel(proxy: &HttpProxy, host: &str, port: u16) -> std::io::Resul
 /// gRPC/HTTP header carrying the connection-string `token` as `Bearer <token>`.
 /// Named here (rather than as a string literal) so the key is written once.
 const AUTHORIZATION_HEADER: &str = "authorization";
+
+/// The HTTP header of the client library, tonic's own, as grpcio sends its own: never the user
+/// agent of the connection string, which the requests carry as their client type.
+const USER_AGENT_HEADER: &str = "user-agent";
 
 /// Wait for `grpc` to become ready, bounded by [`READY_TIMEOUT`], mapping any failure
 /// (or the timeout) to a gRPC `UNAVAILABLE` error. This matches how grpcio reports an
@@ -520,11 +532,13 @@ pub struct SparkConnectClient {
     user_id: Option<String>,
     /// The metadata of the connection string, and the `authorization` of its token.
     metadata: Vec<(String, String)>,
-    /// The headers of every request: the user agent, then `metadata`. They are validated
-    /// once, by `connect`, so that attaching them to a request cannot fail.
+    /// The headers of every request: `metadata`, but a `user-agent` parameter (see `connect`).
+    /// They are validated once, by `connect`, so that attaching them to a request cannot fail.
     headers: Vec<(AsciiMetadataKey, AsciiMetadataValue)>,
-    /// User-agent header.
-    user_agent: String,
+    /// The user agent, which the requests that PySpark builds with `ChannelBuilder.userAgent`
+    /// carry as their client type, or the error of that property, which each of them raises
+    /// (see [`SparkConnectClient::client_type`]).
+    user_agent: Result<String>,
     /// The user context extensions of the requests of the client.
     user_context_extensions: std::sync::Arc<std::sync::Mutex<UserContextExtensions>>,
     /// Retry policy applied to RPCs (exponential backoff on transient failures).
@@ -739,8 +753,9 @@ impl SparkConnectClient {
         // As PySpark's client, whose channel options read the keepalive parameters next.
         builder.check_keepalive()?;
 
-        // Parse user-agent.
-        let user_agent = builder.user_agent()?;
+        // Not an error of the connection: PySpark reads its `userAgent` when it builds a
+        // request, so the error of the user agent is that of each request that carries it.
+        let user_agent = builder.user_agent();
 
         // Build gRPC channel. We connect *lazily* - the channel is created here but the
         // TCP/TLS connection is established on the first RPC (matching the reference
@@ -786,14 +801,18 @@ impl SparkConnectClient {
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
 
         // The headers are checked here, once: one that gRPC cannot send is an error of the
-        // connection, rather than a header that every request silently goes without.
-        let mut headers = vec![(
-            AsciiMetadataKey::from_static("user-agent"),
-            user_agent_header(&user_agent)?,
-        )];
+        // connection, rather than a header that every request silently goes without. The
+        // `user-agent` header is tonic's own, as grpcio sends its own rather than the user agent,
+        // which goes as the client type of the requests. grpcio replaces a `user-agent` of the
+        // metadata with its own too, so a `user-agent` parameter is checked as metadata and not
+        // sent, rather than put before tonic's.
+        let mut headers = Vec::new();
         let mut metadata: Vec<(String, String)> = builder.metadata();
         for (key, value) in &metadata {
-            headers.push((metadata_key(key)?, metadata_value(key, value)?));
+            let header = (metadata_key(key)?, metadata_value(key, value)?);
+            if key != USER_AGENT_HEADER {
+                headers.push(header);
+            }
         }
         // Spark Connect servers that require token auth expect the connection-string
         // `token` as an `Authorization: Bearer <token>` header. It is a reserved key
@@ -1292,11 +1311,11 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         allow_arrow_batch_chunking(&mut request);
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         if let Some(plan) = request.plan.as_mut() {
             self.compress_plan(plan).await;
         }
@@ -1365,9 +1384,9 @@ impl SparkConnectClient {
         &self,
         mut request: ReattachExecuteRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
@@ -1385,9 +1404,9 @@ impl SparkConnectClient {
         &self,
         mut request: ReleaseExecuteRequest,
     ) -> Result<ReleaseExecuteResponse> {
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         let mut req = Request::new(request);
         self._attach_metadata(&mut req);
         match self.stub.clone().release_execute(req).await {
@@ -1435,10 +1454,10 @@ impl SparkConnectClient {
         &self,
         mut request: AnalyzePlanRequest,
     ) -> Result<AnalyzePlanResponse> {
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         if let Some(analyze) = request.analyze.as_mut() {
             for plan in analyze_plans(analyze).into_iter().flatten() {
                 self.compress_plan(plan).await;
@@ -1552,14 +1571,14 @@ impl SparkConnectClient {
         &self,
         mut request: ExecutePlanRequest,
     ) -> Result<ReattachableResponseStream> {
-        self.ensure_open()?;
-        allow_arrow_batch_chunking(&mut request);
-        self.extend_user_context(&mut request.user_context);
         // Before the iterator: its ReattachExecute and ReleaseExecute requests take the
         // user context and the client type of this request, and the request of the hook, as
         // PySpark's iterator is of the request that the hooks return.
+        self.fill_client_type(&mut request.client_type)?;
+        self.ensure_open()?;
+        allow_arrow_batch_chunking(&mut request);
+        self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         if let Some(plan) = request.plan.as_mut() {
             self.compress_plan(plan).await;
         }
@@ -1637,10 +1656,10 @@ impl SparkConnectClient {
         &self,
         mut request: FetchErrorDetailsRequest,
     ) -> Result<FetchErrorDetailsResponse> {
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let deadline = self.rpc_deadlines.fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
@@ -1665,13 +1684,18 @@ impl SparkConnectClient {
         };
         let details = match &server.error_id {
             Some(error_id) => {
-                // PySpark fetches the details through `_stub`, which raises NO_ACTIVE_SESSION
-                // once the client is closed, as a session change closes it; that replaces the
-                // error of the server.
+                // PySpark builds the request of the details with its user agent, and fetches
+                // them through `_stub`, which raises NO_ACTIVE_SESSION once the client is closed,
+                // as a session change closes it: the error of either replaces the error of the
+                // server, the user agent's first.
+                let client_type = match self.client_type() {
+                    Ok(client_type) => client_type,
+                    Err(error) => return error,
+                };
                 if let Err(closed) = self.ensure_open() {
                     return closed;
                 }
-                self.error_details(error_id).await
+                self.error_details(error_id, client_type).await
             }
             None => None,
         };
@@ -1680,12 +1704,17 @@ impl SparkConnectClient {
     }
 
     /// The details of the error that the server keeps under `error_id`, or `None` if they
-    /// cannot be fetched. Mirrors `SparkConnectClient._fetch_enriched_error`.
-    async fn error_details(&self, error_id: &str) -> Option<FetchErrorDetailsResponse> {
+    /// cannot be fetched, with a request of the client type `client_type`. Mirrors
+    /// `SparkConnectClient._fetch_enriched_error`.
+    async fn error_details(
+        &self,
+        error_id: &str,
+        client_type: String,
+    ) -> Option<FetchErrorDetailsResponse> {
         let request = FetchErrorDetailsRequest {
             session_id: self.session_id.clone(),
             error_id: error_id.to_string(),
-            client_type: Some(self.user_agent.clone()),
+            client_type: Some(client_type),
             user_context: self.user_id.as_ref().map(|user_id| UserContext {
                 user_id: user_id.clone(),
                 ..Default::default()
@@ -1745,7 +1774,9 @@ impl SparkConnectClient {
                     keys: vec![key.to_string()],
                 })),
             }),
-            client_type: Some(self.user_agent.clone()),
+            // As the conf of PySpark's `_display_server_stack_trace`, which catches the error of
+            // its user agent as any other: the stack trace is then shown.
+            client_type: Some(self.client_type().ok()?),
             ..Default::default()
         };
         let mut request = request;
@@ -1769,10 +1800,10 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.config`.
     pub async fn config(&self, mut request: ConfigRequest) -> Result<ConfigResponse> {
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.config;
@@ -1796,10 +1827,10 @@ impl SparkConnectClient {
     ///
     /// Mirrors `pyspark.sql.connect.client.core.SparkConnectClient.interrupt`.
     pub async fn interrupt(&self, mut request: InterruptRequest) -> Result<InterruptResponse> {
+        self.fill_client_type(&mut request.client_type)?;
         self.ensure_open()?;
         self.extend_user_context(&mut request.user_context);
         self.fill_user_context(&mut request.user_context);
-        self.fill_client_type(&mut request.client_type);
         let response = self
             .with_retry(|| {
                 let deadline = self.rpc_deadlines.interrupt;
@@ -2160,7 +2191,8 @@ impl SparkConnectClient {
             user_id: self.user_id.clone().unwrap_or_default(),
             ..Default::default()
         });
-        request.client_type = Some(self.user_agent.clone());
+        // The error of the user agent is that of the release, which PySpark's `stop()` logs.
+        request.client_type = Some(self.client_type()?);
 
         let response = self
             .with_retry(|| {
@@ -2287,11 +2319,24 @@ impl SparkConnectClient {
     }
 
     /// The client type of a typed request that the caller built: the user agent, unless it has
-    /// one, as PySpark's requests carry `client_type=self._builder.userAgent`.
-    fn fill_client_type(&self, client_type: &mut Option<String>) {
+    /// one, as PySpark's requests carry `client_type=self._builder.userAgent`. Its error is that
+    /// of the request. A request fills it before anything else, as PySpark builds a request
+    /// before it reads `_stub`, which raises `NO_ACTIVE_SESSION` once the client is closed.
+    fn fill_client_type(&self, client_type: &mut Option<String>) -> Result<()> {
         if client_type.is_none() {
-            *client_type = Some(self.user_agent.clone());
+            *client_type = Some(self.client_type()?);
         }
+        Ok(())
+    }
+
+    /// The user agent as the client type of a request, as PySpark's `ChannelBuilder.userAgent`,
+    /// or the error that the property raises when a request is built: `SparkConnectException`
+    /// for a user agent longer than 2048 characters after URL escaping, or `UnicodeEncodeError`
+    /// for a `SPARK_CONNECT_USER_AGENT` that is not UTF-8 (see [`ChannelBuilder::user_agent`]).
+    /// The session is made all the same, and the requests that PySpark builds without the user
+    /// agent, those of the artifacts and `CloneSession`, are sent.
+    fn client_type(&self) -> Result<String> {
+        self.user_agent.clone()
     }
 
     /// Build a fresh request context, even when no user ID is configured.
@@ -2395,8 +2440,8 @@ impl SparkConnectClient {
 
     /// Attach metadata headers to a request.
     ///
-    /// Inserts the user agent, the metadata of the connection string and the token (if
-    /// present) into the gRPC metadata. They were validated by `connect`.
+    /// Inserts the metadata of the connection string and the token (if present) into the gRPC
+    /// metadata. They were validated by `connect`. The `user-agent` header is tonic's own.
     fn _attach_metadata<T>(&self, req: &mut Request<T>) {
         let metadata = req.metadata_mut();
         // NOTE: the session id is carried in the request *body* (proto), not in gRPC
@@ -2477,19 +2522,6 @@ fn ascii_header_value(value: &str) -> Option<AsciiMetadataValue> {
         return None;
     }
     AsciiMetadataValue::try_from(value).ok()
-}
-
-/// The user agent as the value of the `user-agent` header. The reference client sets it as a
-/// channel option, which gRPC sends as it is, so that its UTF-8 bytes go unchanged. HTTP/2
-/// cannot carry a control character, which is an error here rather than a request without
-/// the header.
-fn user_agent_header(user_agent: &str) -> Result<AsciiMetadataValue> {
-    AsciiMetadataValue::try_from(user_agent.as_bytes()).map_err(|_| {
-        SparkError::builtin_value_msg(
-            "'user_agent' parameter should not contain control characters: it is sent as \
-             the user-agent header.",
-        )
-    })
 }
 
 /// A reattachable, retrying response stream for a reattachable ExecutePlan.
@@ -2637,6 +2669,82 @@ impl SparkConnectClient {
             Ok(handle) => drop(handle.spawn(release)),
             Err(_) => drop(crate::runtime::get_runtime().spawn(release)),
         }
+    }
+
+    /// Send `request`, the execution of a finalizer, as PySpark sends the removal of a cached
+    /// remote relation in `CachedRemoteRelation.__del__`: through the channel itself, as a
+    /// `unary_unary` call of ExecutePlan, so neither reattachable, with no ReleaseExecute after
+    /// it, nor passed to the hooks of the executions. Its request is that of
+    /// `_execute_plan_request_with_metadata`, whose only option allows result chunking, and the
+    /// call is retried under the retry policy of the client, as `_retrying()` retries it.
+    ///
+    /// The request is completed on the calling thread, whose user context extensions it takes,
+    /// as PySpark's is of the thread of its finalizer. It is sent on the shared runtime without
+    /// waiting for the server, so that a drop never blocks on it: a drop may run on a thread of a
+    /// runtime, or in a Python finalizer that holds the GIL, which another thread may need to
+    /// read the responses of the same connection, whose flow control would hold this response
+    /// back meanwhile. A failure is only logged, as PySpark's, and nothing is sent once the
+    /// client is closed. Not a stable API.
+    #[doc(hidden)]
+    pub fn spawn_unary_execute_plan(&self, mut request: ExecutePlanRequest) {
+        if self.is_closed() {
+            return;
+        }
+        allow_arrow_batch_chunking(&mut request);
+        self.extend_user_context(&mut request.user_context);
+        self.fill_user_context(&mut request.user_context);
+        // A user agent that PySpark refuses raises as its finalizer builds the request, before
+        // anything is sent, and the error of a finalizer is only reported.
+        if let Err(error) = self.fill_client_type(&mut request.client_type) {
+            tracing::warn!("ExecutePlan of a finalizer was not sent: {error}");
+            return;
+        }
+        self.observe_on(&mut request.client_observed_server_side_session_id);
+        let operation_id = request
+            .operation_id
+            .get_or_insert_with(|| Uuid::new_v4().to_string())
+            .clone();
+        let stub = self.stub.clone();
+        let metadata = self.execution_metadata();
+        let policy = self.retry_policy.clone();
+        let closed = std::sync::Arc::clone(&self.closed);
+        let send = async move {
+            // A client closed meanwhile makes no more attempts, as the channel of a closed
+            // PySpark client refuses its calls.
+            let still_open = || {
+                if closed.load(std::sync::atomic::Ordering::SeqCst) {
+                    Err(())
+                } else {
+                    Ok(())
+                }
+            };
+            let sent = retrying(&mut Retrying::new(&policy), still_open, || {
+                let mut req = Request::new(request.clone());
+                *req.metadata_mut() = metadata.clone();
+                let mut stub = stub.clone();
+                async move {
+                    let mut responses = stub
+                        .execute_plan(req)
+                        .await
+                        .map_err(RetryError::Status)?
+                        .into_inner();
+                    // The call ends with the responses of the execution, as the unary call
+                    // of the reference reads them.
+                    while responses
+                        .message()
+                        .await
+                        .map_err(RetryError::Status)?
+                        .is_some()
+                    {}
+                    Ok(())
+                }
+            })
+            .await;
+            if let Err(RetryError::Status(status)) = sent {
+                tracing::warn!("ExecutePlan of operation {operation_id} failed: {status}");
+            }
+        };
+        drop(crate::runtime::get_runtime().spawn(send));
     }
 }
 
@@ -3179,18 +3287,16 @@ mod tests {
     async fn test_metadata_headers() {
         let builder = ChannelBuilder::parse("sc://localhost/;custom_header=custom_value").unwrap();
         let client = SparkConnectClient::connect(&builder).await.unwrap();
-        assert!(client.user_agent.contains("spark/"));
-        // The header of the connection string and the user agent are on a request.
+        assert!(client.client_type().unwrap().contains("spark/"));
+        // The header of the connection string is on a request. The user agent is not: it is
+        // the client type of the requests, and tonic sends its own `user-agent` header.
         let mut request = Request::new(());
         client._attach_metadata(&mut request);
         assert_eq!(
             request.metadata().get("custom_header").unwrap(),
             "custom_value"
         );
-        assert_eq!(
-            request.metadata().get("user-agent").unwrap(),
-            client.user_agent.as_str()
-        );
+        assert!(request.metadata().get("user-agent").is_none());
     }
 
     #[test]
@@ -4029,8 +4135,11 @@ mod request_fields_tests {
     /// The method and the bytes of each request that the server received, in order.
     type Received = std::sync::Arc<std::sync::Mutex<Vec<(String, Vec<u8>)>>>;
 
+    /// The values of the `user-agent` header of each request that the server received, in order.
+    type UserAgents = std::sync::Arc<std::sync::Mutex<Vec<Vec<Vec<u8>>>>>;
+
     #[derive(Clone)]
-    struct Recorder(Received);
+    struct Recorder(Received, UserAgents);
 
     impl NamedService for Recorder {
         const NAME: &'static str = "spark.connect.SparkConnectService";
@@ -4054,6 +4163,9 @@ mod request_fields_tests {
                 .path()
                 .trim_start_matches("/spark.connect.SparkConnectService/")
                 .to_string();
+            let user_agents = request.headers().get_all(http::header::USER_AGENT);
+            let user_agents = user_agents.iter().map(|v| v.as_bytes().to_vec()).collect();
+            self.1.lock().unwrap().push(user_agents);
             let rpc = Rpc(self.0.clone(), method.clone());
             Box::pin(async move {
                 let mut grpc = tonic::server::Grpc::new(BytesCodec);
@@ -4251,7 +4363,7 @@ mod request_fields_tests {
         let incoming = futures::stream::unfold(listener, |listener| async {
             Some((listener.accept().await.map(|(socket, _)| socket), listener))
         });
-        let service = Recorder(received.clone());
+        let service = Recorder(received.clone(), Default::default());
         tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(service)
@@ -4318,7 +4430,7 @@ mod request_fields_tests {
         let incoming = futures::stream::unfold(listener, |listener| async {
             Some((listener.accept().await.map(|(socket, _)| socket), listener))
         });
-        let service = Recorder(received.clone());
+        let service = Recorder(received.clone(), Default::default());
         let server = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(service)
@@ -4409,7 +4521,7 @@ mod request_fields_tests {
         server.abort();
 
         let requests = received.lock().unwrap().clone();
-        let user_agent = client.user_agent.clone();
+        let user_agent = client.client_type().unwrap();
         for method in [
             "Config",
             "ExecutePlan",
@@ -4458,16 +4570,146 @@ mod request_fields_tests {
         }
     }
 
-    /// A client of the user `u1` of a recording server, what that server received, and the
-    /// server.
-    async fn recorded_client() -> (SparkConnectClient, Received, tokio::task::JoinHandle<()>) {
+    #[tokio::test]
+    async fn the_user_agent_is_the_client_type_of_the_requests_and_not_their_header() {
+        // As PySpark: its user agent goes in the requests, as their client type, and the
+        // `user-agent` header is grpcio's own. So a user agent of control characters, which no
+        // header can carry, is sent, and a `user-agent` parameter is not, as grpcio replaces it.
+        let (client, received, user_agents, server) =
+            recording_client(";user_agent=my%0A%7Fagent;user-agent=other").await;
+        let user_agent = client.client_type().unwrap();
+        assert!(
+            user_agent.starts_with("my\n\u{7f}agent spark/4.3.0 os/"),
+            "{user_agent:?}"
+        );
+        let session_id = client.session_id().to_string();
+        client
+            .config(ConfigRequest {
+                session_id: session_id.clone(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut stream = client
+            .execute_plan_reattachable(ExecutePlanRequest {
+                session_id,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        while stream.message().await.unwrap().is_some() {}
+        // The release of the execution is sent in the background.
+        for _ in 0..200 {
+            if received.lock().unwrap().len() == 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        server.abort();
+        let requests = received.lock().unwrap().clone();
+        let methods: Vec<&str> = requests.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, ["Config", "ExecutePlan", "ReleaseExecute"]);
+        for (method, bytes) in &requests {
+            assert_eq!(
+                fields_of(method, bytes).0,
+                Some(user_agent.clone()),
+                "{method}"
+            );
+        }
+        // One header on each request, tonic's own, as `tonic/<version>`.
+        let user_agents = user_agents.lock().unwrap().clone();
+        assert_eq!(user_agents.len(), 3);
+        for values in user_agents {
+            let values: Vec<String> = values
+                .into_iter()
+                .map(|value| String::from_utf8(value).unwrap())
+                .collect();
+            assert_eq!(values.len(), 1, "{values:?}");
+            assert!(
+                values[0].starts_with("tonic/") && !values[0].contains(' '),
+                "{values:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_too_long_user_agent_is_the_error_of_each_request_that_carries_it_as_pyspark() {
+        // As PySpark's `userAgent`, which its requests read when they are built: the client is
+        // made, and each request of the user agent raises its SparkConnectException and is not
+        // sent. Those that PySpark builds without it, of the artifacts and CloneSession, are.
+        let (client, received, _, server) =
+            recording_client(&format!(";user_agent={}", "a".repeat(2049))).await;
+        fn error_of<T>(result: Result<T>) -> SparkError {
+            match result {
+                Ok(_) => panic!("the request was made"),
+                Err(error) => error,
+            }
+        }
+        let too_long = |error: SparkError, call: &str| {
+            assert_eq!(
+                error.kind,
+                SparkErrorKind::ConnectMessage,
+                "{call}: {error:?}"
+            );
+            assert_eq!(
+                error.message(),
+                "'user_agent' parameter should not exceed 2048 characters after URL escaping, \
+                 found 2049 characters.",
+                "{call}"
+            );
+        };
+        too_long(error_of(client.config(Default::default()).await), "Config");
+        too_long(error_of(client.get_configs(&["k"]).await), "get_configs");
+        let analyzed = client.analyze_plan(Default::default()).await;
+        too_long(error_of(analyzed), "AnalyzePlan");
+        too_long(
+            error_of(client.execute_plan(Default::default()).await),
+            "ExecutePlan",
+        );
+        let executed = client.execute_plan_reattachable(Default::default()).await;
+        too_long(error_of(executed), "a reattachable ExecutePlan");
+        too_long(error_of(client.interrupt_all().await), "Interrupt");
+        let fetched = client.fetch_error_details(Default::default()).await;
+        too_long(error_of(fetched), "FetchErrorDetails");
+        too_long(error_of(client.release_session().await), "ReleaseSession");
+        // PySpark builds the request of the details of an error of the server with its user
+        // agent, whose error is then that of the call.
+        let raised = client.error_from_status(error_kept_under("error-1")).await;
+        too_long(raised, "an error of the server");
+        assert!(received.lock().unwrap().is_empty());
+        client.artifact_status(&["files/a.txt"]).await.unwrap();
+        client.clone_session(None).await.unwrap();
+        // So is a request of a closed client, as PySpark builds a request before it reads
+        // `_stub`, which raises NO_ACTIVE_SESSION.
+        client.close();
+        too_long(
+            error_of(client.config(Default::default()).await),
+            "a closed client",
+        );
+        server.abort();
+        let requests = received.lock().unwrap().clone();
+        let methods: Vec<&str> = requests.iter().map(|(m, _)| m.as_str()).collect();
+        assert_eq!(methods, ["ArtifactStatus", "CloneSession"]);
+    }
+
+    /// A client of a recording server, of the parameters `params` of its connection string, what
+    /// that server received, the `user-agent` headers of the requests, and the server.
+    async fn recording_client(
+        params: &str,
+    ) -> (
+        SparkConnectClient,
+        Received,
+        UserAgents,
+        tokio::task::JoinHandle<()>,
+    ) {
         let received: Received = Default::default();
+        let user_agents: UserAgents = Default::default();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let incoming = futures::stream::unfold(listener, |listener| async {
             Some((listener.accept().await.map(|(socket, _)| socket), listener))
         });
-        let service = Recorder(received.clone());
+        let service = Recorder(received.clone(), user_agents.clone());
         let server = tokio::spawn(async move {
             tonic::transport::Server::builder()
                 .add_service(service)
@@ -4475,14 +4717,24 @@ mod request_fields_tests {
                 .await
                 .unwrap();
         });
-        // `connect` reads the token of the environment too, so none is set until it returns:
-        // another test may set one, which would make the channel TLS.
-        let env = crate::channel::set_env(&[("SPARK_CONNECT_AUTHENTICATE_TOKEN", None)]);
+        // `connect` reads the token and the user agent of the environment too, so neither is
+        // set until it returns: another test may set them, which would make the channel TLS, or
+        // give it another user agent.
+        let env = crate::channel::set_env(&[
+            ("SPARK_CONNECT_AUTHENTICATE_TOKEN", None),
+            ("SPARK_CONNECT_USER_AGENT", None),
+        ]);
         let builder =
-            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/;user_id=u1", address.port()))
-                .unwrap();
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/{params}", address.port())).unwrap();
         let client = SparkConnectClient::connect(&builder).await.unwrap();
         drop(env);
+        (client, received, user_agents, server)
+    }
+
+    /// A client of the user `u1` of a recording server, what that server received, and the
+    /// server.
+    async fn recorded_client() -> (SparkConnectClient, Received, tokio::task::JoinHandle<()>) {
+        let (client, received, _, server) = recording_client(";user_id=u1").await;
         (client, received, server)
     }
 
@@ -4625,7 +4877,7 @@ mod request_fields_tests {
         let request: ReleaseSessionRequest = only_request(&received, "ReleaseSession");
         assert_eq!(request.session_id, client.session_id());
         assert_eq!(request.user_context.unwrap().user_id, "u1");
-        assert_eq!(request.client_type, Some(client.user_agent.clone()));
+        assert_eq!(request.client_type, Some(client.client_type().unwrap()));
         assert!(!request.allow_reconnect);
     }
 
@@ -4794,10 +5046,37 @@ mod metadata_validation_tests {
     }
 
     #[test]
-    fn user_agent_that_is_not_a_header_value_fails_to_connect() {
-        let e = connect_err("sc://localhost/;user_agent=my%0Aagent");
+    fn a_user_agent_of_control_characters_connects_as_pyspark() {
+        // PySpark sends its user agent only as the client type of the requests, which takes
+        // any character, so a control character is no error, of the connection or of a request.
+        for (url, user_agent) in [
+            ("sc://localhost/;user_agent=my%0Aagent", "my\nagent"),
+            ("sc://localhost/;user_agent=my%7Fagent", "my\u{7f}agent"),
+            ("sc://localhost/;user_agent=%00%0D", "\0\r"),
+        ] {
+            let client = connect(url).unwrap();
+            let client_type = client.client_type().unwrap();
+            assert!(
+                client_type.starts_with(&format!("{user_agent} spark/")),
+                "{url}: {client_type:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_user_agent_parameter_is_checked_as_metadata_and_not_sent() {
+        // grpcio checks a `user-agent` of the metadata as any other, and sends its own header in
+        // its place; here that is tonic's, as on every request.
+        let client = connect("sc://localhost/;user-agent=other;x-hdr=v").unwrap();
+        let mut request = Request::new(());
+        client._attach_metadata(&mut request);
+        for metadata in [request.metadata().clone(), client.execution_metadata()] {
+            assert!(metadata.get("user-agent").is_none(), "{metadata:?}");
+            assert_eq!(metadata.get("x-hdr").unwrap(), "v");
+        }
+        let e = connect_err("sc://localhost/;user-agent=a%0Ab");
         assert_eq!(e.kind, SparkErrorKind::BuiltinValueError);
-        assert!(shown(&e).contains("user_agent"), "{}", shown(&e));
+        assert!(shown(&e).contains("metadata was invalid"), "{}", shown(&e));
     }
 
     #[test]
@@ -4812,11 +5091,13 @@ mod metadata_validation_tests {
             assert_eq!(metadata.get("x-hdr").unwrap(), "a b");
             // An empty value is a value, as in grpc-python.
             assert_eq!(metadata.get("x_y.z-0").unwrap(), "");
-            // The user agent goes as its UTF-8 bytes, as grpc-python sends it.
-            let user_agent = metadata.get("user-agent").unwrap().as_encoded_bytes();
-            assert!(user_agent.starts_with("caf\u{e9} spark/".as_bytes()));
-            assert_eq!(metadata.len(), 4, "{metadata:?}");
+            // The user agent is the client type of the requests, not a header.
+            assert_eq!(metadata.len(), 3, "{metadata:?}");
         }
+        assert!(client
+            .client_type()
+            .unwrap()
+            .starts_with("caf\u{e9} spark/"));
     }
 
     #[test]

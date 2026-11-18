@@ -370,15 +370,30 @@ fn rows_below_the_cache_threshold_are_inline_after_the_settings_are_read() {
 
 #[test]
 fn no_rows_and_rows_that_do_not_fit_the_schema_send_no_request() {
-    // No rows are a relation of the schema alone, as PySpark's empty data is, with no request;
-    // rows are converted before the settings are read, so that a row of another width fails
-    // without one.
+    // No rows are a relation of the schema alone, as PySpark's empty data is, with no request,
+    // and so are columns of no rows; rows are converted before the settings are read, so that a
+    // row of another width fails without one.
     let (spark, log) = serve("64");
     let frame = spark.create_dataframe(Vec::new(), schema()).unwrap();
     let RelType::LocalRelation(local) = relation(&frame) else {
         panic!("no rows are a local relation of the schema");
     };
     assert!(local.data.is_none());
+    let empty: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(Int64Array::from(Vec::<i64>::new())),
+        Arc::new(Int64Array::from(Vec::<i64>::new())),
+    ];
+    let longs = DataType::Struct {
+        fields: vec![field("a", DataType::Long), field("b", DataType::Long)],
+    };
+    let from_columns = spark
+        .create_dataframe_from_columns(empty, longs.clone())
+        .unwrap();
+    assert_eq!(
+        relation(&from_columns),
+        relation(&spark.create_dataframe(Vec::new(), longs).unwrap()),
+        "columns of no rows are the relation of no rows"
+    );
     let short = vec![Row::new(vec!["a".to_string()], vec![Value::Long(1)])];
     let error = spark
         .create_dataframe(short, schema())
