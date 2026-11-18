@@ -87,6 +87,18 @@ jobs:
             CARGO_TARGET_DIR="$PWD/target" \
               cargo clippy --manifest-path "$crate/Cargo.toml" --all-targets -- -D warnings
           done
+      - name: rustdoc - blocking
+        # The API docs of the published library crates that are written by hand, with `wasm-udf`
+        # on so that its module is documented too: a warning, such as an intra-doc link to an
+        # item that does not exist or that the docs cannot see, fails the job. The docs of
+        # apache-spark-connect-proto are generated from the comments of Spark's .proto files,
+        # whose links are not rustdoc's, so that crate is left out.
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: |
+          cargo doc --no-deps -p apache-spark-connect -p apache-spark-connect-core \
+            -p apache-spark-connect-macros -p apache-spark-connect-build \
+            --features apache-spark-connect/wasm-udf
       - name: Tooling unit tests
         run: python3 -m unittest discover -s scripts/tests
       - name: LICENSE-binary and NOTICE-binary are up to date

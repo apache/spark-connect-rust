@@ -17,7 +17,7 @@ The CI consists of these main workflows:
 4. **Coverage** (`.github/workflows/coverage.yml`) - Rust and Python coverage, with regression
    floors
 
-The other workflows are `lint.yml` (rustfmt, clippy, ruff), `generated-drift.yml`,
+The other workflows are `lint.yml` (rustfmt, clippy, rustdoc, ruff), `generated-drift.yml`,
 `vendor-drift.yml`, `docs.yml`, `pandas-parity.yml`, `pipelines-parity.yml` and `release.yml`.
 
 Most workflows run on pushes and pull requests targeting `master` and `branch-*`. Several also
@@ -150,7 +150,8 @@ python scripts/run_official_tests.py \
 
 The runner injects our Rust transport into the official test files (see
 [official-tests.md](official-tests.md)). Its first step is a guard that fails when a
-`python/tests/test_*_e2e.py` file is in no workflow's pytest list. The same job then:
+`python/tests/test_*_e2e.py` file is in no workflow's pytest list: it reads the pytest commands of
+the workflows, and not their comments. The same job then:
 - runs the drop-in-facing live-server pytest files under `python/tests`
   (`test_proto_rust_offline.py`, `test_arrow_e2e.py`, `test_dropin_e2e.py` and the ML e2e files)
   in a virtual environment of only the drop-in's dependencies (pandas, pyarrow, numpy, pyyaml),
@@ -268,8 +269,10 @@ one job does three things:
   the Rust protobuf runtime, the ML suites, the exit hook, the settings of createDataFrame and
   the type stubs) and `test_arrow_handoff.py`. `test_type_stubs_offline.py` runs mypy and
   pyright, at the versions that the job pins, on a user's application and on the stubs. No
-  other workflow runs these files, so this step is their gate: a failing test fails the job, and
-  a guard step at the start of the job fails when one of the files is not in the step's list.
+  other workflow runs these files, but `test_proto_rust_offline.py`, which connect-parity also
+  runs without protobuf (see above), so this step is their gate: a failing test fails the job,
+  and a guard step at the start of the job fails when one of the files is not in the step's list,
+  of which it reads the lines but not the comments.
   `-rs` prints every skipped test with its reason. The scope of the Python number is the
   hand-written shim, as `python/.coveragerc` defines it.
 - **Coverage floors**: the last step fails the job when a number is below its floor,

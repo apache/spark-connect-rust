@@ -153,7 +153,8 @@ SPARK_REMOTE=sc://localhost:15002 TZ=UTC PYTHONPATH=$(pwd) python -m pytest test
 
 CI runs the test files that its workflows name (`coverage.yml` for the offline suites,
 `build_python_connect.yml` for the live ones), so add a new test to an existing file, or
-add a new file to the workflow: a guard step of each fails when a test file is in no list.
+add a new file to the workflow: a guard step of each fails when an offline file
+(`test_*_offline.py` or `test_arrow_handoff.py`) or a live one (`test_*_e2e.py`) is in no list.
 CI also measures the coverage of the hand-written shim within the scope of
 `python/.coveragerc`, over the offline suites, and fails below the floor that `coverage.yml`
 sets:
@@ -246,6 +247,9 @@ For local collection measurements and their interpretation, see
 ```bash
 cargo fmt --all                                         # format (CI runs it with --check)
 cargo clippy --workspace --all-targets -- -D warnings   # lint (blocking in CI)
+RUSTDOCFLAGS="-D warnings" cargo doc --no-deps -p apache-spark-connect \
+  -p apache-spark-connect-core -p apache-spark-connect-macros -p apache-spark-connect-build \
+  --features apache-spark-connect/wasm-udf                # API docs (blocking in CI)
 ```
 
 Rust CI builds with `RUSTFLAGS="-D warnings"`, so a compiler warning fails it, and so
@@ -256,9 +260,10 @@ target (`rustup target add wasm32-unknown-unknown`), because it builds
 run `cargo +1.100.0 clippy ...` to match it. CI also lints the `datafusion` and `polars`
 features of `apache-spark-connect`, and the crates that the workspace excludes
 (`examples/wasm-udfs`, `examples/wasm-udf-inline`, `tests/wasm-udf` and `tests/wasm-udf-wasi`,
-which needs the `wasm32-wasip1` target too) through their manifests. The lints this codebase
-triggers by design are allowed once, with
-a reason, in `[workspace.lints.clippy]` of the root `Cargo.toml`; a targeted `#[allow]`
+which needs the `wasm32-wasip1` target too) through their manifests, and builds the API docs of
+the published crates but the generated `apache-spark-connect-proto` with rustdoc's warnings as
+errors, such as an intra-doc link that does not resolve or that names a private item. The lints
+this codebase triggers by design are allowed once, with a reason, in `[workspace.lints.clippy]` of the root `Cargo.toml`; a targeted `#[allow]`
 needs a comment saying why. CI also fails on deferral
 markers such as `TODO`, `FIXME`, `todo!()` or "for now" in `crates/*/src`
 (`bash scripts/audit_no_stubs.sh`). Match the surrounding code, keep changes focused,

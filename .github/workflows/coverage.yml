@@ -57,14 +57,22 @@ jobs:
           fetch-depth: 0  # Full history for badges branch operations
 
       - name: Check that the offline suite runs every offline test file
-        # The offline suite runs only in this job, so an offline file that its list (the step
-        # "Offline Python test suite" below) does not name runs nowhere, as the guards of
-        # build_python_connect.yml check for the live tests.
+        # The offline suite runs only in this job, apart from test_proto_rust_offline.py, which
+        # the step "Drop-in live-server tests" of connect-parity (build_python_connect.yml) runs
+        # too, without protobuf. So an offline file that the list of the step "Offline Python
+        # test suite" below does not name runs nowhere, as the guards of build_python_connect.yml
+        # check for the live tests. The guard reads the lines of that step only, from its
+        # `- name:` to the next step, and not its comments.
         run: |
+          suite=$(awk '
+            /^[[:space:]]*- name: Offline Python test suite/ { in_step = 1; next }
+            in_step && /^[[:space:]]*- [A-Za-z_-]+:/ { exit }
+            in_step && !/^[[:space:]]*#/
+          ' .github/workflows/coverage.yml)
           missing=0
           for f in python/tests/test_*_offline.py python/tests/test_arrow_handoff.py; do
             name=$(basename "$f")
-            if ! grep -qE "^[[:space:]]+tests/${name}([[:space:]]|$)" .github/workflows/coverage.yml; then
+            if ! grep -qE "^[[:space:]]+tests/${name}([[:space:]]|$)" <<< "$suite"; then
               echo "::error file=$f::$name is not in the offline suite of coverage.yml"
               missing=1
             fi

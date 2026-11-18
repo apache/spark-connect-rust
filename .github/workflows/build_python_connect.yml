@@ -69,12 +69,20 @@ jobs:
       - name: Check that a workflow runs every Python e2e test
         # A live test skips without SPARK_REMOTE, so a `tests/test_*_e2e.py` file that no
         # workflow names in a pytest list passes without running, as the Rust guard of
-        # connect-e2e checks for the Rust live tests.
+        # connect-e2e checks for the Rust live tests. The guard reads the pytest commands of
+        # the workflows only, each of its lines that a backslash continues, and not comments.
         run: |
+          lists=$(awk '
+            FNR == 1 { command = "" }
+            /^[[:space:]]*#/ { next }
+            { command = command " " $0 }
+            /\\$/ { sub(/\\$/, "", command); next }
+            { if (command ~ /pytest/) print command; command = "" }
+          ' .github/workflows/*.yml)
           missing=0
           for f in python/tests/test_*_e2e.py; do
             name=$(basename "$f")
-            if ! grep -qE -- "tests/${name}([^A-Za-z0-9_.]|$)" .github/workflows/*.yml; then
+            if ! grep -qE -- "tests/${name}([^A-Za-z0-9_.]|$)" <<< "$lists"; then
               echo "::error file=$f::$name is in no workflow's pytest list"
               missing=1
             fi
