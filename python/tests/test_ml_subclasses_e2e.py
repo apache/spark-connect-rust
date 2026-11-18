@@ -91,6 +91,105 @@ def test_pysparks_readers_and_writers_save_and_load_native_objects(frame):
     assert loaded.getStages()[0].uid == stage.uid
 
 
+def test_a_set_param_of_a_subclass_is_sent_and_refused_by_the_server(frame):
+    # PySpark's `serialize_ml_params` sends every param of `_paramMap` of a fit, a transform, an
+    # evaluate and a save: the server refuses a param of a Python subclass that is set ("Param
+    # myParam does not exist."), and a param of only a default is not sent.
+    import tempfile
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.ml.param import Param, Params
+
+    def extra():
+        return Param(Params._dummy(), "myParam", "a param of the subclass")
+
+    class MyLR(_cls("classification", "LogisticRegression")):
+        myParam = extra()
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._setDefault(myParam=1)
+
+    class MyTokenizer(_cls("feature", "Tokenizer")):
+        myParam = extra()
+
+    class MyEvaluator(_cls("evaluation", "RegressionEvaluator")):
+        myParam = extra()
+
+    estimator = MyLR(maxIter=2)
+    assert type(estimator.fit(frame)).__name__ == "LogisticRegressionModel"
+    estimator._set(myParam=5)
+    path = tempfile.mkdtemp(prefix="ml-subclass-param-") + "/estimator"
+    tokenizer = MyTokenizer(inputCol="x", outputCol="w")._set(myParam="v")
+    evaluator = MyEvaluator(predictionCol="x")._set(myParam=0.5)
+    for call in [
+        lambda: estimator.fit(frame),
+        lambda: estimator.write().save(path),
+        lambda: tokenizer.transform(frame).collect(),
+        lambda: evaluator.evaluate(frame),
+    ]:
+        with pytest.raises(SparkConnectGrpcException, match="Param myParam does not exist."):
+            call()
+
+
+def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame):
+    # PySpark's `DefaultParamsWriter` writes the class of the object (`instance.__module__ + "." +
+    # instance.__class__.__name__`), so of a Python subclass. Its readers of a OneVsRest and a
+    # Pipeline load the file as of their own class; those of the validators read the grid of a
+    # class of no `pyspark.ml.` as of the JVM's writer, of a JSON string, which fails; and a stage of
+    # a pipeline loads of its class, which a class of a function is not an attribute of its module of.
+    import glob
+    import json
+    import tempfile
+
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    OneVsRest = _cls("classification", "OneVsRest")
+    Pipeline = _cls("pipeline", "Pipeline")
+    CrossValidator = _cls("tuning", "CrossValidator")
+    TrainValidationSplit = _cls("tuning", "TrainValidationSplit")
+
+    class MyOVR(OneVsRest):
+        pass
+
+    class MyPipeline(Pipeline):
+        pass
+
+    class MyCV(CrossValidator):
+        pass
+
+    class MyTVS(TrainValidationSplit):
+        pass
+
+    lr = _cls("classification", "LogisticRegression")(maxIter=2)
+    shared = {
+        "estimator": lr,
+        "estimatorParamMaps": ParamGridBuilder().addGrid(lr.maxIter, [1, 2]).build(),
+        "evaluator": _cls("evaluation", "BinaryClassificationEvaluator")(),
+    }
+    base = tempfile.mkdtemp(prefix="ml-subclass-metadata-")
+    for obj, cls in [
+        (MyOVR(classifier=lr), OneVsRest),
+        (MyPipeline(stages=[lr]), Pipeline),
+        (MyCV(**shared), CrossValidator),
+        (MyTVS(**shared), TrainValidationSplit),
+    ]:
+        name = type(obj).__name__
+        path = f"{base}/{name}"
+        obj.write().save(path)
+        (part,) = glob.glob(os.path.join(path, "metadata", "part-*"))
+        with open(part) as file:
+            assert json.load(file)["class"] == f"{type(obj).__module__}.{name}"
+        if cls in (CrossValidator, TrainValidationSplit):
+            with pytest.raises(TypeError, match="^the JSON object must be str, bytes or bytearray"):
+                cls.load(path)
+        else:
+            assert type(cls.load(path)) is cls
+        Pipeline(stages=[obj]).write().save(f"{path}-in-pipeline")
+        with pytest.raises(AttributeError, match=f"has no attribute '{name}'"):
+            Pipeline.load(f"{path}-in-pipeline")
+
+
 def test_the_copies_of_a_pipeline_and_a_validator_fit_the_subclass(frame):
     LR = _cls("classification", "LogisticRegression")
     Pipeline = _cls("pipeline", "Pipeline")

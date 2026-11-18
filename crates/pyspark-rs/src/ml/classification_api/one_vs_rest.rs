@@ -641,11 +641,15 @@ pub(crate) fn save_one_vs_rest(
     validate_one_vs_rest(instance, false)?;
     let (param_map, default_map) = param_maps(instance)?;
     let uid: String = instance.getattr("uid")?.extract()?;
+    let class = crate::ml::pipeline_api::metadata_class::<crate::ml::PyOneVsRest>(
+        instance,
+        ONE_VS_REST_CLASS,
+    )?;
     save_metadata_at(
         instance.py(),
         session,
         path,
-        ONE_VS_REST_CLASS,
+        &class,
         &uid,
         dumps_compact(param_map.as_any())?,
         dumps_compact(default_map.as_any())?,
@@ -671,11 +675,15 @@ fn save_one_vs_rest_model(
     let (param_map, default_map) = param_maps(instance)?;
     let uid: String = instance.getattr("uid")?.extract()?;
     let models = instance.getattr("models")?;
+    let class = crate::ml::pipeline_api::metadata_class::<PyOneVsRestModel>(
+        instance,
+        ONE_VS_REST_MODEL_CLASS,
+    )?;
     save_metadata_at(
         instance.py(),
         session,
         path,
-        ONE_VS_REST_MODEL_CLASS,
+        &class,
         &uid,
         dumps_compact(param_map.as_any())?,
         dumps_compact(default_map.as_any())?,

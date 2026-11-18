@@ -1672,6 +1672,75 @@ def test_ml_connect_int_lists_are_literals_of_the_type_of_their_first_element_as
     assert _requests_but_deletes(service) == sent
 
 
+def test_ml_connect_params_of_a_python_subclass_are_sent_as_pyspark(ml_mock):
+    # As PySpark's `serialize_ml_params`, which serializes every param of `_paramMap`: a Param of a
+    # Python subclass that is set is sent as the literal of its value (`serialize_param`) by a fit,
+    # a transform, an evaluate and a save, which the server refuses ("Param myParam does not
+    # exist.", as official pyspark-client 4.3.0 shows of each), and one of only a default is not
+    # sent. A value of no literal raises the error of its serialization, of the first param of
+    # `_paramMap` that cannot be sent, before any request.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.param import Param, Params
+
+    spark, service = ml_mock
+    models = []
+
+    def extra():
+        return Param(Params._dummy(), "myParam", "a param of the subclass")
+
+    class MyClassifier(connect.LinearSVC):
+        myParam = extra()
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._setDefault(myParam=1)
+
+    class MyTokenizer(connect.Tokenizer):
+        myParam = extra()
+
+    class MyEvaluator(connect.RegressionEvaluator):
+        myParam = extra()
+
+    estimator = MyClassifier(maxIter=2)
+    assert _native_sent(spark, service, estimator, models) == {"maxIter": ("integer", 2)}
+    estimator._set(myParam=5)
+    for obj in [estimator, MyTokenizer(inputCol="t")._set(myParam=5), MyEvaluator()._set(myParam=5)]:
+        assert _native_sent(spark, service, obj, models)["myParam"] == ("integer", 5)
+        sent = len(service.execute_requests)
+        obj.write().save("/saved/path")
+        (command,) = _commands_but_deletes(service, sent)
+        assert command.ml_command.write.params.params["myParam"] == pb2.Expression.Literal(
+            integer=5
+        )
+    for value, expected in [
+        ([1.5], ("array", [1.5])),
+        ("a", ("string", "a")),
+        (None, ("null", pb2.DataType(null=pb2.DataType.NULL()))),
+    ]:
+        assert _native_sent(spark, service, MyClassifier()._set(myParam=value), models)[
+            "myParam"
+        ] == expected, value
+    df = spark.range(1)
+    sent = _requests_but_deletes(service)
+    for value, condition in [((1,), "UNSUPPORTED_DATA_TYPE"), (2**63, "VALUE_NOT_BETWEEN")]:
+        for run in [lambda obj: obj.fit(df), lambda obj: obj.write().save("/unsent/path")]:
+            with pytest.raises((PySparkTypeError, PySparkValueError)) as error:
+                run(MyClassifier()._set(myParam=value))
+            assert error.value.getCondition() == condition, value
+    # Of the order of `_paramMap`: its first param that cannot be sent raises.
+    for first, then, condition in [
+        ("myParam", "maxIter", "UNSUPPORTED_DATA_TYPE"),
+        ("maxIter", "myParam", "VALUE_NOT_BETWEEN"),
+    ]:
+        obj = MyClassifier()
+        for name in [first, then]:
+            obj._set(**{name: (1,) if name == "myParam" else 2**64})
+        with pytest.raises((PySparkTypeError, PySparkValueError)) as error:
+            obj.fit(df)
+        assert error.value.getCondition() == condition, first
+    assert _requests_but_deletes(service) == sent
+
+
 def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
     # As PySpark: an int beyond a long is taken by the constructor and the setter, and the
     # next fit raises the VALUE_NOT_BETWEEN of PySpark's serialization of the params, before

@@ -96,6 +96,34 @@ def test_scaler_transforms_held_out_values_using_fitted_statistics(session):
     assert_values(model.transform(held).select("out").collect(), [[[2., 4.]]])
 
 
+def test_regex_tokenizer_saves_its_gaps_of_no_converter(session):
+    # As PySpark's save, whose `serialize_ml_params` serializes every param of `_paramMap`: `gaps`,
+    # which has no converter, is saved of its value, so that a load of the stage, also of a
+    # pipeline model of it (whose stages save by their own writers), tokenizes as the stage does.
+    import tempfile
+
+    if REFERENCE:
+        from pyspark.ml import Pipeline, PipelineModel
+    else:
+        from pyspark.ml.connect.pipeline import Pipeline, PipelineModel
+
+    frame = session.createDataFrame([("a1b22c",)], ["text"])
+    path = tempfile.mkdtemp(prefix="ml-regex-tokenizer-gaps-")
+    tokenizer = algorithm("RegexTokenizer")
+    for stage in [
+        tokenizer(inputCol="text", outputCol="w", pattern="\\d+", gaps=False),
+        tokenizer(inputCol="text", outputCol="w", pattern="\\d+").setGaps(False),
+    ]:
+        assert stage.transform(frame).head().w == ["1", "22"]
+        stage.write().overwrite().save(path + "/stage")
+        loaded = tokenizer.load(path + "/stage")
+        assert loaded.getGaps() is False and loaded.transform(frame).head().w == ["1", "22"]
+        Pipeline(stages=[stage]).fit(frame).write().overwrite().save(path + "/model")
+        model = PipelineModel.load(path + "/model")
+        assert model.stages[0].getGaps() is False
+        assert model.transform(frame).head().w == ["1", "22"]
+
+
 def test_stop_words_remover_loads_the_default_stop_words_of_the_server(session):
     # As PySpark's StopWordsRemover.loadDefaultStopWords, which calls the ML helper of the active
     # session, and whose list a remover takes, as with the words added to the default ones.

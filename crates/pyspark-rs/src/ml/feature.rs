@@ -103,6 +103,7 @@ macro_rules! feature_transformer {
         impl Native for $wrapper {
             type Core = core::$core;
             fn inner(&self) -> &Self::Core { &self.inner }
+            fn core_params_mut(core: &mut Self::Core) -> &mut Params { core.params_mut() }
             fn params(&self) -> &Params { self.inner.params() }
             fn params_mut(&mut self) -> &mut Params { self.inner.params_mut() }
             fn unsendable(&self) -> &[&'static str] { &self.unsendable }
@@ -111,17 +112,6 @@ macro_rules! feature_transformer {
             fn raw_params(&self) -> Option<&[(&'static str, Py<PyAny>)]> { Some(&self.raw) }
             fn own_defaults(&self) -> Option<&params_api::OwnDefaults> { Some(&self.own_defaults) }
             fn own_defaults_mut(&mut self) -> Option<&mut params_api::OwnDefaults> { Some(&mut self.own_defaults) }
-            fn snapshot_core(&self, py: Python<'_>) -> PyResult<Self::Core> {
-                let mut inner = self.inner.clone();
-                for (name, value) in &self.raw {
-                    let column = crate::functions::to_value_column(value.bind(py))?;
-                    let spark_connect::expression::ExpressionNode::Literal(lit) = column.expression().node() else {
-                        return Err(crate::column::raise_pyspark(py, "PySparkTypeError", "UNSUPPORTED_DATA_TYPE", &[("data_type", &value.bind(py).get_type().name()?.to_string())]));
-                    };
-                    *inner.params_mut() = std::mem::take(inner.params_mut()).set_param_literal(name, lit.to_literal_proto());
-                }
-                Ok(inner)
-            }
         }
         native_pymethods! {
             $wrapper;
@@ -249,6 +239,7 @@ macro_rules! feature_estimator {
         impl Native for $wrapper {
             type Core = core::$core;
             fn inner(&self) -> &Self::Core { &self.inner }
+            fn core_params_mut(core: &mut Self::Core) -> &mut Params { core.params_mut() }
             fn params(&self) -> &Params { self.inner.params() }
             fn params_mut(&mut self) -> &mut Params { self.inner.params_mut() }
             fn unsendable(&self) -> &[&'static str] { &self.unsendable }
@@ -257,17 +248,6 @@ macro_rules! feature_estimator {
             fn raw_params(&self) -> Option<&[(&'static str, Py<PyAny>)]> { Some(&self.raw) }
             fn own_defaults(&self) -> Option<&params_api::OwnDefaults> { Some(&self.own_defaults) }
             fn own_defaults_mut(&mut self) -> Option<&mut params_api::OwnDefaults> { Some(&mut self.own_defaults) }
-            fn snapshot_core(&self, py: Python<'_>) -> PyResult<Self::Core> {
-                let mut inner = self.inner.clone();
-                for (name, value) in &self.raw {
-                    let column = crate::functions::to_value_column(value.bind(py))?;
-                    let spark_connect::expression::ExpressionNode::Literal(lit) = column.expression().node() else {
-                        return Err(crate::column::raise_pyspark(py, "PySparkTypeError", "UNSUPPORTED_DATA_TYPE", &[("data_type", &value.bind(py).get_type().name()?.to_string())]));
-                    };
-                    *inner.params_mut() = std::mem::take(inner.params_mut()).set_param_literal(name, lit.to_literal_proto());
-                }
-                Ok(inner)
-            }
         }
         native_pymethods! {
             $wrapper;

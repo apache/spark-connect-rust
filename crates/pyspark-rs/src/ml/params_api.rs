@@ -1173,33 +1173,156 @@ pub(super) fn copy<'py, T: ParamsHolder + NativeInstance>(
     Ok(that)
 }
 
-/// The error that PySpark's serialization of the params `params` raises, if any, as `snapshot`
-/// raises it: of the first param of a value that PySpark cannot send, of the JVM name
-/// `unsendable` ([`unsendable_error`]), and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list without
-/// elements. It runs Python code: give it a copy of the params of an object that is not borrowed,
-/// so that a setter that another thread calls meanwhile does not fail.
-pub(super) fn params_error(
-    py: Python<'_>,
-    params: &Params,
-    unsendable: Option<&str>,
-) -> Option<PyErr> {
-    if let Some(jvm) = unsendable {
-        return Some(unsendable_error(py, params, jvm));
+/// The Python values of the params of the converter `identity` of `this` (RegexTokenizer's
+/// `gaps`), of their JVM names, which PySpark's serialization of the params sends as literals.
+pub(super) fn raw_values<T: Native>(py: Python<'_>, this: &T) -> Vec<(&'static str, Py<PyAny>)> {
+    this.raw_params()
+        .unwrap_or_default()
+        .iter()
+        .map(|(name, value)| (T::jvm_name(name), value.clone_ref(py)))
+        .collect()
+}
+
+/// The items of PySpark's `_paramMap` of an object, of the names of their params, in its order.
+pub(super) type ParamMapItems<'py> = Vec<(String, Bound<'py, PyAny>)>;
+
+/// PySpark's `_paramMap` of `obj` (see [`ParamMapItems`]), of an object of a public class whose
+/// maps PySpark's constructor (or a read of them) made, which `_sync` made the native object's
+/// params of (see `_native_classes`). None of another object.
+pub(super) fn param_map_items<'py>(
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<Option<ParamMapItems<'py>>> {
+    let Ok(attributes) = obj.getattr("__dict__") else {
+        return Ok(None);
+    };
+    let Ok(attributes) = attributes.cast_into::<PyDict>() else {
+        return Ok(None);
+    };
+    let Some(map) = attributes.get_item("_paramMap")? else {
+        return Ok(None);
+    };
+    let Ok(map) = map.cast_into::<PyDict>() else {
+        return Ok(None);
+    };
+    map.iter()
+        .map(|(param, value)| Ok((param.getattr("name")?.extract::<String>()?, value)))
+        .collect::<PyResult<Vec<_>>>()
+        .map(Some)
+}
+
+/// The literal of the value `value` of a param, as `serialize_param` of
+/// `pyspark.ml.connect.serialize` serializes it: an ML vector or matrix as the struct of its UDT,
+/// and another value as the literal of `LiteralExpression._from_value`, as the values of the ML
+/// fetches are built (`functions::to_value_column`), of its error of a value that cannot be one
+/// (`UNSUPPORTED_DATA_TYPE` of a tuple, a dict or a Column, `VALUE_NOT_BETWEEN` of an int beyond a
+/// long).
+pub(super) fn param_literal(
+    value: &Bound<'_, PyAny>,
+) -> PyResult<spark_connect_proto::expression::Literal> {
+    let py = value.py();
+    let linalg = py.import("pyspark.ml.linalg")?;
+    for (classes, kind) in [
+        (["SparseVector", "DenseVector"], Kind::Vector),
+        (["SparseMatrix", "DenseMatrix"], Kind::Matrix),
+    ] {
+        for class in classes {
+            if value.is_instance(&linalg.getattr(class)?)? {
+                let value = match convert("value", kind, value)? {
+                    Converted::Vector(vector) => spark_connect::ml::MlValue::Vector(vector),
+                    Converted::Matrix(matrix) => spark_connect::ml::MlValue::Matrix(matrix),
+                    _ => continue,
+                };
+                return value.to_literal().to_pyerr();
+            }
+        }
     }
-    if params.has_empty_array() {
-        return Some(crate::column::raise_pyspark(
+    let unsupported = || -> PyResult<PyErr> {
+        Ok(crate::column::raise_pyspark(
+            py,
+            "PySparkTypeError",
+            "UNSUPPORTED_DATA_TYPE",
+            &[("data_type", &value.get_type().name()?.to_string())],
+        ))
+    };
+    // A Column is no literal of `_from_value`, even of a literal (`F.lit(3)`).
+    if value.is_instance_of::<crate::column::PyColumn>() {
+        return Err(unsupported()?);
+    }
+    let column = crate::functions::to_value_column(value)?;
+    match column.expression().node() {
+        spark_connect::expression::ExpressionNode::Literal(literal) => {
+            Ok(literal.to_literal_proto())
+        }
+        _ => Err(unsupported()?),
+    }
+}
+
+/// What a fit, transform, evaluate or save of `obj` sends of its params beyond the literals of
+/// the params `params` of its native object, as PySpark's `serialize_ml_params` serializes the
+/// `_paramMap` of the object, in its order (`map`, of [`param_map_items`]): the literal (of
+/// [`param_literal`]) of each Python value `raw` of a param of the converter `identity`
+/// (RegexTokenizer's `gaps`), and of each param of a Python subclass of the class that `map`
+/// holds, of a name that the native class does not have (which the server refuses, as of
+/// PySpark's). Or the error of the first param of `map` that PySpark cannot send: of a value
+/// that `unsendable` names ([`unsendable_error`]), of a list without elements
+/// (`CANNOT_INFER_ARRAY_ELEMENT_TYPE`), or of a value of no literal. Of no `map` (an object of no
+/// maps, or a helper call that sends no `_paramMap`), they are of the order of `unsendable`, then
+/// of `raw`. It runs Python code: give it copies of the params of an object that is not borrowed,
+/// so that a setter that another thread calls meanwhile does not fail.
+pub(super) fn sent_params(
+    obj: &Bound<'_, PyAny>,
+    params: &Params,
+    unsendable: &[&'static str],
+    raw: &[(&'static str, Py<PyAny>)],
+    map: Option<ParamMapItems<'_>>,
+) -> PyResult<Vec<(String, spark_connect_proto::expression::Literal)>> {
+    let py = obj.py();
+    let cannot_infer = || {
+        crate::column::raise_pyspark(
             py,
             "PySparkTypeError",
             "CANNOT_INFER_ARRAY_ELEMENT_TYPE",
             &[],
-        ));
+        )
+    };
+    let mut sent = Vec::new();
+    if let Some(map) = map {
+        let class_params = params_of(obj)?;
+        for (name, value) in map {
+            if !class_params.iter().any(|meta| meta.name == name) {
+                sent.push((name, param_literal(&value)?));
+                continue;
+            }
+            if unsendable.contains(&name.as_str()) {
+                return Err(unsendable_error(py, params, &name));
+            }
+            if params.retain_names(|n| n == name).has_empty_array() {
+                return Err(cannot_infer());
+            }
+            if let Some((jvm, value)) = raw.iter().find(|(jvm, _)| *jvm == name) {
+                sent.push((jvm.to_string(), param_literal(value.bind(py))?));
+            }
+        }
     }
-    None
+    // The params that no `map` ordered: none of an object of maps, which hold every set param.
+    if let Some(jvm) = unsendable.first() {
+        return Err(unsendable_error(py, params, jvm));
+    }
+    if params.has_empty_array() {
+        return Err(cannot_infer());
+    }
+    for (jvm, value) in raw {
+        if !sent.iter().any(|(name, _)| name == jvm) {
+            sent.push((jvm.to_string(), param_literal(value.bind(py))?));
+        }
+    }
+    Ok(sent)
 }
 
 /// The writer of the operator `slf` of the JVM class `jvm` and type `op_type`, as
-/// `RemoteMLWriter` writes an estimator, transformer or evaluator: of its uid and params, whose
-/// serialization error, if any, its `save` raises, as PySpark's `serialize_ml_params` does then.
+/// `RemoteMLWriter` writes an estimator, transformer or evaluator: of its uid and of the params
+/// that PySpark's `serialize_ml_params` sends of it (see [`sent_params`], of its `_paramMap`),
+/// whose error, if any, its `save` raises, before any request, as PySpark's does then.
 pub(super) fn operator_writer<T: Native + PyClass<Frozen = False>>(
     slf: &Bound<'_, T>,
     jvm: &str,
@@ -1207,12 +1330,29 @@ pub(super) fn operator_writer<T: Native + PyClass<Frozen = False>>(
 ) -> PyResult<super::object::PyMLWriter> {
     let py = slf.py();
     let uid: String = slf.as_any().getattr("uid")?.extract()?;
-    let (params, unsendable) = {
+    let (mut params, unsendable, raw) = {
         let this = slf.try_borrow()?;
-        let unsendable = this.unsendable().first().map(|name| T::jvm_name(name));
-        (this.params().clone(), unsendable)
+        let unsendable: Vec<&'static str> = this
+            .unsendable()
+            .iter()
+            .map(|name| T::jvm_name(name))
+            .collect();
+        (
+            this.params().clone(),
+            unsendable,
+            raw_values::<T>(py, &*this),
+        )
     };
-    let error = params_error(py, &params, unsendable);
+    let map = param_map_items(slf.as_any())?;
+    let error = match sent_params(slf.as_any(), &params, &unsendable, &raw, map) {
+        Ok(sent) => {
+            for (name, literal) in sent {
+                params = params.set_param_literal(&name, literal);
+            }
+            None
+        }
+        Err(error) => Some(error),
+    };
     let operator = spark_connect::ml::MlOperator::with_uid(jvm, &uid, op_type);
     Ok(
         super::object::PyMLWriter::new(super::object::WriteTarget::Operator(operator, params))
