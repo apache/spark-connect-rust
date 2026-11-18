@@ -241,7 +241,7 @@ impl params_api::NativeInstance for PyPrefixSpan {
 
 native_pymethods! {
     PyPrefixSpan;
-    persistence: python;
+    persistence: none;
     params: [
         "maxLocalProjDBSize" => (
             "getMaxLocalProjDBSize",

@@ -356,7 +356,11 @@ PySpark class has them:
   of `try_remote_intercept` takes any positional arguments, a DataFrame method of
   `try_remote_attribute_relation` any arguments): a call that does not bind raises PySpark's
   message (`JavaMLWritable.write() takes 1 positional argument but 2 were given`) before the
-  native member runs. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
+  native member runs. So do the class methods and the static methods, of PySpark's kind
+  (`read`, of `JavaMLReadable.read` and the `try_remote_read` of a Pipeline's or a validator's,
+  `StringIndexerModel.from_labels`, `StopWordsRemover.loadDefaultStopWords`), whose message of a
+  class method counts its `cls` (`JavaMLReadable.read() takes 1 positional argument but 2 were
+  given`). The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
   converters and defaults of the official class (`crates/pyspark-rs/src/ml/ml_params.json`,
   captured from pyspark-client 4.3.0 by `scripts/capture_ml_api_golden.py`), and a getter per
   param (`getMaxIter`).

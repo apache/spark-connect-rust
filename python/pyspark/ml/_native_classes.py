@@ -284,8 +284,11 @@ def _synced(member, name, official, sync=True):
     PySpark's member (of the class of PySpark's that has it, `JavaMLWritable.write`). So a call that
     does not bind raises PySpark's message (`JavaMLWritable.write() takes 1 positional argument but
     2 were given`). Of a name that PySpark's class does not have, it is the native member's.
-    Without `sync`, it syncs no params, as of an object of none (a summary)."""
+    Without `sync`, it syncs no params, as of an object of none (a summary). Of a class method or
+    a static method of PySpark's (see `_class_member`), it is of PySpark's function of it."""
     _, pysparks = _member_of(official, name)
+    if isinstance(pysparks, (classmethod, staticmethod)):
+        pysparks = pysparks.__func__
     if not callable(pysparks):
         pysparks = member
     binding = _binding_of(pysparks)
@@ -307,6 +310,24 @@ def _synced(member, name, official, sync=True):
     qualname = getattr(pysparks, "__qualname__", None) or f"{official.__name__}.{name}"
     scope = {"_sync": _sync, "__member": member}
     return _function(pysparks, name, qualname, body, scope, binding=binding)
+
+
+def _class_member(own, name, official):
+    """The class method (`read`, `from_labels`) or static method (`loadDefaultStopWords`) `name` of
+    the public class of PySpark's class `official`, over the native one `own` (a
+    `classmethod_descriptor` or a `staticmethod`), as `_synced` makes a method of it, of no params to
+    sync: of PySpark's qualified name, module, docstring and signature (`JavaMLReadable.read`, of the
+    wrapper of `try_remote_read`), so that Python binds a call of it as it binds PySpark's function
+    and raises PySpark's message of a call that does not bind (`JavaMLReadable.read() takes 1
+    positional argument but 2 were given`, of its `cls` too). A class method runs the native one of
+    the class that it is called of (a subclass)."""
+    if isinstance(own, staticmethod):
+        return staticmethod(_synced(own.__func__, name, official, sync=False))
+
+    def of_class(cls, *args, **kwargs):
+        return own.__get__(None, cls)(*args, **kwargs)
+
+    return classmethod(_synced(of_class, name, official, sync=False))
 
 
 def _synced_property(descriptor, doc):
@@ -553,6 +574,11 @@ def _params_api(native, official, namespace):
             namespace[name] = _synced_property(own, member.__doc__)
         elif kind == "method_descriptor":
             namespace[name] = _synced(getattr(native, name), name, official)
+        elif kind in ("classmethod_descriptor", "staticmethod") and isinstance(
+            member, (classmethod, staticmethod)
+        ):
+            # A class or static method, as PySpark's (`from_labels`, `loadDefaultStopWords`).
+            namespace[name] = _class_member(own, name, official)
     for name, primitive in _PRIMITIVES.items():
         if hasattr(native, name) and (_member_of(official, name)[0], name) in dispatchers:
             namespace[primitive] = _synced(getattr(native, name), primitive, official)
@@ -562,6 +588,9 @@ def _params_api(native, official, namespace):
         # The native writer, of the params of the object (and of the objects that it holds) as of
         # the call: it takes them at its making.
         namespace["write"] = _synced(native.write, "write", official)
+    if hasattr(native, "read") and isinstance(_member_of(official, "read")[1], classmethod):
+        # The native reader, of PySpark's class method (`JavaMLReadable.read`, `Pipeline.read`).
+        namespace["read"] = _class_member(inspect.getattr_static(native, "read"), "read", official)
 
 
 def _summary_api(native, official, namespace):
