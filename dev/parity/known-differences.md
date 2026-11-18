@@ -108,11 +108,13 @@ difference is intentional or tracked for a fix.
 - **A `StructField` of a name or a metadata str that UTF-8 cannot encode** (intentional; the types
   of the core hold their names and metadata as UTF-8 and JSON). Its constructor raises the
   `UnicodeEncodeError` of the str, of a lone surrogate, where PySpark's builds the field, whose
-  `json()`, `simpleString()`, `==` and pickle work, and whose uses fail later: the DataFrames of
-  `to`, `createDataFrame`, `from_json`, a cast or a UDF of such a type are made, and fail at the
-  first request that sends the type, with protobuf's `UnicodeEncodeError` of a name, or with the
-  server's error of the string of a lone surrogate (`Unpaired surrogate`) of the JSON in which
-  `json.dumps` escapes it.
+  `json()`, `simpleString()`, `==` and pickle work, and whose uses fail later: PySpark's `udf` of a
+  return type of such a name, and its `createDataFrame` of local rows of one, fail at the call, as
+  they make the pyarrow field of the name (the `_check_return_type` of the UDF); the DataFrames of
+  `to`, `from_json` and a cast of such a type, and of `createDataFrame` of a metadata str of one,
+  are made, and fail at the first request that sends the type, with protobuf's
+  `UnicodeEncodeError` of a name, or with the server's error of the string of a lone surrogate
+  (`Unpaired surrogate`) of the JSON in which `json.dumps` escapes it.
 - **The removal of the relation of a dropped checkpoint, and the deletion of a dropped model**
   (intentional; a drop does not wait). As PySpark's `CachedRemoteRelation.__del__`, the drop of
   the last DataFrame of a checkpoint sends one ExecutePlan of the removal, which is not
@@ -133,10 +135,6 @@ difference is intentional or tracked for a fix.
   `SparkSession.builder.remote(...).create()`) is deleted from the ML cache of the active
   session, which does not hold it, and stays in its own session's until that session ends, and a
   model dropped on a thread of no active session is not deleted.
-- **`schema` and `columns` of a join on a tuple** (intentional). As in PySpark, the plan fails with
-  the `AttributeError` of `to_plan` of the tuple when it is built, and `schema`, a property, then
-  gives a Column of the `__getattr__` of the DataFrame: of `schema`, where PySpark's is of
-  `_schema`; `columns` gives the Column of `columns`, where PySpark's raises `NOT_ITERABLE`.
 - **An exception of the `&` of a join's list of conditions that is not of a class that the plan
   carries** (intentional; a plan of the core carries an error, not a Python object). Python's
   `AttributeError`, `TypeError`, `ValueError` and `OverflowError`, and PySpark's error classes,
@@ -168,12 +166,13 @@ difference is intentional or tracked for a fix.
   window of no partitions (`WARN WindowExpression: No Partition Defined ...`), which
   PySpark's do at each build, and the `and` of the conditions of a join of a list of
   Columns keeps the origin of its call site at the pickle or the copy, where PySpark's has
-  the call site of each request. The pickle itself does not warn, as PySpark's does not.
-  The `plan` of `DataFrame._plan` is a placeholder of the relation (see "Plan logging of a
-  deep DataFrame" below), so it does not warn, and a request of a plan over it warns once,
-  where PySpark's warns at both. The `UserWarning` is of `pyspark.sql.connect.expressions`,
-  as PySpark's, but of a line of the drop-in's module, where PySpark's is of line 1126 of its
-  own.
+  the call site of each request. The pickle itself does not warn, as PySpark's does not, but
+  PySpark's unpickle of a DataFrame warns once, as it builds the plan to read the columns of the
+  new DataFrame, where the drop-in's does not. The `plan` of `DataFrame._plan` is a placeholder of
+  the relation (see "Plan logging of a deep DataFrame" below), so it does not warn, and a request
+  of a plan over it warns once, where PySpark's warns at both. The `UserWarning` is of
+  `pyspark.sql.connect.expressions` and of its line 1126, as PySpark's, in the file of the
+  drop-in's module, which ends before the line, so it shows no source line.
 
 - **Public base and native MRO.** `pyspark.sql.DataFrame` is implemented as a
   Python base/factory, allowing subclasses such as
@@ -460,19 +459,35 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   - the parameters are not entries of its `__dict__`, and a subclass whose `__init__` does not
     call that of its class has the defaults of the class, where PySpark's has no parameters;
   - the `__init__` of a subclass of a singleton type runs at each call of the class, as the
-    drop-in has no `DataTypeSingleton` metaclass, and copies and pickles of its one instance are
-    that instance;
+    native classes are not of the `DataTypeSingleton` metaclass (which `pyspark.sql.types` has, of
+    PySpark's, for the classes made of it, such as PySpark's cloudpickle of such a subclass of
+    `__main__`), and copies and pickles of its one instance are that instance; a subclass of
+    another metaclass is made, where PySpark's raises a metaclass conflict;
   - a class of types of two branches of their hierarchy (`class X(StringType, IntegerType)`)
     raises CPython's `multiple bases have instance lay-out conflict`;
+  - a subclass of `__slots__` pickles at the protocols 0 and 1 too, where PySpark's raises the
+    `TypeError` of `__slots__` without `__getstate__`;
+  - the repr of an array, a map, a field or a struct that holds a type whose repr has a lone
+    surrogate raises its `UnicodeEncodeError`, and so does `DataFrame.to` of such a struct of a
+    type of no proto, at the call;
   - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends
     the `json()` of the object, which the server may fail to parse;
   - the `__repr__` of a cast to a type of a subclass shows the `simpleString` of the class's core
     type.
+
+  The class's own types compare without the attributes that a user set on them, where PySpark's
+  comparison of the `__dict__`s holds them (see `docs/compatibility.md`); their copies and pickles
+  keep them, as PySpark's.
 - **Metadata of the fields of a type** (tracked; the core holds JSON values). A field compares its
-  metadata dict as PySpark's, of the values as they were given, and writes it with `json.dumps`,
-  but a plan and `createDataFrame` of data send the core's JSON values of it, of an int of more
-  than 64 bits as a float, and a float that is not finite (`inf`, `nan`) raises a `ValueError` when
-  the field is made, where PySpark makes the field.
+  metadata dict as PySpark's, of the values as they were given, writes it with `json.dumps`, and
+  copies and pickles it as it is, but a plan and `createDataFrame` of data send the core's JSON
+  values of it, of an int of more than 64 bits as a float. That float is the nearer value, as the
+  server keeps only the low 64 bits of PySpark's exact int (`10**30` becomes
+  `5076944270305263616`), but an Arrow-optimized UDF of a return type of such metadata fails with
+  `ARROW_TYPE_MISMATCH`, as the plan's type of the float is not that of the worker, of the exact
+  int, where PySpark's runs (and its `pandas_udf` fails too). A float that is not finite (`inf`,
+  `nan`) raises serde_json's `ValueError` when the field is made, where PySpark makes the field,
+  whose every request the server refuses, so only its local uses differ (intentional).
 - **Shallow copy of a session builder** (tracked). `copy.copy(SparkSession.builder)` has
   options of its own, where PySpark's shares its `_options` dict and its hook factories
   with the builder that it copies, so that a `config` of either one is seen by both.

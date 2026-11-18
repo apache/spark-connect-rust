@@ -1816,10 +1816,11 @@ editor shows the signatures of these names without PySpark's documentation. The 
   that the drop-in does not have, such as the py4j converters of `pyspark.sql.types`.
 - A few names that PySpark's annotations need are declared, which the drop-in does not have at run
   time: `DataFrame.rdd`, which PySpark defines when not `is_remote_only()`, so that type checkers
-  of `pyspark-client` see it too, and neither client has it; and the bases, the metaclass and the
-  decorators of PySpark's classes that the drop-in implements natively, such as `OptionUtils` of
-  the readers and writers, `PandasGroupedOpsMixin` of `GroupedData`, `DataTypeSingleton` of the
-  atomic types and `dfapi` (`TYPE_ONLY` of the test lists them with their reasons). The
+  of `pyspark-client` see it too, and neither client has it; and the bases and the decorators of
+  PySpark's classes that the drop-in implements natively, such as `OptionUtils` of the readers and
+  writers, `PandasGroupedOpsMixin` of `GroupedData` and `dfapi` (`TYPE_ONLY` of the test lists
+  them with their reasons). `pyspark.sql.types` has `DataTypeSingleton`, the metaclass of the
+  singleton types of the stubs, at run time too, of which the native classes are not. The
   `SparkContext`, `RDD` and the other names of classic PySpark that PySpark's `pyspark` module
   imports of `pyspark.core` when not `is_remote_only()`, which `pyspark-client` does not ship,
   the drop-in's module imports so too, in a block that does not run either: mypy takes them as
@@ -1918,20 +1919,36 @@ collations, nullable flags and parameters, as PySpark's types of them. The priva
 `_alg` of PySpark's spatial types, which its constructors set of the SRID, are not attributes of
 the drop-in's. At protocol 0 or 1 the drop-in raises `TypeError: object.__new__(DecimalType) is not
 safe, use DecimalType.__new__()`. The drop-in's own types pickle, copy and deep-copy as
-`_parse_datatype_json_string` of their JSON, or, with a user-defined type or a nullable flag that is
-not a bool, of the types and flags they are made of, which the Python workers of the server load at
-every protocol. So such a pickle does not keep what PySpark's pickle of the `__dict__` keeps: an
-attribute that a user set, a `hasPrecisionInfo` that is not true, and the `names` and
-`_needConversion` of a `StructType` that an edit of its fields made differ.
+`_parse_datatype_json_string` of their JSON, or, with a user-defined type, a nullable flag that is
+not a bool or a field of metadata, of the types and flags they are made of, which the Python
+workers of the server load at every protocol. So the copies of a struct, and of an array or a map
+of one, keep the metadata dicts of its fields as they are, which JSON does not (a tuple, a key that
+is not a str, the order of the keys), and are equal to it, as PySpark's pickle of the `__dict__`
+is, and `toNullable()` makes each field of the dict of the field, as PySpark's
+`metadata=field.metadata`. A type of a state that its JSON does not keep, of an attribute that a
+user set, a `hasPrecisionInfo` that is not true, or the `names` and `_needConversion` of a
+`StructType` that an edit of its fields made differ, pickles and copies as its class and PySpark's
+`__dict__` of it, as a type of a Python subclass does (see below), also in the types that hold it:
+the pickle of a type of no types in it, such as a `DecimalType` of an attribute, is PySpark's own,
+byte for byte. A shallow copy of a struct that pickles of its JSON is of new fields, where
+PySpark's shares the list of its fields. The class's own types compare without the attributes that
+a user set, where PySpark's comparison of the `__dict__`s holds them: a `DecimalType(7, 3)` of an
+attribute equals `DecimalType(7, 3)`, where a type of a Python subclass compares them (see below).
 
 The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
 `DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr, JSON, `==` and hash show, also in the
 struct, array or map that holds it. A drop-in type holds only the values that its constructor
 makes, so the assignment of another raises the constructor's error, where PySpark keeps it, of
 which its repr or JSON may fail later, as a field that an interval does not have
-(`DayTimeIntervalType().startField = 9`). The parameters that are types, the `elementType` of an
-`ArrayType`, the `keyType` and the `valueType` of a `MapType` and the `dataType` of a
-`StructField`, take a DataType or a DDL string, which they parse, as the constructors take them:
+(`DayTimeIntervalType().startField = 9`). So do the constructors: they refuse values that
+PySpark's keep, with a `TypeError`, such as `DecimalType(10.0)`, `TimeType(6.0)`, `StringType(None)`
+and the metadata `[1]` of a `StructField`, and hold the ints of those they take, so the `precision`
+of `DecimalType(np.int64(12))` is an `int`, where PySpark's is the NumPy int. The assertions of
+PySpark's constructors (`field name 1 should be a string`, `elementType string should be an
+instance of ...`) are made under `python -O` too, which skips PySpark's, whose types are then made.
+The parameters that are types, the `elementType` of an `ArrayType`, the `keyType` and the
+`valueType` of a `MapType` and the `dataType` of a `StructField`, take a DataType or a DDL string,
+which they parse, where the constructors take a DataType only, as PySpark's assert it:
 `ArrayType(LongType()).elementType = "string"` makes it an `ArrayType(StringType(), True)`, a DDL
 string that does not parse raises a `ValueError` and another value, None included, a `TypeError`,
 where PySpark keeps the value as it is given, which its repr shows (`ArrayType(string, True)`) and
@@ -1978,13 +1995,17 @@ their class.
 
 PySpark's singleton types, from `NullType` and `IntegerType` to `CalendarIntervalType` and
 `IntegralType`, are classes of the metaclass `DataTypeSingleton`, which `type(IntegerType)` shows.
-The drop-in's are native classes, whose metaclass is `type`, and `pyspark.sql.types` has no
-`DataTypeSingleton`: PyO3 has no option of a metaclass of a class, and CPython refuses to assign
-the `__class__` of a class of `type` after it is made. Their constructors return the one instance
-and raise the `TypeError` of `DataTypeSingleton.__call__` for an argument, as PySpark's, and
-`inspect.signature` of the class shows no parameters. A copy, a deep copy and a pickle of the one
-instance are the one instance too, where PySpark's `copy.copy`, `copy.deepcopy` and `pickle` make
-another object of the class, as the note of its `DataTypeSingleton` says.
+The drop-in's are native classes, whose metaclass is `type`: PyO3 has no option of a metaclass of
+a class, and CPython refuses to assign the `__class__` of a class of `type` after it is made.
+`pyspark.sql.types` has PySpark's `DataTypeSingleton`, of which a class is made as PySpark's makes
+it, such as a subclass of a singleton type of `__main__`, which PySpark's cloudpickle sends by
+value of its metaclass: it loads, of one instance, as in PySpark. The constructors of the native
+classes return the one instance and raise the `TypeError` of `DataTypeSingleton.__call__` for an
+argument, as PySpark's, and `inspect.signature` of the class shows no parameters. A copy, a deep
+copy and a pickle of the one instance are the one instance too, where PySpark's `copy.copy`,
+`copy.deepcopy` and `pickle` make another object of the class, as the note of its
+`DataTypeSingleton` says. A subclass of such a class of another metaclass, `class X(IntegerType,
+metaclass=Meta)`, is made, where PySpark's raises the `TypeError` of a metaclass conflict.
 
 PySpark's concrete types are plain classes too, which a user subclasses, and so are the drop-in's,
 from `NullType` and `StringType` to `ArrayType`, `StructField` and `StructType`. A type of a Python
@@ -2012,7 +2033,10 @@ read it by `isinstance`, and the methods of its class are PySpark's, of the meth
   `object.__new__` does, and passes the parameters to the `__init__` of the class, which sets them,
   as PySpark's, also of `StringType`, `DecimalType`, `TimeType`, the intervals and `StructType`,
   whose errors of arguments are those of `__init__`
-  (`DecimalType.__init__() got an unexpected keyword argument 'foo'`);
+  (`DecimalType.__init__() got an unexpected keyword argument 'foo'`), but for the counts of too
+  many positional arguments, which are PyO3's, without `self`, as for the other methods (see
+  below): `DecimalType.__init__() takes from 0 to 2 positional arguments but 3 were given`, where
+  PySpark's says "from 1 to 3" and "4";
 - it pickles, copies and deep-copies, at the protocols 2 and up, as `copyreg.__newobj__(cls)` and
   PySpark's `__dict__` of it, of its parameters (and of the `_crs` and `_alg` of a spatial type) and
   of the attributes that a user set, and of its `__slots__`, so each client loads the other's, and
@@ -2029,19 +2053,28 @@ What differs:
   class (`StringType()`, `DecimalType(10, 0)`, an array of `NullType()`), where PySpark's has none
   of them and raises the `AttributeError` of each that a method reads.
 - Python calls the `__init__` of a subclass of a singleton type at each call of the class, which
-  returns the one instance, where PySpark's metaclass calls it on the first call. Copies and
-  pickles of the instance are the instance, as for the class's own. PySpark's cloudpickle of such
-  a subclass of `__main__` names its metaclass, `pyspark.sql.types.DataTypeSingleton`, so it does
-  not load in the drop-in, which loads PySpark's pickle of a class of a module.
+  returns the one instance, where PySpark's metaclass calls it on the first call, as the
+  drop-in's `DataTypeSingleton` does of a class of it, such as of PySpark's cloudpickle of such a
+  subclass of `__main__` (see above). Copies and pickles of the instance are the instance, as for
+  the class's own.
+- A subclass of `__slots__` pickles at the protocols 0 and 1 too, as `copyreg.__newobj__(cls)` of
+  its state, where PySpark's raises `TypeError: a class that defines __slots__ without defining
+  __getstate__ cannot be pickled`.
+- The repr of an array, a map, a field or a struct that holds a type whose repr has a str that
+  UTF-8 cannot encode, such as one of a lone surrogate, raises its `UnicodeEncodeError`, and so do
+  their `str()` and hash, of the repr, where PySpark's make them. `DataFrame.to` of such a struct
+  of a type that has no proto, of a subclass of `DataType`, raises it at the call, where PySpark's
+  raises the `UNSUPPORTED_OPERATION` of the type at the first request.
 - A class of type classes of two branches of their hierarchy, such as
   `class X(StringType, IntegerType)`, raises
   `TypeError: multiple bases have instance lay-out conflict`, as CPython raises of bases of
   conflicting layouts, where PySpark makes the class.
 - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends the
   `json()` of the schema object, which names a type of a subclass by its `typeName()`
-  (`"subinteger"`) and which the server then fails to parse (`PARSE_SYNTAX_ERROR`); of data of no
-  rows it sends the `json()` of the object, as PySpark. The readers, `from_json`, `from_xml`,
-  `applyInPandasWithState` and `toDDL` send the `json()` of the object, as PySpark's.
+  (`"subinteger"`) and which the server then fails to parse (`PARSE_SYNTAX_ERROR`), so sending it
+  would only bring back that failure; of data of no rows it sends the `json()` of the object, as
+  PySpark. The readers, `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the
+  `json()` of the object, as PySpark's.
 - The Column of a `cast` or `try_cast` to a type of a subclass renders the `simpleString` of the
   core type of its class (`CAST(id AS BOOLEAN)`), where PySpark's renders that of the object
   (`CAST(id AS SUB)`). The plans are the same.
@@ -2052,9 +2085,14 @@ hold it: `(1, 2)` is not `[1, 2]`, nor `{1: "a"}` `{"1": "a"}`, nor `10**30` `10
 `jsonValue()` holds that dict, which `json()` writes with `json.dumps`, as PySpark's: an int of more
 than 64 bits as it is and a float as Python writes it (`1e-07`), which the readers and
 `createDataFrame` of no rows send. The core holds the values of JSON of the metadata, which a plan
-and `createDataFrame` of data send, of an int of more than 64 bits as a float, and a float that is
-not finite (`inf`, `nan`), which JSON has no value of, raises a `ValueError` when the field is made,
-where PySpark's makes the field.
+and `createDataFrame` of data send, of an int of more than 64 bits as a float: the server keeps
+only the low 64 bits of PySpark's exact int (`10**30` becomes `5076944270305263616`), so the float
+is the nearer value, but an Arrow-optimized UDF of a return type of such metadata fails with
+`ARROW_TYPE_MISMATCH`, as the type of its plan is not that of the Python worker, of the exact int,
+where PySpark's runs (its `pandas_udf` fails so too). A float that is not finite (`inf`, `nan`),
+which JSON has no value of, raises the `ValueError` of serde_json when the field is made
+(`expected value at line 1 column 7`), where PySpark's makes the field: the server refuses such
+metadata in every request, so only the local uses of the field differ.
 
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's. Its `_subquery_expr` is an
@@ -2115,14 +2153,27 @@ positional arguments but 4 were given". A method that takes no arguments gets "t
 `DataFrame.distinct(1)`. A method that takes one argument gets the plural "positional arguments"
 even for a count of one: the drop-in says "takes 1 positional arguments but 3 were given" for
 `DataFrame.limit(1, 2, 3)`, where CPython says "takes 2 positional arguments but 4 were given".
-A warning that the Rust core raises, such as the
-`FutureWarning` of `registerTempTable`, is attributed to the caller's frame and module, so a
-`warnings.filterwarnings(..., module="pyspark")` does not match it, as it matches PySpark's.
+These are the messages of PyO3 0.29.3, whose `too_many_positional_arguments`
+(`src/impl_/extract_argument.rs`) counts the parameters of the Rust function, of no `self`, and
+writes "positional arguments" of any count: matching CPython's would need a patched PyO3.
+
+A warning that the extension raises, such as the `FutureWarning` of `registerTempTable`,
+`Catalog.registerFunction`, `createExternalTable`, a `dbName` of the catalog, and `getItem` and
+`getField` of a Column, and the `UserWarning` of `replace` of a dict and a value, of
+`GroupedData.apply`, of type hints that `applyInPandas` and `applyInArrow` cannot read, of the
+arguments that `createDataFrame` ignores, of the configurations of the server, and of the listener
+bus of the streams, is attributed as PySpark's is: to the module of `pyspark.sql.connect` of
+PySpark's `warnings.warn`, of the registry of the warnings that the module showed, and to the line
+of that call, in the file of the drop-in's module of that name. So
+`warnings.filterwarnings(..., module="pyspark")` and the filters of a line match it, and the
+default filter shows it once, as PySpark's. The drop-in's module ends before that line, so the
+warning shows no source line, where PySpark's shows its call.
 The warning of a window of no partitions, `WARN WindowExpression: No Partition Defined for Window
-operation! ...`, is PySpark's: a `UserWarning` of `pyspark.sql.connect.expressions`, of one line of
-that module, which the default filter shows once, at each request that builds the plan of such a
-window, as PySpark warns as it builds the plan. Its line is that of the drop-in's module. A pickle
-of a DataFrame or a Column does not warn, as PySpark's builds no plan; but a DataFrame or a Column
+operation! ...`, is PySpark's: a `UserWarning` of `pyspark.sql.connect.expressions`, of its line
+1126, which the default filter shows once, at each request that builds the plan of such a window,
+as PySpark warns as it builds the plan. A pickle of a DataFrame or a Column does not warn, as
+PySpark's builds no plan; but PySpark's unpickle of a DataFrame warns once, as it builds the plan to
+read the columns of the new DataFrame, where the drop-in's does not; and a DataFrame or a Column
 that is unpickled, and a deep copy of a DataFrame whose plan holds no function of a UDF or that is
 copied into another session (see the UDFs below), send the plan that was built for the pickle or
 the copy, so their requests do not warn again, where PySpark's warn at each. Such a plan keeps the
@@ -2221,13 +2272,17 @@ an object that is neither a Column nor a literal, raises the `AttributeError` of
 `_expr` of a Row; an exception of `&` of another class, such as a `KeyError` of an object's
 `__getattr__`, is raised by the join. Of several such values, the requests raise the
 error of the first in the order in which PySpark builds the plan: the input of a plan before the
-plan, but for the partitioning of a repartition, which comes first, and the name of a hint or an
-observation before its expressions; the order of the other values of one plan can differ. As in
-PySpark, a DataFrame of such a plan raises at its requests, `schema` and `collect()` among them,
-and the call raises none. Of a join on a tuple, or on a list of conditions whose `&` fails,
-`schema` gives a Column, as in PySpark: the property raises an `AttributeError`, after which Python
-calls the `__getattr__` of the DataFrame. It is the Column of `schema`, where PySpark's is of
-`_schema`, and `columns` gives the Column of `columns`, where PySpark's raises `NOT_ITERABLE`.
+plan, but for the partitioning of a repartition, which comes first, and its count of partitions,
+which comes after its input, and the name of a hint or an observation before its expressions; the
+order of the other values of one plan can differ. As in PySpark, a DataFrame of such a plan raises
+at its requests, `schema` and `collect()` among them, and the call raises none. Of a join on a
+tuple, or on a list of conditions whose `&` fails, the properties read the Column of `_schema`, as
+PySpark's: their `self._schema` raises an `AttributeError`, after which Python calls the
+`__getattr__` of the DataFrame, of that name. So `schema` gives a deep copy of the Column,
+`columns`, `dtypes`, the representation, `dir()`, the key completions and `toArrow` raise the
+`NOT_ITERABLE` of iterating it, and `printSchema` the `TypeError` of a call of a Column. The
+drop-in's DataFrame has no `_schema` itself, so `df._schema` is the Column of that name, where
+PySpark's is the schema.
 
 A DataFrame whose plan fails to build pickles, also by cloudpickle, and its unpickle raises the
 error, as PySpark's: its pickle keeps the objects of the plan, and its unpickle builds the plan to

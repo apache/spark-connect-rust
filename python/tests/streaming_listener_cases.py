@@ -249,6 +249,11 @@ class TestStreamingListenerLifecycle:
             messages = listener_event_warnings(caught)
             assert len(messages) == 1
             assert messages[0] == _HANDLER_WARNING_PREFIX + expected_error
+            # Of the line of the `warnings.warn` of PySpark's handler thread in its module.
+            import pyspark.sql.connect.streaming.query as query
+
+            handler = [w for w in caught if str(w.message) == messages[0]]
+            assert [(w.filename, w.lineno) for w in handler] == [(query.__file__, 380)]
             assert first.timestamps == ["before-error", "before-error"]
             assert second.timestamps == ["before-error"]
             assert service.wait_listener_streams_finished(1)

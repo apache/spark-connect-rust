@@ -84,14 +84,37 @@ impl PyDataFrame {
     /// a method of the Python class, as PySpark's DataFrame has none of this name: so
     /// `df.column_names` is the column of that name, of `__getattr__`.
     pub(crate) fn column_names(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        if self.schema_object.is_some() {
-            return self.columns(py)?.bind(py).extract();
+        self.own_schema(py)?.columns(py)?.extract()
+    }
+
+    /// The schema of this DataFrame, as PySpark's `_cached_schema` is: the object of `to` that is
+    /// not a DataType, which it keeps (see `schema_object`), or else the schema of the server, as
+    /// PySpark's client converts it. The schema is cached, so it is asked of the server once.
+    fn own_schema<'py>(&self, py: Python<'py>) -> PyResult<PropertySchema<'py>> {
+        if let Some(schema) = &self.schema_object {
+            return Ok(PropertySchema::Object(schema.bind(py).clone()));
         }
-        // The schema is cached, so the names come from it without another request.
-        let session = self.dataframe.spark_session();
-        let schema = interruptible(py, &session, || self.dataframe.schema())?;
+        let schema = interruptible(py, &self.dataframe.spark_session(), || {
+            self.dataframe.schema()
+        })?;
         check_schema_conversion(py, Some(&schema))?;
-        interruptible(py, &session, || self.dataframe.columns())
+        Ok(PropertySchema::Core(schema))
+    }
+
+    /// The schema that the properties `schema`, `columns` and `dtypes` read, as PySpark's read
+    /// `self._schema`: `own_schema`, or, when the plan fails to build with an `AttributeError`, as
+    /// of a join on a tuple, the object that Python then gives of `self._schema`, as PySpark's
+    /// property `_schema` raises it: of the `__getattr__` of the DataFrame (or of its Python
+    /// subclass), the Column of `_schema`.
+    fn property_schema<'py>(slf: &Bound<'py, Self>) -> PyResult<PropertySchema<'py>> {
+        let py = slf.py();
+        let schema = slf.borrow().own_schema(py);
+        match schema {
+            Err(err) if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => Ok(
+                PropertySchema::Object(slf.getattr(pyo3::intern!(py, "_schema"))?),
+            ),
+            schema => schema,
+        }
     }
 
     /// `other`, a DataFrame of the session of this one, as PySpark's `_check_same_session`
@@ -1820,18 +1843,21 @@ impl PyDataFrame {
         } else {
             return Err(not_expected_type(partitionIdCol, "col", "Column or str"));
         };
-        // The count is the proto's int32 of the plan, converted after the column, as in
-        // `repartitionByRange`.
-        let value = proto_int(
+        // The count is the proto's int32 of the plan, which PySpark's `RepartitionByExpression`
+        // sets after the column and the input, as in `repartition`: a count that protobuf refuses
+        // fails the plan, which is built here with no count.
+        let df = match proto_int(
             numPartitions,
             "spark.connect.RepartitionByExpression.num_partitions",
-        );
-        let df = converted_plan(
-            numPartitions.py(),
-            &self.dataframe,
-            value,
-            |num_partitions| self.dataframe.repartition_by_id(num_partitions, col),
-        )?;
+        ) {
+            Ok(num_partitions) => self.dataframe.repartition_by_id(num_partitions, col),
+            // A count of the plan that is never built: one that the core takes, which refuses a
+            // count that is not positive.
+            Err(err) => self
+                .dataframe
+                .repartition_by_id(1, col)
+                .unbuildable_with_cached_schema(unbuildable_error(numPartitions.py(), err)?),
+        };
         Ok(self.of_same_schema(PyDataFrame::new(df)))
     }
 
@@ -1954,13 +1980,21 @@ impl PyDataFrame {
                 .iter()
                 .map(|c| c.expression().clone())
                 .collect();
-            let n = proto_int(
+            // PySpark's `RepartitionByExpression.plan` builds the partition expressions, then the
+            // input, and sets the count last: a count that protobuf refuses fails the plan, which
+            // is built here with no count, so that the errors of the columns and of the input come
+            // first, as in `repartitionByRange`.
+            let df = match proto_int(
                 &numPartitions,
                 "spark.connect.RepartitionByExpression.num_partitions",
-            );
-            let df = converted_plan(py, &self.dataframe, n, |n| {
-                self.dataframe.repartition_by_expressions(n, exprs)
-            })?;
+            ) {
+                Ok(n) => self.dataframe.repartition_by_expressions(n, exprs),
+                // A count of the plan that is never built, which the core takes.
+                Err(err) => self
+                    .dataframe
+                    .repartition_by_expressions(1, exprs)
+                    .unbuildable_with_cached_schema(unbuildable_error(py, err)?),
+            };
             return Ok(self.of_same_schema(PyDataFrame::new(df)));
         }
         if !(numPartitions.is_instance_of::<pyo3::types::PyString>()
@@ -2513,15 +2547,16 @@ impl PyDataFrame {
     }
 
     /// Deprecated alias for createOrReplaceTempView, as PySpark's, which warns that it is
-    /// deprecated and then replaces the view as `createOrReplaceTempView` does.
+    /// deprecated, of its line of `pyspark.sql.connect.dataframe` (see `warn_as_pyspark`), and
+    /// then replaces the view as `createOrReplaceTempView` does.
     #[pyo3(name = "registerTempTable")]
     fn register_temp_table(&self, py: Python<'_>, name: &Bound<'_, PyAny>) -> PyResult<()> {
-        py.import("warnings")?.call_method1(
-            "warn",
-            (
-                "Deprecated in 2.0, use createOrReplaceTempView instead.",
-                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
-            ),
+        crate::errors::warn_as_pyspark(
+            py,
+            "pyspark.sql.connect.dataframe",
+            2259,
+            "Deprecated in 2.0, use createOrReplaceTempView instead.",
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
         )?;
         self.create_or_replace_temp_view(py, name)
     }
@@ -3063,19 +3098,24 @@ impl PyDataFrame {
         self.__getattr__(py, name)
     }
 
-    /// Class attributes and all column names, matching Python Connect.
-    fn __dir__(&self, py: Python<'_>) -> PyResult<Vec<String>> {
+    /// Class attributes and all column names, matching Python Connect, of its `self.columns`,
+    /// which an AttributeError of the property makes a Column, which raises `NOT_ITERABLE`.
+    fn __dir__(slf: &Bound<'_, Self>) -> PyResult<Vec<String>> {
+        let py = slf.py();
         // Inspect the class rather than the instance to avoid calling __dir__ again.
         let mut attrs = py.get_type::<Self>().dir()?.extract::<Vec<String>>()?;
-        attrs.extend(self.column_names(py)?);
+        for name in slf.getattr(pyo3::intern!(py, "columns"))?.try_iter()? {
+            attrs.push(name?.extract()?);
+        }
         attrs.sort();
         attrs.dedup();
         Ok(attrs)
     }
 
-    /// Bracket completion keeps column order, duplicates and non-identifiers.
-    fn _ipython_key_completions_(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        self.column_names(py)
+    /// Bracket completion keeps column order, duplicates and non-identifiers, as PySpark's
+    /// `self.columns`.
+    fn _ipython_key_completions_<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        slf.getattr(pyo3::intern!(slf.py(), "columns"))
     }
 
     /// Aggregate over the whole DataFrame (shorthand for `groupBy().agg(...)`).
@@ -3195,16 +3235,20 @@ impl PyDataFrame {
     /// arrow-rs's reader conversion, sharing compatible decoded Arrow value buffers. Bitmap
     /// alignment and schemas requiring the IPC compatibility fallback can still copy.
     #[pyo3(name = "toArrow")]
-    fn to_arrow(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    fn to_arrow(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
         let kwargs = PyDict::new(py);
         kwargs.set_item("error_on_duplicated_field_names_in_struct", true)?;
         kwargs.set_item("timezone", "UTC")?;
+        // Of `self.schema`, as PySpark's (see `property_schema`).
         let arrow_schema = py
             .import("pyspark.sql.pandas.types")?
             .getattr("to_arrow_schema")?
-            .call((self.schema(py)?,), Some(&kwargs))?;
-        let (batches, _) = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe
+            .call((slf.getattr(pyo3::intern!(py, "schema"))?,), Some(&kwargs))?;
+        let this = slf.borrow();
+        let dataframe = &this.dataframe;
+        let (batches, _) = interruptible(py, &dataframe.spark_session(), || {
+            dataframe
                 .collect_record_batches_with_schema_checked(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
@@ -3384,21 +3428,11 @@ impl PyDataFrame {
 
     /// The schema of this DataFrame as a `StructType` (a property, mirroring
     /// `DataFrame.schema`) — materialized into the proper Python type classes so
-    /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work.
+    /// `df.schema.fields`, `df.schema["c"]`, `df.schema.fieldNames()` all work. Of a schema
+    /// that is an object, a deep copy of it, as PySpark's (see `property_schema`).
     #[getter]
-    fn schema(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // As PySpark's `copy.deepcopy` of the schema that `to` keeps, when it is not a DataType.
-        if let Some(schema) = &self.schema_object {
-            return Ok(py
-                .import("copy")?
-                .call_method1("deepcopy", (schema.bind(py),))?
-                .unbind());
-        }
-        let schema = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.schema()
-        })?;
-        check_schema_conversion(py, Some(&schema))?;
-        crate::types::data_type_to_py(py, &schema)
+    fn schema(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Self::property_schema(slf)?.schema(slf.py())
     }
 
     /// Get the first row.
@@ -3441,19 +3475,15 @@ impl PyDataFrame {
         rows_to_py(py, &self.dataframe, rows, schema.as_ref())
     }
 
-    /// Column names (a property, mirroring `DataFrame.columns`). A schema of `to` that is not a
-    /// DataType gives the names of its fields as it is, as PySpark's `[field.name for field in
-    /// self._schema.fields]`: an AttributeError of it falls back to a Column, as in PySpark.
+    /// Column names (a property, mirroring `DataFrame.columns`). A schema that is an object, of
+    /// `to` that is not a DataType or of a plan that fails to build (see `property_schema`), gives
+    /// the names of its fields as it is, as PySpark's `[field.name for field in
+    /// self._schema.fields]`: an AttributeError of it falls back to a Column, as in PySpark, and
+    /// a Column raises `NOT_ITERABLE`.
     #[getter]
-    fn columns(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(schema) = &self.schema_object {
-            let names = PyList::empty(py);
-            for field in schema.bind(py).getattr("fields")?.try_iter()? {
-                names.append(field?.getattr("name")?)?;
-            }
-            return Ok(names.into_any().unbind());
-        }
-        Ok(PyList::new(py, self.column_names(py)?)?.into_any().unbind())
+    fn columns(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        Ok(Self::property_schema(slf)?.columns(py)?.into_any().unbind())
     }
 
     /// Get the last `num` rows as a list of Rows (eager, like pyspark `tail`), of `num` as the
@@ -3556,63 +3586,47 @@ impl PyDataFrame {
 
     /// Print the schema through Python stdout, honoring the maximum nesting depth.
     #[pyo3(signature = (level=None))]
-    fn printSchema(&self, py: Python<'_>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+    fn printSchema(slf: &Bound<'_, Self>, level: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let py = slf.py();
         // Reference's `if level:` selects the default for false values before
         // resolving the schema; positive fractional depths behave as ceil(level).
         let level = match level {
             Some(level) if level.is_truthy()? => Some(level),
             _ => None,
         };
-        // A schema of `to` that is not a DataType is printed as PySpark's `print(self.schema
-        // .treeString(level))`, of a copy of it, whose `treeString` raises its own AttributeError.
-        if let Some(schema) = &self.schema_object {
-            let schema = py
-                .import("copy")?
-                .call_method1("deepcopy", (schema.bind(py),))?;
-            let tree = match level {
-                Some(level) => schema.call_method1("treeString", (level,))?,
-                None => schema.call_method0("treeString")?,
-            };
-            py.import("builtins")?.getattr("print")?.call1((tree,))?;
-            return Ok(());
-        }
-        let schema = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.schema()
-        })?;
-        check_schema_conversion(py, Some(&schema))?;
-        let depth = level
-            .map(crate::types::normalize_tree_depth)
-            .transpose()?
-            .unwrap_or(i32::MAX);
-        let tree = schema.tree_string_with_depth(depth).to_pyerr()?;
+        let tree = match Self::property_schema(slf)? {
+            // A schema that is an object (see `property_schema`) is printed as PySpark's
+            // `print(self.schema.treeString(level))`, of a copy of it, whose `treeString` raises
+            // its own AttributeError, and that of a Column is a Column, whose call raises.
+            schema @ PropertySchema::Object(_) => {
+                let schema = schema.schema(py)?.into_bound(py);
+                match level {
+                    Some(level) => schema.call_method1("treeString", (level,))?,
+                    None => schema.call_method0("treeString")?,
+                }
+            }
+            PropertySchema::Core(schema) => {
+                let depth = level
+                    .map(crate::types::normalize_tree_depth)
+                    .transpose()?
+                    .unwrap_or(i32::MAX);
+                schema
+                    .tree_string_with_depth(depth)
+                    .to_pyerr()?
+                    .into_pyobject(py)?
+                    .into_any()
+            }
+        };
         py.import("builtins")?.getattr("print")?.call1((tree,))?;
         Ok(())
     }
 
-    /// Get the schema as a list of (name, type) tuples. A schema of `to` that is not a DataType
-    /// gives them as it is, as PySpark's `dtypes` reads its fields.
+    /// Get the schema as a list of (name, type) tuples. A schema that is an object (see
+    /// `property_schema`) gives them as it is, as PySpark's `dtypes` reads its fields.
     #[getter]
-    fn dtypes(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        if let Some(schema) = &self.schema_object {
-            return Ok(object_dtypes(py, schema.bind(py))?.into_any().unbind());
-        }
-        let schema = interruptible(py, &self.dataframe.spark_session(), || {
-            self.dataframe.schema()
-        })?;
-        check_schema_conversion(py, Some(&schema))?;
-        let spark_connect::types::DataType::Struct { fields } = schema else {
-            unreachable!("schema() validates struct responses")
-        };
-        // As PySpark, a user-defined type is named by its simpleString(), such as `vector`,
-        // which only its Python class knows.
-        let pairs = fields
-            .into_iter()
-            .map(|field| {
-                let name = crate::types::simple_string_with_udts(py, &field.data_type)?;
-                Ok((field.name, name))
-            })
-            .collect::<PyResult<Vec<(String, String)>>>()?;
-        Ok(PyList::new(py, pairs)?.into_any().unbind())
+    fn dtypes(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        Ok(Self::property_schema(slf)?.dtypes(py)?.into_any().unbind())
     }
 
     /// Additional set operation: unionAll (alias for union).
@@ -3720,9 +3734,9 @@ impl PyDataFrame {
                         .hasattr("is_mock_session")?
                 {
                     // `self._schema`: the schema that it keeps as a Python object, as it is.
-                    let schema = match &self.schema_object {
-                        Some(schema) => schema.clone_ref(py),
-                        None => self.schema(py)?,
+                    let schema = match self.own_schema(py)? {
+                        PropertySchema::Object(schema) => schema.unbind(),
+                        PropertySchema::Core(schema) => crate::types::data_type_to_py(py, &schema)?,
                     };
                     let verified = py
                         .import("pyspark.sql.connect.types")?
@@ -3780,57 +3794,36 @@ impl PyDataFrame {
 
     /// As PySpark's `DataFrame.__repr__`: the table of `_show_string` when the session's
     /// `spark.sql.repl.eagerEval.enabled` is `true`, with its `maxNumRows` rows and its
-    /// `truncate`, and `DataFrame[name: type, ...]` otherwise. Like PySpark, it reads the
-    /// three settings, in one request, on every call.
-    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        // As PySpark's: once `_repr_html_` was called, the string of the schema.
-        if !self
-            .support_repr_html
-            .load(std::sync::atomic::Ordering::Relaxed)
+    /// `truncate`, and `DataFrame[name: type, ...]` otherwise, of its `dtypes`. Like PySpark, it
+    /// reads the three settings, in one request, on every call.
+    fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let py = slf.py();
         {
-            if let Some((n, truncate)) = self.eager_eval(py)? {
-                return interruptible(py, &self.dataframe.spark_session(), || {
-                    self.dataframe
-                        .show_string(n, truncate, false)
-                        .map_err(Box::new)
-                });
+            let this = slf.borrow();
+            // As PySpark's: once `_repr_html_` was called, the string of the schema.
+            if !this
+                .support_repr_html
+                .load(std::sync::atomic::Ordering::Relaxed)
+            {
+                if let Some((n, truncate)) = this.eager_eval(py)? {
+                    let dataframe = &this.dataframe;
+                    return interruptible(py, &dataframe.spark_session(), || {
+                        dataframe.show_string(n, truncate, false).map_err(Box::new)
+                    });
+                }
             }
         }
-        if let Some(schema) = &self.schema_object {
-            let pairs = match object_dtypes(py, schema.bind(py)) {
-                Ok(pairs) => pairs,
-                // As PySpark's: an AttributeError of `dtypes` falls back to a Column, which the
-                // join of the representation cannot iterate.
-                Err(err) if err.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
-                    return Err(crate::column::raise_pyspark(
-                        py,
-                        "PySparkTypeError",
-                        "NOT_ITERABLE",
-                        &[("objectName", "Column")],
-                    ));
-                }
-                Err(err) => return Err(err),
-            };
-            let fields = pairs
-                .iter()
-                .map(|pair| {
-                    let name = pair.get_item(0)?.str()?.to_string();
-                    let dtype = pair.get_item(1)?.str()?.to_string();
-                    Ok(format!("{name}: {dtype}"))
-                })
-                .collect::<PyResult<Vec<_>>>()?
-                .join(", ");
-            return Ok(format!("DataFrame[{fields}]"));
+        // As PySpark's `", ".join("%s: %s" % c for c in self.dtypes)`: an AttributeError of the
+        // property, of a schema that is an object (see `property_schema`), makes it a Column, which
+        // the join cannot iterate, as it cannot iterate the Column of `_schema`.
+        let mut fields = Vec::new();
+        for pair in slf.getattr(pyo3::intern!(py, "dtypes"))?.try_iter()? {
+            let pair = pair?;
+            let name = pair.get_item(0)?.str()?.to_string();
+            let dtype = pair.get_item(1)?.str()?.to_string();
+            fields.push(format!("{name}: {dtype}"));
         }
-        let fields = self
-            .dtypes(py)?
-            .bind(py)
-            .extract::<Vec<(String, String)>>()?
-            .into_iter()
-            .map(|(name, dtype)| format!("{name}: {dtype}"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        Ok(format!("DataFrame[{fields}]"))
+        Ok(format!("DataFrame[{}]", fields.join(", ")))
     }
 
     /// The HTML table of the DataFrame, which notebooks show, as PySpark Connect's
@@ -4293,12 +4286,17 @@ fn replace_values(
         }
     };
 
-    // The replacements as a dict, as PySpark builds it, so that equal values are one key.
+    // The replacements as a dict, as PySpark builds it, so that equal values are one key. Of a
+    // dict and a value, PySpark's `DataFrame.replace`, which `na.replace` calls, warns of the line
+    // of `pyspark.sql.connect.dataframe` of its `warnings.warn`.
     let replacements = if is_dict {
         if !value.is_none() {
-            py.import("warnings")?.call_method1(
-                "warn",
-                ("to_replace is a dict and value is not None. value will be ignored.",),
+            crate::errors::warn_as_pyspark(
+                py,
+                "pyspark.sql.connect.dataframe",
+                1541,
+                "to_replace is a dict and value is not None. value will be ignored.",
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
             )?;
         }
         to_replace.cast::<PyDict>()?.clone()
@@ -6802,12 +6800,14 @@ pub(crate) fn validate_map_function(
 /// The eval type of a grouped map function from its type hints, by `infer` of
 /// `pyspark.sql.pandas.typehints` (the iterator forms, for example), as the reference
 /// client infers it. `default` is used when the hints give none, and when they cannot be
-/// read, after the reference client's `warning`.
+/// read, after the reference client's `warning`, of the line `line` of its
+/// `pyspark.sql.connect.group` (see `warn_as_pyspark`).
 pub(crate) fn infer_group_map_eval_type(
     py: Python<'_>,
     func: &Bound<'_, PyAny>,
     infer: &str,
     warning: &str,
+    line: u32,
     default: i32,
 ) -> PyResult<i32> {
     match py
@@ -6817,9 +6817,13 @@ pub(crate) fn infer_group_map_eval_type(
         Ok(inferred) if inferred.is_none() => Ok(default),
         Ok(inferred) => inferred.extract(),
         Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
-            let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
-            py.import("warnings")?
-                .call_method1("warn", (warning, category))?;
+            crate::errors::warn_as_pyspark(
+                py,
+                "pyspark.sql.connect.group",
+                line,
+                warning,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+            )?;
             Ok(default)
         }
         Err(err) => Err(err),
@@ -7159,6 +7163,66 @@ fn copy_instance_dict(source: &Bound<'_, PyAny>, target: &Bound<'_, PyAny>) -> P
         .getattr("__dict__")?
         .call_method1("update", (source.getattr("__dict__")?,))?;
     Ok(())
+}
+
+/// The schema that the properties of a DataFrame read, as PySpark's read its `_schema` (see
+/// `PyDataFrame::property_schema`).
+enum PropertySchema<'py> {
+    /// The schema of the server.
+    Core(spark_connect::types::DataType),
+    /// An object, which PySpark's properties read as they read any `_schema`: the schema of `to`
+    /// that is not a DataType, or the Column of `_schema` of the `__getattr__` of the DataFrame.
+    Object(Bound<'py, PyAny>),
+}
+
+impl<'py> PropertySchema<'py> {
+    /// As PySpark's `schema`: the type object of the schema of the server, or a deep copy of the
+    /// object, as PySpark's `copy.deepcopy` of its `_schema`.
+    fn schema(self, py: Python<'py>) -> PyResult<Py<PyAny>> {
+        match self {
+            PropertySchema::Core(schema) => crate::types::data_type_to_py(py, &schema),
+            PropertySchema::Object(schema) => Ok(py
+                .import("copy")?
+                .call_method1("deepcopy", (schema,))?
+                .unbind()),
+        }
+    }
+
+    /// As PySpark's `columns`, `[field.name for field in self._schema.fields]`.
+    fn columns(self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        match self {
+            PropertySchema::Core(spark_connect::types::DataType::Struct { fields }) => {
+                PyList::new(py, fields.into_iter().map(|field| field.name))
+            }
+            PropertySchema::Core(_) => unreachable!("schema() validates struct responses"),
+            PropertySchema::Object(schema) => {
+                let names = PyList::empty(py);
+                for field in schema.getattr("fields")?.try_iter()? {
+                    names.append(field?.getattr("name")?)?;
+                }
+                Ok(names)
+            }
+        }
+    }
+
+    /// As PySpark's `dtypes`, of the `simpleString()` of the type of each field: of a user-defined
+    /// type, such as `vector`, which only its Python class knows.
+    fn dtypes(self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
+        match self {
+            PropertySchema::Core(spark_connect::types::DataType::Struct { fields }) => {
+                let pairs = fields
+                    .into_iter()
+                    .map(|field| {
+                        let name = crate::types::simple_string_with_udts(py, &field.data_type)?;
+                        Ok((field.name, name))
+                    })
+                    .collect::<PyResult<Vec<(String, String)>>>()?;
+                PyList::new(py, pairs)
+            }
+            PropertySchema::Core(_) => unreachable!("schema() validates struct responses"),
+            PropertySchema::Object(schema) => object_dtypes(py, &schema),
+        }
+    }
 }
 
 /// The `(str(field.name), field.dataType.simpleString())` of each field of `schema`, a schema of

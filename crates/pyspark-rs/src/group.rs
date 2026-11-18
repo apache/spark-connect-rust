@@ -599,6 +599,7 @@ impl PyGroupedData {
             &func,
             "infer_group_pandas_eval_type_from_func",
             "Cannot infer the eval type from type hints.",
+            308,
             eval_type::SQL_GROUPED_MAP_PANDAS_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;
@@ -633,14 +634,14 @@ impl PyGroupedData {
                 &[("eval_type", "SQL_GROUPED_MAP_PANDAS_UDF")],
             ));
         }
-        let warnings = py.import("warnings")?;
-        warnings.call_method1(
-            "warn",
-            (
-                "It is preferred to use 'applyInPandas' over this API. This API will be deprecated in the \
-                 future releases. See SPARK-28264 for more details.",
-                py.get_type::<pyo3::exceptions::PyUserWarning>(),
-            ),
+        // Of the line of PySpark's `warnings.warn` in `pyspark.sql.connect.group`.
+        crate::errors::warn_as_pyspark(
+            py,
+            "pyspark.sql.connect.group",
+            285,
+            "It is preferred to use 'applyInPandas' over this API. This API will be deprecated in the \
+             future releases. See SPARK-28264 for more details.",
+            &py.get_type::<pyo3::exceptions::PyUserWarning>(),
         )?;
         let func = udf.getattr("func")?;
         let schema = udf.getattr("returnType")?;
@@ -661,6 +662,7 @@ impl PyGroupedData {
             &func,
             "infer_group_arrow_eval_type_from_func",
             "Cannot infer the eval type from type hints. ",
+            495,
             eval_type::SQL_GROUPED_MAP_ARROW_UDF,
         )?;
         validate_map_function(py, &func, eval_type_id)?;

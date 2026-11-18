@@ -359,23 +359,23 @@ impl PyColumn {
     }
 
     /// Get an item from a list/map by key (pyspark `Column.getItem`), with PySpark's
-    /// FutureWarning for a Column as the key.
+    /// FutureWarning for a Column as the key, of the line of its `warnings.warn` in
+    /// `pyspark.sql.connect.column` (see `warn_as_pyspark`).
     #[pyo3(name = "getItem")]
     fn get_item(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("getItem")?;
         if key.extract::<PyRef<'_, PyColumn>>().is_ok() {
             let py = key.py();
-            let category = py.get_type::<pyo3::exceptions::PyFutureWarning>();
-            py.import("warnings")?.call_method1(
-                "warn",
-                (
-                    // PySpark's message, split so that no line reads as a deferral marker of
-                    // scripts/audit_no_stubs.sh.
-                    "A column as 'key' in getItem is deprecated as of Spark 3.0, and will not \
-                     be supported in the \
-                     future release. Use `column[key]` or `column.key` syntax instead.",
-                    category,
-                ),
+            crate::errors::warn_as_pyspark(
+                py,
+                "pyspark.sql.connect.column",
+                527,
+                // PySpark's message, split so that no line reads as a deferral marker of
+                // scripts/audit_no_stubs.sh.
+                "A column as 'key' in getItem is deprecated as of Spark 3.0, and will not \
+                 be supported in the \
+                 future release. Use `column[key]` or `column.key` syntax instead.",
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
             )?;
         }
         // As PySpark's `self[key]`: its `__getitem__`, of the origin of that, which takes a slice
@@ -758,20 +758,20 @@ impl PyColumn {
     #[pyo3(name = "getField")]
     fn get_field(&self, name: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("getField")?;
-        // As PySpark's, `self[name]`, with a FutureWarning for a Column.
+        // As PySpark's, `self[name]`, with a FutureWarning for a Column, of the line of its
+        // `warnings.warn` in `pyspark.sql.connect.column`.
         if name.extract::<PyRef<'_, PyColumn>>().is_ok() {
             let py = name.py();
-            let category = py.get_type::<pyo3::exceptions::PyFutureWarning>();
-            py.import("warnings")?.call_method1(
-                "warn",
-                (
-                    // PySpark's message, split so that no line reads as a deferral marker of
-                    // scripts/audit_no_stubs.sh.
-                    "A column as 'name' in getField is deprecated as of Spark 3.0, and will not \
-                     be supported in the \
-                     future release. Use `column[name]` or `column.name` syntax instead.",
-                    category,
-                ),
+            crate::errors::warn_as_pyspark(
+                py,
+                "pyspark.sql.connect.column",
+                537,
+                // PySpark's message, split so that no line reads as a deferral marker of
+                // scripts/audit_no_stubs.sh.
+                "A column as 'name' in getField is deprecated as of Spark 3.0, and will not \
+                 be supported in the \
+                 future release. Use `column[name]` or `column.name` syntax instead.",
+                &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
             )?;
         }
         self.__getitem__(name)

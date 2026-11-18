@@ -80,10 +80,6 @@ TYPE_ONLY = {
         "readers and writers are native"
     ),
     "pyspark.sql.connect.readwriter.OptionUtils": "as pyspark.sql.readwriter.OptionUtils",
-    "pyspark.sql.types.DataTypeSingleton": (
-        "the metaclass of PySpark's atomic types, which types their constructors; the drop-in's "
-        "types are native"
-    ),
     "pyspark.sql.types.T": "a type variable of PySpark's annotations of the module",
     "pyspark.sql.types.U": "a type variable of PySpark's annotations of the module",
     "pyspark.sql.connect.streaming.query.StreamingQueryListenerBus": (
