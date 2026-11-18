@@ -890,6 +890,45 @@ impl PyDataFrame {
             ))
     }
 
+    /// The reduce of a pickle at `protocol`, as PySpark Connect's DataFrame pickles its plan before
+    /// its session, of the objects of `pyspark.ml` that the plan keeps (see
+    /// `spark_connect::ml::pickle_block`): of a plan that keeps a model first (a transform of a
+    /// model, a DataFrame of a method of a model or of the summary of an evaluation), the error of
+    /// the lock of the model's `RemoteModelRef` at the protocol, before the session; of a
+    /// DataFrame of a method of the training summary of a fit, the reduce of `__reduce__`, whose
+    /// local function a plain pickle refuses first, as PySpark's refuses the session of the
+    /// summary's `_summary_dataset`, and then a lock, as the model of the summary
+    /// (`_remote_model_obj`) keeps one, which cloudpickle, of the function, reaches next; else the
+    /// reduce of `__reduce__`.
+    fn __reduce_ex__<'py>(
+        slf: &Bound<'py, Self>,
+        protocol: &Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let block = spark_connect::ml::pickle_block(&slf.borrow().dataframe);
+        let reduced = match block {
+            Some(spark_connect::ml::MlPickleBlock::ModelLock) => {
+                return Err(crate::ml::object::lock_pickle_error(py, protocol));
+            }
+            Some(spark_connect::ml::MlPickleBlock::SummarySession(_)) => {
+                slf.call_method0(pyo3::intern!(py, "__reduce__"))?
+            }
+            None => return slf.call_method0(pyo3::intern!(py, "__reduce__")),
+        };
+        let reduced = reduced.cast_into::<PyTuple>()?;
+        let state = PyDict::new(py);
+        match reduced.get_item(2).ok() {
+            Some(given) if given.is_instance_of::<PyDict>() => state.update(given.cast()?)?,
+            Some(given) if !given.is_none() => return Ok(reduced.into_any()),
+            _ => {}
+        }
+        state.set_item("_model_lock", py.import("threading")?.call_method0("Lock")?)?;
+        let mut items: Vec<Bound<'py, PyAny>> = reduced.iter().take(2).collect();
+        items.push(state.into_any());
+        items.extend(reduced.iter().skip(3));
+        Ok(PyTuple::new(py, items)?.into_any())
+    }
+
     /// The shallow copy of a DataFrame, as PySpark's `copy.copy` of its `__reduce__`: the same
     /// plan, and so the same Observations, as PySpark's copy shares its plan, with the
     /// `_support_repr_html` and the schema that its state carries, and an `executionInfo` of its
@@ -920,6 +959,19 @@ impl PyDataFrame {
         // is copied, which raises a PySparkRuntimeError.
         let session = self.dataframe.spark_session();
         interruptible(py, &session, || self.dataframe.schema())?;
+        // As PySpark's copy of the plan, which copies the objects of `pyspark.ml` that it keeps
+        // (see `__reduce_ex__`): the TypeError of the lock of a model, after a copy of the
+        // `_summary_dataset` of the training summary of a DataFrame of a method of the summary, of
+        // its requests of its schema.
+        if let Some(block) = spark_connect::ml::pickle_block(&self.dataframe) {
+            if let spark_connect::ml::MlPickleBlock::SummarySession(dataset) = block {
+                let dataset = Py::new(py, PyDataFrame::new(dataset))?;
+                py.import("copy")?
+                    .call_method1(pyo3::intern!(py, "deepcopy"), (dataset, memo))?;
+            }
+            let protocol = pyo3::types::PyInt::new(py, 4).into_any();
+            return Err(crate::ml::object::lock_pickle_error(py, &protocol));
+        }
         let observations = self
             .dataframe
             .observations()

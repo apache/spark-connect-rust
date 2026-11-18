@@ -1892,6 +1892,58 @@ def test_ml_connect_setters_run_while_a_fit_or_an_evaluate_waits_as_pyspark(ml_m
         }
 
 
+def test_the_models_and_summaries_of_fits_have_pysparks_java_obj_of_their_call_java(ml_mock):
+    # As PySpark's `try_remote_fit`: the `_java_obj` of a fitted model is the RemoteModelRef of its
+    # object (of its copy too), and its training summary is its `_summary`, of the attributes, in
+    # this order, `_java_obj` (`"<id>.summary"`), `_summary_dataset` (the training dataset of a
+    # regression) and `_remote_model_obj` (the RemoteModelRef of the model). `evaluate` sets the
+    # `_java_obj` of its summary, the id that the server returns, and the model
+    # (`__source_transformer__`). PySpark's `_call_java` of each (`try_remote_call`) sends the Fetch
+    # of the id and the methods of its `_java_obj`. A model of PySpark's constructor has the
+    # `_java_obj` of its `__init__`, None, and no `_summary`.
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    service.execute_payload = _operator_info("model-of-a-call-java")
+    model = connect.regression.LinearRegression().fit(frame)
+    svc = connect.classification.LinearSVC().fit(frame)
+    service.payload_for_request = {b"evaluate": _ml_result(summary="evaluated-of-a-call-java")}
+    evaluated = model.evaluate(frame)
+    assert type(model._java_obj) is RemoteModelRef
+    assert model._java_obj.ref_id == model.copy()._java_obj.ref_id == "model-of-a-call-java"
+    summary = model.summary
+    # The `summary()` method of a LinearSVCModel, as PySpark's.
+    assert model._summary is summary and svc._summary is svc.summary()
+    assert list(vars(summary)) == ["_java_obj", "_summary_dataset", "_remote_model_obj"]
+    assert summary._java_obj == "model-of-a-call-java.summary"
+    assert _relation(summary._summary_dataset) == _relation(frame)
+    assert type(summary._remote_model_obj) is RemoteModelRef
+    assert summary._remote_model_obj.ref_id == "model-of-a-call-java"
+    assert list(vars(evaluated)) == ["_java_obj", "__source_transformer__"]
+    assert evaluated._java_obj == "evaluated-of-a-call-java"
+    assert evaluated.__source_transformer__ is model
+    service.payload_for_request = {}
+    service.execute_payload = _ml_result(param=pb2.Expression.Literal(integer=7))
+    sent = len(service.execute_requests)
+    assert model._call_java("numFeatures") == 7
+    assert summary._call_java("totalIterations") == 7
+    assert evaluated._call_java("numInstances") == 7
+    fetches = [command.ml_command.fetch for command in _commands_but_deletes(service, sent)]
+    assert [(fetch.obj_ref.id, [m.method for m in fetch.methods]) for fetch in fetches] == [
+        ("model-of-a-call-java", ["numFeatures"]),
+        ("model-of-a-call-java", ["summary", "totalIterations"]),
+        ("evaluated-of-a-call-java", ["numInstances"]),
+    ]
+    unbound = connect.regression.LinearRegressionModel()
+    assert unbound._java_obj is None and not unbound.hasSummary
+    message = "^'LinearRegressionModel' object has no attribute '_summary'$"
+    with pytest.raises(AttributeError, match=message):
+        unbound._summary
+
+
 def test_the_dataframe_members_of_a_summary_of_its_constructor_read_its_summary_dataset(ml_mock):
     # As PySpark's invoke_remote_attribute_relation: of a summary whose `java_obj` starts with the
     # `summary` method (`"<id>.summary"`, as PySpark names the training summary of a fit), a
@@ -1943,24 +1995,106 @@ def test_the_dataframe_members_of_a_summary_of_its_constructor_read_its_summary_
     assert [method.method for method in command.ml_command.fetch.methods] == ["r2"]
 
 
-def test_a_summary_of_a_fit_or_an_evaluation_is_not_pickled_as_pysparks(ml_mock):
-    # As PySpark's pickle of a summary of a server-side object, of the error of the first of its
-    # attributes that does not pickle: the TypeError of the lock of the RemoteModelRef of the
-    # model that the summary of an evaluation keeps (`__source_transformer__`), and that the
-    # summary dataset of a fit keeps when it reads a transform of a model (`_summary_dataset` of
-    # the clustering models, the transform of the training dataset by the model); else the
-    # AttributeError of the session of the training DataFrame, which it pickles after its plan.
-    # `copy.deepcopy` raises the TypeError of each, which copies the RemoteModelRef of the model.
+def _pickle_error(value, protocol):
+    # The type and the message of the error of the pickle of value at protocol.
+    import pickle
+
+    with pytest.raises(Exception) as error:
+        pickle.dumps(value, protocol)
+    return type(error.value), str(error.value)
+
+
+def _lock_pickle_error(protocol):
+    # The error of the pickle of a lock at protocol, which PySpark's pickle of a RemoteModelRef
+    # raises: the PicklingError of the lookup of its class below protocol 2, a TypeError above.
+    import threading
+
+    return _pickle_error(threading.Lock(), protocol)
+
+
+def _session_pickle_error(protocol):
+    # The error of PySpark's pickle of the session of a DataFrame, of the local function of the
+    # session's `__reduce__`, at every protocol.
+    return AttributeError, "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'"
+
+
+def test_a_fitted_model_and_the_dataframes_that_keep_it_are_not_pickled_as_pysparks(ml_mock):
+    # As PySpark's pickle of a fitted model and of a DataFrame, which pickles its plan before its
+    # session: the error of the lock of the model's RemoteModelRef at the protocol, of the model,
+    # of a transform of it (`__source_transformer__`), of a DataFrame that reads one, and of a
+    # DataFrame of a method of a model or of the summary of an evaluation, which keeps its model
+    # (`__source_instance__`). A DataFrame of a method of a training summary reaches the session of
+    # the summary's `_summary_dataset` first, which a plain pickle refuses, and cloudpickle, which
+    # pickles it, the lock of the summary's `_remote_model_obj`. `copy.deepcopy` raises the
+    # TypeError of the lock, after the requests of the schemas of the DataFrames that PySpark's
+    # copy reaches (its lookup of `__deepcopy__` reads the columns of a DataFrame), and
+    # `copy.copy` copies, sharing the model.
     import copy
     import pickle
 
     import pyspark.ml.connect as connect
+    from pyspark import cloudpickle
     from pyspark.ml.linalg import Vectors
 
     spark, service = ml_mock
     frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
     lock = "^cannot pickle '_thread.lock' object$"
-    session = "^Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'$"
+    service.execute_payload = _operator_info("model-of-dataframes")
+    model = connect.regression.LinearRegression().fit(frame)
+    kmeans = connect.clustering.KMeans(k=2).fit(frame)
+    service.payload_for_request = {b"evaluate": _ml_result(summary="evaluated-of-dataframes")}
+    evaluated = model.evaluate(frame)
+    sent = _requests_but_deletes(service)
+    for obj, blocked, analyses in [
+        (model, _lock_pickle_error, 0),
+        (model.transform(frame), _lock_pickle_error, 1),
+        (model.transform(frame).select("label"), _lock_pickle_error, 1),
+        (frame.join(model.transform(frame), "label"), _lock_pickle_error, 1),
+        (kmeans.summary.cluster, _lock_pickle_error, 1),
+        (evaluated.predictions, _lock_pickle_error, 1),
+        # A request of the lookup of `__deepcopy__` of the DataFrame, and two of the copy of the
+        # `_summary_dataset` of its training summary, which copies (of the lookups of
+        # `__deepcopy__` of the dataset and of `__setstate__` of its copy).
+        (model.summary.predictions, _session_pickle_error, 3),
+    ]:
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            assert _pickle_error(obj, protocol) == blocked(protocol), (obj, protocol)
+        with pytest.raises(TypeError, match=lock):
+            cloudpickle.dumps(obj)
+        analyzed = len(service.analyze_requests)
+        with pytest.raises(TypeError, match=lock):
+            copy.deepcopy(obj)
+        assert len(service.analyze_requests) - analyzed == analyses, obj
+        assert type(copy.copy(obj)) is type(obj)
+    plain = frame.select("label")
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        assert _pickle_error(plain, protocol) == _session_pickle_error(protocol)
+    assert _relation(cloudpickle.loads(cloudpickle.dumps(plain))) == _relation(plain)
+    assert _relation(copy.deepcopy(plain)) == _relation(plain)
+    assert _requests_but_deletes(service) == sent
+
+
+def test_a_summary_of_a_fit_or_an_evaluation_is_not_pickled_as_pysparks(ml_mock):
+    # As PySpark's pickle of a summary of a server-side object, a plain object, of the error of the
+    # first of its attributes that does not pickle, at every protocol: the lock of the
+    # RemoteModelRef of the model that the summary of an evaluation keeps
+    # (`__source_transformer__`), and that the summary dataset of a fit keeps when it reads a
+    # transform of a model (`_summary_dataset` of the clustering models, the transform of the
+    # training dataset by the model); else the AttributeError of the session of the training
+    # DataFrame, which it pickles after its plan, and of cloudpickle, which pickles the session,
+    # the lock of the model of the summary (`_remote_model_obj`). `copy.deepcopy` raises the
+    # TypeError of the lock, after the requests of the schemas of the summary dataset that
+    # PySpark's copy of it sends.
+    import copy
+    import pickle
+
+    import pyspark.ml.connect as connect
+    from pyspark import cloudpickle
+    from pyspark.ml.linalg import Vectors
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    lock = "^cannot pickle '_thread.lock' object$"
     service.execute_payload = _operator_info("model-of-a-summary")
     kmeans = connect.clustering.KMeans(k=2).fit(frame)
     regression = connect.regression.LinearRegression().fit(frame)
@@ -1970,16 +2104,20 @@ def test_a_summary_of_a_fit_or_an_evaluation_is_not_pickled_as_pysparks(ml_mock)
     evaluated = regression.evaluate(frame)
     assert type(evaluated).__name__ == "LinearRegressionSummary"
     sent = _requests_but_deletes(service)
-    for summary, error, message in [
-        (kmeans.summary, TypeError, lock),
-        (regression.summary, AttributeError, session),
-        (after_model.summary, TypeError, lock),
-        (evaluated, TypeError, lock),
+    for summary, blocked, analyses in [
+        (kmeans.summary, _lock_pickle_error, 1),
+        (regression.summary, _session_pickle_error, 2),
+        (after_model.summary, _lock_pickle_error, 1),
+        (evaluated, _lock_pickle_error, 0),
     ]:
-        with pytest.raises(error, match=message):
-            pickle.dumps(summary)
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            assert _pickle_error(summary, protocol) == blocked(protocol), (summary, protocol)
+        with pytest.raises(TypeError, match=lock):
+            cloudpickle.dumps(summary)
+        analyzed = len(service.analyze_requests)
         with pytest.raises(TypeError, match=lock):
             copy.deepcopy(summary)
+        assert len(service.analyze_requests) - analyzed == analyses, summary
     assert _requests_but_deletes(service) == sent
 
 

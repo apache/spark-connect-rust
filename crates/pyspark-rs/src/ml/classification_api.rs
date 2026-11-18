@@ -96,7 +96,8 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        crate::ml::object::new_py(py, PyLinearSVCSummary::from(summary))
+        let object = crate::ml::object::new_py(py, PyLinearSVCSummary::from(summary))?;
+        crate::ml::object::evaluated(slf.as_any(), object)
     }
 }
 

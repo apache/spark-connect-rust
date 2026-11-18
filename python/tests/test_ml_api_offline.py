@@ -240,8 +240,8 @@ _PYSPARKS_OWN_CODE = {("RFormula", "__str__"), ("OneVsRestModel", "transform")}
 @pytest.mark.parametrize("spec", FULL, ids=lambda spec: spec[1])
 def test_public_members_and_dunders_are_the_native_classes(spec):
     # A public member or dunder of PySpark's class that the native class lacks would run PySpark's
-    # code on a native object, whose `_call_java` reads PySpark's server-side object, which a
-    # native object does not have (`_java_obj` is None): the `__repr__` of a
+    # code on a native object, whose `_call_java` reads PySpark's server-side object, of the
+    # `_java_obj` of a model or a summary, and not the native object's own: the `__repr__` of a
     # GeneralizedLinearRegressionTrainingSummary and the `__str__` of an RFormulaModel did, and
     # raised. Each such member is the native class's own, or PySpark's code of its own members.
     cls = native_class(*spec)

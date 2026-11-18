@@ -500,6 +500,74 @@ def _constructors(native, official, holder):
     return __new__, __init__
 
 
+class _JavaObject:
+    """PySpark's `_java_obj` of an object of a native model or summary that PySpark's constructor
+    did not make (of a fit, a load, a copy, an evaluation, a fetch), at its first read, in the
+    object's attributes, where PySpark's sets it, which its `_call_java` (`try_remote_call`)
+    reads: of a model, the `RemoteModelRef` of its server-side object (None of a model of none);
+    of a summary, the id of its object and the methods of the chain (`"<id>.summary"`). A summary
+    of PySpark's constructor has the `java_obj` of its `__init__` (and one of none PySpark's
+    AttributeError)."""
+
+    def __get__(self, obj, owner=None):
+        if obj is None:
+            return self
+        if hasattr(type(obj), "_native_object_id"):
+            ref = obj._native_object_id()
+            if ref is None:
+                value = None
+            else:
+                from pyspark.ml.util import RemoteModelRef
+
+                value = RemoteModelRef(ref)
+        else:
+            value = obj._native_java_obj()
+            if value is None:
+                raise _no_attribute(obj, "_java_obj")
+        obj.__dict__["_java_obj"] = value
+        return value
+
+
+def _no_attribute(obj, name):
+    """Python's AttributeError of the attribute `name` that `obj` does not have, of its `name`
+    and `obj` (which Python 3.10 and up read), as a missing attribute of PySpark's raises it."""
+    error = AttributeError(f"'{type(obj).__name__}' object has no attribute '{name}'")
+    error.name, error.obj = name, obj
+    return error
+
+
+def _training_summary(obj):
+    """PySpark's `_summary` of a native model, which PySpark's fit sets: at its first read, the
+    model's training summary (`summary`), in the object's attributes, of a model that has one
+    (`hasSummary`); one of none (a load) has none, as PySpark's."""
+    attributes = obj.__dict__
+    if "_summary" in attributes:
+        return attributes["_summary"]
+    if not obj.hasSummary:
+        raise _no_attribute(obj, "_summary")
+    summary = obj.summary
+    # The `summary()` method of a LinearSVCModel, an MLP's and an FM classifier's.
+    summary = summary() if callable(summary) else summary
+    attributes["_summary"] = summary
+    return summary
+
+
+def _set_training_summary(obj, summary):
+    obj.__dict__["_summary"] = summary
+
+
+# A property, as PySpark's params walk (`Params.params`) reads every attribute of `dir()` of the
+# object but its class's properties, and a model of no summary has no `_summary`.
+_TRAINING_SUMMARY = property(_training_summary, _set_training_summary)
+
+
+def _has_training_summary(official):
+    """Whether PySpark's class `official` has a training summary (`HasTrainingSummary`)."""
+    from pyspark.ml.util import HasTrainingSummary
+
+    return issubclass(official, HasTrainingSummary)
+
+
 def _public_class(native, official, parents):
     """The public class of `native`, of PySpark's class `official` and of the public classes
     `parents` of its bases of the module (see `publish`)."""
@@ -516,9 +584,16 @@ def _public_class(native, official, parents):
         "__init__": __init__,
         "__del__": _del,
         # The object of the server of PySpark's Java wrappers, which the native class holds
-        # itself: `JavaWrapper.__del__` releases none.
-        "_java_obj": None,
+        # itself: `JavaWrapper.__del__` releases none. A model and a summary have PySpark's value
+        # of it, which its `_call_java` reads.
+        "_java_obj": (
+            _JavaObject()
+            if hasattr(native, "_native_object_id") or hasattr(native, "_native_java_obj")
+            else None
+        ),
     }
+    if _has_training_summary(official):
+        namespace["_summary"] = _TRAINING_SUMMARY
     try:
         # PySpark's signature, of its constructor (and of its `setParams`, which a class of params
         # takes of PySpark's).

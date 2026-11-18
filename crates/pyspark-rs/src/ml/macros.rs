@@ -55,6 +55,15 @@ macro_rules! params_api_block {
                 $crate::ml::params_api::get_state(slf)
             }
 
+            /// The reduce of `pickle` and `copy.deepcopy`, as of PySpark's object, at every
+            /// protocol (see `params_api::reduce_ex`).
+            fn __reduce_ex__<'py>(
+                slf: &Bound<'py, Self>,
+                protocol: &Bound<'py, PyAny>,
+            ) -> PyResult<Bound<'py, PyAny>> {
+                $crate::ml::params_api::reduce_ex(slf, protocol)
+            }
+
             /// The object of a state of `__getstate__`.
             fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
                 $crate::ml::params_api::set_state(slf, state)
@@ -531,7 +540,15 @@ macro_rules! native_model {
                 let model = class.call0()?.cast_into::<Self>()?;
                 let uid = model.try_borrow()?.core.uid();
                 let object = object(&uid)?;
+                let id = object.id().to_string();
                 model.try_borrow_mut()?.core.bind(object);
+                // PySpark's `_java_obj` of the object, the `RemoteModelRef` of its id, in place of
+                // the None of the constructor, as PySpark's constructor of the object and its
+                // class method set it.
+                if let Ok(attributes) = model.getattr(pyo3::intern!(py, "__dict__")) {
+                    let reference = $crate::ml::object::remote_model_ref(py, &id)?;
+                    attributes.set_item("_java_obj", reference)?;
+                }
                 Ok(model)
             }
 
@@ -742,6 +759,14 @@ macro_rules! native_model {
                 #[getter]
                 fn uid(&self) -> String {
                     self.core.uid()
+                }
+
+                /// The id of the server-side object of the model, None of a model of none, of which
+                /// the public class makes PySpark's `_java_obj` of a fitted model, a
+                /// `RemoteModelRef`, which its `_call_java` reads (see `_native_classes`).
+                #[pyo3(name = "_native_object_id")]
+                fn __native_object_id(&self) -> Option<String> {
+                    self.core.model.ml_ref().map(|object| object.id().to_string())
                 }
 
                 /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
@@ -1034,18 +1059,27 @@ macro_rules! native_summary {
                 Ok(that)
             }
 
-            /// `copy.deepcopy`, as of PySpark's summary: of a summary of a server-side object, the
-            /// TypeError of the lock of the `RemoteModelRef` of its model, which PySpark's copies
-            /// (the `_remote_model_obj` of a fit's summary, the `__source_transformer__` of an
-            /// evaluation's); of a summary of PySpark's constructor, a summary of the class and of
-            /// copies of the attributes, as of the reduce of a plain object (`__reduce_ex__`).
+            /// The `_java_obj` of PySpark's summary of this client's fit or evaluation: the id of
+            /// its object and the methods of its chain (`"<id>.summary"`); None of a summary of
+            /// PySpark's constructor, whose `__init__` sets its own.
+            #[pyo3(name = "_native_java_obj")]
+            fn __native_java_obj(&self) -> Option<String> {
+                match &self.object {
+                    $crate::ml::object::SummaryObject::Target(target) => Some(target.id()),
+                    $crate::ml::object::SummaryObject::Given => None,
+                }
+            }
+
+            /// `copy.deepcopy`, as of PySpark's summary: a summary of the class and of copies of
+            /// the attributes, as of the reduce of a plain object (`__reduce_ex__`), which raises
+            /// the error of the first that does not copy, as PySpark's: the lock of the
+            /// `_remote_model_obj` of the training summary of a fit, after a copy of its
+            /// `_summary_dataset` (of its requests of its schema), and of the model of the summary
+            /// of an evaluation (`__source_transformer__`).
             fn __deepcopy__<'py>(
                 slf: &Bound<'py, Self>,
                 memo: &Bound<'py, PyAny>,
             ) -> PyResult<Bound<'py, PyAny>> {
-                if let $crate::ml::object::SummaryObject::Target(_) = &slf.try_borrow()?.object {
-                    return Err($crate::ml::params_api::lock_error());
-                }
                 let py = slf.py();
                 let reduced = $crate::reduce::plain_reduce(slf.as_any())?;
                 let mut args = vec![slf.clone().into_any(), memo.clone()];
@@ -1054,19 +1088,18 @@ macro_rules! native_summary {
                     .call_method1("_reconstruct", pyo3::types::PyTuple::new(py, args)?)
             }
 
-            /// `pickle`, as of PySpark's summary: of a summary of a server-side object, the error
-            /// of the first of its attributes that PySpark's does not pickle (see
-            /// `object::summary_pickle_error`); of a summary of PySpark's constructor, the reduce
-            /// of a plain object, of the class and its attributes (see `reduce::plain_reduce`).
+            /// `pickle`, as of PySpark's summary: the reduce of a plain object, of the class and of
+            /// its attributes (see `reduce::plain_reduce`), PySpark's of a fit's or an
+            /// evaluation's, whose pickle raises the error of the first that does not pickle, as
+            /// PySpark's: of the training summary of a fit, the session of its `_summary_dataset`
+            /// (or the lock of a model that its plan reads), and else the lock of its
+            /// `_remote_model_obj`; of the summary of an evaluation, the lock of its model
+            /// (`__source_transformer__`).
             fn __reduce_ex__<'py>(
                 slf: &Bound<'py, Self>,
                 protocol: &Bound<'py, PyAny>,
             ) -> PyResult<Bound<'py, pyo3::types::PyTuple>> {
-                if let $crate::ml::object::SummaryObject::Target(target) = &slf.try_borrow()?.object
-                {
-                    let py = slf.py();
-                    return Err($crate::ml::object::summary_pickle_error(py, target, protocol));
-                }
+                let _ = protocol;
                 $crate::reduce::plain_reduce(slf.as_any())
             }
         }; $($rest)*);

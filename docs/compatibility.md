@@ -421,6 +421,19 @@ PySpark class has them:
   `toLocal`) is of the constructor of its class, as PySpark's
   `DecisionTreeClassificationModel(RemoteModelRef(...))`: of a new uid, of its defaults and no set
   params.
+- **`_java_obj` and `_call_java`**: a model of a server-side object (of a fit, a load, a copy, a
+  fetch or a class method such as `StringIndexerModel.from_labels`) has PySpark's `_java_obj`, the
+  `RemoteModelRef` of its object, and a summary the id of its object and methods
+  (`"<id>.summary"` of a training summary, the server's id of the summary of an `evaluate`), so
+  PySpark's own `_call_java(name, *args)` of either sends PySpark's Fetch (`try_remote_call`). A
+  model with a training summary has PySpark's `_summary`, the summary. A training summary has the
+  attributes that PySpark's `try_remote_fit` sets, in its order: `_java_obj`, `_summary_dataset` (a
+  DataFrame of the summary dataset) and `_remote_model_obj` (a `RemoteModelRef` of the model, its
+  own, where PySpark's is the model's), and the summary of an `evaluate` those of PySpark's
+  `evaluate`: `_java_obj` and `__source_transformer__`, the model. The `_java_obj` of a fitted,
+  loaded or copied model and its `_summary` are set in its attributes at their first read, so
+  `vars(model)` lacks them until then, where PySpark's fit and load set them. A Pipeline, a
+  OneVsRest, a validator and their models have a `_java_obj` of None, which PySpark's do not have.
 - **Summaries**: the training summary of a fit (`summary`, `hasSummary`), the same object on every
   call as PySpark's `_summary`, and the summary of `evaluate`; a loaded model has none, and raises
   PySpark's `RuntimeError`. Their DataFrames (`predictions`, `roc`, `cluster`, ...) are of the
@@ -477,25 +490,38 @@ PySpark class has them:
     (an `AttributeError` of a class that its module does not have).
 - **`copy.copy`, `copy.deepcopy` and `pickle`** take an object as PySpark's do:
   - An estimator, a transformer, an evaluator, a Pipeline or a validator, and a model of no
-    server-side object, copy, copy deep and pickle of their uid, params and attributes. A shallow
-    copy shares the values (a Pipeline's stages), and a deep copy and a pickle copy them.
+    server-side object, copy, copy deep and pickle, at every protocol, of their uid, params and
+    attributes. A shallow copy shares the values (a Pipeline's stages), and a deep copy and a
+    pickle copy them.
   - A PipelineModel, a OneVsRestModel and a validator's model are made again of their
     constructor's objects (`stages`, `models`, `bestModel`, ...).
   - A model of a server-side object, and its summary, copy, sharing the object, and are not
-    copied deep nor pickled: PySpark's raise the TypeError of the lock of the model's
-    `RemoteModelRef`. A pickle of a summary raises the error of the first of its attributes that
-    does not pickle, as PySpark's: of the summary of an `evaluate`, the lock of its model
-    (`__source_transformer__`); of a training summary, the lock of the model in the plan of its
-    summary dataset when that reads a transform of a model (the transform of the training dataset
-    by the model, of the KMeans, BisectingKMeans and GaussianMixture summaries, and a training
-    dataset of a stage after a model of a Pipeline), else the AttributeError of the session of the
-    training DataFrame, which PySpark pickles after its plan. The error of a lock is that of its
-    pickle at the protocol (a `PicklingError` below 2). Of cloudpickle, which pickles the local
-    function of the session by value, PySpark's training summary of a training DataFrame raises
-    the TypeError of the lock of its model, which comes next, where the drop-in's raises the
-    AttributeError of the session, as of `pickle`. PySpark's `copy.deepcopy` of a training summary
-    requests the schema of its summary dataset before its error (its DataFrame's `__getattr__`
-    reads the columns), where the drop-in's raises at once.
+    copied deep nor pickled, nor is a DataFrame that keeps such a model: PySpark's raise the error
+    of the first object that does not pickle, of the pickle of the lock of the model's
+    `RemoteModelRef` at the protocol (a `PicklingError` below 2, the TypeError
+    `cannot pickle '_thread.lock' object` from 2), or of the session of a DataFrame, which PySpark
+    pickles after its plan (the AttributeError of its local function). A transform of a model, a
+    DataFrame that reads one, and a DataFrame of a method of a model or of the summary of an
+    `evaluate` keep the model in their plans, before their sessions; the summary of an `evaluate`
+    keeps its model (`__source_transformer__`). A training summary pickles its summary dataset
+    first, which keeps the model when it is a transform of a model (the transform of the training
+    dataset by the model, of the KMeans, BisectingKMeans and GaussianMixture summaries, and a
+    training dataset of a stage after a model of a Pipeline), and else raises the AttributeError
+    of the session of the training DataFrame, and so does a DataFrame of a method of the summary
+    (`summary.predictions`). Cloudpickle pickles the session, of its function by value, and so
+    raises the TypeError of the lock of the model of the summary (`_remote_model_obj`) then.
+    `copy.deepcopy` raises the TypeError of the lock, after PySpark's requests of the schemas of
+    the DataFrames that it copies on the way (the lookup of `__deepcopy__` of PySpark's DataFrame
+    reads its columns).
+  - The DataFrames of the models of PySpark's own `pyspark.ml` classes, which build PySpark's
+    plans over the drop-in's DataFrames (`pyspark.ml.regression.LinearRegression`, where the
+    drop-in's own classes are those of `pyspark.ml.connect`), pickle as DataFrames that keep no
+    model, of the AttributeError of their sessions, and cloudpickle and `copy.deepcopy` copy them: a
+    transform of such a model, and a DataFrame of a method of it or of its summaries, where
+    PySpark's raise the error of the lock of the model (and a `pickle` of a DataFrame of a method of
+    a training summary the AttributeError of the session too). So a pickle of the training summary
+    of such a clustering model, of such a transform, raises the AttributeError of the session,
+    where PySpark's raises the error of the lock.
   - A summary of PySpark's constructor (`LinearRegressionSummary("<id>.summary")`), of no
     server-side object, copies, copies deep and pickles, at every protocol, as PySpark's plain
     object: of its class and of its attributes (`_java_obj`).

@@ -211,12 +211,26 @@ def test_the_copies_of_a_pipeline_and_a_validator_fit_the_subclass(frame):
     assert type(model.bestModel).__name__ == "LogisticRegressionModel"
 
 
+def _pickle_error(value, protocol):
+    # The type and the message of the error of the pickle of value at protocol.
+    import pickle
+
+    with pytest.raises(Exception) as error:
+        pickle.dumps(value, protocol)
+    return type(error.value), str(error.value)
+
+
 def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
     # A model of a server-side object copies (sharing the object), and is not copied deep nor
-    # pickled, as PySpark's of the lock of its `RemoteModelRef`; so is its summary, which PySpark's
-    # does not pickle of its DataFrames' session.
+    # pickled, at any protocol, as PySpark's of the lock of its `RemoteModelRef`, nor are the
+    # DataFrames that keep it (its transform, a DataFrame of the summary of its evaluation); so is
+    # its summary, which PySpark's does not pickle of the session of its DataFrame, nor a DataFrame
+    # of it, and which cloudpickle does not pickle of the lock of its model.
     import copy
     import pickle
+    import threading
+
+    from pyspark import cloudpickle
 
     LR = _cls("classification", "LogisticRegression")
     Pipeline = _cls("pipeline", "Pipeline")
@@ -229,12 +243,18 @@ def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
     for call in (lambda: copy.deepcopy(model), lambda: pickle.dumps(model)):
         with pytest.raises(TypeError, match=r"^cannot pickle '_thread.lock' object$"):
             call()
+    keeping = (model, model.transform(frame), model.evaluate(frame).predictions)
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        expected = _pickle_error(threading.Lock(), protocol)
+        assert [_pickle_error(obj, protocol) for obj in keeping] == [expected] * 3, protocol
     summary = model.summary
     assert copy.copy(summary).totalIterations == summary.totalIterations
-    with pytest.raises(TypeError, match=r"^cannot pickle '_thread.lock' object$"):
-        copy.deepcopy(summary)
-    with pytest.raises(AttributeError, match="Can't pickle local object"):
-        pickle.dumps(summary)
+    for call in (lambda: copy.deepcopy(summary), lambda: cloudpickle.dumps(summary)):
+        with pytest.raises(TypeError, match=r"^cannot pickle '_thread.lock' object$"):
+            call()
+    for of_summary in (summary, summary.predictions):
+        with pytest.raises(AttributeError, match="Can't pickle local object"):
+            pickle.dumps(of_summary)
     # The pickle of a summary of an evaluation, which keeps its model, or of a training summary of
     # the transform of the model (a KMeans's), raises the TypeError of the model's lock first.
     KMeans = _cls("clustering", "KMeans")
@@ -247,6 +267,39 @@ def test_copy_deepcopy_and_pickle_of_a_model_and_its_summary(frame):
     for copied in (copy.copy(fitted), copy.deepcopy(fitted), pickle.loads(pickle.dumps(fitted))):
         assert len(copied.stages) == 1 and copied.uid == fitted.uid
         assert copied.transform(frame).columns[-1] == "b"
+
+
+def test_the_models_and_summaries_have_pysparks_java_obj_of_their_call_java(frame):
+    # As PySpark's: the `_java_obj` of a model of a fit, a load, a copy, of a tree of a forest and
+    # of a class method is the RemoteModelRef of its object, and that of a summary the id of its
+    # object and methods, which PySpark's `_call_java` reads.
+    import tempfile
+
+    from pyspark.ml.util import RemoteModelRef
+
+    LR = _cls("classification", "LogisticRegression")
+    LRModel = _cls("classification", "LogisticRegressionModel")
+    RF = _cls("classification", "RandomForestClassifier")
+    Indexer = _cls("feature", "StringIndexerModel")
+    model = LR(maxIter=2).fit(frame)
+    path = tempfile.mkdtemp(prefix="ml-java-obj-") + "/model"
+    model.save(path)
+    tree = RF(numTrees=2, maxDepth=2, seed=1).fit(frame).trees[0]
+    for obj, method, value in [
+        (model, "numFeatures", 2),
+        (LRModel.load(path), "numFeatures", 2),
+        (model.copy(), "numFeatures", 2),
+        (tree, "numNodes", tree.numNodes),
+        (Indexer.from_labels(["a", "b"], inputCol="x"), "labelsArray", [["a", "b"]]),
+    ]:
+        assert type(obj._java_obj) is RemoteModelRef, obj
+        assert obj._call_java(method) == value, obj
+    summary = model.summary
+    assert model._summary is summary and summary._java_obj == f"{model._java_obj}.summary"
+    assert summary._call_java("totalIterations") == summary.totalIterations
+    evaluated = model.evaluate(frame)
+    assert evaluated.__source_transformer__ is model
+    assert evaluated._call_java("accuracy") == evaluated.accuracy
 
 
 def test_a_summary_of_no_server_side_object_raises_pysparks_errors(session):

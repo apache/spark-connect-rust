@@ -265,11 +265,12 @@ native_model! {
         let target = slf.try_borrow()?.core.target()?;
         let output = object::fetch_py(py, &target, "evaluate", std::slice::from_ref(dataset))?;
         let summary = spark_connect::ml::evaluated_summary(&target, output).to_pyerr()?;
-        if fetch_num_classes(py, &target)? <= 2 {
-            Ok(crate::ml::object::new_py(py, PyBinaryRandomForestClassificationSummary::from(summary))?.into_any())
+        let object = if fetch_num_classes(py, &target)? <= 2 {
+            crate::ml::object::new_py(py, PyBinaryRandomForestClassificationSummary::from(summary))?.into_any()
         } else {
-            Ok(crate::ml::object::new_py(py, PyRandomForestClassificationSummary::from(summary))?.into_any())
-        }
+            crate::ml::object::new_py(py, PyRandomForestClassificationSummary::from(summary))?.into_any()
+        };
+        crate::ml::object::evaluated(slf.as_any(), object)
     }
 }
 
