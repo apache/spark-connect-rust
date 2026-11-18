@@ -358,7 +358,7 @@ def main():
     ck("session.session_id", lambda: spark.session_id)
     ck("session.newSession", lambda: spark.newSession())
     ck("session.cloneSession", lambda: spark.cloneSession())
-    ck("session.emptyDataFrame", lambda: spark.emptyDataFrame().count())
+    ck("session.emptyDataFrame", lambda: spark.emptyDataFrame("id long").count())
     ck("session.range_full", lambda: spark.range(0, 10, 2, 2).count())
     ck("session.addTag", lambda: spark.addTag("e2e-tag"))
     ck("session.getTags", lambda: spark.getTags())

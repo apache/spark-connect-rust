@@ -2190,6 +2190,21 @@ def test_create_dataframe_from_empty_arrow_table(session):
         assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
 
 
+def test_empty_dataframe_of_a_schema_as_pyspark(session):
+    # As PySpark's emptyDataFrame(schema), createDataFrame([], schema): a DataFrame of no rows of
+    # the schema, of a type or a DDL string, which the server parses. None has no schema to infer.
+    schema = StructType([StructField("a", LongType()), StructField("b", StringType())])
+    for given in (schema, "a long, b string"):
+        df = session.emptyDataFrame(given)
+        assert df.schema == schema
+        assert df.collect() == [] and df.count() == 0
+    with pytest.raises(PySparkValueError) as error:
+        session.emptyDataFrame(None)
+    assert error.value.getCondition() == "CANNOT_INFER_EMPTY_SCHEMA"
+    with pytest.raises(TypeError):
+        session.emptyDataFrame()
+
+
 _Pair = namedtuple("_Pair", ["x", "y"])
 
 
