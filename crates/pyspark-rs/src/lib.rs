@@ -20,7 +20,6 @@ mod connect_bridge;
 mod dataframe;
 mod datasource;
 mod errors;
-mod eval_type;
 mod functions;
 mod gc;
 mod group;
@@ -140,6 +139,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
             .setattr("__qualname__", format!("MergeIntoWriter.{name}"))?;
     }
     m.add_class::<PyColumn>()?;
+    column::install_getattr(m)?;
     row::register(m)?;
     m.add_class::<PyGroupedData>()?;
     m.add_class::<PyCoGroupedData>()?;
@@ -149,7 +149,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;
     m.add_class::<PyCatalog>()?;
-    m.add_class::<eval_type::PyPythonEvalType>()?;
     m.add_class::<PyRuntimeConf>()?;
     m.add_class::<PyDataFrameReader>()?;
     m.add_class::<PyStatFunctions>()?;

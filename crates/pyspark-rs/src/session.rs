@@ -13,7 +13,6 @@ use crate::dataframe::PyDataFrame;
 use crate::datasource::PyDataSourceRegistration;
 use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
-use crate::resource::PyResourceProfile;
 use crate::streaming::{PyDataStreamReader, PyStreamingQueryManager};
 
 /// Python wrapper for a Spark session builder.
@@ -755,6 +754,54 @@ fn registered_session_object(
         })
 }
 
+/// The session of the constructor `cls(client)` of an object of a session, as the `__new__` of
+/// a native class that takes the arguments of the `__init__` of a subclass too, as the
+/// `object.__new__` of PySpark's plain classes does: the first argument that is a session, of
+/// the keyword `name`, the positional arguments and the other keyword arguments, so that the
+/// `__init__` of a subclass names and orders its arguments as it likes. Without a session, the
+/// error of the keyword `name` or else of the first positional argument, which is not a session,
+/// or without either the TypeError of a call without the argument, which CPython names after the
+/// `__init__` of the class (`DataFrameReader.__init__() missing 1 required positional argument:
+/// 'client'`).
+pub(crate) fn constructor_session<'py>(
+    cls: &Bound<'py, pyo3::types::PyType>,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+    name: &str,
+) -> PyResult<Bound<'py, PySparkSession>> {
+    let py = cls.py();
+    let keyword = match kwargs {
+        Some(kwargs) => kwargs.get_item(name)?,
+        None => None,
+    };
+    let mut given: Vec<Bound<'py, PyAny>> = keyword.iter().cloned().collect();
+    given.extend(args.iter());
+    if let Some(kwargs) = kwargs {
+        for (key, value) in kwargs.iter() {
+            if !key.eq(name)? {
+                given.push(value);
+            }
+        }
+    }
+    if let Some(session) = given
+        .into_iter()
+        .find(|value| value.is_instance_of::<PySparkSession>())
+    {
+        return Ok(session.cast_into::<PySparkSession>()?);
+    }
+    match keyword.or_else(|| args.get_item(0).ok()) {
+        Some(first) => Ok(first.cast_into::<PySparkSession>()?),
+        None => {
+            let init = cls
+                .getattr(pyo3::intern!(py, "__init__"))?
+                .getattr(pyo3::intern!(py, "__qualname__"))?;
+            Err(pyo3::exceptions::PyTypeError::new_err(format!(
+                "{init}() missing 1 required positional argument: '{name}'"
+            )))
+        }
+    }
+}
+
 /// The Python object of `session`, one per session as PySpark has them: its live object, or
 /// else a new one, which the registry holds weakly. So the DataFrames, the streams and the
 /// clients of a session give back the session's object, as PySpark's do.
@@ -1127,9 +1174,15 @@ pub struct PySparkSession {
     pub(crate) session: SparkSession,
     /// The `StreamingQueryManager` of `spark.streams`, made at its first access.
     streams: std::sync::OnceLock<Py<PyStreamingQueryManager>>,
+    /// The `Catalog` of `spark.catalog`, made at its first access and the same object at each
+    /// one after it, as PySpark Connect's `functools.cached_property` keeps it.
+    catalog: std::sync::OnceLock<Py<PyCatalog>>,
     /// Whether `stop()` releases the session on the server, as PySpark's
     /// `release_session_on_close`, which tests set to False to skip the release.
     release_session_on_close: std::sync::atomic::AtomicBool,
+    /// Set once the value is written, as `__traverse__` reads `streams` and `catalog`, which are
+    /// not valid while the session object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 struct PandasArrowColumn {
@@ -1268,7 +1321,9 @@ impl PySparkSession {
         PySparkSession {
             session,
             streams: std::sync::OnceLock::new(),
+            catalog: std::sync::OnceLock::new(),
             release_session_on_close: std::sync::atomic::AtomicBool::new(true),
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 
@@ -2962,11 +3017,17 @@ impl PySparkSession {
         self.create_from_local(py, data, spec, checks, options)
     }
 
-    /// Get the catalog API (`spark.catalog`).
+    /// Get the catalog API (`spark.catalog`): the same object at each access, as PySpark
+    /// Connect's `functools.cached_property`, so that its attributes stick and
+    /// `mock.patch.object(spark.catalog, ...)` patches the catalog that the session gives.
     #[getter]
     #[pyo3(name = "catalog")]
-    fn catalog(&self) -> PyCatalog {
-        PyCatalog::new(self.session.catalog())
+    fn catalog(&self, py: Python<'_>) -> PyResult<Py<PyCatalog>> {
+        if let Some(catalog) = self.catalog.get() {
+            return Ok(catalog.clone_ref(py));
+        }
+        let catalog = Py::new(py, PyCatalog::new(self.session.catalog()))?;
+        Ok(self.catalog.get_or_init(|| catalog).clone_ref(py))
     }
 
     /// Runtime configuration (`spark.conf`).
@@ -3094,6 +3155,29 @@ impl PySparkSession {
             PyStreamingQueryManager::new(self.session.streams(), self.session.clone()),
         )?;
         Ok(self.streams.get_or_init(|| manager).clone_ref(py))
+    }
+
+    /// The `streams` and the `catalog` that the session keeps, Python objects that Python's
+    /// garbage collector sees, as PySpark's `__dict__` holds them: so a reference cycle through
+    /// one of them, such as an attribute of the catalog that refers to the session, is freed.
+    /// Nothing of a session object that is being created, whose cells are not written yet.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        if let Some(manager) = self.streams.get() {
+            visit.call(manager)?;
+        }
+        if let Some(catalog) = self.catalog.get() {
+            visit.call(catalog)?;
+        }
+        Ok(())
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable.
+    fn __clear__(&mut self) {
+        self.streams.take();
+        self.catalog.take();
     }
 
     /// Stop this Spark session. Best-effort and idempotent, mirroring pyspark: a failure
@@ -3306,11 +3390,6 @@ impl PySparkSession {
                 deterministic,
             )
         })
-    }
-
-    #[pyo3(name = "sessionId")]
-    fn session_id_camel(&self) -> String {
-        self.session.session_id().to_string()
     }
 
     /// Add the extension of the bytes of a `google.protobuf.Any`, `extension`, to the user context
@@ -3821,18 +3900,6 @@ impl PySparkSession {
             py,
             &self.session,
         )?))
-    }
-
-    /// Build and register a resource profile with the server.
-    ///
-    /// Returns the server-assigned profile ID that can be used with `DataFrame.withResources()`.
-    #[pyo3(name = "buildResourceProfile")]
-    fn build_resource_profile(&self, py: Python<'_>, profile: &PyResourceProfile) -> PyResult<i32> {
-        interruptible(py, &self.session, || {
-            self.session
-                .build_resource_profile(&profile.inner)
-                .map_err(Box::new)
-        })
     }
 
     #[getter]

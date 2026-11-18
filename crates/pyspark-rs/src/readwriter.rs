@@ -22,9 +22,13 @@ use crate::options::{
 /// and return it, and a reader can be used again after a read. The core reader is a
 /// consuming builder, so the setters replace the wrapped value in place and return
 /// the same Python object, and the terminal reads build their DataFrame from a clone.
+/// As PySpark's plain class, it constructs of a session, `DataFrameReader(spark)`, and is
+/// subclassed: the setters return the object, of its subclass, and its copies and pickles are
+/// of its class.
 #[pyclass(
     name = "DataFrameReader",
     module = "pyspark.sql.connect.readwriter",
+    subclass,
     weakref,
     dict
 )]
@@ -674,14 +678,38 @@ pub(crate) fn changes_of_schema_error(py: Python<'_>) -> PyErr {
 
 #[pymethods]
 impl PyDataFrameReader {
+    /// `DataFrameReader(client)`, as PySpark Connect's, of the session `client`: the reader that
+    /// `spark.read` gives. As the `object.__new__` of PySpark's plain class, it takes the
+    /// arguments of the `__init__` of a subclass too, of which the session is the first that is
+    /// a session (see `session::constructor_session`); `__init__` checks them.
+    #[new]
+    #[classmethod]
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(client)")]
+    fn py_new(
+        cls: &Bound<'_, pyo3::types::PyType>,
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Self> {
+        let session = crate::session::constructor_session(cls, args, kwargs, "client")?;
+        Ok(PyDataFrameReader::new(session.borrow().session.read()))
+    }
+
+    /// As PySpark's `__init__(client)`, which makes the reader of the session anew: of no
+    /// format, schema or options.
+    fn __init__(slf: &Bound<'_, Self>, client: PyRef<'_, crate::session::PySparkSession>) {
+        let reader = PyDataFrameReader::new(client.session.read());
+        *slf.borrow_mut() = reader;
+    }
+
     /// The shallow copy of a reader, as PySpark's `copy.copy`: the copy shares the options of
     /// this reader, as its `_options` dict is shared, so an option that either one sets or
-    /// unsets is seen by both, and has its own format, which is kept as it is.
-    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
+    /// unsets is seen by both, and has its own format, which is kept as it is. It is of the
+    /// class of this reader, as the copy of PySpark's of a subclass is.
+    fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
         let py = slf.py();
         let this = slf.borrow();
-        let copy = Py::new(
-            py,
+        let copy = crate::reduce::new_of_class(
+            &slf.get_type(),
             PyDataFrameReader {
                 inner: this.inner.clone(),
                 options: std::sync::Arc::clone(&this.options),
@@ -694,12 +722,13 @@ impl PyDataFrameReader {
                 gc_ready: crate::gc::GcReady::new(),
             },
         )?;
-        crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
+        crate::reduce::copy_instance_dict(slf.as_any(), copy.as_any())?;
         Ok(copy)
     }
 
     /// The reduce of a reader, as PySpark's pickle of its session and its state, which
-    /// `_of_state` gives back, with the instance attributes of the reader.
+    /// `_of_state` gives back, of the class of the reader (named in the reduce when it is a
+    /// subclass), with the instance attributes of the reader.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use crate::reduce::{optional_object, state_reduce, str_dict};
 
@@ -722,23 +751,27 @@ impl PyDataFrameReader {
                 unencodable,
             ],
         )?;
+        let args = crate::reduce::with_subclass(slf.as_any(), py.get_type::<Self>(), args)?;
         let reduced = state_reduce(py, "reader_reduce", args)?;
         crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
     }
 
-    /// A reader of its state, as `__reduce__` gives it: of the session `session`, the format,
-    /// the schema, the options, the format that is kept (`unsent`), and the schema and the options
-    /// that UTF-8 cannot encode (`unencodable`, as [`unencodable_state`] gives them).
-    #[staticmethod]
-    fn _of_state(
-        py: Python<'_>,
+    /// A reader of its state, as `__reduce__` gives it, of the class `cls`: of the session
+    /// `session`, the format, the schema, the options, the format that is kept (`unsent`), and
+    /// the schema and the options that UTF-8 cannot encode (`unencodable`, as
+    /// [`unencodable_state`] gives them).
+    #[classmethod]
+    #[allow(clippy::too_many_arguments)]
+    fn _of_state<'py>(
+        cls: &Bound<'py, pyo3::types::PyType>,
         session: Py<crate::session::PySparkSession>,
         format: Option<String>,
         schema: String,
         options: HashMap<String, String>,
         unsent: Option<Py<PyAny>>,
         unencodable: Py<PyAny>,
-    ) -> PyResult<PyDataFrameReader> {
+    ) -> PyResult<Bound<'py, PyDataFrameReader>> {
+        let py = cls.py();
         let mut reader = session.borrow(py).session.read();
         if let Some(format) = format {
             reader = reader.format(&format);
@@ -761,7 +794,7 @@ impl PyDataFrameReader {
             let state = result.put_option(result.state(), &key, value.as_ref());
             result.set_state(state);
         }
-        Ok(result)
+        crate::reduce::new_of_class(cls, result)
     }
 
     /// Set the schema, if any, and the options of `options` that are not None, through its own

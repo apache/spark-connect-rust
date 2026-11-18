@@ -833,6 +833,10 @@ impl StatFunctions {
                     LiteralExpression::Null(_) => "NoneType",
                     LiteralExpression::Decimal { .. } => "Decimal",
                     LiteralExpression::Binary(_) => "bytes",
+                    // The name of the class of a bytearray, of its `str()`: `bytearray(b'...')`.
+                    LiteralExpression::ByteArray { rendered, .. } => {
+                        rendered.split('(').next().unwrap_or("bytearray")
+                    }
                     LiteralExpression::Date(_) => "date",
                     LiteralExpression::Timestamp(_) | LiteralExpression::TimestampNtz(_) => {
                         "datetime"
@@ -1698,6 +1702,11 @@ mod tests {
                 "Decimal",
             ),
             (L::Binary(vec![1]), "bytes"),
+            // A bytearray is named by its class, of its `str()`, a subclass's too.
+            (
+                L::bytearray(vec![1], "MyByteArray(b'\\x01')"),
+                "MyByteArray",
+            ),
             (L::Date(0), "date"),
             (L::Timestamp(0), "datetime"),
             (L::TimestampNtz(0), "datetime"),

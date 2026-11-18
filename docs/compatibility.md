@@ -174,6 +174,11 @@ or `INTERVAL MONTH`, which the server cannot narrow the Arrow interval to). Down
 matches on these enums must handle the new variant. The Python client still raises
 `NOT_IMPLEMENTED` when it collects a year-month interval, as PySpark does.
 
+`LiteralExpression` adds a hidden `ByteArray { value, rendered }` variant, the literal of a Python
+`bytearray`, which the Python client makes: it is sent as a `Binary` literal of `value`, and its
+`render` is `rendered`, `bytearray(b'...')`, as PySpark renders a bytearray. It is not a stable API;
+downstream exhaustive matches on `LiteralExpression` must handle it, or have a wildcard arm.
+
 `DataFrame::repartition_by_range` and `repartition_by_range_opt` return a `Result`.
 As PySpark's `repartitionByRange`, a partition count that is not positive is
 `VALUE_NOT_POSITIVE` and an empty column list `CANNOT_BE_EMPTY`. Before, the server
@@ -1493,12 +1498,22 @@ escaped in the `__repr__` of the Column (`a\ud800b`), where PySpark's shows it a
 case (`\UD800`) in the type of a cast, which the `__repr__` upper-cases, and escaped twice in a list
 literal of `Column.otherwise` or `getItem`, which shows the `repr` of its strs.
 
-An `Observation` or a `SparkSession.Hook`, of the class or of a subclass, that PySpark pickled at
-protocol 0 or 1 raises a `TypeError` when the drop-in unpickles it, as CPython's
-`copyreg._reconstructor` cannot create the drop-in's, a class with a native base; protocols 2 and
-up, pickle's default, load in both clients, and PySpark loads the drop-in's at every protocol. A
-hook of a subclass with `__slots__` pickles at protocols 0 and 1 too, where PySpark's raises the
-`TypeError` of a class that defines `__slots__` without `__getstate__`.
+The literal of a `bytearray` is of the bytes that it holds when the Column is made, which its
+`__repr__` shows as PySpark's (`Column<'bytearray(b'xy')'>`), so a change to the bytearray after
+`lit` is in neither the `__repr__` nor the plan, where PySpark's literal keeps the bytearray and
+shows and sends what it holds at the time.
+
+An `Observation` or a `SparkSession.Hook`, of the class or of a subclass (which a module defines
+in both clients), that PySpark pickled at protocol 0 or 1 raises a `TypeError` when the drop-in
+unpickles it, as CPython's `copyreg._reconstructor` cannot create the drop-in's, a class with a
+native base; protocols 2 and up, pickle's default, load in both clients, of the class or the
+subclass, and PySpark loads the drop-in's at every protocol. A hook of a subclass with `__slots__`
+pickles at protocols 0 and 1 too, where PySpark's raises the `TypeError` of a class that defines
+`__slots__` without `__getstate__`. A `StorageLevel` pickles at the protocols 2 and up only: at 0
+and 1 the drop-in raises `TypeError: cannot pickle 'StorageLevel' object`, and a `StorageLevel`
+that PySpark pickled at 0 or 1 raises `TypeError: object.__new__(StorageLevel) is not safe, use
+StorageLevel.__new__()` when the drop-in unpickles it; at the protocols 2 and up both clients load
+each other's.
 
 So it is for the data types. PySpark's are plain classes, which pickle as their class and their
 `__dict__`: at the protocols 2 and up the drop-in makes its type of the class, without arguments,
@@ -1516,11 +1531,17 @@ attribute that a user set, a `hasPrecisionInfo` that is not true, and the `names
 The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
 `DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr, JSON, `==` and hash show, also in the
 struct, array or map that holds it. A drop-in type holds only the values that its constructor
-makes, so the assignment of another, such as a str of `scale` or a field that an interval does not
-have, raises the constructor's error, where PySpark keeps any value, of which its repr or JSON may
-fail later. A set `srid` of a spatial type is of its JSON too, where PySpark's JSON stays that of
-the CRS of its constructor. The parameters are not entries of the `__dict__` of a type, so
-`vars(t)` is empty, where PySpark's has them.
+makes, so the assignment of another raises the constructor's error, where PySpark keeps it, of
+which its repr or JSON may fail later, as a field that an interval does not have
+(`DayTimeIntervalType().startField = 9`). The parameters that are types, the `elementType` of an
+`ArrayType`, the `keyType` and the `valueType` of a `MapType` and the `dataType` of a
+`StructField`, take a DataType or a DDL string, which they parse, as the constructors take them:
+`ArrayType(LongType()).elementType = "string"` makes it an `ArrayType(StringType(), True)`, a DDL
+string that does not parse raises a `ValueError` and another value, None included, a `TypeError`,
+where PySpark keeps the value as it is given, which its repr shows (`ArrayType(string, True)`) and
+its `json()` fails of. A set `srid` of a spatial type is of its JSON too, where PySpark's JSON
+stays that of the CRS of its constructor. The parameters are not entries of the `__dict__` of a
+type, so `vars(t)` is empty, where PySpark's has them.
 
 The abstract classes of the types, `DataType`, `AtomicType`, `NumericType`, `IntegralType`,
 `FractionalType`, `DatetimeType`, `AnyTimeType`, `SpatialType` and `AnsiIntervalType`, make types
@@ -1565,6 +1586,13 @@ another object of the class, as the note of its `DataTypeSingleton` says.
 
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
 pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
+
+The `__repr__` of a Column of a subquery names its plan by its plan ID,
+`SubqueryExpression(plan=<plan 2>, type=scalar)`, where PySpark's shows the repr of its plan
+object, `<pyspark.sql.connect.plan.Project object at 0x...>`.
+
+`DataFrame.inputFiles()` returns a `list` of its paths, where PySpark returns protobuf's repeated
+field of the response, a `RepeatedScalarContainer`, which compares equal to the list.
 
 The keys of `getMessageParameters()` of a server error are in the server's order. PySpark's
 follow the protobuf map of the error details that it fetches: with protobuf's pure-Python
@@ -1837,6 +1865,40 @@ the MRO of such an object is its native class and `object`. The concrete DataFra
 not subclasses of the public `pyspark.sql.DataFrame` and `pyspark.sql.Column`: `isinstance` holds
 by registration, so the MRO of a DataFrame is its native class and `object`, and
 `pyspark.sql.Column` names the concrete class.
+
+PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
+the DataFrame, `Observation`, `DataFrameReader` and `DataStreamReader`, which construct of their
+PySpark arguments (`DataFrameReader(spark)`), also a subclass of an `__init__` of its own, and whose
+setters, copies and pickles are of the subclass; `SparkSession.Hook`, `StorageLevel` and
+`PythonEvalType`; and the `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window`, of
+static methods, which a subclass has too, but of no instances: `Window()`, also of a subclass,
+raises `TypeError: cannot create '...' instances`, where PySpark's makes an object of no state. A
+reader is made of a session, which one of the arguments of its constructor must be, where PySpark's
+`__init__` keeps any `client`: without a session the TypeError is of the missing `client`, or of the
+argument that is not a session, also where PySpark's subclass raises the error of the other
+arguments of its `__init__`. So a reader that PySpark pickled, which unpickles of its class without
+arguments, raises that TypeError in the drop-in, where the drop-in's pickle of a reader loads in
+PySpark, of its class, as PySpark's own do: where the session of its ID is active. The other native
+classes cannot be subclassed (`TypeError: type 'Catalog' is not an acceptable base type`), as their
+objects are of the state of the Rust core. `SparkSession(connection=...)`, `Catalog(spark)`,
+`DataSourceRegistration(spark)` and the data types (`StringType()`, `DecimalType(10, 2)`,
+`StructType([...])`, ...) construct as PySpark's; the others do not construct either
+(`TypeError: cannot create '...' instances`), as PySpark's constructors take the Python objects of
+its client, which the drop-in does not have:
+- `Column` takes an `Expression` of `pyspark.sql.connect.expressions`; the drop-in's expressions
+  are the Rust core's.
+- `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter` and `MergeIntoWriter` take the
+  `LogicalPlan` of a DataFrame, which the drop-in's `_plan` stands in for.
+- `GroupedData` and `PandasCogroupedOps` take a DataFrame and the expressions of its grouping, of
+  the plan of the Rust core.
+- `DataFrameNaFunctions` and `DataFrameStatFunctions` take a DataFrame, of whose native plan they
+  are.
+- `WindowSpec` takes the expressions of its partitioning and ordering and a `WindowFrame`, and
+  `TableArg` a `SubqueryExpression`, of the plan of the Rust core.
+- `RuntimeConf` takes a `SparkConnectClient`, whose transport is native.
+- `StreamingQueryManager` and `StreamingQuery` take a session and the IDs of a query, of the
+  listener bus and the queries of the Rust core.
+- `TableValuedFunction` takes a session, of whose native core it is.
 
 A `copy.copy` or `copy.deepcopy` of a DataFrame requests its schema as PySpark's does, one request
 for the copy, and one more for the DataFrame in a deep copy when it has no schema yet, so a stopped

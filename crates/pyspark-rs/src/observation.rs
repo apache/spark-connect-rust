@@ -11,10 +11,13 @@ use crate::column::{raise_pyspark, PyColumn};
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
-/// Python wrapper for an Observation of metrics, as PySpark Connect's `Observation`.
+/// Python wrapper for an Observation of metrics, as PySpark Connect's `Observation`, a plain
+/// class, which is subclassed: an Observation of a subclass is constructed of the arguments of
+/// its `__init__`, and its copies and pickles are of its class.
 #[pyclass(
     name = "Observation",
     module = "pyspark.sql.connect.observation",
+    subclass,
     weakref,
     dict
 )]
@@ -67,14 +70,31 @@ impl Restored {
 
 #[pymethods]
 impl PyObservation {
-    /// `Observation(name=None)`, as PySpark's: the name is a non-empty string, and an
-    /// observation without one is of a random UUID once it is used.
+    /// An unnamed Observation, as the `object.__new__` of PySpark's plain class: of any
+    /// arguments, which `__init__` takes, so that a subclass of another `__init__` is built as it
+    /// is in PySpark, and an unpickled one is made without them. The class shows the signature of
+    /// `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
+    #[pyo3(
+        signature = (*_args, **_kwargs),
+        text_signature = "(name=None)"
+    )]
+    fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
+        PyObservation {
+            inner: Observation::unnamed(),
+            restored: Restored::default(),
+            unencodable_name: None,
+        }
+    }
+
+    /// `Observation(name=None)`, as PySpark's `__init__`: the name is a non-empty string, and an
+    /// observation without one is of a random UUID once it is used. As PySpark's, it makes the
+    /// observation anew, unused.
     #[pyo3(signature = (name=None))]
-    fn new(py: Python<'_>, name: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let inner = match name {
-            None => Observation::unnamed(),
-            Some(name) if !name.is_instance_of::<PyString>() => {
+    fn __init__(slf: &Bound<'_, Self>, name: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+        let py = slf.py();
+        if let Some(name) = name {
+            if !name.is_instance_of::<PyString>() {
                 let type_name = name.get_type().name()?.to_string();
                 return Err(raise_pyspark(
                     py,
@@ -87,28 +107,21 @@ impl PyObservation {
                     ],
                 ));
             }
-            Some(name) => {
-                if name.eq("")? {
-                    return Err(raise_pyspark(
-                        py,
-                        "PySparkValueError",
-                        "VALUE_NOT_NON_EMPTY_STR",
-                        &[("arg_name", "name"), ("arg_value", "")],
-                    ));
-                }
-                let (inner, unencodable_name) = named(Some(name))?;
-                return Ok(PyObservation {
-                    inner,
-                    restored: Restored::default(),
-                    unencodable_name,
-                });
+            if name.eq("")? {
+                return Err(raise_pyspark(
+                    py,
+                    "PySparkValueError",
+                    "VALUE_NOT_NON_EMPTY_STR",
+                    &[("arg_name", "name"), ("arg_value", "")],
+                ));
             }
-        };
-        Ok(PyObservation {
-            inner,
-            restored: Restored::default(),
-            unencodable_name: None,
-        })
+        }
+        let (inner, unencodable_name) = named(name)?;
+        let mut this = slf.borrow_mut();
+        this.inner = inner;
+        this.restored = Restored::default();
+        this.unencodable_name = unencodable_name;
+        Ok(())
     }
 
     /// The name of the observation, as PySpark's `_name`: None for an unnamed observation
@@ -155,9 +168,9 @@ impl PyObservation {
         observe(slf.py(), &df, slf, exprs)
     }
 
-    /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the name, the
-    /// state and the attributes of this one, which shares the metrics of a used one, as the copy
-    /// of PySpark's shares its result dict (see `Observation::shallow_copy`).
+    /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the class, the
+    /// name, the state and the attributes of this one, which shares the metrics of a used one, as
+    /// the copy of PySpark's shares its result dict (see `Observation::shallow_copy`).
     fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyObservation>> {
         let py = slf.py();
         let this = slf.borrow();
@@ -169,14 +182,14 @@ impl PyObservation {
                 .as_ref()
                 .map(|name| name.clone_ref(py)),
         };
-        let copy = Bound::new(py, copy)?;
+        let copy = crate::reduce::new_of_class(&slf.get_type(), copy)?;
         copy_attributes(slf, &copy, None)?;
         Ok(copy)
     }
 
-    /// `copy.deepcopy`, as of PySpark's Observation: an Observation of the name and the state
-    /// of this one as they are now, which the actions of this one do not set, with deep copies
-    /// of its attributes.
+    /// `copy.deepcopy`, as of PySpark's Observation: an Observation of the class, the name and
+    /// the state of this one as they are now, which the actions of this one do not set, with deep
+    /// copies of its attributes.
     fn __deepcopy__<'py>(
         slf: &Bound<'py, Self>,
         memo: &Bound<'py, PyAny>,
@@ -188,8 +201,8 @@ impl PyObservation {
             .unencodable_name
             .as_ref()
             .map(|name| name.clone_ref(py));
-        let copy = Bound::new(
-            py,
+        let copy = crate::reduce::new_of_class(
+            &slf.get_type(),
             PyObservation {
                 inner,
                 restored: Restored::default(),

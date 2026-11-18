@@ -1306,6 +1306,15 @@ pub enum LiteralExpression {
     },
     String(String),
     Binary(Vec<u8>),
+    /// A binary literal of a Python `bytearray`, or of a subclass of it, which is sent as
+    /// [`LiteralExpression::Binary`] of `value` and renders as `rendered`, the `str()` of the
+    /// value, as PySpark's `LiteralExpression.__repr__` renders the value that it keeps:
+    /// `bytearray(b'xy')`. Not a stable API (see [`LiteralExpression::bytearray`]).
+    #[doc(hidden)]
+    ByteArray {
+        value: Vec<u8>,
+        rendered: String,
+    },
     Date(i32),
     Timestamp(i64),
     TimestampNtz(i64),
@@ -1352,7 +1361,7 @@ impl LiteralExpression {
             LiteralExpression::String(v) => {
                 proto::expression::literal::LiteralType::String(v.clone())
             }
-            LiteralExpression::Binary(v) => {
+            LiteralExpression::Binary(v) | LiteralExpression::ByteArray { value: v, .. } => {
                 proto::expression::literal::LiteralType::Binary(v.clone().into())
             }
             LiteralExpression::Date(v) => proto::expression::literal::LiteralType::Date(*v),
@@ -1426,6 +1435,7 @@ impl LiteralExpression {
             LiteralExpression::Decimal { value, .. } => value.clone(),
             LiteralExpression::String(v) => v.clone(),
             LiteralExpression::Binary(v) => python_bytes_repr(v),
+            LiteralExpression::ByteArray { rendered, .. } => rendered.clone(),
             LiteralExpression::Date(v) => date_repr(*v),
             LiteralExpression::Timestamp(v) => timestamp_repr(*v, true),
             LiteralExpression::TimestampNtz(v) => timestamp_repr(*v, false),
@@ -1484,6 +1494,17 @@ impl LiteralExpression {
     /// Construct a binary literal (byte array).
     pub fn binary(value: Vec<u8>) -> Self {
         LiteralExpression::Binary(value)
+    }
+
+    /// The binary literal of a Python `bytearray` of the bytes `value`, which renders as
+    /// `rendered`, the `str()` of the bytearray (see [`LiteralExpression::ByteArray`]). Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn bytearray(value: Vec<u8>, rendered: impl Into<String>) -> Self {
+        LiteralExpression::ByteArray {
+            value,
+            rendered: rendered.into(),
+        }
     }
 }
 
@@ -2756,6 +2777,26 @@ mod tests {
         let lit = LiteralExpression::Binary(vec![1, 2, 3, b'a', b'\'']);
         // As Python's repr of bytes.
         assert_eq!(lit.render(), "b\"\\x01\\x02\\x03a'\"");
+    }
+
+    #[test]
+    fn test_literal_render_bytearray() {
+        // A literal of a Python bytearray renders as its `str()`, as PySpark's
+        // `LiteralExpression.__repr__`, and is sent as the binary literal of its bytes.
+        let lit = LiteralExpression::bytearray(vec![b'a', b'\''], "bytearray(b\"a\\'\")");
+        assert_eq!(lit.render(), "bytearray(b\"a\\'\")");
+        assert_eq!(
+            Expression::literal(LiteralExpression::Array {
+                element_type: Box::new(DataType::Binary),
+                elements: vec![lit.clone()],
+            })
+            .render(),
+            "[bytearray(b\"a\\'\")]"
+        );
+        assert_eq!(
+            lit.to_proto(),
+            LiteralExpression::Binary(vec![b'a', b'\'']).to_proto()
+        );
     }
 
     #[test]

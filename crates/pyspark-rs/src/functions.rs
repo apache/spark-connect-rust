@@ -278,9 +278,10 @@ fn exact_primitive_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<Expression
     if obj.is_exact_instance_of::<pyo3::types::PyBytes>()
         || obj.is_exact_instance_of::<pyo3::types::PyByteArray>()
     {
-        return Ok(Some(Expression::literal(LiteralExpression::Binary(
+        return Ok(Some(Expression::literal(binary_literal(
+            obj,
             obj.extract()?,
-        ))));
+        )?)));
     }
     Ok(None)
 }
@@ -677,7 +678,7 @@ fn literal_as(
         }
         // As PySpark's `to_plan`, which sends `bytes(value)`.
         DataType::Binary => match crate::infer::bytes_of(obj)? {
-            Some(bytes) => LiteralExpression::Binary(bytes),
+            Some(bytes) => binary_literal(obj, bytes)?,
             None => return Err(assertion()),
         },
         DataType::Date => {
@@ -787,6 +788,19 @@ fn scalar_literal_of(
     }
 }
 
+/// The binary literal of `bytes`, the bytes of the bytes or the bytearray `obj`: of a bytearray,
+/// or of a subclass of it, one that renders as its `str()`, `bytearray(b'xy')`, as PySpark's
+/// `LiteralExpression` keeps and renders the value, where a bytes renders as `b'xy'`.
+fn binary_literal(obj: &Bound<'_, PyAny>, bytes: Vec<u8>) -> PyResult<LiteralExpression> {
+    if obj.is_instance_of::<pyo3::types::PyByteArray>() {
+        return Ok(LiteralExpression::bytearray(
+            bytes,
+            obj.str()?.to_cow()?.into_owned(),
+        ));
+    }
+    Ok(LiteralExpression::Binary(bytes))
+}
+
 /// The data type of a literal, as the type of PySpark's `LiteralExpression` of it.
 fn literal_data_type(literal: &LiteralExpression) -> spark_connect::types::DataType {
     use spark_connect::types::DataType;
@@ -806,7 +820,7 @@ fn literal_data_type(literal: &LiteralExpression) -> spark_connect::types::DataT
             scale: *scale,
         },
         LiteralExpression::String(_) => crate::infer::string_type(),
-        LiteralExpression::Binary(_) => DataType::Binary,
+        LiteralExpression::Binary(_) | LiteralExpression::ByteArray { .. } => DataType::Binary,
         LiteralExpression::Date(_) => DataType::Date,
         LiteralExpression::Timestamp(_) => DataType::Timestamp,
         LiteralExpression::TimestampNtz(_) => DataType::TimestampNtz,
@@ -989,7 +1003,7 @@ fn scalar_literal(obj: &Bound<'_, PyAny>) -> PyResult<Option<LiteralExpression>>
     // bytes / bytearray -> Binary. Checked explicitly so it is not mistaken for anything else.
     // PySpark's `to_plan` sends `bytes(value)`, which honors the `__bytes__` of a subclass.
     if let Some(bytes) = crate::infer::bytes_of(obj)? {
-        return Ok(Some(LiteralExpression::Binary(bytes)));
+        return Ok(Some(binary_literal(obj, bytes)?));
     }
 
     Ok(None)

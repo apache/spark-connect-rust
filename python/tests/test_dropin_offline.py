@@ -3957,6 +3957,17 @@ def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
         "ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
 
 
+def test_the_session_and_its_stream_manager_have_pysparks_public_names(mock_connect):
+    # As PySpark Connect's: the session has `session_id`, and no `sessionId` or
+    # `buildResourceProfile` (a ResourceProfile's `id` creates its profile through
+    # `client._create_profile`, as PySpark's), and the stream manager no `streamListenerEvents`.
+    spark, _ = mock_connect
+    for owner, name in [(spark, "sessionId"), (spark, "buildResourceProfile"),
+                        (spark.streams, "streamListenerEvents")]:
+        assert not hasattr(owner, name), name
+    assert isinstance(spark.session_id, str)
+
+
 def test_session_constructor_and_its_flags_as_pyspark_connect():
     import threading
 
@@ -4527,6 +4538,29 @@ def test_binary_literals_of_subclasses_are_sent_as_the_bytes_of_pyspark(mock_con
     spark.sql("SELECT ?", args=[ByteArray(b"orig")])
     request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
     assert request.plan.command.sql_command.input.sql.pos_arguments[0].literal.binary == b"other"
+
+
+def test_bytearray_literals_render_as_their_values_as_pyspark():
+    # As PySpark's LiteralExpression.__repr__, the f"{value}" of the value that it keeps: a
+    # bytearray renders as `bytearray(b'...')`, of its class (that of a subclass) and of the
+    # escapes of bytearray's repr, in a literal, in the values of the functions and the Column
+    # methods and in a list, where bytes render as `b'...'`; either sends its bytes.
+    from pyspark.sql import functions as F
+
+    class MyBA(bytearray):
+        pass
+
+    assert repr(F.lit(bytearray(b"xy"))) == "Column<'bytearray(b'xy')'>"
+    assert repr(F.lit(b"xy")) == "Column<'b'xy''>"
+    assert repr(F.lit(MyBA(b"xy"))) == "Column<'MyBA(b'xy')'>"
+    assert repr(F.lit(bytearray(b"a'b\x00"))) == "Column<'bytearray(b\"a\\'b\\x00\")'>"
+    assert repr(F.col("a").isin(bytearray(b"x"), b"y")) == (
+        "Column<'in(a, bytearray(b'x'), b'y')'>")
+    assert repr(F.when(F.col("a") > 1, bytearray(b"x")).otherwise(b"y")) == (
+        "Column<'CASE WHEN >(a, 1) THEN bytearray(b'x') ELSE b'y' END'>")
+    assert repr(F.lit([bytearray(b"x"), b"y"])) == "Column<'array(bytearray(b'x'), b'y')'>"
+    assert repr(F.col("m").getItem(bytearray(b"k"))) == "Column<'m['bytearray(b'k')']'>"
+    assert F.lit(bytearray(b"xy"))._expr.to_plan(None).literal.binary == b"xy"
 
 
 def test_time_values_are_sent_as_pyspark(mock_connect):
@@ -5234,6 +5268,36 @@ def test_column_attributes_are_fields_and_slices_are_substrings_as_pyspark():
         assert error.value.getMessageParameters() == parameters
     with pytest.raises(PySparkTypeError, match="NOT_SAME_TYPE"):
         c[:3]
+
+
+def test_column_getattr_is_a_function_of_the_class_as_pyspark():
+    # As PySpark Connect's Column.__getattr__, a function of the class, which a caller calls of a
+    # Column: the field of the name, also of a name that the Column has as an attribute, as
+    # `self[item]`, and the errors of `_jc` and of a dunder name. The class takes its other
+    # attributes as PySpark's does, of object's __getattribute__, before __getattr__.
+    import inspect
+    import pickle
+    import types
+
+    from pyspark.errors import PySparkAttributeError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.column import Column
+
+    c = F.col("a")
+    getattr_ = vars(Column)["__getattr__"]
+    assert isinstance(getattr_, types.FunctionType)
+    assert (getattr_.__name__, getattr_.__qualname__, getattr_.__module__) == (
+        "__getattr__", "Column.__getattr__", "pyspark.sql.connect.column")
+    assert list(inspect.signature(getattr_).parameters) == ["self", "item"]
+    assert "__getattribute__" not in vars(Column)
+    assert repr(Column.__getattr__(c, "b")) == repr(c["b"]) == repr(c.b)
+    assert repr(Column.__getattr__(c, "alias")) == repr(c["alias"])
+    assert c.alias("x") is not None and repr(c.__getattr__("b")) == repr(c["b"])
+    for name, condition in (("_jc", "JVM_ATTRIBUTE_NOT_SUPPORTED"), ("__x__", "ATTRIBUTE_NOT_SUPPORTED")):
+        with pytest.raises(PySparkAttributeError) as error:
+            Column.__getattr__(c, name)
+        assert error.value.getCondition() == condition
+    assert pickle.loads(pickle.dumps(Column.__getattr__)) is Column.__getattr__
 
 
 def _serve_one_raw_http2_call(answer):
@@ -6092,8 +6156,11 @@ def test_udtf_analyze_result_subclass_preserves_custom_state():
         def eval(self, argument):
             yield (self.buffer,)
 
+    from pyspark.sql.udtf import _pickled_handler
+
     function = udtf(Handler, useArrow=False)
-    handler = CloudPickleSerializer().loads(function.command)
+    # The handler class as it is sent, pickled, as PySpark Connect's PythonUDTF.command.
+    handler = CloudPickleSerializer().loads(_pickled_handler(function.func))
     analysis = handler.analyze(None)
     assert isinstance(analysis, AnalyzeResult)
     assert analysis.schema == schema and analysis.withSinglePartition is True
@@ -6365,6 +6432,17 @@ def test_python_eval_type_constants():
     assert PythonEvalType.SQL_TABLE_UDF == 300
     assert PythonEvalType.SQL_ARROW_TABLE_UDF == 301
     assert PythonEvalType.__module__ == "pyspark.util"  # reference path (SPARK-59117)
+    # As PySpark's plain class of pyspark.util, of pyspark.sql.udf too: it constructs, subclasses
+    # and pickles, and its constants are the annotated class attributes of PySpark's.
+    from pyspark.sql.udf import PythonEvalType as UdfPythonEvalType
+
+    assert UdfPythonEvalType is PythonEvalType
+    assert type(PythonEvalType()) is PythonEvalType
+    assert type("Sub", (PythonEvalType,), {}).SQL_ARROW_UDTF == 302
+    assert pickle.loads(pickle.dumps(PythonEvalType)) is PythonEvalType
+    assert PythonEvalType.__annotations__["NON_UDF"] == "NonUDFType"
+    assert {name: value for name, value in vars(PythonEvalType).items() if name.isupper()} == {
+        name: getattr(PythonEvalType, name) for name in PythonEvalType.__annotations__}
 
 
 def test_reexport_paths():
@@ -6501,12 +6579,18 @@ def test_udtf_construction():
 
     assert isinstance(Echo, UserDefinedTableFunction)
     assert Echo._name == "Echo"
+    # The attributes of PySpark Connect's UDTF, without the pickled handler or the Python version
+    # of the client, which it does not keep.
+    assert sorted(vars(Echo)) == ["_name", "deterministic", "evalType", "func", "returnType"]
+    assert not hasattr(Echo, "command") and not hasattr(Echo, "python_ver")
 
 
 def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
     # As PySpark's UDTFRegistration.register: a register_table_function command of the
     # CommonInlineUserDefinedTableFunction of the UDTF, under the name and without
     # arguments, which returns the UDTF as it is; for a UDTF of udtf() or arrow_udtf() only.
+    import sys
+
     from pyspark.errors import PySparkTypeError
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql import functions as F
@@ -6531,7 +6615,10 @@ def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
     # DataType.unparsed=24, whose data_type_string=1.
     return_type = parse_message(python_udtf[1][0])
     assert parse_message(return_type[24][0])[1] == [b"a int"]
-    assert python_udtf[2] == [300] and python_udtf[4] == [udtf.python_ver.encode()]
+    # The Python version of the client, as PySpark's get_python_ver, which a UDTF does not keep.
+    python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    assert python_udtf[2] == [300] and python_udtf[4] == [python_ver.encode()]
+    assert not hasattr(udtf, "python_ver") and not hasattr(udtf, "command")
     assert CloudPickleSerializer().loads(python_udtf[3][0]).__name__ == "Echo"
 
     calls = service.execute_calls
@@ -6635,6 +6722,7 @@ def test_udtf_return_type_connect_validation_and_command():
     subprocess.run([sys.executable, "-c", """
 from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
 from pyspark.sql.connect.types import UnparsedDataType
+from pyspark.sql.udtf import _pickled_handler
 from pyspark.serializers import CloudPickleSerializer
 
 # No server listens: with useArrow, udtf() does not read the Arrow config of the session.
@@ -6650,7 +6738,7 @@ for return_type in ["value BIGINT", "STRUCT<value: BIGINT>",
         fn = (F.udtf(returnType=return_type, useArrow=False)(Echo) if decorate else
               F.udtf(Echo, returnType=return_type, useArrow=False))
         assert isinstance(fn(F.lit(1)), DataFrame)
-        handler = CloudPickleSerializer().loads(fn.command)
+        handler = CloudPickleSerializer().loads(_pickled_handler(fn.func))
         assert isinstance(handler, type)
         assert list(handler().eval(7)) == [(7,)]
         # As PySpark Connect's, a DDL string is an UnparsedDataType.
@@ -6741,7 +6829,7 @@ with mock_connect_session() as (spark, service):
             assert isinstance(command_handler, type)
             assert command_handler.__name__ == handler.__name__
             assert list(command_handler().eval(7)) == [(7,)]
-            assert udtf[4] == [fn.python_ver.encode()]
+            assert udtf[4] == [f"{sys.version_info.major}.{sys.version_info.minor}".encode()]
 """, str(Path(__file__).resolve().parent)], check=True)
 
 
@@ -11822,7 +11910,9 @@ def test_freed_instances_release_their_dict_as_pyspark(mock_connect):
         assert type(copied) is _ScaledPointUDT and vars(copied) == {"scale": 2.0}
 
     for make in (lambda: F.col("a"), lambda: spark.range(1), lambda: df.groupBy("id"),
-                 lambda: spark.conf, lambda: spark.catalog, lambda: spark.read, lambda: df.na,
+                 # A Catalog of its own: `spark.catalog`, which the session keeps, is not freed.
+                 lambda: spark.conf, lambda: type(spark.catalog)(spark), lambda: spark.read,
+                 lambda: df.na,
                  lambda: df.write, lambda: Window.partitionBy("id"), lambda: Observation("o"),
                  lambda: T.StructField("a", T.LongType()), T.DataType,
                  lambda: T.ArrayType(T.LongType()), lambda: _ScaledPointUDT(2.0)):
@@ -14316,6 +14406,50 @@ def test_an_observation_copies_as_the_plain_object_of_pyspark(mock_connect):
     assert both[0] is both[1] and both[0] is not observation and both[0].get == {"c": 4}
 
 
+from pyspark.sql.connect.observation import Observation as _ConnectObservation  # noqa: E402
+
+
+class _ObservationOfTag(_ConnectObservation):
+    def __init__(self, *args, tag=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tag = tag
+
+
+def test_an_observation_of_a_subclass_constructs_copies_and_pickles_as_pyspark(mock_connect):
+    # As PySpark Connect's Observation, a plain class: a subclass constructs of the arguments of
+    # its __init__, which checks the name as PySpark's does, and its copies and pickles, at every
+    # protocol, are of the subclass, with its name, its state and its attributes; a re-run of
+    # __init__ makes it anew.
+    import copy
+
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    observation = _ObservationOfTag("o", tag="t")
+    assert type(observation) is _ObservationOfTag and observation._name == "o"
+    assert observation.tag == "t" and _ObservationOfTag()._name is None
+    with pytest.raises(PySparkTypeError, match="NOT_EXPECTED_TYPE"):
+        _ObservationOfTag(1)
+    with pytest.raises(PySparkValueError, match="VALUE_NOT_NON_EMPTY_STR"):
+        _ObservationOfTag("")
+    with pytest.raises(TypeError, match="unexpected keyword argument 'other'"):
+        _ConnectObservation("o", other=1)
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    batch, observed = _count_batch_and_observed_metrics(service, df)
+    service.execute_payload = batch + observed("o", varint_field(7, 3), "c")
+    assert df.count() == 3
+    copies = [copy.copy(observation), copy.deepcopy(observation)]
+    copies += [pickle.loads(pickle.dumps(observation, protocol))
+               for protocol in range(pickle.HIGHEST_PROTOCOL + 1)]
+    for copied in copies:
+        assert type(copied) is _ObservationOfTag and copied is not observation
+        assert copied._name == "o" and copied.tag == "t" and copied.get == {"c": 3}
+    observation.__init__("again")
+    assert observation._name == "again" and observation.tag is None
+    spark.range(1).observe(observation, F.count(F.lit(1)).alias("c"))
+
+
 def test_an_observation_pickles_as_the_plain_object_of_pyspark(mock_connect):
     # As pickle of PySpark's Observation, a plain object of pyspark.sql.connect.observation, of
     # its __dict__: _name, _result and _error. So a Python worker of the server, whose PySpark
@@ -15188,6 +15322,20 @@ def test_merge_into_writer_nested_class_refs():
     assert isinstance(MergeIntoWriter.WhenMatched, type)
     assert isinstance(MergeIntoWriter.WhenNotMatched, type)
     assert isinstance(MergeIntoWriter.WhenNotMatchedBySource, type)
+
+
+def test_the_clauses_of_a_merge_name_their_writer_as_pyspark(mock_connect):
+    # As PySpark Connect's WhenMatched, WhenNotMatched and WhenNotMatchedBySource, whose `writer`
+    # is the MergeIntoWriter of the clause, also of a copy of the clause.
+    import copy
+
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    merge = spark.range(1).mergeInto("t", F.lit(True))
+    for clause in (merge.whenMatched(), merge.whenNotMatched(), merge.whenNotMatchedBySource()):
+        assert clause.writer is merge, type(clause)
+        assert copy.copy(clause).writer is merge
 
 
 def test_session_hook_is_present_and_passthrough():
@@ -20335,6 +20483,15 @@ def test_dataframes_take_their_arguments_and_attributes_as_pyspark(mock_connect,
 
 
 
+def test_a_column_named_as_an_internal_method_is_an_attribute_as_pyspark(mock_connect):
+    # As PySpark's DataFrame, which has no `column_names`, a method of the drop-in's Rust code
+    # only: `df.column_names` is the Column of that name, of `__getattr__`.
+    spark, _ = mock_connect
+    df = spark.range(1).withColumnRenamed("id", "column_names")
+    assert not hasattr(type(df), "column_names")
+    assert repr(df.column_names) == "Column<'column_names'>"
+
+
 def test_schema_cache_to_uses_supplied_struct_schema(mock_connect):
     spark, service = mock_connect
     df = spark.range(10)
@@ -24643,6 +24800,14 @@ def test_execution_info_and_operation_id():
     assert err.operation_id is None
     err._operation_id = "op-2"
     assert err.operation_id == "op-2"
+    # Of SparkConnectException only, as PySpark's: another error keeps the `_operation_id` that
+    # the client stamps on any error of an execution, without the property.
+    from pyspark.errors import PySparkException, PySparkTypeError
+
+    type_error = PySparkTypeError(errorClass="CANNOT_BE_NONE", messageParameters={"arg_name": "x"})
+    for error in (AnalysisException("boom"), PySparkException("boom"), type_error):
+        error._operation_id = "op-3"
+        assert not hasattr(error, "operation_id"), type(error)
 
 
 def test_create_auto_cdc_flow_scd2_track_history():
@@ -26717,14 +26882,14 @@ def test_sigint_during_add_listener_with_the_acknowledgement_held_raises_at_once
 
 
 def test_sigint_during_the_next_listener_event_raises_keyboard_interrupt_at_once(mock_connect):
-    # The iterator of streamListenerEvents, an extra of this client, waits for the next event of
-    # the server, which a signal ends at once, as it ends the other waits for the server.
+    # The iterator of _stream_listener_events, a private method of this client, waits for the next
+    # event of the server, which a signal ends at once, as it ends the other waits for the server.
     import signal
     import threading
 
     spark, service = mock_connect
     service.listener_bus_enabled = True
-    events = spark.streams.streamListenerEvents()
+    events = spark.streams._stream_listener_events()
     # The stream ends after 10 s, so that a wait that the signal does not end fails, not hangs.
     end = threading.Timer(10, service.end_listener_stream, (spark.session_id,))
     timer = threading.Timer(0.5, os.kill, (os.getpid(), signal.SIGINT))
@@ -29012,6 +29177,48 @@ def _sent_catalog(request, field):
     return parse_message(_sent_relation(request, 200, execute=True)[field][0])
 
 
+def test_the_catalog_of_a_session_is_one_object_as_pyspark(mock_connect):
+    # As PySpark Connect's `catalog`, a functools.cached_property: the same object at each access,
+    # so its attributes stick and mock.patch.object patches the catalog that the session gives,
+    # where conf, read, readStream, udf, udtf, tvf and dataSource are new objects at each access, as
+    # PySpark's properties are, and streams is kept too. A catalog that is constructed, copied or
+    # unpickled is another one, of the session, with the attributes of the one it copies.
+    import copy
+    import gc
+    import weakref
+    from unittest import mock
+
+    import cloudpickle
+    from pyspark.sql.connect.catalog import Catalog
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, service = mock_connect
+    catalog = spark.catalog
+    assert catalog is spark.catalog and spark.streams is spark.streams
+    for name in ("conf", "read", "readStream", "udf", "udtf", "tvf", "dataSource"):
+        assert getattr(spark, name) is not getattr(spark, name), name
+    catalog.tag = [1]
+    assert spark.catalog.tag == [1]
+    with mock.patch.object(spark.catalog, "currentDatabase", return_value="patched"):
+        assert spark.catalog.currentDatabase() == "patched"
+    assert "currentDatabase" not in vars(spark.catalog)
+    made = Catalog(spark)
+    assert type(made) is Catalog and made is not catalog
+    for other in (copy.copy(catalog), copy.deepcopy(catalog),
+                  pickle.loads(cloudpickle.dumps(catalog))):
+        assert type(other) is Catalog and other is not catalog and other.tag == [1]
+    assert spark.catalog is catalog and catalog.tag == [1]
+    # As the __dict__ of PySpark's session, which holds the catalog, the garbage collector sees
+    # the catalog that a session keeps: a cycle through an attribute of it is freed.
+    session = ConnectSession(connection=service.remote)
+    session.release_session_on_close = False
+    session.catalog.session = session
+    freed = weakref.ref(session)
+    del session
+    gc.collect()
+    assert freed() is None
+
+
 def test_catalog_creates_tables_eagerly_as_pyspark(mock_connect):
     import warnings
 
@@ -30526,6 +30733,103 @@ def test_reader_and_stream_writer_attributes_survive_copy_and_pickle(mock_connec
         assert copy.copy(obj).foo == [1, 2]
         assert copy.deepcopy(obj).foo == [1, 2]
         assert cloudpickle.loads(cloudpickle.dumps(obj)).foo == [1, 2]
+
+
+from pyspark.sql.connect.readwriter import DataFrameReader as _ConnectReader  # noqa: E402
+from pyspark.sql.connect.streaming.readwriter import (  # noqa: E402
+    DataStreamReader as _ConnectStreamReader,
+)
+
+
+class _OptionsReader(_ConnectReader):
+    def __init__(self, client, *, extra=None):
+        super().__init__(client)
+        self.extra = extra
+
+
+class _OptionsStreamReader(_ConnectStreamReader):
+    def __init__(self, client, *, extra=None):
+        super().__init__(client)
+        self.extra = extra
+
+
+class _PathReader(_ConnectReader):
+    def __init__(self, path, client):
+        super().__init__(client)
+        self.path = path
+
+
+@pytest.mark.parametrize("subclass", [_OptionsReader, _OptionsStreamReader])
+def test_readers_construct_of_a_session_and_subclass_as_pyspark(mock_connect, subclass):
+    # As PySpark Connect's DataFrameReader(client) and DataStreamReader(client), plain classes:
+    # a reader constructs of a session, as `spark.read` gives it, and a subclass of the arguments
+    # of its __init__; the setters return the reader, of its subclass, and its copies, its deep
+    # copy and its unpickle (cloudpickle, of the active session) are of the subclass, with its
+    # state and its attributes. A re-run of __init__ makes the reader anew. A call without the
+    # client raises CPython's TypeError, named after the __init__ of the class.
+    import copy
+    import inspect
+
+    import cloudpickle
+
+    spark, _ = mock_connect
+    base = subclass.__mro__[1]
+    assert type(base(spark)) is base and type(base(client=spark)) is base
+    assert list(inspect.signature(base).parameters) == ["client"]
+    for cls, kwargs in ((base, {}), (subclass, {}), (subclass, {"extra": 1})):
+        with pytest.raises(TypeError) as excinfo:
+            cls(**kwargs)
+        assert str(excinfo.value) == (
+            f"{cls.__qualname__}.__init__() missing 1 required positional argument: 'client'")
+    reader = subclass(spark, extra=1).format("json").option("a", "1")
+    assert type(reader) is subclass and reader.extra == 1
+    for copied in (copy.copy(reader), copy.deepcopy(reader),
+                   pickle.loads(cloudpickle.dumps(reader))):
+        assert type(copied) is subclass and copied is not reader and copied.extra == 1
+        assert copied._format == "json" and copied._options == {"a": "1"}
+    assert type(pickle.loads(cloudpickle.dumps(base(spark)))) is base
+    reader.__init__(spark)
+    assert reader._format is None and reader._options == {} and reader.extra is None
+
+
+def test_a_reader_subclass_pickle_is_of_its_class_on_a_worker_as_pyspark(monkeypatch):
+    # The pickle of a reader of a subclass names the subclass, which a worker without the
+    # extension, official PySpark's, resolves to a subclass of PySpark's reader: the reader that
+    # it builds of the state is of that subclass, as PySpark's pickle of it would be.
+    import sys
+
+    import pyspark
+    from pyspark.sql.connect._state_reduce import reader_reduce
+
+    class PlainReader:
+        def __init__(self, *state):
+            self.state = state
+
+    class SubReader(PlainReader):
+        pass
+
+    monkeypatch.setattr("pyspark.sql.connect._state_reduce._worker_reader", PlainReader)
+    creator, args = reader_reduce("session", "json", "", {"a": "1"}, None, None, SubReader)
+    monkeypatch.delattr(pyspark, "_pyspark")
+    monkeypatch.setitem(sys.modules, "pyspark._pyspark", None)
+    with pytest.raises(ImportError):
+        from pyspark import _pyspark  # noqa: F401
+    reader = creator(*args)
+    assert type(reader) is SubReader
+    assert reader.state == ("session", "json", "", {"a": "1"}, None, None)
+
+
+def test_a_reader_subclass_takes_its_session_where_its_init_has_it_as_pyspark(mock_connect):
+    # As PySpark's subclass of DataFrameReader, whose __init__ names and orders its arguments as
+    # it likes: the session is any one of them, positional or keyword, and its copies are of it.
+    import copy
+
+    spark, _ = mock_connect
+    for reader in (_PathReader("p", spark), _PathReader("p", client=spark),
+                   _PathReader(client=spark, path="p")):
+        assert type(reader) is _PathReader and reader.path == "p"
+        copied = copy.copy(reader.format("csv"))
+        assert type(copied) is _PathReader and copied.path == "p" and copied._format == "csv"
 
 
 def test_a_builder_remote_that_is_not_a_str_fails_create_as_pyspark(mock_connect):

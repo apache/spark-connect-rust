@@ -200,6 +200,12 @@ def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Any]) -> None:
         )
 
 
+def _python_ver() -> str:
+    """The Python version of the client, ``major.minor``, as PySpark's ``get_python_ver``, which
+    the plan of a UDTF carries."""
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
 def _pickled_handler(func: Type) -> bytes:
     """The command of a UDTF of the handler class ``func``, as PySpark Connect's
     ``PythonUDTF.to_plan`` pickles it each time it builds a plan that holds the UDTF, and its
@@ -258,13 +264,6 @@ class UserDefinedTableFunction:
             func.__name__ if hasattr(func, "__name__") else "udtf"
         )
         self.deterministic = deterministic
-        self.python_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
-
-    @property
-    def command(self) -> bytes:
-        """The pickled handler class, as PySpark Connect's ``PythonUDTF.command``, which
-        ``register`` sends (see ``_pickled_handler``)."""
-        return _pickled_handler(self.func)
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         from pyspark import _pyspark
@@ -282,7 +281,7 @@ class UserDefinedTableFunction:
             self.returnType,
             self.evalType,
             functools.partial(_pickled_handler, self.func),
-            self.python_ver,
+            _python_ver(),
             *cols,
             deterministic=self.deterministic,
             named_args=named,
@@ -414,7 +413,14 @@ class UDTFRegistration:
                 },
             )
 
+        # As PySpark Connect's `register_udtf`, which pickles the handler class and takes the
+        # Python version of the client, which a UDTF does not keep.
         self.sparkSession._registerPythonUdtf(
-            name, f.returnType, f.evalType, f.command, f.python_ver, f.deterministic
+            name,
+            f.returnType,
+            f.evalType,
+            _pickled_handler(f.func),
+            _python_ver(),
+            f.deterministic,
         )
         return f
