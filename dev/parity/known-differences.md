@@ -127,6 +127,12 @@ difference is intentional or tracked for a fix.
   connection. The relation or the model may still be on the server for a moment after the drop,
   and the deletion reports nothing to the progress handlers of the session, which PySpark's
   `execute_command` calls, of its done notification too, on the thread of the finalizer.
+  This client deletes a model in the session that holds it (the session of its fit or load),
+  where PySpark's `del_remote_cache` deletes it through the active session
+  (`SparkSession.getActiveSession()`): a model of a session that is not the active one (of
+  `SparkSession.builder.remote(...).create()`) is deleted from the ML cache of the active
+  session, which does not hold it, and stays in its own session's until that session ends, and a
+  model dropped on a thread of no active session is not deleted.
 - **`schema` and `columns` of a join on a tuple** (intentional). As in PySpark, the plan fails with
   the `AttributeError` of `to_plan` of the tuple when it is built, and `schema`, a property, then
   gives a Column of the `__getattr__` of the DataFrame: of `schema`, where PySpark's is of
@@ -244,8 +250,12 @@ difference is intentional or tracked for a fix.
   four upstream-disabled GC tests skipped on each client. This includes
   `test_pipeline` and `test_identity_pipeline`. An earlier run with independent
   default Python hash seeds failed native Random Forest cross-validation on a
-  one-class training fold; that failure is retained, and its cause is not proven
-  by the fixed-hash passes. API inspection records the public-base and
+  one-class training fold. Its cause is the default seed of a validator,
+  `hash(type(self).__name__)` of PySpark's `HasSeed`, which Python's hash
+  randomization makes differ per process: a run of another seed draws other folds. Of
+  the same seeds, both clients split alike and fail alike (12 seeds of a CrossValidator
+  and a TrainValidationSplit of a RandomForestClassifier gave the same metrics, and the
+  same error of a one-class fold, on both). API inspection records the public-base and
   concrete-class differences; inherited signature and annotation differences remain.
   These results do not establish complete DataFrame or ML parity.
 

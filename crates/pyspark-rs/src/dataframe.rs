@@ -979,9 +979,10 @@ impl PyDataFrame {
 
     /// The reduce of a pickle at `protocol`, as PySpark Connect's DataFrame pickles its plan before
     /// its session, of the objects of `pyspark.ml` that the plan keeps (see
-    /// `spark_connect::ml::pickle_block`): of a plan that keeps a model first (a transform of a
-    /// model, a DataFrame of a method of a model or of the summary of an evaluation), the error of
-    /// the lock of the model's `RemoteModelRef` at the protocol, before the session; of a
+    /// `ml::object::pickle_block`, of the plans of its subqueries and of the Python plans of
+    /// PySpark's own classes of `pyspark.ml` too): of a plan that keeps a model first (a transform
+    /// of a model, a DataFrame of a method of a model or of the summary of an evaluation), the
+    /// error of the lock of the model's `RemoteModelRef` at the protocol, before the session; of a
     /// DataFrame of a method of the training summary of a fit, the reduce of `__reduce__`, whose
     /// local function a plain pickle refuses first, as PySpark's refuses the session of the
     /// summary's `_summary_dataset`, and then a lock, as the model of the summary
@@ -992,7 +993,8 @@ impl PyDataFrame {
         protocol: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
-        let block = spark_connect::ml::pickle_block(&slf.borrow().dataframe);
+        let dataframe = slf.borrow().dataframe.clone();
+        let block = crate::ml::object::pickle_block(py, &dataframe)?;
         let reduced = match block {
             Some(spark_connect::ml::MlPickleBlock::ModelLock) => {
                 return Err(crate::ml::object::lock_pickle_error(py, protocol));
@@ -1056,7 +1058,7 @@ impl PyDataFrame {
         // (see `__reduce_ex__`): the TypeError of the lock of a model, after a copy of the
         // `_summary_dataset` of the training summary of a DataFrame of a method of the summary, of
         // its requests of its schema.
-        if let Some(block) = spark_connect::ml::pickle_block(&self.dataframe) {
+        if let Some(block) = crate::ml::object::pickle_block(py, &self.dataframe)? {
             if let spark_connect::ml::MlPickleBlock::SummarySession(dataset) = block {
                 let dataset = Py::new(py, PyDataFrame::new(dataset))?;
                 py.import("copy")?

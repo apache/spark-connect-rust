@@ -603,19 +603,28 @@ fn core_of<T: Native + PyClass>(slf: &Bound<'_, T>, subclass_params: bool) -> Py
     Ok(core)
 }
 
-/// The dataset of `method`, a Spark DataFrame. Another object raises the `AttributeError` of
-/// `sparkSession`, the attribute that `pyspark.ml` reads of the dataset first (`try_remote_fit`,
-/// `try_remote_transform_relation` and `try_remote_evaluate` of `pyspark.ml.util`), so a pandas
-/// DataFrame raises pandas' own AttributeError too, and an object that has it raises a TypeError.
+/// The dataset of `method` (`fit`, `transform` or `evaluate`), a Spark DataFrame. Of another
+/// object, PySpark's `try_remote_fit`, `try_remote_transform_relation` and `try_remote_evaluate`
+/// of `pyspark.ml.util` read its `sparkSession` first, so a pandas DataFrame raises pandas' own
+/// AttributeError of it; then the `client` of the session (of a transform, of a session that is not
+/// None, else the bare AssertionError of its `assert`), and the `_plan` of the object, so an
+/// object of neither raises the AttributeError of the attribute. An object of both is the DataFrame
+/// of its plan and session (`DataFrame(plan, session)`), as PySpark sends the relation of the plan
+/// (`dataset._plan.plan(client)`), of the error of a plan of none.
 fn dataset_of(dataset: &Bound<'_, PyAny>, method: &str) -> PyResult<DataFrame> {
     if let Ok(df) = dataset.extract::<PyRef<'_, PyDataFrame>>() {
         return Ok(df.dataframe.clone());
     }
-    dataset.getattr("sparkSession")?;
-    Err(PyTypeError::new_err(format!(
-        "{method}() takes a Spark DataFrame, not '{}'",
-        dataset.get_type().name()?
-    )))
+    let py = dataset.py();
+    let session = dataset.getattr(pyo3::intern!(py, "sparkSession"))?;
+    if method == "transform" && session.is_none() {
+        return Err(pyo3::exceptions::PyAssertionError::new_err(()));
+    }
+    session.getattr(pyo3::intern!(py, "client"))?;
+    let plan = dataset.getattr(pyo3::intern!(py, "_plan"))?;
+    let df = py.get_type::<PyDataFrame>().call1((plan, session))?;
+    let df = df.cast::<PyDataFrame>()?.borrow().dataframe.clone();
+    Ok(df)
 }
 
 /// Have the ML fits of `session` log the warning that the server sends with the model of a fit,

@@ -91,6 +91,19 @@ def test_a_subclass_has_a_uid_of_its_own_name_and_the_defaults_of_it():
     assert b.uid.startswith("Bin_") and b.getOutputCol() == b.uid + "__output"
     indexer = Indexer()
     assert indexer.uid.startswith("Indexer_") and indexer.getOutputCol() == indexer.uid + "__output"
+    # A subclass of a meta-model, whose constructor takes its objects (`PipelineModel(stages)`),
+    # as of the `_randomUID` of PySpark's `Identifiable.__init__`.
+    model = _cls("classification", "LogisticRegressionModel")()
+    for base, make in [
+        (_cls("pipeline", "PipelineModel"), lambda cls: cls([])),
+        (_cls("classification", "OneVsRestModel"), lambda cls: cls([])),
+        (_cls("tuning", "CrossValidatorModel"), lambda cls: cls(model)),
+        (_cls("tuning", "TrainValidationSplitModel"), lambda cls: cls(model)),
+    ]:
+        sub = type("My" + base.__name__, (base,), {})
+        prefix, suffix = make(sub).uid.rsplit("_", 1)
+        assert prefix == sub.__name__ and len(suffix) == 12, base
+        assert make(base).uid.startswith(base.__name__ + "_"), base
 
 
 def test_the_uid_is_assignable_as_pysparks():
@@ -233,6 +246,102 @@ def test_copy_deepcopy_and_pickle_of_an_estimator_an_evaluator_and_a_pipeline():
     deep = copy.deepcopy(pipeline).getStages()[0]
     assert deep is not stage and deep.uid == stage.uid and deep.getThreshold() == 0.5
     assert pickle.loads(pickle.dumps(pipeline)).getStages()[0].getThreshold() == 0.5
+
+
+class _ReducedSubclass(_cls("classification", "LogisticRegression")):
+    """A subclass of its own `__reduce__`."""
+
+    def __reduce__(self):
+        return (str, ("reduced",))
+
+
+class _StateSubclass(_cls("classification", "LogisticRegression")):
+    """A subclass of its own `__getstate__`, of the attributes of the object and one of its own."""
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state["extra"] = 1
+        return state
+
+
+class _SetStateSubclass(_cls("classification", "LogisticRegression")):
+    """A subclass of its own `__setstate__`, which takes the attributes of the state."""
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.restored = True
+
+
+class _LockedTokenizer(_cls("feature", "Tokenizer")):
+    """A subclass of a lock, which its `__getstate__` drops and its `__setstate__` makes again."""
+
+    def __init__(self, **kwargs):
+        import threading
+
+        super().__init__(**kwargs)
+        self._lock = threading.Lock()
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["_lock"]
+        return state
+
+    def __setstate__(self, state):
+        import threading
+
+        self.__dict__.update(state)
+        self._lock = threading.Lock()
+
+
+def test_a_subclass_of_its_own_reduce_or_state_copies_and_pickles_of_them_as_pysparks():
+    # PySpark's object is a plain object, of no `__copy__`: `copy.copy` (and `Params.copy` of it),
+    # `copy.deepcopy` and `pickle` run a subclass's own `__reduce__`, `__getstate__` and
+    # `__setstate__`, of PySpark's state of the object, its attributes, of its param maps and its
+    # uid (`__dict__`, which `object.__getstate__` gives), so that the copy keeps its uid, params
+    # and attributes, and a Pipeline of such a stage copies deep of them.
+    import copy
+    import pickle
+
+    for copier in (copy.copy, copy.deepcopy, lambda obj: pickle.loads(pickle.dumps(obj))):
+        assert copier(_ReducedSubclass(maxIter=3)) == "reduced"
+    state = _StateSubclass(maxIter=3)
+    assert state.__getstate__()["uid"] == state.uid and "uid" in vars(state)
+    protocols = range(pickle.HIGHEST_PROTOCOL + 1)
+    for copied in (
+        copy.copy(state),
+        state.copy(),
+        copy.deepcopy(state),
+        *(pickle.loads(pickle.dumps(state, protocol)) for protocol in protocols),
+    ):
+        assert type(copied) is _StateSubclass and copied.extra == 1 and copied.uid == state.uid
+        assert copied.getMaxIter() == 3 and copied.isSet("maxIter") and not copied.isSet("tol")
+    restored = _SetStateSubclass(maxIter=4)
+    pickled = pickle.loads(pickle.dumps(restored))
+    for copied in (copy.copy(restored), copy.deepcopy(restored), pickled):
+        assert copied.restored is True and copied.uid == restored.uid and copied.getMaxIter() == 4
+    tokenizer = _LockedTokenizer(inputCol="text", outputCol="words")
+    pickled = pickle.loads(pickle.dumps(tokenizer))
+    for copied in (copy.copy(tokenizer), copy.deepcopy(tokenizer), pickled):
+        assert copied.uid == tokenizer.uid and copied.getInputCol() == "text"
+        assert copied.getOutputCol() == "words" and copied._lock is not tokenizer._lock
+    stage = copy.deepcopy(_cls("pipeline", "Pipeline")(stages=[tokenizer])).getStages()[0]
+    assert type(stage) is _LockedTokenizer and stage.uid == tokenizer.uid
+    assert stage.getInputCol() == "text"
+
+
+def test_a_state_of_an_earlier_version_of_this_client_still_loads():
+    # This client's state of an earlier version, of the uid, the set params and the own defaults of
+    # the object by name and of its attributes, which a pickle of it holds: `__setstate__` reads
+    # it, of an object of the class's `__new__`, as `copyreg.__newobj__` makes it.
+    if native_module() is None:
+        pytest.skip("of this client's native classes")
+    LR = _cls("classification", "LogisticRegression")
+    obj = LR.__new__(LR)
+    uid = "LogisticRegression_abcdefabcdef"
+    state = {"uid": uid, "params": {"maxIter": 5}, "defaults": {}, "__dict__": {"tag": [1]}}
+    obj.__setstate__(state)
+    assert obj.uid == uid and obj.getMaxIter() == 5 and obj.isSet("maxIter") and obj.tag == [1]
+    assert obj.maxIter.parent == uid
 
 
 def test_the_params_objects_pickle_at_every_protocol_as_pysparks():
@@ -471,6 +580,55 @@ def test_a_native_member_takes_the_params_of_the_maps_of_the_objects_that_its_ob
     ).write()
     assert native_set(estimator) == {"tol": 0.5} and native_set(grid) == {"maxIter": 9}
     assert native_set(evaluator) == {"metricName": "areaUnderPR"}
+
+
+def test_the_meta_algorithms_and_their_models_have_no_java_obj_as_pysparks():
+    # PySpark's Pipeline, OneVsRest, validators and their models are no Java wrappers, of no
+    # `_java_obj`; an estimator's is the name of its JVM class, and a model of no server-side
+    # object's None (of `JavaWrapper.__init__`).
+    model = _cls("classification", "LogisticRegressionModel")()
+    for obj in (
+        _cls("pipeline", "Pipeline")(),
+        _cls("pipeline", "PipelineModel")([]),
+        _cls("classification", "OneVsRest")(),
+        _cls("classification", "OneVsRestModel")([]),
+        _cls("tuning", "CrossValidator")(),
+        _cls("tuning", "CrossValidatorModel")(model),
+        _cls("tuning", "TrainValidationSplit")(),
+        _cls("tuning", "TrainValidationSplitModel")(model),
+    ):
+        name = type(obj).__name__
+        with pytest.raises(AttributeError, match=f"^'{name}' object has no attribute '_java_obj'$"):
+            obj._java_obj  # noqa: B018
+        assert not hasattr(obj, "_java_obj") and "uid" in vars(obj), name
+    lr = _cls("classification", "LogisticRegression")()
+    assert lr._java_obj == "org.apache.spark.ml.classification.LogisticRegression"
+    assert model._java_obj is None
+
+
+def test_cloudpickle_pickles_the_native_members_of_a_public_class_as_pysparks():
+    # PySpark's members, of its classes, pickle by reference; those of a public class that run a
+    # native member (a method, a property, a class method) are functions of PySpark's qualified
+    # names, which cloudpickle pickles by value of a reference to the native member, as it pickles
+    # a closure or a `functools.partial` of one (the function of a UDF): they all load and run.
+    import functools
+    import pickle
+
+    from pyspark import cloudpickle
+
+    LR = _cls("classification", "LogisticRegression")
+    LRModel = _cls("classification", "LogisticRegressionModel")
+    lr = LR(maxIter=3)
+    coefficients = _cls("classification", "LinearSVCModel").coefficients
+    for member in (lr.write, LR.read, LRModel.summary, coefficients):
+        loaded = pickle.loads(cloudpickle.dumps(member))
+        assert type(loaded) is type(member)
+        assert type(pickle.loads(cloudpickle.dumps(lambda: member))()) is type(member)
+    writer = pickle.loads(cloudpickle.dumps(functools.partial(lr.write)))()
+    assert type(writer).__name__ == "RemoteMLWriter" and writer._instance.getMaxIter() == 3
+    assert type(pickle.loads(cloudpickle.dumps(LR.read))()).__name__ == "RemoteMLReader"
+    explained = pickle.loads(cloudpickle.dumps(functools.partial(lr.explainParam, "maxIter")))
+    assert explained() == lr.explainParam("maxIter")
 
 
 def test_the_native_members_of_a_public_class_have_pysparks_docstrings_and_signatures():

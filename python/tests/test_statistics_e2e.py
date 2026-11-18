@@ -42,7 +42,8 @@ def frames(session):
 def test_summary_builders_are_of_the_class_of_pyspark_ml_stat(session):
     # The SummaryBuilder that Summarizer.metrics makes is of the class of pyspark.ml.stat, a
     # JavaWrapper as PySpark's SummaryBuilder is. Here it is of the native class too, and the
-    # statistical tests, whose PySpark classes have no base, are the native classes.
+    # classes of the statistical tests, whose PySpark classes have no base, are subclasses of the
+    # native classes, of PySpark's docstrings and static methods (of their annotations).
     from pyspark.ml.wrapper import JavaWrapper
 
     stat = api()
@@ -53,8 +54,8 @@ def test_summary_builders_are_of_the_class_of_pyspark_ml_stat(session):
         from pyspark import _pyspark
 
         assert isinstance(builder, _pyspark.SummaryBuilder)
-        for name in ("ChiSquareTest", "Correlation", "KolmogorovSmirnovTest"):
-            assert getattr(stat, name) is getattr(_pyspark, name), name
+        for name in ("ChiSquareTest", "Correlation", "KolmogorovSmirnovTest", "Summarizer"):
+            assert issubclass(getattr(stat, name), getattr(_pyspark, name)), name
 
 
 def test_helper_calls_assert_the_active_session_of_their_thread(session):

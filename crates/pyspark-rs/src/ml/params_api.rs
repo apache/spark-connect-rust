@@ -997,6 +997,68 @@ pub(super) fn lock_error() -> PyErr {
     PyTypeError::new_err("cannot pickle '_thread.lock' object")
 }
 
+/// The attributes of `obj` (`__dict__`), of an object of a public class or of a Python subclass of
+/// one; None of an object of a native class of none.
+fn attributes_of<'py>(obj: &Bound<'py, PyAny>) -> Option<Bound<'py, PyDict>> {
+    obj.getattr(pyo3::intern!(obj.py(), "__dict__"))
+        .ok()
+        .and_then(|attributes| attributes.cast_into::<PyDict>().ok())
+}
+
+/// The uid of `slf`, as PySpark's `Identifiable.uid`, an attribute of the object: of its
+/// attributes, where PySpark's `__init__` (`self.uid = ...`), an assignment, `_resetUid` and the
+/// state of a copy or a pickle (`__setstate__`) set it, as they set PySpark's; else of the native
+/// object, of an object that this client makes (of a fit, a load or a native copy) until its param
+/// maps are made, which make it an attribute too (see `_native_classes._materialize`). The native
+/// members read it of the native object, which `_native_sync` makes the attribute's (see
+/// [`sync_params`]).
+pub(super) fn uid_of<T: NativeInstance>(slf: &Bound<'_, T>) -> PyResult<Py<PyAny>> {
+    let py = slf.py();
+    if let Some(uid) = attributes_of(slf.as_any())
+        .map(|attributes| attributes.get_item(pyo3::intern!(py, "uid")))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(uid.unbind());
+    }
+    Ok(PyString::new(py, &slf.try_borrow()?.uid())
+        .into_any()
+        .unbind())
+}
+
+/// Set the uid of `slf` to `uid`, as an assignment of PySpark's `uid` (`self.uid = ...` of
+/// `Identifiable.__init__`, of `_resetUid` and of a load) sets the attribute of the object: of the
+/// native object and of the object's attributes (see [`uid_of`]).
+pub(super) fn assign_uid<T: ParamsHolder + NativeInstance>(
+    slf: &Bound<'_, T>,
+    uid: &str,
+) -> PyResult<()> {
+    slf.try_borrow_mut()?.set_uid(uid);
+    if let Some(attributes) = attributes_of(slf.as_any()) {
+        attributes.set_item(pyo3::intern!(slf.py(), "uid"), uid)?;
+    }
+    Ok(())
+}
+
+/// Make the uid of the native object of `slf` the uid of its attributes (see [`uid_of`]), of a
+/// str, before a native member reads it: a request sends it.
+fn sync_uid<T: ParamsHolder + NativeInstance>(slf: &Bound<'_, T>) -> PyResult<()> {
+    let py = slf.py();
+    let Some(uid) = attributes_of(slf.as_any())
+        .map(|attributes| attributes.get_item(pyo3::intern!(py, "uid")))
+        .transpose()?
+        .flatten()
+    else {
+        return Ok(());
+    };
+    if let Ok(uid) = uid.extract::<String>() {
+        if slf.try_borrow()?.uid() != uid {
+            slf.try_borrow_mut()?.set_uid(&uid);
+        }
+    }
+    Ok(())
+}
+
 /// Give `that`, a copy of `this`, the class of `this` (a Python subclass of the public class), if
 /// their layouts allow it, and the attributes of `this`, shared, as `copy.copy` copies them.
 pub(super) fn copy_class_and_attributes(
@@ -1016,14 +1078,87 @@ pub(super) fn copy_class_and_attributes(
 
 /// `copy.copy` of `slf`, as of PySpark's object: of the same uid, params and defaults (and of a
 /// model, of the same server-side object, summary and cached values, see `ModelCore::duplicate`),
-/// of the class of `slf` and of its attributes, shared.
+/// of the class of `slf` and of its attributes, shared. An object of a Python subclass of its own
+/// reduce, state or slots copies of its reduce, as `copy.copy` copies PySpark's object, of no
+/// `__copy__` (see [`copy_of_reduce`]).
 pub(super) fn shallow_copy<'py, T: NativeInstance>(
     slf: &Bound<'py, T>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let py = slf.py();
+    // A model of a server-side object, which does not reduce, shares its object (see
+    // `NativeInstance::check_picklable`).
+    if slf.try_borrow()?.check_picklable().is_ok() {
+        if let Some(copy) = copy_of_reduce::<T>(slf.as_any())? {
+            return Ok(copy);
+        }
+    }
     let that = slf.try_borrow()?.duplicate(py)?.into_bound(py).into_any();
     copy_class_and_attributes(slf.as_any(), &that)?;
     Ok(that)
+}
+
+/// The members of PySpark's object that `copy.copy`, `copy.deepcopy` and `pickle` run of it, of a
+/// class of no `__copy__`: its reduce, the arguments of its `__new__` and its state.
+const REDUCE_MEMBERS: [&str; 6] = [
+    "__reduce_ex__",
+    "__reduce__",
+    "__getnewargs_ex__",
+    "__getnewargs__",
+    "__getstate__",
+    "__setstate__",
+];
+
+/// `copy.copy` of `obj` as of PySpark's object, whose class has no `__copy__`, where the class of
+/// `obj` has a reducer of `copyreg.dispatch_table`, or a class of its MRO before the public class of
+/// `T` (a Python subclass, or a mixin of one) has its own member of [`REDUCE_MEMBERS`] or
+/// `__slots__`: the reduce of the reducer, else of `obj.__reduce_ex__(4)` (which runs the
+/// subclass's `__reduce__`, `__getnewargs__` and `__getstate__`), and the object of
+/// `copy._reconstruct` of it (which runs the subclass's `__setstate__`), or `obj` itself of a reduce
+/// of a str, as `copy.copy` does. So the copy keeps the uid, params and attributes of a state of
+/// the subclass (its `__dict__` but a lock), and its slots. None of another object, which the native
+/// copy copies as `copy.copy` copies PySpark's (see [`shallow_copy`]).
+fn copy_of_reduce<'py, T: PyTypeInfo>(
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let py = obj.py();
+    let class = obj.get_type();
+    let reductor = py
+        .import("copyreg")?
+        .getattr("dispatch_table")?
+        .call_method1("get", (&class,))?;
+    if reductor.is_none() {
+        let public = super::object::public_class::<T>(py)
+            .filter(|public| class.is_subclass(public).unwrap_or(false))
+            .unwrap_or_else(|| T::type_object(py));
+        let mut own = false;
+        for base in class.getattr(pyo3::intern!(py, "__mro__"))?.try_iter()? {
+            let base = base?;
+            if base.is(&public) {
+                break;
+            }
+            let members = base.getattr(pyo3::intern!(py, "__dict__"))?;
+            for name in REDUCE_MEMBERS.iter().chain(&["__slots__"]) {
+                own |= members.contains(*name)?;
+            }
+        }
+        if !own {
+            return Ok(None);
+        }
+    }
+    let reduced = if reductor.is_none() {
+        obj.call_method1(pyo3::intern!(py, "__reduce_ex__"), (4,))?
+    } else {
+        reductor.call1((obj,))?
+    };
+    if reduced.is_instance_of::<PyString>() {
+        return Ok(Some(obj.clone()));
+    }
+    let mut args = vec![obj.clone(), py.None().into_bound(py)];
+    args.extend(reduced.try_iter()?.collect::<PyResult<Vec<_>>>()?);
+    Ok(Some(
+        py.import("copy")?
+            .call_method1("_reconstruct", PyTuple::new(py, args)?)?,
+    ))
 }
 
 /// The values of the params of `slf` by name: its set values, and its defaults (its own, else the
@@ -1080,16 +1215,18 @@ pub(super) fn native_params<'py, T: ParamsHolder>(
 }
 
 /// Make the params of `slf` those of PySpark's `_paramMap` and `_defaultParamMap` of it, of the
-/// values `set` and `defaults` by name, before a request that sends them: the values of `set`, the
-/// others unset, and the defaults of `defaults` that the object holds of its own. The values of
+/// values `set` and `defaults` by name, and its uid that of its attributes (see [`uid_of`]), before
+/// a request that sends them: the values of `set`, the others unset, and the defaults of
+/// `defaults` that the object holds of its own. The values of
 /// `set` are set in its order, of `_paramMap`, in which PySpark's serialization of the params reads
 /// them: the error of the first that it cannot send is the first of `_paramMap`'s (see
 /// `snapshot`).
-pub(super) fn sync_params<T: ParamsHolder>(
+pub(super) fn sync_params<T: ParamsHolder + NativeInstance>(
     slf: &Bound<'_, T>,
     set: &Bound<'_, PyDict>,
     defaults: &Bound<'_, PyDict>,
 ) -> PyResult<()> {
+    sync_uid(slf)?;
     let params = params_of(slf.as_any())?;
     for meta in params {
         if !set.contains(&meta.name)? {
@@ -1134,13 +1271,62 @@ pub(super) fn reduce_ex<'py, T: ParamsHolder + NativeInstance>(
         .call1((slf, protocol))
 }
 
-/// The state of `slf` that `copy.deepcopy` and `pickle` take (`__getstate__`): its uid, its set
-/// params and the defaults that it holds itself, by name, and its attributes.
+/// The state of `slf` that `copy.deepcopy` and `pickle` take (`__getstate__`), as
+/// `object.__getstate__` gives it of PySpark's object: its attributes (`__dict__`), PySpark's state
+/// of it, of its param maps (which the public class makes before, see `_native_classes._sync`),
+/// its uid and its other attributes, None of none; and of a subclass of `__slots__`, the pair of
+/// them and of the values of its slots that it has (`copyreg._slotnames`), if any. A Python
+/// subclass's own `__getstate__` (`self.__dict__.copy()` but a lock) gives PySpark's too. An object
+/// of no attributes (of a native class of no public class) gives the state of its uid, set params
+/// and own defaults by name, which [`set_state`] reads too. A model of a server-side object raises
+/// the error of PySpark's pickle of its lock.
 pub(super) fn get_state<'py, T: ParamsHolder + NativeInstance>(
+    slf: &Bound<'py, T>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = slf.py();
+    slf.try_borrow()?.check_picklable()?;
+    let Some(attributes) = attributes_of(slf.as_any()) else {
+        return Ok(native_state(slf)?.into_any());
+    };
+    // The uid of the native object, of an object whose attributes do not have it yet.
+    let uid = pyo3::intern!(py, "uid");
+    let attributes = if attributes.contains(uid)? {
+        attributes
+    } else {
+        let copy = attributes.copy()?;
+        copy.set_item(uid, slf.try_borrow()?.uid())?;
+        copy
+    };
+    let state = if attributes.is_empty() {
+        py.None().into_bound(py)
+    } else {
+        attributes.into_any()
+    };
+    let names = py
+        .import("copyreg")?
+        .call_method1("_slotnames", (slf.as_any().get_type(),))?;
+    let slots = PyDict::new(py);
+    for name in names.try_iter()? {
+        let name = name?.cast_into::<PyString>()?;
+        // A slot of no value is not in the state, as `object.__getstate__` skips it.
+        match slf.as_any().getattr(&name) {
+            Ok(value) => slots.set_item(name, value)?,
+            Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if slots.is_empty() {
+        return Ok(state);
+    }
+    Ok(PyTuple::new(py, [state, slots.into_any()])?.into_any())
+}
+
+/// The state of an object of no attributes (see [`get_state`]): its uid, its set params and the
+/// defaults that it holds itself, by name.
+fn native_state<'py, T: ParamsHolder + NativeInstance>(
     slf: &Bound<'py, T>,
 ) -> PyResult<Bound<'py, PyDict>> {
     let py = slf.py();
-    slf.try_borrow()?.check_picklable()?;
     let (params, defaults) = (PyDict::new(py), PyDict::new(py));
     {
         let this = slf.try_borrow()?;
@@ -1157,38 +1343,83 @@ pub(super) fn get_state<'py, T: ParamsHolder + NativeInstance>(
     state.set_item("uid", slf.try_borrow()?.uid())?;
     state.set_item("params", params)?;
     state.set_item("defaults", defaults)?;
-    if let Ok(attributes) = slf.as_any().getattr("__dict__") {
-        state.set_item("__dict__", attributes.call_method0("copy")?)?;
-    }
     Ok(state)
 }
 
-/// `__setstate__(state)` of `slf`, of a state of [`get_state`]: of an object of the class's
-/// constructor of no arguments, as `copyreg.__newobj__` makes it.
+/// Whether `state` is a state of [`native_state`], of the keys `uid`, `params` and `defaults`, and
+/// of the attributes of the object (`__dict__`), which this client's pickles of an earlier version
+/// hold, where PySpark's state is of the attributes of the object, its param maps first.
+fn is_native_state(state: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let Ok(state) = state.cast::<PyDict>() else {
+        return Ok(false);
+    };
+    for key in state.keys() {
+        let known = key
+            .extract::<String>()
+            .is_ok_and(|key| ["uid", "params", "defaults", "__dict__"].contains(&key.as_str()));
+        if !known {
+            return Ok(false);
+        }
+    }
+    let dict = |name: &str| -> PyResult<bool> {
+        Ok(state
+            .get_item(name)?
+            .is_some_and(|value| value.is_instance_of::<PyDict>()))
+    };
+    Ok(state.contains("uid")? && dict("params")? && dict("defaults")?)
+}
+
+/// `__setstate__(state)` of `slf`, an object of the class's `__new__` (`copyreg.__newobj__`), as
+/// `copy._reconstruct` and the unpickler set the state of PySpark's object, of no `__setstate__`:
+/// the attributes of the state (a dict, of `__dict__.update`), and the slots of a pair of the
+/// attributes and the slots (see [`get_state`]); a state of [`native_state`] (of a pickle of an
+/// earlier version of this client too) sets the uid, the params and the defaults of the native
+/// object, and its attributes. The native object takes the uid of the attributes (the native
+/// members take the param maps at their next sync, see `_native_classes._sync`).
 pub(super) fn set_state<T: ParamsHolder + NativeInstance>(
     slf: &Bound<'_, T>,
     state: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
-    let state = state.cast::<PyDict>()?;
-    if let Some(uid) = state.get_item("uid")? {
-        slf.try_borrow_mut()?.set_uid(&uid.extract::<String>()?);
-    }
-    if let Some(params) = state.get_item("params")? {
-        for (name, value) in params.cast::<PyDict>()?.iter() {
-            set_by_name(slf, &name.extract::<String>()?, &value)?;
+    let py = slf.py();
+    if is_native_state(state)? {
+        let state = state.cast::<PyDict>()?;
+        if let Some(uid) = state.get_item("uid")? {
+            assign_uid(slf, &uid.extract::<String>()?)?;
         }
-    }
-    if let Some(defaults) = state.get_item("defaults")? {
-        for (name, value) in defaults.cast::<PyDict>()?.iter() {
-            let meta = get_param_meta(slf.as_any(), &name.extract::<String>()?)?;
-            slf.try_borrow_mut()?
-                .put_own_default(meta.name.as_str(), value.unbind());
+        if let Some(params) = state.get_item("params")? {
+            for (name, value) in params.cast::<PyDict>()?.iter() {
+                set_by_name(slf, &name.extract::<String>()?, &value)?;
+            }
         }
+        if let Some(defaults) = state.get_item("defaults")? {
+            for (name, value) in defaults.cast::<PyDict>()?.iter() {
+                let meta = get_param_meta(slf.as_any(), &name.extract::<String>()?)?;
+                slf.try_borrow_mut()?
+                    .put_own_default(meta.name.as_str(), value.unbind());
+            }
+        }
+        if let Some(attributes) = state.get_item("__dict__")? {
+            slf.as_any()
+                .getattr("__dict__")?
+                .call_method1("update", (attributes,))?;
+        }
+        return Ok(());
     }
-    if let Some(attributes) = state.get_item("__dict__")? {
+    let (attributes, slots) = match state.cast::<PyTuple>() {
+        Ok(pair) if pair.len() == 2 => (pair.get_item(0)?, Some(pair.get_item(1)?)),
+        _ => (state.clone(), None),
+    };
+    if !attributes.is_none() {
         slf.as_any()
-            .getattr("__dict__")?
-            .call_method1("update", (attributes,))?;
+            .getattr(pyo3::intern!(py, "__dict__"))?
+            .call_method1(pyo3::intern!(py, "update"), (&attributes,))?;
+        sync_uid(slf)?;
+    }
+    if let Some(slots) = slots.filter(|slots| !slots.is_none()) {
+        for item in slots.call_method0(pyo3::intern!(py, "items"))?.try_iter()? {
+            let (name, value) = item?.extract::<(Bound<'_, PyString>, Bound<'_, PyAny>)>()?;
+            slf.as_any().setattr(name, value)?;
+        }
     }
     Ok(())
 }
@@ -1449,7 +1680,7 @@ pub(super) fn from_read<T: ParamsHolder + NativeInstance>(
             }
         }
     }
-    instance.try_borrow_mut()?.set_uid(&read.uid);
+    assign_uid(&instance, &read.uid)?;
     for name in names {
         let value = spark_connect::ml::MlValue::from_literal(&proto.params[name]).to_pyerr()?;
         let value = super::object::ml_value_to_py(py, &value)?;
