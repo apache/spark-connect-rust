@@ -276,7 +276,10 @@ VENDORED_FILES=(
   # ExecutionInfo / PlanMetrics / MetricValue (DataFrame.executionInfo).
   "sql/metrics.py"
 
-  # SQL: streaming. TwsTester runs a StatefulProcessor locally - pure upstream.
+  # SQL: streaming. The package of the streaming classes, which exports PySpark's names only (no
+  # Trigger, of the drop-in's readwriter, nor the read limits of its datasource module).
+  "sql/streaming/__init__.py"
+  # TwsTester runs a StatefulProcessor locally - pure upstream.
   "sql/streaming/tws_tester.py"
   # The listener and its events and progress classes, which the client builds of the JSON of
   # the server - pure upstream.

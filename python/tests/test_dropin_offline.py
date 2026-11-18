@@ -14086,6 +14086,69 @@ def test_the_connect_avro_protobuf_and_streaming_packages_are_pysparks():
         assert hasattr(importlib.import_module(f"{name}.{module}"), present)
 
 
+# The public names of PySpark 4.3.0's package pyspark.sql.streaming in a new process: the classes
+# that it imports, and its modules that `import pyspark.sql` loads.
+OFFICIAL_STREAMING_NAMES = [
+    "DataStreamReader", "DataStreamWriter", "StatefulProcessor", "StatefulProcessorHandle",
+    "StreamingQuery", "StreamingQueryException", "StreamingQueryListener",
+    "StreamingQueryManager", "TwsTester", "list_state_client", "listener", "map_state_client",
+    "query", "readwriter", "state", "stateful_processor", "stateful_processor_api_client",
+    "tws_tester", "value_state_client",
+]
+
+
+def test_the_streaming_package_is_pysparks():
+    # As PySpark's, pyspark.sql.streaming is PySpark's file, vendored as it is, which has no
+    # __all__: a star import brings in its classes and its loaded modules, `state` among them, as
+    # the drop-in's pyspark.sql.pandas.group_ops imports it as PySpark's does. Trigger, a name of
+    # the drop-in's readwriter, and the read limits of its datasource module are not its names.
+    import importlib
+    import subprocess
+    import sys
+    import textwrap
+
+    from pyspark.errors import StreamingQueryException
+
+    script = textwrap.dedent('''
+        import json
+        import pyspark.sql.streaming as streaming
+        namespace = {}
+        exec("from pyspark.sql.streaming import *", namespace)
+        print(json.dumps([
+            hasattr(streaming, "__all__"),
+            sorted(name for name in vars(streaming) if not name.startswith("_")),
+            sorted(name for name in namespace if name != "__builtins__"),
+        ]))
+    ''')
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+    has_all, names, star = json.loads(result.stdout)
+    assert not has_all
+    assert names == OFFICIAL_STREAMING_NAMES
+    assert star == OFFICIAL_STREAMING_NAMES
+
+    streaming = importlib.import_module("pyspark.sql.streaming")
+    for name, module in [
+        ("DataStreamReader", "readwriter"), ("DataStreamWriter", "readwriter"),
+        ("StreamingQuery", "query"), ("StreamingQueryManager", "query"),
+        ("StreamingQueryListener", "listener"), ("StatefulProcessor", "stateful_processor"),
+        ("StatefulProcessorHandle", "stateful_processor"), ("TwsTester", "tws_tester"),
+    ]:
+        assert getattr(streaming, name) is getattr(
+            importlib.import_module(f"pyspark.sql.streaming.{module}"), name), name
+    assert streaming.StreamingQueryException is StreamingQueryException
+    for name, module in [
+        ("Trigger", "readwriter"), ("ReadLimit", "datasource"), ("ReadAllAvailable", "datasource"),
+        ("ReadMinRows", "datasource"), ("ReadMaxRows", "datasource"),
+        ("ReadMaxFiles", "datasource"), ("ReadMaxBytes", "datasource"),
+        ("SupportsTriggerAvailableNow", "datasource"),
+    ]:
+        assert not hasattr(streaming, name), name
+        with pytest.raises(ImportError, match=f"cannot import name '{name}' from 'pyspark.sql.streaming'"):
+            exec(f"from pyspark.sql.streaming import {name}", {})
+        assert hasattr(importlib.import_module(f"pyspark.sql.streaming.{module}"), name), name
+
+
 def test_module_namespaces_of_the_official_doctests_as_pyspark():
     # As PySpark's: the official doctests of PySpark Connect take the namespace of a module as
     # their globals (the `_test()` of each module), and their examples use these names of it.
@@ -16057,9 +16120,33 @@ def test_datatype_class_constants():
     assert (T.SpatialType.MIXED_CRS, T.SpatialType.MIXED_SRID) == ("SRID:ANY", -1)
 
 
-def test_types_all_exports_spatial_and_variant():
-    for name in ("Geometry", "GeometryType", "Geography", "GeographyType", "VariantVal"):
-        assert name in T.__all__, name
+# The __all__ of PySpark 4.3.0's pyspark.sql.types, in its order.
+OFFICIAL_TYPES_ALL = [
+    "DataType", "NullType", "CharType", "StringType", "VarcharType", "BinaryType", "BooleanType",
+    "DateType", "TimeType", "TimestampType", "TimestampNTZType", "DecimalType", "DoubleType",
+    "Geography", "Geometry", "FloatType", "ByteType", "IntegerType", "LongType",
+    "DayTimeIntervalType", "YearMonthIntervalType", "CalendarIntervalType", "Row", "ShortType",
+    "ArrayType", "MapType", "StructField", "StructType", "VariantType", "VariantVal",
+    "GeographyType", "GeometryType",
+]
+
+
+def test_types_all_and_its_star_import_are_pysparks():
+    # As PySpark's: __all__ is PySpark's 32 names, the spatial and variant classes among them,
+    # which a star import brings in. UserDefinedType and the private helpers are names of the
+    # module that it does not list, and that a star import does not bring in.
+    assert T.__all__ == OFFICIAL_TYPES_ALL
+    namespace = {}
+    exec("from pyspark.sql.types import *", namespace)
+    namespace.pop("__builtins__")
+    assert list(namespace) == OFFICIAL_TYPES_ALL
+    assert all(namespace[name] is getattr(T, name) for name in OFFICIAL_TYPES_ALL)
+    for name in ("UserDefinedType", "_drop_metadata", "_parse_datatype_json_string",
+                 "_parse_datatype_json_value"):
+        assert name not in namespace, name
+        imported = {}
+        exec(f"from pyspark.sql.types import {name}", imported)
+        assert imported[name] is getattr(T, name), name
 
 
 def test_streaming_progress_and_listeners_are_those_of_pyspark():
