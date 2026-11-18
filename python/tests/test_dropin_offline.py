@@ -21970,9 +21970,11 @@ def test_arrow_input_explicit_schema_matching_width(schema, values):
 def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_connect):
     # As PySpark's pyspark.ml, which builds its plans over the relation of a DataFrame without
     # parsing it: a DataFrame of 120 chained withColumn calls is nested deeper than a protobuf
-    # decoder parses. A plan over it holds a shallow placeholder of that relation, which the core
-    # replaces with the relation when the plan reaches it, so the server receives the relation.
+    # decoder parses. A plan over it holds a placeholder of one level, the extension that holds
+    # the relation encoded, which the core replaces with the relation when the plan reaches it,
+    # so the server receives the relation.
     import gc
+    import weakref
 
     import pyspark.sql.connect.proto as pb2
     from pyspark.sql import functions as F
@@ -21996,8 +21998,11 @@ def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_conne
     for i in range(120):
         deep = deep.withColumn(f"c{i}", F.lit(i))
     relation = deep._relation_bytes()
-    # The placeholder of the relation is shallow, whatever the depth of the DataFrame.
-    assert len(deep._plan.plan(spark.client).SerializeToString()) < 128
+    # The placeholder of the relation is an extension, whose value holds the relation, which
+    # protobuf does not parse, whatever the depth of the DataFrame.
+    placeholder = deep._plan.plan(spark.client)
+    assert placeholder.WhichOneof("rel_type") == "extension"
+    assert placeholder.extension.value.endswith(relation)
     # Two plans of transformers, one over the other, over the DataFrame. The request is read as
     # bytes, as the deep relation is not parsed by protobuf: ExecutePlanRequest.plan=3,
     # Plan.root=1, Relation.ml_relation=300, MlRelation.transform=1, Transform.input=3,
@@ -22012,18 +22017,70 @@ def test_ml_plans_send_a_deep_dataframe_without_parsing_it_as_pyspark(mock_conne
     assert parse_message(inner_transform[1][0]) == {1: [b"m1"]}
     assert inner_transform[3][0] == relation
 
-    # A placeholder of a DataFrame that is gone is an error, and keeps nothing alive.
+    # A placeholder of a DataFrame that is gone stands for its relation, as the relation of
+    # PySpark's plan(session) does, and keeps nothing alive.
     gone = spark.range(3)
+    gone_relation = gone._relation_bytes()
     placeholder = gone._plan.plan(spark.client)
+    freed = weakref.ref(gone)
     del gone
     gc.collect()
+    assert freed() is None
 
     class Gone(LogicalPlan):
         def plan(self, session):
             return placeholder
 
-    with pytest.raises(Exception, match="no longer exists"):
-        DataFrame(Gone(None), spark)
+    DataFrame(Transform(Gone(None), "m3"), spark).collect()
+    root = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+    transform = parse_message(parse_message(parse_message(root)[300][0])[1][0])
+    assert transform[3][0] == gone_relation
+
+
+def test_the_relations_of_the_plans_of_dataframes_are_built_when_they_are_given_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's df._plan.plan(session), which builds the relation of the DataFrame when it is
+    # called: the relation is sent, after the DataFrame is gone too, and of the bytes of a
+    # message that holds it; it is that of the call, of the pickles of its UDFs then, and the
+    # errors of its build are raised by the call, with no request sent.
+    import gc
+    import pickle
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    client = spark.client
+
+    def sent():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan
+
+    list(client.to_table_as_iterator(pb2.Plan(root=spark.range(2)._plan.plan(client)), {}))
+    assert sent().root.range.end == 2
+    kept = spark.range(3).filter("id > 0")._plan.plan(client)
+    gc.collect()
+    plan = pb2.Plan(root=kept)
+    for message in (plan, pb2.Plan.FromString(plan.SerializeToString())):
+        list(client.to_table_as_iterator(message, {}))
+        assert sent().root.filter.input.range.end == 3
+
+    state = ["at the call"]
+    df = spark.range(1).select(F.udf(lambda x: state[0], "string")("id"))
+    relation = df._plan.plan(client)
+    state[0] = "after the call"
+    list(client.to_table_as_iterator(pb2.Plan(root=relation), {}))
+    function = sent().root.project.expressions[0].common_inline_user_defined_function
+    assert b"at the call" in function.python_udf.command
+    assert b"after the call" not in function.python_udf.command
+
+    lock = threading.Lock()
+    unpicklable = spark.range(1).select(F.udf(lambda x: lock is not None, "boolean")("id"))
+    requests = len(service.execute_requests)
+    with pytest.raises(pickle.PicklingError):
+        unpicklable._plan.plan(client)
+    assert len(service.execute_requests) == requests
 
 
 def test_plans_of_plugins_send_the_relations_of_their_dataframes_in_their_extensions(

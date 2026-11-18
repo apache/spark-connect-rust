@@ -145,13 +145,14 @@ those modules (of protoc 3.20 and later, which build their classes with it) get 
 classes, whose fields take ours as they are: their files are added to the runtime's pool at run
 time (`pbmsg::pool::register`; see `docs/compatibility.md`).
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
-that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the shallow
-placeholder that `DataFrame._plan.plan(session)` gives of the relation of a DataFrame, which the
-core replaces wherever a plan, a command or an analysis built in Python holds a relation: every
-input of every relation (`plan::relation_inputs_of`), the relation of each command that holds one,
-the inputs of the plans of `pyspark.ml`, and the messages of the extensions of a plugin's relations
-and commands (`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), but not in an
-expression's extension: "Plans of a DataFrame's relation" in `dev/parity/known-differences.md`.
+that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the
+placeholder that `DataFrame._plan.plan(session)` gives, of one level, which holds the relation of
+the DataFrame encoded, built at the call, and which the core replaces wherever a plan, a command or
+an analysis built in Python holds a relation: every input of every relation
+(`plan::relation_inputs_of`), the relation of each command that holds one, the inputs of the plans
+of `pyspark.ml`, and the messages of the extensions of a plugin's relations and commands
+(`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), but not in an expression's
+extension: "Plans of a DataFrame's relation" in `dev/parity/known-differences.md`.
 
 ## 3. Close API gaps (three layers)
 
