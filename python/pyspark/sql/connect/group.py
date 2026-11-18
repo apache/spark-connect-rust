@@ -14,8 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""GroupedData / PandasCogroupedOps under the connect import path."""
-from pyspark.sql.group import GroupedData
-from pyspark.sql.pandas.group_ops import PandasCogroupedOps
+
+"""GroupedData / PandasCogroupedOps of Spark Connect, as PySpark Connect's
+``pyspark.sql.connect.group``: the native classes of the Rust core."""
+from pyspark._pyspark import GroupedData, PandasCogroupedOps
 
 __all__ = ["GroupedData", "PandasCogroupedOps"]

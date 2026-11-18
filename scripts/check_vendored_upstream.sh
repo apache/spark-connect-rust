@@ -151,6 +151,18 @@ VENDORED_FILES=(
   # Connect returns those of pyspark.sql.connect.context, and their constructors read the
   # SparkContext of a JVM, which a session of Spark Connect does not have.
   "sql/context.py"
+  # PySpark's classic modules of the objects of a session (its Catalog, readers and writers, UDF
+  # and UDTF classes and registrations, GroupedData, PandasCogroupedOps and the streaming query
+  # and readwriter), as in PySpark: the objects of a session of Spark Connect are of the classes
+  # of pyspark.sql.connect, the drop-in's, which are not subclasses of these, as in PySpark.
+  "sql/catalog.py"
+  "sql/readwriter.py"
+  "sql/udf.py"
+  "sql/udtf.py"
+  "sql/group.py"
+  "sql/pandas/group_ops.py"
+  "sql/streaming/readwriter.py"
+  "sql/streaming/query.py"
 
   # PEP 561: the package is typed, and the type aliases of PySpark's stubs.
   "py.typed"

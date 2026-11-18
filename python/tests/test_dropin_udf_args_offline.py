@@ -118,7 +118,7 @@ def test_udf_names_and_keywords_that_utf8_cannot_encode_fail_when_the_plan_is_bu
 
 
 def test_udtf_has_no_name_until_it_is_set(udf_session):
-    from pyspark.sql.udtf import UserDefinedTableFunction, udtf
+    from pyspark.sql.connect.udtf import UserDefinedTableFunction, udtf
 
     @udtf(returnType="x int")
     class Named:
@@ -142,7 +142,7 @@ def test_udtf_has_no_name_until_it_is_set(udf_session):
 
 def test_udtf_name_setter_and_pickling_are_unchanged(udf_session):
     import cloudpickle
-    from pyspark.sql.udtf import udtf
+    from pyspark.sql.connect.udtf import udtf
 
     @udtf(returnType="x int")
     class Pickled:
@@ -156,10 +156,15 @@ def test_udtf_name_setter_and_pickling_are_unchanged(udf_session):
     assert restored.name == "other" and restored._name == "Pickled"
 
 
-def test_classic_names_are_the_connect_classes(udf_session):
-    # Deliberate, see docs/compatibility.md: the classic names are the drop-in's own classes.
-    from pyspark.sql.udf import UserDefinedFunction, udf
-    from pyspark.sql.udtf import UserDefinedTableFunction, udtf
+def test_the_classic_names_are_pysparks_classic_classes(udf_session):
+    # As PySpark's, see docs/compatibility.md: the UDFs and the UDTFs of udf() and udtf() are of
+    # PySpark Connect's classes, and the classic names of pyspark.sql.udf and pyspark.sql.udtf
+    # are PySpark's classic classes, which are not their bases.
+    import pyspark.sql.udf as classic_udf
+    import pyspark.sql.udtf as classic_udtf
+    from pyspark.sql.connect.udf import UserDefinedFunction
+    from pyspark.sql.connect.udtf import UserDefinedTableFunction
+    from pyspark.sql.functions import udf, udtf
 
     @udtf(returnType="x int")
     class Classic:
@@ -167,5 +172,63 @@ def test_classic_names_are_the_connect_classes(udf_session):
             yield (a,)
 
     assert type(Classic) is UserDefinedTableFunction
+    assert not isinstance(Classic, classic_udtf.UserDefinedTableFunction)
     # A UDF of udf() is its function wrapper, which keeps the UserDefinedFunction it wraps.
     assert type(udf(lambda x: x)._unwrapped) is UserDefinedFunction
+    assert not isinstance(udf(lambda x: x)._unwrapped, classic_udf.UserDefinedFunction)
+
+
+def test_udf_and_udtf_raise_an_error_of_the_session_other_than_no_session_as_pyspark(
+    udf_session, monkeypatch
+):
+    # As PySpark Connect's udf() and udtf() without useArrow, which read the Arrow configuration
+    # of the active session: without a session they make a UDF and a UDTF that are not
+    # Arrow-optimized, and another error of the session is raised.
+    from pyspark.errors import PySparkRuntimeError
+    from pyspark.sql import SparkSession
+    from pyspark.sql.functions import udf, udtf
+
+    class Echo:
+        def eval(self, a):
+            yield (a,)
+
+    def raising(condition):
+        def active():
+            raise PySparkRuntimeError(errorClass=condition, messageParameters={})
+
+        return staticmethod(active)
+
+    monkeypatch.setattr(SparkSession, "active", raising("NO_ACTIVE_OR_DEFAULT_SESSION"))
+    assert udf(lambda x: x).evalType == 100  # SQL_BATCHED_UDF
+    assert udtf(Echo, returnType="a int").evalType == 300  # SQL_TABLE_UDF
+    monkeypatch.setattr(SparkSession, "active", raising("SESSION_OR_CONTEXT_NOT_EXISTS"))
+    for make in (lambda: udf(lambda x: x), lambda: udtf(Echo, returnType="a int")):
+        with pytest.raises(PySparkRuntimeError) as error:
+            make()
+        assert error.value.getCondition() == "SESSION_OR_CONTEXT_NOT_EXISTS"
+
+
+def test_a_udtf_of_no_return_type_sends_no_return_type_as_pyspark(udf_session):
+    # As PySpark Connect's PythonUDTF.to_plan: the PythonUDTF of a UDTF of no return type, whose
+    # analyze gives the schema, has no return_type, and the command of the handler.
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import types as T
+    from pyspark.sql.connect.proto import base_pb2
+    from pyspark.sql.functions import lit, udtf
+    from pyspark.sql.udtf import AnalyzeResult
+
+    _, service = udf_session
+
+    class Dynamic:
+        @staticmethod
+        def analyze(a):
+            return AnalyzeResult(T.StructType().add("a", "int"))
+
+        def eval(self, a):
+            yield (a,)
+
+    udtf(Dynamic, useArrow=False)(lit(1)).explain()
+    request = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    python_udtf = request.explain.plan.root.common_inline_user_defined_table_function.python_udtf
+    assert not python_udtf.HasField("return_type")
+    assert CloudPickleSerializer().loads(python_udtf.command).__name__ == "Dynamic"

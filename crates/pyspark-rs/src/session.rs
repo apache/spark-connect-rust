@@ -3448,11 +3448,13 @@ impl PySparkSession {
     }
 
     /// Get the UDF registration API (`spark.udf`). Returns the
-    /// `pyspark.sql.udf.UDFRegistration` bound to this session, so it can register
-    /// Python UDFs and Java UDFs/UDAFs (registerJavaFunction / registerJavaUDAF).
+    /// `pyspark.sql.connect.udf.UDFRegistration` bound to this session, as PySpark Connect's, so
+    /// it can register Python UDFs and Java UDFs/UDAFs (registerJavaFunction / registerJavaUDAF).
     #[getter(udf)]
     fn get_udf<'a>(slf: &Bound<'a, Self>, py: Python<'a>) -> PyResult<Bound<'a, PyAny>> {
-        let cls = py.import("pyspark.sql.udf")?.getattr("UDFRegistration")?;
+        let cls = py
+            .import("pyspark.sql.connect.udf")?
+            .getattr("UDFRegistration")?;
         cls.call1((slf,))
     }
 
@@ -4062,7 +4064,7 @@ impl PySparkSession {
     #[getter]
     fn udtf<'a>(slf: &Bound<'a, Self>) -> PyResult<Bound<'a, PyAny>> {
         slf.py()
-            .import("pyspark.sql.udtf")?
+            .import("pyspark.sql.connect.udtf")?
             .getattr("UDTFRegistration")?
             .call1((slf,))
     }

@@ -46,8 +46,8 @@ official ``pyspark-client``, where these modules are annotated Python. In detail
     any other condition, such as ``is_remote_only()``, both branches are kept, as a type checker
     of PySpark's source sees both.
   * The decorators that type checkers apply are kept (``overload``, ``property``,
-    ``classmethod``, ``functools.cache``, ``dataclass``, ...), and those of the module itself
-    (``dfapi`` of ``pyspark.sql.group``). PySpark's call-site and dispatch decorators are typed
+    ``classmethod``, ``functools.cache``, ``dataclass``, ...), and those that the module defines
+    itself. PySpark's call-site and dispatch decorators are typed
     ``(f: FuncT) -> FuncT``, which ``IDENTITY_DECORATORS`` lists and which the generator checks
     in PySpark's source: they change no type and are dropped. Any other decorator is an error.
   * The implementation of an overloaded function is dropped, as stubs declare only overloads.
@@ -73,10 +73,11 @@ official ``pyspark-client``, where these modules are annotated Python. In detail
     lines of a signature that ast.unparse prints on one line merged.
 
 ``EXTRAS`` adds the names that the drop-in's module has and PySpark's does not, such as the
-native ``Trigger`` of ``pyspark.sql.streaming.readwriter``. python/tests/test_type_stubs_offline.py
-checks that every public name of each module of the drop-in, and every public member of each class
-of a stub, is in its stub, that mypy and pyright type every public instance attribute of the
-stubbed classes, and runs mypy and pyright on a user's application.
+native ``Trigger`` of ``pyspark.sql.connect.streaming.readwriter``.
+python/tests/test_type_stubs_offline.py checks that every public name of each module of the
+drop-in, and every public member of each class of a stub, is in its stub, that mypy and pyright
+type every public instance attribute of the stubbed classes, and runs mypy and pyright on a user's
+application.
 
 The modules of pyspark.ml.connect of the drop-in's native ML classes (``ML_CONNECT_MODULES``) and
 their package are not PySpark's modules of their import paths, which are its ML API on PyTorch:
@@ -134,21 +135,17 @@ RUFF_BLOCK_END = "    # --- generated type stubs: END ---\n"
 # the drop-in whose objects a user imports. The stub is at the path of PySpark's module, with
 # .pyi for .py (pyspark/sql/functions/__init__.pyi for the package pyspark.sql.functions).
 STUB_MODULES = (
-    # The modules of the native classes, which re-export them from pyspark._pyspark. Not
-    # pyspark.sql.conf, merge, observation and tvf, whose classic classes are PySpark's annotated
-    # modules, vendored as they are (scripts/check_vendored_upstream.sh), which a stub would shadow.
+    # The modules of the native classes, which re-export them from pyspark._pyspark. Not the
+    # modules of the classic classes of PySpark, such as pyspark.sql.catalog, readwriter, udf,
+    # udtf, group, conf, merge, observation and tvf, pyspark.sql.pandas.group_ops and the streaming
+    # query and readwriter, PySpark's annotated modules, vendored as they are
+    # (scripts/check_vendored_upstream.sh), which a stub would shadow.
     "pyspark.storagelevel",
-    "pyspark.sql.catalog",
     "pyspark.sql.column",
     "pyspark.sql.dataframe",
-    "pyspark.sql.group",
-    "pyspark.sql.pandas.group_ops",
-    "pyspark.sql.readwriter",
     "pyspark.sql.table_arg",
     "pyspark.sql.types",
     "pyspark.sql.window",
-    "pyspark.sql.streaming.query",
-    "pyspark.sql.streaming.readwriter",
     # The functions: those that functions.py copies into its globals() from
     # functions_generated.py, and those of Avro and Protobuf, unannotated calls of the Rust core.
     "pyspark.sql.functions",
@@ -160,11 +157,8 @@ STUB_MODULES = (
     # pyspark/sql/connect/functions/_copies.py), which copy them into their globals().
     "pyspark.sql.connect.avro.functions",
     "pyspark.sql.connect.protobuf.functions",
-    # PySpark's modules with their Rust-backed parts swapped in: the native PythonEvalType and
-    # SkipRestOfInputTableException, and user-defined functions that annotate fewer parameters.
+    # PySpark's module with its Rust-backed part swapped in: the native PythonEvalType.
     "pyspark.util",
-    "pyspark.sql.udf",
-    "pyspark.sql.udtf",
     # The modules of PySpark Connect, which re-export the drop-in's classes and functions.
     "pyspark.sql.connect.catalog",
     "pyspark.sql.connect.column",
@@ -278,11 +272,12 @@ EXTRAS = {
     ),
     # The drop-in defines udf, udtf and arrow_udtf of pyspark.sql.functions in these modules,
     # and their evaluation types.
-    "pyspark.sql.udf": Extra(
+    "pyspark.sql.connect.udf": Extra(
         "from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer\n"
         "from pyspark.sql.functions.builtin import udf as udf\n"
     ),
-    "pyspark.sql.udtf": Extra(
+    "pyspark.sql.connect.udtf": Extra(
+        "from pyspark.errors import PySparkPicklingError as PySparkPicklingError\n"
         "from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer\n"
         "from pyspark.sql.functions.builtin import arrow_udtf as arrow_udtf\n"
         "from pyspark.sql.functions.builtin import udtf as udtf\n"
@@ -290,17 +285,12 @@ EXTRAS = {
         "SQL_ARROW_TABLE_UDF: int\n"
         "SQL_ARROW_UDTF: int\n"
     ),
-    # The drop-in's module dispatches the events of the listeners itself.
-    "pyspark.sql.streaming.query": Extra(
-        "from pyspark.sql.streaming.listener import QueryIdleEvent as QueryIdleEvent\n"
-        "from pyspark.sql.streaming.listener import QueryProgressEvent as QueryProgressEvent\n"
-        "from pyspark.sql.streaming.listener import QueryStartedEvent as QueryStartedEvent\n"
-        "from pyspark.sql.streaming.listener import QueryTerminatedEvent as QueryTerminatedEvent\n"
-    ),
     # The native classes of the frame bounds, which PySpark's `__all__` does not list as the
     # drop-in's does not, and of the triggers.
     "pyspark.sql.window": Extra("class FrameBound: ...\n"),
-    "pyspark.sql.streaming.readwriter": Extra(
+    "pyspark.sql.connect.streaming.readwriter": Extra(
+        "from pyspark.errors import PySparkAttributeError as PySparkAttributeError\n"
+        "from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError\n"
         "class Trigger:\n"
         "    @staticmethod\n"
         "    def processingTime(interval: str) -> Trigger: ...\n"
@@ -310,7 +300,6 @@ EXTRAS = {
         "    def availableNow() -> Trigger: ...\n"
         "    @staticmethod\n"
         "    def continuous(interval: str) -> Trigger: ...\n",
-        ("Trigger",),
     ),
 }
 
@@ -338,9 +327,6 @@ _CONNECT = (
 UNRESOLVED_IMPORTS = {
     "pyspark.core.context.SparkContext": _CLASSIC,
     "pyspark.core.rdd.RDD": _CLASSIC,
-    # PySpark's streaming readers and writers import it from its readwriter for the bodies of
-    # their option methods, which the stubs keep; the drop-in's readwriter has no to_str.
-    "pyspark.sql.readwriter.to_str": "a helper that only the kept bodies of methods call",
     "pyspark.sql.utils.StringConcat": (
         "the helper of the private tree strings of PySpark's classic types, which the drop-in's "
         "native types build in Rust"

@@ -34,6 +34,7 @@ EXPECTED = {
     "na": "pyspark.sql.connect.dataframe.DataFrameNaFunctions",
     "stat": "pyspark.sql.connect.dataframe.DataFrameStatFunctions",
     "groupBy": "pyspark.sql.connect.group.GroupedData",
+    "cogroup": "pyspark.sql.connect.group.PandasCogroupedOps",
     "column": "pyspark.sql.connect.column.Column",
     "window": "pyspark.sql.connect.window.WindowSpec",
     "asTable": "pyspark.sql.connect.table_arg.TableArg",
@@ -66,6 +67,7 @@ def _objects(spark):
         "na": df.na,
         "stat": df.stat,
         "groupBy": df.groupBy(),
+        "cogroup": df.groupBy().cogroup(df.groupBy()),
         "column": F.col("id"),
         "window": Window.partitionBy("id"),
         "asTable": df.asTable(),
@@ -135,6 +137,130 @@ def test_the_classic_conf_tvf_merge_and_observation_classes_are_pysparks(objects
     assert Observation.__module__ == "pyspark.sql.observation"
 
 
+# The classic class of each object of a session, of its module of PySpark's, which pyspark.sql or
+# pyspark.sql.streaming names too, as PySpark's do.
+_STREAMING = "pyspark.sql.streaming"
+CLASSIC = {
+    "catalog": ("pyspark.sql.catalog", "Catalog", "pyspark.sql"),
+    "read": ("pyspark.sql.readwriter", "DataFrameReader", "pyspark.sql"),
+    "write": ("pyspark.sql.readwriter", "DataFrameWriter", "pyspark.sql"),
+    "writeTo": ("pyspark.sql.readwriter", "DataFrameWriterV2", "pyspark.sql"),
+    "readStream": (f"{_STREAMING}.readwriter", "DataStreamReader", _STREAMING),
+    "writeStream": (f"{_STREAMING}.readwriter", "DataStreamWriter", _STREAMING),
+    "streams": (f"{_STREAMING}.query", "StreamingQueryManager", _STREAMING),
+    "udf": ("pyspark.sql.udf", "UDFRegistration", "pyspark.sql"),
+    "udtf": ("pyspark.sql.udtf", "UDTFRegistration", "pyspark.sql"),
+    "groupBy": ("pyspark.sql.group", "GroupedData", "pyspark.sql"),
+    "cogroup": ("pyspark.sql.pandas.group_ops", "PandasCogroupedOps", "pyspark.sql"),
+}
+
+
+@pytest.mark.parametrize("name", list(CLASSIC))
+def test_the_classic_classes_of_the_objects_of_a_session_are_pysparks(objects, name):
+    # As PySpark's: the classic modules are PySpark's, of Apache Spark as they are, whose classes
+    # are of the JVM of Spark Classic, and the objects of a session are of PySpark Connect's
+    # classes, which are not their subclasses.
+    import importlib
+
+    module, qualname, package = CLASSIC[name]
+    classic = getattr(importlib.import_module(module), qualname)
+    assert f"{classic.__module__}.{classic.__qualname__}" == f"{module}.{qualname}"
+    assert getattr(importlib.import_module(package), qualname) is classic
+    assert not isinstance(objects[name], classic)
+    assert type(objects[name]).__module__.startswith("pyspark.sql.connect.")
+    assert pickle.loads(pickle.dumps(classic)) is classic
+
+
+def test_the_classic_modules_of_the_objects_of_a_session_are_pysparks():
+    # Of PySpark's own names of these modules, which the Connect classes do not have: the option
+    # helpers of its readers and writers, and the decorators and the mixin of its grouped data.
+    from pyspark.sql import group, readwriter
+    from pyspark.sql.pandas import group_ops
+    from pyspark.sql.streaming import query
+    from pyspark.sql.streaming import readwriter as streaming_readwriter
+
+    assert [readwriter.to_str(v) for v in (True, False, None, 1, "a")] == [
+        "true",
+        "false",
+        None,
+        "1",
+        "a",
+    ]
+    for cls in (readwriter.DataFrameReader, readwriter.DataFrameWriter):
+        assert cls.__mro__ == (cls, readwriter.OptionUtils, object)
+    assert streaming_readwriter.DataStreamReader.__mro__[1] is readwriter.OptionUtils
+    assert group.GroupedData.__mro__ == (
+        group.GroupedData,
+        group_ops.PandasGroupedOpsMixin,
+        object,
+    )
+    assert callable(group.dfapi) and callable(group.df_varargs_api)
+    assert query.StreamingCheckpointManager.__module__ == "pyspark.sql.streaming.query"
+
+
+def test_the_udfs_and_udtfs_are_of_pyspark_connects_classes():
+    # As PySpark's on Spark Connect: udf, pandas_udf, udtf and arrow_udtf make the UDFs and the
+    # UDTFs of PySpark Connect's classes, of pyspark.sql.connect.udf and pyspark.sql.connect.udtf,
+    # which are not instances of the classic classes of pyspark.sql.udf and pyspark.sql.udtf,
+    # which pyspark.sql.functions names, as PySpark's does.
+    import pandas as pd
+    import pyarrow as pa
+    import pyspark.sql.udf as classic_udf
+    import pyspark.sql.udtf as classic_udtf
+    from pyspark.sql.connect import udf as connect_udf
+    from pyspark.sql.connect import udtf as connect_udtf
+
+    class Handler:
+        def eval(self, a):
+            yield (a,)
+
+    class ArrowHandler:
+        def eval(self, a: pa.RecordBatch):
+            yield pa.table({"a": [1]})
+
+    for table_function in (
+        F.udtf(Handler, returnType="a int"),
+        F.arrow_udtf(ArrowHandler, returnType="a int"),
+    ):
+        assert type(table_function) is connect_udtf.UserDefinedTableFunction
+        assert not isinstance(table_function, classic_udtf.UserDefinedTableFunction)
+
+    def plus_one(s: pd.Series) -> pd.Series:
+        return s + 1
+
+    for function in (F.udf(lambda x: x), F.pandas_udf(plus_one, "long")):
+        assert type(function._unwrapped) is connect_udf.UserDefinedFunction
+        assert not isinstance(function._unwrapped, classic_udf.UserDefinedFunction)
+
+    assert F.UserDefinedFunction is classic_udf.UserDefinedFunction
+    assert F.UserDefinedTableFunction is classic_udtf.UserDefinedTableFunction
+    for cls, module in [
+        (connect_udf.UserDefinedFunction, "pyspark.sql.connect.udf"),
+        (connect_udtf.UserDefinedTableFunction, "pyspark.sql.connect.udtf"),
+    ]:
+        assert cls.__module__ == module
+        assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+def test_the_native_trigger_and_listener_bus_are_of_the_connect_modules(objects):
+    # The drop-in's Trigger of a stream writer, of its module of PySpark Connect, where it pickles
+    # by reference, and the listener bus of a session's streams, of PySpark Connect's module and
+    # name of the class of its bus.
+    from pyspark.sql.connect.streaming import readwriter
+
+    trigger = readwriter.Trigger
+    assert (trigger.__module__, trigger.__qualname__) == (
+        "pyspark.sql.connect.streaming.readwriter",
+        "Trigger",
+    )
+    assert pickle.loads(pickle.dumps(trigger)) is trigger
+    bus = type(objects["streams"]._sqlb)
+    assert (bus.__module__, bus.__qualname__) == (
+        "pyspark.sql.connect.streaming.query",
+        "StreamingQueryListenerBus",
+    )
+
+
 def test_the_connect_window_is_a_class_of_its_own_as_pysparks():
     # As PySpark Connect's Window, a subclass of pyspark.sql.window.Window, whose static methods
     # make the WindowSpecs of PySpark Connect.
@@ -154,6 +280,9 @@ def test_the_connect_window_is_a_class_of_its_own_as_pysparks():
 
 
 def test_the_streaming_query_class_is_pysparks():
+    # As PySpark's: a query is of PySpark Connect's class, and the StreamingQuery of
+    # pyspark.sql.streaming is PySpark's classic class, which is not its base.
+    import pyspark.sql.streaming.query as classic
     from pyspark.sql.connect.streaming.query import StreamingQuery
     from pyspark.sql.streaming import StreamingQuery as ClassicName
 
@@ -161,7 +290,9 @@ def test_the_streaming_query_class_is_pysparks():
         "pyspark.sql.connect.streaming.query",
         "StreamingQuery",
     )
-    assert ClassicName is StreamingQuery
+    assert ClassicName is classic.StreamingQuery
+    assert classic.StreamingQuery.__module__ == "pyspark.sql.streaming.query"
+    assert not issubclass(StreamingQuery, ClassicName)
     assert pickle.loads(pickle.dumps(StreamingQuery)) is StreamingQuery
 
 

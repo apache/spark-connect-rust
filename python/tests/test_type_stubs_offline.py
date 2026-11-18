@@ -56,7 +56,6 @@ PRIVATE_NAMES = {
         "_make_type_verifier",
         "_drop_metadata",
     ],
-    "pyspark.sql.udf": ["_create_udf", "_create_py_udf"],
     "pyspark.util": ["_parse_memory"],
 }
 
@@ -71,17 +70,10 @@ _CLASSIC_ONLY = (
 TYPE_ONLY = {
     "pyspark.sql.dataframe.DataFrame.rdd": _CLASSIC_ONLY,
     "pyspark.sql.connect.dataframe.DataFrame.rdd": _CLASSIC_ONLY,
-    "pyspark.sql.group.dfapi": "the decorator of PySpark's GroupedData, which types its methods",
-    "pyspark.sql.group.df_varargs_api": "the decorator of PySpark's GroupedData, as dfapi",
-    "pyspark.sql.pandas.group_ops.PandasGroupedOpsMixin": (
-        "the base of PySpark's GroupedData, of its pandas and Arrow methods, which the drop-in's "
-        "native GroupedData has itself"
+    "pyspark.sql.connect.readwriter.OptionUtils": (
+        "the base of PySpark Connect's readers and writers, of private members only; the "
+        "drop-in's readers and writers are native"
     ),
-    "pyspark.sql.readwriter.OptionUtils": (
-        "the base of PySpark's readers and writers, of private members only; the drop-in's "
-        "readers and writers are native"
-    ),
-    "pyspark.sql.connect.readwriter.OptionUtils": "as pyspark.sql.readwriter.OptionUtils",
     "pyspark.sql.types.T": "a type variable of PySpark's annotations of the module",
     "pyspark.sql.types.U": "a type variable of PySpark's annotations of the module",
     "pyspark.sql.connect.streaming.query.StreamingQueryListenerBus": (
@@ -98,7 +90,6 @@ _CONNECT_CLASS = (
     "class, which type checkers see as with pyspark-client, does not have"
 )
 UNDECLARED_MEMBERS = {
-    "pyspark.sql.streaming.query.StreamingQueryManager.close": _CONNECT_CLASS,
     "pyspark.sql.table_arg.TableArg.to_plan": _CONNECT_CLASS,
 }
 
@@ -113,7 +104,7 @@ ATTRIBUTE_TYPES = {
     "pyspark.sql.types.DecimalType.precision": "int",
     "pyspark.sql.types.GeometryType.srid": "int",
     "pyspark.storagelevel.StorageLevel.useDisk": "bool",
-    "pyspark.sql.udf.UserDefinedFunction.func": "def (*Any, **Any) -> Any",
+    "pyspark.sql.connect.udf.UserDefinedFunction.func": "def (*Any, **Any) -> Any",
     "pyspark.sql.connect.session.SparkSession.release_session_on_close": "bool",
 }
 
@@ -128,7 +119,7 @@ PYRIGHT_ATTRIBUTE_TYPES = {
     "pyspark.sql.types.DecimalType.precision": "int",
     "pyspark.sql.types.GeometryType.srid": "int",
     "pyspark.storagelevel.StorageLevel.useDisk": "bool",
-    "pyspark.sql.udf.UserDefinedFunction.func": "(...) -> Any",
+    "pyspark.sql.connect.udf.UserDefinedFunction.func": "(...) -> Any",
     "pyspark.sql.connect.session.SparkSession.release_session_on_close": "bool",
 }
 

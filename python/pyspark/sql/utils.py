@@ -44,7 +44,10 @@ from pyspark.errors.exceptions.captured import CapturedException  # noqa: F401
 if TYPE_CHECKING:
     from py4j.java_gateway import JavaObject, JVMView
 
+    from pyspark.core.context import SparkContext
     from pyspark.pandas._typing import IndexOpsLike, SeriesOrIndex
+    from pyspark.sql.dataframe import DataFrame
+    from pyspark.sql.session import SparkSession
 
 
 FuncT = TypeVar("FuncT", bound=Callable[..., Any])
@@ -61,6 +64,51 @@ def to_str(value: Any) -> Optional[str]:
         return value
     else:
         return str(value)
+
+
+# PySpark's, of Spark Classic, which its classic pyspark.sql.streaming.readwriter imports.
+class ForeachBatchFunction:
+    """
+    This is the Python implementation of Java interface 'ForeachBatchFunction'. This wraps
+    the user-defined 'foreachBatch' function such that it can be called from the JVM when
+    the query is active.
+    """
+
+    def __init__(self, session: "SparkSession", func: Callable[["DataFrame", int], None]):
+        self.func = func
+        self.session = session
+
+    def call(self, jdf: "JavaObject", batch_id: int) -> None:
+        from pyspark.sql.dataframe import DataFrame
+        from pyspark.sql.session import SparkSession
+
+        try:
+            session_jdf = jdf.sparkSession()
+            # assuming that spark context is still the same between JVM and PySpark
+            wrapped_session_jdf = SparkSession(self.session.sparkContext, session_jdf)
+            self.func(DataFrame(jdf, wrapped_session_jdf), batch_id)
+        except Exception as e:
+            self.error = e
+            raise e
+
+    class Java:
+        implements = ["org.apache.spark.sql.execution.streaming.sources.PythonForeachBatchFunction"]
+
+
+# PySpark's, of Spark Classic, which its classic pyspark.sql.udf imports: a Connect-only client has
+# no SparkContext, so `from pyspark import SparkContext` raises its ImportError.
+def get_active_spark_context() -> "SparkContext":
+    """Raise RuntimeError if SparkContext is not initialized,
+    otherwise, returns the active SparkContext."""
+    from pyspark import SparkContext  # type: ignore[attr-defined]
+
+    sc = SparkContext._active_spark_context
+    if sc is None or sc._jvm is None:
+        raise PySparkRuntimeError(
+            errorClass="SESSION_OR_CONTEXT_NOT_EXISTS",
+            messageParameters={},
+        )
+    return sc
 
 
 def to_scala_map(jvm: "JVMView", dic: dict) -> "JavaObject":

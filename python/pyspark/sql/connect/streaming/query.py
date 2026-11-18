@@ -14,7 +14,93 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""StreamingQuery / StreamingQueryManager under the connect import path."""
-from pyspark.sql.streaming.query import StreamingQuery, StreamingQueryManager
+
+"""
+The streaming queries of Spark Connect, as PySpark Connect's
+``pyspark.sql.connect.streaming.query``: the native StreamingQuery and StreamingQueryManager of the
+Rust core, and the Python side of the listener bus of the client, which decodes and dispatches the
+events of the listeners.
+"""
+
+import json
+import warnings
+
+from pyspark._pyspark import (
+    StreamingQuery as _StreamingQuery,
+)
+from pyspark._pyspark import (
+    StreamingQueryManager as _StreamingQueryManager,
+)
+
+# As PySpark's, the exception of a failed query is that of pyspark.errors.
+from pyspark.errors import (
+    PySparkValueError,
+    StreamingQueryException,  # noqa: F401
+)
+from pyspark.sql.streaming.listener import (
+    QueryIdleEvent,
+    QueryProgressEvent,
+    QueryStartedEvent,
+    QueryTerminatedEvent,
+    StreamingQueryListener,  # noqa: F401 (an attribute of PySpark Connect's module too)
+)
+
+# StreamingQueryEventType values (spark.connect.StreamingQueryEventType); the Rust
+# listener stream yields these as the event_type int alongside each event's JSON. The started
+# event of a query comes with the result of its start, which the Rust core posts as
+# spark_connect::streaming::QUERY_STARTED_EVENT, of no StreamingQueryEventType.
+_QUERY_STARTED_EVENT = -1
+_QUERY_PROGRESS_EVENT = 1
+_QUERY_TERMINATED_EVENT = 2
+_QUERY_IDLE_EVENT = 3
+
+# Re-export the core classes from the Rust extension
+StreamingQuery = _StreamingQuery
+
+
+def _deserialize_listener_event(event_type, event_json, *, started=False):
+    """Decode a protocol event before entering callback exception isolation.
+
+    Started events belong to the synchronous start response, not the asynchronous
+    protocol enum. Malformed JSON and missing fields propagate to the caller, as in
+    reference PySpark's writer and listener-bus deserializers.
+    """
+    if started and event_type == _QUERY_STARTED_EVENT:
+        return QueryStartedEvent.fromJson(json.loads(event_json))
+    if event_type == _QUERY_PROGRESS_EVENT:
+        return QueryProgressEvent.fromJson(json.loads(event_json))
+    if event_type == _QUERY_TERMINATED_EVENT:
+        return QueryTerminatedEvent.fromJson(json.loads(event_json))
+    if event_type == _QUERY_IDLE_EVENT:
+        return QueryIdleEvent.fromJson(json.loads(event_json))
+    raise PySparkValueError(
+        errorClass="UNKNOWN_VALUE_FOR",
+        messageParameters={"var": f"proto.StreamingQueryEventType: {event_type}"},
+    )
+
+
+def _dispatch_listener_event(listener, event):
+    """Warn on callback Exception; BaseException and warning-as-error escape to the bus."""
+    try:
+        if isinstance(event, QueryStartedEvent):
+            listener.onQueryStarted(event)
+        elif isinstance(event, QueryProgressEvent):
+            listener.onQueryProgress(event)
+        elif isinstance(event, QueryIdleEvent):
+            listener.onQueryIdle(event)
+        elif isinstance(event, QueryTerminatedEvent):
+            listener.onQueryTerminated(event)
+        else:
+            warnings.warn(f"Unknown StreamingQueryListener event: {event}")
+    except Exception as e:  # noqa: BLE001
+        warnings.warn(f"Listener {str(listener)} threw an exception\n{e}")
+
+
+# ``spark.streams`` returns the native (Rust) StreamingQueryManager, which owns the
+# client-side listener bus: addListener / removeListener / close are implemented in the
+# Rust core (so Rust clients get the listener feature too). Re-export it as the public
+# class.
+StreamingQueryManager = _StreamingQueryManager
+
 
 __all__ = ["StreamingQuery", "StreamingQueryManager"]

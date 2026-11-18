@@ -3221,7 +3221,7 @@ def test_streaming_query_manager_wrapper_has_listener_api():
     # spark.streams returns the Python StreamingQueryManager wrapper, which exposes the
     # listener-bus API (addListener/removeListener/close). Verify the class contract
     # offline (no server needed to check the wrapper class).
-    from pyspark.sql.streaming.query import StreamingQueryManager
+    from pyspark.sql.connect.streaming.query import StreamingQueryManager
 
     for m in ["addListener", "removeListener", "close"]:
         assert hasattr(StreamingQueryManager, m), f"StreamingQueryManager missing {m}"
@@ -3255,7 +3255,7 @@ def test_parquet_sets_only_its_options_as_pyspark(mock_connect):
 
 def test_udf_construction_and_call():
     from pyspark.sql import functions as F
-    from pyspark.sql.udf import UserDefinedFunction
+    from pyspark.sql.connect.udf import UserDefinedFunction
     # As PySpark's: (func, returnType, name, evalType, deterministic).
     u = UserDefinedFunction(lambda x: x + 1, T.IntegerType(), "plus1", 100)
     assert u._name == "plus1" and u._wrapped().__name__ == "plus1"
@@ -3462,7 +3462,7 @@ def test_udfs_are_created_as_pyspark(mock_connect):
     import pandas as pd
     import pyarrow as pa
     from pyspark.sql import functions as F
-    from pyspark.sql.udf import UserDefinedFunction
+    from pyspark.sql.connect.udf import UserDefinedFunction
 
     spark, service = mock_connect
     arrow_conf = "spark.sql.execution.pythonUDF.arrow.enabled"
@@ -6639,15 +6639,15 @@ def test_registrations_and_interrupts_take_their_names_as_protobuf_as_pyspark(mo
 
 def test_udf_registration_has_java_methods():
     # The UDFRegistration class (what spark.udf returns) exposes the Java methods.
-    from pyspark.sql.udf import UDFRegistration
+    from pyspark.sql.connect.udf import UDFRegistration
     for m in ("register", "registerJavaFunction", "registerJavaUDAF"):
         assert hasattr(UDFRegistration, m), f"UDFRegistration missing {m}"
 
 
 def test_udf_udtf_determinism_and_extras(mock_connect):
     from pyspark.sql import functions as F
-    from pyspark.sql.udf import UserDefinedFunction, udf
-    from pyspark.sql.udtf import udtf
+    from pyspark.sql.connect.udf import UserDefinedFunction, udf
+    from pyspark.sql.connect.udtf import udtf
 
     # As PySpark's, asNondeterministic() of the function wrapper of a UDF marks the UDF
     # nondeterministic, in place, and returns a wrapper of it.
@@ -6675,7 +6675,8 @@ def test_udf_udtf_determinism_and_extras(mock_connect):
 def test_catalog_result_classes():
     # As PySpark's: the catalog metadata result classes are the NamedTuples of
     # pyspark.sql.catalog, and the Table `database` property derives from a single-element
-    # namespace. The Catalog of a session is PySpark Connect's, of pyspark.sql.connect.catalog.
+    # namespace. The Catalog of a session is PySpark Connect's, of pyspark.sql.connect.catalog,
+    # and that of pyspark.sql.catalog is PySpark's classic class.
     from pyspark.sql.catalog import (
         Catalog,
         CatalogMetadata,
@@ -6685,7 +6686,11 @@ def test_catalog_result_classes():
         Table,
         TablePartition,
     )
-    assert Catalog.__module__ == "pyspark.sql.connect.catalog"
+    from pyspark.sql.connect.catalog import Catalog as ConnectCatalog
+
+    assert Catalog.__module__ == "pyspark.sql.catalog"
+    assert ConnectCatalog.__module__ == "pyspark.sql.connect.catalog"
+    assert ConnectCatalog is not Catalog
     for cls in (CatalogMetadata, Database, Table, Column, Function, TablePartition):
         assert cls.__module__ == "pyspark.sql.catalog", f"{cls.__name__} module = {cls.__module__}"
         assert issubclass(cls, tuple)
@@ -6758,7 +6763,8 @@ def test_udtf_analyze_result_subclass_preserves_custom_state():
 
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql.connect.udtf import AnalyzeResult as ConnectAnalyzeResult
-    from pyspark.sql.udtf import AnalyzeResult, udtf
+    from pyspark.sql.connect.udtf import udtf
+    from pyspark.sql.udtf import AnalyzeResult
 
     assert ConnectAnalyzeResult is AnalyzeResult
 
@@ -6789,7 +6795,7 @@ def test_udtf_analyze_result_subclass_preserves_custom_state():
         def eval(self, argument):
             yield (self.buffer,)
 
-    from pyspark.sql.udtf import _pickled_handler
+    from pyspark.sql.connect.udtf import _pickled_handler
 
     function = udtf(Handler, useArrow=False)
     # The handler class as it is sent, pickled, as PySpark Connect's PythonUDTF.command.
@@ -7207,7 +7213,7 @@ def test_partition_transforms_are_those_of_pyspark_and_the_others_deprecated():
 
 
 def test_udtf_construction():
-    from pyspark.sql.udtf import UserDefinedTableFunction, udtf
+    from pyspark.sql.connect.udtf import UserDefinedTableFunction, udtf
 
     @udtf(returnType="a int")
     class Echo:
@@ -7235,7 +7241,7 @@ def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):
     from pyspark.errors import PySparkTypeError
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql import functions as F
-    from pyspark.sql.udtf import UDTFRegistration, UserDefinedTableFunction
+    from pyspark.sql.connect.udtf import UDTFRegistration, UserDefinedTableFunction
 
     spark, service = mock_connect
 
@@ -7281,8 +7287,8 @@ def test_udf_and_udtf_pickle_as_pyspark_connect_classes():
 
     from pyspark.serializers import CloudPickleSerializer
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.udf import UserDefinedFunction
     from pyspark.sql.types import IntegerType
-    from pyspark.sql.udf import UserDefinedFunction
 
     def class_references(obj):
         # The strings of the pickle, which name the classes that it refers to by reference.
@@ -7394,7 +7400,7 @@ def test_udtf_return_type_connect_validation_and_command():
     subprocess.run([sys.executable, "-c", """
 from pyspark.sql import SparkSession, DataFrame, functions as F, types as T
 from pyspark.sql.connect.types import UnparsedDataType
-from pyspark.sql.udtf import _pickled_handler
+from pyspark.sql.connect.udtf import _pickled_handler
 from pyspark.serializers import CloudPickleSerializer
 
 # No server listens: with useArrow, udtf() does not read the Arrow config of the session.
@@ -7604,7 +7610,7 @@ def test_udf_defaults_and_registration():
     # register_udf wires to the session's _registerPythonUdf (so the name resolves in SQL), and
     # returns the UDF.
     from pyspark.sql.connect.client import SparkConnectClient
-    from pyspark.sql.udf import UDFRegistration
+    from pyspark.sql.connect.udf import UDFRegistration
 
     class _StubSession:
         def __init__(self):
@@ -9161,7 +9167,7 @@ def test_udf_with_defaults():
 
 def test_udtf_variants():
     """Test UDTF builder methods."""
-    from pyspark.sql.udtf import UserDefinedTableFunction
+    from pyspark.sql.connect.udtf import UserDefinedTableFunction
 
     # Create a simple UDTF for testing; not Arrow-optimized whatever the active session.
     @__import__("pyspark.sql.functions", fromlist=["udtf"]).udtf(
@@ -14689,7 +14695,8 @@ def test_the_streaming_package_is_pysparks():
     # As PySpark's, pyspark.sql.streaming is PySpark's file, vendored as it is, which has no
     # __all__: a star import brings in its classes and its loaded modules, `state` among them, as
     # the drop-in's pyspark.sql.pandas.group_ops imports it as PySpark's does. Trigger, a name of
-    # the drop-in's readwriter, and the read limits of its datasource module are not its names.
+    # the drop-in's connect readwriter, and the read limits of its datasource module are not its
+    # names.
     import importlib
     import subprocess
     import sys
@@ -14726,15 +14733,16 @@ def test_the_streaming_package_is_pysparks():
             importlib.import_module(f"pyspark.sql.streaming.{module}"), name), name
     assert streaming.StreamingQueryException is StreamingQueryException
     for name, module in [
-        ("Trigger", "readwriter"), ("ReadLimit", "datasource"), ("ReadAllAvailable", "datasource"),
-        ("ReadMinRows", "datasource"), ("ReadMaxRows", "datasource"),
-        ("ReadMaxFiles", "datasource"), ("ReadMaxBytes", "datasource"),
-        ("SupportsTriggerAvailableNow", "datasource"),
+        ("Trigger", "connect.streaming.readwriter"), ("ReadLimit", "streaming.datasource"),
+        ("ReadAllAvailable", "streaming.datasource"), ("ReadMinRows", "streaming.datasource"),
+        ("ReadMaxRows", "streaming.datasource"), ("ReadMaxFiles", "streaming.datasource"),
+        ("ReadMaxBytes", "streaming.datasource"),
+        ("SupportsTriggerAvailableNow", "streaming.datasource"),
     ]:
         assert not hasattr(streaming, name), name
         with pytest.raises(ImportError, match=f"cannot import name '{name}' from 'pyspark.sql.streaming'"):
             exec(f"from pyspark.sql.streaming import {name}", {})
-        assert hasattr(importlib.import_module(f"pyspark.sql.streaming.{module}"), name), name
+        assert hasattr(importlib.import_module(f"pyspark.sql.{module}"), name), name
 
 
 def test_module_namespaces_of_the_official_doctests_as_pyspark():
@@ -16506,9 +16514,9 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(
 
 def test_udf_and_pandas_udf_decorator_forms(mock_connect):
     # @udf(returnType) / @pandas_udf(returnType) return a decorator that wraps a function.
+    from pyspark.sql.connect.udf import UserDefinedFunction
     from pyspark.sql.functions import pandas_udf, udf
     from pyspark.sql.types import IntegerType
-    from pyspark.sql.udf import UserDefinedFunction
 
     # As PySpark's, the function wrapper of the UDF.
     @udf(IntegerType())
@@ -24842,7 +24850,7 @@ def test_numpy_longdouble_array_matches_dtype_and_element_checks_as_pyspark():
 ])
 def test_user_defined_function_constructor_checks_its_arguments_as_pyspark(args, kwargs, message):
     from pyspark.errors import PySparkTypeError
-    from pyspark.sql.udf import UserDefinedFunction
+    from pyspark.sql.connect.udf import UserDefinedFunction
 
     with pytest.raises(PySparkTypeError, match=re.escape(message)) as error:
         UserDefinedFunction(*args, **kwargs)
