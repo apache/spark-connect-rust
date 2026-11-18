@@ -130,9 +130,12 @@ impl Kind {
 /// The key and value of a map field, of its map entry message.
 #[derive(Clone, Debug)]
 pub(crate) struct MapDesc {
-    /// The full name of the map entry message, whose fields `key` and `value` the errors of a
-    /// value of the map name, as protobuf's do.
+    /// The full name of the map entry message.
     pub(crate) entry: String,
+    /// The full names of the fields `key` and `value` of the entry message, which the errors of a
+    /// key and of a value of the map name, as protobuf's do (made once, not for each key).
+    pub(crate) key_name: String,
+    pub(crate) value_name: String,
     pub(crate) key: Kind,
     pub(crate) value: Kind,
     /// The full name of the message or enum of the value, if it is one.
@@ -405,6 +408,8 @@ impl Pool {
                 let (key, value) = (field(1), field(2));
                 let map = MapDesc {
                     entry: m.full_name.clone(),
+                    key_name: format!("{}.key", m.full_name),
+                    value_name: format!("{}.value", m.full_name),
                     key: key.map_or(Kind::String, |f| f.kind),
                     value: value.map_or(Kind::String, |f| f.kind),
                     value_type: value.map_or(String::new(), |f| f.type_name.clone()),

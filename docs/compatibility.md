@@ -1212,7 +1212,9 @@ of a `protobuf` install, with their bytes, text, errors and presence (of protobu
 protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timestamp field takes a
 `datetime`), and the modules of the protos with the names of the generated modules
 (`pyspark.sql.connect.proto.base_pb2`, ..., and `example_plugins_pb2`, of Spark's example plugin).
-`protobuf`'s `json_format` and `text_format` print and parse its messages. The differences:
+`protobuf`'s `json_format` and `text_format` print and parse its messages, and
+`unknown_fields.UnknownFieldSet` reads their unknown fields, which `text_format` prints with
+`print_unknown_fields=True` (see below). The differences:
 
 - its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`: its
   classes are of the metaclass `type`, not upb's `MessageMeta`, and can be subclassed, which upb
@@ -1236,15 +1238,20 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   into a value that it keeps;
 - it makes a Python object of each message that it parses or copies, where upb makes one when the
   message is read, so the parse, the copy and the release of a message of many messages take
-  several times as long as upb's (0.25 s for the parse of a million messages, upb's 0.04 s). The
-  parse, the copies (the constructor, `CopyFrom` and `copy.deepcopy`) and the merges (`MergeFrom`)
-  let another thread take the GIL, and a signal interrupt them with the exception of its handler,
-  every 1,024 messages, where upb holds the GIL until they end, so another thread can use a
-  message that one of them reads meanwhile. `SerializeToString` and the release of a message hold
-  the GIL until they end: 0.07 s for a million messages, where upb's take 0.04 s and 2 ms. The
-  messages that the runtime makes, of a parse, a copy or a read of an unset field, are not
-  tracked by the garbage collector (`gc.is_tracked`), as they make no reference cycles, so that a
-  collection does not go through the messages of a large message;
+  several times as long as upb's (0.3 s for the parse of a million messages, upb's 0.05 s, with
+  no other thread running). The parse, the constructor (of lists and mappings too), the copies
+  (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the merges
+  (`MergeFrom`), the `extend` of a repeated field of messages and the `update` and `MergeFrom` of
+  a map let another thread take the GIL, and a signal interrupt them with the exception of its
+  handler, every 1,024 steps of the operation (a message that it reads, makes or copies, an entry
+  of a map, or a value of a repeated field that the constructor takes), where upb holds the GIL
+  until they end (but in the `update` and `MergeFrom` of a map and the constructor of a map of
+  scalars, which run `MutableMapping.update` in Python), so another thread can use a message that
+  one of them reads meanwhile. `SerializeToString`, `==` and the release of a message hold the GIL
+  until they end, as upb's do: 0.07 s, 0.05 s and 0.07 s for a million messages, where upb's take
+  0.04 s, 0.14 s and 2 ms. The messages that the runtime makes, of a parse, a copy or a read of an
+  unset field, are not tracked by the garbage collector (`gc.is_tracked`), as they make no
+  reference cycles, so that a collection does not go through the messages of a large message;
 - the pickle of a message of a nested type names its class, which loads without `protobuf`,
   where upb's names protobuf's `_InternalConstructMessage` of the full name of its type, which
   loads where `protobuf` is installed (as a message of the runtime, whose classes of the protos of
@@ -1296,6 +1303,18 @@ and the rest of such a module is `protobuf`'s:
 
 The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their
 types as they are, and an `Any` of either packs and unpacks a message of either.
+
+`google.protobuf.unknown_fields.UnknownFieldSet` is the drop-in's wrapper of `protobuf`'s class,
+once `pyspark.sql.connect.proto` is imported, which takes the messages of the package too, where
+`protobuf`'s class refuses them ("Expected a message object"). The set of such a message is
+`protobuf`'s set of a message of `protobuf`'s `google.protobuf.Empty` that holds the unknown
+fields of the message, so it has the fields, values and order of upb's, and
+`text_format.MessageToString(message, print_unknown_fields=True)`, which reads the attribute of
+the module, prints them as upb's. Of other arguments, the wrapper gives `protobuf`'s set or raises
+`protobuf`'s error. Its sets are of `protobuf`'s class, as `isinstance` of the wrapper tells, but
+the wrapper is not that class (`type(UnknownFieldSet(message)) is UnknownFieldSet` is false), and
+a name bound to `protobuf`'s class before the package is imported
+(`from google.protobuf.unknown_fields import UnknownFieldSet`) refuses the package's messages.
 
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.

@@ -456,6 +456,18 @@ pub(crate) fn merge(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8])
     merge_with(py, message, data, Some(&ConversionBudget::full()))
 }
 
+/// Merge `data` into `message` as [`merge`] does, a step of `budget` for each message and each map
+/// entry: the budget of the operation that the merge is a part of, such as the constructor or the
+/// `extend` of many of protobuf's messages.
+pub(crate) fn merge_in(
+    py: Python<'_>,
+    message: &Bound<'_, PyMessage>,
+    data: &[u8],
+    budget: &ConversionBudget,
+) -> PyResult<()> {
+    merge_with(py, message, data, Some(budget))
+}
+
 /// Merge `data` into `message` as [`merge`] does, without checkpoints: for a merge of the text
 /// of a message, which holds borrows of the messages that it prints.
 pub(crate) fn merge_unchecked(
@@ -486,8 +498,8 @@ fn merge_with(
 }
 
 /// Merge `data` into `message`, one level of a merge, on a stack with room for it, with the
-/// cause of a failure. Each message merged is a step of `budget`, whose checkpoints find no
-/// borrow held: the merge borrows a message only to set one of its fields.
+/// cause of a failure. Each message merged, and each map entry, is a step of `budget`, whose
+/// checkpoints find no borrow held: the merge borrows a message only to set one of its fields.
 fn merge_message(
     py: Python<'_>,
     message: &Bound<'_, PyMessage>,
@@ -694,6 +706,9 @@ fn merge_map_entry(
     entry: &[u8],
     budget: Option<&ConversionBudget>,
 ) -> PyResult<()> {
+    if let Some(budget) = budget {
+        budget.step(py)?;
+    }
     let mut key = Scalar::default_of(map.key);
     let mut scalar = None;
     let mut child: Option<Bound<'_, PyMessage>> = None;
