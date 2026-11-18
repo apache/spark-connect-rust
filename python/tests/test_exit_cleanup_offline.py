@@ -23,6 +23,7 @@ server and exits; the requests that the server received show what the exit sent.
 """
 
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -37,6 +38,8 @@ _VARIABLE = "SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"
 # The child: it connects, prints the IDs of its sessions, then does what its mode asks for. The
 # modes "stop_wait" and "new_session_dropped_wait" stop the session, then print "ready" and hold
 # the child until a line on its stdin, for a test that stops the server before the child exits.
+# The mode "live_wait" does so with its session live, and prints "exiting" when it exits, just
+# before the exit hook of its session runs.
 _CHILD = textwrap.dedent("""
     import os
     import sys
@@ -77,6 +80,13 @@ _CHILD = textwrap.dedent("""
         spark.stop()
         print("ready", flush=True)
         sys.stdin.readline()
+    if mode == "live_wait":
+        import atexit
+
+        print("ready", flush=True)
+        sys.stdin.readline()
+        # Registered after the session, so it runs before the session's exit hook.
+        atexit.register(lambda: print("exiting", flush=True))
     if mode == "close_all":
         from pyspark._pyspark import _close_sessions_at_exit
 
@@ -279,10 +289,12 @@ def test_h_an_execution_once_the_interpreter_shuts_down_raises_pysparks_runtime_
     assert _exit_requests(exit_service, session_id) == ["execute", "clean_cache"]
 
 
-def _exit_once_the_server_is_gone(mode, variable):
+def _exit_once_the_server_is_gone(mode, variable, interrupt=False):
     # Runs the child in a mode that waits once it stopped its session, until the server of its
     # own stops: then the child exits. Returns the requests of each session of the child up to its
-    # stop, the exit status of the child, the seconds that its exit took, and its stderr.
+    # stop, the exit status of the child, the seconds that its exit took, and its stderr. With
+    # `interrupt`, the child is sent SIGINT once its exit hooks run, and the seconds are those of
+    # its exit after the signal.
     with mock_connect_session() as (spark, service):
         # The session of the test is released while the server is up, so that its stop, which
         # the fixture makes, does not wait on a server that is gone.
@@ -303,6 +315,11 @@ def _exit_once_the_server_is_gone(mode, variable):
             service.connection.send(("stop",))
             child.stdin.write("\n")
             child.stdin.close()
+            if interrupt:
+                assert child.stdout.readline().strip() == "exiting"
+                # The exit hook of the session waits on the retries of its request by now.
+                time.sleep(1)
+                child.send_signal(signal.SIGINT)
             started = time.monotonic()
             status = child.wait(timeout=60)
             elapsed = time.monotonic() - started
@@ -339,3 +356,21 @@ def test_f_stopped_session_exits_promptly_when_the_server_is_gone(variable):
     assert requests == [["release_session"]]
     assert status == 0, stderr
     assert elapsed < 30, elapsed
+
+
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_f_a_signal_ends_the_wait_of_the_exit_hook_when_the_server_is_gone(variable):
+    # (f) The clean_cache of a live session waits on its retries at exit when the server is gone,
+    # as PySpark's does, and a signal ends that wait, as it does PySpark's, whose
+    # `_cleanup_ml_cache` catches `Exception` only: the KeyboardInterrupt of SIGINT is raised out
+    # of the exit hook, which atexit reports, and the child exits at once with status 0, without
+    # waiting on a release either, with and without the release variable.
+    requests, status, elapsed, stderr = _exit_once_the_server_is_gone(
+        "live_wait", variable, interrupt=True
+    )
+    # The live session sent nothing up to the stop of the server.
+    assert requests == [[]]
+    assert status == 0, stderr
+    assert elapsed < 30, elapsed
+    assert "Exception ignored in atexit callback" in stderr, stderr
+    assert "KeyboardInterrupt" in stderr, stderr

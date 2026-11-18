@@ -922,30 +922,59 @@ impl PyExitHook {
     /// dropped or stopped is not touched; otherwise its ML cache is cleaned, and it is released
     /// and closed if the variable asked for it when the session was made. The errors of the
     /// requests are ignored, and the exit waits on the retries of a request whose server is gone,
-    /// as PySpark's does.
-    fn _on_exit(&self, py: Python<'_>) {
+    /// as PySpark's does. A signal ends the wait, as in PySpark, whose `_cleanup_ml_cache` and
+    /// release catch `Exception` only: the exception of the handler that is not one, such as the
+    /// KeyboardInterrupt of Ctrl-C, is raised out of the hook, which `atexit` reports before it
+    /// runs the next one, and the session is neither released nor closed then; one that is an
+    /// `Exception` is ignored, as the errors of the requests are.
+    fn _on_exit(&self, py: Python<'_>) -> PyResult<()> {
         let Some(session) = self.session.upgrade() else {
-            return;
+            return Ok(());
         };
         if session.is_stopped() {
-            return;
+            return Ok(());
         }
-        py.detach(|| {
-            let mut command = spark_connect_proto::Command::default();
-            let clean_cache = spark_connect_proto::ml_command::CleanCache {};
-            command.command_type = Some(spark_connect_proto::command::CommandType::MlCommand(
-                spark_connect_proto::MlCommand {
-                    command: Some(spark_connect_proto::ml_command::Command::CleanCache(
-                        clean_cache,
-                    )),
-                },
-            ));
-            let _ = session.execute_command_proto(command);
-            if self.release_session_on_exit {
-                let _ = session.release_session();
-                session.close();
-            }
-        });
+        let mut command = spark_connect_proto::Command::default();
+        let clean_cache = spark_connect_proto::ml_command::CleanCache {};
+        command.command_type = Some(spark_connect_proto::command::CommandType::MlCommand(
+            spark_connect_proto::MlCommand {
+                command: Some(spark_connect_proto::ml_command::Command::CleanCache(
+                    clean_cache,
+                )),
+            },
+        ));
+        raise_only_base_exceptions(
+            py,
+            crate::interrupt::interruptible_outcome(py, &session, || {
+                session
+                    .execute_command_proto(command)
+                    .map(drop)
+                    .map_err(Box::new)
+            }),
+        )?;
+        if self.release_session_on_exit {
+            raise_only_base_exceptions(
+                py,
+                crate::interrupt::interruptible_outcome(py, &session, || {
+                    session.release_session().map_err(Box::new)
+                }),
+            )?;
+            py.detach(|| session.close());
+        }
+        Ok(())
+    }
+}
+
+/// The outcome of a request of the exit hook, as PySpark's `except Exception: pass` around it:
+/// the failure of the request, and the exception of a signal handler that is an `Exception`, are
+/// ignored; the exception of a handler that is not one, such as KeyboardInterrupt, is raised.
+fn raise_only_base_exceptions<T>(
+    py: Python<'_>,
+    outcome: PyResult<Result<T, Box<spark_connect_core::error::SparkError>>>,
+) -> PyResult<()> {
+    match outcome {
+        Err(signal) if !signal.is_instance_of::<pyo3::exceptions::PyException>(py) => Err(signal),
+        _ => Ok(()),
     }
 }
 
