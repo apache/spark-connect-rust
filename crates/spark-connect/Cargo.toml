@@ -42,6 +42,9 @@ base64 = "0.22"
 futures.workspace = true
 # The gRPC servers of the tests.
 tonic = { workspace = true, features = ["server", "router"] }
+# The tests decode the relations of the placeholders of deep DataFrames, as the drop-in does,
+# whose `pyspark-rs` lifts prost's limit of 100 nested messages: so do the tests.
+prost = { workspace = true, features = ["no-recursion-limit"] }
 
 [features]
 # Run Rust UDFs on Spark via WebAssembly (the `wasm_udf` module). Off by

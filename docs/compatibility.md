@@ -1549,13 +1549,13 @@ files are added to the runtime's pool. So their message fields take the messages
 PySpark's: Delta Lake 4.0's `DeltaTable.delete`, `update` and `merge` build their plans with
 `CopyFrom` of the package's messages, of the bytes, text and JSON of PySpark's, with either
 implementation of `protobuf`. The relation of a DataFrame that such a message takes
-(`df._plan.plan(session)`, as `merge` takes the plan of its source DataFrame) is a shallow
-placeholder of the relation of the DataFrame of this client, as in the plans of `pyspark.ml`: the
-core replaces it when the plan or the command reaches it, so the server receives the relation, as
-PySpark's plugins send it: also anywhere in the message of the extension of a relation or of a
-command, of a type that it does not know, as long as the message holds the placeholder as
-`plan(session)` gives it. "SparkSession.client" below lists the places where the core replaces it:
-under any relation and in any command that holds one, but not one that a plugin changes
+(`df._plan.plan(session)`, as `merge` takes the plan of its source DataFrame) is a placeholder that
+holds the relation of the DataFrame (see "SparkSession.client" below), as in the plans of
+`pyspark.ml`: the core replaces it when the plan or the command reaches it, so the server receives
+the relation, as PySpark's plugins send it: also anywhere in the message of the extension of a
+relation or of a command, of a type that it does not know, as long as the message holds the
+placeholder as `plan(session)` gives it. "SparkSession.client" below lists the places where the core
+replaces it: under any relation and in any command that holds one, but not one that a plugin changes
 (`plan.common.plan_id = ...`) in the message of an extension, which is sent as it is and which the
 server refuses.
 Its classes are the runtime's, as those of the package (not `google.protobuf.message.Message`'s),
@@ -1609,7 +1609,12 @@ a name bound to `protobuf`'s class before the package is imported
 (`from google.protobuf.unknown_fields import UnknownFieldSet`) refuses the package's messages.
 
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
-of this client rather than the one of the plan, which its columns refer to.
+of this client rather than the one of the plan, which its columns refer to: the core keeps the
+relation of the plan as a node of its own plans, which it numbers from the counter of the plan
+IDs of its sessions, and the plans of `pyspark.sql.connect.plan` number theirs from `1 << 48`,
+past the core's, so that the two never give a relation the same ID. So the relation that it sends
+and the columns of its `df["name"]` have the client's plan ID, and its `_plan` is the plan of that
+relation, not `plan`, as PySpark's is.
 
 ## SparkSession.client
 
@@ -1650,16 +1655,25 @@ parameters of the first `DefaultPolicy` of the list, its retries, backoffs, jitt
 that the server asks for, as PySpark's `Retrying` does, of the failures that
 `DefaultPolicy.can_retry` retries; a `RetryPolicy` retries none. It reads the parameters when the
 policies are set, so a change to a policy afterwards applies once the policies are set again. A
-policy of its own `can_retry` or `to_state`, which the transport cannot call, and a backoff, jitter
-or delay that is not a whole number of milliseconds raise `NOT_IMPLEMENTED`. The client of a new
-session has the default policy, as PySpark's `newSession` and `clone` do. With
+policy of its own `can_retry` or `to_state`, which the transport does not call, as it decides each
+retry in Rust, without the GIL, of the parameters that it read of the policies, and a backoff,
+jitter or delay that is not a whole number of milliseconds raise `NOT_IMPLEMENTED`. The client of a
+new session has the default policy, as PySpark's `newSession` and `clone` do. With
 `disable_reattachable_execute`, an execution has no reattach option and no deadline, is never
 released, and is sent again when it fails in a way that its policy retries, as PySpark's.
 
-The relation of a DataFrame's plan (`df._plan.plan(client)`) is a placeholder of the relation of
-the DataFrame, which the core replaces by that relation when it sends a plan, a command or an
-analysis that holds it, while the DataFrame is alive: keep the DataFrame while a plan of it is
-sent. It replaces it wherever PySpark's plans and commands hold the relation of a DataFrame:
+The relation of a DataFrame's plan (`df._plan.plan(client)`) is a placeholder that holds the
+relation of the DataFrame, which the core builds at the call, as PySpark's `plan` builds the
+relation then: the call pickles the functions of its UDFs, warns of a window of no partitions and
+raises the errors of the build, and no request is sent. The core builds the relation, and Python
+has no messages of it, so the placeholder is one message, an extension whose value holds the
+relation encoded, which Python's protobuf does not parse, whatever the depth of the DataFrame,
+where PySpark's `plan` gives the messages of each level of the relation: so its fields are not
+those of the relation (`WhichOneof("rel_type")` is `"extension"`). The core replaces the
+placeholder by the relation that it holds when it sends a plan, a command or an analysis that
+holds it, also after the DataFrame is gone, and when the message is parsed again of its bytes, as
+PySpark's relation is sent. It replaces it wherever PySpark's plans and commands hold the relation
+of a DataFrame:
 
 - as the root relation of a plan, of an execution, of an analysis (`schema`, `explain_string`,
   `same_semantics`, `semantic_hash`) or of `DataFrame(plan, session)`, and as the relation of the
@@ -1678,11 +1692,15 @@ sent. It replaces it wherever PySpark's plans and commands hold the relation of 
   as Delta Lake's `MergeIntoTable` (see the Delta Lake paragraph above), where the message holds it
   as `plan(session)` gives it.
 
-The core does not look into expressions, which hold no relation (a subquery refers to its plan by
-its plan ID in a `WithRelations`), so a placeholder in the extension of an expression is sent as it
-is, and so is one that the message of an extension changes (`plan.common.plan_id = ...`): the server
-rejects them with `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation.
-Delta Lake's plans hold neither.
+The core does not decode the expressions of a plan built in Python, which hold no relation of Spark
+Connect (a subquery refers to its plan by its plan ID in a `WithRelations`), so as not to decode
+every expression of each such plan for a relation that only the extension of an expression of a
+plugin could hold; and it takes a placeholder in the message of an extension by its encoding, as
+`plan(session)` gives it, which a change of the placeholder alters, and does not apply that change
+to the relation that the placeholder holds. So a placeholder in the extension of an expression is
+sent as it is, and so is one that the message of an extension changes (`plan.common.plan_id = ...`):
+the server rejects them with `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends
+the relation. Delta Lake's plans hold neither.
 
 The `observations` of a DataFrame's plan (`df._plan.observations`) are the Observations of the
 DataFrame by their names, as PySpark's `LogicalPlan.observations`: those of `observe` on it and on
@@ -1710,12 +1728,13 @@ RPCs: they are the exception of their error class, such as `UnknownException` or
 the list attribute of PySpark's client, whose changes, and a list that it is set to, the requests
 of all the threads carry.
 
-`get_tags` returns a copy of the tags of the thread, where PySpark returns the set that its client
-keeps, which the later changes of the tags change too. The official tests of the client
-(`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable iterator of
-PySpark's client, which the drop-in does not have; those of its retries (`test_connect_retry.py`)
-and of `pyspark.errors.exceptions.connect.convert_exception` (`test_connect_errors_conversion.py`)
-pass.
+`get_tags`, as `SparkSession.getTags`, returns a copy of the tags of the thread, where PySpark
+returns the set that its client keeps, which the later changes of the tags change too: the tags
+are those of the core session, which its requests read, and not a Python set. The official tests of
+the client (`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable
+iterator of PySpark's client, which the drop-in does not have; those of its retries
+(`test_connect_retry.py`) and of `pyspark.errors.exceptions.connect.convert_exception`
+(`test_connect_errors_conversion.py`) pass.
 
 ## Spark Declarative Pipelines CLI
 

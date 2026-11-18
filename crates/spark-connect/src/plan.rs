@@ -781,15 +781,23 @@ impl PlanIds {
 
 /// The `Any` type of a placeholder: the relation that stands for the relation of a DataFrame, in a
 /// relation that is built outside the core, such as a plan of `pyspark.ml`, which the Python
-/// client builds over the placeholder of each DataFrame it takes as input. The value of a
-/// placeholder is its marker. The core replaces it by the relation of its DataFrame when the
-/// relation or the command that holds it reaches the core, so the nesting of a deep DataFrame is
-/// never decoded: a protobuf decoder limits the depth of what it decodes.
+/// client builds over the placeholder of each DataFrame it takes as input. The core builds the
+/// relation of a DataFrame, and the Python client has no messages of it, so a placeholder is of
+/// one level, an extension, whose value is the marker of its DataFrame, and, of the placeholder
+/// of `DataFrame._plan.plan(session)`, the relation encoded too (see
+/// [`standalone_placeholder_relation`]): the Python client never decodes the nesting of a deep
+/// DataFrame, which a protobuf decoder of Python limits. The core replaces the placeholder by
+/// the relation when the relation or the command that holds it reaches the core: by the relation
+/// that it holds, so a standalone placeholder stands for the relation as it was built after its
+/// DataFrame is gone too, as the relation of PySpark's `plan(session)` does, or else by the
+/// relation of its DataFrame, which must be alive (see [`placeholder_relation`]).
 const PLACEHOLDER_TYPE_URL: &str = "type.googleapis.com/spark.connect.rust.DataFramePlaceholder";
 
 /// The placeholders of all the sessions, by the addresses of their plan node and of their
-/// session's plan IDs, each with its marker. Both are held weakly, as `PlanIds` holds its nodes,
-/// so an entry goes with its DataFrame, and its address is not reused while the entry exists.
+/// session's plan IDs, each with its marker, by which a placeholder of a marker alone finds its
+/// DataFrame, and [`child_observations`] the Observations of the DataFrame of any placeholder.
+/// Both are held weakly, as `PlanIds` holds its nodes, so an entry goes with its DataFrame, and
+/// its address is not reused while the entry exists.
 #[derive(Default)]
 struct Placeholders {
     entries: HashMap<(usize, usize), Placeholder>,
@@ -805,8 +813,8 @@ struct Placeholder {
 static PLACEHOLDERS: LazyLock<Mutex<Placeholders>> =
     LazyLock::new(|| Mutex::new(Placeholders::default()));
 
-/// The placeholder of the relation of `node`, a DataFrame of the session of `ids`: the same
-/// marker each time the DataFrame gives it.
+/// The marker of the placeholder of the relation of `node`, a DataFrame of the session of `ids`:
+/// the same marker each time the DataFrame gives it.
 fn placeholder_marker(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) -> i64 {
     const MIN_PRUNE_AT: usize = 1024;
     let mut placeholders = PLACEHOLDERS.lock().unwrap_or_else(|e| e.into_inner());
@@ -844,17 +852,77 @@ fn placeholder_target(marker: i64) -> Option<(Arc<LogicalPlan>, Arc<PlanIds>)> {
         .and_then(|entry| Some((entry.node.upgrade()?, entry.ids.upgrade()?)))
 }
 
-/// The placeholder of the relation of `node`, a DataFrame of the session of `ids`, as the
-/// relation that the Python client sends in its place.
+/// The placeholder of the relation of `node`, a DataFrame of the session of `ids`, of its marker
+/// alone: the relation that a plan that the core builds over the DataFrame, and resolves while
+/// the DataFrame is alive, holds in its place, as the binding's ML transforms of a DataFrame of
+/// another session do.
 pub(crate) fn placeholder_relation(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) -> proto::Relation {
+    placeholder_of_value(placeholder_marker(node, ids).to_le_bytes().to_vec())
+}
+
+/// The placeholder of the relation of `node`, a DataFrame of the session of `ids`, that holds the
+/// relation, as `DataFrame._plan.plan(session)` gives it to the Python client: the extension's
+/// value is the marker of the DataFrame, the levels of its relation and the encoding of the
+/// relation, which is built now, as PySpark's `plan(session)` builds it, with its errors, and
+/// pickles the functions of its UDFs then. So it stands for the relation after the DataFrame is
+/// gone, its encoding too, while it holds no object of the DataFrame.
+pub(crate) fn standalone_placeholder_relation(
+    node: &Arc<LogicalPlan>,
+    ids: &Arc<PlanIds>,
+) -> Result<proto::Relation> {
+    use prost::Message;
+    let (relation, levels) = relation_with_ids_and_levels(node, ids)?;
     let marker = placeholder_marker(node, ids);
+    // The relation is encoded, and dropped, on a stack of its levels, as both recurse.
+    let stack = raw_relation_stack(levels);
+    let value = stacker::maybe_grow(stack, stack, move || {
+        let mut value = Vec::with_capacity(16 + relation.encoded_len());
+        value.extend_from_slice(&marker.to_le_bytes());
+        value.extend_from_slice(&(levels as u64).to_le_bytes());
+        relation.encode(&mut value).map(|()| value)
+    })
+    .map_err(|error| SparkError::value_msg(error.to_string()))?;
+    Ok(placeholder_of_value(value))
+}
+
+/// The placeholder relation of the extension value `value`.
+fn placeholder_of_value(value: Vec<u8>) -> proto::Relation {
     proto::Relation {
         common: None,
         rel_type: Some(proto::relation::RelType::Extension(prost_types::Any {
             type_url: PLACEHOLDER_TYPE_URL.to_string(),
-            value: marker.to_le_bytes().to_vec(),
+            value,
         })),
     }
+}
+
+/// The relation that the placeholder of the extension value `value` stands for, and its levels:
+/// that which it holds, decoded, or else that of its DataFrame, which must be alive. The decoder
+/// of the drop-in has no limit of depth (`pyspark-rs` lifts prost's), and the core's own limits
+/// a relation of more than 100 levels, which only the Python client makes standalone
+/// placeholders of.
+fn placeholder_contents(value: &[u8]) -> Result<(proto::Relation, usize)> {
+    use prost::Message;
+    let marker = <[u8; 8]>::try_from(value.get(..8).unwrap_or_default())
+        .map(i64::from_le_bytes)
+        .map_err(|_| SparkError::value_msg("a placeholder of no marker"))?;
+    if value.len() == 8 {
+        let (node, ids) = placeholder_target(marker).ok_or_else(|| {
+            SparkError::value_msg("a placeholder of a DataFrame that no longer exists")
+        })?;
+        return relation_with_ids_and_levels(&node, &ids);
+    }
+    let malformed = || SparkError::value_msg("a placeholder of no relation");
+    let levels = value
+        .get(8..16)
+        .and_then(|levels| <[u8; 8]>::try_from(levels).ok())
+        .and_then(|levels| usize::try_from(u64::from_le_bytes(levels)).ok())
+        .ok_or_else(malformed)?;
+    let encoded = &value[16..];
+    let stack = raw_relation_stack(levels);
+    let relation = stacker::maybe_grow(stack, stack, || proto::Relation::decode(encoded))
+        .map_err(|_| malformed())?;
+    Ok((relation, levels))
 }
 
 /// The Observations of the DataFrames whose placeholders `relation`, a relation built in Python, holds
@@ -875,8 +943,10 @@ pub(crate) fn child_observations(
     };
     let (left, right) = match &relation.rel_type {
         Some(RelType::Extension(any)) if any.type_url == PLACEHOLDER_TYPE_URL => {
-            let target = <[u8; 8]>::try_from(any.value.as_slice())
-                .ok()
+            let target = any
+                .value
+                .get(..8)
+                .and_then(|marker| <[u8; 8]>::try_from(marker).ok())
                 .and_then(|marker| placeholder_target(i64::from_le_bytes(marker)));
             return target
                 .map(|(node, _)| node.observations())
@@ -1033,16 +1103,7 @@ pub(crate) fn resolve_relation_levels(relation: &mut proto::Relation) -> Result<
 fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<usize> {
     if let Some(proto::relation::RelType::Extension(any)) = &relation.rel_type {
         if any.type_url == PLACEHOLDER_TYPE_URL {
-            let marker = i64::from_le_bytes(
-                any.value
-                    .as_slice()
-                    .try_into()
-                    .map_err(|_| SparkError::value_msg("a placeholder of no marker"))?,
-            );
-            let (node, ids) = placeholder_target(marker).ok_or_else(|| {
-                SparkError::value_msg("a placeholder of a DataFrame that no longer exists")
-            })?;
-            let (resolved, levels) = relation_with_ids_and_levels(&node, &ids)?;
+            let (resolved, levels) = placeholder_contents(&any.value)?;
             *relation = resolved;
             // The relation of the DataFrame takes the place of the placeholder, at its level.
             return Ok(level - 1 + levels);
@@ -1109,17 +1170,21 @@ fn is_placeholder(relation: &proto::Relation) -> bool {
     )
 }
 
-/// The length of the encoding of a placeholder, whose marker is of 8 bytes.
-static PLACEHOLDER_LEN: LazyLock<usize> = LazyLock::new(|| {
+/// The start of the encoding of a placeholder as `placeholder_relation` and
+/// `standalone_placeholder_relation` give it, of no `common`: the key of the extension of a
+/// relation, its first field.
+static PLACEHOLDER_START: LazyLock<Vec<u8>> = LazyLock::new(|| {
     use prost::Message;
-    proto::Relation {
+    // A relation of an empty extension encodes the key of the extension and the length 0.
+    let mut start = proto::Relation {
         common: None,
-        rel_type: Some(proto::relation::RelType::Extension(prost_types::Any {
-            type_url: PLACEHOLDER_TYPE_URL.to_string(),
-            value: vec![0; 8],
-        })),
+        rel_type: Some(proto::relation::RelType::Extension(
+            prost_types::Any::default(),
+        )),
     }
-    .encoded_len()
+    .encode_to_vec();
+    start.pop();
+    start
 });
 
 /// `encoded`, the encoding of a message of a type that the core need not know, with the
@@ -1138,11 +1203,11 @@ fn resolve_encoded(encoded: &[u8]) -> Result<Option<Vec<u8>>> {
     if !encoded.windows(url.len()).any(|window| window == url) {
         return Ok(None);
     }
-    if encoded.len() == *PLACEHOLDER_LEN {
+    if encoded.starts_with(&PLACEHOLDER_START) {
         if let Ok(mut relation) = proto::Relation::decode(encoded) {
             if is_placeholder(&relation) && relation.encode_to_vec() == encoded {
                 let stack = raw_relation_stack(resolve_relation_levels(&mut relation)?);
-                return Ok(Some(stacker::maybe_grow(stack, stack, || {
+                return Ok(Some(stacker::maybe_grow(stack, stack, move || {
                     relation.encode_to_vec()
                 })));
             }
@@ -4396,7 +4461,7 @@ mod placeholder_tests {
     /// The placeholder of `node`, of the session of `ids`, as the relation that the plans of
     /// `pyspark.ml` send in its place.
     fn placeholder(node: &Arc<LogicalPlan>, ids: &Arc<PlanIds>) -> proto::Relation {
-        placeholder_relation(node, ids)
+        standalone_placeholder_relation(node, ids).unwrap()
     }
 
     /// The `ml_relation` of a transform of `input`, as `pyspark.ml.connect.proto` builds it.
@@ -4419,7 +4484,7 @@ mod placeholder_tests {
     }
 
     #[test]
-    fn a_placeholder_is_shallow_and_stands_for_the_relation_of_its_node() {
+    fn a_placeholder_is_of_one_level_and_stands_for_the_relation_of_its_node() {
         // The plan is converted recursively, so a plan of 200 levels takes more than the 2 MiB
         // stack of a test thread in a debug build, whose frames are much larger than those of a
         // release build.
@@ -4433,11 +4498,25 @@ mod placeholder_tests {
                 });
             }
             let relation = relation_with_ids(&node, &ids).unwrap();
-            let shallow = placeholder(&node, &ids);
-            assert!(shallow.encoded_len() < 128, "{}", shallow.encoded_len());
-            let mut resolved = transform_of(shallow.clone());
+            let placeholder = placeholder(&node, &ids);
+            // An extension of the encoded relation: a decoder of Python reads one level of it.
+            let Some(proto::relation::RelType::Extension(any)) = &placeholder.rel_type else {
+                panic!("not an extension: {placeholder:?}");
+            };
+            assert!(any.value.ends_with(&relation.encode_to_vec()));
+            let mut resolved = transform_of(placeholder.clone());
             resolve_relation(&mut resolved).unwrap();
-            assert_eq!(resolved, transform_of(relation));
+            assert_eq!(resolved, transform_of(relation.clone()));
+            // As PySpark's relation of `plan(session)`, it stands for the relation after its
+            // DataFrame is gone, and so do its bytes, decoded again; it keeps nothing alive.
+            let (weak_node, weak_ids) = (Arc::downgrade(&node), Arc::downgrade(&ids));
+            std::mem::drop((node, ids));
+            assert!(weak_node.upgrade().is_none() && weak_ids.upgrade().is_none());
+            let decoded = proto::Relation::decode(placeholder.encode_to_vec().as_slice()).unwrap();
+            for mut kept in [transform_of(placeholder), transform_of(decoded)] {
+                resolve_relation(&mut kept).unwrap();
+                assert_eq!(kept, transform_of(relation.clone()));
+            }
         };
         std::thread::Builder::new()
             .stack_size(64 * 1024 * 1024)
@@ -4445,6 +4524,27 @@ mod placeholder_tests {
             .unwrap()
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    #[test]
+    fn a_placeholder_of_a_marker_alone_stands_for_the_relation_of_its_node_while_it_lives() {
+        // As the core's own plans over a DataFrame hold it, which they resolve at once.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids).unwrap();
+        let placeholder = placeholder_relation(&node, &ids);
+        assert!(
+            placeholder.encoded_len() < 128,
+            "{}",
+            placeholder.encoded_len()
+        );
+        let mut resolved = transform_of(placeholder.clone());
+        resolve_relation(&mut resolved).unwrap();
+        assert_eq!(resolved, transform_of(relation));
+        std::mem::drop(node);
+        let mut gone = transform_of(placeholder);
+        let error = resolve_relation(&mut gone).unwrap_err();
+        assert!(error.message().contains("no longer exists"), "{error}");
     }
 
     #[test]
@@ -4704,11 +4804,16 @@ mod placeholder_tests {
         resolve_relation(&mut text).unwrap();
         assert_eq!(text, before);
 
-        // A placeholder of a dropped DataFrame in an extension is the error of one elsewhere.
+        // A placeholder of a dropped DataFrame in an extension stands for its relation as one
+        // elsewhere, and one of a marker alone is the error of one elsewhere.
         let gone = Arc::new(range(0, 4, 1));
-        let mut plan = extension_of(&join(&placeholder(&gone, &ids)));
+        let gone_relation = relation_with_ids(&gone, &ids).unwrap();
+        let mut standalone = extension_of(&join(&placeholder(&gone, &ids)));
+        let mut marked = extension_of(&join(&placeholder_relation(&gone, &ids)));
         std::mem::drop(gone);
-        let error = resolve_relation(&mut plan).unwrap_err();
+        resolve_relation(&mut standalone).unwrap();
+        assert_eq!(standalone, extension_of(&join(&gone_relation)));
+        let error = resolve_relation(&mut marked).unwrap_err();
         assert!(error.to_string().contains("no longer exists"), "{error}");
     }
 
@@ -4976,16 +5081,17 @@ mod placeholder_tests {
     }
 
     #[test]
-    fn a_placeholder_of_a_dropped_node_is_an_error_and_keeps_nothing_alive() {
+    fn a_placeholder_of_a_dropped_node_stands_for_its_relation_and_keeps_nothing_alive() {
         let ids = Arc::new(PlanIds::new());
         let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids).unwrap();
         let alive = Arc::downgrade(&node);
-        let shallow = placeholder(&node, &ids);
+        let standalone = placeholder(&node, &ids);
         std::mem::drop(node);
         assert!(alive.upgrade().is_none());
-        let mut relation = transform_of(shallow);
-        let error = resolve_relation(&mut relation).unwrap_err();
-        assert!(error.to_string().contains("no longer exists"), "{error}");
+        let mut resolved = transform_of(standalone);
+        resolve_relation(&mut resolved).unwrap();
+        assert_eq!(resolved, transform_of(relation));
     }
 
     #[test]

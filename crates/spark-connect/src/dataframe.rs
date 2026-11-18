@@ -1771,12 +1771,22 @@ impl DataFrame {
 
     /// A relation that stands for the relation of this DataFrame, `to_relation`, in a relation
     /// built outside the core, such as a plan of `pyspark.ml`, which the core replaces by that
-    /// relation when the relation reaches it (`from_relation`, `execute_command_proto`). It
-    /// is shallow, so it is cheap to build and to decode whatever the depth of this DataFrame.
-    /// Not a stable API.
+    /// relation when the relation reaches it (`from_relation`, `execute_command_proto`), while
+    /// this DataFrame is alive. It is shallow, so it is cheap to build and to decode whatever the
+    /// depth of this DataFrame. Not a stable API.
     #[doc(hidden)]
     pub fn placeholder_relation(&self) -> proto::Relation {
         crate::plan::placeholder_relation(&self.plan, self.session.plan_ids_shared())
+    }
+
+    /// As [`DataFrame::placeholder_relation`], a placeholder that holds the relation of this
+    /// DataFrame, as it is built now, encoded in the value of its extension, with the errors of
+    /// the build: it stands for that relation after this DataFrame is gone, and its encoding
+    /// too, as the relation that PySpark's `plan(session)` gives does, and it is of one level
+    /// for a decoder of protobuf outside the core. Not a stable API.
+    #[doc(hidden)]
+    pub fn standalone_placeholder_relation(&self) -> Result<proto::Relation> {
+        crate::plan::standalone_placeholder_relation(&self.plan, self.session.plan_ids_shared())
     }
 
     /// Get the schema of this DataFrame.

@@ -330,6 +330,24 @@ def test_client_sends_the_relations_of_dataframes_under_the_plans_it_is_given_as
     assert properties["checkpoint_command_result"].count() == 5
 
 
+def test_the_relations_of_the_plans_of_dataframes_are_sent_after_the_dataframes_are_gone(session):
+    # As PySpark Connect's df._plan.plan(client), a relation of the DataFrame built at the call:
+    # the client sends it after the DataFrame is gone, and the bytes of a plan that holds it.
+    import gc
+
+    import pyspark.sql.connect.proto as pb2
+
+    client = session.client
+    table = client.to_table(pb2.Plan(root=session.sql("SELECT 1 AS a")._plan.plan(client)), {})[0]
+    assert table.to_pydict() == {"a": [1]}
+    relation = session.range(3).filter("id > 0")._plan.plan(client)
+    gc.collect()
+    plan = pb2.Plan(root=relation)
+    for sent in (plan, plan, pb2.Plan.FromString(plan.SerializeToString())):
+        assert client.to_table(sent, {})[0].to_pydict() == {"id": [1, 2]}
+    assert client.schema(plan).simpleString() == "struct<id:bigint>"
+
+
 def test_the_plans_of_dataframes_give_the_client_their_observations_as_pyspark(session):
     # As PySpark Connect's DataFrame._plan, whose observations are the Observations of the plan
     # by their names, which its DataFrame gives the executions of its client: an execution of

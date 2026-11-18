@@ -130,10 +130,12 @@ class _DataFramePlan(LogicalPlan):
     """The plan of a DataFrame of the Rust core, as its ``DataFrame._plan``: its relation, as the
     core sends it, of the plan IDs of its session.
 
-    Its ``plan`` is a placeholder of that relation, which the core replaces by the relation when
-    the plan built over it reaches the core, as ``DataFrame(plan, session)`` or a command does.
-    So a plan of ``pyspark.ml`` over a deep DataFrame is never decoded in Python or in Rust, as
-    protobuf decoders limit the depth of what they decode."""
+    Its ``plan`` is a placeholder that holds that relation, which the core builds at the call, as
+    PySpark's ``plan`` builds the relation, and replaces the placeholder with when the plan built
+    over it reaches the core, as ``DataFrame(plan, session)`` or a command does, also after the
+    DataFrame is gone. It is one message, an extension whose value holds the relation encoded, so
+    a plan of ``pyspark.ml`` over a deep DataFrame is never decoded in Python, as protobuf decoders
+    limit the depth of what they decode."""
 
     def __init__(self, df: Any) -> None:
         super().__init__(None)

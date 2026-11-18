@@ -202,11 +202,12 @@ difference is intentional or tracked for a fix.
   Columns keeps the origin of its call site at the pickle or the copy, where PySpark's has
   the call site of each request. The pickle itself does not warn, as PySpark's does not, but
   PySpark's unpickle of a DataFrame warns once, as it builds the plan to read the columns of the
-  new DataFrame, where the drop-in's does not. The `plan` of `DataFrame._plan` is a placeholder of
-  the relation (see "Plan logging of a deep DataFrame" below), so it does not warn, and a request
-  of a plan over it warns once, where PySpark's warns at both. The `UserWarning` is of
-  `pyspark.sql.connect.expressions` and of its line 1126, as PySpark's, in the file of the
-  drop-in's module, which ends before the line, so it shows no source line.
+  new DataFrame, where the drop-in's does not. The `plan` of `DataFrame._plan` builds the relation,
+  and warns, as PySpark's does; a `DataFrame(plan, session)` of a plan over it warns once, when it
+  is made, as the core keeps the relation that it built then, where PySpark's warns at each
+  request, which builds the plan. The `UserWarning` is of `pyspark.sql.connect.expressions` and of
+  its line 1126, as PySpark's, in the file of the drop-in's module, which ends before the line, so
+  it shows no source line.
 
 - **Public base and native MRO** (intentional; a PyO3 class cannot have a Python class as its
   base, so the public base can only be a virtual one). `pyspark.sql.DataFrame` is implemented as a
@@ -425,23 +426,28 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   to remote host: Connection refused`.
 - **`SparkConnectClient.get_tags`** (intentional). A copy of the tags of the thread, where
   PySpark returns the set that its client keeps, which its later changes change too, as
-  `SparkSession.getTags` does.
+  `SparkSession.getTags` does, of which the drop-in returns a copy too: the tags are those of the
+  core session, which its requests read, and not a Python set.
 - **Plans of a DataFrame's relation** (intentional; DESIGN). `df._plan.plan(client)` is a
-  placeholder of the DataFrame's relation, which the core replaces by the relation while the
-  DataFrame is alive, wherever `plan::resolve_relation`, `resolve_command` and `resolve_analysis`
-  find it: as the root relation of a plan or of an analysis, as the input of every relation of
-  Spark Connect under it (`relation_inputs_of`: both sides of joins, set operations and zips, the
-  other inputs of `GroupMap` and `CoGroupMap`, the root and references of a `WithRelations`, so
-  the views of `SQL`), as the relation of each command that holds one (writes, views, streams,
-  `SqlCommand`, checkpoints, `MergeIntoTableCommand`, the flows of pipelines), as the dataset and
-  the fetched arguments of the ML commands, and anywhere in the message of the extension of a
-  relation or of a command (a plugin's, as Delta Lake's `merge`) that holds it as `plan(session)`
-  gives it. The core does not look into expressions, which hold no relation, so a placeholder in
-  an expression's extension is sent as it is, and so is one that the message of an extension
-  changes (`plan.common.plan_id = ...`); the server rejects them with
-  `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`. A plan of it that `client.to_table`,
-  `client.schema` or another method of the client sends after the DataFrame is freed fails with
-  "a placeholder of a DataFrame that no longer exists".
+  placeholder that holds the DataFrame's relation, which the core builds at the call, as
+  PySpark's `plan` does, with its pickles, warnings and errors: the core builds the relation, and
+  Python has no messages of it, so it is one message, an extension whose value holds the relation
+  encoded, which Python's protobuf does not parse, rather than PySpark's messages of each level.
+  The core replaces it by that relation, also after the DataFrame is gone, wherever
+  `plan::resolve_relation`, `resolve_command` and `resolve_analysis` find it: as the root relation
+  of a plan or of an analysis, as the input of every relation of Spark Connect under it
+  (`relation_inputs_of`: both sides of joins, set operations and zips, the other inputs of
+  `GroupMap` and `CoGroupMap`, the root and references of a `WithRelations`, so the views of `SQL`),
+  as the relation of each command that holds one (writes, views, streams, `SqlCommand`, checkpoints,
+  `MergeIntoTableCommand`, the flows of pipelines), as the dataset and the fetched arguments of the
+  ML commands, and anywhere in the message of the extension of a relation or of a command (a
+  plugin's, as Delta Lake's `merge`) that holds it as `plan(session)` gives it. The core does not
+  decode the expressions of such a plan, which hold no relation, so as not to decode every
+  expression of each plan for what only a plugin's expression extension could hold, and it takes a
+  placeholder in an extension's message by its encoding, which a change alters: so a placeholder in
+  an expression's extension is sent as it is, and so is one that the message of an extension changes
+  (`plan.common.plan_id = ...`), whose change the core does not apply to the relation; the server
+  rejects them with `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`.
 - **Default port** (intentional). `DefaultChannelBuilder.default_port()` is 15002. PySpark
   takes the port of a local JVM server in its testing mode; the drop-in has no JVM.
 - **Missing URL error** (intentional). The one builder of the drop-in serves
@@ -451,13 +457,14 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   builder's `SESSION_NEED_CONN_STR_OR_BUILDER` family). Giving both a channel builder and
   a URL raises `SESSION_NEED_CONN_STR_OR_BUILDER`. A channel builder without a host is
   rejected at `channelBuilder(...)`, not when the session is created.
-- **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a
-  placeholder over the relation of the Rust core, so `_plan.to_proto` is not provided.
+- **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a plan of the
+  relation of the Rust core, whose `plan` is a placeholder that holds the relation encoded, so
+  `_plan.to_proto` is not provided.
   Python protobuf refuses to decode a relation nested beyond its limit (`too many levels
-  of nesting`), and the drop-in never decodes a deep plan. `SparkConnectClient._proto_to_string`
-  renders any message, including a deep one built in Python, as PySpark's does. Plan
-  logging of a deep DataFrame therefore does not reach the recursion handling that the
-  test `test_recursion_handling_for_plan_logging` exercises.
+  of nesting`), and the drop-in never decodes a deep plan in Python.
+  `SparkConnectClient._proto_to_string` renders any message, including a deep one built in
+  Python, as PySpark's does. Plan logging of a deep DataFrame therefore does not reach the
+  recursion handling that the test `test_recursion_handling_for_plan_logging` exercises.
 - **Client session ID** (not provided). `SparkConnectClient._session_id` is not exposed and
   is not settable; the session ID belongs to the Rust core. `_server_session_id` is
   exposed and settable, as PySpark's, and a changed value closes the session.
@@ -574,12 +581,13 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   the modules of protoc 3.20 and later, so its message fields take the messages of
   `pyspark.sql.connect.proto` as they are, as PySpark's plugins take PySpark's, and the server
   receives the plans of Delta Lake 4.0's `delete`, `update` and `merge` as PySpark sends them: the
-  core replaces the shallow placeholder of the relation of a DataFrame, which
+  core replaces the placeholder that holds the relation of a DataFrame, which
   `DataFrame._plan.plan(session)` gives, in the message of an extension too. What stays different
   (see `docs/compatibility.md`):
   - the core replaces that placeholder where it replaces the plan of a DataFrame (see "Plans of a
     DataFrame's relation" above). One that a plugin changes in the message of an extension reaches
-    the server as a placeholder, which it refuses, where PySpark's plugins send the relation;
+    the server as a placeholder, which it refuses, where PySpark's plugins send the relation: the
+    core takes a placeholder there by its encoding, which the change alters;
   - its classes are the runtime's, not subclasses of `google.protobuf.message.Message`, while its
     `DESCRIPTOR`, its `_*` descriptors, its extensions and services stay `protobuf`'s, and
     `protobuf`'s `message_factory` and `symbol_database` give `protobuf`'s classes of its types,

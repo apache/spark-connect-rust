@@ -967,11 +967,19 @@ impl PyDataFrame {
     }
 
     /// The bytes of the placeholder of the relation of this DataFrame, which the plan of `_plan`
-    /// sends in its place: shallow, whatever the depth of the DataFrame, and replaced by the
-    /// core with that relation when the plan reaches it.
-    fn _relation_placeholder<'py>(&self, py: Python<'py>) -> Bound<'py, pyo3::types::PyBytes> {
+    /// sends in its place: one extension that holds the relation encoded, which the core builds
+    /// now, as PySpark's `plan(session)` builds the relation, with its errors, and replaces the
+    /// placeholder with when the plan reaches it, also after this DataFrame is gone.
+    fn _relation_placeholder<'py>(
+        &self,
+        py: Python<'py>,
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         use prost::Message;
-        pyo3::types::PyBytes::new(py, &self.dataframe.placeholder_relation().encode_to_vec())
+        let placeholder = self
+            .dataframe
+            .standalone_placeholder_relation()
+            .to_pyerr()?;
+        Ok(pyo3::types::PyBytes::new(py, &placeholder.encode_to_vec()))
     }
 
     /// A DataFrame pickles, as PySpark Connect's, of its session, which gives back the active
