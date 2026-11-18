@@ -909,6 +909,10 @@ impl SparkSession {
                 &fetched
             }
         };
+        // As PySpark's table, of its large types under `useLargeVarTypes`, whose `nbytes` it
+        // compares with the cache threshold.
+        let large = options.use_large_var_types() == Some("true");
+        let batch = with_large_var_types(batch, &schema, large)?;
         let bytes = crate::arrow_input::batch_data_size(&batch);
         if bytes >= INLINE_IPC_BYTES || bytes >= options.cache_threshold() {
             return crate::arrow_input::create_relation(
@@ -1012,7 +1016,11 @@ impl SparkSession {
                 &fetched
             }
         };
-        let inline = data.len() < INLINE_IPC_BYTES && data.len() < options.cache_threshold();
+        // Under `useLargeVarTypes`, the strings and binaries of the IPC are cast to the large types
+        // of PySpark's table, which then decides between inline and cached by its size.
+        let large = options.use_large_var_types() == Some("true") && has_var_types(&schema);
+        let inline =
+            !large && data.len() < INLINE_IPC_BYTES && data.len() < options.cache_threshold();
         let plan = if !inline {
             let reader =
                 arrow::ipc::reader::StreamReader::try_new(std::io::Cursor::new(data), None)
@@ -1021,7 +1029,10 @@ impl SparkSession {
                     })?;
             let batches = reader
                 .collect::<std::result::Result<Vec<_>, _>>()
-                .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?;
+                .map_err(|e| SparkError::connect_msg(format!("Failed to read Arrow IPC: {e}")))?
+                .into_iter()
+                .map(|batch| with_large_var_types(batch, &schema, large))
+                .collect::<Result<Vec<_>>>()?;
             crate::arrow_input::create_relation(&self.client, batches, Some(schema), Some(options))?
         } else {
             LogicalPlan::LocalRelation {
@@ -2172,6 +2183,15 @@ fn decimal128_precision_and_scale(precision: i32, scale: i32) -> Result<(u8, i8)
 
 /// Map a Spark `DataType` to its Arrow `DataType`, recursively (array/map/struct included).
 fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
+    datatype_to_arrow_of(dt, false)
+}
+
+/// [`datatype_to_arrow`], with PySpark's large types if `large`, as its
+/// `to_arrow_type(..., prefers_large_types=True)` makes them under
+/// `spark.sql.execution.arrow.useLargeVarTypes`: a string or a binary, also in an array, a map, a
+/// struct or the SQL type of a user-defined type, is `LargeUtf8` or `LargeBinary`, while the
+/// binaries of a variant, a geometry and a geography stay `Binary`, as PySpark keeps them.
+fn datatype_to_arrow_of(dt: &DataType, large: bool) -> Result<arrow::datatypes::DataType> {
     use arrow::datatypes::{DataType as A, Field, Fields, TimeUnit};
     use std::collections::HashMap;
     Ok(match dt {
@@ -2184,7 +2204,11 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         DataType::Float => A::Float32,
         DataType::Double => A::Float64,
         // CHAR/VARCHAR are string-backed on the wire.
+        DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } if large => {
+            A::LargeUtf8
+        }
         DataType::String { .. } | DataType::Char { .. } | DataType::Varchar { .. } => A::Utf8,
+        DataType::Binary if large => A::LargeBinary,
         DataType::Binary => A::Binary,
         DataType::Date => A::Date32,
         // TIMESTAMP (LTZ) and TIMESTAMP_NTZ are both micros; NTZ carries no zone.
@@ -2211,7 +2235,7 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
             contains_null,
         } => A::List(Arc::new(Field::new(
             "element",
-            datatype_to_arrow(element_type)?,
+            datatype_to_arrow_of(element_type, large)?,
             *contains_null,
         ))),
         DataType::Map {
@@ -2220,10 +2244,10 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
             value_contains_null,
         } => {
             let entry_fields: Fields = vec![
-                Field::new("key", datatype_to_arrow(key_type)?, false),
+                Field::new("key", datatype_to_arrow_of(key_type, large)?, false),
                 Field::new(
                     "value",
-                    datatype_to_arrow(value_type)?,
+                    datatype_to_arrow_of(value_type, large)?,
                     *value_contains_null,
                 ),
             ]
@@ -2244,7 +2268,7 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
                 .map(|(field, name)| {
                     Ok(Field::new(
                         name,
-                        datatype_to_arrow(&field.data_type)?,
+                        datatype_to_arrow_of(&field.data_type, large)?,
                         field.nullable,
                     ))
                 })
@@ -2284,13 +2308,82 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
         DataType::Udt {
             sql_type: Some(sql_type),
             ..
-        } => datatype_to_arrow(sql_type)?,
+        } => datatype_to_arrow_of(sql_type, large)?,
         other => {
             return Err(SparkError::connect_msg(format!(
                 "Unsupported type for Arrow createDataFrame conversion: {other:?}"
             )))
         }
     })
+}
+
+/// `batch`, the Arrow data of local rows or columns of the struct `schema`, as PySpark's
+/// `createDataFrame` makes its table under `spark.sql.execution.arrow.useLargeVarTypes`, if
+/// `large`: each column of a string or a binary, also nested, is cast to the large types of
+/// [`datatype_to_arrow_of`]. The cast keeps the values buffers; it writes 64-bit offsets.
+fn with_large_var_types(
+    batch: arrow::record_batch::RecordBatch,
+    schema: &DataType,
+    large: bool,
+) -> Result<arrow::record_batch::RecordBatch> {
+    use arrow::record_batch::{RecordBatch, RecordBatchOptions};
+    let DataType::Struct { fields } = schema else {
+        return Ok(batch);
+    };
+    if !large || fields.len() != batch.num_columns() {
+        return Ok(batch);
+    }
+    let arrow_schema = batch.schema();
+    let mut arrow_fields = Vec::with_capacity(fields.len());
+    let mut columns = Vec::with_capacity(fields.len());
+    for ((field, arrow_field), column) in fields
+        .iter()
+        .zip(arrow_schema.fields())
+        .zip(batch.columns())
+    {
+        let target = datatype_to_arrow_of(&field.data_type, true)?;
+        if &target == arrow_field.data_type() {
+            arrow_fields.push(Arc::clone(arrow_field));
+            columns.push(Arc::clone(column));
+        } else {
+            columns.push(arrow::compute::cast(column, &target).map_err(|e| {
+                SparkError::connect_msg(format!("Failed to cast to large Arrow types: {e}"))
+            })?);
+            arrow_fields.push(Arc::new(
+                arrow_field.as_ref().clone().with_data_type(target),
+            ));
+        }
+    }
+    let schema =
+        arrow::datatypes::Schema::new_with_metadata(arrow_fields, arrow_schema.metadata().clone());
+    RecordBatch::try_new_with_options(
+        Arc::new(schema),
+        columns,
+        &RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+    )
+    .map_err(|e| SparkError::connect_msg(format!("Failed to build Arrow batch: {e}")))
+}
+
+/// Whether `dt` has a string or a binary that [`datatype_to_arrow_of`] makes large.
+fn has_var_types(dt: &DataType) -> bool {
+    match dt {
+        DataType::String { .. }
+        | DataType::Char { .. }
+        | DataType::Varchar { .. }
+        | DataType::Binary => true,
+        DataType::Array { element_type, .. } => has_var_types(element_type),
+        DataType::Map {
+            key_type,
+            value_type,
+            ..
+        } => has_var_types(key_type) || has_var_types(value_type),
+        DataType::Struct { fields } => fields.iter().any(|field| has_var_types(&field.data_type)),
+        DataType::Udt {
+            sql_type: Some(sql_type),
+            ..
+        } => has_var_types(sql_type),
+        _ => false,
+    }
 }
 
 /// Recursively build an Arrow array from a column of `Value`s against a declared

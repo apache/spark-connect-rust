@@ -157,7 +157,13 @@ conversions in one Config request before it converts any data, as PySpark's does
 that PySpark 4.3.0 reads, in its order (the timestamp type and the session time zone, the
 local-relation settings, the pandas and inference settings, and Arrow's large types). Every
 conversion path takes its settings from that request, including the relation's cache
-threshold, and empty data reads none. The Rust API's `create_dataframe` and
+threshold, and empty data reads none. Under `spark.sql.execution.arrow.useLargeVarTypes`, the
+strings and binaries of every path that converts to a schema, local rows and columns and the
+pandas string columns of the binding's fast path too, are sent as Arrow's large types, as
+PySpark's `to_arrow_type` makes them, but those of a variant, a geometry and a geography. Each
+path compares the cache threshold with the size of the Arrow data as pyarrow's `nbytes` counts
+it, of its `len` offsets per string, binary, list or map array, as PySpark compares
+`_table.nbytes`. The Rust API's `create_dataframe` and
 `create_dataframe_from_columns` read the same settings in one request, once they have converted
 their rows or columns, and apply the cache threshold at any size too. Of no rows, or columns of
 no rows, they send the schema alone and read none, as PySpark's empty data does, and so does

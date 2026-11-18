@@ -92,6 +92,7 @@ type Log = Arc<Mutex<Vec<Received>>>;
 #[derive(Clone)]
 struct TestService {
     cache_threshold: &'static str,
+    use_large_var_types: &'static str,
     log: Log,
 }
 
@@ -148,14 +149,15 @@ impl UnaryService<Vec<u8>> for Config {
             .unwrap()
             .push(Received::ConfigGet(keys.clone()));
         let threshold = self.0.cache_threshold;
+        let large = self.0.use_large_var_types;
         let pairs = keys
             .into_iter()
             .filter_map(|key| {
                 let (setting, value) = SETTINGS.iter().find(|(setting, _)| *setting == key)?;
-                let value = if *setting == "spark.sql.session.localRelationCacheThreshold" {
-                    threshold
-                } else {
-                    value
+                let value = match *setting {
+                    "spark.sql.session.localRelationCacheThreshold" => threshold,
+                    "spark.sql.execution.arrow.useLargeVarTypes" => large,
+                    _ => value,
                 };
                 Some(proto::KeyValue {
                     key,
@@ -219,9 +221,18 @@ impl UnaryService<Vec<u8>> for Unsupported {
 /// Serves on a thread of its own, since a session blocks the thread that calls it, and returns a
 /// session of the service with the log of what it receives.
 fn serve(cache_threshold: &'static str) -> (SparkSession, Log) {
+    serve_with(cache_threshold, "false")
+}
+
+/// [`serve`], of the value `use_large_var_types` of `spark.sql.execution.arrow.useLargeVarTypes`.
+fn serve_with(
+    cache_threshold: &'static str,
+    use_large_var_types: &'static str,
+) -> (SparkSession, Log) {
     let log = Log::default();
     let service = TestService {
         cache_threshold,
+        use_large_var_types,
         log: log.clone(),
     };
     let (sender, receiver) = std::sync::mpsc::channel();
@@ -405,4 +416,241 @@ fn no_rows_and_rows_that_do_not_fit_the_schema_send_no_request() {
         "{error}"
     );
     assert!(log.lock().unwrap().is_empty(), "{:?}", log.lock().unwrap());
+}
+
+/// `count` rows of one string column `s`, each "abcd", whose pyarrow `nbytes` is `8 * count` as
+/// strings (`count` 4-byte offsets and 4 bytes each) and `12 * count` as large strings.
+fn strings(count: usize) -> (Vec<Row>, DataType) {
+    let rows = (0..count)
+        .map(|_| Row::new(vec!["s".to_string()], vec![Value::String("abcd".into())]))
+        .collect();
+    let schema = DataType::Struct {
+        fields: vec![field(
+            "s",
+            DataType::String {
+                collation: "UTF8_BINARY".to_string(),
+            },
+        )],
+    };
+    (rows, schema)
+}
+
+#[test]
+fn the_cache_threshold_is_compared_with_the_nbytes_of_pyarrow_as_pyspark() {
+    // PySpark's `cache_threshold <= _table.nbytes`, of pyarrow's `nbytes`, which counts `len`
+    // offsets of a string array, not the `len + 1` of its buffer: 1000 strings "abcd" are 8000
+    // bytes, so a threshold of 8001 keeps them inline and one of 8000 uploads them.
+    for (threshold, cached) in [("8001", false), ("8004", false), ("8000", true)] {
+        let (spark, _) = serve(threshold);
+        let (rows, schema) = strings(1000);
+        let frame = spark.create_dataframe(rows, schema).unwrap();
+        assert_eq!(
+            matches!(relation(&frame), RelType::ChunkedCachedLocalRelation(_)),
+            cached,
+            "threshold {threshold}"
+        );
+    }
+    // And of large strings under useLargeVarTypes: 12000 bytes.
+    for (threshold, cached) in [("12001", false), ("12000", true), ("10000", true)] {
+        let (spark, _) = serve_with(threshold, "true");
+        let (rows, schema) = strings(1000);
+        let frame = spark.create_dataframe(rows, schema).unwrap();
+        assert_eq!(
+            matches!(relation(&frame), RelType::ChunkedCachedLocalRelation(_)),
+            cached,
+            "threshold {threshold} of large strings"
+        );
+    }
+}
+
+#[test]
+fn rows_and_columns_are_of_the_large_types_of_pyspark_under_use_large_var_types() {
+    // As PySpark's `to_arrow_type(..., prefers_large_types=True)` of
+    // `spark.sql.execution.arrow.useLargeVarTypes`: strings and binaries, also in arrays, maps
+    // and structs, are large, while the binaries of a variant stay binaries.
+    use arrow::datatypes::DataType as A;
+    let string = || DataType::String {
+        collation: "UTF8_BINARY".to_string(),
+    };
+    let schema = DataType::Struct {
+        fields: vec![
+            field("s", string()),
+            field("b", DataType::Binary),
+            field(
+                "a",
+                DataType::Array {
+                    element_type: Box::new(string()),
+                    contains_null: true,
+                },
+            ),
+            field(
+                "m",
+                DataType::Map {
+                    key_type: Box::new(string()),
+                    value_type: Box::new(DataType::Binary),
+                    value_contains_null: true,
+                },
+            ),
+            field(
+                "st",
+                DataType::Struct {
+                    fields: vec![field("x", string()), field("n", DataType::Long)],
+                },
+            ),
+            field("v", DataType::Variant),
+            field("l", DataType::Long),
+        ],
+    };
+    let names = ["s", "b", "a", "m", "st", "v", "l"]
+        .map(str::to_string)
+        .to_vec();
+    let rows = vec![
+        Row::new(
+            names.clone(),
+            vec![
+                Value::String("x".into()),
+                Value::Binary(vec![1, 2]),
+                Value::List(vec![Value::String("y".into()), Value::Null]),
+                Value::Map(vec![(Value::String("k".into()), Value::Binary(vec![3]))]),
+                Value::Struct(
+                    Row::new(
+                        vec!["x".to_string(), "n".to_string()],
+                        vec![Value::String("z".into()), Value::Long(7)],
+                    )
+                    .into(),
+                ),
+                Value::Variant {
+                    value: vec![12, 1],
+                    metadata: vec![1, 0, 0],
+                },
+                Value::Long(1),
+            ],
+        ),
+        Row::new(names.clone(), vec![Value::Null; 7]),
+    ];
+    let types = |frame: &DataFrame| {
+        let RelType::LocalRelation(local) = relation(frame) else {
+            panic!("small rows are inline");
+        };
+        let reader = StreamReader::try_new(Cursor::new(local.data.unwrap()), None).unwrap();
+        let batches: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
+        let schema = batches[0].schema();
+        let column = batches[0].column(0).clone();
+        (
+            schema
+                .fields()
+                .iter()
+                .map(|field| field.data_type().clone())
+                .collect::<Vec<_>>(),
+            column,
+        )
+    };
+    let leaf = |data_type: &A, index: usize| match data_type {
+        A::Struct(fields) => fields[index].data_type().clone(),
+        A::List(field) => field.data_type().clone(),
+        A::Map(entries, _) => match entries.data_type() {
+            A::Struct(fields) => fields[index].data_type().clone(),
+            other => panic!("map entries of {other:?}"),
+        },
+        other => panic!("not nested: {other:?}"),
+    };
+
+    let (spark, _) = serve_with(DEFAULT_CACHE_THRESHOLD, "true");
+    let (large, column) = types(
+        &spark
+            .create_dataframe(rows.clone(), schema.clone())
+            .unwrap(),
+    );
+    assert_eq!(large[0], A::LargeUtf8);
+    assert_eq!(large[1], A::LargeBinary);
+    assert_eq!(leaf(&large[2], 0), A::LargeUtf8);
+    assert_eq!(
+        (leaf(&large[3], 0), leaf(&large[3], 1)),
+        (A::LargeUtf8, A::LargeBinary)
+    );
+    assert_eq!(
+        (leaf(&large[4], 0), leaf(&large[4], 1)),
+        (A::LargeUtf8, A::Int64)
+    );
+    assert_eq!(
+        (leaf(&large[5], 0), leaf(&large[5], 1)),
+        (A::Binary, A::Binary)
+    );
+    assert_eq!(large[6], A::Int64);
+    // The values are kept.
+    let strings = column
+        .as_any()
+        .downcast_ref::<arrow::array::LargeStringArray>()
+        .unwrap();
+    assert_eq!((strings.value(0), strings.is_null(1)), ("x", true));
+
+    // The columns of the same types, as the rows, and of PySpark's types without the setting.
+    let (small, _) = types(
+        &serve(DEFAULT_CACHE_THRESHOLD)
+            .0
+            .create_dataframe(rows, schema)
+            .unwrap(),
+    );
+    assert_eq!((small[0].clone(), small[1].clone()), (A::Utf8, A::Binary));
+    assert_eq!(leaf(&small[2], 0), A::Utf8);
+    let columns: Vec<arrow::array::ArrayRef> = vec![
+        Arc::new(StringArray::from(vec![Some("x"), None])),
+        Arc::new(Int64Array::from(vec![1, 2])),
+    ];
+    let two = DataType::Struct {
+        fields: vec![field("s", string()), field("l", DataType::Long)],
+    };
+    let (spark, _) = serve_with(DEFAULT_CACHE_THRESHOLD, "true");
+    let (large, _) = types(&spark.create_dataframe_from_columns(columns, two).unwrap());
+    assert_eq!(large, [A::LargeUtf8, A::Int64]);
+}
+
+#[test]
+fn the_ipc_of_the_binding_is_of_the_large_types_and_its_nbytes_under_use_large_var_types() {
+    // The IPC that the binding gives, of its pandas string columns, as `_pandas_string_ipc`
+    // writes them, of 4-byte offsets: under useLargeVarTypes it is sent of PySpark's large
+    // strings, and inline or uploaded by their `nbytes`, 12000 bytes for 1000 strings "abcd".
+    let (_, schema) = strings(1000);
+    let ipc = {
+        let column: arrow::array::ArrayRef = Arc::new(StringArray::from(vec!["abcd"; 1000]));
+        let batch = arrow::record_batch::RecordBatch::try_from_iter([("s", column)]).unwrap();
+        let mut writer =
+            arrow::ipc::writer::StreamWriter::try_new(Vec::new(), &batch.schema()).unwrap();
+        writer.write(&batch).unwrap();
+        writer.into_inner().unwrap()
+    };
+    let (spark, _) = serve_with(DEFAULT_CACHE_THRESHOLD, "true");
+    let frame = spark
+        .create_dataframe_from_inline_arrow_ipc(ipc.clone(), schema.clone())
+        .unwrap();
+    let RelType::LocalRelation(local) = relation(&frame) else {
+        panic!("1000 strings are below the default threshold");
+    };
+    let reader = StreamReader::try_new(Cursor::new(local.data.unwrap()), None).unwrap();
+    let batches: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
+    assert_eq!(
+        batches[0].schema().field(0).data_type(),
+        &arrow::datatypes::DataType::LargeUtf8
+    );
+    assert_eq!(batches[0].num_rows(), 1000);
+    for (threshold, cached) in [("12001", false), ("12000", true)] {
+        let (spark, _) = serve_with(threshold, "true");
+        let frame = spark
+            .create_dataframe_from_inline_arrow_ipc(ipc.clone(), schema.clone())
+            .unwrap();
+        assert_eq!(
+            matches!(relation(&frame), RelType::ChunkedCachedLocalRelation(_)),
+            cached,
+            "threshold {threshold}"
+        );
+    }
+    // Without the setting, the IPC is sent as it is, below the threshold.
+    let (spark, _) = serve(DEFAULT_CACHE_THRESHOLD);
+    let frame = spark
+        .create_dataframe_from_inline_arrow_ipc(ipc.clone(), schema)
+        .unwrap();
+    let RelType::LocalRelation(local) = relation(&frame) else {
+        panic!("inline");
+    };
+    assert_eq!(local.data.unwrap(), ipc);
 }

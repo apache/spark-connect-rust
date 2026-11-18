@@ -931,6 +931,44 @@ def test_local_relations_of_64_kib_follow_the_size_limit_as_pyspark(session):
             assert session.createDataFrame(data, form).count() == 1000
 
 
+def test_local_relations_are_of_large_types_and_measured_as_pyspark(session):
+    # As PySpark's createDataFrame, which builds its Arrow table of large strings under
+    # spark.sql.execution.arrow.useLargeVarTypes and compares the table's pyarrow nbytes with
+    # spark.sql.session.localRelationCacheThreshold (connect/session.py:782): under a size limit
+    # of 1000 bytes, a relation that is uploaded fails and an inline one works. 10000 strings
+    # "abcd" are 80000 bytes as strings and 120000 as large strings, and 1000 of them 8000.
+    import pandas as pd
+
+    schema = StructType([StructField("s", StringType())])
+    rows = [("abcd",)] * 10000
+    frame = pd.DataFrame({"s": ["abcd"] * 10000})
+    spark = session.newSession()
+
+    def uploaded(data):
+        try:
+            spark.createDataFrame(data, schema).count()
+        except AnalysisException as e:
+            assert e.getCondition() == "LOCAL_RELATION_SIZE_LIMIT_EXCEEDED"
+            return True
+        return False
+
+    try:
+        spark.conf.set("spark.sql.session.localRelationSizeLimit", "1000")
+        spark.conf.set("spark.sql.session.localRelationCacheThreshold", "100000")
+        assert [uploaded(rows), uploaded(frame)] == [False, False]
+        spark.conf.set("spark.sql.execution.arrow.useLargeVarTypes", "true")
+        assert [uploaded(rows), uploaded(frame)] == [True, True]
+        spark.conf.unset("spark.sql.execution.arrow.useLargeVarTypes")
+        for threshold, expected in (("8001", False), ("8000", True)):
+            spark.conf.set("spark.sql.session.localRelationCacheThreshold", threshold)
+            assert uploaded(rows[:1000]) == expected, threshold
+        for threshold, expected in (("80001", False), ("80000", True)):
+            spark.conf.set("spark.sql.session.localRelationCacheThreshold", threshold)
+            assert uploaded(frame) == expected, threshold
+    finally:
+        spark.stop()
+
+
 def test_instr_and_regexp_replace_apply_their_optional_arguments(session):
     # Column b holds "c", so the literal "b" and the column b find different positions.
     df = session.createDataFrame([("abcabc", "c", "a", "z")], ["s", "b", "p", "r"])

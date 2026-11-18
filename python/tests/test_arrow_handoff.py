@@ -1367,6 +1367,56 @@ def test_arrow_input_batched_normalization_configs(protocol, timestamp_type, zon
         assert not state["relations"][0].local_relation.HasField("schema")
 
 
+@pytest.mark.parametrize("large", ["false", "true"])
+def test_local_rows_and_pandas_strings_take_the_large_types_of_pyspark(protocol, large):
+    # As PySpark's createDataFrame under spark.sql.execution.arrow.useLargeVarTypes, whose
+    # LocalDataToArrowConversion and pandas conversion make the strings and binaries of the
+    # schema large (conversion.py:994-1005, pandas/types.py:137-139), also nested: local rows,
+    # and the object strings of a pandas frame of 10000 rows, which the binding encodes itself.
+    string, binary = ((pa.large_string(), pa.large_binary()) if large == "true"
+                      else (pa.string(), pa.binary()))
+    schema = T.StructType([
+        T.StructField("s", T.StringType()),
+        T.StructField("b", T.BinaryType()),
+        T.StructField("a", T.ArrayType(T.StringType())),
+        T.StructField("m", T.MapType(T.StringType(), T.BinaryType())),
+        T.StructField("st", T.StructType([T.StructField("x", T.StringType())])),
+        T.StructField("l", T.LongType()),
+    ])
+    rows = [("x", b"y", ["z"], {"k": b"v"}, ("w",), 1), (None,) * 6]
+    overrides = {"spark.sql.execution.arrow.useLargeVarTypes": large}
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        spark.createDataFrame(rows, schema).collect()
+        table = state["input_tables"][-1]
+        types = {field.name: field.type for field in table.schema}
+        assert (types["s"], types["b"], types["l"]) == (string, binary, pa.int64())
+        assert types["a"].value_type == string
+        assert (types["m"].key_type, types["m"].item_type) == (string, binary)
+        assert types["st"].field("x").type == string
+        assert table.column("s").to_pylist() == ["x", None]
+        assert table.column("m").to_pylist() == [[("k", b"v")], None]
+        frame = pd.DataFrame({"s": ["abcd"] * 10000})
+        one = T.StructType([T.StructField("s", T.StringType())])
+        assert spark.createDataFrame(frame, one).collect()[0].rows == 10000
+        table = state["input_tables"][-1]
+        assert table.schema.field("s").type == string
+        assert table.column("s").to_pylist() == ["abcd"] * 10000
+
+
+@pytest.mark.parametrize("threshold, cached", [("8001", False), ("8004", False), ("8000", True)])
+def test_the_cache_threshold_is_compared_with_the_nbytes_of_pyarrow(protocol, threshold, cached):
+    # As PySpark's `cache_threshold <= _table.nbytes` (connect/session.py:782): pyarrow's
+    # nbytes counts `len` offsets of a string array, not the `len + 1` of its buffer, so 1000
+    # strings "abcd" are 8000 bytes, inline below a threshold of 8001 and uploaded from 8000.
+    overrides = {"spark.sql.session.localRelationCacheThreshold": threshold}
+    one = T.StructType([T.StructField("s", T.StringType())])
+    with _arrow_input_service(protocol, **overrides) as (spark, state):
+        assert spark.createDataFrame([("abcd",)] * 1000, one).collect()[0].rows == 1000
+        relation = state["relations"][-1]
+        assert relation.HasField("chunked_cached_local_relation") == cached
+        assert relation.HasField("local_relation") == (not cached)
+
+
 @pytest.mark.parametrize("missing", _NORMALIZATION_KEYS + _UPLOAD_KEYS)
 @pytest.mark.parametrize("present_null", [False, True])
 def test_arrow_input_missing_config(protocol, missing, present_null):
@@ -4595,7 +4645,8 @@ def test_string_columns_preserve_every_ipc_cell(protocol, monkeypatch, cached, v
         assert table.num_rows == len(strings)
         assert table.schema.names == schema.names
         for column, values, field in zip(table.columns, expected, schema.fields):
-            assert column.type == pa.string()
+            # As PySpark's conversion of a schema's strings, large under useLargeVarTypes.
+            assert column.type == (pa.large_string() if large == "true" else pa.string())
             assert column.to_pylist() == values
             actual_field = table.schema.field(field.name)
             assert actual_field.nullable == field.nullable
@@ -6246,7 +6297,8 @@ def test_string_large_inline_input_keeps_row_transport_and_schema(protocol):
         assert state["uploads"] == 0
         table = state["input_tables"][0]
         assert table.schema.names == ["renamed"]
-        assert table.column(0).type == pa.string()
+        # Of PySpark's large strings, under useLargeVarTypes.
+        assert table.column(0).type == pa.large_string()
         assert table.schema.field(0).nullable is False
         assert table.schema.field(0).metadata is None
         assert table.column(0).to_pylist() == values
