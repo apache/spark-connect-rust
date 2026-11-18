@@ -58,6 +58,11 @@ class StreamingQueryManager:
     def addListener(self, listener: StreamingQueryListener) -> None: ...
     def removeListener(self, listener: StreamingQueryListener) -> None: ...
 
+class StreamingCheckpointManager:
+    def __init__(self, jmanager: 'JavaObject') -> None:
+        self._jmanager = jmanager
+    def repartition(self, checkpoint_location: str, num_partitions: int, enforce_exactly_once_sink: bool=True) -> None: ...
+
 # Names of the drop-in's module that PySpark's does not have.
 from pyspark.sql.streaming.listener import QueryIdleEvent as QueryIdleEvent
 from pyspark.sql.streaming.listener import QueryProgressEvent as QueryProgressEvent

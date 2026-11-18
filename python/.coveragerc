@@ -51,6 +51,7 @@ omit =
     */pyspark/sql/tvf.py
     */pyspark/sql/merge.py
     */pyspark/sql/observation.py
+    */pyspark/sql/context.py
     */pyspark/serializers.py
     */pyspark/loose_version.py
     */pyspark/_globals.py

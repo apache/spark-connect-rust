@@ -62,14 +62,26 @@ official ``pyspark-client``, where these modules are annotated Python. In detail
     a stub imports from a module of pyspark must be one that the drop-in has, but those of
     ``UNRESOLVED_IMPORTS``, which say why they are not.
   * ``DROPPED`` leaves out the plumbing of PySpark's modules that the drop-in does not have and no
-    annotation needs, such as the py4j converters of ``pyspark.sql.types``.
+    annotation needs, such as the py4j converters of ``pyspark.sql.types``, and
+    ``DROPPED_STAR_IMPORTS`` the star imports of modules that it does not have, such as the gRPC
+    stubs of ``pyspark.sql.connect.proto``. A star import of a module that the drop-in does not
+    have is an error.
   * PySpark's ``# type: ignore`` comments stay on the line of their statement, those of the
     lines of a signature that ast.unparse prints on one line merged.
 
 ``EXTRAS`` adds the names that the drop-in's module has and PySpark's does not, such as the
 native ``Trigger`` of ``pyspark.sql.streaming.readwriter``. python/tests/test_type_stubs_offline.py
-checks that every public name of each module of the drop-in is in its stub, that mypy types every
-public instance attribute of the stubbed classes, and runs mypy on a user's application.
+checks that every public name of each module of the drop-in, and every public member of each class
+of a stub, is in its stub, that mypy and pyright type every public instance attribute of the
+stubbed classes, and runs mypy and pyright on a user's application.
+
+The modules of pyspark.ml.connect of the drop-in's native ML classes (``ML_CONNECT_MODULES``) and
+their package are not PySpark's modules of their import paths, which are its ML API on PyTorch:
+their stubs are made of the drop-in's own modules, of a ``class X(<public bases>, <PySpark's X>):
+...`` of each native class, as ``pyspark.ml._native_classes.publish`` makes its public class, and
+of the re-exports of what the module imports; PySpark's vendored pyspark.ml.connect.feature gets
+the native stages of pyspark.ml.feature that the package sets in it in place of its classes of the
+same names.
 
 ``pyspark.sql.functions`` is a package in PySpark (``functions/__init__.py``, ``builtin.py``,
 ``partitioning.py``) and a module here (``functions.py``, which registers ``builtin`` and
@@ -140,6 +152,10 @@ STUB_MODULES = (
     "pyspark.sql.functions.partitioning",
     "pyspark.sql.avro.functions",
     "pyspark.sql.protobuf.functions",
+    # Their copies of the import paths of PySpark Connect (see
+    # pyspark/sql/connect/functions/_copies.py), which copy them into their globals().
+    "pyspark.sql.connect.avro.functions",
+    "pyspark.sql.connect.protobuf.functions",
     # PySpark's modules with their Rust-backed parts swapped in: the native PythonEvalType and
     # SkipRestOfInputTableException, and user-defined functions that annotate fewer parameters.
     "pyspark.util",
@@ -169,6 +185,13 @@ STUB_MODULES = (
     # the native statistics of pyspark.ml.
     "pyspark.sql.connect.datasource",
     "pyspark.ml.stat",
+    # PySpark's module of the Connect ML API, vendored, to which pyspark.ml.connect adds the native
+    # stages of pyspark.ml.feature (see ML_CONNECT_PACKAGE below).
+    "pyspark.ml.connect.feature",
+    # The protobuf messages of Spark Connect, which the drop-in's protobuf runtime in Rust installs
+    # in the globals() of the package: PySpark's package star-imports them of its generated
+    # modules, of which the drop-in ships PySpark's own stubs (``base_pb2.pyi``, ...), vendored.
+    "pyspark.sql.connect.proto",
 )
 
 # The decorators that a type checker applies: kept as they are. A decorator of the module
@@ -201,6 +224,7 @@ _PROPERTY_ACCESSOR = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*\.(setter|getter|delete
 IDENTITY_DECORATORS = frozenset(
     {
         "pyspark.since",
+        "pyspark.keyword_only",
         "pyspark.errors.utils._with_origin",
         "pyspark.errors.utils.with_origin_to_class",
         "pyspark.sql.utils.dispatch_col_method",
@@ -218,10 +242,12 @@ IDENTITY_DECORATORS = frozenset(
 @dataclass(frozen=True)
 class Extra:
     """Declarations of the names that the drop-in's module has and PySpark's does not: stub
-    source appended to the stub as it is, and the names of it that ``__all__`` lists."""
+    source appended to the stub as it is, under the comment `comment`, and the names of it that
+    ``__all__`` lists."""
 
     source: str
     all_names: tuple[str, ...] = ()
+    comment: str = "Names of the drop-in's module that PySpark's does not have."
 
 
 EXTRAS = {
@@ -342,15 +368,10 @@ DROPPED = {
         "NumpyScalarConverter",
         "TimeConverter",
     },
-    # The manager of the checkpoints of classic PySpark's JVM, not in PySpark's __all__, which
-    # only the private SparkSession._streamingCheckpointManager returns.
-    "pyspark.sql.streaming.query": {"StreamingCheckpointManager"},
-    # The builder of the relation of PySpark Connect's TableArg, which the drop-in builds in
-    # Rust.
-    "pyspark.sql.connect.table_arg": {"TableArg.to_plan"},
     # The module that pyspark/sql/functions.py makes of the five partition transforms, and the
-    # modules of the Connect functions, which copy the functions of pyspark.sql.functions: they
-    # do not import what PySpark's modules import, whose names they do not have at run time.
+    # modules of the Connect functions, which copy the functions of pyspark.sql.functions and of
+    # its Avro and Protobuf modules: they do not import what PySpark's modules import, whose names
+    # they do not have at run time.
     "pyspark.sql.functions.partitioning": {"Column", "PySparkTypeError"},
     "pyspark.sql.connect.functions": {"should_test_connect"},
     "pyspark.sql.connect.functions.builtin": {
@@ -359,6 +380,19 @@ DROPPED = {
         "UnresolvedNamedLambdaVariable",
     },
     "pyspark.sql.connect.functions.partitioning": {"Column", "PySparkTypeError"},
+    "pyspark.sql.connect.avro.functions": {"lit"},
+    "pyspark.sql.connect.protobuf.functions": {"Column", "lit"},
+}
+
+# The star imports of PySpark's modules that the stubs leave out, by module, with the reason: of a
+# module that the drop-in does not have, whose names it has not either.
+DROPPED_STAR_IMPORTS = {
+    "pyspark.sql.connect.proto": {
+        "pyspark.sql.connect.proto.base_pb2_grpc": (
+            "the gRPC stubs of the service (SparkConnectServiceStub, ...): the Rust transport "
+            "speaks gRPC, so the drop-in has neither the module nor its names"
+        ),
+    },
 }
 
 # The line of the header of each stub that marks it as generated.
@@ -575,14 +609,17 @@ def instance_attributes(cls: ast.ClassDef) -> list[str]:
     return names
 
 
-def check_attributes(module: str, tree: ast.Module, text: str) -> None:
+def check_attributes(
+    module: str, tree: ast.Module, text: str, replaced: frozenset[str] = frozenset()
+) -> None:
     """Each public instance attribute of each class of PySpark's module `tree` that the stub of
-    text `text` keeps is declared in the stub's class: in its body, or by one of its methods."""
+    text `text` keeps is declared in the stub's class: in its body, or by one of its methods. The
+    classes `replaced`, which the drop-in's module replaces by its own, are not PySpark's."""
     stubs = dict(_classes(ast.parse(text).body))
     missing = []
     for qualified, cls in _classes(tree.body):
         stub = stubs.get(qualified)
-        if stub is None:
+        if stub is None or qualified.split(".")[0] in replaced:
             continue
         declared = set().union(*(bound_names(s) for s in stub.body))
         declared |= {a for m in _methods(stub.body) for a in assigned_attributes(m)}
@@ -1255,7 +1292,7 @@ def render(stmts: list[ast.stmt], header: str, extra: Extra | None, source: str)
         previous = kind
     text = header + "\n" + "\n".join(lines) + "\n"
     if extra is not None:
-        text += "\n# Names of the drop-in's module that PySpark's does not have.\n" + extra.source
+        text += f"\n# {extra.comment}\n" + extra.source
     return text
 
 
@@ -1288,6 +1325,8 @@ class Stub:
     sites: list[ImportSite]
     extra: Extra | None
     extra_stmts: list[ast.stmt]
+    # The classes of PySpark's module that the drop-in's module replaces by native ones.
+    replaced: frozenset[str] = frozenset()
 
     def declared(self) -> set[str]:
         """The names that the stub defines or assigns, its own and those of its extra."""
@@ -1299,7 +1338,7 @@ class Stub:
         return self.declared() | {s.name for s in self.sites if s.reexported}
 
     def star_imports(self) -> list[str]:
-        return [s.stmt.module for s in self.sites if s.alias.name == "*"]
+        return [s.stmt.module for s in self.sites if s.alias.name == "*" and not s.dropped]
 
 
 def _drop(module: str, stmts: list[ast.stmt], sites: list[ImportSite]) -> list[ast.stmt]:
@@ -1332,11 +1371,25 @@ def _drop(module: str, stmts: list[ast.stmt], sites: list[ImportSite]) -> list[a
     missing = sorted(names - found)
     if missing:
         raise GeneratorError(f"{module}: DROPPED names that PySpark's module lacks: {missing}")
-    return stmts
+    starred = set(DROPPED_STAR_IMPORTS.get(module, {}))
+    dropped_stmts = set()
+    for site in sites:
+        if site.alias.name == "*" and site.stmt.module in starred:
+            site.dropped = True
+            dropped_stmts.add(id(site.stmt))
+            starred.discard(site.stmt.module)
+    if starred:
+        raise GeneratorError(
+            f"{module}: DROPPED_STAR_IMPORTS of modules that PySpark's module does not "
+            f"star-import: {sorted(starred)}"
+        )
+    return [stmt for stmt in stmts if id(stmt) not in dropped_stmts]
 
 
-def transform(pyspark_src: Path, module: str) -> Stub:
-    """The stub statements of PySpark's module `module`, and its extra."""
+def transform(pyspark_src: Path, module: str, natives: tuple[str, list[str]] | None = None) -> Stub:
+    """The stub statements of PySpark's module `module`, and its extra: of the native classes
+    `natives`, (PySpark's module of their classes, their names), that the drop-in's module has
+    instead of PySpark's classes of those names, if any."""
     relative = source_path(pyspark_src, module)
     text = (pyspark_src / relative).read_text()
     tree = ast.parse(text)
@@ -1355,6 +1408,11 @@ def transform(pyspark_src: Path, module: str) -> Stub:
     stmts = _drop(module, stmts, transformer.import_sites)
     sites = transformer.import_sites
     extra = EXTRAS.get(module)
+    replaced: frozenset[str] = frozenset()
+    if natives is not None:
+        if extra is not None:
+            raise GeneratorError(f"{module}: EXTRAS of a module of native classes")
+        stmts, replaced, extra = _with_natives(pyspark_src, module, stmts, *natives)
     extra_stmts: list[ast.stmt] = []
     if extra is not None:
         extra_stmts = ast.parse(extra.source).body
@@ -1372,7 +1430,39 @@ def transform(pyspark_src: Path, module: str) -> Stub:
         sites = [s for s in sites if s.name not in extra_names]
         if extra.all_names:
             _add_to_all(stmts, extra.all_names, module)
-    return Stub(module, relative, text, tree, stmts, sites, extra, extra_stmts)
+    return Stub(module, relative, text, tree, stmts, sites, extra, extra_stmts, replaced)
+
+
+def _with_natives(pyspark_src: Path, module: str, stmts: list[ast.stmt], official: str, names):
+    """`stmts` of PySpark's module `module` with the native classes `names` of the drop-in's
+    module, the public classes of PySpark's classes of the module `official`: the statements that
+    bind them are left out, and ``__all__`` lists the names, as the drop-in sets it. Returns the
+    statements, the names that PySpark's module binds of them, and the extra of the classes."""
+    clash = [s for s in stmts if isinstance(s, (ast.Import, ast.ImportFrom))]
+    clash = sorted(n for s in clash for n in bound_names(s) if n in names)
+    if clash:
+        raise GeneratorError(f"{module}: PySpark's module imports the native classes {clash}")
+    replaced = frozenset(n for s in stmts for n in bound_names(s) if n in names)
+    kept = [s for s in stmts if not (bound_names(s) & set(names))]
+    # Of no line of PySpark's module, so of none of its `# type: ignore` comments.
+    all_names = ast.parse(f"__all__ = {list(names)!r}").body[0]
+    all_names.lineno = None
+    kept = [s for s in kept if not _all_target(s)]
+    first = next(
+        (i for i, s in enumerate(kept) if not isinstance(s, (ast.Import, ast.ImportFrom))),
+        len(kept),
+    )
+    kept.insert(first, all_names)
+    tree = ast.parse((pyspark_src / source_path(pyspark_src, official)).read_text())
+    source = f"import {official} as {_PUBLISHED}\n" + "\n".join(
+        public_classes(official, tree, names)
+    )
+    comment = (
+        f"The native classes that the drop-in sets in the module, over PySpark's classes of their\n"
+        f"# names: the public classes of PySpark's classes of {official} (see\n"
+        "# pyspark.ml._native_classes.publish)."
+    )
+    return kept, replaced, Extra(source + "\n", comment=comment)
 
 
 class DropIn:
@@ -1503,7 +1593,7 @@ def render_stub(stub: Stub, tag: str, runtime: frozenset[str] = frozenset()) -> 
     )
     header = HEADER.format(source=stub.source.as_posix(), tag=tag)
     text = render(kept, header, stub.extra, stub.text)
-    check_attributes(stub.module, stub.tree, text)
+    check_attributes(stub.module, stub.tree, text, stub.replaced)
     return text
 
 
@@ -1516,7 +1606,7 @@ def check_imports(texts: dict[str, str], dropin: DropIn) -> None:
             if isinstance(stmt, ast.ImportFrom) and (stmt.module or "").split(".")[0] == "pyspark":
                 exists = dropin._is_module(stmt.module)
                 for alias in stmt.names:
-                    if alias.name == "*" or (exists and dropin.provides(stmt.module, alias.name)):
+                    if exists and (alias.name == "*" or dropin.provides(stmt.module, alias.name)):
                         continue
                     unresolved.setdefault(f"{stmt.module}.{alias.name}", []).append(module)
             elif isinstance(stmt, ast.Import):
@@ -1534,6 +1624,268 @@ def check_imports(texts: dict[str, str], dropin: DropIn) -> None:
         raise GeneratorError(f"UNRESOLVED_IMPORTS that the drop-in has now: {stale}; drop them")
 
 
+# ---------------------------------------------------------------------------------------
+# The modules of pyspark.ml.connect
+# ---------------------------------------------------------------------------------------
+
+# The modules of pyspark.ml.connect of the drop-in's native ML classes. Each imports them from
+# pyspark._pyspark and makes them public with ``pyspark.ml._native_classes.publish(globals(),
+# "<module>")``: the public class of each is a subclass of the public classes of its bases and of
+# PySpark's class of its name of that module of pyspark.ml. PySpark's modules of these import
+# paths are its own ML API of Spark Connect, on torch, which the drop-in replaces with these
+# (docs/compatibility.md), so their stubs are made of the drop-in's modules, not of PySpark's:
+# ``class X(<public bases>, <PySpark's X>): ...`` of each native class, which type checkers see with
+# the API of PySpark's class, and the re-exports of what the module imports of pyspark.ml.
+ML_CONNECT_MODULES = (
+    "pyspark.ml.connect.classification",
+    "pyspark.ml.connect.clustering",
+    "pyspark.ml.connect.evaluation",
+    "pyspark.ml.connect.fpm",
+    "pyspark.ml.connect.pipeline",
+    "pyspark.ml.connect.recommendation",
+    "pyspark.ml.connect.regression",
+    "pyspark.ml.connect.tuning",
+)
+# The package, of the drop-in's own source, which re-exports the classes of those modules and of
+# the vendored pyspark.ml.connect.feature, and makes the native stages of pyspark.ml.feature public
+# in itself and in that module, of the names that it sets as the module's ``__all__``: the stub of
+# the module (of STUB_MODULES) declares them in place of PySpark's classes of the same names.
+ML_CONNECT_PACKAGE: str | None = "pyspark.ml.connect"
+ML_CONNECT_FEATURE = "pyspark.ml.connect.feature"
+ML_FEATURE = "pyspark.ml.feature"
+# The native classes of pyspark._pyspark that the package imports, of no class of PySpark: their
+# declarations, as the drop-in's classes have them, and the imports that they need.
+ML_CONNECT_NATIVE_CLASSES = {
+    "MLModel": (
+        "class MLModel:\n"
+        "    def transform(\n"
+        "        self, dataset: DataFrame, params: Optional[ParamMap] = None\n"
+        "    ) -> DataFrame: ...\n",
+        (
+            "from typing import Optional",
+            "from pyspark.ml._typing import ParamMap",
+            "from pyspark.sql.dataframe import DataFrame",
+        ),
+    ),
+}
+# The name under which a stub of native classes imports PySpark's module of their classes.
+_PUBLISHED = "_pysparks"
+HEADER_OF_DROPIN = (
+    HEADER.split("# Generated by", 1)[0]
+    + """\
+# Generated by scripts/gen_type_stubs.py from python/{source} of the drop-in and the classes of
+# {official} of Apache Spark {tag}:
+# do not edit. Type checkers read this stub instead of the module of the drop-in.
+"""
+)
+
+
+def _base_names(cls: ast.ClassDef) -> list[str]:
+    """The names of the bases of `cls` that are names, of a generic too (``Estimator["M"]``)."""
+    names = []
+    for base in cls.bases:
+        node = base.value if isinstance(base, ast.Subscript) else base
+        if isinstance(node, ast.Name):
+            names.append(node.id)
+    return names
+
+
+def public_classes(official: str, tree: ast.Module, names) -> list[str]:
+    """The stub lines of the public classes of the native classes `names` of the classes of the
+    same names of PySpark's module `official`, of source `tree`, as
+    ``pyspark.ml._native_classes.publish`` makes them: each is a subclass of the public classes of
+    the nearest of its bases in PySpark's module that are native too, and of PySpark's class, of
+    the module that the stub imports as ``_pysparks``. A class follows the classes of its bases."""
+    classes = {c.name: c for c in tree.body if isinstance(c, ast.ClassDef)}
+    missing = [n for n in names if n not in classes]
+    if missing:
+        raise GeneratorError(f"{official}: no class of the native classes {missing}")
+
+    @functools.cache
+    def ancestors(name: str) -> tuple[str, ...]:
+        """The bases of PySpark's class `name` of its module, in a walk of its bases in order."""
+        out: list[str] = []
+        for base in _base_names(classes[name]):
+            if base in classes and base != name:
+                out += [a for a in (base, *ancestors(base)) if a not in out]
+        return tuple(out)
+
+    lines: list[str] = []
+    done: set[str] = set()
+
+    def declare(name: str) -> None:
+        if name in done:
+            return
+        done.add(name)
+        native = [a for a in ancestors(name) if a in names]
+        parents = [a for a in native if not any(a in ancestors(b) for b in native if b != a)]
+        for parent in parents:
+            declare(parent)
+        lines.append(f"class {name}({', '.join([*parents, f'{_PUBLISHED}.{name}'])}): ...")
+
+    for name in names:
+        declare(name)
+    return lines
+
+
+def _dropin_source(root: Path, module: str) -> tuple[Path, ast.Module]:
+    """The source of the drop-in's module `module`, relative to python/, and its tree."""
+    base = Path(*module.split("."))
+    for relative in (base / "__init__.py", base.with_suffix(".py")):
+        if (root / PACKAGE_ROOT / relative).is_file():
+            return relative, ast.parse((root / PACKAGE_ROOT / relative).read_text())
+    raise GeneratorError(f"{module}: the drop-in has no such module")
+
+
+def _literal_names(node: ast.expr, where: str) -> list[str]:
+    if not isinstance(node, (ast.List, ast.Tuple)) or not all(
+        isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts
+    ):
+        raise GeneratorError(f"{where}: not a list of names")
+    return [e.value for e in node.elts]
+
+
+def _reexports(stmt: ast.ImportFrom, where: str) -> list[str]:
+    """The lines that re-export the names of `stmt`, an import of public names from pyspark."""
+    if not (stmt.module or "").startswith("pyspark.") or stmt.level:
+        raise GeneratorError(
+            f"{where}: an import of {stmt.module} in a module of pyspark.ml.connect"
+        )
+    lines = []
+    for alias in stmt.names:
+        if alias.asname not in (None, alias.name) or _is_private(alias.name) or alias.name == "*":
+            raise GeneratorError(f"{where}: the import of {alias.name} of {stmt.module}")
+        lines.append(f"from {stmt.module} import {alias.name} as {alias.name}")
+    return lines
+
+
+def _is_own_import(stmt: ast.stmt) -> bool:
+    """Whether `stmt` imports private names only, for the module's own use."""
+    return isinstance(stmt, (ast.Import, ast.ImportFrom)) and all(
+        a.asname is not None and _is_private(a.asname) for a in stmt.names
+    )
+
+
+def ml_connect_module(root: Path, pyspark_src: Path, module: str, tag: str) -> tuple[Path, str]:
+    """The path and the text of the stub of the drop-in's module `module` of ML_CONNECT_MODULES."""
+    relative, tree = _dropin_source(root, module)
+    natives: list[str] = []
+    lines: list[str] = []
+    aliases: dict[str, str] = {}
+    all_names: list[str] | None = None
+    official = None
+    for stmt in tree.body:
+        where = f"{module}:{stmt.lineno}"
+        if _is_docstring(stmt) or isinstance(stmt, ast.Delete):
+            continue
+        if isinstance(stmt, ast.ImportFrom) and stmt.module == "pyspark._pyspark":
+            if any(a.asname is not None for a in stmt.names):
+                raise GeneratorError(f"{where}: a native class imported under another name")
+            natives += [a.name for a in stmt.names]
+        elif isinstance(stmt, ast.Import) and _is_own_import(stmt):
+            aliases.update({a.asname: a.name for a in stmt.names})
+        elif _is_own_import(stmt):
+            continue
+        elif isinstance(stmt, ast.ImportFrom):
+            lines += _reexports(stmt, where)
+        elif isinstance(stmt, ast.Assign) and _all_target(stmt):
+            all_names = _literal_names(stmt.value, where)
+        elif (
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Call)
+            and _dotted(stmt.value.func) == "_publish"
+            and len(stmt.value.args) == 2
+            and isinstance(stmt.value.args[1], ast.Constant)
+        ):
+            official = stmt.value.args[1].value
+        elif (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Attribute)
+            and isinstance(stmt.value.value, ast.Name)
+            and stmt.value.value.id in aliases
+            and stmt.value.attr == stmt.targets[0].id
+        ):
+            # A class of PySpark's module that the module binds (`PipelineReader = _p.PipelineReader`).
+            name = stmt.targets[0].id
+            lines.append(f"from {aliases[stmt.value.value.id]} import {name} as {name}")
+        else:
+            raise GeneratorError(f"{where}: unexpected {type(stmt).__name__} statement")
+    if official is None or not natives:
+        raise GeneratorError(f"{module}: no native classes of a publish(globals(), <module>)")
+    official_tree = ast.parse((pyspark_src / source_path(pyspark_src, official)).read_text())
+    body = [f"import {official} as {_PUBLISHED}", *lines, ""]
+    if all_names is not None:
+        body += [f"__all__ = {all_names!r}", ""]
+    body += public_classes(official, official_tree, natives)
+    header = HEADER_OF_DROPIN.format(source=relative.as_posix(), official=official, tag=tag)
+    return relative.with_suffix(".pyi"), header + "\n" + "\n".join(body) + "\n"
+
+
+def ml_connect_package(root: Path, tag: str) -> tuple[Path, str, list[str]]:
+    """The path and the text of the stub of the package ML_CONNECT_PACKAGE of the drop-in, and the
+    names of the native stages of pyspark.ml.feature that it makes public in the module
+    ML_CONNECT_FEATURE (its ``feature.__all__``)."""
+    module = ML_CONNECT_PACKAGE
+    relative, tree = _dropin_source(root, module)
+    lines: list[str] = []
+    imports: list[str] = []
+    declarations: list[str] = []
+    all_names: list[str] | None = None
+    stages: list[str] | None = None
+    extended = False
+    for stmt in tree.body:
+        where = f"{module}:{stmt.lineno}"
+        if _is_docstring(stmt) or _is_own_import(stmt):
+            continue
+        if isinstance(stmt, (ast.FunctionDef, ast.For)) or (
+            isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call)
+        ):
+            # Its private functions, of the native classes, and their calls, and its loop over the
+            # native stages, which it sets in itself and in the module of the features: the stages
+            # are declared of the module's __all__, below.
+            if isinstance(stmt, ast.FunctionDef) and not _is_private(stmt.name):
+                raise GeneratorError(f"{where}: a public function {stmt.name}")
+            continue
+        if isinstance(stmt, ast.ImportFrom) and stmt.module == "pyspark._pyspark":
+            for alias in stmt.names:
+                if alias.name not in ML_CONNECT_NATIVE_CLASSES or alias.asname is not None:
+                    raise GeneratorError(
+                        f"{where}: the native class {alias.name}: declare it in "
+                        "ML_CONNECT_NATIVE_CLASSES"
+                    )
+                declaration, needs = ML_CONNECT_NATIVE_CLASSES[alias.name]
+                declarations.append(declaration)
+                imports += [n for n in needs if n not in imports]
+        elif isinstance(stmt, ast.ImportFrom):
+            lines += _reexports(stmt, where)
+        elif isinstance(stmt, ast.Assign) and [_dotted(t) for t in stmt.targets] == [
+            f"{ML_CONNECT_FEATURE.rpartition('.')[2]}.__all__"
+        ]:
+            stages = _literal_names(stmt.value, where)
+        elif isinstance(stmt, ast.Assign) and _all_target(stmt):
+            all_names = _literal_names(stmt.value, where)
+        elif isinstance(stmt, ast.AugAssign) and _all_target(stmt):
+            extended = True  # of the native stages that the literal does not list
+        else:
+            raise GeneratorError(f"{where}: unexpected {type(stmt).__name__} statement")
+    if stages is None or all_names is None:
+        raise GeneratorError(f"{module}: no __all__ of its own or of {ML_CONNECT_FEATURE}")
+    reexported = {line.rpartition(" as ")[2] for line in lines}
+    lines += [
+        f"from {ML_CONNECT_FEATURE} import {name} as {name}"
+        for name in stages
+        if name not in reexported
+    ]
+    if extended:
+        all_names = all_names + [n for n in stages if n not in all_names]
+    body = [*imports, *lines, "", f"__all__ = {all_names!r}", ""]
+    body += [d.rstrip("\n") for d in declarations]
+    header = HEADER_OF_DROPIN.format(source=relative.as_posix(), official="pyspark.ml", tag=tag)
+    return relative.with_suffix(".pyi"), header + "\n" + "\n".join(body) + "\n", stages
+
+
 def generate(root: Path, pyspark_src: str, log=print) -> dict[Path, str]:
     """The stubs and pyproject.toml with their block of ruff excludes, by path relative to
     `root`."""
@@ -1546,20 +1898,32 @@ def generate(root: Path, pyspark_src: str, log=print) -> dict[Path, str]:
     unknown = sorted(set(ATTRIBUTE_TYPES) - set(STUB_MODULES))
     if unknown:
         raise GeneratorError(f"ATTRIBUTE_TYPES of modules without a stub: {unknown}")
+    unknown = sorted(set(DROPPED_STAR_IMPORTS) - set(STUB_MODULES))
+    if unknown:
+        raise GeneratorError(f"DROPPED_STAR_IMPORTS of modules without a stub: {unknown}")
     check_identity_decorators(src)
     tag = tracked_tag(root)
-    stubs = {module: transform(src, module) for module in STUB_MODULES}
+    natives: dict[str, tuple[str, list[str]]] = {}
+    ml_stubs: dict[str, tuple[Path, str]] = {}
+    if ML_CONNECT_PACKAGE is not None:
+        path, text, stages = ml_connect_package(root, tag)
+        ml_stubs[ML_CONNECT_PACKAGE] = (path, text)
+        natives[ML_CONNECT_FEATURE] = (ML_FEATURE, stages)
+        for module in ML_CONNECT_MODULES:
+            ml_stubs[module] = ml_connect_module(root, src, module, tag)
+    stubs = {module: transform(src, module, natives.get(module)) for module in STUB_MODULES}
     dropin = DropIn(root, stubs)
     resolve_reexports(stubs, dropin)
     texts = {
         stub.module: render_stub(stub, tag, dropin.runtime_names(stub.module))
         for stub in stubs.values()
     }
-    check_imports(texts, dropin)
+    check_imports({**texts, **{m: text for m, (_, text) in ml_stubs.items()}}, dropin)
     outputs = {
         PACKAGE_ROOT / stub.source.with_suffix(".pyi"): texts[stub.module]
         for stub in stubs.values()
     }
+    outputs.update({PACKAGE_ROOT / path: text for path, text in ml_stubs.values()})
     log(f"Generated {len(outputs)} stubs from PySpark {tag}")
     outputs[PYPROJECT] = with_ruff_block((root / PYPROJECT).read_text(), sorted(outputs))
     return outputs

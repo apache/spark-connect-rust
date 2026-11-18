@@ -26300,6 +26300,59 @@ def test_classic_sql_context_on_session_raises_jvm_attribute():
     finally:
         spark.stop()
 
+def test_classic_sql_context_is_pysparks_class_of_its_methods():
+    # As PySpark 4.3.0's pyspark/sql/context.py, which pyspark-client ships: SQLContext and
+    # HiveContext are its classic classes, of all their methods, which type checkers see of the
+    # context that getOrCreate() returns, the SQLContext of pyspark.sql.connect.context. The
+    # drop-in's had getOrCreate() only, so `hasattr(SQLContext, "sql")` was False, and mypy
+    # reported `"SQLContext" has no attribute "sql"` of a context.
+    import pyspark.sql.context as context
+    from pyspark.sql import HiveContext, SQLContext
+    from pyspark.sql.streaming.query import StreamingCheckpointManager
+
+    assert context.__all__ == ["SQLContext", "HiveContext"]
+    assert sorted(n for n in vars(SQLContext) if not n.startswith("__")) == [
+        "_get_or_create",
+        "_instantiatedContext",
+        "_ssql_ctx",
+        "_streamingCheckpointManager",
+        "cacheTable",
+        "clearCache",
+        "createDataFrame",
+        "createExternalTable",
+        "dropTempTable",
+        "getConf",
+        "getOrCreate",
+        "newSession",
+        "range",
+        "read",
+        "readStream",
+        "registerDataFrameAsTable",
+        "registerFunction",
+        "registerJavaFunction",
+        "setConf",
+        "sql",
+        "streams",
+        "table",
+        "tableNames",
+        "tables",
+        "udf",
+        "udtf",
+        "uncacheTable",
+    ]
+    assert sorted(n for n in vars(HiveContext) if not n.startswith("__")) == [
+        "_createForTesting",
+        "_get_or_create",
+        "_static_conf",
+        "refreshTable",
+    ]
+    # The manager of the checkpoints of Spark Classic, which its classic classes annotate, as
+    # PySpark's module of the streaming queries has it.
+    assert StreamingCheckpointManager("jmanager")._jmanager == "jmanager"
+    import pyspark.sql.streaming.query as query
+
+    assert "StreamingCheckpointManager" not in query.__all__
+
 
 def test_execution_info_and_operation_id():
     from pyspark.errors import AnalysisException

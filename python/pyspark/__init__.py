@@ -19,7 +19,26 @@ from typing import cast, Any, Callable, TypeVar, Union
 from pyspark.util import is_remote_only
 
 # As the PySpark client's, of a Connect-only client: the names of pyspark but those of the
-# classic SparkContext (RDD, SparkContext, SparkFiles, ...), which need a JVM.
+# classic SparkContext (RDD, SparkContext, SparkFiles, ...), which need a JVM. PySpark's module
+# imports those from pyspark.core when not is_remote_only(), which never holds of either client, and
+# which type checkers do not evaluate: they see the names, of no type, as pyspark.core is not
+# shipped. So does this block, which does not run either; the names that PySpark's __all__ lists
+# are re-exported, as its __all__ exports them to type checkers.
+if not is_remote_only():
+    from pyspark.core.rdd import RDD as RDD, RDDBarrier as RDDBarrier
+    from pyspark.core.files import SparkFiles as SparkFiles
+    from pyspark.core.status import (
+        StatusTracker as StatusTracker,
+        SparkJobInfo as SparkJobInfo,
+        SparkStageInfo as SparkStageInfo,
+        SparkExecutorInfo as SparkExecutorInfo,
+    )
+    from pyspark.core.broadcast import Broadcast as Broadcast
+    from pyspark.core import rdd, files, status, broadcast  # noqa: F401
+    from pyspark.core.context import SparkContext as SparkContext
+    from pyspark.core import context  # noqa: F401
+    from pyspark.sql import SQLContext, HiveContext  # noqa: F401
+
 from pyspark.conf import SparkConf
 from pyspark.storagelevel import StorageLevel
 from pyspark.accumulators import Accumulator, AccumulatorParam

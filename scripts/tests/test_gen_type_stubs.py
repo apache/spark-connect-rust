@@ -193,14 +193,28 @@ class Tree:
         (base / path).write_text(textwrap.dedent(text).lstrip("\n"))
 
     def generate(
-        self, modules, extras=None, attribute_types=None, unresolved_imports=None, dropped=None
+        self,
+        modules,
+        extras=None,
+        attribute_types=None,
+        unresolved_imports=None,
+        dropped=None,
+        dropped_star_imports=None,
+        ml_connect=None,
     ):
+        """The outputs of the generator of the stubs of `modules`, and of the modules of
+        pyspark.ml.connect `ml_connect` and their package, if given."""
         with (
             mock.patch.object(gen, "STUB_MODULES", tuple(modules)),
             mock.patch.object(gen, "EXTRAS", extras or {}),
             mock.patch.object(gen, "ATTRIBUTE_TYPES", attribute_types or {}),
             mock.patch.object(gen, "UNRESOLVED_IMPORTS", unresolved_imports or {}),
             mock.patch.object(gen, "DROPPED", dropped or {}),
+            mock.patch.object(gen, "DROPPED_STAR_IMPORTS", dropped_star_imports or {}),
+            mock.patch.object(
+                gen, "ML_CONNECT_PACKAGE", None if ml_connect is None else "pyspark.ml.connect"
+            ),
+            mock.patch.object(gen, "ML_CONNECT_MODULES", tuple(ml_connect or ())),
             mock.patch.object(
                 gen, "IDENTITY_DECORATORS", frozenset({"pyspark.sql.utils.try_remote_functions"})
             ),
@@ -617,6 +631,240 @@ class Reader(object):  # type: ignore[misc]
         clash = {"pyspark.sql.window": gen.Extra("class Window: ...\n")}
         with self.assertRaisesRegex(gen.GeneratorError, r"now has \['Window'\]"):
             tree.generate(["pyspark.sql.window"], clash)
+
+    def test_a_star_import_of_a_module_that_the_dropin_lacks(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/proto/__init__.py",
+            """
+            from pyspark.sql.proto.base_pb2_grpc import *
+            from pyspark.sql.proto.base_pb2 import *
+            """,
+        )
+        # The drop-in ships the stub of base_pb2, not the gRPC module, and its package installs
+        # the messages in its globals().
+        tree.write(tree.repo, "python/pyspark/sql/proto/base_pb2.pyi", "class Plan: ...\n")
+        tree.write(tree.repo, "python/pyspark/sql/proto/__init__.py", "install(globals())\n")
+        with self.assertRaisesRegex(
+            gen.GeneratorError, r"does not have: \{'pyspark.sql.proto.base_pb2_grpc.\*'"
+        ):
+            tree.generate(["pyspark.sql.proto"])
+        grpc = {"pyspark.sql.proto": {"pyspark.sql.proto.base_pb2_grpc": "no gRPC"}}
+        stub = tree.generate(["pyspark.sql.proto"], dropped_star_imports=grpc)[
+            Path("python/pyspark/sql/proto/__init__.pyi")
+        ]
+        self.assertEqual(body(stub), "\nfrom pyspark.sql.proto.base_pb2 import *\n")
+        stale = {"pyspark.sql.proto": {"pyspark.sql.proto.gone": "gone"}}
+        with self.assertRaisesRegex(gen.GeneratorError, r"does not star-import: \['pyspark"):
+            tree.generate(["pyspark.sql.proto"], dropped_star_imports=stale)
+
+
+# PySpark's module of the classes of the native classes of the drop-in's module below: summaries
+# of two branches, a generic base and a base of the module that is not native.
+PYSPARKS_CLASSIFICATION = """
+from typing import Generic, TypeVar
+
+T = TypeVar("T")
+
+
+class _Base(Generic[T]): ...
+
+
+class Classifier(_Base["Model"]): ...
+
+
+class Summary: ...
+
+
+class BinarySummary(Summary): ...
+
+
+class TrainingSummary(Summary): ...
+
+
+class BinaryTrainingSummary(BinarySummary, TrainingSummary): ...
+
+
+class Model(_Base["Model"]):
+    def summary(self) -> BinaryTrainingSummary: ...
+
+
+class Reader: ...
+"""
+
+DROPIN_CLASSIFICATION = """
+\"\"\"The drop-in's module of native classes.\"\"\"
+
+from pyspark._pyspark import (
+    BinarySummary,
+    BinaryTrainingSummary,
+    Model,
+    Summary,
+    TrainingSummary,
+)
+from pyspark.ml.classification import Classifier  # noqa: F401
+
+__all__ = ["Model", "Summary"]
+
+from pyspark.ml._native_classes import publish as _publish  # noqa: E402
+
+_publish(globals(), "pyspark.ml.classification")
+
+import pyspark.ml.classification as _pysparks  # noqa: E402
+
+Reader = _pysparks.Reader
+del _pysparks
+"""
+
+DROPIN_ML_CONNECT = """
+\"\"\"The drop-in's package of the native ML classes.\"\"\"
+
+from pyspark.ml.connect.classification import Model, Summary
+from pyspark.ml.connect.feature import ArrayAssembler, MaxAbsScaler
+from pyspark._pyspark import MLModel
+from pyspark import _pyspark as _native
+from pyspark.ml.connect import feature
+
+for _name in _native._ml_feature_names:
+    globals()[_name] = getattr(_native, _name)
+
+feature.__all__ = ["Binarizer", "MaxAbsScaler"]
+
+__all__ = ["Model", "Summary", "ArrayAssembler", "MaxAbsScaler", "MLModel", "feature"]
+
+__all__ += [name for name in _native._ml_feature_names if name not in __all__]
+
+
+def _publish_native_classes() -> None:
+    pass
+
+
+_publish_native_classes()
+"""
+
+
+class MLConnectTests(unittest.TestCase):
+    def tree(self) -> Tree:
+        tree = Tree(self)
+        tree.write(tree.src, "pyspark/ml/classification.py", PYSPARKS_CLASSIFICATION)
+        tree.write(
+            tree.src,
+            "pyspark/ml/feature.py",
+            "class Binarizer: ...\n\n\nclass MaxAbsScaler(Binarizer): ...\n",
+        )
+        tree.write(
+            tree.src,
+            "pyspark/ml/connect/feature.py",
+            """
+            from pyspark.sql.dataframe import DataFrame
+
+
+            class MaxAbsScaler:
+                def fit(self, dataset: DataFrame) -> "MaxAbsScaler": ...
+
+
+            class ArrayAssembler:
+                def transform(self, dataset: DataFrame) -> DataFrame: ...
+            """,
+        )
+        # The drop-in's modules: PySpark's of pyspark.ml, as the vendored ones, and its own of
+        # pyspark.ml.connect.
+        tree.write(tree.repo, "python/pyspark/ml/classification.py", PYSPARKS_CLASSIFICATION)
+        tree.write(tree.repo, "python/pyspark/ml/feature.py", "class Binarizer: ...\n")
+        tree.write(tree.repo, "python/pyspark/ml/_typing.pyi", "ParamMap = dict\n")
+        tree.write(tree.repo, "python/pyspark/ml/connect/classification.py", DROPIN_CLASSIFICATION)
+        tree.write(tree.repo, "python/pyspark/ml/connect/__init__.py", DROPIN_ML_CONNECT)
+        tree.write(tree.repo, "python/pyspark/ml/connect/feature.py", "")
+        return tree
+
+    def generate(self, tree: Tree):
+        return tree.generate(
+            ["pyspark.ml.connect.feature"], ml_connect=["pyspark.ml.connect.classification"]
+        )
+
+    def test_the_native_classes_are_the_public_classes_of_pysparks(self):
+        tree = self.tree()
+        stub = self.generate(tree)[Path("python/pyspark/ml/connect/classification.pyi")]
+        self.assertIn(
+            "from python/pyspark/ml/connect/classification.py of the drop-in and the classes of\n"
+            "# pyspark.ml.classification of Apache Spark v9.9.9:\n",
+            stub,
+        )
+        # Each native class is of the public classes of its nearest native bases, which come
+        # first, and of PySpark's class; the module re-exports what it imports of pyspark.ml and
+        # the class that it binds of PySpark's module, and keeps its __all__.
+        self.assertEqual(
+            body(stub),
+            "\nimport pyspark.ml.classification as _pysparks\n"
+            "from pyspark.ml.classification import Classifier as Classifier\n"
+            "from pyspark.ml.classification import Reader as Reader\n\n"
+            "__all__ = ['Model', 'Summary']\n\n"
+            "class Summary(_pysparks.Summary): ...\n"
+            "class BinarySummary(Summary, _pysparks.BinarySummary): ...\n"
+            "class TrainingSummary(Summary, _pysparks.TrainingSummary): ...\n"
+            "class BinaryTrainingSummary(BinarySummary, TrainingSummary, "
+            "_pysparks.BinaryTrainingSummary): ...\n"
+            "class Model(_pysparks.Model): ...\n",
+        )
+
+    def test_the_package_reexports_and_the_module_of_the_features_has_the_stages(self):
+        outputs = self.generate(self.tree())
+        package = body(outputs[Path("python/pyspark/ml/connect/__init__.pyi")])
+        # The names that it imports, the native stages that it sets in the module of the
+        # features, its own native class, and its __all__ with the stages.
+        self.assertIn("from pyspark.ml.connect.classification import Model as Model\n", package)
+        self.assertIn("from pyspark.ml.connect.feature import Binarizer as Binarizer\n", package)
+        self.assertEqual(package.count("import MaxAbsScaler as MaxAbsScaler\n"), 1)
+        self.assertIn("from pyspark.ml.connect import feature as feature\n", package)
+        self.assertIn(
+            "__all__ = ['Model', 'Summary', 'ArrayAssembler', 'MaxAbsScaler', 'MLModel', "
+            "'feature', 'Binarizer']\n",
+            package,
+        )
+        self.assertIn("class MLModel:\n    def transform(\n", package)
+        self.assertNotIn("_native", package)
+        feature = body(outputs[Path("python/pyspark/ml/connect/feature.pyi")])
+        # PySpark's MaxAbsScaler of the module is replaced, its ArrayAssembler kept, and the
+        # __all__ is the drop-in's.
+        self.assertIn("__all__ = ['Binarizer', 'MaxAbsScaler']\n", feature)
+        self.assertIn("class ArrayAssembler:\n", feature)
+        self.assertNotIn("def fit(", feature)
+        self.assertTrue(
+            feature.endswith(
+                "import pyspark.ml.feature as _pysparks\n"
+                "class Binarizer(_pysparks.Binarizer): ...\n"
+                "class MaxAbsScaler(Binarizer, _pysparks.MaxAbsScaler): ...\n"
+            ),
+            feature,
+        )
+
+    def test_what_the_generator_cannot_stub_is_an_error(self):
+        tree = self.tree()
+        path = "python/pyspark/ml/connect/classification.py"
+        # A statement of another kind.
+        tree.write(tree.repo, path, DROPIN_CLASSIFICATION + "\nx = 1\n")
+        with self.assertRaisesRegex(gen.GeneratorError, r"classification:\d+: unexpected Assign"):
+            self.generate(tree)
+        # A native class of no class of PySpark's module.
+        tree.write(
+            tree.repo,
+            path,
+            DROPIN_CLASSIFICATION.replace("    Model,\n", "    Model,\n    Gone,\n"),
+        )
+        with self.assertRaisesRegex(
+            gen.GeneratorError, r"no class of the native classes \['Gone'\]"
+        ):
+            self.generate(tree)
+        # A native class of the package that ML_CONNECT_NATIVE_CLASSES does not declare.
+        tree.write(tree.repo, path, DROPIN_CLASSIFICATION)
+        tree.write(
+            tree.repo,
+            "python/pyspark/ml/connect/__init__.py",
+            DROPIN_ML_CONNECT.replace("import MLModel", "import MLModel, Other"),
+        )
+        with self.assertRaisesRegex(gen.GeneratorError, "the native class Other"):
+            self.generate(tree)
 
 
 class CheckTests(unittest.TestCase):
