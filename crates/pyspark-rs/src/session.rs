@@ -1266,8 +1266,10 @@ impl PandasArrowSettings {
 
 impl PySparkSession {
     /// Upload local files, or `file:` URIs, as artifacts of the session, each named by the first
-    /// of the flags that it matches. As PySpark's `_parse_artifacts`, every path is parsed, and a
-    /// local file opened, before any upload.
+    /// of the flags that it matches, as PySpark's `SparkConnectClient.add_artifacts`, which gives
+    /// its `ArtifactManager` one path at a time: a path is parsed, and a local file opened (see
+    /// `check_local_artifact`), and then uploaded, before the next path is parsed. So the error of
+    /// a path is raised once the paths before it are uploaded, which the session keeps.
     fn upload_artifacts(
         &self,
         py: Python<'_>,
@@ -1286,13 +1288,13 @@ impl PySparkSession {
                 return Err(unsupported_artifact_error(py, format));
             }
             check_local_artifact(py, &name, &local, pyfile)?;
+            interruptible(py, &self.session, || {
+                self.session
+                    .add_artifacts_of_flags(&[p.as_str()], pyfile, archive, file)
+                    .map_err(Box::new)
+            })?;
         }
-        let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        interruptible(py, &self.session, || {
-            self.session
-                .add_artifacts_of_flags(&refs, pyfile, archive, file)
-                .map_err(Box::new)
-        })
+        Ok(())
     }
 
     pub fn new(session: SparkSession) -> Self {
@@ -3944,7 +3946,7 @@ fn unsupported_artifact_error(py: Python<'_>, unsupported: UnsupportedArtifact) 
 /// The client side of parsing a local artifact, as PySpark's `_parse_artifacts` does it: a
 /// Python file, zip, egg or jar of `pyfile` is importable by the client, and the file is opened
 /// as PySpark's `LocalFile` opens it, so that a missing file or a directory raises the error of
-/// `open` before any upload.
+/// `open` before the path is uploaded.
 fn check_local_artifact(
     py: Python<'_>,
     name: &str,

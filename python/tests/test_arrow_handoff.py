@@ -988,6 +988,37 @@ def test_artifact_upload_retries_a_transient_failure_of_each_path(protocol, tmp_
         assert (state["upload_attempts"], state["uploads"]) == (3, 2)
 
 
+def test_artifact_upload_sends_each_path_before_it_parses_the_next(protocol, tmp_path):
+    # As SparkConnectClient.add_artifacts, which gives its ArtifactManager one path at a time, and
+    # so SparkSession.addArtifacts: a path is parsed and uploaded before the next one is parsed,
+    # so the error of a later path, of a missing file or of a format that the flags do not take,
+    # is raised once the paths before it are uploaded, which the server keeps, and the paths
+    # after it are not uploaded.
+    from pyspark.errors import PySparkRuntimeError
+
+    for name in ("first.py", "second.py", "third.py", "note.txt"):
+        (tmp_path / name).write_text("x = 1\n")
+    first, second, third, note = (
+        str(tmp_path / name) for name in ("first.py", "second.py", "third.py", "note.txt"))
+    missing = str(tmp_path / "missing.py")
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        with pytest.raises(FileNotFoundError):
+            spark.addArtifacts(first, missing, third, pyfile=True)
+        assert (sorted(state["cache"]), state["uploads"]) == (["pyfiles/first.py"], 1)
+        with pytest.raises(PySparkRuntimeError) as error:
+            spark.client.add_artifacts(second, note, pyfile=True, archive=False, file=False)
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert error.value.getMessageParameters() == {"operation": f"{note} file format"}
+        assert sorted(state["cache"]) == ["pyfiles/first.py", "pyfiles/second.py"]
+        with pytest.raises(FileNotFoundError):
+            spark.addArtifacts(missing, third, pyfile=True)
+        assert state["uploads"] == 2
+        spark.addArtifacts(third, note, file=True)
+        assert sorted(state["cache"]) == [
+            "files/note.txt", "files/third.py", "pyfiles/first.py", "pyfiles/second.py"]
+        assert state["uploads"] == 4
+
+
 @pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
 @pytest.mark.parametrize("explicit", [False, True], ids=["inferred", "explicit"])
 def test_arrow_input_schema_handoff(protocol, cached, explicit):
