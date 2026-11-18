@@ -51,6 +51,18 @@ impl Scalar {
 
     /// Whether a field without presence that holds the value is serialized: protobuf skips the
     /// zero of each type, a float only of the bits of +0.0.
+    /// Whether `self` and `other` are equal as upb's `==` of two messages compares the values of
+    /// a field (`upb_Message_IsEqual`): a float or a double of its bits, so that a NaN equals a
+    /// NaN of the same bits and -0.0 is not 0.0, and any other value of its value. (`==` of the
+    /// containers and maps compares their values as Python's `==` does.)
+    pub(crate) fn eq_as_upb(&self, other: &Scalar) -> bool {
+        match (self, other) {
+            (Scalar::F64(a), Scalar::F64(b)) => a.to_bits() == b.to_bits(),
+            (Scalar::F32(a), Scalar::F32(b)) => a.to_bits() == b.to_bits(),
+            _ => self == other,
+        }
+    }
+
     pub(crate) fn is_default(&self) -> bool {
         match self {
             Scalar::F64(v) => v.to_bits() == 0,
