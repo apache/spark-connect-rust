@@ -390,59 +390,68 @@ impl Drop for Nesting {
     }
 }
 
-/// The type of `obj`, as PySpark's `_infer_type`.
-pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<DataType> {
+/// A type that inference gives, with the type objects of the user-defined types in it.
+pub(crate) type Inferred<'py> = (DataType, TypeObjects<'py>);
+
+/// An inferred type that holds no user-defined type.
+fn inferred<'py>(data_type: DataType) -> Inferred<'py> {
+    (data_type, TypeObjects::default())
+}
+
+/// The type of `obj`, as PySpark's `_infer_type`, with the `__UDT__` of a value of a user-defined
+/// type, which PySpark's inferred schema holds.
+pub(crate) fn infer_type<'py>(obj: &Bound<'py, PyAny>, o: Options<'_>) -> PyResult<Inferred<'py>> {
     let _nesting = Nesting::enter()?;
     let py = obj.py();
     o.budget.step(py)?;
     if obj.is_none() {
-        return Ok(DataType::Null);
+        return Ok(inferred(DataType::Null));
     }
     // The types that PySpark maps by `type(obj)`, before it looks for `__UDT__`, which none
     // of them can have: neither these classes nor their instances take new attributes.
     if obj.is_exact_instance_of::<PyBool>() {
-        return Ok(DataType::Boolean);
+        return Ok(inferred(DataType::Boolean));
     }
     if obj.is_exact_instance_of::<PyInt>() {
-        return Ok(DataType::Long);
+        return Ok(inferred(DataType::Long));
     }
     if obj.is_exact_instance_of::<PyFloat>() {
-        return Ok(DataType::Double);
+        return Ok(inferred(DataType::Double));
     }
     if obj.is_exact_instance_of::<PyString>() {
-        return Ok(string_type());
+        return Ok(inferred(string_type()));
     }
     if obj.is_exact_instance_of::<PyBytes>() || obj.is_exact_instance_of::<PyByteArray>() {
-        return Ok(DataType::Binary);
+        return Ok(inferred(DataType::Binary));
     }
     let ty = obj.get_type();
     if ty.is(decimal_type(py)?) {
         // As PySpark: the precision and scale of a value may differ from row to row.
-        return Ok(DataType::Decimal {
+        return Ok(inferred(DataType::Decimal {
             precision: 38,
             scale: 18,
-        });
+        }));
     }
     if ty.is(DATETIME.import(py, "datetime", "datetime")?) {
         let naive = obj.getattr(intern!(py, "tzinfo"))?.is_none();
-        return Ok(if naive && o.value(py, o.prefer_timestamp_ntz)? {
+        return Ok(inferred(if naive && o.value(py, o.prefer_timestamp_ntz)? {
             DataType::TimestampNtz
         } else {
             DataType::Timestamp
-        });
+        }));
     }
     if ty.is(DATE.import(py, "datetime", "date")?) {
-        return Ok(DataType::Date);
+        return Ok(inferred(DataType::Date));
     }
     if ty.is(TIME.import(py, "datetime", "time")?) {
-        return Ok(DataType::Time { precision: 6 });
+        return Ok(inferred(DataType::Time { precision: 6 }));
     }
     if ty.is(TIMEDELTA.import(py, "datetime", "timedelta")?) {
         // `DayTimeIntervalType()`, from days to seconds.
-        return Ok(DataType::DayTimeInterval {
+        return Ok(inferred(DataType::DayTimeInterval {
             start_field: 0,
             end_field: 3,
-        });
+        }));
     }
     // As PySpark's `_infer_type`, the type of a value is `GeometryType(srid)` or
     // `GeographyType(srid)`, which raises `ST_INVALID_SRID_VALUE` for an SRID that the type does
@@ -450,15 +459,17 @@ pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<Dat
     if obj.get_type().is(geometry_class(py)?) {
         let srid = obj.call_method0(intern!(py, "getSrid"))?;
         let srid = crate::types::spatial_type_srid(&srid, false)?;
-        return Ok(DataType::Geometry { srid });
+        return Ok(inferred(DataType::Geometry { srid }));
     }
     if obj.get_type().is(geography_class(py)?) {
         let srid = obj.call_method0(intern!(py, "getSrid"))?;
         let srid = crate::types::spatial_type_srid(&srid, true)?;
-        return Ok(DataType::Geography { srid });
+        return Ok(inferred(DataType::Geography { srid }));
     }
     if obj.hasattr(intern!(py, "__UDT__"))? {
-        return crate::types::py_to_data_type(&obj.getattr(intern!(py, "__UDT__"))?);
+        let udt = obj.getattr(intern!(py, "__UDT__"))?;
+        let data_type = crate::types::py_to_data_type(&udt)?;
+        return Ok((data_type, TypeObjects::of_udt(udt)));
     }
     if let Ok(dict) = obj.cast::<PyDict>() {
         return infer_dict(dict, o);
@@ -469,10 +480,10 @@ pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<Dat
     if obj.is_instance(ARRAY.import(py, "array", "array")?.as_any())? {
         let typecode: String = obj.getattr(intern!(py, "typecode"))?.extract()?;
         return match array_element_type(&typecode) {
-            Some(element_type) => Ok(DataType::Array {
+            Some(element_type) => Ok(inferred(DataType::Array {
                 element_type: Box::new(element_type),
                 contains_null: false,
-            }),
+            })),
             None => Err(raise_pyspark(
                 py,
                 "PySparkTypeError",
@@ -482,7 +493,7 @@ pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<Dat
         };
     }
     if obj.is_instance(variant_val_class(py)?)? {
-        return Ok(DataType::Variant);
+        return Ok(inferred(DataType::Variant));
     }
     match infer_schema(obj, None, o.for_nested_rows()) {
         Err(e) if e.is_instance_of::<PyTypeError>(py) => Err(raise_pyspark(
@@ -497,27 +508,30 @@ pub(crate) fn infer_type(obj: &Bound<'_, PyAny>, o: Options<'_>) -> PyResult<Dat
 
 /// A dict: a struct of its keys with non-null values, the map type of its first pair with
 /// neither null, or, by default, the merged types of its keys and of its values.
-fn infer_dict(dict: &Bound<'_, PyDict>, o: Options<'_>) -> PyResult<DataType> {
+fn infer_dict<'py>(dict: &Bound<'py, PyDict>, o: Options<'_>) -> PyResult<Inferred<'py>> {
     let py = dict.py();
     if o.confs.get(py)?.dict_as_struct {
         let mut fields = Vec::new();
+        let mut objects = FieldObjects::default();
         for (key, value) in dict.iter() {
             if !key.is_none() && !value.is_none() {
-                let data_type = infer_type(&value, o)?;
+                let (data_type, value_objects) = infer_type(&value, o)?;
+                objects.push(fields.len(), value_objects);
                 fields.push(field_of(&key, data_type)?);
             }
         }
-        return Ok(DataType::Struct { fields });
+        let objects = objects.finish(fields.len());
+        return Ok((DataType::Struct { fields }, objects));
     }
     if o.value(py, o.map_from_first_pair)? {
         for (key, value) in dict.iter() {
             if !key.is_none() && !value.is_none() {
-                return Ok(map_type(infer_type(&key, o)?, infer_type(&value, o)?));
+                return Ok(map_of(infer_type(&key, o)?, infer_type(&value, o)?));
             }
         }
-        return Ok(map_type(DataType::Null, DataType::Null));
+        return Ok(inferred(map_type(DataType::Null, DataType::Null)));
     }
-    let (mut key_type, mut value_type) = (DataType::Null, DataType::Null);
+    let (mut key_type, mut value_type) = (inferred(DataType::Null), inferred(DataType::Null));
     for (key, value) in dict.iter() {
         if !key.is_none() {
             key_type = merge_type(py, key_type, infer_type(&key, o)?)?;
@@ -526,20 +540,31 @@ fn infer_dict(dict: &Bound<'_, PyDict>, o: Options<'_>) -> PyResult<DataType> {
             value_type = merge_type(py, value_type, infer_type(&value, o)?)?;
         }
     }
-    Ok(map_type(key_type, value_type))
+    Ok(map_of(key_type, value_type))
+}
+
+/// The inferred map type of an inferred key and value type.
+fn map_of<'py>(
+    (key_type, key): Inferred<'py>,
+    (value_type, value): Inferred<'py>,
+) -> Inferred<'py> {
+    (
+        map_type(key_type, value_type),
+        TypeObjects::of_map(key, value),
+    )
 }
 
 /// A list: an array of the merged types of its elements, or of its first element's type.
-fn infer_list(list: &Bound<'_, PyList>, o: Options<'_>) -> PyResult<DataType> {
+fn infer_list<'py>(list: &Bound<'py, PyList>, o: Options<'_>) -> PyResult<Inferred<'py>> {
     let py = list.py();
     let elements = o.for_elements();
-    let element_type = match list.len() {
-        0 => DataType::Null,
+    let (element_type, element) = match list.len() {
+        0 => inferred(DataType::Null),
         // One element has its own type either way, without reading the configuration.
         1 => infer_type(&list.get_item(0)?, elements)?,
         _ if o.confs.get(py)?.array_from_first_element => infer_type(&list.get_item(0)?, elements)?,
         _ => {
-            let mut merged = DataType::Null;
+            let mut merged = inferred(DataType::Null);
             for (i, value) in list.iter().enumerate() {
                 let data_type = infer_type(&value, elements)?;
                 merged = if i == 0 {
@@ -551,10 +576,11 @@ fn infer_list(list: &Bound<'_, PyList>, o: Options<'_>) -> PyResult<DataType> {
             merged
         }
     };
-    Ok(DataType::Array {
+    let data_type = DataType::Array {
         element_type: Box::new(element_type),
         contains_null: true,
-    })
+    };
+    Ok((data_type, TypeObjects::of_array(element)))
 }
 
 /// The element type of an `array.array` of `typecode`, as PySpark maps the typecodes by the
@@ -632,7 +658,8 @@ pub(crate) fn positional<'py>(
 
 /// The (name, value) pairs of a row, as `_infer_schema` takes them: a dict by its sorted
 /// keys, a Row or a namedtuple by its field names, another tuple or a list by `names`, and
-/// another object by the sorted names of its `__dict__`.
+/// another object by the sorted names of its `__dict__`. The values of a tuple or a list are
+/// those of the Python protocol, of the `__len__` and `__iter__` of a subclass too.
 fn row_items<'py>(
     row: &Bound<'py, PyAny>,
     names: Option<&mut Vec<String>>,
@@ -649,15 +676,20 @@ fn row_items<'py>(
         } else {
             None
         };
-        let values = row.try_iter()?.collect::<PyResult<Vec<_>>>()?;
         return match fields {
-            Some(fields) => Ok(fields
-                .try_iter()?
-                .collect::<PyResult<Vec<_>>>()?
-                .into_iter()
-                .zip(values)
-                .collect()),
-            None => Ok(positional(py, values, names)),
+            // `zip(row.__fields__, tuple(row))`.
+            Some(fields) => {
+                let values = match row.cast::<PyTuple>() {
+                    Ok(tuple) if reads_as_stored(tuple, false)? => tuple.clone(),
+                    _ => sequence_tuple(row)?,
+                };
+                fields
+                    .try_iter()?
+                    .zip(values.iter())
+                    .map(|(name, value)| Ok((name?, value)))
+                    .collect()
+            }
+            None => positional_items(py, row, names),
         };
     }
     if row.hasattr(intern!(py, "__dict__"))? {
@@ -671,12 +703,52 @@ fn row_items<'py>(
     ))
 }
 
+/// The (name, value) pairs of a tuple or a list `row` of no field names, as `_infer_schema`
+/// takes `zip(names, row)`: names as many as `len(row)`, `_1`, `_2`, and so on, or `names`,
+/// extended so, in place, when they are fewer, and the values of `iter(row)`, up to the last
+/// name.
+fn positional_items<'py>(
+    py: Python<'py>,
+    row: &Bound<'py, PyAny>,
+    names: Option<&mut Vec<String>>,
+) -> PyResult<Items<'py>> {
+    let defaults: Vec<String>;
+    let names: &[String] = match names {
+        None => {
+            defaults = (1..=row.len()?).map(|i| format!("_{i}")).collect();
+            &defaults
+        }
+        Some(names) => {
+            // `len(row)` twice, as `elif len(names) < len(row): names.extend(... len(row) ...)`.
+            if names.len() < row.len()? {
+                let (start, width) = (names.len() + 1, row.len()?);
+                names.extend((start..=width).map(|i| format!("_{i}")));
+            }
+            names
+        }
+    };
+    let mut values = row.try_iter()?;
+    let mut items = Vec::with_capacity(names.len());
+    for name in names {
+        match values.next() {
+            Some(value) => items.push((PyString::new(py, name).into_any(), value?)),
+            None => break,
+        }
+    }
+    Ok(items)
+}
+
 /// The struct type of (name, value) pairs. A `TypeError` in inferring a value, as from a
 /// type that cannot be inferred or merged, becomes `CANNOT_INFER_TYPE_FOR_FIELD`.
-pub(crate) fn infer_fields(py: Python<'_>, items: Items<'_>, o: Options<'_>) -> PyResult<DataType> {
+pub(crate) fn infer_fields<'py>(
+    py: Python<'py>,
+    items: Items<'py>,
+    o: Options<'_>,
+) -> PyResult<Inferred<'py>> {
     let mut fields = Vec::with_capacity(items.len());
+    let mut objects = FieldObjects::default();
     for (name, value) in items {
-        let data_type = match infer_type(&value, o) {
+        let (data_type, value_objects) = match infer_type(&value, o) {
             Err(e) if e.is_instance_of::<PyTypeError>(py) => {
                 return Err(raise_pyspark(
                     py,
@@ -687,17 +759,19 @@ pub(crate) fn infer_fields(py: Python<'_>, items: Items<'_>, o: Options<'_>) -> 
             }
             result => result?,
         };
+        objects.push(fields.len(), value_objects);
         fields.push(field_of(&name, data_type)?);
     }
-    Ok(DataType::Struct { fields })
+    let objects = objects.finish(fields.len());
+    Ok((DataType::Struct { fields }, objects))
 }
 
 /// The struct type of a row, as PySpark's `_infer_schema`.
-pub(crate) fn infer_schema(
-    row: &Bound<'_, PyAny>,
+pub(crate) fn infer_schema<'py>(
+    row: &Bound<'py, PyAny>,
     names: Option<&mut Vec<String>>,
     o: Options<'_>,
-) -> PyResult<DataType> {
+) -> PyResult<Inferred<'py>> {
     let items = row_items(row, names)?;
     infer_fields(row.py(), items, o)
 }
@@ -767,31 +841,37 @@ fn same_class(a: &DataType, b: &DataType) -> bool {
 
 /// The merge of two inferred types, as PySpark's `_merge_type`: a null type takes the
 /// other, a string absorbs another atomic type, and structs, arrays and maps merge by
-/// their parts. Other types must be of the same class, and the first one is taken.
-pub(crate) fn merge_type(py: Python<'_>, a: DataType, b: DataType) -> PyResult<DataType> {
+/// their parts. Other types must be of the same class, and the first one is taken, with its type
+/// objects: so a user-defined type is the `__UDT__` of its first value.
+pub(crate) fn merge_type<'py>(
+    py: Python<'_>,
+    a: Inferred<'py>,
+    b: Inferred<'py>,
+) -> PyResult<Inferred<'py>> {
     use DataType as D;
+    let ((a, mut a_objects), (b, mut b_objects)) = (a, b);
     match (&a, &b) {
-        (D::Null, _) => return Ok(b),
-        (_, D::Null) => return Ok(a),
-        (D::Timestamp, D::TimestampNtz) => return Ok(a),
-        (D::TimestampNtz, D::Timestamp) => return Ok(b),
+        (D::Null, _) => return Ok((b, b_objects)),
+        (_, D::Null) => return Ok((a, a_objects)),
+        (D::Timestamp, D::TimestampNtz) => return Ok((a, a_objects)),
+        (D::TimestampNtz, D::Timestamp) => return Ok((b, b_objects)),
         (D::Geometry { srid: x }, D::Geometry { srid: y }) if x != y => {
-            return Ok(D::Geometry {
+            return Ok(inferred(D::Geometry {
                 srid: GeometryType::MIXED_SRID,
-            });
+            }));
         }
         (D::Geography { srid: x }, D::Geography { srid: y }) if x != y => {
-            return Ok(D::Geography {
+            return Ok(inferred(D::Geography {
                 srid: GeographyType::MIXED_SRID,
-            });
+            }));
         }
         _ => {}
     }
     if is_atomic(&a) && matches!(b, D::String { .. }) {
-        return Ok(b);
+        return Ok((b, b_objects));
     }
     if matches!(a, D::String { .. }) && is_atomic(&b) {
-        return Ok(a);
+        return Ok((a, a_objects));
     }
     if !same_class(&a, &b) {
         return Err(raise_pyspark(
@@ -809,32 +889,39 @@ pub(crate) fn merge_type(py: Python<'_>, a: DataType, b: DataType) -> PyResult<D
             // `dict((f.name, f.dataType) for f in b.fields)`: each name at its first place,
             // with the type of its last field.
             let mut index: HashMap<String, usize> = HashMap::with_capacity(b.len());
-            let mut others: Vec<(String, DataType)> = Vec::with_capacity(b.len());
-            for f in b {
+            let mut others: Vec<(String, Inferred<'py>)> = Vec::with_capacity(b.len());
+            for (i, f) in b.into_iter().enumerate() {
+                let other = (f.data_type, b_objects.take_child(i));
                 match index.get(&f.name) {
-                    Some(&i) => others[i].1 = f.data_type,
+                    Some(&j) => others[j].1 = other,
                     None => {
                         index.insert(f.name.clone(), others.len());
-                        others.push((f.name, f.data_type));
+                        others.push((f.name, other));
                     }
                 }
             }
             let mut names: HashSet<String> = HashSet::with_capacity(a.len());
             let mut fields = Vec::with_capacity(a.len() + others.len());
-            for f in a {
+            let mut objects = FieldObjects::default();
+            for (i, f) in a.into_iter().enumerate() {
                 let other = match index.get(&f.name) {
-                    Some(&i) => others[i].1.clone(),
-                    None => D::Null,
+                    Some(&j) => others[j].1.clone(),
+                    None => inferred(D::Null),
                 };
                 names.insert(f.name.clone());
-                fields.push(nullable_field(f.name, merge_type(py, f.data_type, other)?));
+                let (data_type, merged) =
+                    merge_type(py, (f.data_type, a_objects.take_child(i)), other)?;
+                objects.push(fields.len(), merged);
+                fields.push(nullable_field(f.name, data_type));
             }
-            for (name, data_type) in others {
+            for (name, (data_type, other)) in others {
                 if !names.contains(&name) {
+                    objects.push(fields.len(), other);
                     fields.push(nullable_field(name, data_type));
                 }
             }
-            D::Struct { fields }
+            let objects = objects.finish(fields.len());
+            (D::Struct { fields }, objects)
         }
         (
             D::Array {
@@ -843,10 +930,18 @@ pub(crate) fn merge_type(py: Python<'_>, a: DataType, b: DataType) -> PyResult<D
             D::Array {
                 element_type: y, ..
             },
-        ) => D::Array {
-            element_type: Box::new(merge_type(py, *x, *y)?),
-            contains_null: true,
-        },
+        ) => {
+            let (element_type, element) = merge_type(
+                py,
+                (*x, a_objects.take_child(0)),
+                (*y, b_objects.take_child(0)),
+            )?;
+            let data_type = D::Array {
+                element_type: Box::new(element_type),
+                contains_null: true,
+            };
+            (data_type, TypeObjects::of_array(element))
+        }
         (
             D::Map {
                 key_type: ka,
@@ -858,8 +953,19 @@ pub(crate) fn merge_type(py: Python<'_>, a: DataType, b: DataType) -> PyResult<D
                 value_type: vb,
                 ..
             },
-        ) => map_type(merge_type(py, *ka, *kb)?, merge_type(py, *va, *vb)?),
-        (a, _) => a,
+        ) => map_of(
+            merge_type(
+                py,
+                (*ka, a_objects.take_child(0)),
+                (*kb, b_objects.take_child(0)),
+            )?,
+            merge_type(
+                py,
+                (*va, a_objects.take_child(1)),
+                (*vb, b_objects.take_child(1)),
+            )?,
+        ),
+        (a, _) => (a, a_objects),
     })
 }
 
@@ -894,11 +1000,24 @@ fn data_type_str(py: Python<'_>, dt: &DataType) -> PyResult<String> {
         .into_owned())
 }
 
-fn must_not_be_none(py: Python<'_>, dt: &DataType) -> PyResult<PyErr> {
+/// The `str()` of the type of a place of local rows, which PySpark's converters name in their
+/// errors: of the type object of the schema there, as of a subclass, else of the core type `dt`.
+fn type_str(py: Python<'_>, dt: &DataType, objects: Option<&TypeObjects<'_>>) -> PyResult<String> {
+    match objects.and_then(TypeObjects::object) {
+        Some(object) => Ok(object.str()?.to_cow()?.into_owned()),
+        None => data_type_str(py, dt),
+    }
+}
+
+fn must_not_be_none(
+    py: Python<'_>,
+    dt: &DataType,
+    objects: Option<&TypeObjects<'_>>,
+) -> PyResult<PyErr> {
     Ok(pyspark_message(
         py,
         "PySparkValueError",
-        &format!("input for {} must not be None", data_type_str(py, dt)?),
+        &format!("input for {} must not be None", type_str(py, dt, objects)?),
     ))
 }
 
@@ -1237,7 +1356,8 @@ pub(crate) fn bytes_of(obj: &Bound<'_, PyAny>) -> PyResult<Option<Vec<u8>>> {
 ///   a `dict_keys` or a `dict_items`.
 ///
 /// Its errors, as those of its elements, wait for the converters of the other columns. Its
-/// elements hold no user-defined type, which needs a converter, so they have no [`UdtObjects`].
+/// elements need no converter, so they hold no user-defined or spatial type, and raise no error
+/// that names their type object: they take no [`TypeObjects`].
 fn arrow_list(
     obj: &Bound<'_, PyAny>,
     dt: &DataType,
@@ -1391,43 +1511,40 @@ fn arrow_type_text(dt: &DataType) -> Option<String> {
     })
 }
 
-/// The user-defined type objects of a schema that the client was given, at the places of the
-/// user-defined types of its core type: PySpark's converter of a user-defined type serializes each
-/// value with the type object that the schema holds (`udt = dataType` of
-/// `LocalDataToArrowConversion._create_converter`), of its own parameters, which the JSON of the
-/// core type does not keep.
-pub(crate) enum UdtObjects<'py> {
-    /// No user-defined type below.
-    None,
-    /// A user-defined type, and the objects of its `sqlType()`.
-    Udt(Bound<'py, PyAny>, Box<UdtObjects<'py>>),
-    /// The objects of the fields of a struct, in their order.
-    Struct(Vec<UdtObjects<'py>>),
-    /// The objects of the element type of an array.
-    Array(Box<UdtObjects<'py>>),
-    /// The objects of the key type and of the value type of a map.
-    Map(Box<UdtObjects<'py>>, Box<UdtObjects<'py>>),
+/// The type objects of the schema of local rows, at the places of its core type, which PySpark's
+/// converters hold (`LocalDataToArrowConversion._create_converter`) and use:
+/// - a user-defined type serializes each value with its object (`udt = dataType`), of its own
+///   parameters, which the JSON of the core type does not keep;
+/// - a spatial type converts each value with its `toInternal`, which a subclass may override;
+/// - the errors of a value name the `str()` of the type object, as of a subclass.
+///
+/// A schema that the client was given has its object at each place. One that it inferred has
+/// those of its user-defined types alone, as its other types are PySpark's own classes: the
+/// `__UDT__` of the first value at each place, which `_merge_type` keeps of two of one class
+/// (see [`merge_type`]). The empty default holds no object, at no place below either.
+#[derive(Clone, Default)]
+pub(crate) struct TypeObjects<'py> {
+    /// The type object of this place.
+    object: Option<Bound<'py, PyAny>>,
+    /// The objects of the fields of a struct, in their order; of the element of an array; of the
+    /// key and the value of a map; or of the `sqlType()` of a user-defined type.
+    children: Vec<TypeObjects<'py>>,
 }
 
-impl<'py> UdtObjects<'py> {
-    /// The objects of the type object `obj`, of the core type `dt`, as PySpark's converters read
-    /// them: of the `dataType` of each of its `fields`, its `elementType`, its `keyType` and
-    /// `valueType`, and of the `sqlType()` of a user-defined type that holds another.
+impl<'py> TypeObjects<'py> {
+    /// The objects of the type object `obj` of a given schema, of the core type `dt`, as PySpark
+    /// makes its converters of them: of the `dataType` of each of its `fields`, its `elementType`,
+    /// its `keyType` and `valueType`, and of the `sqlType()` of a user-defined type.
     pub(crate) fn of(obj: &Bound<'py, PyAny>, dt: &DataType) -> PyResult<Self> {
         let py = obj.py();
-        if !crate::types::has_udt(dt) {
-            return Ok(Self::None);
-        }
-        Ok(match dt {
-            DataType::Udt { sql_type, .. } => {
-                let sql = match sql_type {
-                    Some(sql_type) if crate::types::has_udt(sql_type) => {
-                        Self::of(&obj.call_method0(intern!(py, "sqlType"))?, sql_type)?
-                    }
-                    _ => Self::None,
-                };
-                Self::Udt(obj.clone(), Box::new(sql))
-            }
+        let children = match dt {
+            DataType::Udt {
+                sql_type: Some(sql_type),
+                ..
+            } => vec![Self::of(
+                &obj.call_method0(intern!(py, "sqlType"))?,
+                sql_type,
+            )?],
             DataType::Struct { fields } => {
                 let objects = obj.getattr(intern!(py, "fields"))?;
                 let mut children = Vec::with_capacity(fields.len());
@@ -1435,57 +1552,173 @@ impl<'py> UdtObjects<'py> {
                     let data_type = object?.getattr(intern!(py, "dataType"))?;
                     children.push(Self::of(&data_type, &field.data_type)?);
                 }
-                Self::Struct(children)
+                children
             }
-            DataType::Array { element_type, .. } => Self::Array(Box::new(Self::of(
+            DataType::Array { element_type, .. } => vec![Self::of(
                 &obj.getattr(intern!(py, "elementType"))?,
                 element_type,
-            )?)),
+            )?],
             DataType::Map {
                 key_type,
                 value_type,
                 ..
-            } => Self::Map(
-                Box::new(Self::of(&obj.getattr(intern!(py, "keyType"))?, key_type)?),
-                Box::new(Self::of(
-                    &obj.getattr(intern!(py, "valueType"))?,
-                    value_type,
-                )?),
-            ),
-            _ => Self::None,
+            } => vec![
+                Self::of(&obj.getattr(intern!(py, "keyType"))?, key_type)?,
+                Self::of(&obj.getattr(intern!(py, "valueType"))?, value_type)?,
+            ],
+            _ => Vec::new(),
+        };
+        Ok(Self {
+            object: Some(obj.clone()),
+            children,
         })
+    }
+
+    /// The objects of a user-defined type that inference took of a value, its `__UDT__`; those
+    /// of its `sqlType()` are read once the schema is inferred ([`Self::with_sql_types`]).
+    fn of_udt(udt: Bound<'py, PyAny>) -> Self {
+        Self {
+            object: Some(udt),
+            children: Vec::new(),
+        }
+    }
+
+    /// The objects of a struct of the objects of its fields, of no type object of its own, as
+    /// the struct of the single column of an atomic schema.
+    pub(crate) fn of_fields(fields: Vec<Self>) -> Self {
+        Self {
+            object: None,
+            children: fields,
+        }
+    }
+
+    /// The objects of an array of inferred elements, empty if they are.
+    fn of_array(element: Self) -> Self {
+        Self::of_children(vec![element])
+    }
+
+    /// The objects of a map of inferred keys and values, empty if both are.
+    fn of_map(key: Self, value: Self) -> Self {
+        Self::of_children(vec![key, value])
+    }
+
+    fn of_children(children: Vec<Self>) -> Self {
+        if children.iter().all(Self::is_empty) {
+            return Self::default();
+        }
+        Self {
+            object: None,
+            children,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.object.is_none() && self.children.is_empty()
+    }
+
+    /// The objects of an inferred schema `dt`, with those of the `sqlType()` of each of its
+    /// user-defined types, as PySpark makes the converter of each of them of its `sqlType()`.
+    pub(crate) fn with_sql_types(mut self, dt: &DataType) -> PyResult<Self> {
+        match dt {
+            DataType::Udt {
+                sql_type: Some(sql_type),
+                ..
+            } => {
+                if let Some(udt) = &self.object {
+                    let sql = udt.call_method0(intern!(udt.py(), "sqlType"))?;
+                    self.children = vec![Self::of(&sql, sql_type)?];
+                }
+            }
+            DataType::Struct { fields } => {
+                for (child, field) in self.children.iter_mut().zip(fields) {
+                    *child = std::mem::take(child).with_sql_types(&field.data_type)?;
+                }
+            }
+            DataType::Array { element_type, .. } => {
+                if let Some(child) = self.children.get_mut(0) {
+                    *child = std::mem::take(child).with_sql_types(element_type)?;
+                }
+            }
+            DataType::Map {
+                key_type,
+                value_type,
+                ..
+            } => {
+                for (child, data_type) in self.children.iter_mut().zip([key_type, value_type]) {
+                    *child = std::mem::take(child).with_sql_types(data_type)?;
+                }
+            }
+            _ => {}
+        }
+        Ok(self)
+    }
+
+    /// The type object of this place, if the schema holds it.
+    fn object(&self) -> Option<&Bound<'py, PyAny>> {
+        self.object.as_ref()
     }
 
     /// The objects of the field `index` of a struct.
     pub(crate) fn field(&self, index: usize) -> Option<&Self> {
-        match self {
-            Self::Struct(fields) => fields.get(index),
-            _ => None,
-        }
+        self.children.get(index)
     }
 
     fn element(&self) -> Option<&Self> {
-        match self {
-            Self::Array(element) => Some(element),
-            _ => None,
-        }
+        self.children.first()
     }
 
     fn key_and_value(&self) -> (Option<&Self>, Option<&Self>) {
-        match self {
-            Self::Map(key, value) => (Some(key), Some(value)),
-            _ => (None, None),
+        (self.children.first(), self.children.get(1))
+    }
+
+    /// The objects of the `sqlType()` of a user-defined type.
+    fn sql_type(&self) -> Option<&Self> {
+        self.children.first()
+    }
+
+    /// The objects of the child `index`, taken out, empty if there are none.
+    fn take_child(&mut self, index: usize) -> Self {
+        self.children
+            .get_mut(index)
+            .map(std::mem::take)
+            .unwrap_or_default()
+    }
+}
+
+/// The objects of the fields of an inferred struct, a field at a time, which allocate only once a
+/// field has some, as most data has no user-defined type.
+#[derive(Default)]
+struct FieldObjects<'py>(Vec<TypeObjects<'py>>);
+
+impl<'py> FieldObjects<'py> {
+    /// The objects of the field `index`, after those of the fields before it.
+    fn push(&mut self, index: usize, objects: TypeObjects<'py>) {
+        if !objects.is_empty() {
+            self.0.resize_with(index, TypeObjects::default);
+            self.0.push(objects);
+        }
+    }
+
+    /// The objects of the struct of `len` fields.
+    fn finish(mut self, len: usize) -> TypeObjects<'py> {
+        if self.0.is_empty() {
+            return TypeObjects::default();
+        }
+        self.0.resize_with(len, TypeObjects::default);
+        TypeObjects {
+            object: None,
+            children: self.0,
         }
     }
 }
 
 /// A field value of `dt` from `obj`, as PySpark's converters and then PyArrow convert it, with the
-/// user-defined type objects `objects` of `dt`, if the schema was given. Each value, also of an
-/// array, a map or a struct, is a step of `budget`.
+/// type objects `objects` of `dt` (see [`TypeObjects`]). Each value, also of an array, a map or a
+/// struct, is a step of `budget`.
 pub(crate) fn convert<'py>(
     obj: &Bound<'py, PyAny>,
     dt: &DataType,
-    objects: Option<&UdtObjects<'py>>,
+    objects: Option<&TypeObjects<'py>>,
     nullable: bool,
     late: &mut Late,
     budget: &ConversionBudget,
@@ -1495,7 +1728,7 @@ pub(crate) fn convert<'py>(
     if obj.is_none() {
         // A null type takes None either way.
         if !nullable && !matches!(dt, DataType::Null) {
-            return Err(must_not_be_none(py, dt)?);
+            return Err(must_not_be_none(py, dt, objects)?);
         }
         return Ok(Value::Null);
     }
@@ -1505,7 +1738,7 @@ pub(crate) fn convert<'py>(
             "PySparkValueError",
             &format!(
                 "input for {} must be None, but got {}",
-                data_type_str(py, dt)?,
+                type_str(py, dt, objects)?,
                 obj.str()?
             ),
         )),
@@ -1525,7 +1758,7 @@ pub(crate) fn convert<'py>(
             {
                 return Err(assertion());
             }
-            let element = objects.and_then(UdtObjects::element);
+            let element = objects.and_then(TypeObjects::element);
             let mut items = Vec::with_capacity(obj.len().unwrap_or(0));
             for item in obj.try_iter()? {
                 items.push(convert(
@@ -1546,7 +1779,7 @@ pub(crate) fn convert<'py>(
         } => {
             let dict = obj.cast::<PyDict>().map_err(|_| assertion())?;
             let (key_objects, value_objects) = objects
-                .map(UdtObjects::key_and_value)
+                .map(TypeObjects::key_and_value)
                 .unwrap_or((None, None));
             let mut entries = Vec::with_capacity(dict.len());
             for (key, value) in dict.iter() {
@@ -1589,7 +1822,7 @@ pub(crate) fn convert<'py>(
             }
             if obj.call_method0(intern!(py, "is_nan"))?.is_truthy()? {
                 if !nullable {
-                    return Err(must_not_be_none(py, dt)?);
+                    return Err(must_not_be_none(py, dt, objects)?);
                 }
                 return Ok(Value::Null);
             }
@@ -1644,7 +1877,8 @@ pub(crate) fn convert<'py>(
         | DataType::Time { .. } => Ok(late.defer(|| arrow_scalar(obj, dt))),
         // As PySpark's converters of these types, their `toInternal`: the `value` and
         // `metadata` attributes of a VariantVal, and the `srid` and `wkb` of a Geometry or a
-        // Geography, which PyArrow converts as the fields of the structs of their Arrow types.
+        // Geography, which PyArrow converts as the fields of the structs of their Arrow types. A
+        // spatial type of the schema of a Python subclass converts with its own (`spatial_value`).
         DataType::Variant => {
             if obj.is_instance(variant_val_class(py)?)? {
                 let value = obj.getattr(intern!(py, "value"))?;
@@ -1666,7 +1900,8 @@ pub(crate) fn convert<'py>(
         }
         DataType::Geometry { .. } => {
             if obj.is_instance(geometry_class(py)?)? {
-                spatial_value(obj, late)
+                let native = py.get_type::<crate::types::PyGeometryType>();
+                spatial_value(obj, objects.and_then(TypeObjects::object), &native, late)
             } else {
                 Err(raise_pyspark(
                     py,
@@ -1678,7 +1913,8 @@ pub(crate) fn convert<'py>(
         }
         DataType::Geography { .. } => {
             if obj.is_instance(geography_class(py)?)? {
-                spatial_value(obj, late)
+                let native = py.get_type::<crate::types::PyGeographyType>();
+                spatial_value(obj, objects.and_then(TypeObjects::object), &native, late)
             } else {
                 Err(raise_pyspark(
                     py,
@@ -1689,17 +1925,17 @@ pub(crate) fn convert<'py>(
             }
         }
         // As PySpark's converter of a user-defined type: the value serialized by the UDT, and
-        // converted as its SQL type. The UDT is the object of the schema that was given, as
-        // PySpark's; of an inferred schema, that of the value.
+        // converted as its SQL type. The UDT is the object of the schema, given or inferred, as
+        // PySpark's.
         DataType::Udt {
             sql_type: Some(sql_type),
             python_class,
             serialized_python_class,
             ..
         } => {
-            let (udt, sql_objects) = match objects {
-                Some(UdtObjects::Udt(udt, sql_objects)) => (udt.clone(), Some(&**sql_objects)),
-                _ => (
+            let (udt, sql_objects) = match objects.and_then(|o| Some((o.object()?, o))) {
+                Some((udt, objects)) => (udt.clone(), objects.sql_type()),
+                None => (
                     udt_of(
                         obj,
                         python_class.as_deref(),
@@ -1897,13 +2133,82 @@ pub(crate) fn time_nanos(obj: &Bound<'_, PyAny>) -> PyResult<i64> {
     Ok(seconds * 1_000_000_000 + field(intern!(py, "microsecond"))? * 1_000)
 }
 
-/// The value of a Geometry or a Geography `obj`, as their `toInternal`, the dict of its `srid`
-/// and `wkb` attributes, which PyArrow converts to the int32 and the binary of their struct.
-fn spatial_value(obj: &Bound<'_, PyAny>, late: &mut Late) -> PyResult<Value> {
+/// The value of a Geometry or a Geography `obj`, as the `toInternal` of the type of its column: of
+/// the class `native` of the type, the dict of its `srid` and `wkb` attributes, which PyArrow
+/// converts to the int32 and the binary of their struct. The type object of a schema of a Python
+/// subclass converts the value with its own `toInternal`, which the subclass may override, as
+/// PySpark's converter calls `dataType.toInternal(value)`; PyArrow then converts what it returns.
+fn spatial_value<'py>(
+    obj: &Bound<'py, PyAny>,
+    type_object: Option<&Bound<'py, PyAny>>,
+    native: &Bound<'py, PyType>,
+    late: &mut Late,
+) -> PyResult<Value> {
     let py = obj.py();
+    if let Some(type_object) = type_object.filter(|t| !t.get_type().is(native)) {
+        let internal = type_object.call_method1(intern!(py, "toInternal"), (obj,))?;
+        return Ok(late.defer(|| spatial_internal(&internal)));
+    }
     let srid = obj.getattr(intern!(py, "srid"))?;
     let wkb = obj.getattr(intern!(py, "wkb"))?;
     Ok(late.defer(|| spatial_struct(&srid, &wkb)))
+}
+
+/// The struct of a spatial value of what the `toInternal` of its type returned, as PyArrow
+/// converts it: None is a null; a dict of the `srid` and the `wkb`, as the type's `toInternal`
+/// returns, and a tuple of two values are read as they are stored; another value, such as a
+/// sequence of (name, value) pairs, is converted by PyArrow alone, which raises its error of it.
+/// PyArrow also keeps the kind of the first value of a column for the others, which this does
+/// not.
+fn spatial_internal(internal: &Bound<'_, PyAny>) -> PyResult<Value> {
+    let py = internal.py();
+    if internal.is_none() {
+        return Ok(Value::Null);
+    }
+    if let Ok(dict) = internal.cast::<PyDict>() {
+        if let (Some(srid), Some(wkb)) = (
+            dict.get_item(intern!(py, "srid"))?,
+            dict.get_item(intern!(py, "wkb"))?,
+        ) {
+            return spatial_struct(&srid, &wkb);
+        }
+    } else if let Ok(tuple) = internal.cast::<PyTuple>() {
+        if tuple.len() == 2 {
+            return spatial_struct(&tuple.get_item(0)?, &tuple.get_item(1)?);
+        }
+    }
+    let Ok(pyarrow) = py.import(intern!(py, "pyarrow")) else {
+        return Err(pyarrow_error(
+            py,
+            "ArrowTypeError",
+            format!(
+                "Could not convert {} with type {}: was not a dict, tuple, or recognized null \
+                 value for conversion to struct type",
+                internal.repr()?,
+                arrow_type_name(internal)?
+            ),
+        )?);
+    };
+    let not_null = [("nullable", false)].into_py_dict(py)?;
+    let field = |name: &str, arrow_type: &str| {
+        pyarrow.call_method(
+            intern!(py, "field"),
+            (name, pyarrow.call_method0(arrow_type)?),
+            Some(&not_null),
+        )
+    };
+    let struct_type = pyarrow.call_method1(
+        intern!(py, "struct"),
+        ([field("srid", "int32")?, field("wkb", "binary")?],),
+    )?;
+    let value = pyarrow
+        .call_method1(intern!(py, "array"), ([internal], struct_type))?
+        .call_method0(intern!(py, "to_pylist"))?
+        .get_item(0)?;
+    if value.is_none() {
+        return Ok(Value::Null);
+    }
+    spatial_struct(&value.get_item("srid")?, &value.get_item("wkb")?)
 }
 
 /// The struct of a Geometry or a Geography, from its `srid` and `wkb` as PyArrow converts them.
@@ -1950,9 +2255,10 @@ fn arrow_binary(obj: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
 }
 
 /// The user-defined type of a column whose class is `python_class`, to serialize `obj`, where the
-/// conversion has no object of the schema (see [`UdtObjects`]), as of a schema that the client
-/// inferred: that of the value, as PySpark infers a UDT by `__UDT__`, when it is of the class;
-/// else an instance of the class, which the type sends cloudpickled for a class of `__main__`.
+/// conversion has no type object of the schema at its place ([`TypeObjects`]), as of a struct
+/// object whose `fields` give fewer than its core type: that of the value, as PySpark infers a UDT
+/// by `__UDT__`, when it is of the class; else an instance of the class, which the type sends
+/// cloudpickled for a class of `__main__`.
 fn udt_of<'py>(
     obj: &Bound<'py, PyAny>,
     python_class: Option<&str>,
@@ -2113,16 +2419,20 @@ fn values_by_position<'py>(
 }
 
 /// A struct value, as PySpark converts one: a tuple or a Row by position, a dict by name,
-/// and another object by the names of its `__dict__`.
+/// and another object by the names of its `__dict__`. A tuple is read by `len(value)` and
+/// `value[i]`, of the `__len__` and `__getitem__` of a subclass too (`struct_by_index`).
 fn convert_struct<'py>(
     obj: &Bound<'py, PyAny>,
     fields: &[StructField],
-    objects: Option<&UdtObjects<'py>>,
+    objects: Option<&TypeObjects<'py>>,
     late: &mut Late,
     budget: &ConversionBudget,
 ) -> PyResult<Value> {
     let py = obj.py();
     let values = if let Ok(tuple) = obj.cast::<PyTuple>() {
+        if !reads_as_stored(tuple, true)? {
+            return struct_by_index(obj, fields, objects, late, budget);
+        }
         values_by_position(py, tuple.iter().collect(), fields)?
     } else if obj.is_instance_of::<PyDict>() {
         values_by_name(obj, fields)?
@@ -2142,7 +2452,7 @@ fn convert_struct<'py>(
 fn struct_of<'py>(
     values: &[Bound<'py, PyAny>],
     fields: &[StructField],
-    objects: Option<&UdtObjects<'py>>,
+    objects: Option<&TypeObjects<'py>>,
     late: &mut Late,
     budget: &ConversionBudget,
 ) -> PyResult<Value> {
@@ -2157,6 +2467,84 @@ fn struct_of<'py>(
         })
         .collect::<PyResult<Vec<_>>>()?;
     Ok(Value::Struct(StructValue::new(names, values)))
+}
+
+/// A struct value of a tuple of a subclass of its own `__len__` or `__getitem__`, as PySpark's
+/// converter reads one: `len(value)` must be the number of fields, and `value[i]` of each field
+/// is read as the value before it is converted.
+fn struct_by_index<'py>(
+    obj: &Bound<'py, PyAny>,
+    fields: &[StructField],
+    objects: Option<&TypeObjects<'py>>,
+    late: &mut Late,
+    budget: &ConversionBudget,
+) -> PyResult<Value> {
+    let py = obj.py();
+    if obj.len()? != fields.len() {
+        // PySpark's message reads `len(value)` again.
+        return Err(axis_length_mismatch(py, fields.len(), obj.len()?));
+    }
+    let names: std::sync::Arc<[String]> = fields.iter().map(|f| f.name.clone()).collect();
+    let mut values = Vec::with_capacity(fields.len());
+    for (index, f) in fields.iter().enumerate() {
+        let field_objects = objects.and_then(|objects| objects.field(index));
+        let value = obj.get_item(index)?;
+        values.push(convert(
+            &value,
+            &f.data_type,
+            field_objects,
+            f.nullable,
+            late,
+            budget,
+        )?);
+    }
+    Ok(Value::Struct(StructValue::new(names, values)))
+}
+
+/// The methods of `tuple` that read a tuple as it is stored, `__len__`, `__iter__` and
+/// `__getitem__`, and the `__getitem__` of the Row class, which reads an int index so.
+static TUPLE_METHODS: PyOnceLock<[Py<PyAny>; 4]> = PyOnceLock::new();
+
+/// Whether the type of the tuple `value` has the `__len__` of `tuple`, and its `__iter__`, or,
+/// `by_index`, the `__getitem__` of `tuple` or of the Row class, which reads an int index of the
+/// storage: so that `len(value)` and `tuple(value)`, or `value[i]`, give the values as they are
+/// stored, which the native reads take without the calls. So do an exact tuple, a Row and a
+/// namedtuple.
+fn reads_as_stored(value: &Bound<'_, PyTuple>, by_index: bool) -> PyResult<bool> {
+    let py = value.py();
+    if value.is_exact_instance_of::<PyTuple>() {
+        return Ok(true);
+    }
+    let [len, iter, item, row_item] = TUPLE_METHODS.get_or_try_init(py, || -> PyResult<_> {
+        let tuple = py.get_type::<PyTuple>();
+        let row = py.import("pyspark.sql.types")?.getattr("Row")?;
+        Ok([
+            tuple.getattr(intern!(py, "__len__"))?.unbind(),
+            tuple.getattr(intern!(py, "__iter__"))?.unbind(),
+            tuple.getattr(intern!(py, "__getitem__"))?.unbind(),
+            row.getattr(intern!(py, "__getitem__"))?.unbind(),
+        ])
+    })?;
+    let ty = value.get_type();
+    if !ty.getattr(intern!(py, "__len__"))?.is(len.bind(py)) {
+        return Ok(false);
+    }
+    if !by_index {
+        return Ok(ty.getattr(intern!(py, "__iter__"))?.is(iter.bind(py)));
+    }
+    let getitem = ty.getattr(intern!(py, "__getitem__"))?;
+    Ok(getitem.is(item.bind(py)) || getitem.is(row_item.bind(py)))
+}
+
+/// `tuple(obj)`, as `PySequence_Tuple` makes it: `obj` itself of an exact tuple, else of the
+/// items of `iter(obj)`, after its length hint, which calls `__len__`.
+fn sequence_tuple<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyTuple>> {
+    // SAFETY: `obj` is a live object, and PySequence_Tuple returns a new reference to a tuple,
+    // or NULL with an exception set.
+    let tuple = unsafe {
+        Bound::from_owned_ptr_or_err(obj.py(), pyo3::ffi::PySequence_Tuple(obj.as_ptr()))
+    }?;
+    Ok(tuple.cast_into::<PyTuple>()?)
 }
 
 /// `dict(sorted(row.items()))`, as PySpark sorts dict rows to respect their inferred schema.
@@ -2179,7 +2567,11 @@ pub(crate) fn variant_row(py: Python<'_>) -> PyErr {
 
 /// The values of a row in the order of `fields`, as PySpark's `to_row` takes them: nulls for
 /// None, a tuple or a Row by position, a dict by name, another object by its `__dict__`, and
-/// another value, such as a list, by position.
+/// another value, such as a list, by position. A tuple of a subclass and another value are taken
+/// by `len(item)`, which must be the number of fields, and `tuple(item)`, of the `__len__` and
+/// `__iter__` of a subclass too, which may give fewer or more values than the fields: PySpark's
+/// `row[i]` of a missing one raises `IndexError` as its column converts, and those after the
+/// fields are not read (`create_from_local`).
 pub(crate) fn row_values<'py>(
     item: &Bound<'py, PyAny>,
     fields: &[StructField],
@@ -2189,6 +2581,9 @@ pub(crate) fn row_values<'py>(
         return Ok(vec![py.None().into_bound(py); fields.len()]);
     }
     if let Ok(tuple) = item.cast::<PyTuple>() {
+        if !reads_as_stored(tuple, false)? {
+            return sequence_values(item, fields);
+        }
         return values_by_position(py, tuple.iter().collect(), fields);
     }
     if item.is_instance_of::<PyDict>() {
@@ -2200,9 +2595,17 @@ pub(crate) fn row_values<'py>(
     if item.hasattr(intern!(py, "__dict__"))? {
         return values_by_name(&item.getattr(intern!(py, "__dict__"))?, fields);
     }
-    let length = item.len()?;
-    if length != fields.len() {
-        return Err(axis_length_mismatch(py, fields.len(), length));
+    sequence_values(item, fields)
+}
+
+/// The values of `tuple(item)` of a row whose `len(item)` must be the number of `fields`.
+fn sequence_values<'py>(
+    item: &Bound<'py, PyAny>,
+    fields: &[StructField],
+) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    if item.len()? != fields.len() {
+        // PySpark's message reads `len(item)` again.
+        return Err(axis_length_mismatch(item.py(), fields.len(), item.len()?));
     }
-    item.try_iter()?.collect()
+    Ok(sequence_tuple(item)?.iter().collect())
 }

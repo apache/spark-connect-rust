@@ -4949,6 +4949,54 @@ def test_local_rows_are_serialized_by_the_udt_objects_of_the_schema_as_pyspark(s
     assert df.toArrow().to_pylist() == [{"a": 6, "b": 40, "c": [50], "d": [("k", 12)]}]
 
 
+class _ScaledValueUDT(UserDefinedType):
+    """A UserDefinedType of a scale, of the values of `_ScaledValue`."""
+
+    def __init__(self, scale=1):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return LongType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj.value * self.scale
+
+    def deserialize(self, datum):
+        return _ScaledValue(datum // self.scale, self.scale)
+
+
+class _ScaledValue:
+    """A value whose `__UDT__` is a `_ScaledValueUDT` of its own scale."""
+
+    def __init__(self, value, scale):
+        self.value, self.scale = value, scale
+
+    @property
+    def __UDT__(self):
+        return _ScaledValueUDT(self.scale)
+
+
+def test_local_rows_of_an_inferred_schema_are_serialized_by_its_udt_objects_as_pyspark(session):
+    # As official PySpark 4.3.0, whose inferred schema holds the `__UDT__` of the first value at
+    # each place of a user-defined type, which serializes every value there: values of other
+    # scales are serialized with the first one's, in a field, an array and a map, as the values
+    # that the server stores show.
+    V = _ScaledValue
+    df = session.createDataFrame([
+        (V(3, 2), [V(1, 2), V(2, 10)], {"k": V(1, 2)}),
+        (V(4, 10), [V(3, 100)], {"k": V(3, 100)}),
+    ])
+    assert df.toArrow().to_pylist() == [
+        {"_1": 6, "_2": [2, 4], "_3": [("k", 2)]},
+        {"_1": 8, "_2": [6], "_3": [("k", 6)]},
+    ]
+
+
 def test_create_dataframe_schema_keeps_metadata_edited_in_place(session):
     # As PySpark: the schema of a DataFrame is the StructType it is created with, so a metadata
     # edited in place of one of its fields is in df.schema.

@@ -1756,7 +1756,8 @@ the arguments of its `__init__`.
 Neither client has a proto or an Arrow type of such a type, also of one nested in another or in the
 `sqlType()` of a user-defined type. A plan of one raises the `UNSUPPORTED_OPERATION` of PySpark's
 `pyspark_types_to_proto_types`, as PySpark's plans do: a cast, `DataFrame.to`, a UDF that is not
-Arrow-optimized and a UDTF at their first request, and the registration of a UDTF or of a Java UDF,
+Arrow-optimized, a UDTF, and `transformWithState` and `transformWithStateInPandas` of an output type
+of one at their first request, and the registration of a UDTF or of a Java UDF,
 `Catalog.createTable` and the schema of a table or a materialized view of a pipeline at the call or
 the decorator. As the schema of `createDataFrame`, local rows of one raise
 `UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION` once their values are converted, as PySpark's
@@ -1796,6 +1797,10 @@ read it by `isinstance`, and the methods of its class are PySpark's, of the meth
   simple string, repr, tree string and conversions, also on the Python workers of the server, to
   which a UDF pickles its return type: a UDF that is not Arrow-optimized converts its results with
   the `toInternal` of the subclass, as PySpark's;
+- the conversion of the local rows of `createDataFrame` takes the type objects of the schema, as
+  PySpark's converters hold them: its errors name the object (`input for SubBooleanType() must not
+  be None`), of its repr, and a geometry or a geography converts with the `toInternal` of a
+  subclass, whose result is converted as PyArrow converts it;
 - a type of a subclass is equal only to a type of its class or of a subclass of it, of the same
   parameters and of the same attributes of its `__dict__`, as PySpark's
   `isinstance(other, self.__class__)` and `__dict__`: `StringType() == SubStringType()` is false in
@@ -1832,11 +1837,8 @@ What differs:
 - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends the
   `json()` of the schema object, which names a type of a subclass by its `typeName()`
   (`"subinteger"`) and which the server then fails to parse (`PARSE_SYNTAX_ERROR`); of data of no
-  rows it sends the `json()` of the object, as PySpark. Its conversion of local rows names the type
-  of the class in its errors (`input for BooleanType() must not be None`), where PySpark's names the
-  object (`SubBooleanType()`), and converts a geometry and a geography without the `toInternal` of a
-  subclass, which PySpark's calls. The readers, `from_json`, `from_xml`, `applyInPandasWithState`
-  and `toDDL` send the `json()` of the object, as PySpark's.
+  rows it sends the `json()` of the object, as PySpark. The readers, `from_json`, `from_xml`,
+  `applyInPandasWithState` and `toDDL` send the `json()` of the object, as PySpark's.
 - The Column of a `cast` or `try_cast` to a type of a subclass renders the `simpleString` of the
   core type of its class (`CAST(id AS BOOLEAN)`), where PySpark's renders that of the object
   (`CAST(id AS SUB)`). The plans are the same.

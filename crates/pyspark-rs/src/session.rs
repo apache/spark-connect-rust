@@ -1360,8 +1360,9 @@ impl PySparkSession {
     /// A DataFrame of local rows, as PySpark Connect creates one: the schema is given, or
     /// inferred by merging the types of every row, and each value is converted to the type
     /// of its field. A list of names names the inferred fields and is applied with `toDF`.
-    /// `schema` is the `StructType` of a schema that was given, whose user-defined type objects
-    /// serialize the values of their types, as PySpark's converters of its fields do.
+    /// `schema` is the type object of a schema that was given, a `StructType` or the atomic type
+    /// of a single column, whose type objects convert the values of their types, as PySpark's
+    /// converters of its fields do (`infer::TypeObjects`).
     fn create_from_local(
         &self,
         py: Python<'_>,
@@ -1373,6 +1374,7 @@ impl PySparkSession {
     ) -> PyResult<PyDataFrame> {
         use crate::infer;
 
+        let atomic = matches!(spec, Spec::Atomic(_));
         let (given, mut cols) = match spec {
             Spec::None => (None, None),
             Spec::Names(names) => (None, Some(names)),
@@ -1437,13 +1439,14 @@ impl PySparkSession {
                 || first.hasattr("__dict__")?)
         };
 
-        let fields = match given {
-            Some(fields) => fields,
+        // The fields, and the type objects of the user-defined types of an inferred schema.
+        let (fields, inferred) = match given {
+            Some(fields) => (fields, None),
             None => {
                 // Of the settings that were read with the others, before any conversion.
                 let confs = infer::InferenceConfs::of_options(&options);
                 let options = infer::Options::new(&confs, &budget);
-                let mut merged: Option<DataType> = None;
+                let mut merged: Option<infer::Inferred<'_>> = None;
                 for item in &items {
                     budget.step(py)?;
                     let row_type = if single {
@@ -1461,7 +1464,7 @@ impl PySparkSession {
                     });
                 }
                 match merged {
-                    Some(schema) if infer::has_null_type(&schema) => {
+                    Some((schema, _)) if infer::has_null_type(&schema) => {
                         return Err(crate::column::raise_pyspark(
                             py,
                             "PySparkValueError",
@@ -1469,7 +1472,7 @@ impl PySparkSession {
                             &[],
                         ));
                     }
-                    Some(DataType::Struct { fields }) => fields,
+                    Some((DataType::Struct { fields }, objects)) => (fields, Some(objects)),
                     _ => unreachable!("rows are inferred as structs"),
                 }
             }
@@ -1493,20 +1496,27 @@ impl PySparkSession {
         if checks.non_bool_nullable {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
         }
-        // Then, as PySpark makes the converters of the fields of the schema: those of a
-        // user-defined type hold the type object of the schema, which serializes each value.
-        let objects = match schema {
-            Some(schema)
-                if fields
-                    .iter()
-                    .any(|field| crate::types::has_udt(&field.data_type)) =>
-            {
+        // Then, as PySpark makes the converters of the fields of the schema, which hold its type
+        // objects: those of the schema that was given, or those of the user-defined types of the
+        // inferred schema, with the objects of the `sqlType()` of each.
+        let objects = match (schema, inferred) {
+            (Some(schema), _) if atomic => {
+                let field = infer::TypeObjects::of(schema, &fields[0].data_type)?;
+                Some(infer::TypeObjects::of_fields(vec![field]))
+            }
+            (Some(schema), _) => {
                 let struct_type = DataType::Struct {
                     fields: fields.clone(),
                 };
-                Some(infer::UdtObjects::of(schema, &struct_type)?)
+                Some(infer::TypeObjects::of(schema, &struct_type)?)
             }
-            _ => None,
+            (None, Some(inferred)) => {
+                let struct_type = DataType::Struct {
+                    fields: fields.clone(),
+                };
+                Some(inferred.with_sql_types(&struct_type)?)
+            }
+            (None, None) => None,
         };
         // The values of each row, whose vector its first value allocates, within the steps of the
         // conversion.
@@ -1518,8 +1528,15 @@ impl PySparkSession {
             for (i, field) in fields.iter().enumerate() {
                 let field_objects = objects.as_ref().and_then(|objects| objects.field(i));
                 for (index, row) in parts.iter().enumerate() {
+                    // A row of `tuple(item)` may have fewer values than the fields, as PySpark's
+                    // `row[i]` finds (`infer::row_values`).
+                    let Some(value) = row.get(i) else {
+                        return Err(pyo3::exceptions::PyIndexError::new_err(
+                            "tuple index out of range",
+                        ));
+                    };
                     let value = infer::convert(
-                        &row[i],
+                        value,
                         &field.data_type,
                         field_objects,
                         field.nullable,
@@ -2788,7 +2805,9 @@ impl PySparkSession {
             },
             _ => LocalChecks::default(),
         };
-        self.create_from_local(py, data, spec, checks, options, struct_schema)
+        // The type object of the schema, a struct or an atomic type, rather than a DDL string.
+        let type_schema = schema.filter(|s| s.is_instance_of::<crate::types::PyDataType>());
+        self.create_from_local(py, data, spec, checks, options, type_schema)
     }
 
     /// Get the catalog API (`spark.catalog`): the same object at each access, as PySpark

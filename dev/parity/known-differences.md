@@ -439,9 +439,7 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   - a class of types of two branches of their hierarchy (`class X(StringType, IntegerType)`)
     raises CPython's `multiple bases have instance lay-out conflict`;
   - `createDataFrame` of data sends the JSON of the core types of its schema, where PySpark sends
-    the `json()` of the object, which the server may fail to parse, and its conversion of local
-    rows names the class's type in its errors and does not call the `toInternal` of a subclass
-    of a spatial type;
+    the `json()` of the object, which the server may fail to parse;
   - the `__repr__` of a cast to a type of a subclass shows the `simpleString` of the class's core
     type.
 - **Metadata of the fields of a type** (tracked; the core holds JSON values). A field compares its
