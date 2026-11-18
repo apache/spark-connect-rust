@@ -1634,8 +1634,9 @@ def test_python_thread_runs_before_operations_on_large_messages_finish(operation
 
     action, failure, in_progress = _large_operation(operation)
     # The other thread takes the GIL at the checkpoints that the operating system schedules it
-    # at: an operation in which it read none is run again, a few times. With no checkpoint, it
-    # reads none.
+    # at: an operation in which it read none is run again, a few times, and so is one whose
+    # signal came only after it ended, as a read near its end leaves no checkpoint after it.
+    # With no checkpoint, it reads none.
     for _ in range(5):
         in_progress.arm()
         probe = LocalDataConversionProbe(in_progress, in_progress, cancel=cancel)
@@ -1650,7 +1651,9 @@ def test_python_thread_runs_before_operations_on_large_messages_finish(operation
             except KeyboardInterrupt:
                 interrupted = True
         assert not probe.failures, probe.failures
-        if "progress" in probe.observed:
+        if "progress" in probe.observed and not (
+            cancel and "late_or_unproven_signal" in probe.observed
+        ):
             break
     progress = probe.observed.get("progress")
     assert progress is not None, probe.observed
