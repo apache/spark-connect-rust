@@ -2816,12 +2816,15 @@ impl PySparkSession {
     /// Copy a local file to the Spark-managed filesystem (`copyFromLocalToFs`), with the errors
     /// of PySpark Connect's: `NO_SCHEMA_AND_DRIVER_DEFAULT_SCHEME` for a destination of a scheme,
     /// an `AssertionError` for a local path that is not a file, and for a destination that is
-    /// not an absolute path.
+    /// not an absolute path. The local path is what PySpark's `Path(local_path).absolute()` takes,
+    /// a str or an `os.PathLike` such as a `pathlib.Path`, of its errors otherwise, and the file
+    /// of the str of that absolute path is uploaded, as PySpark's `LocalFile` reads it. The
+    /// destination is a str.
     #[pyo3(name = "copyFromLocalToFs")]
     fn copy_from_local_to_fs(
         &self,
         py: Python<'_>,
-        local_path: &str,
+        local_path: &Bound<'_, PyAny>,
         dest_path: &str,
     ) -> PyResult<()> {
         let scheme: String = py
@@ -2837,13 +2840,12 @@ impl PySparkSession {
                 &[("arg_name", "dest_path")],
             ));
         }
-        let is_file: bool = py
+        let absolute = py
             .import("pathlib")?
             .getattr("Path")?
             .call1((local_path,))?
-            .call_method0("absolute")?
-            .call_method0("is_file")?
-            .extract()?;
+            .call_method0("absolute")?;
+        let is_file: bool = absolute.call_method0("is_file")?.extract()?;
         if !is_file {
             return Err(pyo3::exceptions::PyAssertionError::new_err(
                 "local path must be a file path.",
@@ -2860,9 +2862,10 @@ impl PySparkSession {
                 "destination FS path must be an absolute path.",
             ));
         }
+        let local_path: String = absolute.str()?.extract()?;
         interruptible(py, &self.session, || {
             self.session
-                .copy_from_local_to_fs(local_path, dest_path)
+                .copy_from_local_to_fs(&local_path, dest_path)
                 .map_err(Box::new)
         })
     }

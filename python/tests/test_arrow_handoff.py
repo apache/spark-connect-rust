@@ -1062,6 +1062,36 @@ def test_artifact_flags_are_any_objects_as_pyspark(protocol, tmp_path):
         assert state["uploads"] == uploads
 
 
+def test_copy_from_local_to_fs_takes_a_path_like_local_path_as_pyspark(
+        protocol, tmp_path, monkeypatch):
+    # As PySpark's `_parse_forward_to_fs_artifacts`, of `Path(local_path).absolute()`: the local
+    # path of SparkSession.copyFromLocalToFs and of SparkConnectClient.copy_from_local_to_fs is a
+    # str or an os.PathLike, such as a pathlib.Path, also a relative one, whose file is uploaded
+    # under the destination, and another value raises the TypeError of Path. A destination that
+    # is not a str stays a TypeError, as the client of PySpark raises one.
+    local = tmp_path / "local.txt"
+    local.write_bytes(b"local artifact")
+    monkeypatch.chdir(tmp_path)
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        spark.copyFromLocalToFs(local, "/wire/a.txt")
+        spark.client.copy_from_local_to_fs(local, "/wire/b.txt")
+        spark.copyFromLocalToFs(Path("local.txt"), "/wire/c.txt")
+        assert state["cache"] == {
+            f"forward_to_fs/wire/{name}.txt": b"local artifact" for name in "abc"}
+        uploads = state["uploads"]
+        for value in (5, str(local).encode()):
+            with pytest.raises(TypeError) as expected:
+                Path(value)
+            with pytest.raises(TypeError) as error:
+                spark.copyFromLocalToFs(value, "/wire/d.txt")
+            assert str(error.value) == str(expected.value)
+        with pytest.raises(AssertionError, match="local path must be a file path."):
+            spark.copyFromLocalToFs(tmp_path / "missing.txt", "/wire/d.txt")
+        with pytest.raises(TypeError):
+            spark.client.copy_from_local_to_fs(local, Path("/wire/d.txt"))
+        assert state["uploads"] == uploads
+
+
 @pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
 @pytest.mark.parametrize("explicit", [False, True], ids=["inferred", "explicit"])
 def test_arrow_input_schema_handoff(protocol, cached, explicit):
