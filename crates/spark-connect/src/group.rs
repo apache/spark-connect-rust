@@ -159,6 +159,42 @@ impl GroupedData {
         &self.grouping_sets
     }
 
+    /// The objects of the picklers of the UDFs of the grouping of these grouped data, of their
+    /// grouping columns, pivot column and values and grouping sets, that they keep alive with the
+    /// clones of them of which the caller answers, `holders` holders of each expression with
+    /// these, as [`DataFrame::exclusive_pickler_objects`] gives those of the plan of a DataFrame.
+    /// A Python wrapper reports them to Python's garbage collector, as PySpark's grouped data, of
+    /// Python objects, holds its grouping columns; it answers for the clones that the cogroups
+    /// of it hold, which keep it. The plan of their DataFrame is not visited: the wrapper of the
+    /// DataFrame, which the wrapper of the grouped data keeps, reports what it holds. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn exclusive_pickler_objects(
+        &self,
+        holders: usize,
+    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        let expressions = self
+            .group_cols
+            .iter()
+            .map(Column::expression)
+            .chain(&self.pivot_col)
+            .chain(&self.pivot_values)
+            .chain(self.grouping_sets.iter().flatten().map(Column::expression));
+        crate::udf::exclusive_pickler_objects_held_by(expressions, holders)
+    }
+
+    /// Drop the plan of the DataFrame and the grouping of these grouped data, as
+    /// [`DataFrame::clear_plan`] drops the plan of a DataFrame: the garbage collector of a Python
+    /// wrapper breaks a reference cycle through the wrapper this way. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.dataframe.clear_plan();
+        self.group_cols = Vec::new();
+        self.pivot_col = None;
+        self.pivot_values = Vec::new();
+        self.grouping_sets = Vec::new();
+    }
+
     /// A GroupedData of its parts, as a pickled GroupedData gives them back: the DataFrame, the
     /// grouping columns, the type of the grouping, the pivot column and values, and the grouping
     /// sets, as they are. Not a stable API.
@@ -724,6 +760,20 @@ impl StatFunctions {
         self.dataframe.spark_session()
     }
 
+    /// Whether these statistics are of the plan of `dataframe`, which they share (see
+    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
+        self.dataframe.shares_plan_with(dataframe)
+    }
+
+    /// Drop the plan of the DataFrame of these statistics, as [`DataFrame::clear_plan`] does. Not
+    /// a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.dataframe.clear_plan();
+    }
+
     /// Create a new StatFunctions.
     pub(crate) fn new(dataframe: DataFrame) -> Self {
         StatFunctions { dataframe }
@@ -947,6 +997,14 @@ impl CoGroupedData {
     /// The session of the cogrouped DataFrames.
     pub fn spark_session(&self) -> crate::session::SparkSession {
         self.left.spark_session()
+    }
+
+    /// Drop the plans and the groupings of both grouped data, as [`GroupedData::clear_plan`]
+    /// does. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.left.clear_plan();
+        self.right.clear_plan();
     }
 
     /// Apply a pandas UDF to each cogroup (`cogroup(...).applyInPandas`).

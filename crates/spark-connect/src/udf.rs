@@ -210,6 +210,23 @@ pub(crate) fn exclusive_pickler_objects<'a>(
     objects
 }
 
+/// The objects of the picklers below `expressions`, as [`exclusive_pickler_objects`] gives those
+/// of an expression that it alone holds, of the expressions whose nodes `holders` hold: the
+/// holder of the expressions and the clones of it that its caller answers for, as the clones of
+/// grouped data that its cogroups hold (see `GroupedData::exclusive_pickler_objects`).
+pub(crate) fn exclusive_pickler_objects_held_by<'a>(
+    expressions: impl IntoIterator<Item = &'a Expression>,
+    holders: usize,
+) -> Vec<&'a (dyn std::any::Any + Send + Sync)> {
+    let mut pending = Vec::new();
+    for expression in expressions {
+        if expression.is_held_by(holders) {
+            expression.node().push_pickler_holders(&mut pending);
+        }
+    }
+    exclusive_pickler_objects(pending)
+}
+
 /// The picklers of `holders`, of their UDFs and UDTFs, below them and in the plans of their
 /// subqueries, each once, in the order of the build of a request: a plan that several plans share,
 /// and an expression that several expressions share, are visited once. Computed without
@@ -738,6 +755,91 @@ mod tests {
             tags(exclusive_pickler_objects(holders)),
             ["argument", "handler"]
         );
+    }
+
+    #[test]
+    fn test_the_pickler_objects_of_the_objects_of_a_dataframe_are_those_that_they_alone_hold() {
+        use crate::column::Column;
+        let spark = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .unwrap();
+        let column = |tag| Column::new(udf_expression(tag));
+        // A DataFrame, of the clones of it that its caller answers for: none other may hold its
+        // plan.
+        let df = spark.range(3).unwrap().select(vec![column("plan")]);
+        assert_eq!(tags(df.exclusive_pickler_objects(1)), ["plan"]);
+        let grouped = df.group_by(vec![column("grouping")]);
+        assert!(grouped.dataframe().shares_plan_with(&df));
+        assert!(df.exclusive_pickler_objects(1).is_empty());
+        assert_eq!(tags(df.exclusive_pickler_objects(2)), ["plan"]);
+        let derived = df.filter(crate::column::lit(1));
+        assert!(df.exclusive_pickler_objects(2).is_empty());
+        drop(derived);
+        // Grouped data, of their grouping and not of the plan, which the DataFrame reports; the
+        // clones of their cogroups are holders of the grouping too.
+        assert_eq!(tags(grouped.exclusive_pickler_objects(1)), ["grouping"]);
+        let mut cogrouped = grouped.cogroup(&grouped);
+        assert!(grouped.exclusive_pickler_objects(1).is_empty());
+        assert!(grouped.exclusive_pickler_objects(2).is_empty());
+        assert_eq!(tags(grouped.exclusive_pickler_objects(3)), ["grouping"]);
+        assert_eq!(tags(df.exclusive_pickler_objects(4)), ["plan"]);
+        cogrouped.clear_plan();
+        assert_eq!(tags(grouped.exclusive_pickler_objects(1)), ["grouping"]);
+        let mut cleared = grouped.clone();
+        cleared.clear_plan();
+        assert!(cleared.exclusive_pickler_objects(1).is_empty());
+        assert!(!cleared.dataframe().shares_plan_with(&df));
+        drop((grouped, cleared, cogrouped));
+        // The writers share the plan, of which the V2 writer reports its partitioning only.
+        let writer = df.write();
+        assert!(writer.shares_plan_with(&df));
+        let mut v2 = df.write_to("t").partition_by(vec![column("partition")]);
+        assert!(v2.shares_plan_with(&df));
+        assert_eq!(tags(v2.exclusive_pickler_objects()), ["partition"]);
+        v2.clear_plan();
+        assert!(!v2.shares_plan_with(&df) && v2.exclusive_pickler_objects().is_empty());
+        let mut stream = df.write_stream();
+        assert!(stream.shares_plan_with(&df));
+        stream.clear_plan();
+        assert!(!stream.shares_plan_with(&df));
+        let mut stat = df.stat();
+        assert!(stat.shares_plan_with(&df));
+        stat.clear_plan();
+        assert!(!stat.shares_plan_with(&df));
+        drop(writer);
+        // A table argument and a merge builder hold the plan, which they report once the
+        // DataFrame is gone, and their expressions.
+        let table = crate::table_arg::TableArg::new(df.clone())
+            .partition_by(vec![column("table")])
+            .unwrap();
+        assert_eq!(tags(table.exclusive_pickler_objects()), ["table"]);
+        let mut merge = df
+            .merge_into("t", column("condition"))
+            .when_matched(Some(column("matched")))
+            .update(vec![("v", column("assignment"))]);
+        assert!(merge.shares_plan_with(&df));
+        assert_eq!(
+            tags(merge.exclusive_pickler_objects()),
+            ["assignment", "condition", "matched"]
+        );
+        drop(df);
+        assert_eq!(tags(table.exclusive_pickler_objects()), ["table"]);
+        drop(table);
+        assert_eq!(
+            tags(merge.exclusive_pickler_objects()),
+            ["assignment", "condition", "matched", "plan"]
+        );
+        merge.clear_plan();
+        assert!(merge.exclusive_pickler_objects().is_empty());
+        // A window specification, of its partitioning and its ordering.
+        let window = crate::window::WindowSpec::new()
+            .partition_by(vec![column("by")])
+            .order_by(vec![column("order").desc()]);
+        assert_eq!(tags(window.exclusive_pickler_objects()), ["by", "order"]);
+        let shared = window.clone();
+        assert!(window.exclusive_pickler_objects().is_empty());
+        drop(shared);
     }
 
     /// The tag of the object of the pickler of the UDF `expression`.

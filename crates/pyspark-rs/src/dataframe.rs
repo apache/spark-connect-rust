@@ -35,6 +35,10 @@ pub struct PyDataFrame {
     /// memory is zeroed, so this flag is false and `__traverse__` reads nothing else (see
     /// [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
+    /// The holders of the plan of this DataFrame that `__traverse__` answers for: this DataFrame,
+    /// and the grouped data, the writers and the other objects of it that keep it and a clone of
+    /// its plan, each with a share (see [`crate::gc::Holders`]).
+    plan_holders: crate::gc::Holders,
     /// The answers that PySpark keeps for each DataFrame once it has them, `isStreaming` (a
     /// `cached_property`), `semanticHash`, `isEmpty` and `inputFiles` (`functools.cache`): later
     /// calls do not ask again, also after the session stopped. (`isLocal` is cached in the core.)
@@ -217,12 +221,27 @@ impl PyDataFrame {
             dataframe,
             support_repr_html: std::sync::atomic::AtomicBool::new(false),
             gc_ready: crate::gc::GcReady::new(),
+            plan_holders: crate::gc::Holders::new(),
             is_streaming: std::sync::OnceLock::new(),
             semantic_hash: std::sync::OnceLock::new(),
             is_empty: std::sync::OnceLock::new(),
             input_files: std::sync::OnceLock::new(),
             schema_object: None,
         }
+    }
+
+    /// A share of the holders of the plan of the DataFrame `frame`, for an object that keeps
+    /// `frame` and a clone of its plan, of which `shares_plan` tells whether it is a clone of that
+    /// plan: else, or when `frame` is borrowed mutably, a share that is not counted, so that
+    /// nothing of the plan is reported (see [`crate::gc::Holders`]).
+    pub(crate) fn plan_share(
+        frame: &Py<PyDataFrame>,
+        shares_plan: impl FnOnce(&DataFrame) -> bool,
+    ) -> crate::gc::Share {
+        Python::attach(|py| match frame.try_borrow(py) {
+            Ok(frame) if shares_plan(&frame.dataframe) => frame.plan_holders.share(),
+            _ => crate::gc::Share::none(),
+        })
     }
 
     /// Whether this DataFrame is streaming, of the answer that `isStreaming` keeps, asked once,
@@ -810,18 +829,21 @@ impl PyDataFrame {
     /// keeps `model.transform(dataset)`, whose plan keeps the model, is released then. So are the
     /// functions of its UDFs, which a request pickles when it builds the plan, as the plan of
     /// PySpark keeps them: a function may keep the DataFrame, as a bound method of an object that
-    /// keeps it does.
+    /// keeps it does. The objects of the plan that its grouped data, its writers and its other
+    /// objects that keep it share are reported here too, as these report this DataFrame, as
+    /// PySpark's report the DataFrame or its plan (see [`crate::gc::Holders`]).
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        for owner in self.dataframe.exclusive_relation_owners() {
+        let holders = self.plan_holders.count();
+        for owner in self.dataframe.exclusive_relation_owners(holders) {
             if let Some(object) = owner.downcast_ref::<Py<PyAny>>() {
                 visit.call(object)?;
             }
         }
         crate::udf_command::visit_pickler_objects(
-            self.dataframe.exclusive_pickler_objects(),
+            self.dataframe.exclusive_pickler_objects(holders),
             &visit,
         )?;
         if let Some(schema) = &self.schema_object {
@@ -831,9 +853,11 @@ impl PyDataFrame {
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the DataFrame drops
-    /// its plan, and so the Python objects that `__traverse__` reported.
+    /// its plan, and so the Python objects that `__traverse__` reported. The shares of the plan
+    /// that its objects hold are not counted any more, as their clones are of the dropped plan.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
+            self.plan_holders = crate::gc::Holders::new();
             self.dataframe.clear_plan();
             self.schema_object = None;
         }
@@ -3487,10 +3511,15 @@ impl PyDataFrame {
     #[pyo3(name = "writeTo")]
     fn write_to(slf: &Bound<'_, Self>, table: &Bound<'_, PyAny>) -> PyDataFrameWriterV2 {
         let (name, unsent_table) = written_table(table);
+        let frame = slf.clone().unbind();
         PyDataFrameWriterV2 {
-            inner: std::sync::Arc::new(WriterState::new(slf.borrow().dataframe.write_to(&name))),
+            inner: std::sync::Arc::new(WriterState::of_frame(
+                slf.borrow().dataframe.write_to(&name),
+                &frame,
+                spark_connect::readwriter::DataFrameWriterV2::shares_plan_with,
+            )),
             unsent_table,
-            frame: slf.clone().unbind(),
+            frame,
             unsent_provider: std::sync::Arc::new(std::sync::Mutex::new(None)),
             unsent_clustering: std::sync::Arc::new(std::sync::Mutex::new(None)),
             unsent_partition: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -3512,30 +3541,34 @@ impl PyDataFrame {
     /// `df`, as PySpark's.
     #[getter]
     fn na(slf: &Bound<'_, Self>) -> PyDataFrameNaFunctions {
-        PyDataFrameNaFunctions {
-            df: slf.borrow().dataframe.clone(),
-            frame: slf.clone().unbind(),
-        }
+        PyDataFrameNaFunctions::new(slf.borrow().dataframe.clone(), slf.clone().unbind())
     }
 
     /// Merge-into (`df.mergeInto("table", cond)`), returning a V2 merge builder, of the table as
     /// [`written_table`] takes it, and of the condition as PySpark's builder keeps it, which the
-    /// merge builds ([`merge_condition`]).
+    /// merge builds ([`merge_condition`]). The builder keeps this DataFrame, as PySpark's keeps it
+    /// in the callback of its execution.
     #[pyo3(name = "mergeInto")]
     fn merge_into(
-        &self,
+        slf: &Bound<'_, Self>,
         table: &Bound<'_, PyAny>,
         condition: &Bound<'_, PyAny>,
     ) -> PyResult<PyMergeIntoWriter> {
         let (name, unsent_table) = written_table(table);
+        let frame = slf.clone().unbind();
         Ok(PyMergeIntoWriter {
-            inner: std::sync::Arc::new(WriterState::new(
-                self.dataframe
+            inner: std::sync::Arc::new(WriterState::of_frame(
+                slf.borrow()
+                    .dataframe
                     .merge_into(&name, merge_condition(condition)?),
+                &frame,
+                spark_connect::MergeIntoWriter::shares_plan_with,
             )),
             schema_evolution: std::sync::atomic::AtomicBool::new(false),
 
             unsent_table,
+            frame,
+            gc_ready: crate::gc::GcReady::new(),
         })
     }
 
@@ -3886,9 +3919,28 @@ impl PyDataFrame {
     dict
 )]
 pub struct PyDataFrameNaFunctions {
+    /// The share of the holders of the plan of `frame`, of which `df` is a clone, dropped before
+    /// it (see [`crate::gc::Holders`]).
+    frame_share: crate::gc::Share,
     df: spark_connect::dataframe::DataFrame,
     /// The DataFrame of `df.na`, as PySpark's `DataFrameNaFunctions.df`.
     frame: Py<PyDataFrame>,
+    /// Set once the value is written, as `__traverse__` reads `frame`, which is not valid while
+    /// the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
+}
+
+impl PyDataFrameNaFunctions {
+    fn new(df: spark_connect::dataframe::DataFrame, frame: Py<PyDataFrame>) -> Self {
+        let frame_share =
+            PyDataFrame::plan_share(&frame, |dataframe| df.shares_plan_with(dataframe));
+        PyDataFrameNaFunctions {
+            frame_share,
+            df,
+            frame,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
 }
 
 #[pymethods]
@@ -3900,13 +3952,29 @@ impl PyDataFrameNaFunctions {
         let this = slf.borrow();
         let copy = Py::new(
             py,
-            PyDataFrameNaFunctions {
-                df: this.df.clone(),
-                frame: this.frame.clone_ref(py),
-            },
+            PyDataFrameNaFunctions::new(this.df.clone(), this.frame.clone_ref(py)),
         )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
         Ok(copy)
+    }
+
+    /// As PySpark's null functions, a Python object that holds its DataFrame, which Python's
+    /// garbage collector sees: the DataFrame is reported, which reports the objects of the plan
+    /// that the two share (see [`crate::gc::Holders`]).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.frame)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the null functions
+    /// drop their clone of the plan, after their share of it.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.frame_share = crate::gc::Share::none();
+            self.df.clear_plan();
+        }
     }
 
     /// The reduce of the null functions, as PySpark's: `na` of their DataFrame, which unpickles
@@ -4226,6 +4294,12 @@ pub struct PyMergeIntoWriter {
     /// The table of `mergeInto` that its string field does not take, which Python's garbage
     /// collector sees ([`written_table`]).
     unsent_table: Option<Py<PyAny>>,
+    /// The DataFrame of `mergeInto`, which PySpark's builder keeps in the callback of its
+    /// execution.
+    frame: Py<PyDataFrame>,
+    /// Set once the value is written, as `__traverse__` reads `inner` and `frame`, which are not
+    /// valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 /// Apply a clause action to the parent writer in place and return that same writer
@@ -4307,6 +4381,20 @@ impl ClauseCondition {
             ClauseCondition::Object(object) => ClauseCondition::Object(object.clone_ref(py)),
         }
     }
+
+    /// Report the condition to Python's garbage collector, as PySpark's clause holds it: an
+    /// object as it is, and the functions of the UDFs that a Column alone keeps alive, as the
+    /// Column reports them.
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        match self {
+            ClauseCondition::None => Ok(()),
+            ClauseCondition::Column(column) => crate::udf_command::visit_pickler_objects(
+                column.expression().exclusive_pickler_objects(),
+                visit,
+            ),
+            ClauseCondition::Object(object) => visit.call(object),
+        }
+    }
 }
 
 /// The condition and the assignments of a merge clause, in the order of the assignments.
@@ -4380,6 +4468,8 @@ impl PyMergeIntoWriter {
                 ),
 
                 unsent_table: this.unsent_table.as_ref().map(|table| table.clone_ref(py)),
+                frame: this.frame.clone_ref(py),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
@@ -4415,10 +4505,7 @@ impl PyMergeIntoWriter {
     /// it ([`merge_clause`]).
     #[pyo3(name = "whenMatched", signature = (condition=None))]
     fn when_matched(slf: &Bound<'_, Self>, condition: Option<&Bound<'_, PyAny>>) -> PyWhenMatched {
-        PyWhenMatched {
-            writer: slf.clone().unbind(),
-            condition: ClauseCondition::of(condition),
-        }
+        PyWhenMatched::new(slf.clone().unbind(), ClauseCondition::of(condition))
     }
 
     #[pyo3(name = "whenNotMatched", signature = (condition=None))]
@@ -4426,10 +4513,7 @@ impl PyMergeIntoWriter {
         slf: &Bound<'_, Self>,
         condition: Option<&Bound<'_, PyAny>>,
     ) -> PyWhenNotMatched {
-        PyWhenNotMatched {
-            writer: slf.clone().unbind(),
-            condition: ClauseCondition::of(condition),
-        }
+        PyWhenNotMatched::new(slf.clone().unbind(), ClauseCondition::of(condition))
     }
 
     #[pyo3(name = "whenNotMatchedBySource", signature = (condition=None))]
@@ -4437,10 +4521,7 @@ impl PyMergeIntoWriter {
         slf: &Bound<'_, Self>,
         condition: Option<&Bound<'_, PyAny>>,
     ) -> PyWhenNotMatchedBySource {
-        PyWhenNotMatchedBySource {
-            writer: slf.clone().unbind(),
-            condition: ClauseCondition::of(condition),
-        }
+        PyWhenNotMatchedBySource::new(slf.clone().unbind(), ClauseCondition::of(condition))
     }
 
     #[pyo3(name = "withSchemaEvolution")]
@@ -4466,18 +4547,42 @@ impl PyMergeIntoWriter {
         })
     }
 
-    /// The table that the merge keeps, a Python object, which Python's garbage collector sees.
-    /// Only an `Option<Py<_>>` field is read, which is `None` while the object is created, so no
-    /// [`crate::gc::GcReady`] is needed.
+    /// The DataFrame and the table that the merge keeps, Python objects, which Python's garbage
+    /// collector sees, and the functions of the UDFs of its condition and its clauses that it
+    /// alone keeps alive, as PySpark's merge builder, a Python object, holds the DataFrame and the
+    /// Columns: so a reference cycle through them is collected, as PySpark collects it. The
+    /// DataFrame reports the objects of the plan that the two share (see [`crate::gc::Holders`]).
+    /// A state that a copy shares, or that another thread holds, is not visited, so that nothing
+    /// is counted twice.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.frame)?;
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
+        }
+        if std::sync::Arc::strong_count(&self.inner) == 1 {
+            if let Some(writer) = self.inner.try_lock() {
+                crate::udf_command::visit_pickler_objects(
+                    writer.exclusive_pickler_objects(),
+                    &visit,
+                )?;
+            }
         }
         Ok(())
     }
 
+    /// Drop this builder's references to its table and to its state, of which it keeps a cleared
+    /// copy; a copy of the builder keeps the state.
     fn __clear__(&mut self) {
-        self.unsent_table = None;
+        if self.gc_ready.get() {
+            self.unsent_table = None;
+            self.inner = std::sync::Arc::new(
+                self.inner
+                    .cleared(spark_connect::MergeIntoWriter::clear_plan),
+            );
+        }
     }
 }
 
@@ -4492,6 +4597,19 @@ impl PyMergeIntoWriter {
 pub struct PyWhenMatched {
     writer: Py<PyMergeIntoWriter>,
     condition: ClauseCondition,
+    /// Set once the value is written, as `__traverse__` reads `writer` and `condition`, which are
+    /// not valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
+}
+
+impl PyWhenMatched {
+    fn new(writer: Py<PyMergeIntoWriter>, condition: ClauseCondition) -> Self {
+        PyWhenMatched {
+            writer,
+            condition,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
 }
 
 #[pymethods]
@@ -4509,13 +4627,28 @@ impl PyWhenMatched {
         let this = slf.borrow();
         let copy = Py::new(
             py,
-            PyWhenMatched {
-                writer: this.writer.clone_ref(py),
-                condition: this.condition.clone_ref(py),
-            },
+            PyWhenMatched::new(this.writer.clone_ref(py), this.condition.clone_ref(py)),
         )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
         Ok(copy)
+    }
+
+    /// As PySpark's clause, a Python object that holds its merge builder and its condition,
+    /// which Python's garbage collector sees (see [`ClauseCondition::visit`]).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.writer)?;
+        self.condition.visit(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the clause drops its
+    /// condition.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.condition = ClauseCondition::None;
+        }
     }
 
     /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
@@ -4558,6 +4691,19 @@ impl PyWhenMatched {
 pub struct PyWhenNotMatched {
     writer: Py<PyMergeIntoWriter>,
     condition: ClauseCondition,
+    /// Set once the value is written, as `__traverse__` reads `writer` and `condition`, which are
+    /// not valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
+}
+
+impl PyWhenNotMatched {
+    fn new(writer: Py<PyMergeIntoWriter>, condition: ClauseCondition) -> Self {
+        PyWhenNotMatched {
+            writer,
+            condition,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
 }
 
 #[pymethods]
@@ -4575,13 +4721,28 @@ impl PyWhenNotMatched {
         let this = slf.borrow();
         let copy = Py::new(
             py,
-            PyWhenNotMatched {
-                writer: this.writer.clone_ref(py),
-                condition: this.condition.clone_ref(py),
-            },
+            PyWhenNotMatched::new(this.writer.clone_ref(py), this.condition.clone_ref(py)),
         )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
         Ok(copy)
+    }
+
+    /// As PySpark's clause, a Python object that holds its merge builder and its condition,
+    /// which Python's garbage collector sees (see [`ClauseCondition::visit`]).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.writer)?;
+        self.condition.visit(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the clause drops its
+    /// condition.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.condition = ClauseCondition::None;
+        }
     }
 
     /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
@@ -4619,6 +4780,19 @@ impl PyWhenNotMatched {
 pub struct PyWhenNotMatchedBySource {
     writer: Py<PyMergeIntoWriter>,
     condition: ClauseCondition,
+    /// Set once the value is written, as `__traverse__` reads `writer` and `condition`, which are
+    /// not valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
+}
+
+impl PyWhenNotMatchedBySource {
+    fn new(writer: Py<PyMergeIntoWriter>, condition: ClauseCondition) -> Self {
+        PyWhenNotMatchedBySource {
+            writer,
+            condition,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
 }
 
 #[pymethods]
@@ -4636,13 +4810,28 @@ impl PyWhenNotMatchedBySource {
         let this = slf.borrow();
         let copy = Py::new(
             py,
-            PyWhenNotMatchedBySource {
-                writer: this.writer.clone_ref(py),
-                condition: this.condition.clone_ref(py),
-            },
+            PyWhenNotMatchedBySource::new(this.writer.clone_ref(py), this.condition.clone_ref(py)),
         )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
         Ok(copy)
+    }
+
+    /// As PySpark's clause, a Python object that holds its merge builder and its condition,
+    /// which Python's garbage collector sees (see [`ClauseCondition::visit`]).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.writer)?;
+        self.condition.visit(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the clause drops its
+    /// condition.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.condition = ClauseCondition::None;
+        }
     }
 
     /// A merge action does not pickle, as PySpark's, whose merge builder holds a client with a
@@ -4738,7 +4927,11 @@ impl PyDataFrameWriter {
         frame: Py<PyDataFrame>,
     ) -> Self {
         PyDataFrameWriter {
-            inner: std::sync::Arc::new(WriterState::new(writer)),
+            inner: std::sync::Arc::new(WriterState::of_frame(
+                writer,
+                &frame,
+                spark_connect::readwriter::DataFrameWriter::shares_plan_with,
+            )),
             refused_bucket_count: std::sync::Arc::new(std::sync::Mutex::new(None)),
             refused_bucket_cols: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             unsent: std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default())),
@@ -5646,13 +5839,16 @@ impl PyDataFrameWriter {
     }
 
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        // The kept arguments, which Python's garbage collector sees, as `exclusive_relation_owners`
-        // reports a DataFrame's owners: only when this writer holds them alone, so that a copy that
-        // shares them does not count one reference twice. A lock held elsewhere is skipped. Nothing
-        // of a writer object that is being created.
+        // The DataFrame, which reports the objects of the plan that the writer shares with it, as
+        // PySpark's writer holds the plan (see `crate::gc::Holders`). The kept arguments, which
+        // Python's garbage collector sees, as `exclusive_relation_owners` reports a DataFrame's
+        // owners: only when this writer holds them alone, so that a copy that shares them does not
+        // count one reference twice. A lock held elsewhere is skipped. Nothing of a writer object
+        // that is being created.
         if !self.gc_ready.get() {
             return Ok(());
         }
+        visit.call(&self.frame)?;
         if std::sync::Arc::strong_count(&self.unsent) != 1 {
             return Ok(());
         }
@@ -5672,9 +5868,14 @@ impl PyDataFrameWriter {
         Ok(())
     }
 
-    /// Drop this writer's reference to the kept arguments; a copy's are kept.
+    /// Drop this writer's references to the kept arguments and to its state, of which it keeps a
+    /// cleared copy; a copy's are kept.
     fn __clear__(&mut self) {
         self.unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
+        self.inner = std::sync::Arc::new(
+            self.inner
+                .cleared(spark_connect::readwriter::DataFrameWriter::clear_plan),
+        );
     }
 }
 
@@ -5949,7 +6150,11 @@ impl PyDataFrameWriterV2 {
             writer = writer.cluster_by(cluster_cols);
         }
         let restored = PyDataFrameWriterV2 {
-            inner: std::sync::Arc::new(WriterState::new(writer)),
+            inner: std::sync::Arc::new(WriterState::of_frame(
+                writer,
+                &frame,
+                spark_connect::readwriter::DataFrameWriterV2::shares_plan_with,
+            )),
             unsent_table,
             unsent_provider: std::sync::Arc::new(std::sync::Mutex::new(kept_provider)),
             unsent_clustering: std::sync::Arc::new(std::sync::Mutex::new(kept_clustering)),
@@ -6170,11 +6375,15 @@ impl PyDataFrameWriterV2 {
         if !self.gc_ready.get() {
             return Ok(());
         }
+        // The DataFrame, which reports the objects of the plan that the writer shares with it, as
+        // PySpark's writer holds the plan (see `crate::gc::Holders`).
+        visit.call(&self.frame)?;
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
         }
-        // The kept arguments that a copy shares are reported by no owner, as the writer's are, and a
-        // lock held elsewhere is skipped.
+        // The kept arguments and the state that a copy shares are reported by no owner, as the
+        // writer's are, and a lock held elsewhere is skipped: of the state, the functions of the
+        // UDFs of the partitioning columns that it alone keeps alive.
         for kept in [&self.unsent_provider, &self.unsent_clustering] {
             if std::sync::Arc::strong_count(kept) != 1 {
                 continue;
@@ -6185,14 +6394,27 @@ impl PyDataFrameWriterV2 {
                 }
             }
         }
+        if std::sync::Arc::strong_count(&self.inner) == 1 {
+            if let Some(writer) = self.inner.try_lock() {
+                crate::udf_command::visit_pickler_objects(
+                    writer.exclusive_pickler_objects(),
+                    &visit,
+                )?;
+            }
+        }
         Ok(())
     }
 
-    /// Drop this writer's references to the kept arguments; a copy's are kept.
+    /// Drop this writer's references to the kept arguments and to its state, of which it keeps a
+    /// cleared copy; a copy's are kept.
     fn __clear__(&mut self) {
         self.unsent_table = None;
         self.unsent_provider = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.unsent_clustering = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.inner = std::sync::Arc::new(
+            self.inner
+                .cleared(spark_connect::readwriter::DataFrameWriterV2::clear_plan),
+        );
     }
 }
 
@@ -6201,17 +6423,54 @@ impl PyDataFrameWriterV2 {
 /// once; a method that releases the GIL for its request must not hold a Rust borrow of the
 /// object (that would make the calls of the other threads fail with "Already borrowed"). So
 /// the lock is held only to copy or replace the state, and a request runs on its own copy.
-pub(crate) struct WriterState<T>(std::sync::Mutex<T>);
+pub(crate) struct WriterState<T> {
+    /// The share of the holders of the plan of the DataFrame of the writers that hold this
+    /// state, which keep the DataFrame, of which the state holds a clone, dropped before it: the
+    /// builder steps keep the plan of the state (see [`crate::gc::Holders`]). It is only held.
+    _share: crate::gc::Share,
+    state: std::sync::Mutex<T>,
+}
 
 impl<T: Clone> WriterState<T> {
     pub(crate) fn new(state: T) -> Self {
-        WriterState(std::sync::Mutex::new(state))
+        WriterState {
+            _share: crate::gc::Share::none(),
+            state: std::sync::Mutex::new(state),
+        }
+    }
+
+    /// The state of a writer that keeps the DataFrame `frame`, of which `shares_plan` tells
+    /// whether the state holds a clone of the plan, with a share of the holders of the plan.
+    pub(crate) fn of_frame(
+        state: T,
+        frame: &Py<PyDataFrame>,
+        shares_plan: impl FnOnce(&T, &DataFrame) -> bool,
+    ) -> Self {
+        let share = PyDataFrame::plan_share(frame, |dataframe| shares_plan(&state, dataframe));
+        WriterState {
+            _share: share,
+            state: std::sync::Mutex::new(state),
+        }
+    }
+
+    /// A state of no share, of a copy of this one that `clear` cleared, for the `__clear__` of a
+    /// writer, whose copies keep this one.
+    pub(crate) fn cleared(&self, clear: impl FnOnce(&mut T)) -> Self {
+        let mut state = self.get();
+        clear(&mut state);
+        WriterState::new(state)
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, T> {
-        self.0
+        self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The state, unless another thread holds the lock, for a `__traverse__`, which must not
+    /// wait for it.
+    pub(crate) fn try_lock(&self) -> Option<std::sync::MutexGuard<'_, T>> {
+        self.state.try_lock().ok()
     }
 
     /// A copy of the state, to run a request or a builder step on.

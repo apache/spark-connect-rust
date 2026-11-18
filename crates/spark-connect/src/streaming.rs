@@ -414,6 +414,33 @@ impl DataStreamWriter {
         self.trigger.as_ref()
     }
 
+    /// The payload of the function of `foreach_batch`, if one is set. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_foreach_batch_payload(&self) -> Option<&PythonUDFPayload> {
+        self.foreach_batch_payload.as_ref()
+    }
+
+    /// The payload of the function of `foreach`, if one is set. Not a stable API.
+    #[doc(hidden)]
+    pub fn get_foreach_payload(&self) -> Option<&PythonUDFPayload> {
+        self.foreach_payload.as_ref()
+    }
+
+    /// Whether this writer streams the plan of `dataframe`, which it shares (see
+    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
+        Arc::ptr_eq(&self.plan, &dataframe.plan)
+    }
+
+    /// Drop the plan that this writer streams, as [`DataFrame::clear_plan`] drops the plan of a
+    /// DataFrame: the garbage collector of a Python wrapper breaks a reference cycle through the
+    /// wrapper this way. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.plan = crate::dataframe::cleared_plan();
+    }
+
     #[cfg(test)]
     pub(crate) fn plan(&self) -> &LogicalPlan {
         self.plan.as_ref()

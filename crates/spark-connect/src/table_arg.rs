@@ -66,6 +66,30 @@ impl TableArg {
         TableArg { subquery }
     }
 
+    /// The objects of the picklers of the UDFs and the UDTFs of the plan and of the expressions
+    /// of this table argument that it alone keeps alive, as
+    /// [`DataFrame::exclusive_pickler_objects`] gives those of a DataFrame, which a Python
+    /// wrapper reports to Python's garbage collector, as PySpark's table argument, of Python
+    /// objects, holds the plan of its DataFrame: the plan once the DataFrame is gone, and the
+    /// partitioning and the ordering. Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Subquery(
+            &self.subquery,
+        )])
+    }
+
+    /// Drop the plan and the expressions of this table argument, as [`DataFrame::clear_plan`]
+    /// drops the plan of a DataFrame: the garbage collector of a Python wrapper breaks a
+    /// reference cycle through the wrapper this way. Not a stable API.
+    #[doc(hidden)]
+    pub fn clear_plan(&mut self) {
+        self.subquery.plan = crate::dataframe::cleared_plan();
+        self.subquery.partition_spec = Vec::new();
+        self.subquery.order_spec = Vec::new();
+        self.subquery.in_subquery_values = Vec::new();
+    }
+
     /// Whether partitioning has been applied, by [`TableArg::partition_by`] or
     /// [`TableArg::with_single_partition`], as PySpark's `TableArg._is_partitioned`.
     pub fn is_partitioned(&self) -> bool {

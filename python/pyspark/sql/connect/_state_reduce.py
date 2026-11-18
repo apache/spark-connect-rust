@@ -403,6 +403,20 @@ def stream_reader_reduce(
     )
 
 
+def _worker_foreach_commands(writer: Any, commands: list[tuple[str, bytes, str]]) -> Any:
+    """PySpark's DataStreamWriter ``writer`` with the pickles of the functions of
+    ``foreachBatch`` and ``foreach``, each of its kind and of the version of Python that pickled
+    it, in the fields where PySpark's ``foreachBatch`` and ``foreach`` set them, as an unpickled
+    writer of PySpark keeps them: PySpark's writer keeps the pickle of a function, and not the
+    function."""
+    for kind, command, python_ver in commands:
+        proto = writer._write_proto
+        sink = proto.foreach_batch if kind == "foreachBatch" else proto.foreach_writer
+        sink.python_function.command = command
+        sink.python_function.python_ver = python_ver
+    return writer
+
+
 def _worker_stream_writer(
     frame: Any,
     source: Any,
@@ -412,10 +426,11 @@ def _worker_stream_writer(
     cluster_cols: list[str],
     query_name: Optional[str],
     trigger: Optional[tuple[str, Optional[str]]],
-    functions: list[tuple[str, Any]],
+    commands: list[tuple[str, bytes, str]],
 ) -> Any:
     """PySpark's DataStreamWriter of the DataFrame ``frame``, which replays the calls of the
-    drop-in's writer of that state, the functions that it applied last."""
+    drop-in's writer of that state, with the pickles of the functions of ``foreachBatch`` and
+    ``foreach`` that it keeps (``_worker_foreach_commands``)."""
     writer = frame.writeStream
     if source is not None:
         writer = writer.format(source)
@@ -431,11 +446,8 @@ def _worker_stream_writer(
     if trigger is not None:
         kind, value = trigger
         writer = writer.trigger(**{kind: True if value is None else value})
-    for kind, function in functions:
-        if kind == "foreachBatch":
-            writer = writer.foreachBatch(function)
-        else:
-            writer = writer.foreach(function)
+    if commands:
+        writer = _worker_foreach_commands(writer, commands)
     return writer
 
 
@@ -462,10 +474,11 @@ def stream_writer_reduce(
     cluster_cols: list[str],
     query_name: Optional[str],
     trigger: Optional[tuple[str, Optional[str]]],
-    functions: list[tuple[str, Any]],
+    commands: list[tuple[str, bytes, str]],
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The reduce of a DataStreamWriter of ``frame``, of the state that ``_of_state`` takes, which
-    holds the plan of ``frame``, as PySpark's writer holds the plan and not the DataFrame."""
+    holds the plan of ``frame``, as PySpark's writer holds the plan and not the DataFrame, and the
+    pickles of its functions, as PySpark's writer holds them and not the functions."""
     return _state_reduce(
         "DataStreamWriter",
         _worker_stream_writer,
@@ -478,7 +491,7 @@ def stream_writer_reduce(
             cluster_cols,
             query_name,
             trigger,
-            functions,
+            commands,
         ),
     )
 

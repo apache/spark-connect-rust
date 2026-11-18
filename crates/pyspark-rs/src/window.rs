@@ -241,14 +241,27 @@ impl PyFrameBound {
     weakref,
     dict
 )]
-#[derive(Clone)]
 pub struct PyWindowSpec {
     pub(crate) spec: WindowSpec,
+    /// Set once the value is written, as `__traverse__` reads `spec`, which is not valid while
+    /// the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyWindowSpec {
     pub fn new(spec: WindowSpec) -> Self {
-        PyWindowSpec { spec }
+        PyWindowSpec {
+            spec,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
+}
+
+impl Clone for PyWindowSpec {
+    /// A window specification of the same partitioning, ordering and frame, whose value is
+    /// written.
+    fn clone(&self) -> Self {
+        PyWindowSpec::new(self.spec.clone())
     }
 }
 
@@ -348,6 +361,25 @@ impl PyWindowSpec {
         let args = (partition, order, frame).into_pyobject(py)?;
         let reduce = PyTuple::new(py, [window_of, args.into_any()])?.into_any();
         crate::group::reduce_with_state(&reduce, slf.as_any())
+    }
+
+    /// As PySpark's window specification, a Python object that holds its partitioning and
+    /// ordering columns, which Python's garbage collector sees: the functions of the UDFs that the
+    /// specification alone keeps alive are reported, so that a reference cycle through them is
+    /// collected, as PySpark collects it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        crate::udf_command::visit_pickler_objects(self.spec.exclusive_pickler_objects(), &visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the specification
+    /// drops its columns, and so the objects that `__traverse__` reported.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.spec = WindowSpec::new();
+        }
     }
 }
 

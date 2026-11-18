@@ -99,17 +99,32 @@ pub(crate) fn reduce_with_state<'py>(
     dict
 )]
 pub struct PyGroupedData {
+    /// The share of the holders of the plan of `frame`, of which `grouped_data` holds a clone,
+    /// dropped before it (see [`crate::gc::Holders`]).
+    frame_share: crate::gc::Share,
+    /// The holders of the grouping of `grouped_data`: these grouped data and the cogroups of them,
+    /// which hold a clone of it, each with a share.
+    holders: crate::gc::Holders,
     pub(crate) grouped_data: RustGroupedData,
     /// The DataFrame that is grouped, as the Python object that `groupBy` was called on, as
     /// PySpark's `GroupedData._df` is.
     frame: Py<PyDataFrame>,
+    /// Set once the value is written, as `__traverse__` reads `frame` and `grouped_data`, which
+    /// are not valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyGroupedData {
     pub fn new(grouped_data: RustGroupedData, frame: Py<PyDataFrame>) -> Self {
+        let frame_share = PyDataFrame::plan_share(&frame, |dataframe| {
+            grouped_data.dataframe().shares_plan_with(dataframe)
+        });
         PyGroupedData {
+            frame_share,
+            holders: crate::gc::Holders::new(),
             grouped_data,
             frame,
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 }
@@ -238,13 +253,39 @@ impl PyGroupedData {
         let this = slf.borrow();
         let copy = Bound::new(
             py,
-            PyGroupedData {
-                grouped_data: this.grouped_data.clone(),
-                frame: this.frame.clone_ref(py),
-            },
+            PyGroupedData::new(this.grouped_data.clone(), this.frame.clone_ref(py)),
         )?;
         copy_instance_state(copy.as_any(), slf.as_any())?;
         Ok(copy)
+    }
+
+    /// As PySpark's grouped data, a Python object that holds its DataFrame and its grouping
+    /// columns, which Python's garbage collector sees: the DataFrame is reported, which reports
+    /// the objects of the plan that the two share, and so are the functions of the UDFs of the
+    /// grouping that these grouped data and their cogroups alone keep alive (see
+    /// [`crate::gc::Holders`]). So a reference cycle through these grouped data and the function
+    /// of a UDF, or the DataFrame, is collected, as PySpark collects it.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.frame)?;
+        crate::udf_command::visit_pickler_objects(
+            self.grouped_data
+                .exclusive_pickler_objects(self.holders.count()),
+            &visit,
+        )
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the grouped data
+    /// drop their clone of the plan and their grouping, and so the objects that `__traverse__`
+    /// reported, after their share of the plan.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.frame_share = crate::gc::Share::none();
+            self.holders = crate::gc::Holders::new();
+            self.grouped_data.clear_plan();
+        }
     }
 
     /// The reduce of grouped data, as PySpark's pickle of its state: its DataFrame, the
@@ -615,11 +656,11 @@ impl PyGroupedData {
         let this = slf.borrow();
         let that = other.borrow();
         check_same_session(py, &this.grouped_data, &that.grouped_data)?;
-        Ok(PyCoGroupedData {
-            inner: this.grouped_data.cogroup(&that.grouped_data),
-            left: slf.clone().unbind(),
-            right: other.clone().unbind(),
-        })
+        Ok(PyCoGroupedData::new(
+            py,
+            slf.clone().unbind(),
+            other.clone().unbind(),
+        ))
     }
 
     /// `GroupedData.applyInPandasWithState` (stateful streaming), as PySpark's: the output
@@ -898,10 +939,42 @@ fn twus_func<'py>(
     dict
 )]
 pub struct PyCoGroupedData {
+    /// The shares of the holders of what `inner` holds clones of, dropped before it: the
+    /// groupings of `left` and `right`, and the plans of their DataFrames, which they keep (see
+    /// [`crate::gc::Holders`]).
+    shares: [crate::gc::Share; 4],
     pub(crate) inner: RustCoGroupedData,
     /// The grouped data on the left and on the right, as the Python objects of `cogroup`.
     left: Py<PyGroupedData>,
     right: Py<PyGroupedData>,
+    /// Set once the value is written, as `__traverse__` reads `left` and `right`, which are not
+    /// valid while the object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
+}
+
+impl PyCoGroupedData {
+    /// The cogrouped ops of the grouped data `left` and `right`, of clones of them, with the
+    /// shares of what the clones hold.
+    fn new(py: Python<'_>, left: Py<PyGroupedData>, right: Py<PyGroupedData>) -> Self {
+        let (inner, shares) = {
+            let this = left.borrow(py);
+            let that = right.borrow(py);
+            let shares = [
+                this.holders.share(),
+                this.frame_share.again(),
+                that.holders.share(),
+                that.frame_share.again(),
+            ];
+            (this.grouped_data.cogroup(&that.grouped_data), shares)
+        };
+        PyCoGroupedData {
+            shares,
+            inner,
+            left,
+            right,
+            gc_ready: crate::gc::GcReady::new(),
+        }
+    }
 }
 
 #[pymethods]
@@ -913,14 +986,30 @@ impl PyCoGroupedData {
         let this = slf.borrow();
         let copy = Bound::new(
             py,
-            PyCoGroupedData {
-                inner: this.inner.clone(),
-                left: this.left.clone_ref(py),
-                right: this.right.clone_ref(py),
-            },
+            PyCoGroupedData::new(py, this.left.clone_ref(py), this.right.clone_ref(py)),
         )?;
         copy_instance_state(copy.as_any(), slf.as_any())?;
         Ok(copy)
+    }
+
+    /// As PySpark's cogrouped ops, a Python object that holds its two grouped data, which
+    /// Python's garbage collector sees: they report what the cogrouped ops share with them (see
+    /// [`crate::gc::Holders`]).
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
+        visit.call(&self.left)?;
+        visit.call(&self.right)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: the cogrouped ops
+    /// drop their clones of the grouped data, after their shares.
+    fn __clear__(&mut self) {
+        if self.gc_ready.get() {
+            self.shares = std::array::from_fn(|_| crate::gc::Share::none());
+            self.inner.clear_plan();
+        }
     }
 
     /// The reduce of cogrouped ops, as PySpark's pickle of its two grouped data, which
@@ -946,12 +1035,7 @@ impl PyCoGroupedData {
         left: Py<PyGroupedData>,
         right: Py<PyGroupedData>,
     ) -> PyResult<PyCoGroupedData> {
-        let inner = {
-            let this = left.borrow(py);
-            let that = right.borrow(py);
-            this.grouped_data.cogroup(&that.grouped_data)
-        };
-        Ok(PyCoGroupedData { inner, left, right })
+        Ok(PyCoGroupedData::new(py, left, right))
     }
 
     /// `PandasCogroupedOps.applyInPandas`.
