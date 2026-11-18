@@ -131,9 +131,11 @@ new version introduces).
 There are no justified non-gaps: anything in the diff is a real gap to close. Re-run the
 diff until it shows none.
 
-`SparkSession.client` is not the gRPC `SparkConnectClient`: it is the client that the
-vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses
-over the Rust transport - `execute_command(pb2.Command)` and the ML cache RPCs - with the
+`SparkSession.client` is not the gRPC `SparkConnectClient`: it has the public API of PySpark
+Connect's over the Rust transport (`python/pyspark/sql/connect/client/__init__.py`), which the
+vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses -
+`execute_command(pb2.Command)`, `to_table(pb2.Plan)`, `schema(pb2.Plan)`, `config`, the ML cache
+RPCs, and the retry policies, which the transport retries with - with the
 `pyspark.sql.connect.proto`: always the Rust protobuf runtime (`crates/pyspark-rs/src/pbmsg`,
 exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are not vendored, only
 their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where
@@ -477,6 +479,13 @@ For every method matching a pyspark name:
   reference cycle through an instance dict is collected. No code of the extension wraps the
   `tp_dealloc` of a class any more. (PyO3 0.28 did not do any of this, which needed the
   `instance_dict` wrapper of SPARK-61490; that module was removed with the upgrade.)
+  On CPython 3.11 the collector can traverse such an object while it is created, before PyO3
+  writes its value, as `object.__new__` allocates the dict of the tracked object: a custom
+  `__traverse__` checks the class's `crate::gc::GcReady` first, unless it reads only
+  `Option<Py<_>>` fields, whose zeroed memory is `None` (an `Arc`, a `OnceLock` or an `Option` of
+  a struct is not valid then). The offline test
+  `test_objects_traversed_while_they_are_created_do_not_crash` makes a collection meet each such
+  class there; add a new one to it.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;

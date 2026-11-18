@@ -443,6 +443,70 @@ def test_the_native_members_bind_a_call_as_pysparks_functions():
         assert str(error.value) == message
 
 
+def test_the_class_and_static_methods_are_pysparks_functions():
+    # A class method (`read`, of the wrapper of `try_remote_read`, `from_labels`) and a static
+    # method (`loadDefaultStopWords`) of a public class are of PySpark's kind, docstring,
+    # signature, module and qualified name, and Python binds a call of one as it binds PySpark's
+    # function (a class method of its `cls` too). `read` gives the reader of the class of the
+    # call, a subclass's. PrefixSpan's `clear` is `JavaParams.clear`, which takes any positional
+    # arguments and does nothing over Spark Connect.
+    import inspect
+
+    import pyspark.ml.feature as feature_reference
+    import pyspark.ml.pipeline as pipeline_reference
+
+    LR = _cls("classification", "LogisticRegression")
+    Pipeline = _cls("pipeline", "Pipeline")
+    Indexer = _cls("feature", "StringIndexerModel")
+    Vectorizer = _cls("feature", "CountVectorizerModel")
+    Remover = _cls("feature", "StopWordsRemover")
+    import pyspark.ml.classification as classification_reference
+
+    for public, pysparks, name, qualname in [
+        (LR, classification_reference.LogisticRegression, "read", "JavaMLReadable.read"),
+        (Pipeline, pipeline_reference.Pipeline, "read", "Pipeline.read"),
+        (Indexer, feature_reference.StringIndexerModel, "from_labels", "StringIndexerModel.from_labels"),
+        (
+            Indexer,
+            feature_reference.StringIndexerModel,
+            "from_arrays_of_labels",
+            "StringIndexerModel.from_arrays_of_labels",
+        ),
+        (Vectorizer, feature_reference.CountVectorizerModel, "from_vocabulary", "CountVectorizerModel.from_vocabulary"),
+        (Remover, feature_reference.StopWordsRemover, "loadDefaultStopWords", "StopWordsRemover.loadDefaultStopWords"),
+    ]:
+        ours, theirs = inspect.getattr_static(public, name), inspect.getattr_static(pysparks, name)
+        assert type(ours) is type(theirs), name
+        assert ours.__func__.__qualname__ == qualname, name
+        assert ours.__func__.__module__ == theirs.__func__.__module__, name
+        assert ours.__func__.__doc__ == theirs.__func__.__doc__, name
+        assert inspect.signature(getattr(public, name)) == inspect.signature(getattr(pysparks, name)), name
+    Sub = type("Sub", (LR,), {})
+    assert type(Sub.read()).__name__ == type(LR.read()).__name__ == "RemoteMLReader"
+    prefix_span = _cls("fpm", "PrefixSpan")()
+    assert prefix_span.clear() is None and prefix_span.clear(1, 2) is None
+    assert prefix_span.clear(prefix_span.minSupport) is None
+    cases = [
+        (lambda: LR.read(1), "JavaMLReadable.read() takes 1 positional argument but 2 were given"),
+        (lambda: Pipeline.read(x=1), _unexpected("Pipeline.read", "x")),
+        (
+            lambda: Indexer.from_labels(1, 2, 3, 4, 5),
+            "StringIndexerModel.from_labels() takes from 3 to 5 positional arguments but 6 were given",
+        ),
+        (lambda: Vectorizer.from_vocabulary(vocab=1), _unexpected("CountVectorizerModel.from_vocabulary", "vocab")),
+        (
+            lambda: Remover.loadDefaultStopWords(),
+            "StopWordsRemover.loadDefaultStopWords() missing 1 required positional argument: 'language'",
+        ),
+    ]
+    if sys.version_info < (3, 10):
+        return
+    for call, message in cases:
+        with pytest.raises(TypeError) as error:
+            call()
+        assert str(error.value) == message
+
+
 def test_the_members_of_a_summary_have_pysparks_docstrings_and_signatures():
     # As the native members of a class of params: a member of a summary is a property of a
     # property of PySpark's (`r2`, `predictions`), and a method of a method (`fMeasureByLabel`,

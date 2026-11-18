@@ -32,8 +32,9 @@ pub struct PyDataFrame {
     /// Set once the value is written. Python's garbage collector may traverse the object while it
     /// is created: the allocation already tracks it, and `object.__new__` allocates the instance
     /// dictionary, which can start a collection, before PyO3 writes the value. Until then the
-    /// memory is zeroed, so this flag is false and `__traverse__` reads nothing else.
-    gc_ready: std::sync::atomic::AtomicBool,
+    /// memory is zeroed, so this flag is false and `__traverse__` reads nothing else (see
+    /// [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
     /// The answers that PySpark keeps for each DataFrame once it has them, `isStreaming` (a
     /// `cached_property`), `semanticHash`, `isEmpty` and `inputFiles` (`functools.cache`): later
     /// calls do not ask again, also after the session stopped. (`isLocal` is cached in the core.)
@@ -201,7 +202,7 @@ impl PyDataFrame {
         PyDataFrame {
             dataframe,
             support_repr_html: std::sync::atomic::AtomicBool::new(false),
-            gc_ready: std::sync::atomic::AtomicBool::new(true),
+            gc_ready: crate::gc::GcReady::new(),
             is_streaming: std::sync::OnceLock::new(),
             semantic_hash: std::sync::OnceLock::new(),
             is_empty: std::sync::OnceLock::new(),
@@ -797,7 +798,7 @@ impl PyDataFrame {
     /// PySpark keeps them: a function may keep the DataFrame, as a bound method of an object that
     /// keeps it does.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if !self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self.gc_ready.get() {
             return Ok(());
         }
         for owner in self.dataframe.exclusive_relation_owners() {
@@ -818,7 +819,7 @@ impl PyDataFrame {
     /// Break a reference cycle that the garbage collector found unreachable: the DataFrame drops
     /// its plan, and so the Python objects that `__traverse__` reported.
     fn __clear__(&mut self) {
-        if self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
+        if self.gc_ready.get() {
             self.dataframe.clear_plan();
             self.schema_object = None;
         }
@@ -3420,6 +3421,7 @@ impl PyDataFrame {
             unsent_partition: std::sync::Arc::new(std::sync::Mutex::new(None)),
             unsent_options: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             unsent_properties: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 
@@ -4389,6 +4391,9 @@ impl PyMergeIntoWriter {
         })
     }
 
+    /// The table that the merge keeps, a Python object, which Python's garbage collector sees.
+    /// Only an `Option<Py<_>>` field is read, which is `None` while the object is created, so no
+    /// [`crate::gc::GcReady`] is needed.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
@@ -4603,6 +4608,9 @@ pub struct PyDataFrameWriter {
     /// The format, the partitioning columns and the save mode that PySpark keeps as they are,
     /// and whose `WriteOperation.command` converts, or resolves, at each write ([`UnsentArgs`]).
     unsent: std::sync::Arc<std::sync::Mutex<UnsentArgs>>,
+    /// Set once the value is written, as `__traverse__` reads `unsent`, which is not valid while
+    /// the writer object is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 /// The arguments of a writer that PySpark keeps as they are, and that its `WriteOperation.command`
@@ -4642,6 +4650,7 @@ impl PyDataFrameWriter {
             refused_bucket_cols: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             unsent: std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default())),
             frame,
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 
@@ -4855,6 +4864,7 @@ impl PyDataFrameWriter {
                 refused_bucket_cols: std::sync::Arc::clone(&this.refused_bucket_cols),
                 unsent: std::sync::Arc::clone(&this.unsent),
                 frame: this.frame.clone_ref(py),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )?;
         copy_instance_dict(slf.as_any(), copy.as_any())?;
@@ -5545,7 +5555,11 @@ impl PyDataFrameWriter {
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         // The kept arguments, which Python's garbage collector sees, as `exclusive_relation_owners`
         // reports a DataFrame's owners: only when this writer holds them alone, so that a copy that
-        // shares them does not count one reference twice. A lock held elsewhere is skipped.
+        // shares them does not count one reference twice. A lock held elsewhere is skipped. Nothing
+        // of a writer object that is being created.
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
         if std::sync::Arc::strong_count(&self.unsent) != 1 {
             return Ok(());
         }
@@ -5602,6 +5616,10 @@ pub struct PyDataFrameWriterV2 {
     /// The table properties that the core writer does not take, which each write fails with after
     /// its options.
     unsent_properties: std::sync::Arc<std::sync::Mutex<crate::options::UnencodableOptions>>,
+    /// Set once the value is written, as `__traverse__` reads `unsent_provider` and
+    /// `unsent_clustering`, which are not valid while the writer object is created (see
+    /// [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyDataFrameWriterV2 {
@@ -5741,6 +5759,7 @@ impl PyDataFrameWriterV2 {
                 unsent_options: std::sync::Arc::clone(&this.unsent_options),
                 unsent_properties: std::sync::Arc::clone(&this.unsent_properties),
                 frame: this.frame.clone_ref(py),
+                gc_ready: crate::gc::GcReady::new(),
             },
         )?;
         copy_instance_dict(slf.as_any(), copy.as_any())?;
@@ -5845,6 +5864,7 @@ impl PyDataFrameWriterV2 {
             unsent_options: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             unsent_properties: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             frame,
+            gc_ready: crate::gc::GcReady::new(),
         };
         // The options and the table properties that the core writer does not take are set in
         // their order, as PySpark's dicts, which keep them.
@@ -6053,6 +6073,10 @@ impl PyDataFrameWriterV2 {
     }
 
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        // Nothing of a writer object that is being created.
+        if !self.gc_ready.get() {
+            return Ok(());
+        }
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
         }
@@ -7009,7 +7033,7 @@ impl PyLocalRowIterator {
 
 /// The metrics and observed metrics of an execution, as the lists of `PlanMetrics` and
 /// `PlanObservedMetrics` that `SparkConnectClient._build_metrics` makes.
-fn execution_metrics<'py>(
+pub(crate) fn execution_metrics<'py>(
     py: Python<'py>,
     info: &spark_connect::session::ExecutionInfo,
 ) -> PyResult<(

@@ -1108,10 +1108,51 @@ fn resolve_fetch_at(fetch: &mut proto::Fetch, level: usize) -> Result<usize> {
 /// session hook built in Python, as `DataFrame::from_relation` does. Not a stable API.
 #[doc(hidden)]
 pub fn resolve_request(request: &mut proto::ExecutePlanRequest) -> Result<()> {
-    match request.plan.as_mut().and_then(|plan| plan.op_type.as_mut()) {
+    match request.plan.as_mut() {
+        Some(plan) => resolve_plan(plan),
+        None => Ok(()),
+    }
+}
+
+/// Replace the placeholders of `plan`, a plan built outside the core, of its relation or of its
+/// command, as [`resolve_request`] does for the plan of a request.
+pub(crate) fn resolve_plan(plan: &mut proto::Plan) -> Result<()> {
+    match plan.op_type.as_mut() {
         Some(proto::plan::OpType::Root(relation)) => resolve_relation(relation),
         Some(proto::plan::OpType::Command(command)) => resolve_command(command),
         _ => Ok(()),
+    }
+}
+
+/// Replace the placeholders of the plans and the relations of `analyze`, an analysis built
+/// outside the core, as [`resolve_plan`] does for each.
+pub(crate) fn resolve_analysis(analyze: &mut proto::analyze_plan_request::Analyze) -> Result<()> {
+    use proto::analyze_plan_request::Analyze;
+    let (plans, relation) = match analyze {
+        Analyze::Schema(request) => (vec![&mut request.plan], None),
+        Analyze::Explain(request) => (vec![&mut request.plan], None),
+        Analyze::TreeString(request) => (vec![&mut request.plan], None),
+        Analyze::IsLocal(request) => (vec![&mut request.plan], None),
+        Analyze::IsStreaming(request) => (vec![&mut request.plan], None),
+        Analyze::InputFiles(request) => (vec![&mut request.plan], None),
+        Analyze::SemanticHash(request) => (vec![&mut request.plan], None),
+        Analyze::SameSemantics(request) => (
+            vec![&mut request.target_plan, &mut request.other_plan],
+            None,
+        ),
+        Analyze::Persist(request) => (Vec::new(), request.relation.as_mut()),
+        Analyze::Unpersist(request) => (Vec::new(), request.relation.as_mut()),
+        Analyze::GetStorageLevel(request) => (Vec::new(), request.relation.as_mut()),
+        Analyze::SparkVersion(_) | Analyze::DdlParse(_) | Analyze::JsonToDdl(_) => {
+            (Vec::new(), None)
+        }
+    };
+    for plan in plans.into_iter().flatten() {
+        resolve_plan(plan)?;
+    }
+    match relation {
+        Some(relation) => resolve_relation(relation),
+        None => Ok(()),
     }
 }
 

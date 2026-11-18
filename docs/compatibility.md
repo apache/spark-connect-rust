@@ -356,7 +356,11 @@ PySpark class has them:
   of `try_remote_intercept` takes any positional arguments, a DataFrame method of
   `try_remote_attribute_relation` any arguments): a call that does not bind raises PySpark's
   message (`JavaMLWritable.write() takes 1 positional argument but 2 were given`) before the
-  native member runs. The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
+  native member runs. So do the class methods and the static methods, of PySpark's kind
+  (`read`, of `JavaMLReadable.read` and the `try_remote_read` of a Pipeline's or a validator's,
+  `StringIndexerModel.from_labels`, `StopWordsRemover.loadDefaultStopWords`), whose message of a
+  class method counts its `cls` (`JavaMLReadable.read() takes 1 positional argument but 2 were
+  given`). The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
   converters and defaults of the official class (`crates/pyspark-rs/src/ml/ml_params.json`,
   captured from pyspark-client 4.3.0 by `scripts/capture_ml_api_golden.py`), and a getter per
   param (`getMaxIter`).
@@ -1179,8 +1183,14 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
 (`pyspark.sql.connect.proto.base_pb2`, ..., and `example_plugins_pb2`, of Spark's example plugin).
 `protobuf`'s `json_format` and `text_format` print and parse its messages. The differences:
 
-- its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`, and
-  it has one map container type where upb has a scalar one and a message one;
+- its types and its `DecodeError` are of `pyspark.sql.connect.proto`, not `google.protobuf`: its
+  classes are of the metaclass `type`, not upb's `MessageMeta`, and can be subclassed, which upb
+  refuses, and its map of scalars is a `MapContainer`, where upb's is a `ScalarMapContainer`, of
+  which its map of messages, a `MessageMapContainer` as upb's, is a subclass;
+- the pool of its descriptors (`DESCRIPTOR.file.pool`) is its own, of the files of the protos of
+  Spark Connect and of the plugins' files that the drop-in adds to it (see below), not
+  `protobuf`'s default pool: it finds their descriptors as upb's does, but has no `Add`,
+  `AddSerializedFile` or `SetFeatureSetDefaults`, so Python code adds no file to it;
 - it parses, prints and builds (of nested dicts) messages of any depth, where upb refuses to
   parse more than 100 nested messages, its constructor overflows the stack of a thread from
   thousands of nested dicts, and `text_format` exceeds Python's recursion limit;
@@ -1190,6 +1200,25 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   end the process;
 - the iteration order of a map is the order of insertion, where upb's is that of its hash table.
   Serialization and the text format write the entries in upb's order of the keys;
+- a varint that the end of the data, or of its packed field, cuts short fails the parse without a
+  value, where upb reads the bytes after it (of the next field, or zeros past the end of the data)
+  into a value that it keeps;
+- it makes a Python object of each message that it parses or copies, where upb makes one when the
+  message is read, so the parse, the copy and the release of a message of many messages take
+  several times as long as upb's (0.25 s for the parse of a million messages, upb's 0.04 s). The
+  parse, the copies (the constructor, `CopyFrom` and `copy.deepcopy`) and the merges (`MergeFrom`)
+  let another thread take the GIL, and a signal interrupt them with the exception of its handler,
+  every 1,024 messages, where upb holds the GIL until they end, so another thread can use a
+  message that one of them reads meanwhile. `SerializeToString` and the release of a message hold
+  the GIL until they end: 0.07 s for a million messages, where upb's take 0.04 s and 2 ms. The
+  messages that the runtime makes, of a parse, a copy or a read of an unset field, are not
+  tracked by the garbage collector (`gc.is_tracked`), as they make no reference cycles, so that a
+  collection does not go through the messages of a large message;
+- the pickle of a message of a nested type names its class, which loads without `protobuf`,
+  where upb's names protobuf's `_InternalConstructMessage` of the full name of its type, which
+  loads where `protobuf` is installed (as a message of the runtime, whose classes of the protos of
+  Spark Connect are those of protobuf's default symbol database; those of a plugin's files stay
+  `protobuf`'s there, as below);
 - `GetOptions()` of a descriptor gives `protobuf`'s `descriptor_pb2` options, as upb's does, so
   it needs `protobuf`.
 
@@ -1234,6 +1263,76 @@ types as they are, and an `Any` of either packs and unpacks a message of either.
 
 A DataFrame of a plan of `pyspark.ml` (`DataFrame(plan, session)`) takes the plan ID
 of this client rather than the one of the plan, which its columns refer to.
+
+## SparkSession.client
+
+`spark.client` is PySpark Connect's `SparkConnectClient` (`pyspark.sql.connect.client`), with the
+public API of pyspark-client 4.3.0, over the Rust transport of the session. It sends the messages
+of `pyspark.sql.connect.proto` that it is given as they are, and reads their responses as PySpark's
+client does:
+
+- the analyses of a `pb2.Plan` (`schema`, `explain_string`, `same_semantics`, `semantic_hash`), the
+  configuration requests of a `ConfigRequest.Operation` (`config`, which returns a `ConfigResult`),
+  and the executions of a plan (`to_table`, `to_table_as_iterator`, `to_pandas`) or of a command
+  (`execute_command`, `execute_command_as_iterator`), with the `ExecutionInfo` of the execution, the
+  Observations that they are given set by their names, and the progress of the progress handlers
+  (`register_progress_handler`), except for `execute_command_as_iterator`, as in PySpark;
+- the registrations of `register_udf`, `register_udtf`, `register_java` and
+  `register_data_source`, the artifacts of `add_artifacts`, `copy_from_local_to_fs`,
+  `cache_artifact` and `cache_artifacts`, with the checks of PySpark's client rather than those of
+  `SparkSession.addArtifacts` and `copyFromLocalToFs`, the tags, the interrupts, `token`, `host`,
+  and the clients of `newSession` and `clone`.
+
+`SparkConnectClient(connection, user_id=None, ...)` takes the arguments of PySpark's: it makes a
+client of a session of its own of the connection string or the `ChannelBuilder` `connection`, which
+is neither the default nor the active session. Its `retry_policy`, `use_reattachable_execute`,
+`session_hooks`, `allow_arrow_batch_chunking`, `preferred_arrow_chunk_size`, `rpc_deadlines`
+(`pyspark.sql.connect.client.RpcDeadlines`, of which the transport has no GetStatus RPC) and
+`max_retry_exception_elapsed_time` are those of the transport. A `channel_options` of a connection
+string raises `NOT_IMPLEMENTED`, as `DefaultChannelBuilder` does: the Rust transport opens the
+channel; as PySpark's, the client of a `ChannelBuilder` does not read it.
+
+The retry policies of `get_retry_policies` and `set_retry_policies` are PySpark's own
+(`pyspark.sql.connect.client.retries`, vendored from v4.3.0, which needs `grpcio`,
+`grpcio-status` and `googleapis-common-protos`). The transport retries a failure with the
+parameters of the first `DefaultPolicy` of the list, its retries, backoffs, jitter and the delay
+that the server asks for, as PySpark's `Retrying` does, of the failures that
+`DefaultPolicy.can_retry` retries; a `RetryPolicy` retries none. It reads the parameters when the
+policies are set, so a change to a policy afterwards applies once the policies are set again. A
+policy of its own `can_retry` or `to_state`, which the transport cannot call, and a backoff, jitter
+or delay that is not a whole number of milliseconds raise `NOT_IMPLEMENTED`. The client of a new
+session has the default policy, as PySpark's `newSession` and `clone` do. With
+`disable_reattachable_execute`, an execution has no reattach option and no deadline, is never
+released, and is sent again when it fails in a way that its policy retries, as PySpark's.
+
+The relation of a DataFrame's plan (`df._plan.plan(client)`) is a placeholder of the relation of
+the DataFrame, which the core replaces by that relation when it sends a plan that holds it, while
+the DataFrame is alive: keep the DataFrame while a plan of it is sent. The core replaces it only
+where it looks for it:
+
+- as the root relation of a plan, of an execution, of an analysis (`schema`, `explain_string`,
+  `same_semantics`, `semantic_hash`) or of `DataFrame(plan, session)`, and as the relation of the
+  analyses of a relation (`persist`, `unpersist`, `get_storage_level`);
+- under it, as the input of the relations of `pyspark.ml` (an `MlRelation`'s input, its model
+  summary dataset and its fetched arguments, and a `WithRelations`'s root and references), and as
+  the dataset of the ML commands (`Fit`, `Evaluate`, `CreateSummary`) and the arguments of a
+  `Fetch`;
+- anywhere in the message of the extension of a relation or of a command, a plugin's message such
+  as Delta Lake's `MergeIntoTable` (see the Delta Lake paragraph above).
+
+Elsewhere it is sent as it is, and the server rejects the plan with
+`CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends the relation: as the input of
+another relation built in Python over it, such as a `Limit`, a `Join` or a `SubqueryAlias`, also in
+a `WithRelations`; as the relation of a command that is neither an ML command nor an extension,
+such as a `WriteOperation`, a `CreateDataFrameView` or a `CheckpointCommand`; and in the extension
+of an expression.
+
+`get_tags` returns a copy of the tags of the thread, where PySpark returns the set that its client
+keeps, which the later changes of the tags change too. The official tests of the client
+(`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable iterator of
+PySpark's client, which the drop-in does not have; those of its retries (`test_connect_retry.py`)
+and of `pyspark.errors.exceptions.connect.convert_exception` (`test_connect_errors_conversion.py`)
+pass.
 
 ## Spark Declarative Pipelines CLI
 
@@ -1297,14 +1396,33 @@ Three differences come with being a different package with a native core. The di
 `pyspark-client-rust`, so `importlib.metadata.version("pyspark-client")` raises
 `PackageNotFoundError`, where `pyspark.__version__` is PySpark's. A traceback of an error that the
 server raises has the frames of the user's code only, without those of PySpark's client
-(`collect`, `_to_table`, `_execute_and_fetch`, ...), which the native core does not have. The
-package is marked typed as PySpark's is (`py.typed` and PySpark's stubs), and
-`pyspark.sql.SparkSession`, PySpark's own class, has PySpark's signatures and docstrings. The
-functions of `pyspark.sql.functions` and the methods of the native classes, such as
+(`collect`, `_to_table`, `_execute_and_fetch`, ...), which the native core does not have. At run
+time, `pyspark.sql.SparkSession`, PySpark's own class, has PySpark's signatures and docstrings,
+while the functions of `pyspark.sql.functions` and the methods of the native classes, such as
 `DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
 The `__init__` of a native type of parameters, such as `ArrayType`, is a slot of its class, whose
 `inspect.signature` is CPython's `(self, /, *args, **kwargs)`; that of the class shows the
 parameters, as PySpark's does.
+
+Type checkers and editors see PySpark's API, as with `pyspark-client`. The package is marked typed
+as PySpark's is (`py.typed`), and the modules whose classes are native or whose functions are made
+at import time, such as `pyspark.sql.functions`, `pyspark.sql.dataframe` and `pyspark.sql.types`,
+have stubs (`.pyi`) of PySpark 4.3.0's modules, with their annotations and overloads, which
+`scripts/gen_type_stubs.py` generates. So mypy and pyright type an application as they do with
+`pyspark-client`, but for the classes of modules that the drop-in implements in another way: the
+client of `SparkSession.client` (`pyspark.sql.connect.client`), `SQLContext`, and the internal
+expressions and protobuf messages of PySpark Connect, which annotate a few internal constructors.
+The stubs also re-export the names that PySpark's modules import at run time, which mypy takes for
+attributes of the modules by default, so pyright, and mypy with `--no-implicit-reexport`, do not
+report a use of such a name as they do with `pyspark-client`, such as `F.partitioning` (pyright's
+`reportPrivateImportUsage`) and `F.PandasUDFType`.
+
+PySpark's `pyspark.sql.functions` is a package of the modules `builtin` and `partitioning`, where
+the drop-in's is a module, with the stubs of the three in the directory `pyspark/sql/functions/`,
+which Python does not import. pyright types an import of `pyspark.sql.functions.builtin` or
+`pyspark.sql.functions.partitioning`, such as `from pyspark.sql.functions import partitioning`,
+from those stubs, and warns that the module "could not be resolved from source"
+(`reportMissingModuleSource`); `F.partitioning.bucket` has no warning.
 
 The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
 that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
@@ -1385,12 +1503,13 @@ of their own, as PySpark's plain classes do. `AtomicType()` has the `typeName`, 
 `__dict__` only. It pickles as its class and its `__dict__`: at the protocols 2 and up its pickle
 is PySpark's own, byte for byte, and PySpark loads the drop-in's at every protocol. The struct,
 array or map that holds it names it in its `simpleString`, JSON and tree string, and pickles of
-the types it is made of. It holds it by its JSON, though, so it does not tell apart two of the
-same JSON, of one class and different `__dict__`s or of two classes of one `typeName`: two
-structs, arrays or maps of such types are equal, and a struct names each in its `simpleString` by
-the last that a type was made of, where PySpark's compare and name the types they hold, as of a
-`UserDefinedType` of parameters. `IntegralType()` is one instance, as PySpark's
-`DataTypeSingleton` makes it, and a Python subclass of these classes, such as a
+the types it is made of. It compares it, and names it in its `simpleString` and tree string, by the
+object that it holds, as PySpark's does, rather than by its JSON: so two types of the same JSON, of
+one class and different `__dict__`s or of two classes of one `typeName`, stay apart in the types
+that hold them, as `UserDefinedType`s of other parameters do, and `toNullable()` keeps them as they
+are. A struct, array or map made of core types, such as one of `fromJson`, holds the user-defined
+type of its JSON that a type was last made of, if one was. `IntegralType()` is one instance, as
+PySpark's `DataTypeSingleton` makes it, and a Python subclass of these classes, such as a
 `UserDefinedType` of parameters, takes the arguments of its `__init__`. A Python subclass of
 `IntegralType` cannot be instantiated, where PySpark's `DataTypeSingleton` makes one instance of
 each subclass: the constructor of a native class either returns an object that exists or makes
@@ -1653,8 +1772,9 @@ SparkSession, its `conf`, `catalog`, `read`, `readStream`, `streams`, `udf`, `ud
 `dataSource`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
 `mergeInto` and its clauses, `na`, `stat`, `groupBy`, `cogroup`, `asTable` and the WindowSpec of
 its windows, and an `Observation`. So are `SparkSession.Hook`, nested in the session class, and
-the classes of `pyspark.sql.connect.client` (its channel builders, `PlanObservedMetrics` and
-`SparkConnectClient`), which are of `pyspark.sql.connect.client.core`.
+the classes of `pyspark.sql.connect.client` (its channel builders, `PlanObservedMetrics`,
+`SparkConnectClient`, `RpcDeadlines`, `AnalyzeResult` and `ConfigResult`), which are of
+`pyspark.sql.connect.client.core`.
 The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` and
 `partitioning`), and so are those of `pyspark.sql.connect.avro.functions` and
 `pyspark.sql.connect.protobuf.functions`: they are not those of `pyspark.sql.functions`,

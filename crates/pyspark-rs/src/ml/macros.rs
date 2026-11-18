@@ -195,7 +195,9 @@ macro_rules! params_api_block {
 /// Of the JVM class `$jvm` of the operator type `$op` (`Estimator`, `Transformer` or `Evaluator`),
 /// it also has `copy` (of `NativeInstance::duplicate`), and `write`, `save`, `read` and `load`, as
 /// `RemoteMLWriter` and `RemoteMLReader`. Of `persistence: python`, the class has its own `copy`
-/// and persistence, in PySpark's Python format (a Pipeline or a validator).
+/// and persistence, in PySpark's Python format (a Pipeline or a validator), and the `clear` of
+/// PySpark's `Params`. Of `persistence: none`, it is a `JavaParams` of PySpark of no persistence
+/// (PrefixSpan), of its own `copy`, and of the `clear` of `JavaParams` over Spark Connect.
 macro_rules! native_pymethods {
     // The arms of `params_only` come first, each of a section that is not optional: an optional
     // one before the body of any tokens is ambiguous ("local ambiguity"). The arms without it give
@@ -376,6 +378,48 @@ macro_rules! native_pymethods {
             params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
             params_only: [];
             $($body)*
+        }
+    };
+    (
+        $ty:ty;
+        persistence: none;
+        params: [
+            $( $param:literal => ($getter_py:literal, $getter:ident, $attr:ident) ),* $(,)?
+        ];
+        $($body:tt)*
+    ) => {
+        params_api_block! {
+            $ty;
+            params: [ $( $param => ($getter_py, $getter, $attr) ),* ];
+            params_only: [];
+            {
+                $($body)*
+
+                /// The uid, as `Identifiable.uid`.
+                #[getter]
+                fn uid(&self) -> String {
+                    $crate::ml::params_api::NativeInstance::uid(self)
+                }
+
+                /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
+                /// `_resetUid`).
+                #[setter(uid)]
+                fn __set_uid(&mut self, uid: String) {
+                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
+                }
+
+                /// The uid, as `Identifiable.__repr__`.
+                fn __repr__(slf: &Bound<'_, Self>) -> PyResult<String> {
+                    slf.getattr("uid")?.extract()
+                }
+
+                /// As `JavaParams.clear` over Spark Connect, which does nothing: its
+                /// `try_remote_intercept` takes any positional arguments and returns None.
+                #[pyo3(name = "clear", signature = (*args), text_signature = "($self, param)")]
+                fn __params_clear(&self, args: &Bound<'_, pyo3::types::PyTuple>) {
+                    let _ = args;
+                }
+            }
         }
     };
 }

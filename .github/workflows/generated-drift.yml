@@ -23,6 +23,8 @@ name: Generated files drift
 # crates/spark-connect/src/functions.rs and the PySpark of the tracked Apache Spark
 # tag, and fails with a diff when a checked-in file differs. Catches hand edits to the
 # generated files, and generator or functions.rs changes that were not regenerated.
+# It guards the same way the type stubs that scripts/gen_type_stubs.py generates from that
+# PySpark (python/pyspark/**/*.pyi, and their block of ruff excludes in pyproject.toml).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -35,7 +37,7 @@ on:
 
 jobs:
   generated-drift:
-    name: Generated files match scripts/gen_fn_dispatch.py
+    name: Generated files match scripts/gen_fn_dispatch.py and scripts/gen_type_stubs.py
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -62,3 +64,6 @@ jobs:
           python -m pip install 'pandas>=2.2,<3.0' pyarrow numpy grpcio grpcio-status googleapis-common-protos zstandard py4j
       - name: Check the generated files
         run: python scripts/gen_fn_dispatch.py --pyspark-src "${RUNNER_TEMP}/spark/python" --check
+      - name: Check the type stubs
+        # The generator parses the reference PySpark, and imports none of it.
+        run: python scripts/gen_type_stubs.py --pyspark-src "${RUNNER_TEMP}/spark/python" --check

@@ -542,6 +542,46 @@ fn with_user_id(url: &str, user: &str) -> PyResult<String> {
     })
 }
 
+/// A session of the URL or channel builder `connection`, of the user `user_id` unless its URL has
+/// one, with the hooks that `hook_factories` make of it, as PySpark's
+/// `SparkSession(connection, userId, hook_factories)`, of the builder that `configure` configures:
+/// neither the default nor the active session, as PySpark's constructor does not make it either.
+fn new_session_of_connection(
+    py: Python<'_>,
+    connection: &Bound<'_, PyAny>,
+    user_id: Option<String>,
+    hook_factories: Option<Bound<'_, PyAny>>,
+    configure: impl FnOnce(spark_connect::SparkSessionBuilder) -> spark_connect::SparkSessionBuilder
+        + Send,
+) -> PyResult<Py<PySparkSession>> {
+    let url = match connection.extract::<String>() {
+        Ok(url) => url,
+        Err(_) => url_of_channel_builder(connection)?,
+    };
+    let url = match user_id {
+        Some(user) => with_user_id(&url, &user)?,
+        None => url,
+    };
+    let session = py
+        .detach(|| {
+            configure(SparkSession::builder().remote(&url))
+                .get_or_create()
+                .map_err(Box::new)
+        })
+        .to_pyerr()?;
+    let session = session_object(py, &session)?;
+    let factories = match hook_factories {
+        Some(factories) => factories
+            .try_iter()?
+            .map(|factory| factory.map(Bound::unbind))
+            .collect::<PyResult<Vec<_>>>()?,
+        None => Vec::new(),
+    };
+    install_hook_factories(py, &factories, &session)?;
+    log_client_banner(py);
+    Ok(session)
+}
+
 /// Install on `session` the hooks that `factories` make of it, each called with the session, as
 /// PySpark's `SparkSession(hook_factories=...)`.
 fn install_hook_factories(
@@ -1182,6 +1222,36 @@ impl PandasRowColumns {
 }
 
 impl PySparkSession {
+    /// Upload local files, or `file:` URIs, as artifacts of the session, each named by the first
+    /// of the flags that it matches. As PySpark's `_parse_artifacts`, every path is parsed, and a
+    /// local file opened, before any upload.
+    fn upload_artifacts(
+        &self,
+        py: Python<'_>,
+        path: Vec<String>,
+        pyfile: bool,
+        archive: bool,
+        file: bool,
+    ) -> PyResult<()> {
+        for p in &path {
+            let (name, local) = match parse_artifact(p, pyfile, archive, file) {
+                Ok(parsed) => parsed,
+                Err(unsupported) => return Err(unsupported_artifact_error(py, unsupported)),
+            };
+            if name.starts_with("classes/") {
+                let format = UnsupportedArtifact::Format(local.to_string_lossy().into_owned());
+                return Err(unsupported_artifact_error(py, format));
+            }
+            check_local_artifact(py, &name, &local, pyfile)?;
+        }
+        let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
+        interruptible(py, &self.session, || {
+            self.session
+                .add_artifacts_of_flags(&refs, pyfile, archive, file)
+                .map_err(Box::new)
+        })
+    }
+
     pub fn new(session: SparkSession) -> Self {
         // The progress of the session, for the progress bars of its executions, and its
         // profiles, which the updates of its first execution update too.
@@ -3296,23 +3366,32 @@ impl PySparkSession {
 
     /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
     /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
-    /// `ExecutePlanResponse`: for the `execute_command` of `client`.
+    /// `ExecutePlanResponse`: for the `execute_command` of `client`. The command is decoded, and
+    /// the responses encoded, with the GIL released, as the execution waits: a command or a
+    /// response of many values (the vocabulary of a model) takes as long as it is large.
     fn _execute_command<'py>(
         &self,
         py: Python<'py>,
         command: &[u8],
     ) -> PyResult<Vec<Bound<'py, pyo3::types::PyBytes>>> {
         use prost::Message;
-        let command = spark_connect_proto::Command::decode(command)
+        let command = py
+            .detach(|| spark_connect_proto::Command::decode(command))
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let responses = interruptible(py, &self.session, || {
             self.session
                 .execute_command_proto(command)
+                .map(|responses| {
+                    responses
+                        .iter()
+                        .map(|response| response.encode_to_vec())
+                        .collect::<Vec<_>>()
+                })
                 .map_err(Box::new)
         })?;
         Ok(responses
             .iter()
-            .map(|response| pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
+            .map(|response| pyo3::types::PyBytes::new(py, response))
             .collect())
     }
 
@@ -3372,33 +3451,163 @@ impl PySparkSession {
         userId: Option<String>,
         hook_factories: Option<Bound<'_, PyAny>>,
     ) -> PyResult<Py<Self>> {
-        let url = match connection.extract::<String>() {
-            Ok(url) => url,
-            Err(_) => url_of_channel_builder(connection)?,
-        };
-        let url = match userId {
-            Some(user) => with_user_id(&url, &user)?,
-            None => url,
-        };
-        let session = py
-            .detach(|| {
-                SparkSession::builder()
-                    .remote(&url)
-                    .get_or_create()
-                    .map_err(Box::new)
+        new_session_of_connection(py, connection, userId, hook_factories, |builder| builder)
+    }
+
+    /// The session of PySpark Connect's `SparkConnectClient(connection, ...)`, of the URL or
+    /// channel builder `connection`, as `SparkSession(connection, userId, hook_factories)` makes
+    /// one, whose client has the result chunking of `allow_arrow_batch_chunking` and
+    /// `preferred_arrow_chunk_size` and the RPC deadlines of `rpc_deadlines`, a dict of the
+    /// deadlines in seconds by the names of the fields of PySpark's `RpcDeadlines`, if given.
+    #[staticmethod]
+    #[pyo3(signature = (connection, user_id, hook_factories, allow_arrow_batch_chunking, preferred_arrow_chunk_size, rpc_deadlines))]
+    fn _of_client_options(
+        py: Python<'_>,
+        connection: &Bound<'_, PyAny>,
+        user_id: Option<String>,
+        hook_factories: Option<Bound<'_, PyAny>>,
+        allow_arrow_batch_chunking: bool,
+        preferred_arrow_chunk_size: Option<i64>,
+        rpc_deadlines: Option<Bound<'_, PyDict>>,
+    ) -> PyResult<Py<Self>> {
+        let chunking =
+            crate::client::result_chunking(allow_arrow_batch_chunking, preferred_arrow_chunk_size);
+        let deadlines = rpc_deadlines
+            .as_ref()
+            .map(crate::client::rpc_deadlines)
+            .transpose()?;
+        new_session_of_connection(py, connection, user_id, hook_factories, move |builder| {
+            builder.configure_client(move |client| {
+                client.set_result_chunking(chunking);
+                if let Some(deadlines) = deadlines {
+                    client.set_rpc_deadlines(deadlines);
+                }
             })
-            .to_pyerr()?;
-        let session = session_object(py, &session)?;
-        let factories = match hook_factories {
-            Some(factories) => factories
-                .try_iter()?
-                .map(|factory| factory.map(Bound::unbind))
-                .collect::<PyResult<Vec<_>>>()?,
-            None => Vec::new(),
-        };
-        install_hook_factories(py, &factories, &session)?;
-        log_client_banner(py);
-        Ok(session)
+        })
+    }
+
+    /// The bytes of the response of the server to `request`, the bytes of an `AnalyzePlanRequest`
+    /// that `client` builds, as PySpark's `SparkConnectClient._analyze` sends it: of its
+    /// `schema`, `explain_string`, `same_semantics` and `semantic_hash`.
+    fn _analyze_plan<'py>(
+        &self,
+        py: Python<'py>,
+        request: &[u8],
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        crate::client::analyze_plan(py, &self.session, request)
+    }
+
+    /// The bytes of the response of the server to `request`, the bytes of a `ConfigRequest` that
+    /// `client` builds, as PySpark's `SparkConnectClient.config` sends it.
+    fn _config<'py>(
+        &self,
+        py: Python<'py>,
+        request: &[u8],
+    ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
+        crate::client::config(py, &self.session, request)
+    }
+
+    /// Start the execution of `plan`, the bytes of a `Plan` that `client` is given, as PySpark's
+    /// `SparkConnectClient` executes the plans of `to_table`, `to_pandas`, `to_table_as_iterator`
+    /// and `execute_command_as_iterator`: its responses, whose observed metrics set the
+    /// Observations of `observations`, the pairs of a name and an Observation, and whose progress
+    /// reaches the progress handlers when `reported`.
+    fn _execute_plan(
+        &self,
+        py: Python<'_>,
+        plan: &[u8],
+        observations: Vec<(String, Bound<'_, PyAny>)>,
+        reported: bool,
+    ) -> PyResult<crate::client::PyExecutePlanResponses> {
+        crate::client::execute_plan(py, &self.session, plan, observations, reported)
+    }
+
+    /// Cache `blobs`, bytes or bytearrays, as artifacts of the session, as PySpark's
+    /// `SparkConnectClient.cache_artifacts`: their SHA-256 hashes, of each blob in order.
+    fn _cache_artifacts(
+        &self,
+        py: Python<'_>,
+        blobs: Vec<pyo3::pybacked::PyBackedBytes>,
+    ) -> PyResult<Vec<String>> {
+        let blobs: Vec<Vec<u8>> = blobs.iter().map(|blob| blob.to_vec()).collect();
+        interruptible(py, &self.session, || {
+            self.session.cache_artifacts(blobs).map_err(Box::new)
+        })
+    }
+
+    /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
+    /// `SparkConnectClient.add_artifacts(*path, pyfile, archive, file)`: as `addArtifacts`, but of
+    /// any of the flags, each path named by the first flag that it matches, as PySpark's client
+    /// does not check them.
+    #[pyo3(signature = (*path, pyfile, archive, file))]
+    fn _add_artifacts_of_flags(
+        &self,
+        py: Python<'_>,
+        path: Vec<String>,
+        pyfile: bool,
+        archive: bool,
+        file: bool,
+    ) -> PyResult<()> {
+        self.upload_artifacts(py, path, pyfile, archive, file)
+    }
+
+    /// The retry policy of the RPCs of the session, as the keyword arguments of PySpark's
+    /// `RetryPolicy`, and the `max_retry_exception_elapsed_time` of its client, in seconds, or None
+    /// without a bound.
+    fn _retry_policy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        crate::client::retry_policy(py, &self.session)
+    }
+
+    /// Set the retry policy of the RPCs of the session, for the calls that start from now on, as
+    /// PySpark's `SparkConnectClient.set_retry_policies` sets the policies of its client: of the
+    /// parameters of PySpark's `RetryPolicy`, the backoffs and the delays in milliseconds, and of
+    /// the bound of the retries of a `RetryException`, in seconds, or None without a bound.
+    #[pyo3(signature = (*, max_retries, initial_backoff, max_backoff, backoff_multiplier, jitter, min_jitter_threshold, recognize_server_retry_delay, max_server_retry_delay, max_retry_exception_elapsed_time))]
+    #[allow(clippy::too_many_arguments)]
+    fn _set_retry_policy(
+        &self,
+        max_retries: Option<u32>,
+        initial_backoff: u64,
+        max_backoff: Option<u64>,
+        backoff_multiplier: f64,
+        jitter: u64,
+        min_jitter_threshold: u64,
+        recognize_server_retry_delay: bool,
+        max_server_retry_delay: Option<u64>,
+        max_retry_exception_elapsed_time: Option<f64>,
+    ) {
+        crate::client::set_retry_policy(
+            &self.session,
+            crate::client::RetryParameters {
+                max_retries,
+                initial_backoff,
+                max_backoff,
+                backoff_multiplier,
+                jitter,
+                min_jitter_threshold,
+                recognize_server_retry_delay,
+                max_server_retry_delay,
+                max_retry_exception_elapsed_time,
+            },
+        );
+    }
+
+    /// Whether the executions of the session are reattachable, as PySpark's
+    /// `use_reattachable_execute` of its client.
+    fn _reattachable_execute(&self) -> bool {
+        self.session.reattachable_execute()
+    }
+
+    /// Make the executions of the session reattachable or not, from the next one on, as PySpark's
+    /// `enable_reattachable_execute` and `disable_reattachable_execute` of its client.
+    fn _set_reattachable_execute(&self, reattachable: bool) {
+        self.session.set_reattachable_execute(reattachable);
+    }
+
+    /// The `token` parameter of the connection string of the session, if it has one, for the
+    /// `token` of its client.
+    fn _token_parameter(&self) -> Option<String> {
+        self.session.token_parameter().map(String::from)
     }
 
     /// Whether `stop()` releases the session on the server, as PySpark's
@@ -3818,25 +4027,7 @@ impl PySparkSession {
                 ],
             ));
         }
-        // As PySpark's _parse_artifacts, every path is parsed, and a local file opened, before
-        // any upload.
-        for p in &path {
-            let (name, local) = match parse_artifact(p, pyfile, archive, file) {
-                Ok(parsed) => parsed,
-                Err(unsupported) => return Err(unsupported_artifact_error(py, unsupported)),
-            };
-            if name.starts_with("classes/") {
-                let format = UnsupportedArtifact::Format(local.to_string_lossy().into_owned());
-                return Err(unsupported_artifact_error(py, format));
-            }
-            check_local_artifact(py, &name, &local, pyfile)?;
-        }
-        let refs: Vec<&str> = path.iter().map(|s| s.as_str()).collect();
-        interruptible(py, &self.session, || {
-            self.session
-                .add_artifacts_with(&refs, pyfile, archive, file)
-                .map_err(Box::new)
-        })
+        self.upload_artifacts(py, path, pyfile, archive, file)
     }
 
     /// `addArtifact` is `addArtifacts`, as in PySpark.

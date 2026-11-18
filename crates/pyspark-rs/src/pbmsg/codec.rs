@@ -7,12 +7,13 @@
 
 use pyo3::prelude::*;
 
-use super::containers::MapValue;
-use super::message::{new_instance, weak, PyMessage, Slot};
-use super::pool::{FieldDesc, Kind, MapDesc};
+use super::containers::{MapValue, RepeatedComposite, RepeatedScalar};
+use super::message::{new_instance, MessageClass, PyMessage, Slot};
+use super::pool::{FieldDesc, Kind, MapDesc, MessageDesc};
 use super::scalar::Scalar;
 use super::text::upb_wire_key_order;
 use super::{grow, DecodeError};
+use crate::interrupt::ConversionBudget;
 
 fn write_varint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
@@ -55,51 +56,172 @@ fn write_value(out: &mut Vec<u8>, kind: Kind, value: &Scalar) {
     }
 }
 
-/// The bytes of `message`.
+/// The length of the varint of `value`.
+fn varint_len(value: u64) -> usize {
+    (64 - (value | 1).leading_zeros() as usize).div_ceil(7)
+}
+
+fn tag_len(number: u32, wire_type: u8) -> usize {
+    varint_len(((number as u64) << 3) | wire_type as u64)
+}
+
+/// The length of `value`, a value of a field of `kind`, as [`write_value`] writes it.
+fn value_len(kind: Kind, value: &Scalar) -> usize {
+    match (kind, value) {
+        (Kind::Double | Kind::Fixed64 | Kind::SFixed64, _) => 8,
+        (Kind::Float | Kind::Fixed32 | Kind::SFixed32, _) => 4,
+        (Kind::Int64, Scalar::I64(v)) => varint_len(*v as u64),
+        (Kind::SInt64, Scalar::I64(v)) => varint_len(((v << 1) ^ (v >> 63)) as u64),
+        (Kind::UInt64, Scalar::U64(v)) => varint_len(*v),
+        (Kind::Int32, Scalar::I32(v)) => varint_len(*v as i64 as u64),
+        (Kind::SInt32, Scalar::I32(v)) => varint_len(((v << 1) ^ (v >> 31)) as u32 as u64),
+        (Kind::UInt32, Scalar::U32(v)) => varint_len(*v as u64),
+        (Kind::Bool, _) => 1,
+        (Kind::String, Scalar::Str(v)) => varint_len(v.len() as u64) + v.len(),
+        (Kind::Bytes, Scalar::Bytes(v)) => varint_len(v.len() as u64) + v.len(),
+        (Kind::Enum, Scalar::Enum(v)) => varint_len(*v as i64 as u64),
+        // A value always has the variant of the kind of its field (see `Scalar::from_py`).
+        _ => 0,
+    }
+}
+
+/// The bytes of `message`, as upb writes a message once into one buffer: the sizes of the
+/// message and of the messages that it holds first ([`measure`]), then the bytes, each message
+/// after its tag and size.
 pub(crate) fn encode(py: Python<'_>, message: &PyMessage) -> PyResult<Vec<u8>> {
-    let mut out = Vec::new();
-    encode_into(py, message, &mut out)?;
+    let mut sizes = Vec::new();
+    let len = measure(py, message, &mut sizes)?;
+    let mut out = Vec::with_capacity(len);
+    write(py, message, &sizes, &mut 0, &mut out)?;
     Ok(out)
 }
 
-fn encode_message_field(
-    py: Python<'_>,
-    number: u32,
-    message: &Py<PyMessage>,
-    out: &mut Vec<u8>,
-) -> PyResult<()> {
-    let mut buffer = Vec::new();
-    encode_into(py, &message.bind(py).borrow(), &mut buffer)?;
-    write_tag(out, number, 2);
-    write_len_delimited(out, &buffer);
-    Ok(())
+/// The length of the bytes of `message`, as [`encode`] writes them.
+pub(crate) fn encoded_len(py: Python<'_>, message: &PyMessage) -> PyResult<usize> {
+    measure(py, message, &mut Vec::new())
 }
 
-fn encode_into(py: Python<'_>, message: &PyMessage, out: &mut Vec<u8>) -> PyResult<()> {
+/// The entries of `map`, in upb's order of the keys of its deterministic serialization.
+fn sorted_entries(map: &super::containers::MapContainer) -> Vec<&(Scalar, MapValue)> {
+    let mut entries: Vec<_> = map.entries.iter().collect();
+    entries.sort_by(|a, b| upb_wire_key_order(&a.0, &b.0));
+    entries
+}
+
+/// The length of the bytes of `message`, with the lengths of the messages and the packed fields
+/// that it holds (and of the entries of its maps), each pushed onto `sizes` in the order in which
+/// [`write`] writes them.
+fn measure(py: Python<'_>, message: &PyMessage, sizes: &mut Vec<usize>) -> PyResult<usize> {
     grow(|| {
-        for &index in &message.desc.order {
+        let mut total = 0;
+        for (index, slot) in message.slots.iter() {
             let field = &message.desc.fields[index];
-            match &message.slots[index] {
-                None => {}
-                Some(Slot::Scalar(value)) => {
+            match slot {
+                Slot::Scalar(value) => {
+                    if field.has_presence() || !value.is_default() {
+                        total += tag_len(field.number, field.kind.wire_type())
+                            + value_len(field.kind, value);
+                    }
+                }
+                Slot::Message(child) => {
+                    total += measure_field(py, field.number, &child.bind(py).borrow(), sizes)?;
+                }
+                Slot::Repeated(container) => {
+                    let container = container.bind(py).borrow();
+                    if container.items.is_empty() {
+                        continue;
+                    }
+                    let values: usize = container
+                        .items
+                        .iter()
+                        .map(|value| value_len(field.kind, value))
+                        .sum();
+                    if field.packed {
+                        sizes.push(values);
+                        total += tag_len(field.number, 2) + varint_len(values as u64) + values;
+                    } else {
+                        total += container.items.len()
+                            * tag_len(field.number, field.kind.wire_type())
+                            + values;
+                    }
+                }
+                Slot::Composite(container) => {
+                    for child in &container.bind(py).borrow().items {
+                        total += measure_field(py, field.number, &child.bind(py).borrow(), sizes)?;
+                    }
+                }
+                Slot::Map(map) => {
+                    let map = map.bind(py).borrow();
+                    let desc = &map.map;
+                    for (key, value) in sorted_entries(&map) {
+                        let at = sizes.len();
+                        sizes.push(0);
+                        let mut entry = tag_len(1, desc.key.wire_type()) + value_len(desc.key, key);
+                        entry += match value {
+                            MapValue::Scalar(value) => {
+                                tag_len(2, desc.value.wire_type()) + value_len(desc.value, value)
+                            }
+                            MapValue::Message(child) => {
+                                measure_field(py, 2, &child.bind(py).borrow(), sizes)?
+                            }
+                        };
+                        sizes[at] = entry;
+                        total += tag_len(field.number, 2) + varint_len(entry as u64) + entry;
+                    }
+                }
+            }
+        }
+        Ok(total + message.unknown.len())
+    })
+}
+
+/// The length of `child` as the field `number` of its message, its tag and size included, with
+/// its size pushed onto `sizes` before those of its own messages.
+fn measure_field(
+    py: Python<'_>,
+    number: u32,
+    child: &PyMessage,
+    sizes: &mut Vec<usize>,
+) -> PyResult<usize> {
+    let at = sizes.len();
+    sizes.push(0);
+    let len = measure(py, child, sizes)?;
+    sizes[at] = len;
+    Ok(tag_len(number, 2) + varint_len(len as u64) + len)
+}
+
+/// Write the bytes of `message`, of the sizes that [`measure`] pushed, from `next`.
+fn write(
+    py: Python<'_>,
+    message: &PyMessage,
+    sizes: &[usize],
+    next: &mut usize,
+    out: &mut Vec<u8>,
+) -> PyResult<()> {
+    grow(|| {
+        for (index, slot) in message.slots.iter() {
+            let field = &message.desc.fields[index];
+            match slot {
+                Slot::Scalar(value) => {
                     if field.has_presence() || !value.is_default() {
                         write_tag(out, field.number, field.kind.wire_type());
                         write_value(out, field.kind, value);
                     }
                 }
-                Some(Slot::Message(child)) => encode_message_field(py, field.number, child, out)?,
-                Some(Slot::Repeated(container)) => {
+                Slot::Message(child) => {
+                    write_field(py, field.number, &child.bind(py).borrow(), sizes, next, out)?
+                }
+                Slot::Repeated(container) => {
                     let container = container.bind(py).borrow();
                     if container.items.is_empty() {
                         continue;
                     }
                     if field.packed {
-                        let mut payload = Vec::new();
-                        for value in &container.items {
-                            write_value(&mut payload, field.kind, value);
-                        }
                         write_tag(out, field.number, 2);
-                        write_len_delimited(out, &payload);
+                        write_varint(out, take_size(sizes, next) as u64);
+                        for value in &container.items {
+                            write_value(out, field.kind, value);
+                        }
                     } else {
                         for value in &container.items {
                             write_tag(out, field.number, field.kind.wire_type());
@@ -107,32 +229,28 @@ fn encode_into(py: Python<'_>, message: &PyMessage, out: &mut Vec<u8>) -> PyResu
                         }
                     }
                 }
-                Some(Slot::Composite(container)) => {
+                Slot::Composite(container) => {
                     for child in &container.bind(py).borrow().items {
-                        encode_message_field(py, field.number, child, out)?;
+                        write_field(py, field.number, &child.bind(py).borrow(), sizes, next, out)?;
                     }
                 }
-                Some(Slot::Map(map)) => {
+                Slot::Map(map) => {
                     let map = map.bind(py).borrow();
                     let desc = &map.map;
-                    // In upb's order of the keys of its deterministic serialization.
-                    let mut entries: Vec<_> = map.entries.iter().collect();
-                    entries.sort_by(|a, b| upb_wire_key_order(&a.0, &b.0));
-                    for (key, value) in entries {
-                        let mut entry = Vec::new();
-                        write_tag(&mut entry, 1, desc.key.wire_type());
-                        write_value(&mut entry, desc.key, key);
+                    for (key, value) in sorted_entries(&map) {
+                        write_tag(out, field.number, 2);
+                        write_varint(out, take_size(sizes, next) as u64);
+                        write_tag(out, 1, desc.key.wire_type());
+                        write_value(out, desc.key, key);
                         match value {
                             MapValue::Scalar(value) => {
-                                write_tag(&mut entry, 2, desc.value.wire_type());
-                                write_value(&mut entry, desc.value, value);
+                                write_tag(out, 2, desc.value.wire_type());
+                                write_value(out, desc.value, value);
                             }
                             MapValue::Message(child) => {
-                                encode_message_field(py, 2, child, &mut entry)?
+                                write_field(py, 2, &child.bind(py).borrow(), sizes, next, out)?
                             }
                         }
-                        write_tag(out, field.number, 2);
-                        write_len_delimited(out, &entry);
                     }
                 }
             }
@@ -140,6 +258,39 @@ fn encode_into(py: Python<'_>, message: &PyMessage, out: &mut Vec<u8>) -> PyResu
         out.extend_from_slice(&message.unknown);
         Ok(())
     })
+}
+
+fn take_size(sizes: &[usize], next: &mut usize) -> usize {
+    let size = sizes[*next];
+    *next += 1;
+    size
+}
+
+/// Write `child` as the field `number` of its message: its tag, its size and its bytes.
+fn write_field(
+    py: Python<'_>,
+    number: u32,
+    child: &PyMessage,
+    sizes: &[usize],
+    next: &mut usize,
+    out: &mut Vec<u8>,
+) -> PyResult<()> {
+    write_tag(out, number, 2);
+    write_varint(out, take_size(sizes, next) as u64);
+    write(py, child, sizes, next, out)
+}
+
+/// Write `child` as the field `number` of its message, measured alone.
+fn encode_message_field(
+    py: Python<'_>,
+    number: u32,
+    child: &Py<PyMessage>,
+    out: &mut Vec<u8>,
+) -> PyResult<()> {
+    let child = child.bind(py).borrow();
+    let mut sizes = Vec::new();
+    measure_field(py, number, &child, &mut sizes)?;
+    write_field(py, number, &child, &sizes, &mut 0, out)
 }
 
 /// The cause of a decode error, which [`merge`] gives in upb's error of the message type.
@@ -302,7 +453,26 @@ impl<'a> Reader<'a> {
 /// failure is upb's `DecodeError` of the message type, also of a failure in a message that it
 /// holds: "Error parsing message with type 'spark.connect.Plan': Wire format was corrupt".
 pub(crate) fn merge(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> PyResult<()> {
-    merge_message(py, message, data).map_err(|err| {
+    merge_with(py, message, data, Some(&ConversionBudget::full()))
+}
+
+/// Merge `data` into `message` as [`merge`] does, without checkpoints: for a merge of the text
+/// of a message, which holds borrows of the messages that it prints.
+pub(crate) fn merge_unchecked(
+    py: Python<'_>,
+    message: &Bound<'_, PyMessage>,
+    data: &[u8],
+) -> PyResult<()> {
+    merge_with(py, message, data, None)
+}
+
+fn merge_with(
+    py: Python<'_>,
+    message: &Bound<'_, PyMessage>,
+    data: &[u8],
+    budget: Option<&ConversionBudget>,
+) -> PyResult<()> {
+    merge_message(py, message, data, budget).map_err(|err| {
         if !err.is_instance_of::<DecodeError>(py) {
             return err;
         }
@@ -316,13 +486,77 @@ pub(crate) fn merge(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8])
 }
 
 /// Merge `data` into `message`, one level of a merge, on a stack with room for it, with the
-/// cause of a failure.
-fn merge_message(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> PyResult<()> {
-    grow(|| merge_inner(py, message, data))
+/// cause of a failure. Each message merged is a step of `budget`, whose checkpoints find no
+/// borrow held: the merge borrows a message only to set one of its fields.
+fn merge_message(
+    py: Python<'_>,
+    message: &Bound<'_, PyMessage>,
+    data: &[u8],
+    budget: Option<&ConversionBudget>,
+) -> PyResult<()> {
+    grow(|| merge_inner(py, message, data, budget))
 }
 
-fn merge_inner(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> PyResult<()> {
+/// The repeated fields that the merge of a message has set values of, whose next values (which
+/// the wire format gives in a row) take the same container, and their elements the same class.
+#[derive(Default)]
+struct Repeated {
+    messages: Option<(usize, Py<RepeatedComposite>, MessageClass)>,
+    scalars: Option<(usize, Py<RepeatedScalar>)>,
+}
+
+impl Repeated {
+    fn messages(
+        &mut self,
+        py: Python<'_>,
+        message: &Bound<'_, PyMessage>,
+        field: &FieldDesc,
+    ) -> PyResult<(Py<RepeatedComposite>, &MessageClass)> {
+        if !matches!(&self.messages, Some((index, _, _)) if *index == field.index) {
+            let container = PyMessage::composite_of(message, field.index)?;
+            let class = container.bind(py).borrow().class.clone_ref(py);
+            self.messages = Some((field.index, container, class));
+        }
+        let (_, container, class) = self.messages.as_ref().expect("set above");
+        Ok((container.clone_ref(py), class))
+    }
+
+    fn scalars(
+        &mut self,
+        py: Python<'_>,
+        message: &Bound<'_, PyMessage>,
+        field: &FieldDesc,
+    ) -> PyResult<Py<RepeatedScalar>> {
+        if !matches!(&self.scalars, Some((index, _)) if *index == field.index) {
+            let container = PyMessage::repeated_scalar_of(message, field.index)?;
+            self.scalars = Some((field.index, container));
+        }
+        let (_, container) = self.scalars.as_ref().expect("set above");
+        Ok(container.clone_ref(py))
+    }
+}
+
+/// The field of the number `number` of `desc`, of a binary search of the fields in the order of
+/// their numbers, which takes less time than the hash of the number in `by_number`, as the parse
+/// of a message looks up each of its fields.
+fn field_of_number(desc: &MessageDesc, number: u32) -> Option<&FieldDesc> {
+    desc.order
+        .binary_search_by_key(&number, |&i| desc.fields[i].number)
+        .ok()
+        .map(|at| &desc.fields[desc.order[at]])
+}
+
+fn merge_inner(
+    py: Python<'_>,
+    message: &Bound<'_, PyMessage>,
+    data: &[u8],
+    budget: Option<&ConversionBudget>,
+) -> PyResult<()> {
+    if let Some(budget) = budget {
+        budget.step(py)?;
+    }
     let desc = message.borrow().desc.clone();
+    let mut repeated = Repeated::default();
     let mut reader = Reader::new(data);
     while !reader.done() {
         let start = reader.pos;
@@ -333,9 +567,16 @@ fn merge_inner(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> P
         if wire_type == 4 {
             return Err(decode_error("unexpected end of group"));
         }
-        let field = desc.by_number.get(&number).map(|&i| &desc.fields[i]);
-        let known = match field {
-            Some(field) => merge_field(py, message, field, wire_type, &mut reader)?,
+        let known = match field_of_number(&desc, number) {
+            Some(field) => merge_field(
+                py,
+                message,
+                field,
+                wire_type,
+                &mut reader,
+                &mut repeated,
+                budget,
+            )?,
             None => false,
         };
         if !known {
@@ -351,13 +592,16 @@ fn merge_inner(py: Python<'_>, message: &Bound<'_, PyMessage>, data: &[u8]) -> P
 
 /// Merge the value of `field` that `reader` is at, of `wire_type`, into `message`, and return
 /// whether the wire type is that of the field: a value of another wire type is an unknown field,
-/// as protobuf reads it.
+/// as protobuf reads it. As upb's, the message of a message field is set (or appended) before its
+/// bytes are read, so a failure in them leaves it set, of the fields read before the failure.
 fn merge_field(
     py: Python<'_>,
     message: &Bound<'_, PyMessage>,
     field: &FieldDesc,
     wire_type: u8,
     reader: &mut Reader<'_>,
+    repeated: &mut Repeated,
+    budget: Option<&ConversionBudget>,
 ) -> PyResult<bool> {
     let index = field.index;
     if let Some(map) = &field.map {
@@ -365,43 +609,67 @@ fn merge_field(
             return Ok(false);
         }
         let entry = reader.len_delimited()?;
-        merge_map_entry(py, message, field, map, entry)?;
+        merge_map_entry(py, message, field, map, entry, budget)?;
         return Ok(true);
     }
     if field.kind == Kind::Message {
         if wire_type != 2 {
             return Ok(false);
         }
-        let bytes = reader.len_delimited()?;
-        if field.repeated {
-            let child = new_instance(py, &field.type_name)?;
-            merge_message(py, &child, bytes)?;
-            let container = message
+        let child = if field.repeated {
+            let (container, class) = repeated.messages(py, message, field)?;
+            let child = class.new_message(py)?;
+            container
+                .bind(py)
                 .borrow_mut()
-                .composite(py, index, Some(weak(message)?))?;
-            container.bind(py).borrow_mut().items.push(child.unbind());
+                .items
+                .push(child.clone().unbind());
+            child
         } else {
-            let child = message.borrow_mut().child_for_merge(py, index)?;
-            merge_message(py, &child, bytes)?;
-        }
+            message.borrow_mut().child_for_merge(py, index)?
+        };
+        let bytes = reader.len_delimited()?;
+        merge_message(py, &child, bytes, budget)?;
         return Ok(true);
     }
     if field.repeated {
-        let mut values = Vec::new();
         if wire_type == 2 && field.kind.packable() {
-            let mut packed = Reader::new(reader.len_delimited()?);
+            let payload = reader.len_delimited()?;
+            // Values of a fixed width are read at once, of a payload of a whole number of them
+            // (else corrupt, as upb's, which then sets none); varints in turn.
+            let width = match field.kind.wire_type() {
+                1 => 8,
+                5 => 4,
+                _ => 0,
+            };
+            if width > 0 {
+                if payload.len() % width != 0 {
+                    return Err(decode_error("truncated packed field"));
+                }
+                let container = repeated.scalars(py, message, field)?;
+                let mut c = container.bind(py).borrow_mut();
+                c.items.reserve(payload.len() / width);
+                let mut packed = Reader::new(payload);
+                while !packed.done() {
+                    let value = packed.value(field.kind)?;
+                    c.items.push(value);
+                }
+                return Ok(true);
+            }
+            let mut packed = Reader::new(payload);
+            let mut values = Vec::new();
             while !packed.done() {
                 values.push(packed.value(field.kind)?);
             }
+            let container = repeated.scalars(py, message, field)?;
+            container.bind(py).borrow_mut().items.extend(values);
         } else if wire_type == field.kind.wire_type() {
-            values.push(reader.value(field.kind)?);
+            let value = reader.value(field.kind)?;
+            let container = repeated.scalars(py, message, field)?;
+            container.bind(py).borrow_mut().items.push(value);
         } else {
             return Ok(false);
         }
-        let container = message
-            .borrow_mut()
-            .repeated_scalar(py, index, Some(weak(message)?))?;
-        container.bind(py).borrow_mut().items.extend(values);
         return Ok(true);
     }
     if wire_type != field.kind.wire_type() {
@@ -424,6 +692,7 @@ fn merge_map_entry(
     field: &FieldDesc,
     map: &MapDesc,
     entry: &[u8],
+    budget: Option<&ConversionBudget>,
 ) -> PyResult<()> {
     let mut key = Scalar::default_of(map.key);
     let mut scalar = None;
@@ -441,7 +710,7 @@ fn merge_map_entry(
                 if child.is_none() {
                     child = Some(new_instance(py, &map.value_type)?);
                 }
-                merge_message(py, child.as_ref().expect("made above"), bytes)?;
+                merge_message(py, child.as_ref().expect("made above"), bytes, budget)?;
             }
             2 if map.value != Kind::Message && wire_type == map.value.wire_type() => {
                 scalar = Some(reader.value(map.value)?);
@@ -481,9 +750,7 @@ fn merge_map_entry(
     } else {
         MapValue::Scalar(scalar.unwrap_or_else(|| Scalar::default_of(map.value)))
     };
-    let container = message
-        .borrow_mut()
-        .map(py, field.index, Some(weak(message)?))?;
+    let container = PyMessage::map_of_field(message, field.index)?;
     // The value that the entry replaces is dropped once the map is no longer borrowed.
     let _replaced = container.bind(py).borrow_mut().insert(key, value);
     Ok(())

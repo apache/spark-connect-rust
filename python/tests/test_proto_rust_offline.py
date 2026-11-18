@@ -461,6 +461,57 @@ def test_map_entries_of_fields_of_no_field_of_their_type_are_unknown_fields_as_u
         assert parsed(ours, "spark.connect.SQL", "named_arguments", data) == expected, entry.hex()
 
 
+def test_messages_that_fail_to_parse_keep_what_they_read_as_upbs(upb):
+    # As upb's: a parse that fails keeps what it read before the failure. A message of a message
+    # field is set, or appended, before its bytes are read, so a failure in them, or a length past
+    # the end of the data, leaves it set of the fields read before; a map entry is set once it is
+    # read. A packed field of a fixed width whose bytes are not a whole number of values keeps
+    # none of them. MergeFromString keeps the fields that the message had, and ParseFromString
+    # clears them first.
+    def parsed(cls, full_name, before, data, method):
+        def parse():
+            message = cls(full_name)()
+            message.MergeFromString(before)
+            try:
+                getattr(message, method)(data)
+            except Exception as e:  # noqa: BLE001
+                failure = (type(e).__name__, str(e))
+            else:
+                failure = None
+            fields = [field.name for field, _ in message.ListFields()]
+            return failure, fields, message.SerializeToString(deterministic=True), str(message)
+
+        return _outcome(parse)
+
+    expression = upb("spark.connect.Expression")(literal={"integer": 1}).SerializeToString()
+    common = upb("spark.connect.Relation")(common={"plan_id": 7}).SerializeToString()
+    sql = upb("spark.connect.Relation")(sql={"query": "q"}).SerializeToString()
+    cut = _tag(6, 0) + _varint(5) + b"\xff"  # Literal.integer, then a tag cut short
+    function = "spark.connect.Expression.UnresolvedFunction"
+    cases = [
+        ("spark.connect.Relation", common, sql + b"\xff"),
+        ("spark.connect.Relation", common, sql[:-1]),
+        ("spark.connect.Expression", b"", _field(1, cut)),  # of a set message
+        (function, b"", _field(2, expression) + _field(2, _field(1, cut))),  # of an element
+        ("spark.connect.SQL", b"", _field(4, _field(1, b"a") + _field(2, _field(1, cut)))),
+        ("spark.connect.Expression", b"", _tag(1, 2) + _varint(9) + _tag(6, 0)),
+        (function, b"", _field(2, expression) + _tag(2, 2) + _varint(9) + b"\x0a"),
+        ("spark.connect.SQL", b"", _tag(4, 2) + _varint(9) + b"\x0a"),
+        ("spark.connect.Strings", b"", _field(1, b"a") + _tag(1, 2) + _varint(5) + b"ab"),
+        ("spark.connect.Ints", _field(1, b"\x07"), _tag(1, 2) + _varint(9) + b"\x01"),
+        ("spark.connect.Doubles", _field(1, bytes(8)), _field(1, bytes(12))),
+    ]
+    for full_name, before, data in cases:
+        for method in ("MergeFromString", "ParseFromString"):
+            expected = parsed(upb, full_name, before, data, method)
+            assert expected[1][0] is not None, (full_name, data.hex())
+            assert parsed(ours, full_name, before, data, method) == expected, (
+                full_name,
+                data.hex(),
+                method,
+            )
+
+
 _UNKNOWN = _tag(999, 0) + _varint(1)
 
 
@@ -721,6 +772,71 @@ def _expression(cls):
     return message, message
 
 
+# Values of each type of a repeated scalar field, by the type of the field.
+_VALUES_OF_TYPES = {
+    1: [1.5, float("nan")],  # double
+    2: [1.5, -0.0],  # float
+    3: [1, -(2**62)],  # int64
+    4: [1, 2**64 - 1],  # uint64
+    5: [1, -2],  # int32
+    6: [1, 2**64 - 1],  # fixed64
+    7: [1, 2**32 - 1],  # fixed32
+    8: [True, False],  # bool
+    9: ["a", "b\u00e9"],  # string
+    12: [b"a", b"\xff"],  # bytes
+    13: [1, 2**32 - 1],  # uint32
+    14: [0, 1],  # enum
+    15: [1, -2],  # sfixed32
+    16: [1, -(2**62)],  # sfixed64
+    17: [1, -2],  # sint32
+    18: [1, -(2**62)],  # sint64
+}
+
+
+@pytest.mark.filterwarnings("ignore:invalid value encountered in cast:RuntimeWarning")
+def test_arrays_of_repeated_scalar_fields_are_upbs(upb):
+    # As upb's `__array__`: a new numpy array of the values, of the type of the field (int32 of an
+    # enum, S of bytes and str of strings), or of `numpy.dtype(dtype)` when a dtype is given, None
+    # too (float64), so that `numpy.asarray` of a field of floats is of float32, and its errors.
+    np = pytest.importorskip("numpy")
+    calls = [
+        ("asarray", lambda c: np.asarray(c)),
+        ("array int8", lambda c: np.array(c, dtype=np.int8)),
+        ("__array__()", lambda c: c.__array__()),
+        ("__array__(None)", lambda c: c.__array__(None)),
+        ("__array__(f4)", lambda c: c.__array__("f4")),
+        ("__array__(dtype, copy)", lambda c: c.__array__(dtype=np.int64, copy=False)),
+        ("__array__(None, True)", lambda c: c.__array__(None, True)),
+        ("__array__(str)", lambda c: c.__array__(str)),
+        ("__array__(bool)", lambda c: c.__array__(bool)),
+        ("__array__(1, 2, 3)", lambda c: c.__array__(1, 2, 3)),
+        ("__array__(nope)", lambda c: c.__array__(nope=1)),
+        ("__array__(True)", lambda c: c.__array__(True)),
+    ]
+
+    def array(fn, container):
+        values = fn(container)
+        is_new = not np.shares_memory(values, fn(container))
+        return type(values).__name__, values.dtype.str, values.shape, values.tolist(), is_new
+
+    found = {}
+    for full_name, cls in sorted(_rust._CLASSES.items()):
+        message = cls()
+        for field in cls.DESCRIPTOR.fields:
+            container = type(getattr(message, field.name)).__name__
+            if field.type in _VALUES_OF_TYPES and container == "RepeatedScalarContainer":
+                found.setdefault(field.type, (full_name, field.name))
+    assert {1, 2, 3, 5, 8, 9} <= set(found), found  # of the arrays of Literal.SpecializedArray
+    for field_type, (full_name, name) in sorted(found.items()):
+        for values in (_VALUES_OF_TYPES[field_type], []):
+            real, mine = getattr(upb(full_name)(), name), getattr(ours(full_name)(), name)
+            real.extend(values)
+            mine.extend(values)
+            for label, fn in calls:
+                expected = _outcome(lambda: array(fn, real))
+                assert _outcome(lambda: array(fn, mine)) == expected, (full_name, name, label)
+
+
 _SEQUENCE_CASES = [
     ("abc", lambda c: [isinstance(c, t) for t in (abc.Sequence, abc.MutableSequence, abc.Mapping)]),
     ("len", len),
@@ -781,6 +897,10 @@ _MESSAGE_SEQUENCE_CASES = [
     ('setitem ["a"]', lambda c: c.__setitem__("a", c[1])),
     ("setitem 9", lambda c: c.__setitem__(9, c[1])),
     ("remove", lambda c: (c.remove(c[1]), len(c))),
+    # As upb's: append gives the message that it appends, a copy of its argument.
+    ("append returns", lambda c: (c.append(c[0]), len(c))),
+    ("append returns the element", lambda c: (c.append(c[0]) is c[-1], c.append(c[0]) is c[0])),
+    ("add positional", lambda c: c.add(1)),
 ]
 
 _MAP_CASES = [
@@ -804,6 +924,13 @@ _MAP_CASES = [
     ("MergeFrom dict", lambda c: c.MergeFrom({})),
     ("MergeFrom pairs", lambda c: c.MergeFrom([("m", "n")])),
     ("GetEntryClass", lambda c: c.GetEntryClass().DESCRIPTOR.full_name),
+    # As upb's: a map of messages (a MessageMapContainer) has `get_or_create`, the message of the
+    # key, which it inserts if it is missing, and a map of scalars has none.
+    ("get_or_create", lambda c: (c.get_or_create("zz"), len(c))),
+    ("get_or_create present", lambda c: (c.get_or_create("a") is c["a"], len(c))),
+    ("get_or_create 1", lambda c: c.get_or_create(1)),
+    ("get_or_create no key", lambda c: c.get_or_create()),
+    ("get_or_create keyword", lambda c: c.get_or_create(key="a")),
 ]
 
 _MESSAGE_CASES = [
@@ -833,6 +960,26 @@ _MESSAGE_CASES = [
     ("__getstate__", lambda m: m.__getstate__()),
     ("__setstate__", lambda m: (m.__setstate__({"serialized": b""}), m)[1]),
     ("dir", lambda m: "unresolved_function" in dir(m) and "HasField" in dir(m)),
+    # As upb's: a message that declares no extension ranges has no `Extensions` (an
+    # AttributeError of no message), which `dir` does not list.
+    ("Extensions", lambda m: m.Extensions),
+    ("dir Extensions", lambda m: ("Extensions" in dir(m), "Extensions" in dir(type(m)))),
+    # As upb's: the names of fields of HasField, ClearField and WhichOneof (and `in`) are str or
+    # bytes, of UTF-8.
+    ("HasField bytes", lambda m: (m.HasField(b"unresolved_function"), m.HasField(b"literal"))),
+    ("HasField bytes of a oneof", lambda m: m.HasField(b"expr_type")),
+    ("HasField bytes of no field", lambda m: m.HasField(b"nope")),
+    ("HasField bytes not UTF-8", lambda m: m.HasField(b"\xff")),
+    ("HasField bytearray", lambda m: m.HasField(bytearray(b"literal"))),
+    ("WhichOneof bytes", lambda m: m.WhichOneof(b"expr_type")),
+    ("WhichOneof bytes of a field", lambda m: m.WhichOneof(b"literal")),
+    ("ClearField bytes", lambda m: (m.ClearField(b"unresolved_function"), m.WhichOneof("expr_type"))),
+    ("ClearField bytes of a oneof", lambda m: (m.ClearField(b"expr_type"), m.ListFields())),
+    ("in bytes", lambda m: (b"unresolved_function" in m, b"literal" in m)),
+    # As upb's: the classes have the number of each field, and a message has the attributes of its
+    # class and of the metaclass of its class.
+    ("FIELD_NUMBER", lambda m: (type(m).LITERAL_FIELD_NUMBER, m.UNRESOLVED_FUNCTION_FIELD_NUMBER)),
+    ("attributes of the metaclass", lambda m: (m.__name__, m.__qualname__, m.__module__)),
     ("hash", hash),
     ("== None", lambda m: m == None),  # noqa: E711
     ("deepcopy", lambda m: copy.deepcopy(m) == m),
@@ -1250,6 +1397,94 @@ def test_deep_messages_discard_and_build_on_a_small_stack():
     )
     assert result.returncode == 0, result.stderr[-3000:]
     assert result.stdout.strip() == "[True, True, True]", result.stderr[-3000:]
+
+
+# The messages of a large message of the tests of the checkpoints of its operations: steps enough
+# for another thread to wait for the GIL at the checkpoints, every 1,024 messages, for a few tens
+# of milliseconds at least.
+_LARGE = 262144
+
+
+class _References:
+    """Whether an operation is in progress, by `test` of the references to `target` beyond those
+    that it has when armed, right before the operation."""
+
+    def __init__(self, target, test):
+        self.target = target
+        self.test = test
+        self.base = None
+
+    def arm(self):
+        self.base = sys.getrefcount(self.target)
+
+    def __call__(self):
+        return self.test(sys.getrefcount(self.target) - self.base)
+
+
+def _large_operation(operation):
+    """An operation of `operation` on a message of `_LARGE` messages, what it raises, and whether
+    it is in progress, of the references that it holds while it runs."""
+    literal_class = ours("spark.connect.Expression.Literal")
+    element = _field(literal_class.Array.ELEMENTS_FIELD_NUMBER, literal_class(string="w").SerializeToString())
+    data = _field(literal_class.ARRAY_FIELD_NUMBER, element * _LARGE)
+    if operation == "parse":
+        # The data ends with a corrupt tag, so that the parse fails once it has made its messages,
+        # which it releases before it returns, running no Python code: each message holds a
+        # reference to its class until then.
+        corrupt = data + b"\xff"
+        in_progress = _References(literal_class, lambda extra: extra >= 1024)
+        return lambda: literal_class.FromString(corrupt), _rust.DecodeError, in_progress
+    literal = literal_class.FromString(data)
+    operations = {
+        "constructor": lambda: ours("spark.connect.Fetch.Method.Args")(param=literal),
+        "CopyFrom": lambda: literal_class().CopyFrom(literal),
+        "MergeFrom": lambda: literal_class().MergeFrom(literal),
+        "deepcopy": lambda: copy.deepcopy(literal),
+    }
+    # The copy holds a reference to each message that it copies until it has copied it: of the
+    # last one, until it ends.
+    in_progress = _References(literal.array.elements[-1], lambda extra: extra == 1)
+    return operations[operation], None, in_progress
+
+
+@pytest.mark.parametrize("operation", ["parse", "constructor", "CopyFrom", "MergeFrom", "deepcopy"])
+@pytest.mark.parametrize("cancel", [False, True])
+def test_python_thread_runs_before_operations_on_large_messages_finish(operation, cancel):
+    # The parse, the copies and the merges of a message of many messages, which take longer than
+    # upb's, let another thread take the GIL every 1,024 messages, and a signal interrupt them,
+    # so that the GIL is held as long as upb's at most, for a thousand messages; upb holds it
+    # until the operation ends. The other thread reads the operation in progress from the
+    # references that it holds; a signal raises KeyboardInterrupt in it.
+    from _local_data_conversion_probe import LocalDataConversionProbe
+
+    action, failure, in_progress = _large_operation(operation)
+    # The other thread takes the GIL at the checkpoints that the operating system schedules it
+    # at: an operation in which it read none is run again, a few times. With no checkpoint, it
+    # reads none.
+    for _ in range(5):
+        in_progress.arm()
+        probe = LocalDataConversionProbe(in_progress, in_progress, cancel=cancel)
+        interrupted = False
+        with probe:
+            try:
+                if failure is None:
+                    probe.convert(action)
+                else:
+                    with pytest.raises(failure):
+                        probe.convert(action)
+            except KeyboardInterrupt:
+                interrupted = True
+        assert not probe.failures, probe.failures
+        if "progress" in probe.observed:
+            break
+    progress = probe.observed.get("progress")
+    assert progress is not None, probe.observed
+    assert progress["captured_at"] < probe.observed["conversion_ended_at"], probe.observed
+    assert interrupted is cancel, probe.observed
+    if cancel:
+        assert probe.observed.get("signal_in_conversion"), probe.observed
+    # The messages take the next operation.
+    assert ours("spark.connect.Expression.Literal").FromString(b"\x6a\x01w").string == "w"
 
 
 _AWKWARD_VALUES = [
@@ -1976,6 +2211,34 @@ def test_extensions_of_the_messages_are_upbs(upb):
     assert ("Extensions" in dir(type(mine))) is ("Extensions" in dir(type(real))) is True
 
 
+def test_pickles_of_nested_messages_load_as_upbs(upb):
+    # As upb's: a pickle of a message of a nested type made by upb, which protobuf reduces to its
+    # `_InternalConstructMessage` of the full name of the type, a class of protobuf's default
+    # symbol database, loads where protobuf is installed: the runtime registers its classes in
+    # the database of the files that it adds to protobuf's default pool, so it loads as a message
+    # of the runtime. A pickle of the runtime's, of its class (by its module and qualified name,
+    # those of the class of upb), loads of its class.
+    import pickle
+
+    from google.protobuf import symbol_database
+
+    for full_name, fields in [
+        ("spark.connect.Expression.Literal", {"string": "x"}),
+        ("spark.connect.Expression.UnresolvedFunction", {"function_name": "f"}),
+    ]:
+        loaded = pickle.loads(pickle.dumps(upb(full_name)(**fields)))
+        assert type(loaded) is ours(full_name), full_name
+        assert loaded.SerializeToString() == ours(full_name)(**fields).SerializeToString()
+        assert symbol_database.Default().GetSymbol(full_name) is ours(full_name)
+    for full_name, fields in [
+        ("spark.connect.Expression.Literal", {"string": "x"}),
+        ("spark.connect.Relation", {"sql": {"query": "q"}}),
+    ]:
+        mine = ours(full_name)(**fields)
+        loaded = pickle.loads(pickle.dumps(mine))
+        assert type(loaded) is ours(full_name) and loaded == mine, full_name
+
+
 def _protobuf_cases(cls):
     """Messages of the maps, Anys of a type of the protos and Timestamps that protobuf's
     json_format and text_format print and parse."""
@@ -2142,6 +2405,33 @@ def test_generated_modules_of_plugins_have_the_classes_of_the_runtime(plugin):
     # builds it of the file of the pool: the classes of the package.
     module = _build_generated_module(_protobuf_file("spark/connect/example_plugins.proto"))
     assert module["ExamplePluginRelation"] is ours("spark.connect.ExamplePluginRelation")
+
+
+def test_installs_register_the_classes_of_the_protos_only_in_protobufs_database(plugin):
+    # The runtime registers the classes of its own files in protobuf's symbol database, where
+    # PySpark's pickles of nested messages load (Expression.Literal), but not those that it made
+    # for a plugin's module: protobuf's lookups of a plugin's file give protobuf's classes, also
+    # when the package installs again, of a file whose class the database lacks too.
+    from google.protobuf import symbol_database
+
+    plugin_pb2, _, _ = plugin
+    database = symbol_database.Default()
+    descriptor = plugin_pb2._DELETEFROMTABLE
+    kept = database._classes.pop(descriptor)
+    try:
+        _rust._add_files_to_protobuf()
+        assert descriptor not in database._classes
+    finally:
+        database._classes[descriptor] = kept
+    assert database.GetSymbol("thirdparty.DeleteFromTable") is kept
+    assert not issubclass(kept, _pyspark.ProtoMessage)
+    literal = "spark.connect.Expression.Literal"
+    assert database.GetSymbol(literal) is ours(literal)
+    assert all(
+        descriptor.file.name in _rust._EMBEDDED_FILES
+        for descriptor, cls in database._classes.items()
+        if issubclass(cls, _pyspark.ProtoMessage)
+    )
 
 
 def test_messages_of_plugins_take_the_messages_of_the_package_as_upbs(plugin):
@@ -2349,6 +2639,71 @@ def test_files_that_the_runtime_does_not_hold_keep_protobufs_classes(upb):
         with pytest.raises(KeyError):
             _pyspark._proto_message_descriptor(cls.DESCRIPTOR.full_name)
     assert not issubclass(upb("spark.connect.Relation"), _pyspark.ProtoMessage)
+
+
+def test_classes_of_a_file_built_before_the_hook_are_of_its_generated_module(upb):
+    # A file that a plugin's file imports and whose generated module protobuf's builder built
+    # before the hook was installed, as Delta Lake's delta/connect/proto/__init__.py imports
+    # base_pb2 (of delta/connect/base.proto) before the modules that import the protos of Spark
+    # Connect: the runtime's classes of its messages are of that module, as protobuf's are
+    # (delta.connect.proto.base_pb2), not of protoc's name of the file's path.
+    import types
+
+    from google.protobuf.internal import builder
+
+    early = _add_plugin_file("tests/before/early.proto", [], [])
+    late = _add_plugin_file(
+        "tests/before/late.proto",
+        ["spark/connect/relations.proto", early.name],
+        [("input", ".spark.connect.Relation"), ("early", ".tests.early.M")],
+    )
+    module = types.ModuleType("tests_before.generated.early_pb2")
+    namespace = vars(module)
+    namespace["DESCRIPTOR"] = early
+    builder.BuildMessageAndEnumDescriptors(early, namespace)
+    # As the module of the file, which protobuf's own builder built before the hook.
+    builder.BuildTopDescriptorsAndMessages._protobuf_build(early, module.__name__, namespace)
+    assert namespace["M"].__module__ == module.__name__
+    sys.modules[module.__name__] = module
+    try:
+        built = _build_generated_module(late)
+    finally:
+        del sys.modules[module.__name__]
+    assert issubclass(built["M"], _pyspark.ProtoMessage)
+    assert not issubclass(namespace["M"], _pyspark.ProtoMessage)
+    held = type(built["M"]().early)
+    assert held is ours("tests.early.M")
+    assert (held.__module__, held.__qualname__) == (module.__name__, "M")
+
+
+def test_a_protobuf_whose_builder_lacks_the_hooked_function_imports_the_package(upb):
+    # The hook wraps a function of protobuf's internal builder. Where a protobuf's builder lacks
+    # it, as where there is no builder (protobuf before 3.20), the package imports without the
+    # hook, of the classes of the runtime.
+    script = textwrap.dedent(
+        """
+        from google.protobuf.internal import builder
+
+        del builder.BuildTopDescriptorsAndMessages
+        from pyspark import _pyspark
+        import pyspark.sql.connect.proto as proto
+
+        assert issubclass(proto.Relation, _pyspark.ProtoMessage)
+        assert proto.Relation(sql={"query": "q"}).sql.query == "q"
+        assert not hasattr(builder, "BuildTopDescriptorsAndMessages")
+        print("imported")
+        """
+    )
+    root = pathlib.Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        cwd=str(root),
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.split() == ["imported"]
 
 
 def test_protobufs_own_classes_of_a_plugins_file_take_the_messages_through_bytes(upb):

@@ -75,7 +75,7 @@ impl Writer<'_> {
                 .desc
                 .by_name
                 .get(name)
-                .and_then(|&i| match &message.slots[i] {
+                .and_then(|&i| match message.slots.get(i) {
                     Some(Slot::Scalar(v)) => Some(v.clone()),
                     _ => None,
                 })
@@ -94,7 +94,7 @@ impl Writer<'_> {
             _ => Vec::new(),
         };
         let packed = new_instance(self.py, type_name)?;
-        if codec::merge(self.py, &packed, &bytes).is_err() {
+        if codec::merge_unchecked(self.py, &packed, &bytes).is_err() {
             return Ok(false);
         }
         start_line(out, self.one_line, indent);
@@ -115,11 +115,10 @@ impl Writer<'_> {
             if self.any(message, indent, out)? {
                 return Ok(());
             }
-            for &index in &message.desc.order {
+            for (index, slot) in message.slots.iter() {
                 let field = &message.desc.fields[index];
-                match &message.slots[index] {
-                    None => {}
-                    Some(Slot::Scalar(value)) => {
+                match slot {
+                    Slot::Scalar(value) => {
                         if field.has_presence() || !value.is_default() {
                             self.scalar(
                                 &field.name,
@@ -131,10 +130,10 @@ impl Writer<'_> {
                             )?;
                         }
                     }
-                    Some(Slot::Message(child)) => {
+                    Slot::Message(child) => {
                         self.message_field(&field.name, &child.bind(py).borrow(), indent, out)?
                     }
-                    Some(Slot::Repeated(container)) => {
+                    Slot::Repeated(container) => {
                         for value in &container.bind(py).borrow().items {
                             self.scalar(
                                 &field.name,
@@ -146,14 +145,12 @@ impl Writer<'_> {
                             )?;
                         }
                     }
-                    Some(Slot::Composite(container)) => {
+                    Slot::Composite(container) => {
                         for child in &container.bind(py).borrow().items {
                             self.message_field(&field.name, &child.bind(py).borrow(), indent, out)?;
                         }
                     }
-                    Some(Slot::Map(map)) => {
-                        self.map(&field.name, &map.bind(py).borrow(), indent, out)?
-                    }
+                    Slot::Map(map) => self.map(&field.name, &map.bind(py).borrow(), indent, out)?,
                 }
             }
             Ok(())

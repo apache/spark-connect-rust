@@ -162,6 +162,95 @@ fn session_runtime_helpers() {
     let _ = cs.range(1);
 }
 
+/// The plans, the analyses and the configuration requests built outside the core, as PySpark's
+/// `SparkConnectClient.to_table`, `schema` and `config` send them: of the session, whose
+/// responses are those of the server, with the information of the execution, whether its
+/// executions are reattachable or not, under its retry policy, which its clones share and a new
+/// session has the default of; and the artifacts that it caches, of their hashes.
+#[test]
+fn plans_analyses_and_configurations_built_outside_the_core() {
+    use spark_connect_core::RetryPolicy;
+    use spark_connect_proto as proto;
+
+    if !should_run() {
+        return;
+    }
+    let spark = session();
+    let range = proto::Relation {
+        common: None,
+        rel_type: Some(proto::relation::RelType::Range(proto::Range {
+            start: Some(0),
+            end: 3,
+            step: 1,
+            ..Default::default()
+        })),
+    };
+    let plan = proto::Plan {
+        op_type: Some(proto::plan::OpType::Root(range)),
+    };
+    let analysis = proto::AnalyzePlanRequest {
+        analyze: Some(proto::analyze_plan_request::Analyze::Schema(
+            proto::analyze_plan_request::Schema {
+                plan: Some(plan.clone()),
+            },
+        )),
+        ..Default::default()
+    };
+    let response = spark.analyze_plan_proto(analysis).expect("analyze");
+    assert_eq!(response.session_id, spark.session_id());
+    assert!(matches!(
+        response.result,
+        Some(proto::analyze_plan_response::Result::Schema(_))
+    ));
+    let get = proto::config_request::Operation {
+        op_type: Some(proto::config_request::operation::OpType::Get(
+            proto::config_request::Get {
+                keys: vec!["spark.sql.session.timeZone".to_string()],
+            },
+        )),
+    };
+    let request = proto::ConfigRequest {
+        operation: Some(get),
+        ..Default::default()
+    };
+    let response = spark.config_proto(request).expect("config");
+    assert_eq!(response.pairs[0].key, "spark.sql.session.timeZone");
+
+    for reattachable in [false, true] {
+        spark.set_reattachable_execute(reattachable);
+        assert_eq!(spark.reattachable_execute(), reattachable);
+        let mut execution = spark
+            .execute_plan_proto(plan.clone(), Vec::new(), true)
+            .expect("execute");
+        let mut rows = 0;
+        while let Some(response) = execution.next_response().expect("response") {
+            if let Some(proto::execute_plan_response::ResponseType::ArrowBatch(batch)) =
+                &response.response_type
+            {
+                rows += batch.row_count;
+            }
+        }
+        assert_eq!(rows, 3);
+        assert_eq!(
+            execution.execution_info().operation_id.as_deref(),
+            Some(execution.operation_id())
+        );
+    }
+
+    spark.set_retry_policy(RetryPolicy::no_retries());
+    assert_eq!(spark.clone().retry_policy().max_retries, Some(0));
+    assert_eq!(
+        spark.new_session().retry_policy().max_retries,
+        RetryPolicy::default().max_retries
+    );
+    assert_eq!(spark.token_parameter(), None);
+    let hashes = spark
+        .cache_artifacts(vec![b"e2e-cached".to_vec(), b"e2e-cached".to_vec()])
+        .expect("cache artifacts");
+    assert_eq!(hashes.len(), 2);
+    assert_eq!(hashes[0], hashes[1]);
+}
+
 /// `clone_session` clones the session on the server, as PySpark's `cloneSession`: the clone,
 /// of a session id of its own or the one given, has the configurations and the temporary
 /// views of the session, and changes to either do not show in the other.

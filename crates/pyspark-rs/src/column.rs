@@ -47,15 +47,15 @@ pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<Strin
 pub struct PyColumn {
     pub(crate) column: Column,
     /// Set once the value is written, so that `__traverse__` reads nothing else of an object that
-    /// the garbage collector traverses while it is created (see `PyDataFrame`).
-    gc_ready: std::sync::atomic::AtomicBool,
+    /// the garbage collector traverses while it is created (see [`crate::gc::GcReady`]).
+    gc_ready: crate::gc::GcReady,
 }
 
 impl PyColumn {
     pub fn new(column: Column) -> Self {
         PyColumn {
             column,
-            gc_ready: std::sync::atomic::AtomicBool::new(true),
+            gc_ready: crate::gc::GcReady::new(),
         }
     }
 }
@@ -768,7 +768,7 @@ impl PyColumn {
     /// to the collector, so that a reference cycle through a function and the Column is freed, as
     /// PySpark frees it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if !self.gc_ready.load(std::sync::atomic::Ordering::Relaxed) {
+        if !self.gc_ready.get() {
             return Ok(());
         }
         crate::udf_command::visit_pickler_objects(

@@ -791,6 +791,126 @@ def test_create_dataframe_of_rows_of_no_length_checks_the_schema_as_pysparks():
             spark.createDataFrame(iter([]), T.AtomicType())
 
 
+def _same_named_classes():
+    """Two classes of one name, so of one `typeName` and JSON, `x`, whose `simpleString` differ."""
+
+    def make(n):
+        class XType(T.DataType):
+            def simpleString(self):
+                return f"x{n}"
+
+        return XType
+
+    return make(1), make(2)
+
+
+class _ScaleUDT(T.UserDefinedType):
+    """A UserDefinedType of a parameter, whose JSON does not hold it."""
+
+    def __init__(self, scale):
+        self.scale = scale
+
+    @classmethod
+    def sqlType(cls):
+        return T.DoubleType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return obj * self.scale
+
+    def deserialize(self, datum):
+        return datum / self.scale
+
+    def simpleString(self):
+        return f"scale{self.scale}"
+
+
+def test_nested_types_of_the_same_json_compare_by_their_objects_as_pysparks():
+    # As official PySpark's `__dict__` comparison, which compares the type objects that a struct,
+    # an array, a map or a field holds: two types of the same JSON, of one class and another
+    # `__dict__`, of two classes of one name, or of a UserDefinedType of other parameters, make
+    # types that are not equal, where the drop-in compared them by their JSON. Of the same
+    # objects, or of equal ones, the types are equal.
+    X1, X2 = _same_named_classes()
+    tagged, other = T.AtomicType(), T.AtomicType()
+    tagged.tag, other.tag = 1, 2
+    for a, b in [(tagged, other), (X1(), X2()), (_ScaleUDT(2), _ScaleUDT(10))]:
+        assert a.json() == b.json() and a != b
+        for wrap in (
+            T.ArrayType,
+            lambda t: T.MapType(T.StringType(), t),
+            lambda t: T.MapType(t, T.StringType()),
+            lambda t: T.StructField("f", t),
+            lambda t: T.StructType([T.StructField("f", t)]),
+            lambda t: T.StructType([T.StructField("f", T.ArrayType(T.MapType(T.StringType(), t)))]),
+        ):
+            assert wrap(a) != wrap(b) and not wrap(a) == wrap(b)
+            assert wrap(a) == wrap(a) and wrap(b) == wrap(b)
+            assert hash(wrap(a)) == hash(wrap(b))
+    same = T.AtomicType()
+    same.tag = 1
+    assert T.ArrayType(tagged) == T.ArrayType(same)
+    assert T.StructType([T.StructField("a", _ScaleUDT(2)), T.StructField("b", _ScaleUDT(10))]) != (
+        T.StructType([T.StructField("a", _ScaleUDT(10)), T.StructField("b", _ScaleUDT(2))])
+    )
+
+
+def test_nested_types_of_the_same_json_render_by_their_objects_as_pysparks():
+    # As official PySpark, which names each type that a struct, an array or a map holds by its
+    # object: its `simpleString`, its `typeName` in the tree string, and its object in a copy of
+    # `toNullable`, which keeps the types that are not arrays, maps nor structs as they are. The
+    # drop-in named them by the last object of their JSON that a type was made of.
+    X1, X2 = _same_named_classes()
+    x1, x2 = X1(), X2()
+    struct = T.StructType([T.StructField("a", x1), T.StructField("b", x2, False)])
+    assert struct.simpleString() == "struct<a:x1,b:x2>"
+    assert T.MapType(x1, T.ArrayType(x2)).simpleString() == "map<x1,array<x2>>"
+    assert T.StructType([T.StructField("a", x1)]).add("b", x2).simpleString() == "struct<a:x1,b:x2>"
+    nullable = struct.toNullable()
+    assert [f.dataType for f in nullable.fields] == [x1, x2]
+    assert nullable.fields[0].dataType is x1 and nullable.fields[1].dataType is x2
+    assert [f.nullable for f in nullable.fields] == [True, True]
+    assert nullable.simpleString() == "struct<a:x1,b:x2>"
+    array = T.ArrayType(T.MapType(T.StringType(), x1), False).toNullable()
+    assert array.elementType.valueType is x1 and array.containsNull is True
+    assert array.elementType.valueContainsNull is True
+    udts = T.StructType([T.StructField("a", _ScaleUDT(2)), T.StructField("b", _ScaleUDT(10))])
+    assert udts.simpleString() == "struct<a:scale2,b:scale10>"
+    assert [f.dataType.scale for f in udts.toNullable().fields] == [2, 10]
+    assert udts.toInternal((1.0, 1.0)) == (2.0, 10.0)
+
+    class Alpha(T.AtomicType):
+        @classmethod
+        def typeName(cls):
+            return "alpha"
+
+        def jsonValue(self):
+            return "same"
+
+    class Beta(T.AtomicType):
+        @classmethod
+        def typeName(cls):
+            return "beta"
+
+        def jsonValue(self):
+            return "same"
+
+    tree = T.StructType([
+        T.StructField("a", Alpha()),
+        T.StructField("b", T.ArrayType(Beta())),
+        T.StructField("c", T.MapType(Alpha(), Beta())),
+    ])
+    assert tree.treeString() == (
+        "root\n |-- a: alpha (nullable = true)\n |-- b: array (nullable = true)\n"
+        " |    |-- element: beta (containsNull = true)\n |-- c: map (nullable = true)\n"
+        " |    |-- key: alpha\n |    |-- value: beta (valueContainsNull = true)\n"
+    )
+    assert tree.simpleString() == "struct<a:alpha,b:array<beta>,c:map<alpha,beta>>"
+
+
 def test_python_subclasses_of_the_abstract_types_are_made_as_pysparks():
     # As PySpark's plain classes, whose `object.__new__` takes the arguments that the `__init__`
     # of a subclass takes, such as that of a UserDefinedType of parameters, and raises them

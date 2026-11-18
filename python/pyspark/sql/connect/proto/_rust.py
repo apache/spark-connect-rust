@@ -51,6 +51,7 @@ DecodeError = _pyspark.ProtoDecodeError
 RepeatedScalarContainer = _pyspark.ProtoRepeatedScalarContainer
 RepeatedCompositeContainer = _pyspark.ProtoRepeatedCompositeContainer
 MapContainer = _pyspark.ProtoMapContainer
+MessageMapContainer = _pyspark.ProtoMessageMapContainer
 
 # As upb's containers: a repeated field is a MutableSequence, and a map a MutableMapping.
 collections.abc.MutableSequence.register(RepeatedScalarContainer)
@@ -359,6 +360,9 @@ def _make_class(full_name: str, qualname: str, module_name: str) -> type:
         },
     )
     _CLASSES[full_name] = cls
+    # As upb's classes: the number of each field, as ``Literal.STRING_FIELD_NUMBER``.
+    for field in descriptor.fields:
+        setattr(cls, field.name.upper() + "_FIELD_NUMBER", field.number)
     for nested in descriptor.nested_types:
         setattr(
             cls,
@@ -529,6 +533,32 @@ def _add_files_to_protobuf() -> None:
             pool.AddSerializedFile(_pyspark._proto_file_descriptor(file_name).serialized_pb)
         except Exception:  # pragma: no cover  # noqa: BLE001 - other descriptors of its names
             pass
+    _register_classes_in_protobuf(pool)
+
+
+def _register_classes_in_protobuf(pool: _Any) -> None:
+    """Register the classes of the messages of the files of the descriptor set of the runtime
+    (``_EMBEDDED_FILES``) in protobuf's default symbol database, by the descriptors of the default
+    pool, as protobuf's builder registers the classes of its generated modules
+    (``RegisterMessage``): ``symbol_database.Default().GetSymbol`` then gives them, which is how
+    PySpark's pickle of a message of a nested type (``Expression.Literal``) loads, through
+    protobuf's ``_InternalConstructMessage`` of the full name of its type. The database's own
+    classes (of the well-known types) stay. So do those of the files that the hook added to the
+    runtime for a plugin's module, when the package installs again: protobuf's lookups give
+    protobuf's classes of them (see ``_hook_protobuf_builder``)."""
+    try:
+        from google.protobuf import symbol_database
+
+        registered = symbol_database.Default()._classes
+    except Exception:  # pragma: no cover  # noqa: BLE001 - a protobuf without the database
+        return
+    for full_name, cls in _CLASSES.items():
+        try:
+            descriptor = pool.FindMessageTypeByName(full_name)
+        except KeyError:  # pragma: no cover - a file that the pool refused
+            continue
+        if descriptor.file.name in _EMBEDDED_FILES:
+            registered.setdefault(descriptor, cls)
 
 
 # The files of the descriptor set of the runtime, and those of them of the protos of Spark Connect.
@@ -538,8 +568,9 @@ _SPARK_CONNECT_FILES = frozenset(
 )
 
 # The name of the generated module of each file of protobuf's default pool that protobuf's
-# builder built since the hook was installed: the module of the classes of the runtime of the
-# messages of a file that the runtime holds for a plugin's file that imports it.
+# builder built since the hook was installed, or that ``_module_of_file`` found of one built
+# before: the module of the classes of the runtime of the messages of a file that the runtime
+# holds for a plugin's file that imports it.
 _GENERATED_MODULES: dict[str, str] = {}
 
 # The lock of the files that the hook adds to the runtime and of their classes: the generated
@@ -578,6 +609,43 @@ def _files_for_runtime(file_des: _Any) -> Optional[list[_Any]]:
     return found if imports_spark_connect else None
 
 
+def _module_of_file(name: str) -> str:
+    """The name of the generated module of the file ``name`` of protobuf's default pool, which the
+    classes of the runtime of its messages take, as protobuf's classes of them do: that of the
+    module that protobuf's builder built of it since the hook was installed, else that of a
+    module of it that the builder built before (as Delta Lake's ``delta/connect/proto/__init__.py``
+    imports ``base_pb2``, of ``delta/connect/base.proto``, before the modules that import the
+    protos of Spark Connect, which install the hook), else protoc's name of its path."""
+    module_name = _GENERATED_MODULES.get(name)
+    if module_name is None:
+        module_name = _imported_module_of_file(name) or _protoc_module_name(name)
+        _GENERATED_MODULES[name] = module_name
+    return module_name
+
+
+def _imported_module_of_file(name: str) -> Optional[str]:
+    """The module name of protobuf's classes of the messages of the file ``name`` of protobuf's
+    default pool, of an imported module of the file (whose ``DESCRIPTOR`` is the file), which
+    protobuf's builder gave them: None if no imported module has them. Only the globals of the
+    modules are read, so no module's ``__getattr__`` runs."""
+    from google.protobuf import descriptor_pool
+
+    pool = descriptor_pool.Default()
+    for module in list(sys.modules.values()):
+        try:
+            namespace = vars(module)
+            file = namespace.get("DESCRIPTOR")
+            if file is None or file.name != name or file.pool is not pool:
+                continue
+            for message in file.message_types_by_name:
+                cls = namespace.get(message)
+                if isinstance(cls, type):
+                    return cls.__module__
+        except Exception:  # noqa: BLE001 - an object of other globals, or of none
+            continue
+    return None
+
+
 def _use_runtime_classes(file_des: _Any, module_name: str, module: dict[str, _Any]) -> None:
     """Give ``module``, the globals of the generated module ``module_name`` of the file
     ``file_des`` of protobuf's default pool, the classes of this runtime of the messages of the
@@ -611,11 +679,7 @@ def _use_runtime_classes(file_des: _Any, module_name: str, module: dict[str, _An
                 return
             made = set(_CLASSES)
             for name, _, messages, _ in held:
-                of_module = (
-                    module_name
-                    if name == file_des.name
-                    else _GENERATED_MODULES.get(name, _protoc_module_name(name))
-                )
+                of_module = module_name if name == file_des.name else _module_of_file(name)
                 for full_name in messages:
                     if full_name not in _CLASSES:
                         _make_class(full_name, full_name.rpartition(".")[2], of_module)
@@ -637,15 +701,17 @@ def _hook_protobuf_builder() -> None:
     makes protobuf's classes of the file first, as it does without the hook, so protobuf's own
     lookups of the file (``message_factory.GetMessageClass``, ``symbol_database``) still give them.
     A file of another pool, such as one that a test builds, keeps protobuf's classes. One hook
-    wraps the builder's own function, of the runtime of the last install."""
+    wraps the builder's own function, of the runtime of the last install. A protobuf of no builder
+    (before 3.20), or whose builder has no such function, is passed over, as the drop-in itself
+    needs none of this."""
     try:
         from google.protobuf import descriptor_pool
         from google.protobuf.internal import builder
 
         default_pool = descriptor_pool.Default()
-    except Exception:  # pragma: no cover  # noqa: BLE001 - no protobuf, or one that fails
+        build = builder.BuildTopDescriptorsAndMessages
+    except Exception:  # pragma: no cover  # noqa: BLE001 - no protobuf, or one that fails or lacks it
         return
-    build = builder.BuildTopDescriptorsAndMessages
     build = getattr(build, "_protobuf_build", build)
 
     @functools.wraps(build)

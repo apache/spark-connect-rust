@@ -1197,12 +1197,13 @@ impl DataType {
     where
         F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
     {
-        self.tree_string_with_names(max_depth, flag, |_| None)
+        self.tree_string_with_names(max_depth, flag, |_, _| None)
     }
 
-    /// Like [`DataType::tree_string_with_flags`], but a type that `name` gives a name of is
-    /// written with that name, rather than the core's: the Python client names here the types
-    /// of Python classes that it holds as [`DataType::Unparsed`], whose name is not the core's.
+    /// Like [`DataType::tree_string_with_flags`], but a type that `name` gives a name of, of its
+    /// path from the root and of itself, is written with that name, rather than the core's: the
+    /// Python client names here the types of Python classes that it holds as
+    /// [`DataType::Unparsed`], whose name is not the core's, of the objects at their paths.
     ///
     /// Not a stable API: it exists for the Python client.
     #[doc(hidden)]
@@ -1214,7 +1215,7 @@ impl DataType {
     ) -> Result<String>
     where
         F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
-        N: FnMut(&DataType) -> Option<String>,
+        N: FnMut(&[TreeStep], &DataType) -> Option<String>,
     {
         match self {
             DataType::Struct { .. } => {
@@ -1238,12 +1239,12 @@ impl DataType {
         }
     }
 
-    /// The name of the type in a tree string, as `name` gives it, or else the core's.
-    fn tree_name_of<F, N>(&self, text: &mut TreeText<'_, F, N>) -> String
+    /// The name of the type at `path` in a tree string, as `name` gives it, or else the core's.
+    fn tree_name_of<F, N>(&self, path: &[TreeStep], text: &mut TreeText<'_, F, N>) -> String
     where
-        N: FnMut(&DataType) -> Option<String>,
+        N: FnMut(&[TreeStep], &DataType) -> Option<String>,
     {
-        (text.name)(self).unwrap_or_else(|| self.tree_type_name())
+        (text.name)(path, self).unwrap_or_else(|| self.tree_type_name())
     }
 
     fn tree_type_name(&self) -> String {
@@ -1269,7 +1270,7 @@ impl DataType {
         text: &mut TreeText<'_, F, N>,
     ) where
         F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
-        N: FnMut(&DataType) -> Option<String>,
+        N: FnMut(&[TreeStep], &DataType) -> Option<String>,
     {
         if remaining <= 0 {
             return;
@@ -1282,14 +1283,14 @@ impl DataType {
                     out.push_str("-- ");
                     push_escaped_name(out, &f.name);
                     let nullable = (text.flag)(&path[..], TreeFlag::Nullable(i), f.nullable);
+                    path.push(TreeStep::Field(i));
                     writeln!(
                         out,
                         ": {} (nullable = {})",
-                        f.data_type.tree_name_of(text),
+                        f.data_type.tree_name_of(&path[..], text),
                         nullable
                     )
                     .expect("writing to a String cannot fail");
-                    path.push(TreeStep::Field(i));
                     f.data_type
                         .append_tree(out, &child_prefix, remaining - 1, path, text);
                     path.pop();
@@ -1301,15 +1302,15 @@ impl DataType {
             } => {
                 let child_prefix = format!("{prefix}    |");
                 let contains_null = (text.flag)(&path[..], TreeFlag::ContainsNull, *contains_null);
+                path.push(TreeStep::Element);
                 writeln!(
                     out,
                     "{}-- element: {} (containsNull = {})",
                     prefix,
-                    element_type.tree_name_of(text),
+                    element_type.tree_name_of(&path[..], text),
                     contains_null
                 )
                 .expect("writing to a String cannot fail");
-                path.push(TreeStep::Element);
                 element_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
             }
@@ -1319,22 +1320,27 @@ impl DataType {
                 value_contains_null,
             } => {
                 let child_prefix = format!("{prefix}    |");
-                writeln!(out, "{}-- key: {}", prefix, key_type.tree_name_of(text))
-                    .expect("writing to a String cannot fail");
                 path.push(TreeStep::Key);
+                writeln!(
+                    out,
+                    "{}-- key: {}",
+                    prefix,
+                    key_type.tree_name_of(&path[..], text)
+                )
+                .expect("writing to a String cannot fail");
                 key_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
                 let value_contains_null =
                     (text.flag)(&path[..], TreeFlag::ValueContainsNull, *value_contains_null);
+                path.push(TreeStep::Value);
                 writeln!(
                     out,
                     "{}-- value: {} (valueContainsNull = {})",
                     prefix,
-                    value_type.tree_name_of(text),
+                    value_type.tree_name_of(&path[..], text),
                     value_contains_null
                 )
                 .expect("writing to a String cannot fail");
-                path.push(TreeStep::Value);
                 value_type.append_tree(out, &child_prefix, remaining - 1, path, text);
                 path.pop();
             }
@@ -4357,18 +4363,29 @@ mod tests {
                 },
             ],
         };
+        let mut named = Vec::new();
         let text = struct_type
             .tree_string_with_names(
                 i32::MAX,
                 |_, _, truth| truth.to_string(),
-                |data_type| match data_type {
+                |path, data_type| match data_type {
                     DataType::Unparsed { data_type_string } if data_type_string != "int" => {
+                        named.push(path.to_vec());
                         Some(data_type_string.clone())
                     }
                     _ => None,
                 },
             )
             .unwrap();
+        // Each type is named of its path from the root, at which the client finds its object.
+        assert_eq!(
+            named,
+            vec![
+                vec![TreeStep::Field(0)],
+                vec![TreeStep::Field(1), TreeStep::Key],
+                vec![TreeStep::Field(1), TreeStep::Value, TreeStep::Element],
+            ]
+        );
         assert_eq!(
             text,
             "root\n |-- a: atomic (nullable = true)\n |-- m: map (nullable = false)\n \

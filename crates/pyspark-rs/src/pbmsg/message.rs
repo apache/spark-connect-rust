@@ -21,17 +21,19 @@ use pyo3::exceptions::{
     PyAttributeError, PyKeyError, PyNotImplementedError, PyTypeError, PyValueError,
 };
 use pyo3::prelude::*;
+use pyo3::pyclass_init::PyClassInitializer;
 use pyo3::types::{
     PyByteArray, PyBytes, PyDict, PyMemoryView, PyString, PyTuple, PyType, PyWeakrefMethods,
     PyWeakrefReference,
 };
 use pyo3::IntoPyObjectExt;
 
-use super::containers::{MapContainer, MapValue, RepeatedComposite, RepeatedScalar};
+use super::containers::{MapContainer, MapEntries, MapValue, RepeatedComposite, RepeatedScalar};
 use super::descriptors::{field_descriptor_object, PyDescriptor};
 use super::pool::{pool, FieldDesc, Kind, MessageDesc};
 use super::scalar::Scalar;
 use super::{codec, grow, text};
+use crate::interrupt::ConversionBudget;
 
 /// The maximum depth of upb's `DiscardUnknownFields`, which passes it to
 /// `upb_Message_DiscardUnknown`.
@@ -44,6 +46,127 @@ pub(crate) enum Slot {
     Repeated(Py<RepeatedScalar>),
     Composite(Py<RepeatedComposite>),
     Map(Py<MapContainer>),
+}
+
+/// The set fields of a message, each with the index of its field, in the order of the numbers of
+/// the fields, in which the message writes, prints and lists them. A message holds the slots of
+/// its set fields only, as a message of Spark Connect sets few of its fields (a literal, one of
+/// its 25), so that a message of many messages takes the room of those it sets; one set field is
+/// held in place, without an allocation of its own.
+#[derive(Default)]
+pub(crate) enum Slots {
+    #[default]
+    Empty,
+    One((usize, Slot)),
+    Many(Vec<(usize, Slot)>),
+}
+
+impl Slots {
+    /// The slots of `entries`, which are in the order of the numbers of their fields.
+    pub(crate) fn from_vec(mut entries: Vec<(usize, Slot)>) -> Slots {
+        match entries.len() {
+            0 => Slots::Empty,
+            1 => Slots::One(entries.pop().expect("one entry")),
+            _ => Slots::Many(entries),
+        }
+    }
+
+    fn as_slice(&self) -> &[(usize, Slot)] {
+        match self {
+            Slots::Empty => &[],
+            Slots::One(entry) => std::slice::from_ref(entry),
+            Slots::Many(entries) => entries,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    pub(crate) fn get(&self, index: usize) -> Option<&Slot> {
+        self.as_slice()
+            .iter()
+            .find(|(i, _)| *i == index)
+            .map(|(_, slot)| slot)
+    }
+
+    pub(crate) fn contains(&self, index: usize) -> bool {
+        self.as_slice().iter().any(|(i, _)| *i == index)
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut Slot> {
+        match self {
+            Slots::Empty => None,
+            Slots::One((i, slot)) => (*i == index).then_some(slot),
+            Slots::Many(entries) => entries
+                .iter_mut()
+                .find(|(i, _)| *i == index)
+                .map(|(_, slot)| slot),
+        }
+    }
+
+    /// Set the slot of the field `index` of `desc`, and give back the slot that it replaces.
+    pub(crate) fn set(&mut self, desc: &MessageDesc, index: usize, slot: Slot) -> Option<Slot> {
+        if let Some(old) = self.get_mut(index) {
+            return Some(std::mem::replace(old, slot));
+        }
+        if let Slots::Empty = self {
+            *self = Slots::One((index, slot));
+            return None;
+        }
+        let mut entries = std::mem::take(self).into_vec();
+        let number = desc.fields[index].number;
+        let at = entries
+            .iter()
+            .rposition(|(i, _)| desc.fields[*i].number < number)
+            .map_or(0, |at| at + 1);
+        entries.insert(at, (index, slot));
+        *self = Slots::Many(entries);
+        None
+    }
+
+    /// Set the slot of the field `index`, whose number is greater than those of the set fields.
+    fn push_last(&mut self, index: usize, slot: Slot) {
+        *self = match std::mem::take(self) {
+            Slots::Empty => Slots::One((index, slot)),
+            Slots::One(first) => Slots::Many(vec![first, (index, slot)]),
+            Slots::Many(mut entries) => {
+                entries.push((index, slot));
+                Slots::Many(entries)
+            }
+        };
+    }
+
+    /// Clear the field `index`, and give back its slot.
+    pub(crate) fn remove(&mut self, index: usize) -> Option<Slot> {
+        let at = self.as_slice().iter().position(|(i, _)| *i == index)?;
+        let mut entries = std::mem::take(self).into_vec();
+        let (_, slot) = entries.remove(at);
+        *self = Slots::from_vec(entries);
+        Some(slot)
+    }
+
+    /// Keep the slots that `keep` takes of the index of their field.
+    pub(crate) fn retain(&mut self, keep: impl Fn(usize) -> bool) {
+        match self {
+            Slots::One((i, _)) if !keep(*i) => *self = Slots::Empty,
+            Slots::Many(entries) => entries.retain(|(i, _)| keep(*i)),
+            _ => {}
+        }
+    }
+
+    /// The set fields, by the index of their field, in the order of their numbers.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (usize, &Slot)> {
+        self.as_slice().iter().map(|(i, slot)| (*i, slot))
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<(usize, Slot)> {
+        match self {
+            Slots::Empty => Vec::new(),
+            Slots::One(entry) => vec![entry],
+            Slots::Many(entries) => entries,
+        }
+    }
 }
 
 /// The message, and its field, that an unset message of `__getattr__` sets itself in when one of
@@ -66,30 +189,57 @@ pub(crate) fn weak(message: &Bound<'_, PyMessage>) -> PyResult<Py<PyWeakrefRefer
 )]
 pub struct PyMessage {
     pub(crate) desc: Arc<MessageDesc>,
-    /// The set fields, by index.
-    pub(crate) slots: Vec<Option<Slot>>,
-    /// The unset children that `__getattr__` gave, by the index of their field.
-    lazy: Vec<Option<Py<PyMessage>>>,
+    /// The set fields.
+    pub(crate) slots: Slots,
+    /// The unset children that `__getattr__` gave, each with the index of its field.
+    lazy: Vec<(usize, Py<PyMessage>)>,
     /// The parent of an unset child.
     parent: Option<Parent>,
     /// The encoded fields that the message type has no field for, as the message read them.
     pub(crate) unknown: Vec<u8>,
 }
 
-fn classes() -> &'static Mutex<HashMap<String, Py<PyType>>> {
-    static CLASSES: OnceLock<Mutex<HashMap<String, Py<PyType>>>> = OnceLock::new();
-    CLASSES.get_or_init(|| Mutex::new(HashMap::new()))
+/// A class that `_proto_register_classes` set, with the message type of its `DESCRIPTOR`.
+struct Registered {
+    class: Py<PyType>,
+    desc: Arc<MessageDesc>,
 }
 
-/// Set the class of each message, by full name, that the runtime makes the instances of.
+/// The classes that `_proto_register_classes` set, by the full name of their message type, and
+/// the message types of their `DESCRIPTOR`s by the address of the class, which `__new__` reads.
+#[derive(Default)]
+struct Registry {
+    by_name: HashMap<String, Registered>,
+    by_type: HashMap<usize, Arc<MessageDesc>>,
+}
+
+fn classes() -> &'static Mutex<Registry> {
+    static CLASSES: OnceLock<Mutex<Registry>> = OnceLock::new();
+    CLASSES.get_or_init(|| Mutex::new(Registry::default()))
+}
+
+/// Set the class of each message, by full name, that the runtime makes the instances of: a
+/// subclass of `Message`, of the `DESCRIPTOR` of its message type.
 #[pyfunction]
 pub(crate) fn _proto_register_classes(classes_by_name: &Bound<'_, PyDict>) -> PyResult<()> {
-    let mut registered = classes().lock().unwrap_or_else(|e| e.into_inner());
+    let mut found = Vec::new();
     for (name, class) in classes_by_name.iter() {
-        registered.insert(
-            name.extract::<String>()?,
-            class.cast_into::<PyType>()?.unbind(),
-        );
+        let class = class.cast_into::<PyType>()?;
+        if !class.is_subclass_of::<PyMessage>()? {
+            return Err(PyTypeError::new_err(format!(
+                "{} is not a class of protocol messages",
+                class.str()?
+            )));
+        }
+        let desc = class_descriptor(&class)?;
+        found.push((name.extract::<String>()?, class.unbind(), desc));
+    }
+    let mut registered = classes().lock().unwrap_or_else(|e| e.into_inner());
+    for (name, class, desc) in found {
+        registered
+            .by_type
+            .insert(class.as_ptr() as usize, desc.clone());
+        registered.by_name.insert(name, Registered { class, desc });
     }
     Ok(())
 }
@@ -99,8 +249,74 @@ pub(crate) fn registered_class(py: Python<'_>, full_name: &str) -> Option<Py<PyT
     classes()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
+        .by_name
         .get(full_name)
-        .map(|c| c.clone_ref(py))
+        .map(|r| r.class.clone_ref(py))
+}
+
+/// A maker of the messages of a message type: of its registered class, of the message type of
+/// that class's `DESCRIPTOR`, or of the message type of the pool when it has no class.
+pub(crate) struct MessageClass {
+    class: Option<Py<PyType>>,
+    desc: Arc<MessageDesc>,
+}
+
+impl MessageClass {
+    pub(crate) fn clone_ref(&self, py: Python<'_>) -> MessageClass {
+        MessageClass {
+            class: self.class.as_ref().map(|c| c.clone_ref(py)),
+            desc: self.desc.clone(),
+        }
+    }
+
+    pub(crate) fn of(py: Python<'_>, full_name: &str) -> PyResult<MessageClass> {
+        if let Some(r) = classes()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .by_name
+            .get(full_name)
+        {
+            return Ok(MessageClass {
+                class: Some(r.class.clone_ref(py)),
+                desc: r.desc.clone(),
+            });
+        }
+        let desc = pool()
+            .message(full_name)
+            .ok_or_else(|| PyTypeError::new_err(format!("no message type named {full_name}")))?
+            .clone();
+        Ok(MessageClass { class: None, desc })
+    }
+
+    /// A new, empty message, made as the `tp_new` of the class makes one, without the call of
+    /// the class (whose `__init__` is `object`'s) or the read of its `DESCRIPTOR`.
+    ///
+    /// The cyclic garbage collector does not track it. A registered class has `__slots__ = ()`,
+    /// so its object holds no Python reference that the collector can see (the messages and
+    /// containers that it holds are Rust's): tracking it finds no cycle, while the collections
+    /// that the tracked objects of a message of many messages start, every 700 of them, each read
+    /// all of them, which took more than half of a parse. (A message that Python code makes by
+    /// calling its class is tracked, as Python makes it.)
+    pub(crate) fn new_message<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyMessage>> {
+        let message = PyMessage::empty(self.desc.clone());
+        let Some(class) = &self.class else {
+            return Bound::new(py, message);
+        };
+        // SAFETY: `class` is a subclass of `PyMessage` (see `_proto_register_classes`), of which
+        // PyO3's `tp_new_impl`, the `tp_new` of a `#[new]`, makes an object of an initializer.
+        // The object is untracked once, before any Python code sees it; its deallocation
+        // untracks it only if it is tracked.
+        unsafe {
+            let ptr = pyo3::impl_::pymethods::tp_new_impl::<
+                PyClassInitializer<PyMessage>,
+                PyMessage,
+            >(py, message.into(), class.bind(py).as_type_ptr())?;
+            if pyo3::ffi::PyObject_GC_IsTracked(ptr) != 0 {
+                pyo3::ffi::PyObject_GC_UnTrack(ptr.cast());
+            }
+            Ok(Bound::from_owned_ptr(py, ptr).cast_into_unchecked())
+        }
+    }
 }
 
 /// A new, empty message of the message type `full_name`, of its registered class.
@@ -108,14 +324,27 @@ pub(crate) fn new_instance<'py>(
     py: Python<'py>,
     full_name: &str,
 ) -> PyResult<Bound<'py, PyMessage>> {
-    if let Some(class) = registered_class(py, full_name) {
-        return Ok(class.bind(py).call0()?.cast_into::<PyMessage>()?);
+    MessageClass::of(py, full_name)?.new_message(py)
+}
+
+/// A new, empty message of the message type `desc`, of its registered class.
+fn new_instance_of<'py>(py: Python<'py>, desc: &MessageDesc) -> PyResult<Bound<'py, PyMessage>> {
+    new_instance(py, &desc.full_name)
+}
+
+/// The message type of the class `cls`: of a registered class, the one of its `DESCRIPTOR` that
+/// the registry holds, else (a subclass of one) of its `DESCRIPTOR`.
+fn message_type_of(cls: &Bound<'_, PyType>) -> PyResult<Arc<MessageDesc>> {
+    let registered = classes()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .by_type
+        .get(&(cls.as_ptr() as usize))
+        .cloned();
+    match registered {
+        Some(desc) => Ok(desc),
+        None => class_descriptor(cls),
     }
-    let desc = pool()
-        .message(full_name)
-        .ok_or_else(|| PyTypeError::new_err(format!("no message type named {full_name}")))?
-        .clone();
-    Bound::new(py, PyMessage::empty(desc))
 }
 
 /// The message type of the class `cls`, of its `DESCRIPTOR`.
@@ -147,15 +376,49 @@ pub(crate) fn bytes_of(value: &Bound<'_, PyAny>) -> PyResult<Vec<u8>> {
         .unwrap_or_else(|| PyTypeError::new_err("expected bytes")))
 }
 
-/// The name of a field (or a oneof) that `HasField`, `ClearField` and `WhichOneof` take, with
-/// upb's error of an argument that is not a str.
-fn field_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
-    match name.cast::<PyString>() {
-        Ok(name) => Ok(name.to_cow()?.into_owned()),
-        Err(_) => Err(PyValueError::new_err(format!(
-            "Expected a field name, but got non-string argument {}.",
-            name.repr()?
-        ))),
+/// The name of a field (or a oneof) that `HasField`, `ClearField` and `WhichOneof` take, as upb
+/// reads it: the UTF-8 of a str, or the bytes of a bytes object, a name if they are UTF-8. Another
+/// object, or a str of no UTF-8 (of a lone surrogate), is upb's error, of `str()` of the object.
+struct FieldName<'py>(Bound<'py, PyBytes>);
+
+impl<'py> FieldName<'py> {
+    fn of(name: &Bound<'py, PyAny>) -> PyResult<FieldName<'py>> {
+        if let Ok(text) = name.cast::<PyString>() {
+            return text
+                .encode_utf8()
+                .map(FieldName)
+                .map_err(|_| not_a_field_name(name));
+        }
+        match name.cast::<PyBytes>() {
+            Ok(bytes) => Ok(FieldName(bytes.clone())),
+            Err(_) => Err(not_a_field_name(name)),
+        }
+    }
+
+    /// The name to look up: none of a field, of bytes that are not UTF-8.
+    fn text(&self) -> &str {
+        std::str::from_utf8(self.0.as_bytes()).unwrap_or("")
+    }
+
+    /// The name as upb's errors print it: up to its first NUL, of U+FFFD for bytes that are not
+    /// UTF-8.
+    fn display(&self) -> String {
+        let bytes = self.0.as_bytes();
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    }
+}
+
+fn not_a_field_name(name: &Bound<'_, PyAny>) -> PyErr {
+    let py = name.py();
+    let message = name.str().and_then(|text| {
+        PyString::new(py, "Expected a field name, but got non-string argument ")
+            .add(text)?
+            .add(".")
+    });
+    match message {
+        Ok(message) => PyValueError::new_err(message.unbind()),
+        Err(err) => err,
     }
 }
 
@@ -293,22 +556,119 @@ pub(crate) fn duplicate<'py>(
     py: Python<'py>,
     message: &Bound<'py, PyMessage>,
 ) -> PyResult<Bound<'py, PyMessage>> {
+    duplicate_with(py, message, &ConversionBudget::full())
+}
+
+/// A slot of a message, read for its copy: its scalars copied, and the messages that it holds,
+/// which the copy copies once the message is no longer borrowed.
+enum Shallow {
+    Copied(Slot),
+    Message(Py<PyMessage>),
+    Composite(MessageClass, Vec<Py<PyMessage>>),
+    Map(MapEntries),
+}
+
+/// A copy of `message`, as [`duplicate`] makes it, a step of `budget` for each message copied:
+/// each message is read under a short borrow, and the messages that it holds are copied after
+/// it, so that the checkpoints of the copy of a message of many messages, whose Python code may
+/// use the message, find no borrow of it held.
+pub(crate) fn duplicate_with<'py>(
+    py: Python<'py>,
+    message: &Bound<'py, PyMessage>,
+    budget: &ConversionBudget,
+) -> PyResult<Bound<'py, PyMessage>> {
+    copy_as(py, message, None, budget)
+}
+
+/// A copy of `message`, as [`duplicate_with`] makes it, of `class` when it is given: that of the
+/// messages of a container, which the copy of each of them takes, rather than the class of the
+/// message's type.
+fn copy_as<'py>(
+    py: Python<'py>,
+    message: &Bound<'py, PyMessage>,
+    class: Option<&MessageClass>,
+    budget: &ConversionBudget,
+) -> PyResult<Bound<'py, PyMessage>> {
     grow(|| {
-        let (full_name, slots, unknown) = {
-            let m = message.borrow();
-            (
-                m.desc.full_name.clone(),
-                m.copy_slots(py)?,
-                m.unknown.clone(),
-            )
+        budget.step(py)?;
+        let (slots, unknown) = copy_fields_of(py, message, budget)?;
+        let copy = match class {
+            Some(class) => class.new_message(py)?,
+            None => {
+                let desc = message.borrow().desc.clone();
+                new_instance_of(py, &desc)?
+            }
         };
-        let copy = new_instance(py, &full_name)?;
         {
             let mut c = copy.borrow_mut();
             c.slots = slots;
             c.unknown = unknown;
         }
         Ok(copy)
+    })
+}
+
+/// Copies of the fields and the unknown fields of `message`, read under a short borrow, whose
+/// messages are copied after it.
+fn copy_fields_of(
+    py: Python<'_>,
+    message: &Bound<'_, PyMessage>,
+    budget: &ConversionBudget,
+) -> PyResult<(Slots, Vec<u8>)> {
+    // The copied slots are set in the order of the fields at once; those of messages, after the
+    // borrow, in their places.
+    let (mut slots, held, desc, unknown) = {
+        let m = message.borrow();
+        let mut slots = Slots::default();
+        let mut held = Vec::new();
+        for (index, slot) in m.slots.iter() {
+            match shallow_slot(py, slot)? {
+                Shallow::Copied(slot) => slots.push_last(index, slot),
+                shallow => held.push((index, shallow)),
+            }
+        }
+        let desc = (!held.is_empty()).then(|| m.desc.clone());
+        (slots, held, desc, m.unknown.clone())
+    };
+    if let Some(desc) = desc {
+        for (index, shallow) in held {
+            let slot = deep_slot(py, shallow, budget)?;
+            slots.set(&desc, index, slot);
+        }
+    }
+    Ok((slots, unknown))
+}
+
+fn shallow_slot(py: Python<'_>, slot: &Slot) -> PyResult<Shallow> {
+    Ok(match slot {
+        Slot::Scalar(v) => Shallow::Copied(Slot::Scalar(v.clone())),
+        Slot::Message(c) => Shallow::Message(c.clone_ref(py)),
+        Slot::Repeated(c) => {
+            Shallow::Copied(Slot::Repeated(Py::new(py, c.bind(py).borrow().copy())?))
+        }
+        Slot::Composite(c) => {
+            let c = c.bind(py).borrow();
+            Shallow::Composite(
+                c.class.clone_ref(py),
+                c.items.iter().map(|m| m.clone_ref(py)).collect(),
+            )
+        }
+        Slot::Map(c) => Shallow::Map(c.bind(py).borrow().entries_for_copy(py)),
+    })
+}
+
+fn deep_slot(py: Python<'_>, slot: Shallow, budget: &ConversionBudget) -> PyResult<Slot> {
+    Ok(match slot {
+        Shallow::Copied(slot) => slot,
+        Shallow::Message(c) => Slot::Message(duplicate_with(py, c.bind(py), budget)?.unbind()),
+        Shallow::Composite(class, items) => {
+            let mut copies = Vec::with_capacity(items.len());
+            for item in &items {
+                copies.push(copy_as(py, item.bind(py), Some(&class), budget)?.unbind());
+            }
+            Slot::Composite(Py::new(py, RepeatedComposite::new(class, copies, None))?)
+        }
+        Shallow::Map(entries) => Slot::Map(entries.copy(py, budget)?.into_object(py)?),
     })
 }
 
@@ -327,15 +687,15 @@ pub(crate) fn mark_present(message: &Bound<'_, PyMessage>) -> PyResult<()> {
         };
         {
             let mut p = owner.borrow_mut();
-            let still_unset = p.lazy[parent.field]
-                .as_ref()
+            let still_unset = p
+                .lazy_child(parent.field)
                 .is_some_and(|c| c.bind(py).is(&current));
             if !still_unset {
                 return Ok(());
             }
-            p.lazy[parent.field] = None;
+            p.take_lazy_child(parent.field);
             p.clear_oneof_siblings(py, parent.field);
-            p.slots[parent.field] = Some(Slot::Message(current.clone().unbind()));
+            p.set_slot(parent.field, Slot::Message(current.clone().unbind()));
         }
         current = owner;
     }
@@ -348,23 +708,41 @@ pub(crate) fn merge_into(
     target: &Bound<'_, PyMessage>,
     source: &Bound<'_, PyMessage>,
 ) -> PyResult<()> {
+    merge_into_with(py, target, source, &ConversionBudget::full())
+}
+
+/// Merge `source` into `target`, as [`merge_into`] does, a step of `budget` for each message
+/// merged or copied, with no borrow held between the fields.
+fn merge_into_with(
+    py: Python<'_>,
+    target: &Bound<'_, PyMessage>,
+    source: &Bound<'_, PyMessage>,
+    budget: &ConversionBudget,
+) -> PyResult<()> {
     if target.is(source) {
-        let copy = duplicate(py, source)?;
-        return merge_into(py, target, &copy);
+        let copy = duplicate_with(py, source, budget)?;
+        return merge_into_with(py, target, &copy, budget);
     }
     enum Merge {
         Scalar(Scalar),
         Message(Py<PyMessage>),
         Repeated(Vec<Scalar>),
         Composite(Vec<Py<PyMessage>>),
-        Map(Py<MapContainer>),
+        Map(MapEntries),
     }
     grow(|| {
-        let desc = source.borrow().desc.clone();
-        for index in 0..desc.fields.len() {
+        budget.step(py)?;
+        let (desc, indices): (Arc<MessageDesc>, Vec<usize>) = {
+            let s = source.borrow();
+            (
+                s.desc.clone(),
+                s.slots.iter().map(|(index, _)| index).collect(),
+            )
+        };
+        for index in indices {
             let merge = {
                 let s = source.borrow();
-                match &s.slots[index] {
+                match s.slots.get(index) {
                     None => continue,
                     Some(Slot::Scalar(v)) => {
                         if !desc.fields[index].has_presence() && v.is_default() {
@@ -382,30 +760,30 @@ pub(crate) fn merge_into(
                             .map(|m| m.clone_ref(py))
                             .collect(),
                     ),
-                    Some(Slot::Map(c)) => Merge::Map(c.clone_ref(py)),
+                    Some(Slot::Map(c)) => Merge::Map(c.bind(py).borrow().entries_for_copy(py)),
                 }
             };
-            let owner = Some(weak(target)?);
             match merge {
                 Merge::Scalar(v) => target.borrow_mut().set_scalar(py, index, v),
                 Merge::Message(child) => {
                     let into = target.borrow_mut().child_for_merge(py, index)?;
-                    merge_into(py, &into, child.bind(py))?;
+                    merge_into_with(py, &into, child.bind(py), budget)?;
                 }
                 Merge::Repeated(items) => {
-                    let container = target.borrow_mut().repeated_scalar(py, index, owner)?;
+                    let container = PyMessage::repeated_scalar_of(target, index)?;
                     container.bind(py).borrow_mut().items.extend(items);
                 }
                 Merge::Composite(items) => {
-                    let container = target.borrow_mut().composite(py, index, owner)?;
+                    let container = PyMessage::composite_of(target, index)?;
+                    let class = container.bind(py).borrow().class.clone_ref(py);
                     for item in items {
-                        let copy = duplicate(py, item.bind(py))?;
+                        let copy = copy_as(py, item.bind(py), Some(&class), budget)?;
                         container.bind(py).borrow_mut().items.push(copy.unbind());
                     }
                 }
-                Merge::Map(map) => {
-                    let container = target.borrow_mut().map(py, index, owner)?;
-                    MapContainer::merge(py, container.bind(py), map.bind(py))?;
+                Merge::Map(entries) => {
+                    let container = PyMessage::map_of_field(target, index)?;
+                    MapContainer::merge_entries(py, container.bind(py), entries, budget)?;
                 }
             }
         }
@@ -431,7 +809,7 @@ pub(crate) fn content_eq(
             return Ok(false);
         }
         for (index, field) in x.desc.fields.iter().enumerate() {
-            if !slot_eq(py, field, &x.slots[index], &y.slots[index])? {
+            if !slot_eq(py, field, x.slots.get(index), y.slots.get(index))? {
                 return Ok(false);
             }
         }
@@ -442,8 +820,8 @@ pub(crate) fn content_eq(
 fn slot_eq(
     py: Python<'_>,
     field: &FieldDesc,
-    a: &Option<Slot>,
-    b: &Option<Slot>,
+    a: Option<&Slot>,
+    b: Option<&Slot>,
 ) -> PyResult<bool> {
     if field.map.is_some() {
         let (a, b) = (map_of(a), map_of(b));
@@ -454,7 +832,7 @@ fn slot_eq(
         };
     }
     if field.repeated && field.kind == Kind::Message {
-        let items = |slot: &Option<Slot>| match slot {
+        let items = |slot: Option<&Slot>| match slot {
             Some(Slot::Composite(c)) => c
                 .bind(py)
                 .borrow()
@@ -476,7 +854,7 @@ fn slot_eq(
         return Ok(true);
     }
     if field.repeated {
-        let items = |slot: &Option<Slot>| match slot {
+        let items = |slot: Option<&Slot>| match slot {
             Some(Slot::Repeated(c)) => c.bind(py).borrow().items.clone(),
             _ => Vec::new(),
         };
@@ -491,7 +869,7 @@ fn slot_eq(
             _ => Ok(false),
         };
     }
-    let value = |slot: &Option<Slot>| match slot {
+    let value = |slot: Option<&Slot>| match slot {
         Some(Slot::Scalar(v)) => v.clone(),
         _ => Scalar::default_of(field.kind),
     };
@@ -501,7 +879,7 @@ fn slot_eq(
     Ok(value(a) == value(b))
 }
 
-fn map_of(slot: &Option<Slot>) -> Option<&Py<MapContainer>> {
+fn map_of(slot: Option<&Slot>) -> Option<&Py<MapContainer>> {
     match slot {
         Some(Slot::Map(m)) => Some(m),
         _ => None,
@@ -510,20 +888,34 @@ fn map_of(slot: &Option<Slot>) -> Option<&Py<MapContainer>> {
 
 impl PyMessage {
     pub(crate) fn empty(desc: Arc<MessageDesc>) -> Self {
-        let n = desc.fields.len();
         PyMessage {
             desc,
-            slots: (0..n).map(|_| None).collect(),
-            lazy: (0..n).map(|_| None).collect(),
+            slots: Slots::default(),
+            lazy: Vec::new(),
             parent: None,
             unknown: Vec::new(),
         }
     }
 
+    /// Set the slot of the field `index`, giving back the one that it replaces.
+    pub(crate) fn set_slot(&mut self, index: usize, slot: Slot) -> Option<Slot> {
+        self.slots.set(&self.desc, index, slot)
+    }
+
+    /// The unset child of the field `index` that `__getattr__` gave, if any.
+    fn lazy_child(&self, index: usize) -> Option<&Py<PyMessage>> {
+        self.lazy.iter().find(|(i, _)| *i == index).map(|(_, c)| c)
+    }
+
+    fn take_lazy_child(&mut self, index: usize) -> Option<Py<PyMessage>> {
+        let at = self.lazy.iter().position(|(i, _)| *i == index)?;
+        Some(self.lazy.swap_remove(at).1)
+    }
+
     /// Detach the unset child of the field `index` that `__getattr__` gave, so that setting its
     /// fields no longer sets the field.
     fn sever(&mut self, py: Python<'_>, index: usize) {
-        if let Some(child) = self.lazy[index].take() {
+        if let Some(child) = self.take_lazy_child(index) {
             if let Ok(mut c) = child.bind(py).try_borrow_mut() {
                 c.parent = None;
             }
@@ -537,33 +929,34 @@ impl PyMessage {
         let Some(oneof) = self.desc.fields[index].oneof else {
             return;
         };
-        let desc = self.desc.clone();
-        for &member in &desc.oneofs[oneof].fields {
-            if member != index {
-                self.slots[member] = None;
-            }
-        }
+        // Of the set fields, which are few, not of the members, which may be many.
+        let desc = &self.desc;
+        self.slots
+            .retain(|member| member == index || desc.fields[member].oneof != Some(oneof));
     }
 
     pub(crate) fn set_scalar(&mut self, py: Python<'_>, index: usize, value: Scalar) {
         self.clear_oneof_siblings(py, index);
-        self.slots[index] = Some(Slot::Scalar(value));
+        self.set_slot(index, Slot::Scalar(value));
     }
 
     pub(crate) fn set_message(&mut self, py: Python<'_>, index: usize, child: Py<PyMessage>) {
         self.clear_oneof_siblings(py, index);
         self.sever(py, index);
-        self.slots[index] = Some(Slot::Message(child));
+        self.set_slot(index, Slot::Message(child));
     }
 
     fn clear_index(&mut self, py: Python<'_>, index: usize) {
-        self.slots[index] = None;
+        self.slots.remove(index);
         self.sever(py, index);
     }
 
     fn clear_all(&mut self, py: Python<'_>) {
-        for index in 0..self.slots.len() {
-            self.clear_index(py, index);
+        self.slots = Slots::default();
+        for (_, child) in std::mem::take(&mut self.lazy) {
+            if let Ok(mut c) = child.bind(py).try_borrow_mut() {
+                c.parent = None;
+            }
         }
         self.unknown.clear();
     }
@@ -571,15 +964,11 @@ impl PyMessage {
     /// Replace the fields with `slots` and the unknown fields with `unknown`, as upb's `CopyFrom`
     /// copies a message: an unset child that the message gave out becomes the child of its field
     /// when the copy sets that field, and stays unset (and the field's) when it does not.
-    fn replace_slots(
-        &mut self,
-        py: Python<'_>,
-        slots: Vec<Option<Slot>>,
-        unknown: Vec<u8>,
-    ) -> PyResult<()> {
-        for (index, slot) in slots.into_iter().enumerate() {
-            self.slots[index] = match (slot, self.lazy[index].take()) {
-                (Some(Slot::Message(copied)), Some(stub)) => {
+    fn replace_slots(&mut self, py: Python<'_>, slots: Slots, unknown: Vec<u8>) -> PyResult<()> {
+        let mut replaced = Vec::with_capacity(slots.len());
+        for (index, slot) in slots.into_vec() {
+            let slot = match (slot, self.take_lazy_child(index)) {
+                (Slot::Message(copied), Some(stub)) => {
                     let (fields, unknown) = {
                         let mut c = copied.bind(py).borrow_mut();
                         (std::mem::take(&mut c.slots), std::mem::take(&mut c.unknown))
@@ -590,14 +979,18 @@ impl PyMessage {
                         child.slots = fields;
                         child.unknown = unknown;
                     }
-                    Some(Slot::Message(stub))
+                    Slot::Message(stub)
                 }
                 (slot, stub) => {
-                    self.lazy[index] = stub;
+                    if let Some(stub) = stub {
+                        self.lazy.push((index, stub));
+                    }
                     slot
                 }
             };
+            replaced.push((index, slot));
         }
+        self.slots = Slots::from_vec(replaced);
         self.unknown = unknown;
         Ok(())
     }
@@ -609,12 +1002,12 @@ impl PyMessage {
         py: Python<'py>,
         index: usize,
     ) -> PyResult<Bound<'py, PyMessage>> {
-        if let Some(Slot::Message(c)) = &self.slots[index] {
+        if let Some(Slot::Message(c)) = self.slots.get(index) {
             return Ok(c.bind(py).clone());
         }
         // As upb's: an unset child that the message gave out becomes the child that the merge
         // sets, so that the object it gave out holds the merged fields.
-        let child = match self.lazy[index].take() {
+        let child = match self.take_lazy_child(index) {
             Some(stub) => {
                 let stub = stub.into_bound(py);
                 stub.try_borrow_mut()?.parent = None;
@@ -623,7 +1016,7 @@ impl PyMessage {
             None => new_instance(py, &self.desc.fields[index].type_name)?,
         };
         self.clear_oneof_siblings(py, index);
-        self.slots[index] = Some(Slot::Message(child.clone().unbind()));
+        self.set_slot(index, Slot::Message(child.clone().unbind()));
         Ok(child)
     }
 
@@ -634,7 +1027,7 @@ impl PyMessage {
         index: usize,
         owner: Option<Py<PyWeakrefReference>>,
     ) -> PyResult<Py<RepeatedScalar>> {
-        if let Some(Slot::Repeated(c)) = &self.slots[index] {
+        if let Some(Slot::Repeated(c)) = self.slots.get(index) {
             return Ok(c.clone_ref(py));
         }
         let field = &self.desc.fields[index];
@@ -648,7 +1041,7 @@ impl PyMessage {
                 owner,
             ),
         )?;
-        self.slots[index] = Some(Slot::Repeated(container.clone_ref(py)));
+        self.set_slot(index, Slot::Repeated(container.clone_ref(py)));
         Ok(container)
     }
 
@@ -659,15 +1052,13 @@ impl PyMessage {
         index: usize,
         owner: Option<Py<PyWeakrefReference>>,
     ) -> PyResult<Py<RepeatedComposite>> {
-        if let Some(Slot::Composite(c)) = &self.slots[index] {
+        if let Some(Slot::Composite(c)) = self.slots.get(index) {
             return Ok(c.clone_ref(py));
         }
         let field = &self.desc.fields[index];
-        let container = Py::new(
-            py,
-            RepeatedComposite::new(field.type_name.clone(), Vec::new(), owner),
-        )?;
-        self.slots[index] = Some(Slot::Composite(container.clone_ref(py)));
+        let class = MessageClass::of(py, &field.type_name)?;
+        let container = Py::new(py, RepeatedComposite::new(class, Vec::new(), owner))?;
+        self.set_slot(index, Slot::Composite(container.clone_ref(py)));
         Ok(container)
     }
 
@@ -678,7 +1069,7 @@ impl PyMessage {
         index: usize,
         owner: Option<Py<PyWeakrefReference>>,
     ) -> PyResult<Py<MapContainer>> {
-        if let Some(Slot::Map(c)) = &self.slots[index] {
+        if let Some(Slot::Map(c)) = self.slots.get(index) {
             return Ok(c.clone_ref(py));
         }
         let field = &self.desc.fields[index];
@@ -686,22 +1077,50 @@ impl PyMessage {
             .map
             .as_ref()
             .ok_or_else(|| PyTypeError::new_err(format!("{} is not a map", field.full_name)))?;
-        let container = Py::new(
-            py,
-            MapContainer::new(field.name.clone(), map.clone(), owner),
-        )?;
-        self.slots[index] = Some(Slot::Map(container.clone_ref(py)));
+        let container =
+            MapContainer::new(field.name.clone(), map.clone(), owner).into_object(py)?;
+        self.set_slot(index, Slot::Map(container.clone_ref(py)));
         Ok(container)
     }
 
-    fn copy_slots(&self, py: Python<'_>) -> PyResult<Vec<Option<Slot>>> {
-        self.slots
-            .iter()
-            .map(|slot| match slot {
-                None => Ok(None),
-                Some(slot) => copy_slot(py, slot).map(Some),
-            })
-            .collect()
+    /// The container of the repeated scalar field `index` of `message`, made if absent, which
+    /// holds `message` weakly.
+    pub(crate) fn repeated_scalar_of(
+        message: &Bound<'_, PyMessage>,
+        index: usize,
+    ) -> PyResult<Py<RepeatedScalar>> {
+        let py = message.py();
+        if let Some(Slot::Repeated(c)) = message.borrow().slots.get(index) {
+            return Ok(c.clone_ref(py));
+        }
+        let owner = weak(message)?;
+        message.borrow_mut().repeated_scalar(py, index, Some(owner))
+    }
+
+    /// The container of the repeated message field `index` of `message`, made if absent.
+    pub(crate) fn composite_of(
+        message: &Bound<'_, PyMessage>,
+        index: usize,
+    ) -> PyResult<Py<RepeatedComposite>> {
+        let py = message.py();
+        if let Some(Slot::Composite(c)) = message.borrow().slots.get(index) {
+            return Ok(c.clone_ref(py));
+        }
+        let owner = weak(message)?;
+        message.borrow_mut().composite(py, index, Some(owner))
+    }
+
+    /// The map of the map field `index` of `message`, made if absent.
+    pub(crate) fn map_of_field(
+        message: &Bound<'_, PyMessage>,
+        index: usize,
+    ) -> PyResult<Py<MapContainer>> {
+        let py = message.py();
+        if let Some(Slot::Map(c)) = message.borrow().slots.get(index) {
+            return Ok(c.clone_ref(py));
+        }
+        let owner = weak(message)?;
+        message.borrow_mut().map(py, index, Some(owner))
     }
 
     /// Set the fields of the items of `mapping`, as the constructor and a mapping for a message
@@ -784,7 +1203,7 @@ impl PyMessage {
         }
         grow(|| {
             self.unknown.clear();
-            for slot in self.slots.iter().flatten() {
+            for (_, slot) in self.slots.iter() {
                 match slot {
                     Slot::Message(child) => child.bind(py).borrow_mut().discard_unknown(py, depth),
                     Slot::Composite(c) => {
@@ -805,13 +1224,68 @@ impl PyMessage {
         })
     }
 
-    fn field_index(&self, name: &str) -> PyResult<usize> {
-        self.desc.by_name.get(name).copied().ok_or_else(|| {
-            PyValueError::new_err(format!(
-                "Protocol message {} has no \"{name}\" field.",
-                self.desc.name
-            ))
-        })
+    /// The value of the field `index`, which `__getattribute__` gives.
+    fn field_value(slf: &Bound<'_, Self>, index: usize) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        {
+            let me = slf.borrow();
+            let field = &me.desc.fields[index];
+            if !field.repeated && field.kind != Kind::Message {
+                return match me.slots.get(index) {
+                    Some(Slot::Scalar(v)) => v.to_py(py),
+                    _ => Scalar::default_of(field.kind).to_py(py),
+                };
+            }
+        }
+        let desc = slf.borrow().desc.clone();
+        let field = &desc.fields[index];
+        if field.map.is_some() {
+            let map = slf.borrow_mut().map(py, index, Some(weak(slf)?))?;
+            return Ok(map.into_any());
+        }
+        if field.repeated && field.kind == Kind::Message {
+            let container = slf.borrow_mut().composite(py, index, Some(weak(slf)?))?;
+            return Ok(container.into_any());
+        }
+        if field.repeated {
+            let container = slf
+                .borrow_mut()
+                .repeated_scalar(py, index, Some(weak(slf)?))?;
+            return Ok(container.into_any());
+        }
+        // A message field.
+        {
+            let me = slf.borrow();
+            if let Some(Slot::Message(c)) = me.slots.get(index) {
+                return Ok(c.clone_ref(py).into_any());
+            }
+            if let Some(c) = me.lazy_child(index) {
+                return Ok(c.clone_ref(py).into_any());
+            }
+        }
+        let child = new_instance(py, &field.type_name)?;
+        child.borrow_mut().parent = Some(Parent {
+            message: weak(slf)?,
+            field: index,
+        });
+        slf.borrow_mut().lazy.push((index, child.clone().unbind()));
+        Ok(child.into_any().unbind())
+    }
+
+    fn no_field(&self, name: &str) -> PyErr {
+        PyValueError::new_err(format!(
+            "Protocol message {} has no \"{name}\" field.",
+            self.desc.name
+        ))
+    }
+
+    /// The index of the field `name`, with upb's error of a name of no field.
+    fn field_index_of(&self, name: &FieldName) -> PyResult<usize> {
+        self.desc
+            .by_name
+            .get(name.text())
+            .copied()
+            .ok_or_else(|| self.no_field(&name.display()))
     }
 
     /// upb's `KeyError` of `HasExtension` and `ClearExtension` of `field`, of a message that
@@ -847,27 +1321,6 @@ fn assigns_values(py: Python<'_>, full_name: &str) -> bool {
             .is_some_and(|class| class.bind(py).hasattr("_internal_assign").unwrap_or(false))
 }
 
-fn copy_slot(py: Python<'_>, slot: &Slot) -> PyResult<Slot> {
-    Ok(match slot {
-        Slot::Scalar(v) => Slot::Scalar(v.clone()),
-        Slot::Message(c) => Slot::Message(duplicate(py, c.bind(py))?.unbind()),
-        Slot::Repeated(c) => Slot::Repeated(Py::new(py, c.bind(py).borrow().copy())?),
-        Slot::Composite(c) => {
-            let c = c.bind(py).borrow();
-            let items = c
-                .items
-                .iter()
-                .map(|m| duplicate(py, m.bind(py)).map(Bound::unbind))
-                .collect::<PyResult<Vec<_>>>()?;
-            Slot::Composite(Py::new(
-                py,
-                RepeatedComposite::new(c.message_type.clone(), items, None),
-            )?)
-        }
-        Slot::Map(c) => Slot::Map(Py::new(py, c.bind(py).borrow().copy(py)?)?),
-    })
-}
-
 #[pymethods]
 impl PyMessage {
     #[new]
@@ -878,7 +1331,7 @@ impl PyMessage {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let desc = class_descriptor(cls)?;
+        let desc = message_type_of(cls)?;
         if !args.is_empty() {
             return Err(PyTypeError::new_err("No positional arguments allowed"));
         }
@@ -889,54 +1342,48 @@ impl PyMessage {
         Ok(message)
     }
 
-    fn __getattr__(slf: &Bound<'_, Self>, name: &str) -> PyResult<Py<PyAny>> {
-        let py = slf.py();
-        let desc = slf.borrow().desc.clone();
-        let Some(&index) = desc.by_name.get(name) else {
-            // As upb's: the `AttributeError` of the `Extensions` of a message that declares no
-            // extension ranges has no message.
-            if name == "Extensions" {
-                return Err(PyAttributeError::new_err(()));
-            }
-            return Err(PyAttributeError::new_err(name.to_string()));
+    /// As upb's: a field of the name, else an attribute of the class (a method, a nested type),
+    /// else (`__getattr__`) one of its metaclass. The field is looked up first, as upb's is, so
+    /// that the read of a field raises no `AttributeError` to look it up, which would take longer
+    /// than the read.
+    fn __getattribute__(slf: &Bound<'_, Self>, name: &Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
+        let index = {
+            // The UTF-8 of the name, of one allocation (the str's own is not in the stable ABI
+            // of Python 3.9).
+            let utf8 = name.encode_utf8()?;
+            let me = slf.borrow();
+            std::str::from_utf8(utf8.as_bytes())
+                .ok()
+                .and_then(|text| me.desc.by_name.get(text).copied())
         };
-        let field = &desc.fields[index];
-        if field.map.is_some() {
-            let map = slf.borrow_mut().map(py, index, Some(weak(slf)?))?;
-            return Ok(map.into_any());
+        if let Some(index) = index {
+            return Self::field_value(slf, index);
         }
-        if field.repeated && field.kind == Kind::Message {
-            let container = slf.borrow_mut().composite(py, index, Some(weak(slf)?))?;
-            return Ok(container.into_any());
+        // SAFETY: `slf` and `name` are live objects, and the result is a new reference, or null
+        // with an exception set.
+        unsafe {
+            Bound::from_owned_ptr_or_err(
+                slf.py(),
+                pyo3::ffi::PyObject_GenericGetAttr(slf.as_ptr(), name.as_ptr()),
+            )
         }
-        if field.repeated {
-            let container = slf
-                .borrow_mut()
-                .repeated_scalar(py, index, Some(weak(slf)?))?;
-            return Ok(container.into_any());
+        .map(Bound::unbind)
+    }
+
+    /// The attribute `name` of no field nor attribute of the class: as upb's, an attribute of its
+    /// metaclass (`__name__`, `mro`), else `AttributeError(name)`, but of `Extensions`, whose
+    /// `AttributeError` (of a message that declares no extension ranges) has no message.
+    fn __getattr__(slf: &Bound<'_, Self>, name: &Bound<'_, PyString>) -> PyResult<Py<PyAny>> {
+        let py = slf.py();
+        if name.to_cow()? == "Extensions" {
+            return Err(PyAttributeError::new_err(()));
         }
-        if field.kind == Kind::Message {
-            {
-                let me = slf.borrow();
-                if let Some(Slot::Message(c)) = &me.slots[index] {
-                    return Ok(c.clone_ref(py).into_any());
-                }
-                if let Some(c) = &me.lazy[index] {
-                    return Ok(c.clone_ref(py).into_any());
-                }
+        match slf.get_type().as_any().getattr(name) {
+            Ok(value) => Ok(value.unbind()),
+            Err(error) if error.is_instance_of::<PyAttributeError>(py) => {
+                Err(PyAttributeError::new_err(name.clone().unbind()))
             }
-            let child = new_instance(py, &field.type_name)?;
-            child.borrow_mut().parent = Some(Parent {
-                message: weak(slf)?,
-                field: index,
-            });
-            slf.borrow_mut().lazy[index] = Some(child.clone().unbind());
-            return Ok(child.into_any().unbind());
-        }
-        let me = slf.borrow();
-        match &me.slots[index] {
-            Some(Slot::Scalar(v)) => v.to_py(py),
-            _ => Scalar::default_of(field.kind).to_py(py),
+            Err(error) => Err(error),
         }
     }
 
@@ -962,7 +1409,7 @@ impl PyMessage {
             // As upb's: a field of a well-known type whose class assigns values (a Timestamp, of
             // a datetime) takes the value through the `_internal_assign` of its message.
             if assigns_values(py, &field.type_name) {
-                let child = Self::__getattr__(slf, name)?;
+                let child = Self::field_value(slf, index)?;
                 child.bind(py).call_method1("_internal_assign", (value,))?;
                 return Ok(());
             }
@@ -988,21 +1435,23 @@ impl PyMessage {
         let py = slf.py();
         let full_name = slf.borrow().desc.full_name.clone();
         if let Ok(other) = other_msg.cast::<PyMessage>() {
-            let other = other.borrow();
-            if other.desc.full_name != full_name {
-                return Err(not_same_class("CopyFrom", slf.as_any(), other_msg));
-            }
+            let unset = {
+                let o = other.borrow();
+                if o.desc.full_name != full_name {
+                    return Err(not_same_class("CopyFrom", slf.as_any(), other_msg));
+                }
+                o.parent.is_some()
+            };
             // An unset child (of no fields) copies as upb's: the message is cleared.
-            let source = (other.parent.is_none())
-                .then(|| Ok::<_, PyErr>((other.copy_slots(py)?, other.unknown.clone())));
-            drop(other);
+            let source = if unset {
+                None
+            } else {
+                Some(copy_fields_of(py, other, &ConversionBudget::full())?)
+            };
             mark_present(slf)?;
             let mut me = slf.borrow_mut();
             match source {
-                Some(copied) => {
-                    let (slots, unknown) = copied?;
-                    me.replace_slots(py, slots, unknown)?;
-                }
+                Some((slots, unknown)) => me.replace_slots(py, slots, unknown)?,
                 None => me.clear_all(py),
             }
             Ok(())
@@ -1013,14 +1462,14 @@ impl PyMessage {
                 return Err(not_same_class("CopyFrom", slf.as_any(), other_msg));
             }
             mark_present(slf)?;
-            let empty = (0..slf.borrow().slots.len()).map(|_| None).collect();
-            slf.borrow_mut().replace_slots(py, empty, Vec::new())?;
+            slf.borrow_mut()
+                .replace_slots(py, Slots::default(), Vec::new())?;
             codec::merge(py, slf, &bytes)
         }
     }
 
     #[pyo3(name = "MergeFrom")]
-    fn merge_from(slf: &Bound<'_, Self>, other_msg: &Bound<'_, PyAny>) -> PyResult<()> {
+    pub(crate) fn merge_from(slf: &Bound<'_, Self>, other_msg: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         let full_name = slf.borrow().desc.full_name.clone();
         if let Ok(other) = other_msg.cast::<PyMessage>() {
@@ -1057,21 +1506,21 @@ impl PyMessage {
     fn clear_field(slf: &Bound<'_, Self>, field_name: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         mark_present(slf)?;
-        let field_name = field_name_of(field_name)?;
+        let field_name = FieldName::of(field_name)?;
         let index = {
             let me = slf.borrow();
-            match me.desc.oneof_by_name.get(field_name.as_str()) {
+            match me.desc.oneof_by_name.get(field_name.text()) {
                 Some(&oneof) => {
                     let set = me.desc.oneofs[oneof]
                         .fields
                         .iter()
-                        .find(|&&i| me.slots[i].is_some());
+                        .find(|&&i| me.slots.contains(i));
                     match set {
                         Some(&index) => index,
                         None => return Ok(()),
                     }
                 }
-                None => me.field_index(&field_name)?,
+                None => me.field_index_of(&field_name)?,
             }
         };
         slf.borrow_mut().clear_index(py, index);
@@ -1079,49 +1528,52 @@ impl PyMessage {
     }
 
     #[pyo3(name = "HasField")]
-    fn has_field(&self, field_name: &Bound<'_, PyAny>) -> PyResult<bool> {
-        let field_name = &field_name_of(field_name)?;
-        if let Some(&oneof) = self.desc.oneof_by_name.get(field_name.as_str()) {
-            return Ok(self.desc.oneofs[oneof]
+    fn has_field(slf: &Bound<'_, Self>, field_name: &Bound<'_, PyAny>) -> PyResult<bool> {
+        let field_name = FieldName::of(field_name)?;
+        let me = slf.borrow();
+        if let Some(&oneof) = me.desc.oneof_by_name.get(field_name.text()) {
+            return Ok(me.desc.oneofs[oneof]
                 .fields
                 .iter()
-                .any(|&i| self.slots[i].is_some()));
+                .any(|&i| me.slots.contains(i)));
         }
-        let index = self.field_index(field_name)?;
-        let field = &self.desc.fields[index];
+        let index = me.field_index_of(&field_name)?;
+        let field = &me.desc.fields[index];
         if !field.has_presence() {
             return Err(PyValueError::new_err(format!(
                 "Field {} does not have presence.",
                 field.full_name
             )));
         }
-        Ok(self.slots[index].is_some())
+        Ok(me.slots.contains(index))
     }
 
     /// `name in message`, as upb's: whether the field `name` is set, as `HasField` tells it.
-    fn __contains__(&self, name: &Bound<'_, PyAny>) -> PyResult<bool> {
-        self.has_field(name)
+    fn __contains__(slf: &Bound<'_, Self>, name: &Bound<'_, PyAny>) -> PyResult<bool> {
+        Self::has_field(slf, name)
     }
 
     #[pyo3(name = "WhichOneof")]
-    fn which_oneof(&self, oneof_group: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
-        let oneof_group = &field_name_of(oneof_group)?;
-        let Some(&oneof) = self.desc.oneof_by_name.get(oneof_group.as_str()) else {
-            if self.desc.by_name.contains_key(oneof_group.as_str()) {
+    fn which_oneof(
+        slf: &Bound<'_, Self>,
+        oneof_group: &Bound<'_, PyAny>,
+    ) -> PyResult<Option<String>> {
+        let oneof_group = FieldName::of(oneof_group)?;
+        let me = slf.borrow();
+        let Some(&oneof) = me.desc.oneof_by_name.get(oneof_group.text()) else {
+            if me.desc.by_name.contains_key(oneof_group.text()) {
                 return Err(PyValueError::new_err(format!(
-                    "Expected a oneof name, but got field name {oneof_group}."
+                    "Expected a oneof name, but got field name {}.",
+                    oneof_group.display()
                 )));
             }
-            return Err(PyValueError::new_err(format!(
-                "Protocol message {} has no \"{oneof_group}\" field.",
-                self.desc.name
-            )));
+            return Err(me.no_field(&oneof_group.display()));
         };
-        Ok(self.desc.oneofs[oneof]
+        Ok(me.desc.oneofs[oneof]
             .fields
             .iter()
-            .find(|&&i| self.slots[i].is_some())
-            .map(|&i| self.desc.fields[i].name.clone()))
+            .find(|&&i| me.slots.contains(i))
+            .map(|&i| me.desc.fields[i].name.clone()))
     }
 
     #[pyo3(name = "ListFields")]
@@ -1129,21 +1581,20 @@ impl PyMessage {
         let py = slf.py();
         let me = slf.borrow();
         let mut out = Vec::new();
-        for &index in &me.desc.order {
+        for (index, slot) in me.slots.iter() {
             let field = &me.desc.fields[index];
-            let value: Option<Py<PyAny>> = match &me.slots[index] {
-                None => None,
-                Some(Slot::Scalar(v)) => (field.has_presence() || !v.is_default())
+            let value: Option<Py<PyAny>> = match slot {
+                Slot::Scalar(v) => (field.has_presence() || !v.is_default())
                     .then(|| v.to_py(py))
                     .transpose()?,
-                Some(Slot::Message(c)) => Some(c.clone_ref(py).into_any()),
-                Some(Slot::Repeated(c)) => {
+                Slot::Message(c) => Some(c.clone_ref(py).into_any()),
+                Slot::Repeated(c) => {
                     (!c.bind(py).borrow().items.is_empty()).then(|| c.clone_ref(py).into_any())
                 }
-                Some(Slot::Composite(c)) => {
+                Slot::Composite(c) => {
                     (!c.bind(py).borrow().items.is_empty()).then(|| c.clone_ref(py).into_any())
                 }
-                Some(Slot::Map(c)) => {
+                Slot::Map(c) => {
                     (!c.bind(py).borrow().entries.is_empty()).then(|| c.clone_ref(py).into_any())
                 }
             };
@@ -1179,7 +1630,7 @@ impl PyMessage {
 
     #[pyo3(name = "ByteSize")]
     fn byte_size(slf: &Bound<'_, Self>) -> PyResult<usize> {
-        Ok(codec::encode(slf.py(), &slf.borrow())?.len())
+        codec::encoded_len(slf.py(), &slf.borrow())
     }
 
     /// As upb's: `Clear()`, then `MergeFromString`, so that a value that is not bytes leaves the
@@ -1252,7 +1703,7 @@ impl PyMessage {
     }
 
     /// The extensions of the message: as upb's of a message that declares no extension ranges,
-    /// an `AttributeError` of no message (see `__getattr__`).
+    /// an `AttributeError` of no message (which `__getattr__` keeps).
     #[getter(Extensions)]
     fn extensions(&self) -> PyResult<Py<PyAny>> {
         Err(PyAttributeError::new_err(()))
@@ -1329,6 +1780,9 @@ impl PyMessage {
         let py = slf.py();
         let object = py.import("builtins")?.getattr("object")?;
         let mut names: Vec<String> = object.call_method1("__dir__", (slf,))?.extract()?;
+        // As upb's: not `Extensions`, which a message that declares no extension ranges (as none
+        // of Spark Connect does) has not, though its class lists it.
+        names.retain(|name| name != "Extensions");
         names.extend(slf.borrow().desc.fields.iter().map(|f| f.name.clone()));
         names.sort();
         names.dedup();

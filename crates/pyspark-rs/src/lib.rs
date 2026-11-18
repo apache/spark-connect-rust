@@ -13,6 +13,7 @@
 use pyo3::prelude::*;
 
 mod catalog;
+mod client;
 mod column;
 mod conf;
 mod connect_bridge;
@@ -21,6 +22,7 @@ mod datasource;
 mod errors;
 mod eval_type;
 mod functions;
+mod gc;
 mod group;
 mod infer;
 mod interrupt;
@@ -142,6 +144,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGroupedData>()?;
     m.add_class::<PyCoGroupedData>()?;
     m.add_class::<PyLocalRowIterator>()?;
+    m.add_class::<client::PyExecutePlanResponses>()?;
     m.add_class::<transport::RustConnectStub>()?;
     m.add_class::<transport::ResponseStream>()?;
     m.add("RustRpcError", m.py().get_type::<transport::RustRpcError>())?;

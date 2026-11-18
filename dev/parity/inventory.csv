@@ -72,9 +72,9 @@ sql/connect/client/artifact.py,method,ArtifactManager,is_cached_artifact,"(self,
 sql/connect/client/artifact.py,method,ArtifactManager,get_cached_artifacts,"(self, hashes)",446,done,spark-connect-core/src/artifact.rs
 sql/connect/client/artifact.py,method,ArtifactManager,cache_artifact,"(self, blob)",472,done,spark-connect-core/src/artifact.rs
 sql/connect/client/artifact.py,method,ArtifactManager,cache_artifacts,"(self, blobs)",488,done,spark-connect-core/src/artifact.rs
-sql/connect/client/core.py,class,,RpcDeadlines,,136,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,RpcDeadlines,__post_init__,(self),162,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,RpcDeadlines,disabled,(cls),174,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,class,,RpcDeadlines,,136,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,RpcDeadlines,__post_init__,(self),162,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,RpcDeadlines,disabled,(cls),174,done,pyspark/sql/connect/client (over the Rust transport of the session)
 sql/connect/client/core.py,class,,ChannelBuilder,,207,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/client/core.py,method,ChannelBuilder,__init__,"(self, channelOptions, params)",242,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/client/core.py,method,ChannelBuilder,get,"(self, key)",255,done,spark-connect-core/channel.rs
@@ -109,60 +109,60 @@ sql/connect/client/core.py,method,PlanObservedMetrics,metrics,(self),660,n/a,arc
 sql/connect/client/core.py,method,PlanObservedMetrics,pairs,(self),664,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/client/core.py,method,PlanObservedMetrics,keys,(self),671,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
 sql/connect/client/core.py,method,PlanObservedMetrics,to_dict,(self),674,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,class,,AnalyzeResult,,689,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,AnalyzeResult,__init__,"(self, schema, explain_string, tree_string, is_local, is_streaming, input_files, spark_version, parsed, is_same_semantics, semantic_hash, storage_level, ddl_string)",690,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,AnalyzeResult,fromProto,"(cls, pb)",719,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,class,,ConfigResult,,780,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ConfigResult,__init__,"(self, pairs, warnings)",781,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,ConfigResult,fromProto,"(cls, pb)",786,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,class,,SparkConnectClient,,798,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,__init__,"(self, connection, user_id, channel_options, retry_policy, use_reattachable_execute, session_hooks, allow_arrow_batch_chunking, preferred_arrow_chunk_size, rpc_deadlines, max_retry_exception_elapsed_time)",811,done,spark-connect-core/src/client.rs
-sql/connect/client/core.py,method,SparkConnectClient,register_progress_handler,"(self, handler)",976,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,clear_progress_handlers,(self),990,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,remove_progress_handler,"(self, handler)",993,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,disable_reattachable_execute,(self),1011,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,enable_reattachable_execute,(self),1015,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,set_retry_policies,"(self, policies)",1019,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,get_retry_policies,(self),1027,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,register_udf,"(self, function, return_type, name, eval_type, deterministic)",1077,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,register_udtf,"(self, function, return_type, name, eval_type, deterministic)",1116,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,register_data_source,"(self, dataSource)",1150,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,register_java,"(self, name, javaClassName, return_type, aggregate)",1167,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,to_table_as_iterator,"(self, plan, observations)",1208,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,to_table,"(self, plan, observations)",1227,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,to_pandas,"(self, plan, observations, **kwargs)",1246,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,schema,"(self, plan)",1375,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,explain_string,"(self, plan, explain_mode)",1389,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,execute_command,"(self, command, observations)",1405,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,execute_command_as_iterator,"(self, command, observations)",1427,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,same_semantics,"(self, plan, other)",1452,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,semantic_hash,"(self, plan)",1460,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,close,(self),1468,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,is_closed,(self),1478,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,host,(self),1485,done,spark-connect-core/src/client.rs
-sql/connect/client/core.py,method,SparkConnectClient,token,(self),1492,done,spark-connect-core/src/client.rs
-sql/connect/client/core.py,method,SparkConnectClient,get_configs,"(self, *keys)",2016,done,client.rs
-sql/connect/client/core.py,method,SparkConnectClient,get_config_dict,"(self, *keys)",2021,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,get_config_with_defaults,"(self, *pairs)",2025,done,client.rs
-sql/connect/client/core.py,method,SparkConnectClient,config,"(self, operation)",2036,done,spark-connect-core/src/client.rs
-sql/connect/client/core.py,method,SparkConnectClient,interrupt_all,(self),2098,done,client.rs
-sql/connect/client/core.py,method,SparkConnectClient,interrupt_tag,"(self, tag)",2114,done,client.rs
-sql/connect/client/core.py,method,SparkConnectClient,interrupt_operation,"(self, op_id)",2130,done,client.rs
-sql/connect/client/core.py,method,SparkConnectClient,release_session,(self),2146,done,client.rs
-sql/connect/client/core.py,method,SparkConnectClient,add_tag,"(self, tag)",2222,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,remove_tag,"(self, tag)",2228,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,get_tags,(self),2234,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,clear_tags,(self),2239,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,add_threadlocal_user_context_extension,"(self, extension)",2266,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,add_global_user_context_extension,"(self, extension)",2273,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,remove_user_context_extension,"(self, extension_id)",2279,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,clear_user_context_extensions,(self),2292,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,add_artifacts,"(self, *paths, pyfile, archive, file)",2437,done,client.rs
-sql/connect/client/core.py,method,SparkConnectClient,copy_from_local_to_fs,"(self, local_path, dest_path)",2448,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,cache_artifact,"(self, blob)",2453,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,cache_artifacts,"(self, blobs)",2459,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,clone,"(self, new_session_id)",2718,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
-sql/connect/client/core.py,method,SparkConnectClient,newSession,(self),2788,n/a,architecture-satisfied: equivalent wire behavior provided by the Rust core (spark-connect / -core / -proto); reference-private or generated class not mirrored 1:1
+sql/connect/client/core.py,class,,AnalyzeResult,,689,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,AnalyzeResult,__init__,"(self, schema, explain_string, tree_string, is_local, is_streaming, input_files, spark_version, parsed, is_same_semantics, semantic_hash, storage_level, ddl_string)",690,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,AnalyzeResult,fromProto,"(cls, pb)",719,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,class,,ConfigResult,,780,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,ConfigResult,__init__,"(self, pairs, warnings)",781,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,ConfigResult,fromProto,"(cls, pb)",786,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,class,,SparkConnectClient,,798,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,__init__,"(self, connection, user_id, channel_options, retry_policy, use_reattachable_execute, session_hooks, allow_arrow_batch_chunking, preferred_arrow_chunk_size, rpc_deadlines, max_retry_exception_elapsed_time)",811,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_progress_handler,"(self, handler)",976,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clear_progress_handlers,(self),990,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,remove_progress_handler,"(self, handler)",993,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,disable_reattachable_execute,(self),1011,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,enable_reattachable_execute,(self),1015,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,set_retry_policies,"(self, policies)",1019,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_retry_policies,(self),1027,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_udf,"(self, function, return_type, name, eval_type, deterministic)",1077,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_udtf,"(self, function, return_type, name, eval_type, deterministic)",1116,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_data_source,"(self, dataSource)",1150,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,register_java,"(self, name, javaClassName, return_type, aggregate)",1167,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,to_table_as_iterator,"(self, plan, observations)",1208,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,to_table,"(self, plan, observations)",1227,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,to_pandas,"(self, plan, observations, **kwargs)",1246,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,schema,"(self, plan)",1375,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,explain_string,"(self, plan, explain_mode)",1389,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,execute_command,"(self, command, observations)",1405,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,execute_command_as_iterator,"(self, command, observations)",1427,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,same_semantics,"(self, plan, other)",1452,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,semantic_hash,"(self, plan)",1460,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,close,(self),1468,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,is_closed,(self),1478,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,host,(self),1485,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,token,(self),1492,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_configs,"(self, *keys)",2016,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_config_dict,"(self, *keys)",2021,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_config_with_defaults,"(self, *pairs)",2025,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,config,"(self, operation)",2036,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,interrupt_all,(self),2098,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,interrupt_tag,"(self, tag)",2114,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,interrupt_operation,"(self, op_id)",2130,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,release_session,(self),2146,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_tag,"(self, tag)",2222,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,remove_tag,"(self, tag)",2228,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,get_tags,(self),2234,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clear_tags,(self),2239,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_threadlocal_user_context_extension,"(self, extension)",2266,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_global_user_context_extension,"(self, extension)",2273,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,remove_user_context_extension,"(self, extension_id)",2279,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clear_user_context_extensions,(self),2292,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,add_artifacts,"(self, *paths, pyfile, archive, file)",2437,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,copy_from_local_to_fs,"(self, local_path, dest_path)",2448,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,cache_artifact,"(self, blob)",2453,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,cache_artifacts,"(self, blobs)",2459,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,clone,"(self, new_session_id)",2718,done,pyspark/sql/connect/client (over the Rust transport of the session)
+sql/connect/client/core.py,method,SparkConnectClient,newSession,(self),2788,done,pyspark/sql/connect/client (over the Rust transport of the session)
 sql/connect/client/reattach.py,class,,ExecutePlanResponseReattachableIterator,,37,done,reattach.rs full impl
 sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,__new__,"(cls, *args, **kwargs)",64,done,reattach.rs full impl
 sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,__init__,"(self, request, stub, retrying, metadata, reattachable_execute_plan_timeout, reattach_execute_timeout)",69,done,reattach.rs full impl
@@ -171,33 +171,33 @@ sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,sh
 sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,send,"(self, value)",150,done,reattach.rs full impl
 sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,throw,"(self, type, value, traceback)",362,done,reattach.rs full impl
 sql/connect/client/reattach.py,method,ExecutePlanResponseReattachableIterator,close,(self),365,done,reattach.rs full impl
-sql/connect/client/retries.py,class,,RetryPolicy,,46,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicy,__init__,"(self, max_retries, initial_backoff, max_backoff, backoff_multiplier, jitter, min_jitter_threshold, recognize_server_retry_delay, max_server_retry_delay)",81,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicy,name,(self),103,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicy,can_retry,"(self, exception)",106,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicy,to_state,(self),109,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,class,,RetryPolicyState,,113,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicyState,__init__,"(self, policy)",118,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicyState,policy,(self),126,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicyState,name,(self),130,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicyState,can_retry,"(self, exception)",133,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,RetryPolicyState,next_attempt,"(self, exception)",136,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,class,,AttemptManager,,173,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,AttemptManager,__init__,"(self, retrying)",178,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,AttemptManager,__enter__,(self),181,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,AttemptManager,__exit__,"(self, exc_type, exception, exc_tb)",184,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,class,,Retrying,,207,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,Retrying,__init__,"(self, policies, sleep, max_retry_exception_elapsed_time, now)",230,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,Retrying,can_retry,"(self, exception)",250,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,Retrying,accept_exception,"(self, exception)",256,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,Retrying,accept_succeeded,(self),262,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,Retrying,__iter__,(self),314,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,class,,RetryException,,331,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,class,,DefaultPolicy,,338,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,DefaultPolicy,__init__,"(self, max_retries, backoff_multiplier, initial_backoff, max_backoff, jitter, min_jitter_threshold, recognize_server_retry_delay, max_server_retry_delay)",345,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,method,DefaultPolicy,can_retry,"(self, e)",367,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,function,,extract_retry_info,(exception),409,done,spark-connect-core/src/retries.rs
-sql/connect/client/retries.py,function,,extract_retry_delay,(exception),422,done,spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,class,,RetryPolicy,,46,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicy,__init__,"(self, max_retries, initial_backoff, max_backoff, backoff_multiplier, jitter, min_jitter_threshold, recognize_server_retry_delay, max_server_retry_delay)",81,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicy,name,(self),103,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicy,can_retry,"(self, exception)",106,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicy,to_state,(self),109,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,class,,RetryPolicyState,,113,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicyState,__init__,"(self, policy)",118,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicyState,policy,(self),126,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicyState,name,(self),130,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicyState,can_retry,"(self, exception)",133,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,RetryPolicyState,next_attempt,"(self, exception)",136,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,class,,AttemptManager,,173,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,AttemptManager,__init__,"(self, retrying)",178,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,AttemptManager,__enter__,(self),181,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,AttemptManager,__exit__,"(self, exc_type, exception, exc_tb)",184,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,class,,Retrying,,207,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,Retrying,__init__,"(self, policies, sleep, max_retry_exception_elapsed_time, now)",230,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,Retrying,can_retry,"(self, exception)",250,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,Retrying,accept_exception,"(self, exception)",256,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,Retrying,accept_succeeded,(self),262,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,Retrying,__iter__,(self),314,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,class,,RetryException,,331,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,class,,DefaultPolicy,,338,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,DefaultPolicy,__init__,"(self, max_retries, backoff_multiplier, initial_backoff, max_backoff, jitter, min_jitter_threshold, recognize_server_retry_delay, max_server_retry_delay)",345,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,method,DefaultPolicy,can_retry,"(self, e)",367,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,function,,extract_retry_info,(exception),409,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
+sql/connect/client/retries.py,function,,extract_retry_delay,(exception),422,done,vendored (pyspark/sql/connect/client/retries.py); spark-connect-core/src/retries.rs
 sql/connect/column.py,class,,Column,,109,verified,golden-verified
 sql/connect/column.py,method,Column,__new__,"(cls, *args, **kwargs)",110,verified,golden-verified
 sql/connect/column.py,method,Column,__getnewargs__,(self),113,verified,golden-verified
@@ -2153,8 +2153,8 @@ sql/column.py,method,Column,__nonzero__,(self),1607,done,
 sql/column.py,method,Column,__bool__,(self),1610,done,
 sql/column.py,method,Column,__repr__,(self),1613,done,
 errors/exceptions/connect.py,class,,SparkConnectException,,51,done,error.rs
-errors/exceptions/connect.py,function,,convert_exception,"(info, truncated_message, resp, display_server_stacktrace, grpc_status_code)",57,done,error.rs
-errors/exceptions/connect.py,function,,convert_observation_errors,"(root_error_idx, errors)",89,done,error.rs
+errors/exceptions/connect.py,function,,convert_exception,"(info, truncated_message, resp, display_server_stacktrace, grpc_status_code)",57,done,pyspark/errors/exceptions/connect.py (upstream's); error.rs
+errors/exceptions/connect.py,function,,convert_observation_errors,"(root_error_idx, errors)",89,done,pyspark/errors/exceptions/connect.py (upstream's); error.rs
 errors/exceptions/connect.py,class,,SparkConnectGrpcException,,253,done,error.rs
 errors/exceptions/connect.py,method,SparkConnectGrpcException,__init__,"(self, message, errorClass, messageParameters, reason, sql_state, server_stacktrace, display_server_stacktrace, contexts, grpc_status_code, breaking_change_info)",258,done,error.rs
 errors/exceptions/connect.py,method,SparkConnectGrpcException,getSqlState,(self),301,done,error.rs
