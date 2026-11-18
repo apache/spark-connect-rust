@@ -1582,15 +1582,10 @@ fn save_impl<T: Validator>(
         .map(|(key, value)| Ok((key.to_string(), compact_json(value)?)))
         .collect::<PyResult<Vec<_>>>()?;
     let uid: String = instance.as_any().getattr("uid")?.extract()?;
+    let class = super::pipeline_api::metadata_class::<T>(instance.as_any(), T::METADATA_CLASS)?;
     interruptible(py, session, || {
         let version = session.version()?;
-        let mut metadata = Metadata::new(
-            T::METADATA_CLASS,
-            &uid,
-            &version,
-            param_map,
-            default_param_map,
-        );
+        let mut metadata = Metadata::new(&class, &uid, &version, param_map, default_param_map);
         metadata.extra = extra;
         save_metadata(session, path, &metadata.to_json()).map_err(Box::new)
     })?;

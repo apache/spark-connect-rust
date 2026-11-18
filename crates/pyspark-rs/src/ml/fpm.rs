@@ -30,6 +30,9 @@ impl Native for PyFPGrowth {
     fn inner(&self) -> &Self::Core {
         &self.inner
     }
+    fn core_params_mut(core: &mut Self::Core) -> &mut Params {
+        core.params_mut()
+    }
     fn params(&self) -> &Params {
         self.inner.params()
     }
@@ -197,6 +200,9 @@ impl Native for PyPrefixSpan {
     type Core = PrefixSpan;
     fn inner(&self) -> &Self::Core {
         &self.inner
+    }
+    fn core_params_mut(core: &mut Self::Core) -> &mut Params {
+        core.params_mut()
     }
     fn params(&self) -> &Params {
         self.inner.params()

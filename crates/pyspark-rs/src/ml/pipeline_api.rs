@@ -16,6 +16,29 @@ const PIPELINE_CLASS: &str = "pyspark.ml.pipeline.Pipeline";
 /// The class of the metadata of a PipelineModel (see [`PIPELINE_CLASS`]).
 const PIPELINE_MODEL_CLASS: &str = "pyspark.ml.pipeline.PipelineModel";
 
+/// The class of the metadata of `instance`, a Pipeline, a validator or a OneVsRest (or a model of
+/// one), as PySpark's `DefaultParamsWriter` writes it (`instance.__module__ + "." +
+/// instance.__class__.__name__`): `class`, PySpark's class of the native class `T`, which PySpark
+/// loads, of an object of the native class or of its public class, and the module and the name of
+/// the class of an object of a Python subclass of them (`__main__.MyPipeline`), as of a subclass of
+/// PySpark's class.
+pub(super) fn metadata_class<T: pyo3::PyTypeInfo>(
+    instance: &Bound<'_, PyAny>,
+    class: &str,
+) -> PyResult<String> {
+    let py = instance.py();
+    let ty = instance.get_type();
+    let public = crate::ml::object::public_class::<T>(py);
+    if ty.is(py.get_type::<T>()) || public.is_some_and(|public| ty.is(&public)) {
+        return Ok(class.to_string());
+    }
+    instance
+        .getattr("__module__")?
+        .add(".")?
+        .add(instance.getattr("__class__")?.getattr("__name__")?)?
+        .extract()
+}
+
 /// PySpark's `Pipeline`: its `stages` (a param of the converter `identity`, the object as it was
 /// set), and its uid.
 #[pyclass(subclass, name = "Pipeline", module = "pyspark.ml.connect.pipeline")]
@@ -402,7 +425,8 @@ fn save_pipeline(
     _options: &std::collections::HashMap<String, String>,
 ) -> PyResult<()> {
     let stages = instance.call_method0("getStages")?;
-    save_with_stages(instance, PIPELINE_CLASS, &stages, spark, session, path)
+    let class = metadata_class::<PyPipeline>(instance, PIPELINE_CLASS)?;
+    save_with_stages(instance, &class, &stages, spark, session, path)
 }
 
 /// Save the model `instance`, as `PipelineModelWriter.saveImpl`: of its stages.
@@ -414,14 +438,8 @@ fn save_pipeline_model(
     _options: &std::collections::HashMap<String, String>,
 ) -> PyResult<()> {
     let stages = instance.getattr("stages")?;
-    save_with_stages(
-        instance,
-        PIPELINE_MODEL_CLASS,
-        &stages,
-        spark,
-        session,
-        path,
-    )
+    let class = metadata_class::<PyPipelineModel>(instance, PIPELINE_MODEL_CLASS)?;
+    save_with_stages(instance, &class, &stages, spark, session, path)
 }
 
 /// Save `instance` of the class `class` and its stages `stages` to `path`, as

@@ -277,6 +277,45 @@ def test_regex_identity_is_deferred_and_retains_python_value(ml_mock):
     assert wire(stage, "RegexTokenizer", spark, service).params["gaps"] == pb2.Expression.Literal(boolean=False)
 
 
+def test_regex_identity_is_saved_of_its_python_value_as_pyspark(ml_mock):
+    # As PySpark's save of a RegexTokenizer (`RemoteMLWriter.saveInstance`), whose
+    # `serialize_ml_params` serializes every param of `_paramMap`: `gaps`, of no converter, is saved
+    # as the literal of its Python value, of the constructor, the setter and setParams, so that a
+    # load (also of a Pipeline, whose stages save by their own writers) has it. A value of no
+    # literal raises the error of its serialization, before any request.
+    from pyspark.errors import PySparkTypeError, PySparkValueError
+
+    spark, service = ml_mock
+    null = pb2.Expression.Literal(null=pb2.DataType(null=pb2.DataType.NULL()))
+    for value, expected in [
+        (False, pb2.Expression.Literal(boolean=False)),
+        (True, pb2.Expression.Literal(boolean=True)),
+        (1, pb2.Expression.Literal(integer=1)),
+        ("yes", pb2.Expression.Literal(string="yes")),
+        (None, null),
+    ]:
+        for stage in [
+            feature.RegexTokenizer(gaps=value),
+            feature.RegexTokenizer().setGaps(value),
+            feature.RegexTokenizer().setParams(gaps=value),
+        ]:
+            sent = len(service.execute_requests)
+            stage.write().save("/saved/path")
+            (command,) = _commands_but_deletes(service, sent)
+            assert command.ml_command.write.params.params["gaps"] == expected, value
+    for value, error_class, condition in [
+        ((1,), PySparkTypeError, "UNSUPPORTED_DATA_TYPE"),
+        ({"a": 1}, PySparkTypeError, "UNSUPPORTED_DATA_TYPE"),
+        (2**63, PySparkValueError, "VALUE_NOT_BETWEEN"),
+        ([], PySparkTypeError, "CANNOT_INFER_ARRAY_ELEMENT_TYPE"),
+    ]:
+        sent = _requests_but_deletes(service)
+        with pytest.raises(error_class) as error:
+            feature.RegexTokenizer(gaps=value).write().save("/saved/path")
+        assert error.value.getCondition() == condition, value
+        assert _requests_but_deletes(service) == sent
+
+
 @pytest.mark.parametrize("name,param", [(name, param) for name, api in GOLDEN["api"].items() for param, converter in api["params"].items() if converter != "identity"])
 def test_feature_setters_reject_invalid_types_without_mutating(name, param, ml_mock):
     # The constructor fetches the defaults of the active session, as PySpark's does.

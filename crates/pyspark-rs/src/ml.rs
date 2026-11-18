@@ -240,9 +240,9 @@ fn int_list(converted: &Bound<'_, PyAny>) -> PyResult<Converted> {
 trait Native {
     type Core: Clone;
     fn inner(&self) -> &Self::Core;
-    fn snapshot_core(&self, _py: Python<'_>) -> PyResult<Self::Core> {
-        Ok(self.inner().clone())
-    }
+    /// The params of the core object `core`, of a copy of [`Native::inner`] that a fit, transform
+    /// or evaluate sends (see `snapshot`).
+    fn core_params_mut(core: &mut Self::Core) -> &mut Params;
     fn raw_params_mut(&mut self) -> Option<&mut Vec<(&'static str, Py<PyAny>)>> {
         None
     }
@@ -277,6 +277,9 @@ macro_rules! native {
             type Core = $core;
             fn inner(&self) -> &$core {
                 &self.inner
+            }
+            fn core_params_mut(core: &mut $core) -> &mut Params {
+                core.params_mut()
             }
             fn params_mut(&mut self) -> &mut Params {
                 self.inner.params_mut()
@@ -555,23 +558,49 @@ fn check_params(params: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
 }
 
 /// The core object of `slf`, cloned under a short borrow, so that a setter that another
-/// thread calls while a fit, transform or evaluate waits for the server does not fail. As
-/// PySpark's serialization of the params, it first raises the error of a value that PySpark
-/// cannot send (`VALUE_NOT_BETWEEN` of an int beyond a long, see
-/// [`params_api::unsendable_error`]), and `CANNOT_INFER_ARRAY_ELEMENT_TYPE` of a list param
-/// without elements, whose element type PySpark cannot infer.
+/// thread calls while a fit, transform or evaluate waits for the server does not fail, of the
+/// params that PySpark's `serialize_ml_params` sends of it (see [`params_api::sent_params`]): its
+/// own, the values of its params of the converter `identity`, and the params of a Python subclass
+/// that its `_paramMap` holds. As PySpark's serialization of the params, it first raises the
+/// error of a value that PySpark cannot send, of the first of `_paramMap`: `VALUE_NOT_BETWEEN` of
+/// an int beyond a long (see [`params_api::unsendable_error`]), `CANNOT_INFER_ARRAY_ELEMENT_TYPE`
+/// of a list param without elements, whose element type PySpark cannot infer, and the error of a
+/// value of no literal.
 fn snapshot<T: Native + PyClass>(slf: &Bound<'_, T>) -> PyResult<T::Core> {
+    core_of(slf, true)
+}
+
+/// The core object of `slf` (see [`snapshot`]), of the params of a Python subclass that its
+/// `_paramMap` holds if `subclass_params`: a helper call that sends some of the params of the
+/// object, rather than its `_paramMap`, sends none of them (PowerIterationClustering's
+/// `assignClusters`).
+fn core_of<T: Native + PyClass>(slf: &Bound<'_, T>, subclass_params: bool) -> PyResult<T::Core> {
     let py = slf.py();
-    let this = slf.try_borrow()?;
-    let unsendable = this.unsendable().first().map(|name| T::jvm_name(name));
-    if unsendable.is_none() && !this.params().has_empty_array() {
-        return this.snapshot_core(py);
+    let (mut core, unsendable, raw) = {
+        let this = slf.try_borrow()?;
+        let unsendable: Vec<&'static str> = this
+            .unsendable()
+            .iter()
+            .map(|name| T::jvm_name(name))
+            .collect();
+        (
+            this.inner().clone(),
+            unsendable,
+            params_api::raw_values::<T>(py, &*this),
+        )
+    };
+    // The serialization of the params runs Python code: of the copies, after the borrow.
+    let params = T::core_params_mut(&mut core);
+    let map = if subclass_params {
+        params_api::param_map_items(slf.as_any())?
+    } else {
+        None
+    };
+    let sent = params_api::sent_params(slf.as_any(), params, &unsendable, &raw, map)?;
+    for (name, literal) in sent {
+        *params = std::mem::take(params).set_param_literal(&name, literal);
     }
-    // The error of a copy of the params, after the borrow (see `params_api::params_error`).
-    let params = this.params().clone();
-    drop(this);
-    Err(params_api::params_error(py, &params, unsendable)
-        .unwrap_or_else(|| crate::functions::value_not_between(py)))
+    Ok(core)
 }
 
 /// The dataset of `method`, a Spark DataFrame. Another object raises the `AttributeError` of
@@ -6424,7 +6453,7 @@ native_pymethods! {
     fn assign_clusters(slf: &Bound<'_, Self>, dataset: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         use spark_connect::ml::{attribute_relation, FetchArg, MlTarget};
         let py = slf.py();
-        let algorithm = snapshot(slf)?;
+        let algorithm = core_of(slf, false)?;
         let session = crate::session::active_session(py)
             .ok_or_else(|| pyo3::exceptions::PyAssertionError::new_err(()))?
             .borrow(py)

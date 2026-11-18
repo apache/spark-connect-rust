@@ -460,6 +460,17 @@ PySpark class has them:
     of `copy.copy`.
   - `uid` is assignable. An assignment re-parents the object's Params, where PySpark's keeps the
     Params of the old uid, which then do not belong to the object (until its `_resetUid`).
+  - A fit, transform, evaluate and save send every param of `_paramMap`, as PySpark's
+    `serialize_ml_params`: a Param of the subclass that is set too, of the literal of its value, which
+    the server refuses (`Param myParam does not exist.`), as PySpark's; a Param of only a default is
+    not sent. The error of a value of no literal, of the first param of `_paramMap` that cannot be
+    sent, is raised before any request.
+  - A save of a subclass of a OneVsRest, a Pipeline, a validator or a model of one writes the class
+    of the object in its metadata (`__main__.MyPipeline`), as PySpark's `DefaultParamsWriter` does,
+    so the loads of such a file are PySpark's: the readers of a OneVsRest and a Pipeline load it of
+    their own class, those of a validator fail of PySpark's `TypeError` (they read the grid of a
+    class of no `pyspark.ml.` as of the JVM's writer), and a stage of a pipeline loads of its class
+    (an `AttributeError` of a class that its module does not have).
 - **`copy.copy`, `copy.deepcopy` and `pickle`** take an object as PySpark's do:
   - An estimator, a transformer, an evaluator, a Pipeline or a validator, and a model of no
     server-side object, copy, copy deep and pickle of their uid, params and attributes. A shallow
@@ -2013,7 +2024,8 @@ constructor's defaults of a OneVsRest of its constructor, of the names of a load
 metadata of the model
 also has `numClasses`, and each submodel is saved at `model_<index>` by its own writer. What each
 of PySpark and this client saves, the other loads, with the same uids, params and predictions, and
-the metadata files equal PySpark's apart from their timestamps and uids. As PySpark's readers, the
+the metadata files equal PySpark's apart from their timestamps and uids (of a subclass, of its class,
+see "Subclasses" above). As PySpark's readers, the
 loads read metadata of any class, of PySpark's Python format and of the JVM's class names, which
 classic PySpark's `JavaMLWriter` (and Scala's writer) saves of a OneVsRest of a Java classifier, in
 the same layout, also as a stage of a pipeline. A load of a model loads its classifier and each of
@@ -2173,6 +2185,9 @@ their fitted models and upstream input plans. The Rust wrapper of the discretize
 `QuantileDiscretizerModel`. Training-only parameters are omitted from model transforms.
 Multi-column parameters, nested Bucketizer splits, vector-valued ElementwiseProduct weights,
 NaN imputation values, and UnivariateFeatureSelector's setter-only parameters are supported.
+RegexTokenizer's `gaps`, which has no converter in PySpark, keeps its Python value, which a
+transform and a save send as its literal (of `LiteralExpression._from_value`, as PySpark's
+`serialize_param`), so that a load has it; a value of no literal raises its error at either.
 
 `StandardScaler` and `MaxAbsScaler` exports now refer to the native implementations. This
 changes the previous deprecated `pyspark.ml.connect` scaler behavior: pandas frames and
