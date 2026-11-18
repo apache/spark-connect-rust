@@ -18,14 +18,13 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union, overload
-from pyspark.util import is_remote_only as is_remote_only
 from pyspark.storagelevel import StorageLevel as StorageLevel
-from pyspark.resource import ResourceProfile as ResourceProfile
+from pyspark.resource import ResourceProfile
 from pyspark.sql.column import Column as Column
-from pyspark.sql.readwriter import DataFrameWriter as DataFrameWriter, DataFrameWriterV2 as DataFrameWriterV2
-from pyspark.sql.merge import MergeIntoWriter as MergeIntoWriter
-from pyspark.sql.streaming import DataStreamWriter as DataStreamWriter
-from pyspark.sql.table_arg import TableArg as TableArg
+from pyspark.sql.readwriter import DataFrameWriter, DataFrameWriterV2
+from pyspark.sql.merge import MergeIntoWriter
+from pyspark.sql.streaming import DataStreamWriter
+from pyspark.sql.table_arg import TableArg
 from pyspark.sql.types import StructType as StructType, Row as Row
 from py4j.java_gateway import JavaObject
 import pyarrow as pa

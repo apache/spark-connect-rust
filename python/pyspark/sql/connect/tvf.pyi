@@ -18,7 +18,6 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Optional
-from pyspark.errors import PySparkValueError as PySparkValueError
 from pyspark.sql.tvf import TableValuedFunction as PySparkTableValuedFunction
 from pyspark.sql.connect.column import Column
 from pyspark.sql.connect.dataframe import DataFrame

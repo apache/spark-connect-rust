@@ -18,11 +18,9 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import overload, Dict, List, Optional, Tuple, Union
-from pyspark.util import is_remote_only as is_remote_only
-from pyspark.sql.types import StructType as StructType
-from pyspark.sql import utils as utils
-from pyspark.sql.utils import to_str as to_str
-from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError
+from pyspark.sql.types import StructType
+from pyspark.sql.utils import to_str
+from pyspark.errors import PySparkTypeError
 from py4j.java_gateway import JavaObject
 from pyspark.core.rdd import RDD
 from pyspark.sql._typing import OptionalPrimitiveType, ColumnOrName

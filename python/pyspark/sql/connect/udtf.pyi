@@ -18,18 +18,12 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Type, Optional, Union
-from pyspark.util import PythonEvalType as PythonEvalType
-from pyspark.sql.connect.column import Column as Column
-from pyspark.sql.connect.expressions import Expression as Expression
+from pyspark.util import PythonEvalType
 from pyspark.sql.connect.plan import CommonInlineUserDefinedTableFunction
-from pyspark.sql.connect.table_arg import TableArg as TableArg
-from pyspark.sql.connect.types import UnparsedDataType as UnparsedDataType
-from pyspark.sql.connect.utils import get_python_ver as get_python_ver
-from pyspark.sql.pandas.utils import require_minimum_pyarrow_version as require_minimum_pyarrow_version, require_minimum_pandas_version as require_minimum_pandas_version
+from pyspark.sql.connect.types import UnparsedDataType
 from pyspark.sql.udtf import AnalyzeArgument as AnalyzeArgument, AnalyzeResult as AnalyzeResult
 from pyspark.sql.udtf import _validate_udtf_handler
-from pyspark.sql.types import DataType as DataType, StructType as StructType
-from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError, PySparkTypeError as PySparkTypeError, PySparkAttributeError as PySparkAttributeError
+from pyspark.sql.types import DataType, StructType
 from pyspark.sql.connect._typing import ColumnOrName
 from pyspark.sql.connect.dataframe import DataFrame
 from pyspark.sql.connect.session import SparkSession

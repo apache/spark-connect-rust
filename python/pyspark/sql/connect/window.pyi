@@ -18,9 +18,8 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Any, Union, Sequence, Optional, Tuple
-from pyspark.sql.column import Column as Column
 from pyspark.sql.window import Window as ParentWindow, WindowSpec as ParentWindowSpec
-from pyspark.sql.connect.expressions import Expression as Expression, SortOrder
+from pyspark.sql.connect.expressions import Expression, SortOrder
 from pyspark.sql.connect._typing import ColumnOrName
 
 __all__ = ['Window', 'WindowSpec']

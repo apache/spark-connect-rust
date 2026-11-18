@@ -20,13 +20,16 @@
 from typing import Any, Mapping, Union, Sequence, overload, Optional, Tuple, Type, Callable
 from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError
 from pyspark.sql import Column as Column
-from pyspark.sql.connect.expressions import Expression as Expression, LiteralExpression as LiteralExpression, UnresolvedNamedLambdaVariable as UnresolvedNamedLambdaVariable
+from pyspark.sql.connect.expressions import Expression
 from pyspark.sql.connect.udtf import AnalyzeArgument as AnalyzeArgument, AnalyzeResult as AnalyzeResult
 from pyspark.sql.types import DataType as DataType, StructType as StructType, ArrayType as ArrayType, MapType as MapType, StringType as StringType
 from pyspark.sql.functions import arrow_udf as arrow_udf, pandas_udf as pandas_udf
 from pyspark.sql.connect._typing import ColumnOrName, DataTypeOrString, UserDefinedFunctionLike
 from pyspark.sql.dataframe import DataFrame
 
+def _to_col(col: 'ColumnOrName') -> Column: ...
+def _invoke_function(name: str, *args: Union[Column, Expression]) -> Column: ...
+def _invoke_function_over_columns(name: str, *cols: 'ColumnOrName') -> Column: ...
 def col(col: str) -> Column: ...
 
 column = col

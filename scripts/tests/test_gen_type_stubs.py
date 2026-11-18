@@ -184,6 +184,7 @@ class Tree:
             "extend-exclude = [\n" + gen.RUFF_BLOCK_BEGIN + gen.RUFF_BLOCK_END + "]\n",
         )
         self.write(self.repo, "python/pyspark/sql/column.py", "class Column: ...\n")
+        self.write(self.repo, "python/pyspark/sql/dataframe.py", "class DataFrame: ...\n")
         self.write(self.repo, "python/pyspark/sql/utils.py", DROPIN_UTILS)
 
     @staticmethod
@@ -191,11 +192,15 @@ class Tree:
         (base / path).parent.mkdir(parents=True, exist_ok=True)
         (base / path).write_text(textwrap.dedent(text).lstrip("\n"))
 
-    def generate(self, modules, extras=None, attribute_types=None):
+    def generate(
+        self, modules, extras=None, attribute_types=None, unresolved_imports=None, dropped=None
+    ):
         with (
             mock.patch.object(gen, "STUB_MODULES", tuple(modules)),
             mock.patch.object(gen, "EXTRAS", extras or {}),
             mock.patch.object(gen, "ATTRIBUTE_TYPES", attribute_types or {}),
+            mock.patch.object(gen, "UNRESOLVED_IMPORTS", unresolved_imports or {}),
+            mock.patch.object(gen, "DROPPED", dropped or {}),
             mock.patch.object(
                 gen, "IDENTITY_DECORATORS", frozenset({"pyspark.sql.utils.try_remote_functions"})
             ),
@@ -400,6 +405,174 @@ class Schema:
             mock.patch.object(
                 gen, "IDENTITY_DECORATORS", frozenset({"pyspark.sql.utils.not_identity"})
             ),
+            self.assertRaisesRegex(gen.GeneratorError, "not annotated as returning what it takes"),
+        ):
+            gen.check_identity_decorators(tree.src)
+
+    def test_keeps_the_private_names_of_the_dropins_module(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/reader.py",
+            """
+            from typing import Dict
+
+            _registry: Dict[str, int] = {}
+
+            def _helper(x: int) -> int:
+                return x
+
+            def _unused(x: int) -> int:
+                return x
+
+            def read(x: int) -> int:
+                return x
+            """,
+        )
+        # The drop-in's module has _helper and _registry at run time, of its own source (not
+        # of its stub), so the stub declares them; _unused, which it does not have, is dropped.
+        tree.write(
+            tree.repo,
+            "python/pyspark/sql/reader.py",
+            "from pyspark._pyspark import _helper, read\n_registry = {}\n",
+        )
+        stub = body(tree.generate(["pyspark.sql.reader"])[Path("python/pyspark/sql/reader.pyi")])
+        self.assertEqual(
+            stub,
+            "\nfrom typing import Dict\n\n_registry: Dict[str, int]\n\n"
+            "def _helper(x: int) -> int: ...\ndef read(x: int) -> int: ...\n",
+        )
+
+    def test_keeps_the_type_ignores_and_the_imports_of_the_annotation_of_all(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/reader.py",
+            """
+            from typing import List
+
+            __all__: List[str] = ["Reader"]
+
+
+            class Reader(object):  # type: ignore[misc]
+                @property  # type: ignore[override]
+                def name(self) -> str:
+                    return ""
+
+                def __eq__(  # type: ignore[override]
+                    self,
+                    other: "Reader",
+                ) -> "Reader":  # type: ignore[misc]
+                    return self
+
+                same = __eq__  # type: ignore[assignment]
+            """,
+        )
+        stub = body(tree.generate(["pyspark.sql.reader"])[Path("python/pyspark/sql/reader.pyi")])
+        # The import of List, which only the annotation of __all__ reads, stays. Each comment
+        # stays on the line that ast.unparse prints of its statement, those of a multi-line
+        # signature merged.
+        self.assertEqual(
+            stub,
+            """
+from typing import List
+
+__all__: List[str] = ['Reader']
+
+class Reader(object):  # type: ignore[misc]
+    @property  # type: ignore[override]
+    def name(self) -> str: ...
+    def __eq__(self, other: 'Reader') -> 'Reader': ...  # type: ignore[misc, override]
+    same = __eq__  # type: ignore[assignment]
+""",
+        )
+
+    def test_the_imports_of_a_stub_resolve_in_the_dropin(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/reader.py",
+            """
+            from pyspark.sql.utils import helper, missing_helper
+
+            def read(x: missing_helper) -> helper: ...
+            """,
+        )
+        # The drop-in's pyspark.sql.utils has helper, not missing_helper.
+        with self.assertRaisesRegex(
+            gen.GeneratorError, r"does not have: \{'pyspark.sql.utils.missing_helper'"
+        ):
+            tree.generate(["pyspark.sql.reader"])
+        unresolved = {"pyspark.sql.utils.missing_helper": "the reason"}
+        tree.generate(["pyspark.sql.reader"], unresolved_imports=unresolved)
+        unresolved["pyspark.sql.utils.helper"] = "it has it"
+        with self.assertRaisesRegex(gen.GeneratorError, r"has now: \['pyspark.sql.utils.helper'"):
+            tree.generate(["pyspark.sql.reader"], unresolved_imports=unresolved)
+
+    def test_reexports_and_declares_only_what_the_dropins_module_has(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/sql/reader.py",
+            """
+            from pyspark.sql.column import Column
+            from pyspark.sql.utils import helper
+
+            class Converter:
+                def convert(self, x: int) -> int: ...
+
+            class Reader:
+                def load(self, path: str) -> Column: ...
+
+                def to_plan(self) -> None: ...
+            """,
+        )
+        # The drop-in's module binds helper at run time, and calls globals() only in the body
+        # of a function, so its source tells its names: it does not import Column.
+        tree.write(
+            tree.repo,
+            "python/pyspark/sql/reader.py",
+            "from pyspark.sql.utils import helper\n"
+            "from pyspark._pyspark import Reader\n"
+            "def f():\n    return globals()\n",
+        )
+        dropped = {"pyspark.sql.reader": {"Converter", "Reader.to_plan"}}
+        stub = body(
+            tree.generate(["pyspark.sql.reader"], dropped=dropped)[
+                Path("python/pyspark/sql/reader.pyi")
+            ]
+        )
+        # Column, which load() needs, is imported, not re-exported; helper is re-exported. The
+        # converter and Reader.to_plan, PySpark's plumbing, are left out.
+        self.assertEqual(
+            stub,
+            "\nfrom pyspark.sql.column import Column\n"
+            "from pyspark.sql.utils import helper as helper\n\n"
+            "class Reader:\n    def load(self, path: str) -> Column: ...\n",
+        )
+        with self.assertRaisesRegex(gen.GeneratorError, r"DROPPED names that .* lacks: \['Gone'\]"):
+            tree.generate(["pyspark.sql.reader"], dropped={"pyspark.sql.reader": {"Gone"}})
+
+    def test_a_factory_of_identity_decorators_is_checked_in_pyspark(self):
+        tree = Tree(self)
+        tree.write(
+            tree.src,
+            "pyspark/__init__.py",
+            """
+            from typing import Any, Callable, TypeVar, Union
+
+            _F = TypeVar("_F", bound=Callable)
+
+            def since(version: Union[str, float]) -> Callable[[_F], _F]: ...
+
+            def until(version: str) -> Callable[..., Any]: ...
+            """,
+        )
+        # since("2.4.0") returns a decorator that returns what it takes, as PySpark annotates it.
+        with mock.patch.object(gen, "IDENTITY_DECORATORS", frozenset({"pyspark.since"})):
+            gen.check_identity_decorators(tree.src)
+        with (
+            mock.patch.object(gen, "IDENTITY_DECORATORS", frozenset({"pyspark.until"})),
             self.assertRaisesRegex(gen.GeneratorError, "not annotated as returning what it takes"),
         ):
             gen.check_identity_decorators(tree.src)

@@ -20,11 +20,10 @@
 import warnings
 from typing import Any, cast, Dict, List, Optional, Union, Iterator
 from threading import Thread, Lock
-from pyspark.errors import StreamingQueryException as StreamingQueryException, PySparkValueError as PySparkValueError
+from pyspark.errors import StreamingQueryException
 import pyspark.sql.connect.proto as pb2
-from pyspark.sql.connect import proto as proto
-from pyspark.sql.streaming import StreamingQueryListener as StreamingQueryListener
-from pyspark.sql.streaming.listener import QueryStartedEvent as QueryStartedEvent, QueryProgressEvent as QueryProgressEvent, QueryIdleEvent as QueryIdleEvent, QueryTerminatedEvent as QueryTerminatedEvent, StreamingQueryProgress as StreamingQueryProgress
+from pyspark.sql.streaming import StreamingQueryListener
+from pyspark.sql.streaming.listener import QueryStartedEvent, QueryProgressEvent, QueryIdleEvent, QueryTerminatedEvent, StreamingQueryProgress
 from pyspark.sql.connect.session import SparkSession
 
 class StreamingQuery:

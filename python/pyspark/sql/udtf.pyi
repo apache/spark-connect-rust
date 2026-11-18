@@ -19,9 +19,8 @@
 
 from dataclasses import dataclass
 from typing import Any, Type, Optional, Sequence, Union
-from pyspark.errors import PySparkAttributeError as PySparkAttributeError, PySparkPicklingError as PySparkPicklingError, PySparkTypeError as PySparkTypeError, PySparkImportError as PySparkImportError
-from pyspark.util import PythonEvalType as PythonEvalType
-from pyspark.sql.pandas.utils import require_minimum_pandas_version as require_minimum_pandas_version, require_minimum_pyarrow_version as require_minimum_pyarrow_version
+from pyspark.errors import PySparkAttributeError as PySparkAttributeError, PySparkPicklingError as PySparkPicklingError, PySparkTypeError as PySparkTypeError
+from pyspark.util import PythonEvalType
 from pyspark.sql.types import DataType as DataType, StructType as StructType, _parse_datatype_string
 from py4j.java_gateway import JavaObject
 from pyspark.sql._typing import TVFArgumentOrName
@@ -62,6 +61,7 @@ class AnalyzeResult:
 
 class SkipRestOfInputTableException(Exception): ...
 
+def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Union[StructType, str]]) -> None: ...
 def _validate_udtf_handler(cls: Any, returnType: Optional[Union[StructType, str]]) -> None: ...
 
 class UserDefinedTableFunction:

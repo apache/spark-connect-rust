@@ -18,13 +18,10 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import List, Optional, Union
-from pyspark.errors import PySparkTypeError as PySparkTypeError
-from pyspark.util import PythonEvalType as PythonEvalType
-from pyspark.sql.column import Column as Column
-from pyspark.sql.dataframe import DataFrame as DataFrame
-from pyspark.sql.streaming.state import GroupStateTimeout as GroupStateTimeout
-from pyspark.sql.streaming.stateful_processor import StatefulProcessor as StatefulProcessor
-from pyspark.sql.types import StructType as StructType
+from pyspark.sql.column import Column
+from pyspark.sql.dataframe import DataFrame
+from pyspark.sql.streaming.stateful_processor import StatefulProcessor
+from pyspark.sql.types import StructType
 from pyspark.sql.pandas._typing import GroupedMapPandasUserDefinedFunction, PandasGroupedMapFunction, PandasGroupedMapFunctionWithState, PandasCogroupedMapFunction, ArrowGroupedMapFunction, ArrowCogroupedMapFunction
 from pyspark.sql.group import GroupedData
 

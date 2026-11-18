@@ -18,7 +18,7 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 from typing import Dict, Optional
-from pyspark.sql.column import Column as Column
+from pyspark.sql.column import Column
 from pyspark.sql._typing import ColumnOrName
 
 def from_protobuf(data: 'ColumnOrName', messageName: str, descFilePath: Optional[str]=None, options: Optional[Dict[str, str]]=None, binaryDescriptorSet: Optional[bytes]=None) -> Column: ...

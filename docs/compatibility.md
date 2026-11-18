@@ -1466,10 +1466,12 @@ have stubs (`.pyi`) of PySpark 4.3.0's modules, with their annotations and overl
 `pyspark-client`, but for the classes of modules that the drop-in implements in another way: the
 client of `SparkSession.client` (`pyspark.sql.connect.client`), `SQLContext`, and the internal
 expressions and protobuf messages of PySpark Connect, which annotate a few internal constructors.
-The stubs also re-export the names that PySpark's modules import at run time, which mypy takes for
-attributes of the modules by default, so pyright, and mypy with `--no-implicit-reexport`, do not
-report a use of such a name as they do with `pyspark-client`, such as `F.partitioning` (pyright's
-`reportPrivateImportUsage`) and `F.PandasUDFType`.
+The stubs declare only the names that the drop-in's modules have at run time. A name that a module
+of PySpark imports, which mypy takes for an attribute of the module by default, is re-exported when
+the drop-in's module has it too, such as `F.partitioning` and `F.PandasUDFType`, which pyright, and
+mypy with `--no-implicit-reexport`, then do not report as they do with `pyspark-client`. One that
+the drop-in's module does not have, such as `pyspark.sql.catalog.DataFrame`, is an error, where mypy
+takes it with `pyspark-client` by default, as it fails at run time.
 
 PySpark's `pyspark.sql.functions` is a package of the modules `builtin` and `partitioning`, where
 the drop-in's is a module, with the stubs of the three in the directory `pyspark/sql/functions/`,

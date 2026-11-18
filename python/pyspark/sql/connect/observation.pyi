@@ -19,9 +19,9 @@
 
 from typing import Any, Dict, Optional
 import uuid
-from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkValueError as PySparkValueError, IllegalArgumentException as IllegalArgumentException, PySparkAssertionError as PySparkAssertionError
-from pyspark.sql.column import Column as Column
-from pyspark.sql.connect.dataframe import DataFrame as DataFrame
+from pyspark.errors import PySparkTypeError, PySparkValueError, IllegalArgumentException, PySparkAssertionError
+from pyspark.sql.column import Column
+from pyspark.sql.connect.dataframe import DataFrame
 import pyspark.sql.connect.plan as plan
 
 __all__ = ['Observation']
