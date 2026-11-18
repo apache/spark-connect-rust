@@ -23430,6 +23430,55 @@ def test_client_raises_the_argument_errors_of_pyspark(mock_connect):
     assert (len(service.execute_requests), len(service.analyze_requests)) == sent
 
 
+def test_client_registers_a_udtf_in_the_order_of_pyspark(mock_connect):
+    # As PySpark Connect's register_udtf: its PythonUDTF reads the name of the handler class when
+    # it is made, and its udtf_plan sets the name in the string field of its command and then
+    # converts the return type (PythonUDTF.to_plan) before it pickles the handler. So of a handler
+    # that does not pickle, a name that the string field does not take, a return type that is not
+    # a DataType and a DDL string that UTF-8 cannot encode raise their own errors, the name's
+    # first, and UDTF_SERIALIZATION_ERROR comes last, before anything is sent.
+    import threading
+
+    from pyspark.errors import PySparkPicklingError, PySparkValueError
+    from pyspark.sql.types import IntegerType, StructField
+
+    spark, service = mock_connect
+    client = spark.client
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    lock = threading.Lock()
+
+    class Unpicklable:
+        def eval(self):
+            yield (lock,)
+
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        client.register_udtf(Unpicklable, "x int", 5)
+    with pytest.raises(UnicodeEncodeError):
+        client.register_udtf(Unpicklable, "x int", "\udc80")
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        client.register_udtf(Unpicklable, 5, 5)
+    for return_type, operation in [
+        (5, "data type 5"),
+        (StructField("x", IntegerType()), "data type StructField('x', IntegerType(), True)"),
+    ]:
+        with pytest.raises(PySparkValueError) as error:
+            client.register_udtf(Unpicklable, return_type, "t")
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert error.value.getMessageParameters() == {"operation": operation}
+    with pytest.raises(UnicodeEncodeError):
+        client.register_udtf(Unpicklable, "x \udc80", "t")
+    with pytest.raises(PySparkPicklingError) as error:
+        client.register_udtf(Unpicklable, "x int", "t")
+    assert error.value.getCondition() == "UDTF_SERIALIZATION_ERROR"
+    assert error.value.getMessageParameters() == {
+        "name": "Unpicklable",
+        "message": "Please check the stack trace and make sure the function is serializable.",
+    }
+    with pytest.raises(AttributeError, match="'object' object has no attribute '__name__'"):
+        client.register_udtf(object(), 5, 5)
+    assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+
 def test_client_registers_functions_and_artifacts_as_pyspark(mock_connect, tmp_path):
     # As PySpark Connect's SparkConnectClient: register_udf parses a DDL return type on the
     # server and pickles the function with the type, register_udtf sends a DDL return type for

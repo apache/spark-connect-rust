@@ -1927,8 +1927,10 @@ by the UDTF as it is, and each request of a call of it raises `UNSUPPORTED_OPERA
 `data type 5`, of the str of the value when the request is built, or the error of that str; so does
 a type that has no proto, such as `AtomicType()`. `spark.udf.register` and `spark.udtf.register`
 are commands, which pickle the function when they are called, as PySpark's do; `spark.udtf.register`
-sets the name and converts the return type first. A copy of a Column, a DataFrame, grouped data or a
-table argument holds the functions, which the requests of the copy pickle, as PySpark's:
+and `spark.client.register_udtf` set the name and convert the return type first, and the latter
+reads the `__name__` of the handler class before them, as PySpark's `PythonUDTF` does. A copy of a
+Column, a DataFrame, grouped data or a table argument holds the functions, which the requests of
+the copy pickle, as PySpark's:
 `copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo` of the call, so a
 function, a lambda or a closure is the function itself, and a callable object, a bound method or a
 `functools.partial` is a copy, which the copies of one call share, as the two Columns of a UDF of

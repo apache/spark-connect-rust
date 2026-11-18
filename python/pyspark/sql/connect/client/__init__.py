@@ -28,10 +28,10 @@ __all__ = ["ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConn
 
 
 import copy
+import functools
 import logging
 import math
 import os
-import pickle
 import platform
 import sys
 import urllib.parse
@@ -45,7 +45,6 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 from pyspark import _pyspark
 from pyspark.errors import (
     PySparkNotImplementedError,
-    PySparkPicklingError,
     PySparkValueError,
 )
 from pyspark.errors.exceptions.connect import SparkConnectException
@@ -1395,27 +1394,24 @@ class SparkConnectClient:
     ) -> str:
         """Register the user-defined table function class ``function`` as the temporary
         function ``name`` of the session, as SparkConnectClient's ``register_udtf``: the name. A
-        DDL ``return_type`` is left to the server to parse, and a handler that does not pickle
-        raises ``UDTF_SERIALIZATION_ERROR``."""
-        from pyspark.serializers import CloudPickleSerializer
+        DDL ``return_type`` is left to the server to parse. As PySpark's, the name and then the
+        return type are converted before the handler is pickled, so a handler that does not
+        pickle raises ``UDTF_SERIALIZATION_ERROR`` only of a valid name and return type."""
         from pyspark.sql.connect.utils import get_python_ver
+        from pyspark.sql.udtf import _pickled_handler
 
-        if return_type is not None and not isinstance(return_type, str):
-            _check_data_type(return_type)
-        udtf_name = function.__name__
-        try:
-            command = CloudPickleSerializer().dumps(function)
-        except pickle.PicklingError:
-            raise PySparkPicklingError(  # noqa: B904
-                errorClass="UDTF_SERIALIZATION_ERROR",
-                messageParameters={
-                    "name": udtf_name,
-                    "message": "Please check the stack trace and "
-                    "make sure the function is serializable.",
-                },
-            )
+        # As PySpark's PythonUDTF, which reads the name of the handler class when it is made.
+        _ = function.__name__
+        # As PySpark's register_udtf, which sets the name in its command and converts the return
+        # type (PythonUDTF.to_plan) before it pickles the handler: `_registerPythonUdtf` calls the
+        # pickling after them.
         self._session._registerPythonUdtf(
-            name, return_type, eval_type, command, get_python_ver(), deterministic
+            name,
+            return_type,
+            eval_type,
+            functools.partial(_pickled_handler, function),
+            get_python_ver(),
+            deterministic,
         )
         return name
 
@@ -1780,8 +1776,8 @@ def _client_of(session: Any) -> "SparkConnectClient":
 
 def _check_data_type(data_type: Any) -> None:
     """Raise PySpark's ``UNSUPPORTED_OPERATION`` of ``data_type`` unless it is a ``DataType``, as
-    ``pyspark_types_to_proto_types`` raises it for the return type of a UDF or a UDTF that is
-    neither a ``DataType`` nor a DDL string."""
+    ``pyspark_types_to_proto_types`` raises it for the return type of a UDF that is neither a
+    ``DataType`` nor a DDL string."""
     if not isinstance(data_type, DataType):
         raise PySparkValueError(
             errorClass="UNSUPPORTED_OPERATION",
