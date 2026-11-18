@@ -11,22 +11,22 @@
 //! cluster, without touching the Spark server:
 //!
 //! 1. The user compiles their Rust function to a WebAssembly module.
-//! 2. [`udf`] embeds the `.wasm` bytes and the signature and runs a packer script
-//!    **embedded in this crate** as `python -c` (so it executes as `__main__`),
+//! 2. [`udf`](crate::wasm_udf::udf) embeds the `.wasm` bytes and the signature and runs a packer
+//!    script **embedded in this crate** as `python -c` (so it executes as `__main__`),
 //!    which uses `cloudpickle` to serialize a runner **by value**
 //!    into the `command`. Running it as `__main__` is what makes cloudpickle embed
 //!    the runner by value, so there is no separate `pyspark_wasm_udf` pip package to
 //!    install on the client and the executors need only the `wasmtime` package.
 //! 3. On each executor the runner instantiates the module with `wasmtime` and
-//!    invokes the exported entrypoint once per Arrow batch (with a batch
-//!    entrypoint, see [`UserDefinedFunction::with_batch_entrypoint`]) or once per
-//!    input row.
+//!    invokes the exported entrypoint once per Arrow batch (with a batch entrypoint, see
+//!    [`with_batch_entrypoint`](crate::wasm_udf::UserDefinedFunction::with_batch_entrypoint))
+//!    or once per input row.
 //!
 //! # ABI
 //!
 //! For a per-row entrypoint, arguments and the result cross the WASM boundary
-//! as a little-endian, length-prefixed byte buffer (see [`AbiType`]): the runner
-//! encodes the row's arguments into linear memory (via the module's exported
+//! as a little-endian, length-prefixed byte buffer (see [`AbiType`](crate::wasm_udf::AbiType)):
+//! the runner encodes the row's arguments into linear memory (via the module's exported
 //! `spark_udf_alloc`), calls the entrypoint `fn(ptr, len) -> packed_ptr_len`, and
 //! decodes the result. This supports scalars, `bool`, strings, binary, arrays,
 //! and nullability — not just numbers.
@@ -38,8 +38,9 @@
 //! # API
 //!
 //! Prefer the [`spark_wasm_udf`](https://docs.rs/apache-spark-connect-macros)
-//! macro, which writes the [`AbiType`]s and the constructor for you. This
-//! lower-level [`udf`] factory (mirroring `pyspark.sql.functions.udf`) is for
+//! macro, which writes the [`AbiType`](crate::wasm_udf::AbiType)s and the constructor for you.
+//! This lower-level [`udf`](crate::wasm_udf::udf) factory (mirroring
+//! `pyspark.sql.functions.udf`) is for
 //! loading a prebuilt module by hand:
 //!
 //! ```no_run

@@ -284,7 +284,8 @@ cargo test -p apache-spark-connect --release --no-run              # compiles AL
 cargo test -p apache-spark-connect --release --features wasm-udf --no-run
 cargo fmt --all --check                                            # BLOCKING CI gate
 cargo clippy --workspace --all-targets -- -D warnings              # BLOCKING CI gate (needs the wasm32-unknown-unknown target)
-# CI's lint job pins Rust 1.100.0 and also lints datafusion,polars and the excluded crates
+# CI's lint job pins Rust 1.100.0, also lints datafusion,polars and the excluded crates, and runs
+# rustdoc of the published crates but proto with RUSTDOCFLAGS="-D warnings" (see docs/contributing.md)
 ```
 Then re-run the step-2 diff (0 user-facing gaps) and the parity gate
 `scripts/run_official_tests.py` (runs the official connect suite through our Rust
