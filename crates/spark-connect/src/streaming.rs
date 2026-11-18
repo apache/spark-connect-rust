@@ -760,12 +760,16 @@ impl StreamingQuery {
     /// any request, and a NaN, an infinite or a too large one is the error of its
     /// `int(timeout * 1000)`.
     pub fn await_termination(&self, timeout_sec: Option<f64>) -> Result<Option<bool>> {
-        let mut cmd = proto::StreamingQueryCommand::default();
-        let mut await_term = proto::streaming_query_command::AwaitTerminationCommand::default();
+        self.await_termination_ms(timeout_sec.map(timeout_ms).transpose()?)
+    }
 
-        if let Some(timeout) = timeout_sec {
-            await_term.timeout_ms = Some(timeout_ms(timeout)?);
-        }
+    /// As [`StreamingQuery::await_termination`], of the `timeout_ms` that the request sends as
+    /// it is given: of a caller that computes PySpark's `int(timeout * 1000)` itself, such as of
+    /// a Python int, which a float would round. Not a stable API.
+    #[doc(hidden)]
+    pub fn await_termination_ms(&self, timeout_ms: Option<i64>) -> Result<Option<bool>> {
+        let mut cmd = proto::StreamingQueryCommand::default();
+        let await_term = proto::streaming_query_command::AwaitTerminationCommand { timeout_ms };
 
         cmd.command = Some(proto::streaming_query_command::Command::AwaitTermination(
             await_term,
@@ -777,7 +781,7 @@ impl StreamingQuery {
             await_result,
         )) = result.result_type
         {
-            if timeout_sec.is_some() {
+            if timeout_ms.is_some() {
                 Ok(Some(await_result.terminated))
             } else {
                 Ok(None)
@@ -2112,13 +2116,16 @@ impl StreamingQueryManager {
     /// Wait for any streaming query to terminate with optional timeout in seconds, of the
     /// errors of PySpark's `awaitAnyTermination`, as [`StreamingQuery::await_termination`].
     pub fn await_any_termination(&self, timeout_sec: Option<f64>) -> Result<Option<bool>> {
-        let mut cmd = proto::StreamingQueryManagerCommand::default();
-        let mut await_term =
-            proto::streaming_query_manager_command::AwaitAnyTerminationCommand::default();
+        self.await_any_termination_ms(timeout_sec.map(timeout_ms).transpose()?)
+    }
 
-        if let Some(timeout) = timeout_sec {
-            await_term.timeout_ms = Some(timeout_ms(timeout)?);
-        }
+    /// As [`StreamingQueryManager::await_any_termination`], of the `timeout_ms` that the request
+    /// sends as it is given, as [`StreamingQuery::await_termination_ms`]. Not a stable API.
+    #[doc(hidden)]
+    pub fn await_any_termination_ms(&self, timeout_ms: Option<i64>) -> Result<Option<bool>> {
+        let mut cmd = proto::StreamingQueryManagerCommand::default();
+        let await_term =
+            proto::streaming_query_manager_command::AwaitAnyTerminationCommand { timeout_ms };
 
         cmd.command =
             Some(proto::streaming_query_manager_command::Command::AwaitAnyTermination(await_term));
@@ -2131,7 +2138,7 @@ impl StreamingQueryManager {
             ),
         ) = result.result_type
         {
-            if timeout_sec.is_some() {
+            if timeout_ms.is_some() {
                 return Ok(Some(await_result.terminated));
             } else {
                 return Ok(None);
@@ -3710,6 +3717,81 @@ mod tests {
                 }
             ))
         );
+    }
+
+    /// The waits of a timeout in milliseconds send it as it is given, as PySpark's
+    /// `int(timeout * 1000)` of a Python int, which no float holds exactly, and no timeout of
+    /// `None`.
+    #[test]
+    fn await_timeouts_in_milliseconds_are_sent_as_they_are() {
+        let spark = unreachable_session_without_retries();
+        let seen: Arc<Mutex<Vec<proto::ExecutePlanRequest>>> = Arc::default();
+        let requests = Arc::clone(&seen);
+        let hook: crate::ExecutePlanHook = Arc::new(move |request| {
+            requests.lock().unwrap().push(request);
+            Err(SparkError::value_msg("not sent"))
+        });
+        spark.set_execute_plan_hook(Some(hook));
+        let query = StreamingQuery {
+            session: spark.clone(),
+            query_id: "id".to_string(),
+            run_id: "run".to_string(),
+            name: None,
+        };
+        // `(2**53 + 1) * 1000`, whose float is 9007199254740992000.
+        let exact = 9_007_199_254_740_993_000;
+        for timeout_ms in [Some(exact), Some(0), None] {
+            assert!(query.await_termination_ms(timeout_ms).is_err());
+            assert!(spark
+                .streams()
+                .await_any_termination_ms(timeout_ms)
+                .is_err());
+        }
+        let commands = |request: &proto::ExecutePlanRequest| match request
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.op_type.as_ref())
+        {
+            Some(proto::plan::OpType::Command(proto::Command { command_type })) => {
+                command_type.clone()
+            }
+            other => panic!("expected a command: {other:?}"),
+        };
+        let sent: Vec<_> = seen.lock().unwrap().iter().map(commands).collect();
+        let expected: Vec<_> = [Some(exact), Some(0), None]
+            .into_iter()
+            .flat_map(|timeout_ms| {
+                [
+                    Some(proto::command::CommandType::StreamingQueryCommand(
+                        proto::StreamingQueryCommand {
+                            query_id: Some(proto::StreamingQueryInstanceId {
+                                id: "id".to_string(),
+                                run_id: "run".to_string(),
+                            }),
+                            command: Some(
+                                proto::streaming_query_command::Command::AwaitTermination(
+                                    proto::streaming_query_command::AwaitTerminationCommand {
+                                        timeout_ms,
+                                    },
+                                ),
+                            ),
+                        },
+                    )),
+                    Some(proto::command::CommandType::StreamingQueryManagerCommand(
+                        proto::StreamingQueryManagerCommand {
+                            command: Some(
+                                proto::streaming_query_manager_command::Command::AwaitAnyTermination(
+                                    proto::streaming_query_manager_command::AwaitAnyTerminationCommand {
+                                        timeout_ms,
+                                    },
+                                ),
+                            ),
+                        },
+                    )),
+                ]
+            })
+            .collect();
+        assert_eq!(sent, expected);
     }
 
     #[test]

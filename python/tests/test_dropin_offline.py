@@ -28930,6 +28930,57 @@ def test_streaming_queries_check_their_timeouts_as_pyspark(mock_connect):
         assert parse_message(query_command[7][0]).get(1, [0]) == [sent]
 
 
+def test_streaming_query_waits_compute_the_timeout_as_pyspark(mock_connect):
+    # As PySpark's awaitTermination and awaitAnyTermination, which refuse only a timeout that is
+    # not an int or a float or is `<= 0`, and then send `int(timeout * 1000)`: a NaN, which is not
+    # `<= 0`, raises the ValueError of `int`, an int beyond a float the ValueError of protobuf's
+    # int64 field, of all its digits, both before any request, and an int is sent exactly.
+    spark, service = mock_connect
+    # ExecutePlanResponse.write_stream_operation_start_result=8: query_id=1 (id=1, run_id=2).
+    service.execute_payload = message_field(
+        8, message_field(1, message_field(1, "q") + message_field(2, "r"))
+    )
+    query = spark.readStream.format("rate").load().writeStream.format("noop").start()
+    requests = len(service.execute_requests)
+    for timeout, message in (
+        (float("nan"), "cannot convert float NaN to integer"),
+        (10**400, f"Value out of range: {10**403}"),
+        (10**16, "Value out of range: 10000000000000000000"),
+    ):
+        for wait in (query.awaitTermination, spark.streams.awaitAnyTermination):
+            with pytest.raises(ValueError) as e:
+                wait(timeout)
+            assert type(e.value) is ValueError and str(e.value) == message
+    assert len(service.execute_requests) == requests
+
+    def sent_timeout_ms(field, wait_field, timeout_field):
+        # ExecutePlanRequest.plan=3, Plan.command=2, then the command of `field`, its wait of
+        # `wait_field` and the `timeout_ms` of `timeout_field` of the wait.
+        sent = parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0]
+        wait = parse_message(parse_message(parse_message(sent)[field][0])[wait_field][0])
+        return wait.get(timeout_field)
+
+    # (2**53 + 1) * 1000, whose float would be 9007199254740992000, and True, an int of 1.
+    for timeout, timeout_ms in ((2**53 + 1, 9007199254740993000), (True, 1000), (1.5, 1500)):
+        # ExecutePlanResponse.streaming_query_command_result=9: query_id=1,
+        # await_termination=6 (terminated=1).
+        service.execute_payload = message_field(9, message_field(
+            1, message_field(1, "q") + message_field(2, "r")) + message_field(
+                6, varint_field(1, 1)))
+        assert query.awaitTermination(timeout) is True
+        # Command.streaming_query_command=7, StreamingQueryCommand.await_termination=9,
+        # AwaitTerminationCommand.timeout_ms=2.
+        assert sent_timeout_ms(7, 9, 2) == [timeout_ms]
+        # ExecutePlanResponse.streaming_query_manager_command_result=11:
+        # await_any_termination=3 (terminated=1).
+        service.execute_payload = message_field(11, message_field(3, varint_field(1, 1)))
+        assert spark.streams.awaitAnyTermination(timeout) is True
+        # Command.streaming_query_manager_command=9,
+        # StreamingQueryManagerCommand.await_any_termination=3,
+        # AwaitAnyTerminationCommand.timeout_ms=1.
+        assert sent_timeout_ms(9, 3, 1) == [timeout_ms]
+
+
 def test_stream_writer_setters_mutate_and_return_self(offline_spark):
     w = offline_spark.readStream.format("rate").load().writeStream
     assert w.outputMode("append") is w
