@@ -1652,6 +1652,19 @@ At interpreter exit, a session that is not stopped has its ML cache cleaned by o
 `clean_cache` request, as PySpark's client does. Its errors are ignored, but when the server
 is gone the exit waits on that request's retries, as PySpark's does, so the exit can take as
 long as those retries. A stopped session sends nothing at exit.
+Nor does a session that the program dropped, of which no object is left: neither the session
+nor a DataFrame, reader, writer, catalog, stream or ML object of it. PySpark's session object
+closes its client when it is freed, and the exit sends nothing for a closed client. The drop-in
+drops such a session with its client, and closes the connection of the client once no session
+uses it (a `newSession()` or a `cloneSession()` shares the connection of its session). Once its
+`catalog` or `streams` is read, PySpark's session object is in a reference cycle, which only
+the garbage collector frees, so that until a collection its exit still cleans its ML cache; the
+drop-in's session has no such cycle and is freed at once. A `conf` or a `client` of a session
+that the program keeps keeps the drop-in's session open, where PySpark's `__del__` of the
+session closes its client under them.
+A client that no session object owns, of `SparkConnectClient(...)` or of its `newSession()` or
+`clone()`, lives until the exit, as PySpark's `atexit` registration keeps it, so its ML cache
+is cleaned at exit unless it is closed, even when the program dropped it.
 `SPARK_CONNECT_RELEASE_SESSION_ON_EXIT` is read when a session is made, as PySpark reads it:
 when it is `true` or `1`, the session is then also released and closed at exit, after the
 cleanup.

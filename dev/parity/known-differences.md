@@ -360,6 +360,29 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 - **`_closed`** (tracked). Reading `_closed` gives the session's stopped state. Setting it
   to True closes the session, as a test's stand-in for the client's close. Setting it to
   False does not reopen a closed session.
+- **The exit of a dropped session in a reference cycle** (intentional). PySpark's
+  `SparkSession.__del__` closes the client of a session object that is freed, and the exit hook
+  of a closed client sends nothing; the drop-in's exit hook holds its session weakly, so a
+  session that the program dropped, of which no object is left, sends nothing at exit either.
+  But once its `catalog` or `streams` is read, PySpark's session object is in a reference cycle
+  with the `Catalog` of its `functools.cached_property` or the `StreamingQueryManager` of its
+  `_sqm`, each of which holds the session, so that a drop does not free it: it stays open until
+  a collection of the garbage collector frees it, and an exit before that sends its
+  `clean_cache` (and its release, with `SPARK_CONNECT_RELEASE_SESSION_ON_EXIT`), which waits on
+  the retries when the server is gone. The drop-in's session keeps its catalog and its streams
+  without a cycle, so it is freed when the program drops it, and its exit sends nothing,
+  whatever the timing of the collections. The same goes for the other cycles that keep a
+  PySpark session until a collection, such as that of an error that the `_handle_error` of its
+  client raises again (`raise error`), whose traceback keeps the frame that holds the error and,
+  with it, the frames of the calls that led to it and their variables.
+- **A `conf` or a `client` kept apart from its session** (tracked). PySpark's `RuntimeConf` and
+  the `SparkConnectClient` of a session hold the client, not the session object: once the
+  program drops the session, its `__del__` closes the client, so the `conf` or `client` that the
+  program kept raises `NO_ACTIVE_SESSION`, and the exit sends nothing for the session. The
+  drop-in's hold the session, which stays open while either is alive: their requests work, and
+  the exit cleans its ML cache. A client that no session object owns, of
+  `SparkConnectClient(...)` or of the `newSession()` or `clone()` of a client, lives until the
+  exit in both, as the `atexit` registration of PySpark's keeps it.
 - **The `__dict__` of the objects of a session** (intentional; the state is native). The
   readers, writers, builders and the other objects of a session or a DataFrame hold their
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,

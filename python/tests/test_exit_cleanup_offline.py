@@ -17,8 +17,9 @@
 """
 The exit hook of a session: the ML cache of a session that is not stopped is cleaned when the
 interpreter exits, and the session is released there if SPARK_CONNECT_RELEASE_SESSION_ON_EXIT
-asks for it, as PySpark 4.3.0's client does. Each case runs a child interpreter that connects to
-a mock server and exits; the requests that the server received show what the exit sent.
+asks for it, as PySpark 4.3.0's client does. A session that the program dropped sends nothing, as
+PySpark's that its `__del__` closed. Each case runs a child interpreter that connects to a mock
+server and exits; the requests that the server received show what the exit sent.
 """
 
 import os
@@ -34,8 +35,8 @@ from _mock_connect_server import mock_connect_session, parse_message
 _VARIABLE = "SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"
 
 # The child: it connects, prints the IDs of its sessions, then does what its mode asks for. The
-# mode "stop_wait" stops the session, then prints "ready" and holds the child until a line on its
-# stdin, for a test that stops the server before the child exits.
+# modes "stop_wait" and "new_session_dropped_wait" stop the session, then print "ready" and hold
+# the child until a line on its stdin, for a test that stops the server before the child exits.
 _CHILD = textwrap.dedent("""
     import os
     import sys
@@ -45,9 +46,27 @@ _CHILD = textwrap.dedent("""
     remote, mode = sys.argv[1], sys.argv[2]
     spark = SparkSession.builder.remote(remote).getOrCreate()
     sessions = [spark]
-    if mode == "two":
+    if mode == "two" or mode.startswith("new_session"):
         sessions.append(spark.newSession())
     print(" ".join(session.session_id for session in sessions), flush=True)
+    if mode in ("new_session_dropped", "new_session_dropped_wait"):
+        del sessions[1]
+    if mode == "new_session_dataframe":
+        # Only a DataFrame of the new session is left, which holds the session.
+        dataframe = sessions.pop().range(3)
+    if mode == "new_session_dropped_wait":
+        spark.stop()
+        print("ready", flush=True)
+        sys.stdin.readline()
+    if mode == "client_dropped":
+        from pyspark.sql.connect.client import SparkConnectClient
+
+        # A client of a session of its own, which the child drops at once.
+        SparkConnectClient(remote)
+    if mode == "client_new_session_dropped":
+        spark.client.newSession()
+    if mode == "client_clone_dropped":
+        spark.client.clone()
     if mode == "stop":
         spark.stop()
     if mode == "set_after_creation":
@@ -140,6 +159,17 @@ def _exit_requests(service, session_id):
     return requests
 
 
+def _session_ids_of_requests(service):
+    # The IDs of the sessions of the requests that the server received, in the order of their
+    # first request.
+    session_ids = []
+    for _, data in service.recorded_order:
+        session_id = parse_message(data).get(1, [b""])[0].decode()
+        if session_id not in session_ids:
+            session_ids.append(session_id)
+    return session_ids
+
+
 def test_a_live_session_cleans_its_ml_cache_at_exit(exit_service):
     # (a) A session that is not stopped sends one clean_cache at exit, and nothing else.
     _, (session_id,) = _run_child(exit_service.remote, "plain")
@@ -195,6 +225,46 @@ def test_e_two_live_sessions_send_one_clean_cache_each(exit_service):
         assert _exit_requests(exit_service, session_id) == ["clean_cache"]
 
 
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_i_a_new_session_that_the_child_dropped_sends_nothing_at_exit(exit_service, variable):
+    # (i) PySpark's SparkSession.__del__ closes the client of a session object that is freed, and
+    # the exit hook of a closed client sends nothing: a newSession() that the child dropped,
+    # whose objects are all freed, sends no clean_cache and no release at exit, while the
+    # session that it keeps sends them, with and without the release variable.
+    _, (kept_id, dropped_id) = _run_child(exit_service.remote, "new_session_dropped", variable)
+    kept = ["clean_cache", "release_session"] if variable else ["clean_cache"]
+    assert _exit_requests(exit_service, kept_id) == kept
+    assert _exit_requests(exit_service, dropped_id) == []
+
+
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_i_a_new_session_that_a_dataframe_holds_cleans_its_ml_cache_at_exit(
+    exit_service, variable
+):
+    # (i) A DataFrame holds its session, as PySpark's holds the session object, so a newSession()
+    # of which the child keeps only a DataFrame is alive at exit and sends its exit requests.
+    _, (_, session_id) = _run_child(exit_service.remote, "new_session_dataframe", variable)
+    expected = ["clean_cache", "release_session"] if variable else ["clean_cache"]
+    assert _exit_requests(exit_service, session_id) == expected
+
+
+@pytest.mark.parametrize(
+    "mode", ["client_dropped", "client_new_session_dropped", "client_clone_dropped"]
+)
+def test_i_a_dropped_client_of_a_session_of_its_own_cleans_its_ml_cache_at_exit(
+    exit_service, mode
+):
+    # (i) The atexit registration of PySpark's SparkConnectClient keeps the client until the exit,
+    # and no session object owns a client of SparkConnectClient(connection), or of the newSession
+    # or the clone of a client, which none closes: its exit hook sends its clean_cache, even
+    # though the child dropped the client.
+    _, (session_id,) = _run_child(exit_service.remote, mode)
+    session_ids = _session_ids_of_requests(exit_service)
+    assert len(session_ids) == 2 and session_id in session_ids
+    (client_session_id,) = [other for other in session_ids if other != session_id]
+    assert _exit_requests(exit_service, client_session_id) == ["clean_cache"]
+
+
 def test_h_an_execution_once_the_interpreter_shuts_down_raises_pysparks_runtime_error(
     exit_service,
 ):
@@ -209,17 +279,16 @@ def test_h_an_execution_once_the_interpreter_shuts_down_raises_pysparks_runtime_
     assert _exit_requests(exit_service, session_id) == ["execute", "clean_cache"]
 
 
-@pytest.mark.parametrize("variable", [None, "true"])
-def test_f_stopped_session_exits_promptly_when_the_server_is_gone(variable):
-    # (f) A session that is stopped while the server is up sends nothing at exit, as PySpark's
-    # exit hook skips a closed client: when the server is gone before the child exits, the child
-    # exits promptly with status 0 and sends no request, with and without the release variable.
+def _exit_once_the_server_is_gone(mode, variable):
+    # Runs the child in a mode that waits once it stopped its session, until the server of its
+    # own stops: then the child exits. Returns the requests of each session of the child up to its
+    # stop, the exit status of the child, the seconds that its exit took, and its stderr.
     with mock_connect_session() as (spark, service):
         # The session of the test is released while the server is up, so that its stop, which
         # the fixture makes, does not wait on a server that is gone.
         spark.stop()
         child = subprocess.Popen(
-            [sys.executable, "-c", _CHILD, service.remote, "stop_wait"],
+            [sys.executable, "-c", _CHILD, service.remote, mode],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -227,10 +296,9 @@ def test_f_stopped_session_exits_promptly_when_the_server_is_gone(variable):
             env=_child_env(variable),
         )
         try:
-            (session_id,) = child.stdout.readline().split()
+            session_ids = child.stdout.readline().split()
             assert child.stdout.readline().strip() == "ready"
-            # The requests of the child up to its stop: its release, and nothing at exit.
-            assert _exit_requests(service, session_id) == ["release_session"]
+            requests = [_exit_requests(service, session_id) for session_id in session_ids]
             # The server stops, so that nothing listens at the exit of the child.
             service.connection.send(("stop",))
             child.stdin.write("\n")
@@ -243,5 +311,31 @@ def test_f_stopped_session_exits_promptly_when_the_server_is_gone(variable):
             if child.poll() is None:
                 child.kill()
                 child.wait()
+    return requests, status, elapsed, stderr
+
+
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_f_dropped_new_session_exits_promptly_when_the_server_is_gone(variable):
+    # (f) A newSession() that the child dropped sends nothing at exit, as PySpark's session that
+    # its __del__ closed: when the server is gone before the child exits, the child exits promptly
+    # with status 0, where the clean_cache of the session would wait on its retries, with and
+    # without the release variable.
+    requests, status, elapsed, stderr = _exit_once_the_server_is_gone(
+        "new_session_dropped_wait", variable
+    )
+    # The requests of the child up to the stop of the session that it kept: its release.
+    assert requests == [["release_session"], []]
+    assert status == 0, stderr
+    assert elapsed < 30, elapsed
+
+
+@pytest.mark.parametrize("variable", [None, "true"])
+def test_f_stopped_session_exits_promptly_when_the_server_is_gone(variable):
+    # (f) A session that is stopped while the server is up sends nothing at exit, as PySpark's
+    # exit hook skips a closed client: when the server is gone before the child exits, the child
+    # exits promptly with status 0 and sends no request, with and without the release variable.
+    requests, status, elapsed, stderr = _exit_once_the_server_is_gone("stop_wait", variable)
+    # The requests of the child up to its stop: its release, and nothing at exit.
+    assert requests == [["release_session"]]
     assert status == 0, stderr
     assert elapsed < 30, elapsed

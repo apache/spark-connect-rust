@@ -3,7 +3,7 @@
 //! Provides the entry point for DataFrame operations and SQL queries.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
@@ -14,7 +14,7 @@ use spark_connect_proto as proto;
 
 use crate::dataframe::DataFrame;
 use crate::plan::{LogicalPlan, PlanIds};
-use crate::profiler::PythonAccumulators;
+use crate::profiler::{PythonAccumulators, WeakPythonAccumulators};
 use crate::progress::{ExecutionStream, ProgressTracker, ProgressUpdate};
 use crate::row::{Row, Value};
 use crate::types::DataType;
@@ -608,6 +608,27 @@ impl SparkSession {
     /// made apart are not the same session, even of the same session ID.
     pub fn is_same_session(&self, other: &SparkSession) -> bool {
         Arc::ptr_eq(&self.client, &other.client)
+    }
+
+    /// A handle of this session that does not keep it alive, as `Arc::downgrade` makes a `Weak`
+    /// of an `Arc`, for the exit hook of the Python binding. See [`WeakSparkSession`]. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn downgrade(&self) -> WeakSparkSession {
+        WeakSparkSession {
+            client: Arc::downgrade(&self.client),
+            plan_ids: Arc::downgrade(&self.plan_ids),
+            tags: Arc::downgrade(&self.tags),
+            last_execution: Arc::downgrade(&self.last_execution),
+            progress_handlers: Arc::downgrade(&self.progress_handlers),
+            progress_handler_id: Arc::downgrade(&self.progress_handler_id),
+            python_accumulators: self.python_accumulators.downgrade(),
+            observation_metrics_check: Arc::downgrade(&self.observation_metrics_check),
+            ml_fit_warning_handler: Arc::downgrade(&self.ml_fit_warning_handler),
+            stopped: Arc::downgrade(&self.stopped),
+            server_version: Arc::downgrade(&self.server_version),
+            listener_bus: Arc::downgrade(&self.listener_bus),
+        }
     }
 
     /// Create a builder for a new SparkSession.
@@ -1845,6 +1866,51 @@ impl Clone for SparkSession {
             server_version: Arc::clone(&self.server_version),
             listener_bus: Arc::clone(&self.listener_bus),
         }
+    }
+}
+
+/// A handle of a session that does not keep it alive, of [`SparkSession::downgrade`], as a
+/// `std::sync::Weak` is of an `Arc`. [`WeakSparkSession::upgrade`] gives the session back while a
+/// handle of it is alive, the session itself, a clone, or one that an object of the session
+/// holds, such as a DataFrame, a reader, a writer, a catalog or a stream, and None once they are
+/// all dropped. The handle keeps none of the state of the session: neither its client, which is
+/// dropped with the last handle, nor the handlers, the listeners and the hook that the session
+/// holds, which may hold objects that hold the session. Not a stable API.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct WeakSparkSession {
+    client: Weak<SparkConnectClient>,
+    plan_ids: Weak<PlanIds>,
+    tags: Weak<ThreadTags>,
+    last_execution: Weak<Mutex<Option<ExecutionInfo>>>,
+    progress_handlers: Weak<Mutex<Vec<(u64, FallibleProgressHandler)>>>,
+    progress_handler_id: Weak<AtomicU64>,
+    python_accumulators: WeakPythonAccumulators,
+    observation_metrics_check: Weak<Mutex<Option<ObservationMetricsCheck>>>,
+    ml_fit_warning_handler: Weak<Mutex<Option<MlFitWarningHandler>>>,
+    stopped: Weak<AtomicBool>,
+    server_version: Weak<Mutex<Option<String>>>,
+    listener_bus: Weak<crate::streaming::ListenerBus>,
+}
+
+impl WeakSparkSession {
+    /// The session, while a handle of it is alive, or None once they are all dropped. Each
+    /// handle holds all of the state of the session, so the state is alive as long as one is.
+    pub fn upgrade(&self) -> Option<SparkSession> {
+        Some(SparkSession {
+            client: self.client.upgrade()?,
+            plan_ids: self.plan_ids.upgrade()?,
+            tags: self.tags.upgrade()?,
+            last_execution: self.last_execution.upgrade()?,
+            progress_handlers: self.progress_handlers.upgrade()?,
+            progress_handler_id: self.progress_handler_id.upgrade()?,
+            python_accumulators: self.python_accumulators.upgrade()?,
+            observation_metrics_check: self.observation_metrics_check.upgrade()?,
+            ml_fit_warning_handler: self.ml_fit_warning_handler.upgrade()?,
+            stopped: self.stopped.upgrade()?,
+            server_version: self.server_version.upgrade()?,
+            listener_bus: self.listener_bus.upgrade()?,
+        })
     }
 }
 
@@ -4276,6 +4342,53 @@ mod tests {
         // Both should have the same tag
         let tags = spark2.get_tags();
         assert!(tags.contains(&"test".to_string()));
+    }
+
+    #[test]
+    fn a_weak_session_upgrades_while_a_handle_of_it_is_alive() {
+        // As a Weak of an Arc: the handle gives back the session itself, of its state, while a
+        // handle of it is alive, the session, a clone, or one that a DataFrame of it holds, and
+        // None once they are all dropped.
+        let spark = session();
+        spark.add_tag("a").unwrap();
+        let weak = spark.downgrade();
+        let upgraded = weak.upgrade().expect("the session is alive");
+        assert!(upgraded.is_same_session(&spark));
+        assert_eq!(upgraded.get_tags(), vec!["a".to_string()]);
+        drop(upgraded);
+        let df = spark.range(3).unwrap();
+        drop(spark);
+        let upgraded = weak.upgrade().expect("its DataFrame holds the session");
+        drop(df);
+        assert!(weak.clone().upgrade().is_some(), "a handle of it is left");
+        drop(upgraded);
+        assert!(weak.upgrade().is_none());
+        // A new session is a session of its own, which its handle does not keep.
+        let spark = session();
+        let new_session = spark.new_session().downgrade();
+        assert!(new_session.upgrade().is_none());
+        assert!(spark.downgrade().upgrade().is_some());
+    }
+
+    #[test]
+    fn a_weak_session_keeps_none_of_the_state_of_the_session() {
+        // The handle holds none of the state of the session: its client, its listener bus and
+        // the handlers that it holds, which may hold objects that hold the session, are dropped
+        // with the last handle of the session.
+        let spark = session();
+        let marker = Arc::new(());
+        let held = Arc::clone(&marker);
+        spark.register_progress_handler(move |_| {
+            let _ = &held;
+        });
+        let client = Arc::downgrade(spark.client());
+        let listener_bus = Arc::downgrade(&spark.listener_bus());
+        let weak = spark.downgrade();
+        drop(spark);
+        assert!(weak.upgrade().is_none());
+        assert!(client.upgrade().is_none());
+        assert!(listener_bus.upgrade().is_none());
+        assert_eq!(Arc::strong_count(&marker), 1);
     }
 
     // createDataFrame input IPC fixtures.
