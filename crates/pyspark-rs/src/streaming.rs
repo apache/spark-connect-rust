@@ -448,19 +448,13 @@ impl PyDataStreamReader {
     /// `DataStreamReader(client)`, as PySpark Connect's, of the session `client`: the reader that
     /// `spark.readStream` gives. As the `object.__new__` of PySpark's plain class, it takes the
     /// arguments of the `__init__` of a subclass too, of which the session is the first that is
-    /// a session (see `session::constructor_session`); `__init__` checks them.
+    /// a session, and none, as an unpickle gives none (see `session::constructor_session`);
+    /// `__init__` checks them.
     #[new]
-    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(client)")]
-    fn py_new(
-        cls: &Bound<'_, pyo3::types::PyType>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        let session = crate::session::constructor_session(cls, args, kwargs, "client")?;
-        Ok(PyDataStreamReader::new(
-            session.borrow().session.read_stream(),
-        ))
+    fn py_new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let session = crate::session::constructor_session(args, kwargs, "client")?;
+        Ok(PyDataStreamReader::new(session.read_stream()))
     }
 
     /// As PySpark's `__init__(client)`, which makes the reader of the session anew: of no
@@ -523,6 +517,60 @@ impl PyDataStreamReader {
         let args = crate::reduce::with_subclass(slf.as_any(), py.get_type::<Self>(), args)?;
         let reduced = state_reduce(py, "stream_reader_reduce", args)?;
         crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
+    }
+
+    /// The state of a pickle of a stream reader, which pickle sets on the reader that `__new__`
+    /// made of no arguments. Of PySpark's pickle, the state is the `__dict__` of its plain object,
+    /// which holds `_options`: so the reader is of the session `_client`, and of the format, the
+    /// schema, the options and the source name of `_format`, `_schema`, `_options` and
+    /// `_source_name`, which it takes as `format`, `schema`, `option` and `name` take them, and
+    /// the other entries are its instance attributes. The state of the drop-in's pickle holds the
+    /// instance attributes alone (see `__reduce__`), as a reader's `__dict__` cannot hold
+    /// `_options`, a property of the reader.
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyDict>) -> PyResult<()> {
+        let py = slf.py();
+        let state = state.copy()?;
+        if state.contains("_options")? {
+            let take = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+                let value = state.get_item(key)?;
+                if value.is_some() {
+                    state.del_item(key)?;
+                }
+                Ok(value)
+            };
+            if let Some(client) = take("_client")? {
+                let session = client.cast_into::<crate::session::PySparkSession>()?;
+                let reader = PyDataStreamReader::new(session.borrow().session.read_stream());
+                let replaced = std::mem::replace(&mut *slf.borrow_mut(), reader);
+                drop(replaced);
+            }
+            if let Some(format) = take("_format")? {
+                let source = (!format.is_none()).then_some(&format);
+                Self::format(slf.borrow_mut(), source)?;
+            }
+            if let Some(schema) = take("_schema")? {
+                Self::schema(slf.borrow_mut(), &schema)?;
+            }
+            if let Some(options) = take("_options")? {
+                for (key, value) in options.cast_into::<PyDict>()?.iter() {
+                    Self::option(slf.borrow_mut(), &key, &value)?;
+                }
+            }
+            if let Some(source_name) = take("_source_name")? {
+                if !source_name.is_none() {
+                    Self::name(slf.borrow_mut(), &source_name)?;
+                }
+            }
+        }
+        slf.getattr(pyo3::intern!(py, "__dict__"))?
+            .call_method1(pyo3::intern!(py, "update"), (state,))?;
+        Ok(())
+    }
+
+    /// The source name of `name`, or None, as PySpark's `DataStreamReader._source_name`.
+    #[getter]
+    fn _source_name(&self) -> Option<String> {
+        self.inner.get_source_name().map(str::to_string)
     }
 
     /// A stream reader of its state, as `__reduce__` gives it, of the class `cls`: of the session
@@ -648,6 +696,13 @@ impl PyDataStreamReader {
 
     fn __clear__(&mut self) {
         self.unsent_format = None;
+    }
+
+    /// The session of the reader, as PySpark Connect's `DataStreamReader._client`, which its
+    /// pickle keeps.
+    #[getter]
+    fn _client(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
+        crate::session::session_object(py, &self.inner.spark_session())
     }
 
     /// The configured source format (PySpark Connect's `DataStreamReader._format`), which is the

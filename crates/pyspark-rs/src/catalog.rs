@@ -200,10 +200,13 @@ fn named_tuples<T: NamedTuple>(py: Python<'_>, results: Vec<T>) -> PyResult<Vec<
 }
 
 /// Python wrapper for Spark Catalog. It has the default repr, as PySpark Connect's Catalog, which
-/// defines none: `<pyspark.sql.connect.catalog.Catalog object at 0x...>`.
+/// defines none: `<pyspark.sql.connect.catalog.Catalog object at 0x...>`. As PySpark's plain class,
+/// it is subclassed: a subclass constructs of the arguments of its own `__init__`, and its copies
+/// and pickles are of its class.
 #[pyclass(
     name = "Catalog",
     module = "pyspark.sql.connect.catalog",
+    subclass,
     weakref,
     dict
 )]
@@ -229,30 +232,85 @@ impl PyCatalog {
 
 #[pymethods]
 impl PyCatalog {
-    /// `Catalog(sparkSession)`, as PySpark Connect's: a catalog of the session, another object
-    /// than `spark.catalog`, which the session keeps.
+    /// A catalog, as the `object.__new__` of PySpark's plain class: of any arguments, which
+    /// `__init__` takes, so that a subclass of another `__init__` is built as it is in PySpark. It
+    /// is of the first of them that is a session, or else of the session of no server until
+    /// `__init__` gives it one (see `session::constructor_session`). The class shows the signature
+    /// of `__init__`, as `inspect.signature` of PySpark's class does.
     #[new]
-    #[allow(non_snake_case)]
-    fn py_new(py: Python<'_>, sparkSession: Py<crate::session::PySparkSession>) -> Self {
-        PyCatalog::new(sparkSession.borrow(py).session.catalog())
+    #[pyo3(signature = (*args, **kwargs), text_signature = "(sparkSession)")]
+    fn py_new(
+        args: &Bound<'_, pyo3::types::PyTuple>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
+    ) -> PyResult<Self> {
+        let session = crate::session::constructor_session(args, kwargs, "sparkSession")?;
+        Ok(PyCatalog::new(session.catalog()))
     }
 
-    /// The shallow copy of the catalog, as PySpark's `copy.copy`: of the same session.
+    /// `Catalog(sparkSession)`, as PySpark Connect's `__init__`: a catalog of the session, another
+    /// object than `spark.catalog`, which the session keeps.
+    #[allow(non_snake_case)]
+    fn __init__(slf: &Bound<'_, Self>, sparkSession: PyRef<'_, crate::session::PySparkSession>) {
+        let catalog = sparkSession.session.catalog();
+        // The catalog that it replaces is dropped once the object is not borrowed, as the drop of
+        // its session may run Python code.
+        let replaced = std::mem::replace(&mut slf.borrow_mut().catalog, catalog);
+        drop(replaced);
+    }
+
+    /// The shallow copy of the catalog, as PySpark's `copy.copy`: of the same session, and of the
+    /// class of this one, as the copy of PySpark's of a subclass is.
     fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, Self>> {
-        let copy = Bound::new(slf.py(), PyCatalog::new(slf.borrow().catalog.clone()))?;
+        let catalog = PyCatalog::new(slf.borrow().catalog.clone());
+        let copy = crate::reduce::new_of_class(&slf.get_type(), catalog)?;
         crate::group::copy_instance_state(copy.as_any(), slf.as_any())?;
         Ok(copy)
     }
 
     /// The reduce of the catalog, as PySpark's pickle of a plain object of its session: a new
     /// `Catalog` of its session, which unpickles with it, and not the catalog that the session
-    /// keeps (`spark.catalog`), whose attributes a copy or an unpickle would otherwise change.
+    /// keeps (`spark.catalog`), whose attributes a copy or an unpickle would otherwise change. A
+    /// catalog of a subclass is made of its class as an unpickle of PySpark's makes it, by
+    /// `copyreg.__newobj__`, without its `__init__`, which may take other arguments.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        use pyo3::types::PyTuple;
         let py = slf.py();
         let session = crate::session::session_object(py, slf.borrow().catalog.spark_session())?;
-        let args = pyo3::types::PyTuple::new(py, [session.into_bound(py)])?;
-        let reduce = pyo3::types::PyTuple::new(py, [slf.get_type().into_any(), args.into_any()])?;
+        let session = session.into_bound(py).into_any();
+        let cls = slf.get_type();
+        let reduce = if cls.is(py.get_type::<Self>()) {
+            let args = PyTuple::new(py, [session])?;
+            PyTuple::new(py, [cls.into_any(), args.into_any()])?
+        } else {
+            let newobj = py.import("copyreg")?.getattr("__newobj__")?;
+            let args = PyTuple::new(py, [cls.into_any(), session])?;
+            PyTuple::new(py, [newobj, args.into_any()])?
+        };
         crate::group::reduce_with_state(reduce.as_any(), slf.as_any())
+    }
+
+    /// The state of a pickle of a catalog, which pickle sets on the catalog that `__new__` made
+    /// of no arguments: of PySpark's pickle, the `__dict__` of its plain object, whose
+    /// `_sparkSession` is the session of the catalog, and the other entries its instance
+    /// attributes, which are all that the state of the drop-in's pickle holds.
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, pyo3::types::PyDict>) -> PyResult<()> {
+        let py = slf.py();
+        let state = state.copy()?;
+        if let Some(session) = state.get_item("_sparkSession")? {
+            if let Ok(session) = session.cast::<crate::session::PySparkSession>() {
+                Self::__init__(slf, session.borrow());
+                state.del_item("_sparkSession")?;
+            }
+        }
+        slf.getattr(pyo3::intern!(py, "__dict__"))?
+            .call_method1(pyo3::intern!(py, "update"), (state,))?;
+        Ok(())
+    }
+
+    /// The session of the catalog, as PySpark Connect's `Catalog._sparkSession`.
+    #[getter]
+    fn _sparkSession(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
+        crate::session::session_object(py, self.catalog.spark_session())
     }
 
     /// Get the current catalog.

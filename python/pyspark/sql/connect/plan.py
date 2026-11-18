@@ -19,9 +19,10 @@
 The Rust core builds the plans of the DataFrame API. ``LogicalPlan`` is PySpark Connect's, from
 Apache Spark v4.3.0, the base of the plans that the modules of PySpark build themselves, such as
 those of ``pyspark.ml.connect.proto``: a plan of a child, of a ``plan(session)`` that is its
-``spark.connect.Relation``, which ``DataFrame(plan, session)`` sends as it is. It has no
-``to_proto``, ``_collect_references``, ``print`` or ``_repr_html_``, which are of the plans and the
-Columns of PySpark Connect's DataFrame, which the core builds. ``_DataFramePlan`` is the plan of a
+``spark.connect.Relation``, which ``DataFrame(plan, session)`` sends as it is, and of a
+``to_proto(session)`` that is the ``spark.connect.Plan`` of it. It has no
+``_collect_references``, ``print`` or ``_repr_html_``, which are of the plans and the Columns of
+PySpark Connect's DataFrame, which the core builds. ``_DataFramePlan`` is the plan of a
 DataFrame of the core, its ``DataFrame._plan``. ``Read``, ``Range``, ``SQL``, ``SubqueryAlias``,
 ``CachedRemoteRelation`` and ``RemoveRemoteCachedRelation`` are PySpark Connect's, which
 ``pyspark.testing.connectutils`` and ``pyspark.sql.connect.conversion`` build DataFrames of. The
@@ -88,6 +89,27 @@ class LogicalPlan:
 
     def command(self, session: Any) -> "proto.Command":  # type: ignore[empty-body]
         ...
+
+    def to_proto(self, session: Any, debug: bool = False) -> "proto.Plan":
+        """
+        Generates connect proto plan based on this LogicalPlan.
+
+        Parameters
+        ----------
+        session : :class:`SparkConnectClient`, optional.
+            a session that connects remote spark cluster.
+        debug: bool
+            if enabled, the proto plan will be printed.
+        """
+        # As PySpark's, of its relation as the root of the plan. The transport compresses the
+        # plans that it sends itself, so the plan is the relation as it is.
+        plan = proto.Plan()
+        plan.root.CopyFrom(self.plan(session))
+
+        if debug:
+            print(plan)
+
+        return plan
 
     def _verify(self, session: Any) -> bool:
         """This method is used to verify that the current logical plan

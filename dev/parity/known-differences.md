@@ -209,6 +209,12 @@ difference is intentional or tracked for a fix.
   its line 1126, as PySpark's, in the file of the drop-in's module, which ends before the line, so
   it shows no source line.
 
+- **A DataFrame of a plan that fails to build** (tracked). `DataFrame(plan, session)`, of the
+  class or of a subclass, builds the relation of `plan.plan(session.client)` when it is made, so a
+  plan that fails, such as the `_plan` of a DataFrame of a UDF that does not pickle or of a read of
+  an option that UTF-8 cannot encode, raises its error there, where PySpark's DataFrame keeps the
+  plan and raises the error at its first request.
+
 - **Public base and native MRO** (intentional; a PyO3 class cannot have a Python class as its
   base, so the public base can only be a virtual one). `pyspark.sql.DataFrame` is implemented as a
   Python base/factory, allowing subclasses such as
@@ -364,17 +370,17 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   a reference cycle through it, such as through a bound method of an object that keeps both the
   Column and the DataFrame, is not collected, where PySpark collects it. A stream writer holds its
   DataFrame, where PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed by
-  the collector rather than at its last reference. The session builder reports its channel builder
-  and its hook factories, but not one that a copy of it shares, so a cycle through one of those is
-  not collected while the builder and its copy live, where PySpark collects it.
+  the collector rather than at its last reference.
 
 ## Session and client (Connect)
 
 - **Custom gRPC channels** (intentional; the transport is native). `ChannelBuilder` and
   `DefaultChannelBuilder` parse the connection string and hold its parameters, `host`,
-  `port`, `endpoint`, `get`, `set`, `userId`, `token`, `session_id`, `use_ssl`, `secure`
-  and `metadata()`. The transport reads them as a `sc://` URL, so they apply. The gRPC
-  channel members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
+  `endpoint`, `get`, `set`, `userId`, `token`, `session_id`, `use_ssl`, `secure` and
+  `metadata()`, and the drop-in's `DefaultChannelBuilder` has a `port` too, which PySpark's has
+  not (it keeps the port in `_port`). The transport reads the `host`, the `port` (15002 without
+  one) and the `_params` of a channel builder as a `sc://` URL, so they apply. The gRPC channel
+  members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
   properties and `userAgent` read the parameters as PySpark does, but `userAgent` reports
   PySpark's `python/<version>` where the transport sends `python/rust` as the client type. The
   transport reads `SPARK_CONNECT_USER_AGENT` when a session is made of a connection string, and
@@ -469,23 +475,27 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   an expression's extension is sent as it is, and so is one that the message of an extension changes
   (`plan.common.plan_id = ...`), whose change the core does not apply to the relation; the server
   rejects them with `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`.
-- **Default port** (intentional). `DefaultChannelBuilder.default_port()` is 15002. PySpark
-  takes the port of a local JVM server in its testing mode; the drop-in has no JVM.
-- **Missing URL error** (intentional). The one builder of the drop-in serves
-  `pyspark.sql.SparkSession.builder` and `pyspark.sql.connect.session.SparkSession.builder`.
-  Without a URL or a channel builder it raises `CONNECT_URL_NOT_SET`, which is both a
-  `PySparkRuntimeError` (the unified builder) and a `PySparkValueError` (the Connect
-  builder's `SESSION_NEED_CONN_STR_OR_BUILDER` family). Giving both a channel builder and
-  a URL raises `SESSION_NEED_CONN_STR_OR_BUILDER`. A channel builder without a host is
-  rejected at `channelBuilder(...)`, not when the session is created.
-- **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a plan of the
-  relation of the Rust core, whose `plan` is a placeholder that holds the relation encoded, so
-  `_plan.to_proto` is not provided.
-  Python protobuf refuses to decode a relation nested beyond its limit (`too many levels
-  of nesting`), and the drop-in never decodes a deep plan in Python.
-  `SparkConnectClient._proto_to_string` renders any message, including a deep one built in
-  Python, as PySpark's does. Plan logging of a deep DataFrame therefore does not reach the
-  recursion handling that the test `test_recursion_handling_for_plan_logging` exercises.
+- **A channel builder without a host** (intentional; the transport is native). The builders of
+  `pyspark.sql.SparkSession` and `pyspark.sql.connect.session.SparkSession` are PySpark's two
+  builders, with its errors: `CONNECT_URL_NOT_SET`, a `PySparkRuntimeError`, and
+  `SESSION_NEED_CONN_STR_OR_BUILDER`, a `PySparkValueError`, also for both a URL and a channel
+  builder. `channelBuilder(...)` rejects a channel builder without a `host` with a `ValueError`,
+  as the transport connects to the `sc://` URL of its `host`, `port` and `_params`; PySpark's
+  takes any object, and its session fails when it is made, of the error of the object (the
+  `TypeError` of a str's slicing, or the error of its `toChannel`).
+- **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a
+  placeholder over the relation of the Rust core, whose `to_proto(client)` is the `Plan` of the
+  placeholder, `plan(client)`, as the root. The `to_proto` of a `LogicalPlan` is the `Plan` of
+  its relation as it is, as the transport compresses the plans that it sends, where PySpark's
+  compresses one of over `spark.connect.session.planCompression.threshold` bytes (10 MiB, which
+  its client asks the server for at its first plan) into a `compressed_operation`. Python
+  protobuf refuses to decode a relation nested beyond its limit (`too many levels of nesting`),
+  and the drop-in never decodes a deep plan. `SparkConnectClient._proto_to_string` renders a
+  message of the drop-in's protobuf runtime in Rust at any depth: past about 125 levels, PySpark's
+  `text_format` raises its `RecursionError`, and it returns `<Truncated message due to recursion
+  error>`, where the drop-in returns the full text; with `truncate=True`, both cut it at 8
+  levels. Plan logging of a deep DataFrame therefore does not reach the recursion handling that
+  the test `test_recursion_handling_for_plan_logging` exercises.
 - **Client session ID** (intentional). `SparkConnectClient._session_id` is the session ID that
   the requests carry, which a set changes for them, as PySpark's, so the next response of
   another server-side session closes the session; `_server_session_id` is exposed and settable,
@@ -513,7 +523,11 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   whatever the timing of the collections. The same goes for the other cycles that keep a
   PySpark session until a collection, such as that of an error that the `_handle_error` of its
   client raises again (`raise error`), whose traceback keeps the frame that holds the error and,
-  with it, the frames of the calls that led to it and their variables.
+  with it, the frames of the calls that led to it and their variables. And PySpark 4.3.0 does not
+  exit at all while a session other than its default one is left open to the end (of
+  `newSession()`, or `SparkSession(connection=...)`), as its `SparkSession.__del__` closes the
+  client in the teardown of the interpreter, whose grpcio `Channel.close()` waits forever; the
+  drop-in exits.
 - **A `conf` or a `client` kept apart from its session** (tracked). PySpark's `RuntimeConf` and
   the `SparkConnectClient` of a session hold the client, not the session object: once the
   program drops the session, its `__del__` closes the client, so the `conf` or `client` that the
@@ -528,19 +542,28 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
   holds there (`vars(spark.streams)` is empty, where PySpark's has `_session` and `_sqlb`).
 - **Subclasses** (intentional; the state is native). PySpark's classes are plain classes that a
-  user subclasses. The drop-in's DataFrame, `Observation`, `DataFrameReader`, `DataStreamReader`,
-  `SparkSession.Hook`, `StorageLevel`, `PythonEvalType` and the data types are subclassed as
-  PySpark's: a subclass constructs of the arguments of its `__init__`, and its copies and pickles
-  are of the subclass.
-  The `Window` of `pyspark.sql.window` and of `pyspark.sql.connect.window` is subclassed, of its
-  static methods, and it and a subclass make objects of no state, as PySpark's. A reader is made
-  of a session, one of those arguments, so PySpark's pickle of a reader, which makes it of its
-  class without arguments,
-  does not load in the drop-in (`TypeError`). The other native classes are not subclassable
-  (`TypeError: type '...' is not an acceptable base type`), and of them only `SparkSession`,
-  `Catalog` and `DataSourceRegistration` construct, as PySpark's do; the others
-  raise `cannot create '...' instances`, as their constructors take the Python objects of
-  PySpark's client, which the drop-in's native state replaces (see `docs/compatibility.md`):
+  user subclasses. The drop-in's DataFrame, `Observation`, `SparkSession`, `Catalog`,
+  `DataSourceRegistration`, `DataFrameReader`, `DataStreamReader`, `SparkSession.Hook`,
+  `StorageLevel`, `PythonEvalType` and the data types are subclassed as PySpark's: a subclass
+  constructs of the arguments of its `__init__`, and its copies and pickles are of the subclass
+  (but those of a session, which are the active session of its ID, as PySpark's), and PySpark's
+  pickle of a reader, a catalog or a registration, which makes it of its class without
+  arguments, loads in the drop-in. The `Window` of `pyspark.sql.window` and of
+  `pyspark.sql.connect.window` is subclassed, of its static methods, and it and a subclass make
+  objects of no state, as PySpark's. The session, the readers and the catalog are of the native
+  state of a session, which the `__init__` of the class, of PySpark's arguments, gives them: one
+  whose `__init__` never ran, as of a subclass whose `__init__` does not call it, is of the
+  session of no server, whose requests raise `NO_ACTIVE_SESSION` and whose `is_stopped` is True,
+  where PySpark's raise the `AttributeError` of their `_client` or `_sparkSession` (a reader or a
+  catalog is of the first session among the arguments of the subclass, if any, which then
+  works). The `__init__` of a reader, a catalog or a registration takes a session, and raises the
+  `TypeError` of another object, where PySpark's keeps any object until it is used.
+  The other native classes are not subclassable (`TypeError: type '...' is not an acceptable
+  base type`), and do not construct (`cannot create '...' instances`): their objects are of the
+  native state of a plan, an expression or a query, which the arguments of PySpark's
+  constructors, the Python objects of its client, do not give, as the drop-in's native state
+  replaces those objects, so a subclass would have no `__init__` to call (see
+  `docs/compatibility.md`):
   - `Column`: an `Expression` of `pyspark.sql.connect.expressions`;
   - `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamWriter`, `MergeIntoWriter`: the
     `LogicalPlan` of a DataFrame;
@@ -593,12 +616,6 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   its JSON raise its error, but `createDataFrame` of local rows or of a pandas DataFrame of one
   raises the `NOT_IMPLEMENTED` of its `jsonValue()`, where PySpark's converters raise that of its
   `sqlType()` or `serialize` (see `docs/compatibility.md`).
-- **Shallow copy of a session builder** (tracked). `copy.copy(SparkSession.builder)` has
-  options of its own, where PySpark's shares its `_options` dict and its hook factories
-  with the builder that it copies, so that a `config` of either one is seen by both.
-- **Session registry lock** (intentional). `SparkSession._lock` is a `threading.RLock`
-  for the Python code that takes it. The drop-in serializes its own session creation with
-  a Rust lock, not with this one.
 - **Direct construction** (intentional). `SparkSession(connection=..., userId=...,
   hook_factories=...)` makes a session that is neither default nor active, as PySpark's
   constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
