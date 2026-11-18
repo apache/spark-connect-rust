@@ -7,7 +7,7 @@
 use super::*;
 use pyo3::types::PyString;
 use spark_connect::ml::{
-    FetchArg, FetchOutput, MlOperator, MlRef, MlTarget, MlValue, OperatorType,
+    FetchArg, FetchOutput, MlOperator, MlPickleBlock, MlRef, MlTarget, MlValue, OperatorType,
 };
 use spark_connect::SparkSession;
 use std::collections::HashMap;
@@ -487,9 +487,160 @@ pub(crate) fn lock_pickle_error(py: Python<'_>, protocol: &Bound<'_, PyAny>) -> 
     }
 }
 
+/// What PySpark's pickle of the DataFrame `df` reaches first that does not pickle, of the objects
+/// of `pyspark.ml` that its plan keeps (see `spark_connect::ml::pickle_block`), of the Python plans
+/// of `pyspark.ml` that its relations keep too (`DataFrame(plan, session)`, the plans of PySpark's
+/// own classes of `pyspark.ml`), as PySpark's pickle reaches them in its plan (see
+/// [`python_plan_block`]). The first error of the walk is its error.
+pub(crate) fn pickle_block(py: Python<'_>, df: &DataFrame) -> PyResult<Option<MlPickleBlock>> {
+    pickle_block_in(py, df, &mut std::collections::HashSet::new())
+}
+
+/// [`pickle_block`] of `df`, of the Python objects of `visited` (by id) visited.
+fn pickle_block_in(
+    py: Python<'_>,
+    df: &DataFrame,
+    visited: &mut std::collections::HashSet<usize>,
+) -> PyResult<Option<MlPickleBlock>> {
+    let mut error = None;
+    let block = spark_connect::ml::pickle_block_with(df, &mut |owner| {
+        let plan = owner.downcast_ref::<Py<PyAny>>()?;
+        match python_plan_block(plan.bind(py), visited) {
+            Ok(block) => block,
+            Err(failed) => {
+                error = Some(failed);
+                // Stop the walk, of the error.
+                Some(MlPickleBlock::ModelLock)
+            }
+        }
+    });
+    match error {
+        Some(error) => Err(error),
+        None => Ok(block),
+    }
+}
+
+/// What PySpark's pickle of the Python plan `plan` (a `LogicalPlan` of `pyspark.sql.connect.plan`)
+/// reaches first that does not pickle, of its attributes in their order, as the pickle takes them:
+/// its child (`_child`, of a DataFrame of this client the plan of the DataFrame, see
+/// [`pickle_block`]) and its references (`_references`, the plans of its subqueries) first, and
+/// then the objects of `pyspark.ml` that it keeps (`__source_transformer__` of a transform,
+/// `__source_instance__` of a DataFrame of a method of a model or a summary, see
+/// [`object_block`]). A plan of `visited` is pickled once, as of the memo of the pickle.
+fn python_plan_block(
+    plan: &Bound<'_, PyAny>,
+    visited: &mut std::collections::HashSet<usize>,
+) -> PyResult<Option<MlPickleBlock>> {
+    let py = plan.py();
+    if !visited.insert(plan.as_ptr() as usize) {
+        return Ok(None);
+    }
+    let plans = py.import("pyspark.sql.connect.plan")?;
+    if plan.is_instance(&plans.getattr("_DataFramePlan")?)? {
+        let df = plan.getattr(pyo3::intern!(py, "_df"))?;
+        let df = df.cast::<PyDataFrame>()?.borrow().dataframe.clone();
+        return pickle_block_in(py, &df, visited);
+    }
+    let logical = plans.getattr("LogicalPlan")?;
+    let Ok(attributes) = plan.getattr(pyo3::intern!(py, "__dict__")) else {
+        return Ok(None);
+    };
+    for item in attributes.call_method0("items")?.try_iter()? {
+        let (name, value) = item?.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+        let block = if name.eq("__source_transformer__")? || name.eq("__source_instance__")? {
+            object_block(&value, visited)?
+        } else if value.is_instance(&logical)? {
+            python_plan_block(&value, visited)?
+        } else if value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>() {
+            let mut block = None;
+            for item in value.try_iter()? {
+                let item = item?;
+                if item.is_instance(&logical)? {
+                    block = python_plan_block(&item, visited)?;
+                    if block.is_some() {
+                        break;
+                    }
+                }
+            }
+            block
+        } else {
+            None
+        };
+        if block.is_some() {
+            return Ok(block);
+        }
+    }
+    Ok(None)
+}
+
+/// What PySpark's pickle of the object `obj` of `pyspark.ml` that a plan keeps reaches first that
+/// does not pickle: the lock of a `RemoteModelRef` (a model's `_java_obj`, the `_remote_model_obj`
+/// of a training summary), of its attributes in their order, and of those of the model that it
+/// keeps (`__source_transformer__` of the summary of an evaluation); a DataFrame of its attributes
+/// (the `_summary_dataset` of a training summary) pickles its plan (see [`pickle_block`]) and then
+/// its session, which a plain pickle refuses before a lock after it, as
+/// `MlPickleBlock::SummarySession` tells. A native model of a server-side object is its lock. An
+/// object of `visited` is pickled once, as of the memo of the pickle.
+fn object_block(
+    obj: &Bound<'_, PyAny>,
+    visited: &mut std::collections::HashSet<usize>,
+) -> PyResult<Option<MlPickleBlock>> {
+    let py = obj.py();
+    if !visited.insert(obj.as_ptr() as usize) {
+        return Ok(None);
+    }
+    let reference = py.import("pyspark.ml.util")?.getattr("RemoteModelRef")?;
+    if obj.is_instance(&reference)? {
+        return Ok(Some(MlPickleBlock::ModelLock));
+    }
+    let class = obj.get_type();
+    if class.hasattr("_native_sync")? && class.hasattr("_native_java_obj")? {
+        let object = obj.call_method0(pyo3::intern!(py, "_native_java_obj"))?;
+        return Ok((!object.is_none()).then_some(MlPickleBlock::ModelLock));
+    }
+    let Ok(attributes) = obj.getattr(pyo3::intern!(py, "__dict__")) else {
+        return Ok(None);
+    };
+    // The DataFrame whose session the pickle reaches first, before a lock.
+    let mut session: Option<DataFrame> = None;
+    for item in attributes.call_method0("items")?.try_iter()? {
+        let (name, value) = item?.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+        let block = if value.is_instance(&reference)? {
+            Some(MlPickleBlock::ModelLock)
+        } else if let Ok(df) = value.cast::<PyDataFrame>() {
+            let df = df.borrow().dataframe.clone();
+            let block = pickle_block_in(py, &df, visited)?;
+            if block.is_none() && session.is_none() {
+                session = Some(df);
+            }
+            block
+        } else if name.eq("__source_transformer__")? {
+            object_block(&value, visited)?
+        } else {
+            None
+        };
+        match block {
+            Some(MlPickleBlock::ModelLock) => {
+                return Ok(Some(match session {
+                    Some(dataset) => MlPickleBlock::SummarySession(dataset),
+                    None => MlPickleBlock::ModelLock,
+                }));
+            }
+            Some(MlPickleBlock::SummarySession(dataset)) => {
+                return Ok(Some(MlPickleBlock::SummarySession(
+                    session.unwrap_or(dataset),
+                )));
+            }
+            None => {}
+        }
+    }
+    Ok(None)
+}
+
 /// PySpark's `RemoteModelRef` of the server-side object of the id `id`, as PySpark's fit makes the
-/// `_java_obj` of its model and the `_remote_model_obj` of its training summary: a holder of the
-/// id, which this client never releases through it, as the native object releases itself.
+/// `_java_obj` of its model, which the `_remote_model_obj` of its training summary is too (see
+/// [`ModelCore::java_obj`]): a holder of the id, which this client never releases through it, as
+/// the native object releases itself.
 pub(crate) fn remote_model_ref<'py>(py: Python<'py>, id: &str) -> PyResult<Bound<'py, PyAny>> {
     py.import("pyspark.ml.util")?
         .getattr("RemoteModelRef")?
@@ -514,9 +665,10 @@ pub(crate) fn evaluated<T>(model: &Bound<'_, PyAny>, summary: Py<T>) -> PyResult
 /// The training summary object of `make` of the model `core` and the target `target`, of the
 /// attributes that PySpark's `try_remote_fit` sets of it, in its order: `_java_obj`
 /// (`"<id>.summary"`), `_summary_dataset` (the summary dataset of the fit) and
-/// `_remote_model_obj` (the `RemoteModelRef` of the model), which PySpark's `_call_java` reads
-/// and its pickle and `copy.deepcopy` take, as its attributes (an object of no public class has
-/// none).
+/// `_remote_model_obj`, the `RemoteModelRef` of the model, its `_java_obj`, of one more reference
+/// (`summary._remote_model_obj = model._java_obj; summary._remote_model_obj.add_ref()`), which
+/// PySpark's `_call_java` reads and its pickle and `copy.deepcopy` take, as its attributes (an
+/// object of no public class has none).
 fn training_summary_object(
     py: Python<'_>,
     make: SummaryMaker,
@@ -532,8 +684,11 @@ fn training_summary_object(
                 Py::new(py, PyDataFrame::new(dataset.clone()))?,
             )?;
         }
-        if let Some(model) = target.root() {
-            attributes.set_item("_remote_model_obj", remote_model_ref(py, model.id())?)?;
+        if target.root().is_some() {
+            if let Some(reference) = core.java_obj(py)? {
+                reference.call_method0(py, pyo3::intern!(py, "add_ref"))?;
+                attributes.set_item("_remote_model_obj", reference)?;
+            }
         }
     }
     Ok(object)
@@ -1008,6 +1163,9 @@ pub(super) struct ModelCore {
     /// [`ModelCore::summary_object`]).
     summary_object: std::sync::OnceLock<Py<PyAny>>,
     pub(super) own_defaults: params_api::OwnDefaults,
+    /// PySpark's `_java_obj` of the model, the `RemoteModelRef` of its server-side object, made at
+    /// its first need, which its copies share (see [`ModelCore::java_obj`]).
+    java_obj: std::sync::Arc<std::sync::OnceLock<Py<PyAny>>>,
     /// The values of the `functools.cached_property` members, by name (see [`ModelCore::cached`]).
     cache: std::sync::Mutex<Vec<(&'static str, Py<PyAny>)>>,
     /// The values of the methods of `functools.cache`, by name, of this object only (see
@@ -1110,6 +1268,7 @@ impl ModelCore {
             summary,
             summary_object: std::sync::OnceLock::new(),
             own_defaults: Vec::new(),
+            java_obj: Default::default(),
             cache: Default::default(),
             method_cache: Default::default(),
         };
@@ -1132,6 +1291,7 @@ impl ModelCore {
         self.model = Box::new(spark_connect::ml::ObjectModel::new(
             object, operator, params,
         ));
+        self.java_obj = Default::default();
     }
 
     /// The model that a `Read` loads: of its object, the model's JVM class `jvm_class`, its uid and
@@ -1159,6 +1319,7 @@ impl ModelCore {
             summary: None,
             summary_object: std::sync::OnceLock::new(),
             own_defaults: params_api::uid_defaults(py, class)?,
+            java_obj: Default::default(),
             cache: Default::default(),
             method_cache: Default::default(),
         })
@@ -1170,7 +1331,19 @@ impl ModelCore {
     /// [`params_api::uid_defaults_of`]). Its Params API, copy and write work, and the members of
     /// the server, a transform and a save raise PySpark's bare AssertionError.
     pub(super) fn unbound(py: Python<'_>, jvm_class: &str, class: &str) -> PyResult<Self> {
-        let uid = params_api::random_uid(py, class)?;
+        Self::unbound_named(py, jvm_class, class, class)
+    }
+
+    /// The model of [`ModelCore::unbound`] of the class `class`, of a uid of the class `uid_class`,
+    /// as `Identifiable._randomUID` names the uid of the class of the object (a Python
+    /// subclass's).
+    pub(super) fn unbound_named(
+        py: Python<'_>,
+        jvm_class: &str,
+        class: &str,
+        uid_class: &str,
+    ) -> PyResult<Self> {
+        let uid = params_api::random_uid(py, uid_class)?;
         let operator = MlOperator::with_uid(jvm_class, &uid, OperatorType::Model);
         Ok(Self {
             model: Box::new(UnboundModel {
@@ -1181,6 +1354,7 @@ impl ModelCore {
             summary: None,
             summary_object: std::sync::OnceLock::new(),
             own_defaults: params_api::uid_defaults_of(py, class, &uid)?,
+            java_obj: Default::default(),
             cache: Default::default(),
             method_cache: Default::default(),
         })
@@ -1204,6 +1378,9 @@ impl ModelCore {
                 None => std::sync::OnceLock::new(),
             },
             own_defaults: params_api::clone_own_defaults(py, &self.own_defaults),
+            // A copy shares the `RemoteModelRef` of the model, as `copy.copy` and PySpark's
+            // `JavaParams.copy` share its `_java_obj`.
+            java_obj: std::sync::Arc::clone(&self.java_obj),
             // A copy shares the values cached before it, as of the `__dict__` that `copy.copy`
             // copies.
             cache: std::sync::Mutex::new(params_api::clone_own_defaults(
@@ -1287,6 +1464,22 @@ impl ModelCore {
         }
         let object = training_summary_object(py, make, self, self.training_summary_target(slf)?)?;
         Ok(self.summary_object.get_or_init(|| object).clone_ref(py))
+    }
+
+    /// PySpark's `_java_obj` of the model: the `RemoteModelRef` of its server-side object, None of
+    /// a model of none. It is made once, at its first need (the training summary of a fit, whose
+    /// `_remote_model_obj` it is, or the first read of the model's `_java_obj`), and shared by the
+    /// copies of the model, as PySpark's fit gives the model and its summary one and its copies
+    /// share it, whichever is read first.
+    pub(super) fn java_obj(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
+        let Some(object) = self.model.ml_ref() else {
+            return Ok(None);
+        };
+        if let Some(reference) = self.java_obj.get() {
+            return Ok(Some(reference.clone_ref(py)));
+        }
+        let reference = remote_model_ref(py, object.id())?.unbind();
+        Ok(Some(self.java_obj.get_or_init(|| reference).clone_ref(py)))
     }
 
     /// The target of the methods of the model's object.

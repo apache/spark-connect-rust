@@ -51,7 +51,7 @@ macro_rules! params_api_block {
             }
 
             /// The state that `copy.deepcopy` and `pickle` take (see `params_api::get_state`).
-            fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
+            fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
                 $crate::ml::params_api::get_state(slf)
             }
 
@@ -64,7 +64,7 @@ macro_rules! params_api_block {
                 $crate::ml::params_api::reduce_ex(slf, protocol)
             }
 
-            /// The object of a state of `__getstate__`.
+            /// The object of a state of `__getstate__` (see `params_api::set_state`).
             fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
                 $crate::ml::params_api::set_state(slf, state)
             }
@@ -227,17 +227,17 @@ macro_rules! native_pymethods {
             {
                 $($body)*
 
-                /// The uid, as `Identifiable.uid`.
+                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
                 #[getter]
-                fn uid(&self) -> String {
-                    $crate::ml::params_api::NativeInstance::uid(self)
+                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+                    $crate::ml::params_api::uid_of(slf)
                 }
 
                 /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`).
+                /// `_resetUid`; see `params_api::assign_uid`).
                 #[setter(uid)]
-                fn __set_uid(&mut self, uid: String) {
-                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
+                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
+                    $crate::ml::params_api::assign_uid(slf, &uid)
                 }
 
                 /// The uid, as `Identifiable.__repr__`.
@@ -345,17 +345,17 @@ macro_rules! native_pymethods {
             {
                 $($body)*
 
-                /// The uid, as `Identifiable.uid`.
+                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
                 #[getter]
-                fn uid(&self) -> String {
-                    $crate::ml::params_api::NativeInstance::uid(self)
+                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+                    $crate::ml::params_api::uid_of(slf)
                 }
 
                 /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`).
+                /// `_resetUid`; see `params_api::assign_uid`).
                 #[setter(uid)]
-                fn __set_uid(&mut self, uid: String) {
-                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
+                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
+                    $crate::ml::params_api::assign_uid(slf, &uid)
                 }
 
                 /// The uid, as `Identifiable.__repr__`.
@@ -403,17 +403,17 @@ macro_rules! native_pymethods {
             {
                 $($body)*
 
-                /// The uid, as `Identifiable.uid`.
+                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
                 #[getter]
-                fn uid(&self) -> String {
-                    $crate::ml::params_api::NativeInstance::uid(self)
+                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+                    $crate::ml::params_api::uid_of(slf)
                 }
 
                 /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`).
+                /// `_resetUid`; see `params_api::assign_uid`).
                 #[setter(uid)]
-                fn __set_uid(&mut self, uid: String) {
-                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
+                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
+                    $crate::ml::params_api::assign_uid(slf, &uid)
                 }
 
                 /// The uid, as `Identifiable.__repr__`.
@@ -539,13 +539,12 @@ macro_rules! native_model {
                 let model = class.call0()?.cast_into::<Self>()?;
                 let uid = model.try_borrow()?.core.uid();
                 let object = object(&uid)?;
-                let id = object.id().to_string();
                 model.try_borrow_mut()?.core.bind(object);
                 // PySpark's `_java_obj` of the object, the `RemoteModelRef` of its id, in place of
                 // the None of the constructor, as PySpark's constructor of the object and its
                 // class method set it.
                 if let Ok(attributes) = model.getattr(pyo3::intern!(py, "__dict__")) {
-                    let reference = $crate::ml::object::remote_model_ref(py, &id)?;
+                    let reference = model.try_borrow()?.core.java_obj(py)?;
                     attributes.set_item("_java_obj", reference)?;
                 }
                 Ok(model)
@@ -755,24 +754,27 @@ macro_rules! native_model {
                     Ok(Self { core, make: Self::__make })
                 }
 
+                /// The uid, as `Identifiable.uid` (see `params_api::uid_of`).
                 #[getter]
-                fn uid(&self) -> String {
-                    self.core.uid()
+                fn uid(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+                    $crate::ml::params_api::uid_of(slf)
                 }
 
-                /// The id of the server-side object of the model, None of a model of none, of which
-                /// the public class makes PySpark's `_java_obj` of a fitted model, a
-                /// `RemoteModelRef`, which its `_call_java` reads (see `_native_classes`).
-                #[pyo3(name = "_native_object_id")]
-                fn __native_object_id(&self) -> Option<String> {
-                    self.core.model.ml_ref().map(|object| object.id().to_string())
+                /// PySpark's `_java_obj` of the model, the `RemoteModelRef` of its server-side
+                /// object, None of a model of none, of which the public class makes the attribute,
+                /// which its `_call_java` reads (see `_native_classes`): the one of the
+                /// `_remote_model_obj` of its training summary and of its copies (see
+                /// `ModelCore::java_obj`).
+                #[pyo3(name = "_native_java_obj")]
+                fn __native_java_obj(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyAny>>> {
+                    slf.try_borrow()?.core.java_obj(slf.py())
                 }
 
                 /// Set the uid, as an assignment of PySpark's `uid` of the instance does (and its
-                /// `_resetUid`).
+                /// `_resetUid`; see `params_api::assign_uid`).
                 #[setter(uid)]
-                fn __set_uid(&mut self, uid: String) {
-                    $crate::ml::params_api::NativeInstance::set_uid(self, &uid)
+                fn __set_uid(slf: &Bound<'_, Self>, uid: String) -> PyResult<()> {
+                    $crate::ml::params_api::assign_uid(slf, &uid)
                 }
 
                 /// The transform of `dataset`, as `Transformer.transform`: of a copy of the model

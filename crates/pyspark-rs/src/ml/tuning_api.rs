@@ -363,8 +363,28 @@ impl PyCrossValidatorModel {
         sub_models: Py<PyAny>,
         std_metrics: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
+        Self::of_class(
+            py,
+            "CrossValidatorModel",
+            best_model,
+            avg_metrics,
+            sub_models,
+            std_metrics,
+        )
+    }
+
+    /// The model of [`PyCrossValidatorModel::of`], of a uid of the class `class`, as
+    /// `Identifiable._randomUID` names the uid of the class of the object (a Python subclass's).
+    fn of_class(
+        py: Python<'_>,
+        class: &str,
+        best_model: Py<PyAny>,
+        avg_metrics: Option<&Bound<'_, PyAny>>,
+        sub_models: Py<PyAny>,
+        std_metrics: Option<&Bound<'_, PyAny>>,
+    ) -> PyResult<Self> {
         Ok(Self {
-            uid: params_api::random_uid(py, "CrossValidatorModel")?,
+            uid: params_api::random_uid(py, class)?,
             values: ParamValues::new(),
             best_model,
             avg_metrics: or_empty_list(py, avg_metrics)?,
@@ -382,8 +402,26 @@ impl PyTrainValidationSplitModel {
         validation_metrics: Option<&Bound<'_, PyAny>>,
         sub_models: Py<PyAny>,
     ) -> PyResult<Self> {
+        Self::of_class(
+            py,
+            "TrainValidationSplitModel",
+            best_model,
+            validation_metrics,
+            sub_models,
+        )
+    }
+
+    /// The model of [`PyTrainValidationSplitModel::of`], of a uid of the class `class`, as
+    /// `Identifiable._randomUID` names the uid of the class of the object (a Python subclass's).
+    fn of_class(
+        py: Python<'_>,
+        class: &str,
+        best_model: Py<PyAny>,
+        validation_metrics: Option<&Bound<'_, PyAny>>,
+        sub_models: Py<PyAny>,
+    ) -> PyResult<Self> {
         Ok(Self {
-            uid: params_api::random_uid(py, "TrainValidationSplitModel")?,
+            uid: params_api::random_uid(py, class)?,
             values: ParamValues::new(),
             best_model,
             validation_metrics: or_empty_list(py, validation_metrics)?,
@@ -1049,17 +1087,28 @@ native_pymethods! {
         "seed" => ("getSeed", get_seed, param_seed),
     ];
 
+    /// `CrossValidatorModel(bestModel, ...)`, of a uid of the class of the object, as
+    /// `Identifiable._randomUID` names it (`MyCrossValidatorModel_...` of a Python subclass).
     #[new]
+    #[classmethod]
     #[pyo3(signature = (bestModel, avgMetrics=None, subModels=None, stdMetrics=None))]
     #[allow(non_snake_case)]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         bestModel: Py<PyAny>,
         avgMetrics: Option<&Bound<'_, PyAny>>,
         subModels: Option<Py<PyAny>>,
         stdMetrics: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
-        Self::of(py, bestModel, avgMetrics, subModels.unwrap_or_else(|| py.None()), stdMetrics)
+        let py = cls.py();
+        Self::of_class(
+            py,
+            &cls.name()?.to_string(),
+            bestModel,
+            avgMetrics,
+            subModels.unwrap_or_else(|| py.None()),
+            stdMetrics,
+        )
     }
 
     /// The transform of `dataset` by the best model, as `CrossValidatorModel._transform`.
@@ -1303,16 +1352,26 @@ native_pymethods! {
         "trainRatio" => ("getTrainRatio", get_train_ratio, param_train_ratio),
     ];
 
+    /// `TrainValidationSplitModel(bestModel, ...)`, of a uid of the class of the object, as
+    /// `Identifiable._randomUID` names it (`MyTrainValidationSplitModel_...` of a Python subclass).
     #[new]
+    #[classmethod]
     #[pyo3(signature = (bestModel, validationMetrics=None, subModels=None))]
     #[allow(non_snake_case)]
     fn new(
-        py: Python<'_>,
+        cls: &Bound<'_, pyo3::types::PyType>,
         bestModel: Py<PyAny>,
         validationMetrics: Option<&Bound<'_, PyAny>>,
         subModels: Option<Py<PyAny>>,
     ) -> PyResult<Self> {
-        Self::of(py, bestModel, validationMetrics, subModels.unwrap_or_else(|| py.None()))
+        let py = cls.py();
+        Self::of_class(
+            py,
+            &cls.name()?.to_string(),
+            bestModel,
+            validationMetrics,
+            subModels.unwrap_or_else(|| py.None()),
+        )
     }
 
     /// The transform of `dataset` by the best model, as `TrainValidationSplitModel._transform`.
@@ -1447,12 +1506,22 @@ fn compact_json(value: &Bound<'_, PyAny>) -> PyResult<String> {
 /// The params of `slf` that its metadata writes, as `DefaultParamsWriter.extractJsonParams`
 /// (`extractParamMap()` of the params not in `skip`): of each default in the order of
 /// `_defaultParamMap`, its set value or the default, and then each set param without a default, in
-/// the order of `_paramMap`.
+/// the order of `_paramMap`. Of an object of PySpark's maps (of its public class), they are those
+/// of its `extractParamMap()`, of the Params of a Python subclass too (`myParam`), as PySpark's
+/// writer writes them.
 fn json_params<'py, T: Validator>(
     slf: &Bound<'py, T>,
     skip: &[&str],
 ) -> PyResult<Bound<'py, PyDict>> {
     let py = slf.py();
+    if let Some(map) = python_params(slf.as_any(), "extractParamMap")? {
+        for name in skip {
+            if map.contains(*name)? {
+                map.del_item(*name)?;
+            }
+        }
+        return Ok(map);
+    }
     let this = slf.try_borrow()?;
     let values = this.values();
     let defaults = values.default_names(T::DEFAULTS);
@@ -1487,9 +1556,37 @@ fn json_params<'py, T: Validator>(
     Ok(params)
 }
 
-/// The defaults of `slf`, as `_defaultParamMap`, in its order.
+/// The params of the map of PySpark's of `obj` that `name` gives (`extractParamMap()`, or the
+/// attribute `_defaultParamMap`), by the names of their Params, in its order; None of an object of
+/// no maps of PySpark's (of a native class of no public class).
+fn python_params<'py>(obj: &Bound<'py, PyAny>, name: &str) -> PyResult<Option<Bound<'py, PyDict>>> {
+    let py = obj.py();
+    let has_maps = obj
+        .getattr(pyo3::intern!(py, "__dict__"))
+        .and_then(|attributes| attributes.contains("_defaultParamMap"))
+        .unwrap_or(false);
+    if !has_maps {
+        return Ok(None);
+    }
+    let map = if name == "extractParamMap" {
+        obj.call_method0(name)?
+    } else {
+        obj.getattr(name)?
+    };
+    let params = PyDict::new(py);
+    for (param, value) in map.cast_into::<PyDict>()?.iter() {
+        params.set_item(param.getattr(pyo3::intern!(py, "name"))?, value)?;
+    }
+    Ok(Some(params))
+}
+
+/// The defaults of `slf`, as `_defaultParamMap`, in its order: of an object of PySpark's maps,
+/// those of its `_defaultParamMap`, of the Params of a Python subclass too.
 fn default_params<'py, T: Validator>(slf: &Bound<'py, T>) -> PyResult<Bound<'py, PyDict>> {
     let py = slf.py();
+    if let Some(defaults) = python_params(slf.as_any(), "_defaultParamMap")? {
+        return Ok(defaults);
+    }
     let names = slf.try_borrow()?.values().default_names(T::DEFAULTS);
     let defaults = PyDict::new(py);
     for name in names {
@@ -1865,13 +1962,13 @@ fn get_and_set_params<T: Validator>(
     Ok(())
 }
 
-/// `instance._resetUid(uid)` of a loaded validator: of `str(uid)`, with its maps in the order of
+/// `instance._resetUid(uid)` of a loaded validator: of `str(uid)`, an attribute of the object, as
+/// its `self.uid = newUid` sets it (see `params_api::assign_uid`), with its maps in the order of
 /// the names of the params.
 fn reset_uid<T: Validator>(instance: &Bound<'_, T>, uid: &Bound<'_, PyAny>) -> PyResult<()> {
     let uid = uid.str()?.to_string();
-    let mut this = instance.try_borrow_mut()?;
-    this.set_uid(&uid);
-    this.values_mut().sort();
+    params_api::assign_uid(instance, &uid)?;
+    instance.try_borrow_mut()?.values_mut().sort();
     Ok(())
 }
 

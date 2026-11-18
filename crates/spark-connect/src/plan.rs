@@ -1467,6 +1467,46 @@ pub(crate) fn refer_to(plan: &Arc<LogicalPlan>, ids: Option<&Arc<PlanIds>>) {
     });
 }
 
+/// The plans that the subqueries of the own expressions of `node` refer to (its children's are of
+/// them), each once, in the order of its expressions and of their nodes, as the references of
+/// PySpark's plan of the node hold them, which its pickle takes after its child: of a subquery of
+/// an IN, of a table argument and of the arguments of a subquery's own expressions too.
+pub(crate) fn subquery_plans(node: &LogicalPlan) -> Vec<&Arc<LogicalPlan>> {
+    use crate::udf::PicklerHolder;
+    let mut plans: Vec<&Arc<LogicalPlan>> = Vec::new();
+    let mut pending = Vec::new();
+    node.push_own_pickler_holders(&mut pending);
+    // The first is visited first.
+    pending.reverse();
+    while let Some(holder) = pending.pop() {
+        let mut below = Vec::new();
+        match holder {
+            PicklerHolder::Expression(expression) => {
+                expression.node().push_pickler_holders(&mut below)
+            }
+            PicklerHolder::Subquery(subquery) => {
+                if !plans.iter().any(|plan| Arc::ptr_eq(plan, &subquery.plan)) {
+                    plans.push(&subquery.plan);
+                }
+                below.extend(
+                    subquery
+                        .partition_spec
+                        .iter()
+                        .chain(&subquery.order_spec)
+                        .chain(&subquery.in_subquery_values)
+                        .map(PicklerHolder::Expression),
+                );
+            }
+            PicklerHolder::Udf(udf) => {
+                below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
+            }
+            PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) => {}
+        }
+        pending.extend(below.into_iter().rev());
+    }
+    plans
+}
+
 /// The relation of `node`, and the plans that the subqueries of its own expressions refer
 /// to; its children collect those of theirs as they are serialized.
 fn relation_and_references(

@@ -413,13 +413,17 @@ native_pymethods! {
     }
 
     /// A model of the given `models`, as PySpark's `OneVsRestModel(models)`: of a new uid and no
-    /// set params, with the defaults of the class, and of no classifier.
+    /// set params, with the defaults of the class, and of no classifier. The uid is of the class
+    /// of the object, as `Identifiable._randomUID` names it (`MyOneVsRestModel_...` of a Python
+    /// subclass).
     #[new]
-    fn new(py: Python<'_>, models: Py<PyAny>) -> PyResult<Self> {
-        let core = object::ModelCore::unbound(
-            py,
+    #[classmethod]
+    fn new(cls: &Bound<'_, pyo3::types::PyType>, models: Py<PyAny>) -> PyResult<Self> {
+        let core = object::ModelCore::unbound_named(
+            cls.py(),
             "org.apache.spark.ml.classification.OneVsRestModel",
             "OneVsRestModel",
+            &cls.name()?.to_string(),
         )?;
         Ok(Self {
             core,

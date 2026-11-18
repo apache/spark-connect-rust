@@ -385,8 +385,23 @@ classes to build on:
 The native Python classes of `pyspark.ml.connect` follow the API of `pyspark.ml` 4.3.0 over Spark
 Connect in full, one for each class of the `__all__` of its classification, clustering,
 evaluation, feature, fpm, recommendation, regression and tuning modules, and for `Pipeline` and
-`PipelineModel` (`Evaluator` and `ParamGridBuilder` are PySpark's own). Each class has, where its
-PySpark class has them:
+`PipelineModel` (`Evaluator` and `ParamGridBuilder` are PySpark's own).
+
+They live in the package of PySpark's deprecated `pyspark.ml.connect` (deprecated since Spark 4.0,
+of pandas and PyTorch training), as `pyspark.ml` itself stays PySpark's vendored classes over Spark
+Connect, and replace its classes of the same names: `LogisticRegression`, `StandardScaler`,
+`MaxAbsScaler`, `CrossValidator` and `Pipeline` (and their models), and its
+`RegressionEvaluator`, `BinaryClassificationEvaluator` and `MulticlassClassificationEvaluator`. So
+the package and its modules have the native classes and an `__all__` of them (PySpark's
+`pyspark.ml.connect` exports `Estimator`, `Evaluator`, `Model`, `Pipeline`, `PipelineModel`,
+`Transformer` and its modules, which have no `__all__`); the constructors take the params of
+`pyspark.ml`, so the PyTorch params of the deprecated `LogisticRegression` (`numTrainWorkers`,
+`batchSize`, `learningRate`, `momentum` and `seed`) raise the `TypeError` of an unexpected keyword
+argument; and they fit, transform and evaluate Spark DataFrames only, so a pandas DataFrame raises
+the `AttributeError` of its `sparkSession`, where the deprecated classes fit it. The base classes
+`Estimator`, `Transformer`, `Model` and `Evaluator` of the package, its `ArrayAssembler`, its
+`summarizer` and its other helper modules stay PySpark's deprecated ones, unchanged. Each class
+has, where its PySpark class has them:
 
 - **The Params API of `pyspark.ml.param.Params`, as PySpark's own code**: `params`, `getParam`,
   `hasParam`, `isSet`, `isDefined`, `hasDefault`, `getOrDefault`, `explainParam(s)`,
@@ -434,7 +449,17 @@ PySpark class has them:
   (`read`, of `JavaMLReadable.read` and the `try_remote_read` of a Pipeline's or a validator's,
   `StringIndexerModel.from_labels`, `StopWordsRemover.loadDefaultStopWords`), whose message of a
   class method counts its `cls` (`JavaMLReadable.read() takes 1 positional argument but 2 were
-  given`). The Param objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
+  given`). Such a function, which runs the native member of a reference to it of its class's and
+  its own names, pickles of cloudpickle by value (as a property of one, a bound method of one, and
+  a closure or a `functools.partial` of one, the function of a UDF), where PySpark's pickle by
+  reference; a plain `pickle` of one of the class (`pickle.dumps(LinearSVCModel.summary)`), which
+  pickles a function by its qualified name, finds PySpark's function there, and raises
+  `PicklingError` (`... it's not the same object as
+  pyspark.ml.classification.LinearSVCModel.summary`), where PySpark's pickles. The objects have the
+  members of the native classes that PySpark's do not, which `dir()` lists: `_native_params`,
+  `_native_sync` and `__setstate__` of an object of params, `_native_java_obj` of a model and of a
+  summary, `__copy__`, `__deepcopy__` of a summary, and the `__signature__` of the class. The Param
+  objects are PySpark's own `pyspark.ml.param.Param`, of the docs,
   converters and defaults of the official class (`crates/pyspark-rs/src/ml/ml_params.json`,
   captured from pyspark-client 4.3.0 by `scripts/capture_ml_api_golden.py`), and a getter per
   param (`getMaxIter`).
@@ -473,6 +498,8 @@ PySpark class has them:
     (`pyspark.ml.connect.readwrite.RemoteMLWriter` is PySpark's), a pickle of one names the native
     module's `_new_remote_ml_writer` (`_new_remote_ml_reader`), where PySpark's names
     `copyreg.__newobj__` of the class.
+  - Their classes are subclasses of PySpark's (`isinstance(w, RemoteMLWriter)` holds), not
+    PySpark's classes themselves (`type(w) is RemoteMLWriter` is false), of the native classes.
   - Their `save` and `load` are functions of PySpark's names, docstrings and signatures
     (`RemoteMLWriter.save`, `RemoteMLReader.load`), which bind a call as PySpark's do, assert an
     active session first (also of a model, whose `Write` the session that holds it sends), and read
@@ -523,12 +550,26 @@ PySpark class has them:
   PySpark's own `_call_java(name, *args)` of either sends PySpark's Fetch (`try_remote_call`). A
   model with a training summary has PySpark's `_summary`, the summary. A training summary has the
   attributes that PySpark's `try_remote_fit` sets, in its order: `_java_obj`, `_summary_dataset` (a
-  DataFrame of the summary dataset) and `_remote_model_obj` (a `RemoteModelRef` of the model, its
-  own, where PySpark's is the model's), and the summary of an `evaluate` those of PySpark's
-  `evaluate`: `_java_obj` and `__source_transformer__`, the model. The `_java_obj` of a fitted,
-  loaded or copied model and its `_summary` are set in its attributes at their first read, so
-  `vars(model)` lacks them until then, where PySpark's fit and load set them. A Pipeline, a
-  OneVsRest, a validator and their models have a `_java_obj` of None, which PySpark's do not have.
+  DataFrame of the summary dataset) and `_remote_model_obj`, the model's `_java_obj` itself, of a
+  reference of its own (`add_ref()`, so `_ref_count` is 2 after a fit, as PySpark's), and the
+  summary of an `evaluate` those of PySpark's `evaluate`: `_java_obj` and
+  `__source_transformer__`, the model. The copies of a model share its `RemoteModelRef`, as
+  PySpark's `copy.copy` and `Params.copy` share the `_java_obj` of its attributes, also of a copy
+  made before either reads it. PySpark's Pipeline, OneVsRest, validators and their models are no
+  Java wrappers, of no `_java_obj`, and neither are the native ones.
+- **The attributes of the objects that this client makes**: the attributes of an object that
+  PySpark's constructor makes (its param maps, Params, `_params` and uid, of `Params.__init__`,
+  and `_input_kwargs` and `_java_obj`) are in `vars()` from its `__init__`, as PySpark's, and so
+  are those of a PipelineModel, a OneVsRestModel and a validator's model of their constructors (but
+  the objects that the constructors take, native properties, see "Native validators").
+  Those of an object that this client makes in Rust (of a fit, a load, a native copy, a fetch) are
+  made at their first read: its param maps, Params, `_params` and uid at the first read of one of
+  its maps (by any member of the Params API, a native member, a copy or a pickle), and its
+  `_java_obj` and `_summary` at their first read, so `vars()` of a fitted model lacks them until
+  then, where PySpark's fit and load set them. Their values are those of PySpark's whenever they are
+  read (of the order of PySpark's maps, see above). They are not made at the fit or the load, which
+  makes the objects of many classes in Rust of their native params, so that a fit or a fetch (of
+  the trees of an ensemble) reads no params of an object for `vars()` alone.
 - **Summaries**: the training summary of a fit (`summary`, `hasSummary`), the same object on every
   call as PySpark's `_summary`, and the summary of `evaluate`; a loaded model has none, and raises
   PySpark's `RuntimeError`. Their DataFrames (`predictions`, `roc`, `cluster`, ...) are of the
@@ -561,8 +602,10 @@ PySpark class has them:
     arguments but 3 were given`).
   - An object of a subclass of an estimator, transformer or evaluator, or of a model class of
     PySpark's `JavaModel`, has a uid of the subclass's name (`Identifiable._randomUID`), and the
-    defaults of that uid and name (`outputCol`, `seed`). A subclass of PipelineModel,
-    OneVsRestModel or a validator's model keeps the uid of its class's name.
+    defaults of that uid and name (`outputCol`, `seed`), and so does an object of the constructor
+    of a subclass of PipelineModel, OneVsRestModel or a validator's model
+    (`MyPipelineModel(stages)`). The models of a fit are of their base class, of its name, as
+    PySpark's.
   - `fit`, `fitMultiple`, `transform`, `evaluate`, `save` and `load` are PySpark's own (of
     `Estimator`, `Transformer`, `Evaluator`, `MLWritable` and `MLReadable`), with PySpark's
     signatures and docstrings. They run the object's `_fit`, `_transform`, `_evaluate`, `copy`,
@@ -570,8 +613,13 @@ PySpark class has them:
     CrossValidator fits.
   - A `copy` is of the class of the object, of its attributes, as PySpark's `Params.copy` makes it
     of `copy.copy`.
-  - `uid` is assignable. An assignment re-parents the object's Params, where PySpark's keeps the
-    Params of the old uid, which then do not belong to the object (until its `_resetUid`).
+  - `uid` is an attribute of the object (`vars()` has it), which an assignment sets, as PySpark's:
+    it keeps the Params of the old uid, which then do not belong to the object (until its
+    `_resetUid`), so the getters, `isSet` and `explainParam` of a Param raise PySpark's
+    `ValueError` (`... does not belong to ...`), and the setters and the calls of a name set and
+    read the maps. It is a native property over the attribute, whose value the native members
+    send: `del obj.uid` raises `AttributeError: property has no deleter`, where PySpark's deletes
+    the attribute (and its next read raises the `AttributeError` of a missing attribute).
   - A fit, transform, evaluate and save send every param of `_paramMap`, as PySpark's
     `serialize_ml_params`: a Param of the subclass that is set too, of the literal of its value, which
     the server refuses (`Param myParam does not exist.`), as PySpark's; a Param of only a default is
@@ -579,15 +627,30 @@ PySpark class has them:
     sent, is raised before any request.
   - A save of a subclass of a OneVsRest, a Pipeline, a validator or a model of one writes the class
     of the object in its metadata (`__main__.MyPipeline`), as PySpark's `DefaultParamsWriter` does,
-    so the loads of such a file are PySpark's: the readers of a OneVsRest and a Pipeline load it of
-    their own class, those of a validator fail of PySpark's `TypeError` (they read the grid of a
-    class of no `pyspark.ml.` as of the JVM's writer), and a stage of a pipeline loads of its class
-    (an `AttributeError` of a class that its module does not have).
+    and the Params of the subclass: the params of its `extractParamMap()` (of a OneVsRest and a
+    validator, but the classifier, the estimator, the evaluator and the grid, which are saved of
+    their own; a Pipeline's are its `stageUids` and `language`), and the defaults of its
+    `_defaultParamMap`, as PySpark's writers write them. So the loads of such a file are PySpark's:
+    the readers of a OneVsRest and a Pipeline load it of their own class, those of a validator fail
+    of PySpark's `TypeError` (they read the grid of a class of no `pyspark.ml.` as of the JVM's
+    writer), and a stage of a pipeline loads of its class (an `AttributeError` of a class that its
+    module does not have).
 - **`copy.copy`, `copy.deepcopy` and `pickle`** take an object as PySpark's do:
   - An estimator, a transformer, an evaluator, a Pipeline or a validator, and a model of no
     server-side object, copy, copy deep and pickle, at every protocol, of their uid, params and
     attributes. A shallow copy shares the values (a Pipeline's stages), and a deep copy and a
-    pickle copy them.
+    pickle copy them. Their state (`__getstate__`) is PySpark's, the attributes of the object
+    (`__dict__`, of its param maps and its uid), as `object.__getstate__` gives it (of a subclass
+    of slots, the pair of the attributes and the slots), which `__setstate__` takes as
+    `copy._reconstruct` and the unpickler take PySpark's, of `__dict__.update`. As PySpark's class
+    has no `__copy__`, `copy.copy` (and `Params.copy`, of `copy.copy`), `copy.deepcopy` and
+    `pickle` of an object of a Python subclass of its own `__reduce__`, `__reduce_ex__`,
+    `__getnewargs__`, `__getstate__`, `__setstate__` or slots, or of a class of a reducer of
+    `copyreg.dispatch_table`, run them as of PySpark's subclass: a subclass whose `__getstate__`
+    drops a lock of `__dict__` (and whose `__setstate__` makes it again) keeps its uid, params and
+    attributes, alone and in a Pipeline. `__setstate__` also takes the state of the pickles of this
+    client's earlier versions (the uid, the set params and the own defaults of the object by name,
+    and its attributes).
   - A PipelineModel, a OneVsRestModel and a validator's model are made again of their
     constructor's objects (`stages`, `models`, `bestModel`, ...).
   - A model of a server-side object, and its summary, copy, sharing the object, and are not
@@ -596,9 +659,11 @@ PySpark class has them:
     `RemoteModelRef` at the protocol (a `PicklingError` below 2, the TypeError
     `cannot pickle '_thread.lock' object` from 2), or of the session of a DataFrame, which PySpark
     pickles after its plan (the AttributeError of its local function). A transform of a model, a
-    DataFrame that reads one, and a DataFrame of a method of a model or of the summary of an
-    `evaluate` keep the model in their plans, before their sessions; the summary of an `evaluate`
-    keeps its model (`__source_transformer__`). A training summary pickles its summary dataset
+    DataFrame that reads one (also only through a subquery of its expressions, `exists()`,
+    `scalar()` or `isin(df)`, as the references of PySpark's plan keep the plans of its subqueries,
+    after its child), and a DataFrame of a method of a model or of the summary of an `evaluate` keep
+    the model in their plans, before their sessions; the summary of an `evaluate` keeps its model
+    (`__source_transformer__`). A training summary pickles its summary dataset
     first, which keeps the model when it is a transform of a model (the transform of the training
     dataset by the model, of the KMeans, BisectingKMeans and GaussianMixture summaries, and a
     training dataset of a stage after a model of a Pipeline), and else raises the AttributeError
@@ -610,19 +675,26 @@ PySpark class has them:
     reads its columns).
   - The DataFrames of the models of PySpark's own `pyspark.ml` classes, which build PySpark's
     plans over the drop-in's DataFrames (`pyspark.ml.regression.LinearRegression`, where the
-    drop-in's own classes are those of `pyspark.ml.connect`), pickle as DataFrames that keep no
-    model, of the AttributeError of their sessions, and cloudpickle and `copy.deepcopy` copy them: a
-    transform of such a model, and a DataFrame of a method of it or of its summaries, where
-    PySpark's raise the error of the lock of the model (and a `pickle` of a DataFrame of a method of
-    a training summary the AttributeError of the session too). So a pickle of the training summary
-    of such a clustering model, of such a transform, raises the AttributeError of the session,
-    where PySpark's raises the error of the lock.
+    drop-in's own classes are those of `pyspark.ml.connect`), are refused as PySpark's: a DataFrame
+    of such a plan (`DataFrame(plan, session)`) reaches what PySpark's pickle of the plan reaches,
+    of the models and the summaries that the plan keeps (`__source_transformer__`,
+    `__source_instance__`), its child first (the plan of a DataFrame of the drop-in). So a transform
+    of such a model, and a DataFrame of a method of it or of the summary of its `evaluate`, raise
+    the error of the lock of the model, and a DataFrame of a method of its training summary the
+    AttributeError of the session of the summary's `_summary_dataset` (of `pickle`) and the
+    TypeError of the lock of its `_remote_model_obj` (of cloudpickle and `copy.deepcopy`), or the
+    lock of a summary dataset that is a transform of the model (of a clustering model).
   - A summary of PySpark's constructor (`LinearRegressionSummary("<id>.summary")`), of no
     server-side object, copies, copies deep and pickles, at every protocol, as PySpark's plain
     object: of its class and of its attributes (`_java_obj`).
-  - A shallow copy of a model keeps the server-side object while either object lives. PySpark's
-    shares its `RemoteModelRef` without a reference of its own, so the garbage collection of the
-    copy releases the object of the original (`CONNECT_ML.CACHE_INVALID` at its next use).
+  - A shallow copy of a model keeps the server-side object while either object lives (the native
+    objects hold it, and its last owner deletes it). PySpark's `copy.copy` shares its
+    `RemoteModelRef` without a reference of its own, and the `__del__` of each object releases one,
+    which deletes the server-side object at a count of 0: the collection of one copy of a model of
+    no training summary deletes the object of the original (`CONNECT_ML.CACHE_INVALID` at its next
+    use), and that of a model with one, whose summary holds a reference too, survives one copy's
+    collection and not two (of copies of the model or of its summary), where this client's
+    original keeps working.
 - **A model of no server-side object**: a model class constructs as PySpark's
   `JavaModel(java_model=None)` (`KMeansModel()`, `LDAModel()`), of PySpark's `JavaModel.__init__`,
   a model of a new uid of its class and of its params, none set, whose Params API, `copy` and
@@ -753,14 +825,30 @@ The Rust `transform` of a fitted model rejects a DataFrame of another session. I
 Python, as with PySpark, it returns a DataFrame whose analysis or execution fails
 on the server of that session with `CONNECT_ML.CACHE_INVALID`.
 
-In Python, a fit, its training summary and the members of its model (`predict`, the summary's
-DataFrames) are sent over the session of the dataset and of the model, so ML works on a session
-that is not the active one (a second session of `SparkSession.builder.remote(...).create()`).
-This is a deliberate difference from PySpark: it sends the summary of a fit and the members of a
-model (`_call_java`) over `SparkSession.getActiveSession()`, so on such a session its fits of a
-model with a summary and its models' members fail with `CONNECT_ML.CACHE_INVALID` (`Cannot
-retrieve Summary object ... from the ML cache`). A model used from a session other than its own
-fails on both.
+In Python, a fit, its training summary and the members of its model (`predict`, `__repr__`, the
+summary's DataFrames) are sent over the session of the dataset and of the model, so ML works on a
+session that is not the active one (a second session of
+`SparkSession.builder.remote(...).create()`) and on a thread of no active session. This is a
+deliberate difference from PySpark, which sends the members of a model and of a summary
+(`_call_java`, the DataFrame methods of `try_remote_attribute_relation`) over
+`SparkSession.getActiveSession()`, and its fits of the dataset's session (`dataset.sparkSession`):
+
+- On a session that is not the active one, PySpark's members of a model and of its summary, the
+  summary's DataFrames and the model's `__repr__` fail with `CONNECT_ML.CACHE_INVALID` (`Cannot
+  retrieve Summary object ... from the ML cache`), and so do the fits that read a member of their
+  model: of LogisticRegression and RandomForestClassifier, whose `_summaryCls` reads `numClasses`,
+  and of GBTClassifier, whose params walk of `_resetUid` reads its `trees`. The fits of the others
+  (LinearRegression, DecisionTreeClassifier, KMeans, StringIndexer, ...) and the transforms succeed.
+- On a thread of no active session (a thread that the program starts, as of `fitMultiple` shared by
+  threads), the same members and fits raise PySpark's bare `AssertionError` (its `assert session is
+  not None`), where this client's run.
+- PySpark deletes a dropped model through the active session (`del_remote_cache`): a model of a
+  session that is not the active one is not deleted from the ML cache of its session, and one
+  dropped on a thread of no active session neither. This client deletes it in its own session (see
+  "The removal of the relation of a dropped checkpoint, and the deletion of a dropped model" in
+  `dev/parity/known-differences.md`).
+
+A model used from a session other than its own fails on both.
 
 The native estimators, transformers and evaluators of `pyspark.ml.connect` take
 keyword-only constructor parameters. The evaluators follow standard
@@ -792,9 +880,9 @@ pair, the `ZeroDivisionError` and `TypeError` of their arithmetic, and the `KeyE
 A native class has the `setParams` of its `pyspark.ml` class. It is keyword-only, takes the params
 of the constructor, sets the params that it is given, in order, and returns the object, as
 PySpark's `_set` does. As PySpark's, the `setParams` of `LogisticRegression` then checks its
-`threshold` and `thresholds`, whichever call set them, as its constructor does. Its signature is PySpark's for every class, the feature stages included, except
-`CrossValidator`, which takes `numFolds`, `parallelism` and `seed`, with a default of `None` for
-the first two. The `params` argument of a fit, transform or
+`threshold` and `thresholds`, whichever call set them, as its constructor does. Its signature is
+PySpark's for every class, the feature stages and the validators included. The `params` argument
+of a fit, transform or
 evaluate, which `pyspark.ml` takes as a param map, is accepted: `None` and an empty dict leave the
 params as they are. A non-empty map is copied with the map, as `Estimator.fit` and
 `Transformer.transform` copy it, so a key that is not a Param raises PySpark's `TypeError` of that
@@ -823,8 +911,15 @@ DataFrames; call `toPandas()` explicitly when a local result is needed. The depr
 
 Another object than a DataFrame raises the `AttributeError` of `sparkSession`, the attribute
 that `pyspark.ml` reads of the dataset first (`'int' object has no attribute 'sparkSession'` of
-`fit(5)`), before any request; an object that has a `sparkSession` raises a `TypeError`. The
-methods that `pyspark.ml` runs as a helper or attribute call read nothing of their dataset.
+`fit(5)`), before any request. Of an object that has a `sparkSession`, a fit, a transform and an
+evaluate read the `client` of the session (a transform asserts a session that is not None first,
+of PySpark's bare `AssertionError`) and then the `_plan` of the object, of their `AttributeError`s
+(`'HasSession' object has no attribute '_plan'`), as PySpark's `try_remote_fit`,
+`try_remote_transform_relation` and `try_remote_evaluate` do, and an object of both is the
+DataFrame of its plan and session (`DataFrame(plan, session)`), whose relation they send, as
+PySpark sends that of the plan. A transform reads them before it asserts the server-side object of
+a model and serializes its params, which PySpark does before it reads the `_plan`. The methods that
+`pyspark.ml` runs as a helper or attribute call read nothing of their dataset.
 `PowerIterationClustering.assignClusters`, `PrefixSpan.findFrequentSequentialPatterns`, and
 `ALSModel.recommendForUserSubset` and `recommendForItemSubset`, send a dataset that is not a
 DataFrame as PySpark does, and the server rejects it when the result is analyzed or collected.
@@ -1149,6 +1244,11 @@ Spark Connect:
   - the metadata of `pyspark.ml.pipeline.Pipeline` (or `PipelineModel`), of the `stageUids`;
   - each stage, saved by its own writer at `stages/<index>_<uid>`.
 
+  As PySpark's writers, a save iterates the stages three times: to check that they write
+  (`validateStages`), for their uids, and to save them. So the stages of a one-shot iterator (a
+  generator), which the check consumes, are saved as no stages (`stageUids` of `[]`), and a fit of
+  the Pipeline after the save fits none, as PySpark's.
+
   PySpark loads what this client saves, and this client loads what PySpark saves, and a pipeline,
   a validator or a OneVsRest (and its model) that the JVM writer saved (of the `org.apache.spark.ml`
   class names, as Scala and classic PySpark's `JavaMLWriter` write them), also as a stage. A stage
@@ -1190,9 +1290,13 @@ class.
     best of them by `isLargerBetter`.
   - The best param map is fitted on the whole dataset, in a model of a new uid that gets the
     params of the validator, as `_copyValues` gives them.
-- **Models:** `bestModel`, the metrics and `subModels` are attributes of the instance, as
-  PySpark's. `transform` transforms by the best model. `copy` copies the best model and the
-  sub-models, and a model of no sub-models fails as PySpark's `assert` does.
+- **Models:** `bestModel`, the metrics (`avgMetrics`, `stdMetrics`, `validationMetrics`) and
+  `subModels`, which are attributes of PySpark's instance, are native properties, assignable as
+  PySpark's attributes: `vars()` lacks them, and `del` of one raises `AttributeError: property has
+  no deleter`, where PySpark's deletes the attribute (and its next read raises the `AttributeError`
+  of a missing attribute). So are PipelineModel's `stages` and OneVsRestModel's `models`, which the
+  native members read. `transform` transforms by the best model. `copy` copies the best model and
+  the sub-models, and a model of no sub-models fails as PySpark's `assert` does.
 - **Copy:** `CrossValidator.copy` and `TrainValidationSplit.copy` keep the uid and copy the
   estimator and the evaluator with the extra params. The param maps stay the same.
 - **Persistence:** of PySpark's Python format (`_ValidatorSharedReadWrite`):
@@ -2590,7 +2694,8 @@ of a LogisticRegression model), which the Rust API makes when they are asked for
   below zero raise their errors after the max label is read and the dataset is cached:
   `ValueError: Number of processes must be at least 1`, or the `TypeError` of `min` of a None. This
   client fits at most 2147483647 classes: a count beyond raises a `MemoryError` in Python (and an
-  error in Rust), where PySpark allocates its list of that many tasks, and beyond 2^63 the
+  error in Rust), where PySpark allocates its list of that many tasks (`[trainSingleClass] *
+  numClasses`, of 8 bytes a class, 16 GiB of 2^31 classes, before any fit), and beyond 2^63 the
   `OverflowError` of that list, as PySpark's.
 - **Params:** the params are read where PySpark reads them, with no check of their own: an unset
   classifier raises PySpark's `KeyError` of the param, a null `labelCol` the `AttributeError` of
@@ -2656,13 +2761,18 @@ typed `DecisionTreeClassificationModel`; a RandomForestClassification submodel i
 GBTClassification submodel is a typed `GBTClassificationModel`, with the trees of its ensemble. The
 per-class fits send the requests of PySpark's, and PySpark's client also reads the post-fit requests
 of each submodel: `numClasses` of a LogisticRegression submodel, and `numClasses` and `trees` of a
-RandomForestClassification one, and `trees` of a GBTClassification one. This client makes the same
-reads, but after all the class fits rather than between them, so their order differs. The remaining
-differences from PySpark are these:
+RandomForestClassification one, and `trees` of a GBTClassification one. PySpark's makes the reads
+of a class right after its fit, on the thread of its pool that fits it (its `try_remote_fit`), so
+they come between the fits of the classes; this client's core fits the classes, in the threads of
+its own pool, and then the Python client makes the reads of each class, in their order, once all
+the fits are done: the requests are the same, of another order. Their order would need a Python
+call of each class's fit on the threads of the core's pool, for no other difference.
 
-- A `OneVsRest` or a `OneVsRestModel` whose classifier or submodel is not writable raises
-  `ValueError` on `write`, as PySpark's `validateParams` does. A `OneVsRest` of no classifier
-  raises the `KeyError` of its unset param on `write`, as PySpark's does.
+As PySpark's, the `write()` of a `OneVsRest` or a `OneVsRestModel` gives its writer, whose `save`
+raises the `KeyError` of the unset `classifier` param of one of no classifier (a `OneVsRestModel`
+of its constructor too), and then PySpark's `ValueError` of `validateParams` of a classifier or a
+submodel that is not writable (`OneVsRest write will fail because it contains ... which is not
+writable.`), before any request.
 
 ## Native AFTSurvivalRegression, IsotonicRegression and FMRegressor
 
@@ -2983,13 +3093,17 @@ plain classes: of no arguments (`ChiSquareTest() takes no arguments`) unless a s
 `SummaryBuilder` is a `JavaWrapper` of PySpark's `__init__(self, jSummaryBuilder)`, which keeps no
 Java object over Spark Connect: its `summary` reads the `_metrics` of its attributes, which
 `Summarizer.metrics` sets with a `_java_obj` of None, so `SummaryBuilder(None).summary(col)` raises
-PySpark's AttributeError, and a subclass that sets `_metrics` summarizes of them. The static
-methods have PySpark's parameters and module (`Summarizer.mean.__module__` is `pyspark.ml.stat`),
-without its annotations and docstrings, and only `SummaryBuilder` has PySpark's class docstring.
-`SummaryBuilder.summary` is a function of the module, of PySpark's signature and docstring, over
-the native method, so a call binds as PySpark's does (`SummaryBuilder.summary() takes from 2 to 3
-positional arguments but 4 were given`); its annotations name the drop-in's `Column`, the class of
-`pyspark.sql.column.Column`, which is `pyspark.sql.connect.column.Column`.
+PySpark's AttributeError, and a subclass that sets `_metrics` summarizes of them. The classes have
+PySpark's docstrings, and their static methods (and `SummaryBuilder.summary`) are functions of the
+module of PySpark's signatures, annotations and docstrings (`Summarizer.mean.__module__` is
+`pyspark.ml.stat`, and its docstring has the `.. versionadded:: 2.4.0` of PySpark's `since`), over
+the native methods, so `inspect` and `help` give PySpark's and a call binds as PySpark's does
+(`SummaryBuilder.summary() takes from 2 to 3 positional arguments but 4 were given`);
+`Summarizer._check_param` and `_get_single_metric` are PySpark's code over Spark Connect. The
+annotations name the drop-in's `Column`, the class of `pyspark.sql.column.Column`, which is
+`pyspark.sql.connect.column.Column`, and the classes are subclasses of the native classes, which
+their MROs name after them (`ChiSquareTest`, `ChiSquareTest`, `object`), where PySpark's are plain
+classes.
 
 The statistical tests return lazy Spark DataFrames. Chi-square supports both the
 vector result and one row per feature (`flatten=True`); correlation supports

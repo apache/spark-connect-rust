@@ -190,6 +190,77 @@ def test_the_metadata_of_a_subclass_of_a_meta_algorithm_is_of_its_class(frame):
             Pipeline.load(f"{path}-in-pipeline")
 
 
+def test_the_metadata_of_a_subclass_has_the_params_of_the_subclass(frame):
+    # PySpark's writers write the params of `extractParamMap()` (of a validator and a OneVsRest,
+    # but its estimator, evaluator, grid and classifier, which they save of their own) and the
+    # defaults of `_defaultParamMap`, of the Params of a Python subclass too; a Pipeline's params
+    # are its `stageUids` and `language`, of its defaults.
+    import glob
+    import json
+    import tempfile
+
+    from pyspark.ml.param import Param, Params, TypeConverters
+    from pyspark.ml.tuning import ParamGridBuilder
+
+    def subclass(base):
+        def __init__(self, **kwargs):
+            base.__init__(self, **kwargs)
+            self._setDefault(myParam=3)
+
+        param = Param(Params._dummy(), "myParam", "a param of the subclass", TypeConverters.toInt)
+        return type("My" + base.__name__, (base,), {"myParam": param, "__init__": __init__})
+
+    lr = _cls("classification", "LogisticRegression")(maxIter=2)
+    shared = {
+        "estimator": lr,
+        "estimatorParamMaps": ParamGridBuilder().addGrid(lr.maxIter, [1]).build(),
+        "evaluator": _cls("evaluation", "BinaryClassificationEvaluator")(),
+    }
+    base = tempfile.mkdtemp(prefix="ml-subclass-params-")
+    for obj, set_in_params in [
+        (subclass(_cls("tuning", "CrossValidator"))(**shared), True),
+        (subclass(_cls("tuning", "TrainValidationSplit"))(**shared), True),
+        (subclass(_cls("classification", "OneVsRest"))(classifier=lr), True),
+        (subclass(_cls("pipeline", "Pipeline"))(stages=[lr]), False),
+    ]:
+        obj._set(myParam=7)
+        path = f"{base}/{type(obj).__name__}"
+        obj.write().save(path)
+        (part,) = glob.glob(os.path.join(path, "metadata", "part-*"))
+        with open(part) as file:
+            metadata = json.load(file)
+        assert metadata["defaultParamMap"]["myParam"] == 3, type(obj)
+        assert metadata["paramMap"].get("myParam") == (7 if set_in_params else None), type(obj)
+
+
+def test_the_save_of_a_pipeline_of_a_one_shot_iterator_writes_no_stage(frame):
+    # PySpark's writers iterate the stages to check them (`validateStages`), then for their uids
+    # and then to save them: a generator of stages is consumed by the check, so the metadata has
+    # no `stageUids` and no stage is saved, and a fit after it fits none, as of PySpark's.
+    import glob
+    import json
+    import tempfile
+
+    Pipeline = _cls("pipeline", "Pipeline")
+    PipelineModel = _cls("pipeline", "PipelineModel")
+
+    def stages():
+        return [_cls("feature", "Binarizer")(threshold=0.5, inputCol="x", outputCol="b")]
+
+    base = tempfile.mkdtemp(prefix="ml-pipeline-iterator-")
+    pipeline = Pipeline(stages=(stage for stage in stages()))
+    model = PipelineModel(stages=(stage for stage in Pipeline(stages=stages()).fit(frame).stages))
+    for obj, name in [(pipeline, "pipeline"), (model, "model")]:
+        path = f"{base}/{name}"
+        obj.write().save(path)
+        (part,) = glob.glob(os.path.join(path, "metadata", "part-*"))
+        with open(part) as file:
+            assert json.load(file)["paramMap"]["stageUids"] == [], name
+        assert not os.path.exists(os.path.join(path, "stages")), name
+    assert Pipeline.load(f"{base}/pipeline").getStages() == []
+    assert pipeline.fit(frame).stages == []
+
+
 def test_the_copies_of_a_pipeline_and_a_validator_fit_the_subclass(frame):
     LR = _cls("classification", "LogisticRegression")
     Pipeline = _cls("pipeline", "Pipeline")

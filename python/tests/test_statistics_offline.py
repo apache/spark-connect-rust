@@ -305,6 +305,84 @@ def test_a_summary_builder_constructs_and_summarizes_as_pysparks():
         type("Sub", (SummaryBuilder,), {})(None).summary(F.col("f"))
 
 
+def test_the_classes_and_static_methods_have_pysparks_docstrings_signatures_and_annotations():
+    # PySpark's classes are documented, and their static methods are functions of PySpark's
+    # docstrings (of `since` of Summarizer's metrics), signatures and annotations, which `inspect`
+    # and `help` give, also Summarizer's `_check_param` and `_get_single_metric`, PySpark's code
+    # over Spark Connect. (The drop-in's `Column`, of the annotations, is the class of
+    # `pyspark.sql.column.Column`, which is `pyspark.sql.connect.column.Column`.)
+    stat = api()
+    column = f"{stat.Column.__module__}.{stat.Column.__qualname__}"
+    frame = "pyspark.sql.dataframe.DataFrame"
+    docs = {
+        "ChiSquareTest": (
+            "Conduct Pearson's independence test for every feature against the label. For each "
+            "feature,"
+        ),
+        "Correlation": (
+            "Compute the correlation matrix for the input dataset of Vectors using the specified "
+            "method."
+        ),
+        "KolmogorovSmirnovTest": (
+            "Conduct the two-sided Kolmogorov Smirnov (KS) test for data sampled from a continuous"
+        ),
+        "Summarizer": "Tools for vectorized statistics on MLlib Vectors.",
+    }
+    for name, first in docs.items():
+        assert inspect.getdoc(getattr(stat, name)).splitlines()[0] == first, name
+    signatures = {
+        stat.ChiSquareTest.test: (
+            f"(dataset: {frame}, featuresCol: str, labelCol: str, flatten: bool = False) "
+            f"-> {frame}",
+            "Perform a Pearson's independence test using dataset.",
+        ),
+        stat.Correlation.corr: (
+            f"(dataset: {frame}, column: str, method: str = 'pearson') -> {frame}",
+            "Compute the correlation matrix with specified method using dataset.",
+        ),
+        stat.KolmogorovSmirnovTest.test: (
+            f"(dataset: {frame}, sampleCol: str, distName: str, *params: float) -> {frame}",
+            "Conduct a one-sample, two-sided Kolmogorov-Smirnov test for probability distribution",
+        ),
+        stat.Summarizer.metrics: (
+            "(*metrics: str) -> 'SummaryBuilder'",
+            "Given a list of metrics, provides a builder that it turns computes metrics from a "
+            "column.",
+        ),
+    }
+    for metric, version in [
+        ("mean", "2.4.0"), ("sum", "3.0.0"), ("variance", "2.4.0"), ("std", "3.0.0"),
+        ("count", "2.4.0"), ("numNonZeros", "2.4.0"), ("max", "2.4.0"), ("min", "2.4.0"),
+        ("normL1", "2.4.0"), ("normL2", "2.4.0"),
+    ]:
+        function = getattr(stat.Summarizer, metric)
+        summary = "numNonZero" if metric == "numNonZeros" else metric
+        signatures[function] = (
+            f"(col: {column}, weightCol: Optional[{column}] = None) -> {column}",
+            f"return a column of {summary} summary",
+        )
+        assert inspect.getdoc(function).splitlines()[-1] == f".. versionadded:: {version}", metric
+    for function, (signature, first) in signatures.items():
+        assert str(inspect.signature(function)) == signature, function
+        assert inspect.getdoc(function).splitlines()[0] == first, function
+        assert set(function.__annotations__) == set(inspect.signature(function).parameters) | {
+            "return"
+        }, function
+    assert str(inspect.signature(stat.Summarizer._check_param)) == (
+        f"(featuresCol: {column}, weightCol: Optional[{column}]) -> Tuple[{column}, {column}]"
+    )
+    assert str(inspect.signature(stat.Summarizer._get_single_metric)) == (
+        f"(col: {column}, weightCol: Optional[{column}], metric: str) -> {column}"
+    )
+    # PySpark's `_check_param` and `_get_single_metric`, of the column of the metric's method.
+    features, weight = F.col("f"), F.col("w")
+    assert stat.Summarizer._check_param(features, weight) == (features, weight)
+    with pytest.raises(TypeError, match="^featureCol and weightCol should be a Column$"):
+        stat.Summarizer._check_param("f", None)
+    single = stat.Summarizer._get_single_metric(features, None, "mean")
+    assert str(single) == str(stat.Summarizer.mean(features))
+
+
 def test_the_methods_are_of_pysparks_module_and_summary_binds_as_its_function():
     # PySpark's static methods are functions of pyspark.ml.stat (`Summarizer.mean.__module__`), and
     # `SummaryBuilder.summary` (stat.py:504) is a function of its module, of PySpark's parameters

@@ -645,15 +645,30 @@ impl std::fmt::Debug for MlPickleBlock {
 
 /// What PySpark's pickle of the DataFrame `df` reaches first that does not pickle, of the objects
 /// of `pyspark.ml` that its plan keeps, in the order that PySpark's pickle of the plan takes them:
-/// the child of a plan first, as its attribute `_child` comes first, and then the objects that the
-/// plan keeps, of each plan in the order of its inputs. A transform of a model keeps the model
-/// (`__source_transformer__`); a DataFrame of a method of a model or of a summary keeps that
-/// object (`__source_instance__`), and the summary dataset of a summary as its child, but not the
-/// DataFrames of its arguments, which PySpark's plan holds as their relations. Not a stable API.
+/// the child of a plan first, as its attribute `_child` comes first, then the plans that the
+/// subqueries of its expressions refer to (`exists()`, `scalar()`, `isin(df)`), as its
+/// `_references` come next, and then the objects that the plan keeps, of each plan in the order of
+/// its inputs. A transform of a model keeps the model (`__source_transformer__`); a DataFrame of a
+/// method of a model or of a summary keeps that object (`__source_instance__`), and the summary
+/// dataset of a summary as its child, but not the DataFrames of its arguments, which PySpark's plan
+/// holds as their relations. Not a stable API.
 #[doc(hidden)]
 pub fn pickle_block(df: &DataFrame) -> Option<MlPickleBlock> {
+    pickle_block_with(df, &mut |_| None)
+}
+
+/// [`pickle_block`] of the DataFrame `df`, of the block that `owned` gives of the owner of a
+/// relation built outside the core (`DataFrame::from_relation`), such as the Python plan of
+/// `pyspark.ml` of the Python client, whose pickle reaches what PySpark's pickle of the plan
+/// reaches, where the walk reaches the relation. Not a stable API.
+#[doc(hidden)]
+pub fn pickle_block_with(
+    df: &DataFrame,
+    owned: &mut dyn FnMut(&(dyn std::any::Any + Send + Sync)) -> Option<MlPickleBlock>,
+) -> Option<MlPickleBlock> {
     // A walk of its own stack, as a plan may be deeper than the thread's stack, which leaves a plan
-    // after its inputs, and visits a plan that several plans read (a self-join) once.
+    // after its inputs and the plans of its subqueries, and visits a plan that several plans read
+    // (a self-join) once.
     enum Step<'a> {
         Enter(&'a Arc<LogicalPlan>),
         Leave(&'a LogicalPlan),
@@ -668,11 +683,14 @@ pub fn pickle_block(df: &DataFrame) -> Option<MlPickleBlock> {
                 }
                 steps.push(Step::Leave(plan.as_ref()));
                 // The inputs that PySpark's plan pickles, of the attribute relations only the
-                // summary dataset, which are entered in their order.
+                // summary dataset, which are entered in their order, and then the plans of the
+                // subqueries of its expressions.
                 let inputs = match relation_target_of(plan) {
                     Some(target) if target.target.summary_dataset.is_none() => Vec::new(),
                     _ => plan.inputs(),
                 };
+                let subqueries = crate::plan::subquery_plans(plan);
+                steps.extend(subqueries.into_iter().rev().map(Step::Enter));
                 steps.extend(inputs.into_iter().rev().map(Step::Enter));
             }
             Step::Leave(plan) => {
@@ -688,11 +706,11 @@ pub fn pickle_block(df: &DataFrame) -> Option<MlPickleBlock> {
                 if owner.0.downcast_ref::<CachedModelRef>().is_some() {
                     return Some(MlPickleBlock::ModelLock);
                 }
-                if let Some(block) = owner
-                    .0
-                    .downcast_ref::<RelationTarget>()
-                    .and_then(|relation| relation.target.instance_pickle_block())
-                {
+                if let Some(relation) = owner.0.downcast_ref::<RelationTarget>() {
+                    if let Some(block) = relation.target.instance_pickle_block() {
+                        return Some(block);
+                    }
+                } else if let Some(block) = owned(owner.0.as_ref()) {
                     return Some(block);
                 }
             }
@@ -1674,7 +1692,51 @@ mod tests {
         let helper = MlTarget::helper(&session);
         let of_helper = relation(&helper, vec![FetchArg::Input(transformed.clone())]);
         assert_eq!(block(&of_helper), None);
+        // A DataFrame that reads a model only through a subquery of its expressions, as the
+        // references of PySpark's plan keep the plans of the subqueries, which its pickle takes
+        // after its child: an EXISTS, a scalar and an IN subquery, also of a summary.
+        assert_eq!(block(&train.where_(transformed.exists())), Some("lock"));
+        assert_eq!(block(&train.select([transformed.scalar()])), Some("lock"));
+        let isin = crate::functions::col("id").isin_subquery(&transformed);
+        assert_eq!(block(&train.where_(isin)), Some("lock"));
+        assert_eq!(block(&train.where_(of_summary.exists())), Some("session"));
+        assert_eq!(block(&train.where_(train.exists())), None);
         std::mem::forget((transformed, object, evaluated, model, summary, of_transform));
+    }
+
+    #[test]
+    fn the_owners_of_relations_built_outside_the_core_give_their_pickle_blocks() {
+        // The block that `pickle_block_with` gives of the owner of a relation of
+        // `DataFrame::from_relation` (a Python plan of `pyspark.ml` of the Python client), where
+        // the walk reaches it: of a DataFrame over it too, and after the inputs before it.
+        fn block(df: &DataFrame, of_owner: Option<&'static str>) -> Option<&'static str> {
+            let mut owned = |owner: &(dyn std::any::Any + Send + Sync)| {
+                owner
+                    .downcast_ref::<&'static str>()
+                    .and(of_owner)
+                    .map(|_| MlPickleBlock::ModelLock)
+            };
+            pickle_block_with(df, &mut owned).map(|block| match block {
+                MlPickleBlock::ModelLock => "lock",
+                MlPickleBlock::SummarySession(_) => "session",
+            })
+        }
+
+        let session = crate::session::SparkSession::builder()
+            .remote("sc://localhost:15002")
+            .get_or_create()
+            .expect("session");
+        let relation = session
+            .range(1)
+            .expect("range")
+            .to_relation()
+            .expect("relation");
+        let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new("python plan");
+        let built = DataFrame::from_relation(session.clone(), relation, Some(owner)).unwrap();
+        assert_eq!(block(&built, Some("lock")), Some("lock"));
+        assert_eq!(block(&built.limit(1), Some("lock")), Some("lock"));
+        assert_eq!(block(&built, None), None);
+        assert!(pickle_block(&built).is_none());
     }
 
     #[test]

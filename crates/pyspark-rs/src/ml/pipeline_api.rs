@@ -230,8 +230,14 @@ pub struct PyPipelineModel {
 impl PyPipelineModel {
     /// The model of the stages `stages`, of a new uid, as `PipelineModel(stages)`.
     fn of_stages(py: Python<'_>, stages: Py<PyAny>) -> PyResult<Self> {
+        Self::of_class(py, "PipelineModel", stages)
+    }
+
+    /// The model of [`PyPipelineModel::of_stages`], of a uid of the class `class`, as
+    /// `Identifiable._randomUID` names the uid of the class of the object (a Python subclass's).
+    fn of_class(py: Python<'_>, class: &str, stages: Py<PyAny>) -> PyResult<Self> {
         Ok(Self {
-            uid: params_api::random_uid(py, "PipelineModel")?,
+            uid: params_api::random_uid(py, class)?,
             stages,
         })
     }
@@ -274,9 +280,12 @@ native_pymethods! {
     persistence: python;
     params: [];
 
+    /// `PipelineModel(stages)`, of a uid of the class of the object, as `Identifiable._randomUID`
+    /// names it (`MyPipelineModel_...` of a Python subclass).
     #[new]
-    fn new(py: Python<'_>, stages: Py<PyAny>) -> PyResult<Self> {
-        Self::of_stages(py, stages)
+    #[classmethod]
+    fn new(cls: &Bound<'_, pyo3::types::PyType>, stages: Py<PyAny>) -> PyResult<Self> {
+        Self::of_class(cls.py(), &cls.name()?.to_string(), stages)
     }
 
     /// The transform of `dataset` by each stage in order, as `Transformer.transform` (a param map
@@ -442,8 +451,11 @@ fn save_pipeline_model(
 
 /// Save `instance` of the class `class` and its stages `stages` to `path`, as
 /// `PipelineSharedReadWrite.validateStages` and `saveImpl`: the metadata of the uids of the stages
-/// (`stageUids`, of the language "Python"), and each stage, of its own writer and the session
-/// `spark`, at `stages/<index>_<uid>`.
+/// (`stageUids`, of the language "Python") and of the defaults of `_defaultParamMap` (of the Params
+/// of a Python subclass, which a Pipeline of PySpark's has none of), and each stage, of its own
+/// writer and the session `spark`, at `stages/<index>_<uid>` (of `len(stages)`). As PySpark's, each
+/// of the three iterates the stages: the check of `validateStages` consumes stages of a one-shot
+/// iterator (a generator), so that the metadata has no uids and no stage is written.
 pub(super) fn save_with_stages(
     instance: &Bound<'_, PyAny>,
     class: &str,
@@ -453,10 +465,10 @@ pub(super) fn save_with_stages(
     path: &str,
 ) -> PyResult<()> {
     let py = instance.py();
-    let stages = stages.try_iter()?.collect::<PyResult<Vec<_>>>()?;
-    for stage in &stages {
+    for stage in stages.try_iter()? {
+        let stage = stage?;
         // As `validateStages`.
-        if !writable(stage)? {
+        if !writable(&stage)? {
             return Err(PyValueError::new_err((
                 "Pipeline write will fail on this pipeline because stage %s of type %s is not \
                  MLWritable",
@@ -466,8 +478,8 @@ pub(super) fn save_with_stages(
         }
     }
     let uids = stages
-        .iter()
-        .map(|stage| stage.getattr("uid")?.extract::<String>())
+        .try_iter()?
+        .map(|stage| stage?.getattr("uid")?.extract::<String>())
         .collect::<PyResult<Vec<_>>>()?;
     let uid: String = instance.getattr("uid")?.extract()?;
     // As PySpark's `{"stageUids": stageUids, "language": "Python"}`, of its order.
@@ -475,20 +487,48 @@ pub(super) fn save_with_stages(
         ("stageUids", serde_json::json!(uids).to_string()),
         ("language", serde_json::json!("Python").to_string()),
     ]);
+    let default_map = default_params_json(instance)?;
     interruptible(py, session, || {
         let version = session.version()?;
-        let metadata = Metadata::new(class, &uid, &version, param_map, "{}".to_string());
+        let metadata = Metadata::new(class, &uid, &version, param_map, default_map);
         save_metadata(session, path, &metadata.to_json()).map_err(Box::new)
     })?;
     let stages_dir = join_path(path, "stages");
-    for (index, (stage, stage_uid)) in stages.iter().zip(&uids).enumerate() {
-        let stage_path = stage_path(stage_uid, index, stages.len(), &stages_dir);
+    for (index, stage) in stages.try_iter()?.enumerate() {
+        let stage = stage?;
+        let stage_uid: String = stage.getattr("uid")?.extract()?;
+        let stage_path = stage_path(&stage_uid, index, stages.len()?, &stages_dir);
         stage
             .call_method0("write")?
             .call_method1("session", (spark,))?
             .call_method1("save", (stage_path,))?;
     }
     Ok(())
+}
+
+/// The `defaultParamMap` of the metadata of `instance`, as `DefaultParamsWriter` writes it of
+/// `_defaultParamMap` (`json.dumps` of the defaults by the names of their Params): of an object of
+/// PySpark's maps, the defaults of the Params of a Python subclass (`_setDefault(myParam=3)`), and
+/// else none, as of PySpark's Pipeline, which has none.
+fn default_params_json(instance: &Bound<'_, PyAny>) -> PyResult<String> {
+    let py = instance.py();
+    let has_maps = instance
+        .getattr(pyo3::intern!(py, "__dict__"))
+        .and_then(|attributes| attributes.contains("_defaultParamMap"))
+        .unwrap_or(false);
+    let defaults = PyDict::new(py);
+    if has_maps {
+        let map = instance.getattr(pyo3::intern!(py, "_defaultParamMap"))?;
+        for (param, value) in map.cast_into::<PyDict>()?.iter() {
+            defaults.set_item(param.getattr(pyo3::intern!(py, "name"))?, value)?;
+        }
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("separators", (",", ":"))?;
+    py.import("json")?
+        .getattr("dumps")?
+        .call((defaults,), Some(&kwargs))?
+        .extract()
 }
 
 /// Whether `obj` writes, as PySpark's `isinstance(obj, MLWritable)`: an `MLWritable` of PySpark's,

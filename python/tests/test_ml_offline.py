@@ -581,8 +581,10 @@ def test_native_ml_other_invalid_inputs(ml_mock):
     # As pyspark.ml's try_remote_fit, try_remote_transform_relation and try_remote_evaluate, which
     # read the sparkSession of the dataset first: a fit, a transform or an evaluate of an object
     # that is not a DataFrame raises the AttributeError of sparkSession, before any request, also
-    # of an object of the attributes that the deprecated pyspark.ml.connect read. An object that has
-    # a sparkSession, which is still no DataFrame, raises a TypeError. (A pandas DataFrame raises the
+    # of an object of the attributes that the deprecated pyspark.ml.connect read. Of an object that
+    # has a sparkSession, they read its `client` (a transform asserts a session that is not None
+    # first) and then the object's `_plan` (`dataset._plan.plan(client)`), whose AttributeErrors
+    # they raise, and an object of both is the DataFrame of its plan. (A pandas DataFrame raises the
     # AttributeError of its own sparkSession, as test_native_ml_rejects_pandas_before_any_requests
     # pins.)
     import pyspark.ml.connect as connect
@@ -597,6 +599,15 @@ def test_native_ml_other_invalid_inputs(ml_mock):
 
     class Session:
         sparkSession = None
+
+    class OfSession:
+        sparkSession = spark
+
+    frame = spark.range(1)
+
+    class OfPlan:
+        sparkSession = spark
+        _plan = frame._plan
 
     methods = [
         ("fit", connect.LogisticRegression().fit),
@@ -615,11 +626,24 @@ def test_native_ml_other_invalid_inputs(ml_mock):
             assert str(error.value) == (
                 f"'{type(other).__name__}' object has no attribute 'sparkSession'"
             ), (name, other)
-        with pytest.raises(TypeError) as error:
-            method(Session())
-        assert str(error.value) == f"{name}() takes a Spark DataFrame, not 'Session'"
+        if name == "transform":
+            with pytest.raises(AssertionError):
+                method(Session())
+        else:
+            message = "^'NoneType' object has no attribute 'client'$"
+            with pytest.raises(AttributeError, match=message):
+                method(Session())
+        with pytest.raises(AttributeError, match="^'OfSession' object has no attribute '_plan'$"):
+            method(OfSession())
     assert len(_session_requests(service, spark)) == sent
     assert len(_session_analyses(service, spark)) == analyzed
+    # The transform of an object of a plan and a session is of the relation of the plan (of a plan
+    # ID of this client's, as of `DataFrame(plan, session)`).
+    transformed = connect.VectorAssembler(inputCols=["id"], outputCol="v").transform(OfPlan())
+    expected = connect.VectorAssembler(inputCols=["id"], outputCol="v").transform(frame)
+    assert _relation(transformed).ml_relation.transform.input.range == (
+        _relation(expected).ml_relation.transform.input.range
+    )
     # The helper calls of pyspark.ml read nothing of their dataset, but send it as an argument,
     # which pyspark.ml.connect.serialize sends as a literal unless it is a DataFrame:
     # PowerIterationClustering.assignClusters, PrefixSpan.findFrequentSequentialPatterns and
@@ -1962,6 +1986,8 @@ def test_the_models_and_summaries_of_fits_have_pysparks_java_obj_of_their_call_j
     # (`__source_transformer__`). PySpark's `_call_java` of each (`try_remote_call`) sends the Fetch
     # of the id and the methods of its `_java_obj`. A model of PySpark's constructor has the
     # `_java_obj` of its `__init__`, None, and no `_summary`.
+    import copy
+
     import pyspark.ml.connect as connect
     from pyspark.ml.linalg import Vectors
     from pyspark.ml.util import RemoteModelRef
@@ -1973,7 +1999,10 @@ def test_the_models_and_summaries_of_fits_have_pysparks_java_obj_of_their_call_j
     svc = connect.classification.LinearSVC().fit(frame)
     service.payload_for_request = {b"evaluate": _ml_result(summary="evaluated-of-a-call-java")}
     evaluated = model.evaluate(frame)
-    assert type(model._java_obj) is RemoteModelRef
+    # A copy shares the model's RemoteModelRef, also of a copy before its first read, as PySpark's
+    # `copy.copy` shares the `_java_obj` of its attributes.
+    shallow = copy.copy(model)
+    assert type(model._java_obj) is RemoteModelRef and shallow._java_obj is model._java_obj
     assert model._java_obj.ref_id == model.copy()._java_obj.ref_id == "model-of-a-call-java"
     summary = model.summary
     # The `summary()` method of a LinearSVCModel, as PySpark's.
@@ -1981,8 +2010,11 @@ def test_the_models_and_summaries_of_fits_have_pysparks_java_obj_of_their_call_j
     assert list(vars(summary)) == ["_java_obj", "_summary_dataset", "_remote_model_obj"]
     assert summary._java_obj == "model-of-a-call-java.summary"
     assert _relation(summary._summary_dataset) == _relation(frame)
-    assert type(summary._remote_model_obj) is RemoteModelRef
-    assert summary._remote_model_obj.ref_id == "model-of-a-call-java"
+    # The model's own RemoteModelRef, of a reference of the summary too (`add_ref`), and of one of
+    # the `JavaParams.copy` above.
+    assert summary._remote_model_obj is model._java_obj
+    assert svc.summary()._remote_model_obj is svc._java_obj
+    assert summary._remote_model_obj._ref_count == 3 and svc._java_obj._ref_count == 2
     assert list(vars(evaluated)) == ["_java_obj", "__source_transformer__"]
     assert evaluated._java_obj == "evaluated-of-a-call-java"
     assert evaluated.__source_transformer__ is model
@@ -2096,6 +2128,7 @@ def test_a_fitted_model_and_the_dataframes_that_keep_it_are_not_pickled_as_pyspa
     import pyspark.ml.connect as connect
     from pyspark import cloudpickle
     from pyspark.ml.linalg import Vectors
+    from pyspark.sql import functions as F
 
     spark, service = ml_mock
     frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
@@ -2111,6 +2144,19 @@ def test_a_fitted_model_and_the_dataframes_that_keep_it_are_not_pickled_as_pyspa
         (model.transform(frame), _lock_pickle_error, 1),
         (model.transform(frame).select("label"), _lock_pickle_error, 1),
         (frame.join(model.transform(frame), "label"), _lock_pickle_error, 1),
+        # A DataFrame that keeps a model only through a subquery of its expressions, as the
+        # references of PySpark's plan keep the plans of the subqueries.
+        (frame.where(model.transform(frame).exists()), _lock_pickle_error, 1),
+        (
+            frame.select(model.transform(frame).select(F.max("label")).scalar()),
+            _lock_pickle_error,
+            1,
+        ),
+        (
+            frame.where(F.col("label").isin(model.transform(frame).select("label"))),
+            _lock_pickle_error,
+            1,
+        ),
         (kmeans.summary.cluster, _lock_pickle_error, 1),
         (evaluated.predictions, _lock_pickle_error, 1),
         # A request of the lookup of `__deepcopy__` of the DataFrame, and two of the copy of the
@@ -2132,6 +2178,67 @@ def test_a_fitted_model_and_the_dataframes_that_keep_it_are_not_pickled_as_pyspa
         assert _pickle_error(plain, protocol) == _session_pickle_error(protocol)
     assert _relation(cloudpickle.loads(cloudpickle.dumps(plain))) == _relation(plain)
     assert _relation(copy.deepcopy(plain)) == _relation(plain)
+    assert _requests_but_deletes(service) == sent
+
+
+def test_the_dataframes_of_the_models_of_pysparks_own_classes_are_not_pickled_as_pysparks(ml_mock):
+    # The plans of PySpark's own classes of `pyspark.ml` (`pyspark.ml.regression.LinearRegression`,
+    # where the drop-in's own classes are those of `pyspark.ml.connect`) keep their models and
+    # summaries (`__source_transformer__`, `__source_instance__`), which PySpark's pickle of a
+    # DataFrame of such a plan (`DataFrame(plan, session)`) reaches before its session: the lock of
+    # the model's RemoteModelRef, of a transform, of a DataFrame over one and of a DataFrame of the
+    # summary of an evaluation; the session of the `_summary_dataset` of a training summary, which
+    # a plain pickle refuses first, and then the lock of its `_remote_model_obj`, which cloudpickle
+    # and `copy.deepcopy` reach; and the lock of a summary dataset that is a transform of the model.
+    import copy
+    import pickle
+
+    from pyspark import cloudpickle
+    from pyspark.ml.clustering import KMeansModel, KMeansSummary
+    from pyspark.ml.linalg import Vectors
+    from pyspark.ml.regression import (
+        LinearRegressionModel,
+        LinearRegressionSummary,
+        LinearRegressionTrainingSummary,
+    )
+    from pyspark.ml.util import RemoteModelRef
+
+    spark, service = ml_mock
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    lock = "^cannot pickle '_thread.lock' object$"
+    # The models and the summaries of PySpark's `try_remote_fit` and `evaluate`.
+    model = LinearRegressionModel(RemoteModelRef("pysparks-model"))
+    trained = LinearRegressionTrainingSummary("pysparks-model.summary")
+    trained._summary_dataset = frame
+    trained._remote_model_obj = model._java_obj
+    trained._remote_model_obj.add_ref()
+    evaluated = LinearRegressionSummary("pysparks-evaluated")
+    evaluated.__source_transformer__ = model
+    kmeans = KMeansModel(RemoteModelRef("pysparks-kmeans"))
+    clustered = KMeansSummary("pysparks-kmeans.summary")
+    clustered._summary_dataset = kmeans.transform(frame)
+    clustered._remote_model_obj = kmeans._java_obj
+    clustered._remote_model_obj.add_ref()
+    sent = _requests_but_deletes(service)
+    for obj, blocked in [
+        (model.transform(frame), _lock_pickle_error),
+        (model.transform(frame).select("label"), _lock_pickle_error),
+        (evaluated.predictions, _lock_pickle_error),
+        (clustered.cluster, _lock_pickle_error),
+        (trained.predictions, _session_pickle_error),
+    ]:
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            assert _pickle_error(obj, protocol) == blocked(protocol), (obj, protocol)
+        with pytest.raises(TypeError, match=lock):
+            cloudpickle.dumps(obj)
+        with pytest.raises(TypeError, match=lock):
+            copy.deepcopy(obj)
+    # A transform of a transformer of no model keeps no model, and pickles of its session.
+    from pyspark.ml.feature import Binarizer
+
+    binarized = Binarizer(threshold=0.5, inputCol="label", outputCol="b").transform(frame)
+    assert _pickle_error(binarized, 2) == _session_pickle_error(2)
+    assert _relation(cloudpickle.loads(cloudpickle.dumps(binarized))) == _relation(binarized)
     assert _requests_but_deletes(service) == sent
 
 
