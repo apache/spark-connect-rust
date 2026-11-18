@@ -342,12 +342,20 @@ PySpark class has them:
   a model of no server-side object, of the model of an object that a fetch returns (a tree of an
   ensemble, `toLocal`), of a model of a class method (`StringIndexerModel.from_labels`), of the
   `Bucketizer` of a QuantileDiscretizer's fit (of its keywords), and of the model of a validator's
-  or a OneVsRest's fit; of the names of the params of the model of a JVM estimator's fit and of a
-  load, which PySpark's `_resetUid` rebuilds (the set params of a load of PySpark's Python format,
-  a OneVsRest's or a validator's, are then in the order of its metadata), and of a copy of
-  `Params.copy`. `clear` does nothing over Spark Connect, as PySpark's `JavaParams.clear`, of any
-  positional arguments. The native object's params are made those of the maps before each native
-  member reads them (a fit, a transform, an evaluation, a writer, a model's members), and so are
+  or a OneVsRest's fit; of the model of a JVM estimator's fit as PySpark's `try_remote_fit` makes
+  them, whose `_resetUid` rebuilds the defaults of the model's constructor in the order of the
+  names of the params and whose `_copyValues` then adds the estimator's defaults that the model's
+  class does not set and sets the estimator's params, each of their names (an ALSModel's
+  `blockSize` and `predictionCol`, and then ALS's `coldStartStrategy`, `itemCol` and `userCol`);
+  and of a copy of `Params.copy`, of the names. The defaults of a load are those of its class's
+  constructor, of the names, as `_resetUid` rebuilds them. The set params of a load are of their
+  names too, a deterministic choice: PySpark's `_set` of a load follows the server's map of them,
+  which upb's iteration of a map gives in an order that differs from one process to another (the
+  set params of a load of PySpark's Python format, a OneVsRest's or a validator's, are in the
+  order of its metadata, as PySpark's). `clear` does nothing over Spark Connect, as PySpark's
+  `JavaParams.clear`, of any positional arguments. The native object's params are made those of
+  the maps before each native member reads them (a fit, a transform, an evaluation, a writer, a
+  model's members), and so are
   those of the objects that it
   holds (an OneVsRest's classifier, a Pipeline's stages, a validator's estimator, evaluator and the
   values of its grids, a PipelineModel's stages, an OneVsRestModel's models, a validator model's
@@ -392,10 +400,31 @@ PySpark class has them:
   PySpark's fit sets, as the summary dataset of the relation, and raises the AttributeError of the
   attribute of a summary of none, as PySpark's `invoke_remote_attribute_relation` does. The Param of a class (`LinearSVC.maxIter`) is PySpark's, of
   the parent `undefined`, so `ParamGridBuilder().addGrid(LinearSVC.maxIter, ...)` builds.
-  `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect, of
-  the attributes `shouldOverwrite` and `optionMap`, and the AttributeError of a missing attribute
-  names the class as PySpark's does, of an object as of the class itself
-  (`type object 'DecisionTreeRegressor' has no attribute 'maxIter'`).
+  The AttributeError of a missing attribute names the class as PySpark's does, of an object as of
+  the class itself (`type object 'DecisionTreeRegressor' has no attribute 'maxIter'`).
+  `MLWriter`s and `MLReader`s are `RemoteMLWriter` and `RemoteMLReader`, as over Spark Connect.
+  - They are plain objects of the attributes of PySpark's `__init__`: `_sparkSession`,
+    `shouldOverwrite`, `optionMap` and `_instance` of a writer (`RemoteMLWriter(instance)`), and
+    `_sparkSession` and `_clazz` of a reader (`RemoteMLReader(clazz)`), which PySpark's own
+    `session`, `sparkSession`, `overwrite` and `option` set and read. So they construct, take any
+    value of an attribute, and copy, copy deep and pickle at every protocol as PySpark's, of their
+    class and attributes; as no module has the drop-in's class by its name
+    (`pyspark.ml.connect.readwrite.RemoteMLWriter` is PySpark's), a pickle of one names the native
+    module's `_new_remote_ml_writer` (`_new_remote_ml_reader`), where PySpark's names
+    `copyreg.__newobj__` of the class.
+  - Their `save` and `load` are functions of PySpark's names, docstrings and signatures
+    (`RemoteMLWriter.save`, `RemoteMLReader.load`), which bind a call as PySpark's do, assert an
+    active session first (also of a model, whose `Write` the session that holds it sends), and read
+    the attributes at the call, as PySpark's do: a writer saves its `_instance`, of its params as of
+    the save, and a reader loads its `_clazz`; another object or class than a native one is saved
+    and loaded by PySpark's own `saveInstance` and `loadInstance`, with their errors
+    (`NotImplementedError: Unsupported write for <class 'NoneType'>`). The `Write` of an estimator,
+    a transformer, an evaluator or a model takes `shouldOverwrite` and `optionMap` as its protobuf
+    fields take them: an int as a bool, None as an unset overwrite (false) and as no options, a
+    dict (or pairs) of strings, and upb's error of anything else (`TypeError: bad argument type
+    for built-in operation`). A save of PySpark's Python format overwrites of the truth of
+    `shouldOverwrite`, of the ML helper's `handleOverwrite` of the value as it is, and the writer of
+    a validator's model reads its `persistSubModels` of `optionMap`, as PySpark's do.
   - Their `save` and `load` (and the object's) take a path as PySpark's do. A path of an
     estimator, a model or an evaluator is the protobuf field of its `Write` or `Read`: bytes of
     their UTF-8, None the empty path (which the server refuses), and anything else (a
@@ -1048,7 +1077,10 @@ Spark Connect:
   `pyspark.ml`'s, or the user's.
 - **Fit:** `fit` is `Pipeline._fit`. Up to the last estimator, a transformer transforms and an
   estimator fits, and its model transforms for the stages after it. The stages after the last
-  estimator are kept as they are, in a `PipelineModel` of a new uid.
+  estimator are kept as they are, in a `PipelineModel` of a new uid. As `Pipeline._fit`, it
+  iterates the stages three times (to check their types, to find the last estimator, and to fit
+  them), so stages of an iterator, such as a generator, which the first iteration consumes, fit a
+  `PipelineModel` of no stages, as PySpark's.
 - **Transform:** `PipelineModel.transform` transforms by each stage in order.
 - **Copy:** `Pipeline.copy` keeps the uid and copies each stage with the extra params, while
   `PipelineModel.copy` is of a new uid.
@@ -2688,9 +2720,13 @@ plain classes: of no arguments (`ChiSquareTest() takes no arguments`) unless a s
 `SummaryBuilder` is a `JavaWrapper` of PySpark's `__init__(self, jSummaryBuilder)`, which keeps no
 Java object over Spark Connect: its `summary` reads the `_metrics` of its attributes, which
 `Summarizer.metrics` sets with a `_java_obj` of None, so `SummaryBuilder(None).summary(col)` raises
-PySpark's AttributeError, and a subclass that sets `_metrics` summarizes of them. The methods have
-PySpark's parameters, without its annotations and docstrings, and only `SummaryBuilder` has
-PySpark's class docstring.
+PySpark's AttributeError, and a subclass that sets `_metrics` summarizes of them. The static
+methods have PySpark's parameters and module (`Summarizer.mean.__module__` is `pyspark.ml.stat`),
+without its annotations and docstrings, and only `SummaryBuilder` has PySpark's class docstring.
+`SummaryBuilder.summary` is a function of the module, of PySpark's signature and docstring, over
+the native method, so a call binds as PySpark's does (`SummaryBuilder.summary() takes from 2 to 3
+positional arguments but 4 were given`); its annotations name the drop-in's `Column`, the class of
+`pyspark.sql.column.Column`, which is `pyspark.sql.connect.column.Column`.
 
 The statistical tests return lazy Spark DataFrames. Chi-square supports both the
 vector result and one row per feature (`flatten=True`); correlation supports

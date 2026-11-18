@@ -305,6 +305,49 @@ def test_a_summary_builder_constructs_and_summarizes_as_pysparks():
         type("Sub", (SummaryBuilder,), {})(None).summary(F.col("f"))
 
 
+def test_the_methods_are_of_pysparks_module_and_summary_binds_as_its_function():
+    # PySpark's static methods are functions of pyspark.ml.stat (`Summarizer.mean.__module__`), and
+    # `SummaryBuilder.summary` (stat.py:504) is a function of its module, of PySpark's parameters
+    # and docstring, of which Python binds a call as it binds PySpark's: its messages count `self`.
+    import sys
+
+    stat = api()
+    for name in ["ChiSquareTest", "Correlation", "KolmogorovSmirnovTest", "Summarizer"]:
+        cls = getattr(stat, name)
+        statics = [n for n, v in vars(cls).items() if isinstance(v, staticmethod)]
+        assert statics, name
+        for static in statics:
+            function = getattr(cls, static)
+            assert function.__module__ == "pyspark.ml.stat", (name, static)
+            assert function.__qualname__ == f"{name}.{static}", (name, static)
+    summary = stat.SummaryBuilder.summary
+    assert inspect.isfunction(summary) and summary.__module__ == "pyspark.ml.stat"
+    assert summary.__qualname__ == "SummaryBuilder.summary"
+    assert inspect.getdoc(summary).splitlines()[:2] == [
+        "Returns an aggregate object that contains the summary of the column with the requested",
+        "metrics.",
+    ]
+    assert list(inspect.signature(summary).parameters) == ["self", "featuresCol", "weightCol"]
+    builder = stat.Summarizer.metrics("mean")
+    expected = clean(builder.summary(F.col("f"), F.col("w"))._expr.to_plan(None))
+    keywords = builder.summary(featuresCol=F.col("f"), weightCol=F.col("w"))
+    assert clean(keywords._expr.to_plan(None)) == expected
+    cases = [
+        (lambda: builder.summary(), "missing 1 required positional argument: 'featuresCol'"),
+        (
+            lambda: builder.summary(F.col("f"), F.col("w"), 1),
+            "takes from 2 to 3 positional arguments but 4 were given",
+        ),
+        (lambda: builder.summary(F.col("f"), x=1), "got an unexpected keyword argument 'x'"),
+    ]
+    if sys.version_info < (3, 10):
+        return
+    for call, message in cases:
+        with pytest.raises(TypeError) as error:
+            call()
+        assert str(error.value) == f"SummaryBuilder.summary() {message}"
+
+
 @pytest.mark.parametrize("features,weight", [("features", None), (F.col("features"), "weight")])
 def test_builder_requires_columns(features, weight):
     with pytest.raises(AssertionError):

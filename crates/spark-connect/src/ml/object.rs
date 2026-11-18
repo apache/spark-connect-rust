@@ -956,6 +956,21 @@ pub fn write_operator(
     overwrite: bool,
     options: &HashMap<String, String>,
 ) -> spark_connect_core::error::Result<()> {
+    write_operator_opt(session, operator, params, path, Some(overwrite), options)
+}
+
+/// [`write_operator`] of an overwrite that may be unset: `None` leaves the `should_overwrite` of
+/// the `Write` unset, as PySpark's `MlCommand.Write(should_overwrite=None)` does of a writer whose
+/// `shouldOverwrite` is None (which the server reads as false). Not a stable API.
+#[doc(hidden)]
+pub fn write_operator_opt(
+    session: &SparkSession,
+    operator: &MlOperator,
+    params: &Params,
+    path: &str,
+    overwrite: Option<bool>,
+    options: &HashMap<String, String>,
+) -> spark_connect_core::error::Result<()> {
     run_ml_command(
         session,
         proto::ml_command::Command::Write(proto::ml_command::Write {
@@ -964,7 +979,7 @@ pub fn write_operator(
             )),
             params: Some(params.sendable()?),
             path: path.to_string(),
-            should_overwrite: Some(overwrite),
+            should_overwrite: overwrite,
             options: options.clone(),
         }),
     )?;
@@ -980,13 +995,26 @@ pub fn write_object(
     overwrite: bool,
     options: &HashMap<String, String>,
 ) -> spark_connect_core::error::Result<()> {
+    write_object_opt(object, params, path, Some(overwrite), options)
+}
+
+/// [`write_object`] of an overwrite that may be unset (see [`write_operator_opt`]). Not a stable
+/// API.
+#[doc(hidden)]
+pub fn write_object_opt(
+    object: &MlRef,
+    params: &Params,
+    path: &str,
+    overwrite: Option<bool>,
+    options: &HashMap<String, String>,
+) -> spark_connect_core::error::Result<()> {
     run_ml_command(
         object.session(),
         proto::ml_command::Command::Write(proto::ml_command::Write {
             r#type: Some(proto::ml_command::write::Type::ObjRef(object.object_ref())),
             params: Some(params.sendable()?),
             path: path.to_string(),
-            should_overwrite: Some(overwrite),
+            should_overwrite: overwrite,
             options: options.clone(),
         }),
     )?;

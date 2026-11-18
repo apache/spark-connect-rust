@@ -266,6 +266,8 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ml::PyMLModel>()?;
     m.add_class::<ml::object::PyMLWriter>()?;
     m.add_class::<ml::object::PyMLReader>()?;
+    m.add_function(wrap_pyfunction!(ml::object::new_remote_ml_writer, m)?)?;
+    m.add_function(wrap_pyfunction!(ml::object::new_remote_ml_reader, m)?)?;
     m.add_class::<ml::params_api::PyFitMultipleIterator>()?;
     ml::classification_api::register(m)?;
     ml::clustering_api::register(m)?;

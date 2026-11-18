@@ -1741,6 +1741,67 @@ def test_ml_connect_params_of_a_python_subclass_are_sent_as_pyspark(ml_mock):
     assert _requests_but_deletes(service) == sent
 
 
+def test_a_writer_and_a_reader_read_their_attributes_at_the_call_as_pyspark(ml_mock):
+    # PySpark's `RemoteMLWriter.save` (ml/connect/readwrite.py:39-50) reads the writer's
+    # `_instance`, `shouldOverwrite` and `optionMap` at the save, of a copy, a pickle and a writer
+    # of the constructor too, which `pb2.MlCommand.Write` takes as its protobuf fields: an int as
+    # the bool, None as no overwrite (unset, which the server reads as false) and as no options,
+    # pairs as the options, and upb's error of another value, before any request. An object that is not native is saved by PySpark's own
+    # `saveInstance`, and a reader's `_clazz` that is not a native class is loaded by its
+    # `loadInstance`, with their errors (readwrite.py:190, 366).
+    import copy
+    import pickle
+
+    from pyspark.ml.connect.classification import LogisticRegression
+
+    spark, service = ml_mock
+    lr, other = LogisticRegression(maxIter=3), LogisticRegression(maxIter=9)
+
+    def written(writer):
+        sent = len(service.execute_requests)
+        writer.save("/saved/path")
+        (command,) = _commands_but_deletes(service, sent)
+        write = command.ml_command.write
+        overwrite = write.should_overwrite if write.HasField("should_overwrite") else None
+        return write.operator.uid, overwrite, dict(write.options), write.params.params["maxIter"].integer
+
+    writer = lr.write()
+    lr.setMaxIter(4)
+    assert written(writer) == (lr.uid, False, {}, 4)
+    writer.shouldOverwrite, writer.optionMap = 1, [("Key", "v")]
+    assert written(writer) == (lr.uid, True, {"Key": "v"}, 4)
+    for copied in (copy.copy(writer), pickle.loads(pickle.dumps(writer)), type(writer)(lr)):
+        copied.shouldOverwrite, copied.optionMap = 1, [("Key", "v")]
+        assert written(copied) == (lr.uid, True, {"Key": "v"}, 4)
+    writer._instance = other
+    assert written(writer) == (other.uid, True, {"Key": "v"}, 9)
+    writer.shouldOverwrite, writer.optionMap = None, None
+    assert written(writer) == (other.uid, None, {}, 9)
+    sent = _requests_but_deletes(service)
+    for name, value, error, message in [
+        ("shouldOverwrite", "x", TypeError, "'str' object cannot be interpreted as an integer"),
+        ("optionMap", {"a": 1}, TypeError, "bad argument type for built-in operation"),
+        ("optionMap", "ab", ValueError, r"not enough values to unpack \(expected 2, got 1\)"),
+        ("_instance", None, NotImplementedError, "Unsupported write for <class 'NoneType'>"),
+    ]:
+        failing = lr.write()
+        setattr(failing, name, value)
+        with pytest.raises(error, match=f"^{message}$"):
+            failing.save("/unsent/path")
+    del writer.optionMap
+    with pytest.raises(AttributeError, match="^'RemoteMLWriter' object has no attribute 'optionMap'$"):
+        writer.save("/unsent/path")
+    reader = LogisticRegression.read()
+    for clazz, error, message in [
+        (int, RuntimeError, "Unsupported read for <class 'int'>"),
+        (None, TypeError, r"issubclass\(\) arg 1 must be a class"),
+    ]:
+        reader._clazz = clazz
+        with pytest.raises(error, match=f"^{message}$"):
+            reader.load("/unsent/path")
+    assert _requests_but_deletes(service) == sent
+
+
 def test_ml_connect_unsendable_ints_none_and_uids_as_pyspark(ml_mock):
     # As PySpark: an int beyond a long is taken by the constructor and the setter, and the
     # next fit raises the VALUE_NOT_BETWEEN of PySpark's serialization of the params, before
@@ -4092,6 +4153,25 @@ def test_python_dataframe_subclass_with_official_identity_pipeline():
         Pipeline().fit(dataset)
 
 
+def test_the_native_pipeline_iterates_its_stages_as_pysparks_fit():
+    # PySpark's `Pipeline._fit` (pipeline.py:120-142) iterates the stages three times: to check
+    # their types, to find the last estimator, and to fit them. So stages of an iterator, such as
+    # a generator, which the first iteration consumes, fit a PipelineModel of no stages, as those
+    # of PySpark's own Pipeline (vendored, `pyspark.ml.Pipeline`) do, and a list fits each stage.
+    from pyspark.ml import Pipeline as PySparksPipeline
+    from pyspark.ml.connect import Pipeline, Tokenizer
+    from pyspark.testing.mlutils import MockDataset
+
+    dataset = MockDataset()
+    stage = Tokenizer(inputCol="a", outputCol="b")
+    for cls in (Pipeline, PySparksPipeline):
+        assert cls(stages=[stage]).fit(dataset).stages == [stage]
+        for stages in (iter([stage]), (s for s in [stage]), map(lambda s: s, [stage])):
+            assert cls(stages=stages).fit(dataset).stages == [], cls
+        with pytest.raises(TypeError, match=r"^Cannot recognize a pipeline stage of type <class 'int'>\.$"):
+            cls(stages=iter([1])).fit(dataset)
+
+
 def test_ml_logical_plan_ids_as_pyspark():
     # As PySpark Connect's LogicalPlan: a plan ID of each plan, and another of a plan with
     # references, which _plan_id is.
@@ -5201,6 +5281,40 @@ def test_the_models_of_objects_of_the_server_are_of_their_constructors_as_pyspar
         assert [p.name for p in model._defaultParamMap] == order and not model._paramMap
     assert _relation(tree.transform(spark.range(1))).ml_relation.transform.obj_ref.id == "tree-1"
     assert _relation(local.transform(spark.range(1))).ml_relation.transform.obj_ref.id == "local-model"
+
+
+def test_the_maps_of_the_model_of_a_fit_are_of_pysparks_try_remote_fit(ml_mock):
+    # PySpark's `try_remote_fit` (ml/util.py:207-208) makes the maps of the model of a JVM
+    # estimator's fit of the model's constructor, then of its `_resetUid`, which rebuilds the
+    # defaults of the constructor in the order of the names of the params, and then of the
+    # estimator's `_copyValues`, which adds the estimator's defaults that the model's class does
+    # not set and sets the estimator's params, each of their names. So an ALSModel's defaults are
+    # its constructor's `blockSize` and `predictionCol`, and then ALS's `coldStartStrategy`,
+    # `itemCol` and `userCol`, as official pyspark-client 4.3.0 gives them; a model whose
+    # constructor sets every default of its estimator (a LogisticRegressionModel's) has them of
+    # their names. A copy (`Params.copy`) is of the names.
+    import pyspark.ml.recommendation as reference
+    from pyspark.ml.connect.classification import LogisticRegression
+    from pyspark.ml.connect.recommendation import ALS
+
+    spark, service = ml_mock
+    assert [p.name for p in reference.ALSModel()._defaultParamMap] == ["predictionCol", "blockSize"]
+    order = ["blockSize", "predictionCol", "coldStartStrategy", "itemCol", "userCol"]
+    for kwargs, set_names in [
+        ({}, []),
+        ({"userCol": "u", "itemCol": "i", "coldStartStrategy": "drop"}, ["coldStartStrategy", "itemCol", "userCol"]),
+    ]:
+        estimator = ALS(rank=2, **kwargs)
+        _answer_fit(service, estimator, ref="als-model")
+        model = estimator.fit(spark.range(1))
+        assert [p.name for p in model._defaultParamMap] == order
+        assert [p.name for p in model.extractParamMap()] == order
+        assert [p.name for p in model._paramMap] == set_names
+        assert [p.name for p in model.copy()._defaultParamMap] == sorted(order)
+    estimator = LogisticRegression(maxIter=2)
+    _answer_fit(service, estimator, ref="lr-model")
+    names = [p.name for p in estimator.fit(spark.range(1))._defaultParamMap]
+    assert names == sorted(names) and "threshold" in names
 
 
 def test_the_model_of_a_one_vs_rest_fit_is_of_its_constructor_and_warns_as_pysparks(ml_mock):

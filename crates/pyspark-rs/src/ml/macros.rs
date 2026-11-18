@@ -267,9 +267,8 @@ macro_rules! native_pymethods {
                         slf,
                         $jvm,
                         spark_connect::ml::OperatorType::$op,
-                    )?
-                    .with_instance(slf.as_any());
-                    $crate::ml::object::new_py(slf.py(), writer)
+                    )?;
+                    writer.object_of(slf.as_any())
                 }
 
                 /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -289,7 +288,7 @@ macro_rules! native_pymethods {
                         spark_connect::ml::OperatorType::$op,
                         <$ty>::__from_read,
                     )?;
-                    $crate::ml::object::new_py(cls.py(), reader)
+                    reader.object_of(cls.as_any())
                 }
 
                 /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -475,8 +474,8 @@ macro_rules! native_model {
             pyclass: [subclass];
             persistence: {
                 fn write(slf: &Bound<'_, Self>) -> PyResult<Py<$crate::ml::object::PyMLWriter>> {
-                    let writer = slf.try_borrow()?.core.writer(slf.py())?.with_instance(slf.as_any());
-                    $crate::ml::object::new_py(slf.py(), writer)
+                    let writer = slf.try_borrow()?.core.writer(slf.py())?;
+                    writer.object_of(slf.as_any())
                 }
 
                 fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -494,7 +493,7 @@ macro_rules! native_model {
                         spark_connect::ml::OperatorType::Model,
                         <$ty>::__from_read,
                     )?;
-                    $crate::ml::object::new_py(cls.py(), reader)
+                    reader.object_of(cls.as_any())
                 }
 
                 #[classmethod]

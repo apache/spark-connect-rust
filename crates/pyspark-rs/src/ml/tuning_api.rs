@@ -1006,11 +1006,8 @@ native_pymethods! {
     /// The writer, as `CrossValidator.write` over Spark Connect (`RemoteMLWriter`, which saves
     /// as `CrossValidatorWriter`).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            save_cross_validator,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(save_cross_validator))
+            .object_of(slf.as_any())
     }
 
     /// Save to `path`, as `MLWritable.save`: `self.write().save(path)`.
@@ -1023,7 +1020,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(load_cross_validator);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     /// Load from `path`, as `MLReadable.load`: `cls.read().load(path)`.
@@ -1117,11 +1114,8 @@ native_pymethods! {
     /// The writer, as `CrossValidatorModel.write` over Spark Connect (`RemoteMLWriter`, which saves
     /// as `CrossValidatorModelWriter`, of its option `persistSubModels`).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            save_cross_validator_model,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(save_cross_validator_model))
+            .object_of(slf.as_any())
     }
 
     fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -1132,7 +1126,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(load_cross_validator_model);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     #[classmethod]
@@ -1270,11 +1264,8 @@ native_pymethods! {
     /// The writer, as `TrainValidationSplit.write` over Spark Connect (`RemoteMLWriter`, which
     /// saves as `TrainValidationSplitWriter`).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            save_train_validation_split,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(save_train_validation_split))
+            .object_of(slf.as_any())
     }
 
     fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -1285,7 +1276,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(load_train_validation_split);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     #[classmethod]
@@ -1370,11 +1361,8 @@ native_pymethods! {
     /// The writer, as `TrainValidationSplitModel.write` over Spark Connect (`RemoteMLWriter`,
     /// which saves as `TrainValidationSplitModelWriter`, of its option `persistSubModels`).
     fn write(slf: &Bound<'_, Self>) -> PyResult<Py<object::PyMLWriter>> {
-        let writer = object::PyMLWriter::new(object::WriteTarget::Python(
-            slf.clone().into_any().unbind(),
-            save_train_validation_split_model,
-        ));
-        object::new_py(slf.py(), writer)
+        object::PyMLWriter::new(object::WriteTarget::Python(save_train_validation_split_model))
+            .object_of(slf.as_any())
     }
 
     fn save(slf: &Bound<'_, Self>, path: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -1385,7 +1373,7 @@ native_pymethods! {
     #[classmethod]
     fn read(cls: &Bound<'_, pyo3::types::PyType>) -> PyResult<Py<object::PyMLReader>> {
         let reader = object::PyMLReader::python(load_train_validation_split_model);
-        object::new_py(cls.py(), reader)
+        reader.object_of(cls.as_any())
     }
 
     #[classmethod]
@@ -1601,23 +1589,27 @@ fn save_impl<T: Validator>(
 }
 
 /// Whether a model's writer saves the sub-models, as
-/// `getValidatorModelWriterPersistSubModelsParam`: of its option `persistSubModels` ("true" or
-/// "false" of any case), else of whether the model has sub-models.
-fn persist_sub_models(
-    instance: &Bound<'_, PyAny>,
-    options: &std::collections::HashMap<String, String>,
-) -> PyResult<bool> {
-    match options.get("persistsubmodels") {
-        Some(value) => match value.to_lowercase().as_str() {
-            "true" => Ok(true),
-            "false" => Ok(false),
-            other => Err(PyValueError::new_err(format!(
-                "persistSubModels option value {other} is invalid, the possible values are \
-                 True, 'True' or False, 'False'"
-            ))),
-        },
-        None => Ok(!instance.getattr("subModels")?.is_none()),
+/// `getValidatorModelWriterPersistSubModelsParam` reads the writer's `optionMap`, `options`: of
+/// its option `persistsubmodels`, if `in` it, of the `lower()` of its value ("true" or "false"),
+/// else of whether the model has sub-models.
+fn persist_sub_models(instance: &Bound<'_, PyAny>, options: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if !options.contains("persistsubmodels")? {
+        return Ok(!instance.getattr("subModels")?.is_none());
     }
+    let value = options
+        .get_item("persistsubmodels")?
+        .call_method0("lower")?;
+    if value.eq("true")? {
+        return Ok(true);
+    }
+    if value.eq("false")? {
+        return Ok(false);
+    }
+    Err(PyValueError::new_err(format!(
+        "persistSubModels option value {} is invalid, the possible values are True, 'True' or \
+         False, 'False'",
+        value.str()?
+    )))
 }
 
 /// `model.write().session(spark).save(path)`.
@@ -1635,7 +1627,7 @@ fn save_cross_validator(
     _spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    _options: &std::collections::HashMap<String, String>,
+    _options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     validate_params(instance)?;
     save_impl(
@@ -1652,7 +1644,7 @@ fn save_train_validation_split(
     _spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    _options: &std::collections::HashMap<String, String>,
+    _options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     validate_params(instance)?;
     save_impl(
@@ -1671,7 +1663,7 @@ fn save_cross_validator_model(
     spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    options: &std::collections::HashMap<String, String>,
+    options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let py = instance.py();
     validate_params(instance)?;
@@ -1725,7 +1717,7 @@ fn save_train_validation_split_model(
     spark: &Bound<'_, PyAny>,
     session: &SparkSession,
     path: &str,
-    options: &std::collections::HashMap<String, String>,
+    options: &Bound<'_, PyAny>,
 ) -> PyResult<()> {
     let py = instance.py();
     validate_params(instance)?;

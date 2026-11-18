@@ -373,5 +373,35 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyKolmogorovSmirnovTest>()?;
     m.add_class::<PySummarizer>()?;
     m.add_class::<PySummaryBuilder>()?;
+    let py = m.py();
+    for class in [
+        py.get_type::<PyChiSquareTest>(),
+        py.get_type::<PyCorrelation>(),
+        py.get_type::<PyKolmogorovSmirnovTest>(),
+        py.get_type::<PySummarizer>(),
+    ] {
+        of_stat_module(&class)?;
+    }
+    Ok(())
+}
+
+/// Give the static methods of the class `class` the module of PySpark's functions,
+/// `pyspark.ml.stat` (`Summarizer.mean.__module__`), which PyO3 leaves None: the `__module__` of
+/// the function of each `staticmethod` of the class, which a builtin function takes.
+fn of_stat_module(class: &Bound<'_, pyo3::types::PyType>) -> PyResult<()> {
+    let py = class.py();
+    let staticmethod = py.import("builtins")?.getattr("staticmethod")?;
+    for member in class
+        .getattr(pyo3::intern!(py, "__dict__"))?
+        .call_method0("values")?
+        .try_iter()?
+    {
+        let member = member?;
+        if member.is_instance(&staticmethod)? {
+            member
+                .getattr(pyo3::intern!(py, "__func__"))?
+                .setattr(pyo3::intern!(py, "__module__"), "pyspark.ml.stat")?;
+        }
+    }
     Ok(())
 }
