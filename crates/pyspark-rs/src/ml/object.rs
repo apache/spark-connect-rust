@@ -465,27 +465,11 @@ pub(crate) fn class_member<'py>(
     Ok(None)
 }
 
-/// The error of a pickle at `protocol` of the summary of the server-side object `target`, as
-/// PySpark's pickle of its summary raises it, of the first of its attributes that does not pickle:
-/// the lock of the `RemoteModelRef` of the model that the summary of an evaluation keeps
-/// (`__source_transformer__`), and that the plan of the summary dataset of a fit's keeps when that
-/// reads a transform of a fitted model (PySpark's default `_summary_dataset`,
-/// `model.transform(dataset)` of the clustering models, and a training dataset of a stage after a
-/// model of a Pipeline); else the session of that DataFrame, which it pickles after its plan, of
-/// the local function of its `__reduce__`.
-pub(crate) fn summary_pickle_error(
-    py: Python<'_>,
-    target: &MlTarget,
-    protocol: &Bound<'_, PyAny>,
-) -> PyErr {
-    // The summary of an evaluation is of the id that the server returns, of no root object.
-    if !(target.root().is_none() || target.summary_dataset_reads_model()) {
-        return pyo3::exceptions::PyAttributeError::new_err(
-            "Can't pickle local object 'SparkSession.__reduce__.<locals>.creator'",
-        );
-    }
-    // The error of the pickle of a lock at the protocol: the TypeError of the protocols 2 and up,
-    // and the PicklingError of the lookup of its class below.
+/// The error of a pickle at `protocol` of an object that keeps the lock of a `RemoteModelRef`, as
+/// PySpark's pickle of a fitted model, of the summary of an evaluation (which keeps its model) or
+/// of a DataFrame of a model raises it: the error of the pickle of a lock at the protocol, the
+/// TypeError of the protocols 2 and up, and the PicklingError of the lookup of its class below.
+pub(crate) fn lock_pickle_error(py: Python<'_>, protocol: &Bound<'_, PyAny>) -> PyErr {
     let pickled = py
         .import("threading")
         .and_then(|threading| threading.call_method0("Lock"))
@@ -494,6 +478,58 @@ pub(crate) fn summary_pickle_error(
         Err(error) => error,
         Ok(_) => params_api::lock_error(),
     }
+}
+
+/// PySpark's `RemoteModelRef` of the server-side object of the id `id`, as PySpark's fit makes the
+/// `_java_obj` of its model and the `_remote_model_obj` of its training summary: a holder of the
+/// id, which this client never releases through it, as the native object releases itself.
+pub(crate) fn remote_model_ref<'py>(py: Python<'py>, id: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("pyspark.ml.util")?
+        .getattr("RemoteModelRef")?
+        .call1((id,))
+}
+
+/// The object `summary` of the summary of an evaluation of the model `model`, of the attributes
+/// that PySpark's `evaluate` sets of it, in its order: `_java_obj`, the id of the object that the
+/// server returns, and `__source_transformer__`, the model, which it keeps, so that its pickle and
+/// `copy.deepcopy` raise the error of the model's lock first, as PySpark's do (an object of no
+/// public class has none).
+pub(crate) fn evaluated<T>(model: &Bound<'_, PyAny>, summary: Py<T>) -> PyResult<Py<T>> {
+    let py = model.py();
+    let object = summary.bind(py).as_any();
+    if let Ok(attributes) = object.getattr(pyo3::intern!(py, "__dict__")) {
+        attributes.set_item("_java_obj", object.call_method0("_native_java_obj")?)?;
+        attributes.set_item("__source_transformer__", model)?;
+    }
+    Ok(summary)
+}
+
+/// The training summary object of `make` of the model `core` and the target `target`, of the
+/// attributes that PySpark's `try_remote_fit` sets of it, in its order: `_java_obj`
+/// (`"<id>.summary"`), `_summary_dataset` (the summary dataset of the fit) and
+/// `_remote_model_obj` (the `RemoteModelRef` of the model), which PySpark's `_call_java` reads
+/// and its pickle and `copy.deepcopy` take, as its attributes (an object of no public class has
+/// none).
+fn training_summary_object(
+    py: Python<'_>,
+    make: SummaryMaker,
+    core: &ModelCore,
+    target: MlTarget,
+) -> PyResult<Py<PyAny>> {
+    let object = make(py, core, target.clone())?;
+    if let Ok(attributes) = object.bind(py).getattr(pyo3::intern!(py, "__dict__")) {
+        attributes.set_item("_java_obj", target.id())?;
+        if let Some(dataset) = target.summary_dataset() {
+            attributes.set_item(
+                "_summary_dataset",
+                Py::new(py, PyDataFrame::new(dataset.clone()))?,
+            )?;
+        }
+        if let Some(model) = target.root() {
+            attributes.set_item("_remote_model_obj", remote_model_ref(py, model.id())?)?;
+        }
+    }
+    Ok(object)
 }
 
 /// What a writer saves: an operator that is not fitted (an estimator, a transformer or an
@@ -979,7 +1015,7 @@ impl ModelCore {
         };
         // The summary object, of the fit, as `try_remote_fit` sets `_summary` right after it.
         if let (Some(make), Some(target)) = (make_summary, core.summary.clone()) {
-            let object = make(py, &core, target)?;
+            let object = training_summary_object(py, make, &core, target)?;
             let _ = core.summary_object.set(object);
         }
         Ok(core)
@@ -1149,7 +1185,7 @@ impl ModelCore {
         if let Some(object) = self.summary_object.get() {
             return Ok(object.clone_ref(py));
         }
-        let object = make(py, self, self.training_summary_target(slf)?)?;
+        let object = training_summary_object(py, make, self, self.training_summary_target(slf)?)?;
         Ok(self.summary_object.get_or_init(|| object).clone_ref(py))
     }
 

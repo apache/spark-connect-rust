@@ -518,36 +518,22 @@ impl MlTarget {
         self.summary_dataset.as_ref()
     }
 
-    /// Whether the summary dataset of this target reads the transform of a fitted model: the
-    /// plan of the transform of a model's object, or one that reads it, such as the transform of
-    /// the training dataset by the model of no params ([`summary_transform`]), or a training
-    /// dataset that a model of a Pipeline transformed. PySpark's plan of such a DataFrame keeps
-    /// the model (`__source_transformer__`), as the plans of the transforms of models of this
-    /// client keep their objects. Not a stable API.
-    #[doc(hidden)]
-    pub fn summary_dataset_reads_model(&self) -> bool {
-        let Some(dataset) = &self.summary_dataset else {
-            return false;
-        };
-        // A walk of the plan of its own stack, as a plan may be deeper than the thread's stack,
-        // which visits a plan that several plans read (a self-join) once.
-        let mut pending = vec![&dataset.plan];
-        let mut visited = std::collections::HashSet::new();
-        while let Some(plan) = pending.pop() {
-            if !visited.insert(Arc::as_ptr(plan)) {
-                continue;
+    /// What PySpark's pickle of the object of this target, the `__source_instance__` of the plan
+    /// of a DataFrame of one of its methods, reaches first that does not pickle, after the child of
+    /// the plan, its summary dataset (see [`pickle_block`]): of a model, the lock of its
+    /// `RemoteModelRef`; of the training summary of a fit, the session of its `_summary_dataset`;
+    /// of the summary of an evaluation, the lock of the model that it keeps
+    /// (`__source_transformer__`). The ML helper, and a summary of PySpark's constructor, of no
+    /// object of this client, reach none.
+    fn instance_pickle_block(&self) -> Option<MlPickleBlock> {
+        match (&self.root, self.chain.is_empty(), &self.summary_dataset) {
+            (TargetRoot::Object(_), true, _) => Some(MlPickleBlock::ModelLock),
+            (TargetRoot::Object(_), false, Some(dataset)) => {
+                Some(MlPickleBlock::SummarySession(dataset.clone()))
             }
-            if let LogicalPlan::MlTransform {
-                owner: Some(owner), ..
-            } = plan.as_ref()
-            {
-                if owner.0.downcast_ref::<CachedModelRef>().is_some() {
-                    return true;
-                }
-            }
-            pending.extend(plan.inputs());
+            (TargetRoot::Object(_), false, None) => Some(MlPickleBlock::ModelLock),
+            _ => self.keep_alive.as_ref().map(|_| MlPickleBlock::ModelLock),
         }
-        false
     }
 
     /// The object at the root of the target, unless it is the helper.
@@ -627,6 +613,114 @@ impl MlTarget {
             methods,
         })
     }
+}
+
+/// What PySpark's pickle of a DataFrame reaches first that does not pickle, of the objects of
+/// `pyspark.ml` that its plan keeps, which `pickle` and `copy.deepcopy` of PySpark's DataFrame read
+/// before its session (see [`pickle_block`]). Not a stable API.
+#[doc(hidden)]
+#[derive(Clone)]
+pub enum MlPickleBlock {
+    /// The lock of the `RemoteModelRef` of a model that the plan keeps: of a transform of the
+    /// model (`__source_transformer__`), of a DataFrame of a method of the model, or of the
+    /// summary of an evaluation, which keeps its model (`__source_instance__`).
+    ModelLock,
+    /// The session of the `_summary_dataset` of the training summary of a fit, of a DataFrame of
+    /// a method of the summary (`__source_instance__`), which PySpark's pickle refuses (a local
+    /// function of its `__reduce__`) before the lock of the model of the summary
+    /// (`_remote_model_obj`), which comes next: cloudpickle, which pickles the function, and
+    /// `copy.deepcopy` reach that lock, a deep copy after a copy of the summary dataset, which it
+    /// holds.
+    SummarySession(DataFrame),
+}
+
+impl std::fmt::Debug for MlPickleBlock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ModelLock => f.write_str("ModelLock"),
+            Self::SummarySession(_) => f.write_str("SummarySession"),
+        }
+    }
+}
+
+/// What PySpark's pickle of the DataFrame `df` reaches first that does not pickle, of the objects
+/// of `pyspark.ml` that its plan keeps, in the order that PySpark's pickle of the plan takes them:
+/// the child of a plan first, as its attribute `_child` comes first, and then the objects that the
+/// plan keeps, of each plan in the order of its inputs. A transform of a model keeps the model
+/// (`__source_transformer__`); a DataFrame of a method of a model or of a summary keeps that
+/// object (`__source_instance__`), and the summary dataset of a summary as its child, but not the
+/// DataFrames of its arguments, which PySpark's plan holds as their relations. Not a stable API.
+#[doc(hidden)]
+pub fn pickle_block(df: &DataFrame) -> Option<MlPickleBlock> {
+    // A walk of its own stack, as a plan may be deeper than the thread's stack, which leaves a plan
+    // after its inputs, and visits a plan that several plans read (a self-join) once.
+    enum Step<'a> {
+        Enter(&'a Arc<LogicalPlan>),
+        Leave(&'a LogicalPlan),
+    }
+    let mut steps = vec![Step::Enter(&df.plan)];
+    let mut visited = std::collections::HashSet::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            Step::Enter(plan) => {
+                if !visited.insert(Arc::as_ptr(plan)) {
+                    continue;
+                }
+                steps.push(Step::Leave(plan.as_ref()));
+                // The inputs that PySpark's plan pickles, of the attribute relations only the
+                // summary dataset, which are entered in their order.
+                let inputs = match relation_target_of(plan) {
+                    Some(target) if target.target.summary_dataset.is_none() => Vec::new(),
+                    _ => plan.inputs(),
+                };
+                steps.extend(inputs.into_iter().rev().map(Step::Enter));
+            }
+            Step::Leave(plan) => {
+                let owner = match plan {
+                    LogicalPlan::MlTransform {
+                        owner: Some(owner), ..
+                    }
+                    | LogicalPlan::Raw {
+                        owner: Some(owner), ..
+                    } => owner,
+                    _ => continue,
+                };
+                if owner.0.downcast_ref::<CachedModelRef>().is_some() {
+                    return Some(MlPickleBlock::ModelLock);
+                }
+                if let Some(block) = owner
+                    .0
+                    .downcast_ref::<RelationTarget>()
+                    .and_then(|relation| relation.target.instance_pickle_block())
+                {
+                    return Some(block);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// The target of the attribute relation of `plan` (see [`attribute_relation`]), if it is one.
+fn relation_target_of(plan: &LogicalPlan) -> Option<&RelationTarget> {
+    match plan {
+        LogicalPlan::MlTransform {
+            owner: Some(owner), ..
+        }
+        | LogicalPlan::Raw {
+            owner: Some(owner), ..
+        } => owner.0.downcast_ref::<RelationTarget>(),
+        _ => None,
+    }
+}
+
+/// What the DataFrame of an attribute relation keeps alive, as PySpark's plan keeps the object of
+/// its method (`__source_instance__`): the target, of its object, its summary dataset and the model
+/// that the summary of an evaluation keeps, and the plans of the DataFrames of its arguments.
+struct RelationTarget {
+    target: MlTarget,
+    #[allow(dead_code)] // Kept alive, as the relation refers to their plans.
+    inputs: Vec<Arc<LogicalPlan>>,
 }
 
 /// An argument of a method of a fetch, as `serialize` of `pyspark.ml.connect.serialize` sends it.
@@ -824,8 +918,10 @@ pub fn attribute_relation(
         ))),
         ..Default::default()
     };
-    let owner: Arc<dyn std::any::Any + Send + Sync> =
-        Arc::new((target.root().cloned(), inputs.clone()));
+    let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new(RelationTarget {
+        target: target.clone(),
+        inputs: inputs.clone(),
+    });
     match target.summary_dataset() {
         Some(dataset) => Ok(DataFrame::new(
             target.session().clone(),
@@ -1491,12 +1587,22 @@ mod tests {
     }
 
     #[test]
-    fn summary_datasets_of_the_transforms_of_models_read_their_models() {
-        // As PySpark's plan of the transform of a model keeps the model: the summary dataset of a
-        // KMeans fit (the transform of the training dataset by the model) reads a model, and so
-        // does a dataset of it, of a self-join too; the training dataset, the transform of a
-        // transformer and a target of no summary dataset read none.
+    fn the_pickle_blocks_of_plans_are_those_of_pysparks_plans() {
+        // As PySpark's pickle of a DataFrame, which pickles its plan, the child of a plan first,
+        // before its session: the transform of a model keeps the model, whose lock comes first, of
+        // a DataFrame of it and of a self-join too; so does a DataFrame of a method of a model or
+        // of the summary of an evaluation, which keeps its model. A DataFrame of a method of a
+        // training summary reaches the session of its summary dataset first, unless that dataset
+        // reads a model. The DataFrame of the ML helper, whose arguments PySpark's plan holds as
+        // their relations, the training dataset and the transform of a transformer keep none.
         use crate::plan::JoinType;
+
+        fn block(df: &DataFrame) -> Option<&'static str> {
+            pickle_block(df).map(|block| match block {
+                MlPickleBlock::ModelLock => "lock",
+                MlPickleBlock::SummarySession(_) => "session",
+            })
+        }
 
         let session = crate::session::SparkSession::builder()
             .remote("sc://localhost:15002")
@@ -1505,19 +1611,42 @@ mod tests {
         let object = MlRef::from_id(&session, "fitted");
         let train = session.range(3).expect("range");
         let transformed = summary_transform(&object, &train).expect("transform");
-        let read =
-            |dataset: &DataFrame| training_summary(&object, dataset).summary_dataset_reads_model();
-        assert!(read(&transformed));
-        assert!(read(&transformed.limit(1)));
-        assert!(read(&transformed.join(&transformed, None, JoinType::Cross)));
-        assert!(!read(&train));
-        assert!(!read(&train.join(&train, None, JoinType::Cross)));
+        assert_eq!(block(&transformed), Some("lock"));
+        assert_eq!(block(&transformed.limit(1)), Some("lock"));
+        assert_eq!(
+            block(&train.join(&transformed, None, JoinType::Cross)),
+            Some("lock")
+        );
+        let self_joined = transformed.join(&transformed, None, JoinType::Cross);
+        assert_eq!(block(&self_joined), Some("lock"));
+        assert_eq!(block(&train), None);
+        assert_eq!(block(&train.join(&train, None, JoinType::Cross)), None);
         let binarized = crate::ml::Binarizer::new()
             .transform(&train)
             .expect("transform");
-        assert!(!read(&binarized));
-        assert!(!MlTarget::object(&object).summary_dataset_reads_model());
-        std::mem::forget((transformed, object));
+        assert_eq!(block(&binarized), None);
+
+        let relation = |target: &MlTarget, args: Vec<FetchArg>| {
+            attribute_relation(target, "predictions", args).expect("relation")
+        };
+        let model = MlTarget::object(&object);
+        assert_eq!(block(&relation(&model, Vec::new())), Some("lock"));
+        let summary = training_summary(&object, &train);
+        let of_summary = relation(&summary, Vec::new());
+        assert_eq!(block(&of_summary), Some("session"));
+        let Some(MlPickleBlock::SummarySession(dataset)) = pickle_block(&of_summary) else {
+            panic!("of the session of the summary dataset");
+        };
+        assert!(Arc::ptr_eq(&dataset.plan, &train.plan));
+        let of_transform = training_summary(&object, &transformed);
+        assert_eq!(block(&relation(&of_transform, Vec::new())), Some("lock"));
+        let evaluated =
+            evaluated_summary(&model, FetchOutput::Summary("evaluated".into())).expect("summary");
+        assert_eq!(block(&relation(&evaluated, Vec::new())), Some("lock"));
+        let helper = MlTarget::helper(&session);
+        let of_helper = relation(&helper, vec![FetchArg::Input(transformed.clone())]);
+        assert_eq!(block(&of_helper), None);
+        std::mem::forget((transformed, object, evaluated, model, summary, of_transform));
     }
 
     #[test]

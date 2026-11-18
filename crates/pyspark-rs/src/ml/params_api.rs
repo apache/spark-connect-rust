@@ -1093,6 +1093,31 @@ pub(super) fn sync_params<T: ParamsHolder>(
     Ok(())
 }
 
+/// The reduce of `pickle` and `copy.deepcopy` of `slf` at `protocol` (`__reduce_ex__`), as of
+/// PySpark's object, which pickles at every protocol as a plain object: the reduce of
+/// `object.__reduce_ex__` of the protocols 2 and up (`copyreg.__newobj__` of its class, of the
+/// arguments of `__getnewargs__` and the state of `__getstate__`), below 2 too, where the default
+/// reduce of a class of a native base fails. A model of a server-side object raises the error of
+/// the pickle of the lock of PySpark's `RemoteModelRef` at the protocol, as PySpark's does (a
+/// `PicklingError` below 2).
+pub(super) fn reduce_ex<'py, T: ParamsHolder + NativeInstance>(
+    slf: &Bound<'py, T>,
+    protocol: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = slf.py();
+    if slf.try_borrow()?.check_picklable().is_err() {
+        return Err(super::object::lock_pickle_error(py, protocol));
+    }
+    let protocol = if protocol.lt(2)? {
+        pyo3::types::PyInt::new(py, 2).into_any()
+    } else {
+        protocol.clone()
+    };
+    py.get_type::<PyAny>()
+        .getattr(pyo3::intern!(py, "__reduce_ex__"))?
+        .call1((slf, protocol))
+}
+
 /// The state of `slf` that `copy.deepcopy` and `pickle` take (`__getstate__`): its uid, its set
 /// params and the defaults that it holds itself, by name, and its attributes.
 pub(super) fn get_state<'py, T: ParamsHolder + NativeInstance>(

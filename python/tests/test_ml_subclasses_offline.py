@@ -235,6 +235,50 @@ def test_copy_deepcopy_and_pickle_of_an_estimator_an_evaluator_and_a_pipeline():
     assert pickle.loads(pickle.dumps(pipeline)).getStages()[0].getThreshold() == 0.5
 
 
+def test_the_params_objects_pickle_at_every_protocol_as_pysparks():
+    # PySpark's objects pickle as plain objects at every protocol, of their attributes: below
+    # protocol 2 too, of the reduce of `copyreg`, where the default reduce of a class of a native
+    # base fails. An estimator, a transformer, an evaluator, the meta-algorithms and the models of
+    # no server-side object load of their class, uid, params and attributes.
+    import pickle
+
+    LR = _cls("classification", "LogisticRegression")
+    Tokenizer = _cls("feature", "Tokenizer")
+    Evaluator = _cls("evaluation", "RegressionEvaluator")
+
+    def params(obj):
+        # The values of the params of obj, by name, of a stage or an estimator by its uid.
+        def value(given):
+            if isinstance(given, list):
+                return [value(item) for item in given]
+            return getattr(given, "uid", given)
+
+        return {param.name: value(given) for param, given in obj.extractParamMap().items()}
+
+    subclass = _PicklableSubclass(maxIter=4)
+    subclass.extra = [1]
+    objects = [
+        subclass,
+        LR(maxIter=3, regParam=0.5),
+        Tokenizer(inputCol="a", outputCol="b"),
+        Evaluator(metricName="mae"),
+        _cls("pipeline", "Pipeline")(stages=[Tokenizer(inputCol="a")]),
+        _cls("tuning", "CrossValidator")(estimator=LR(), evaluator=Evaluator(), numFolds=3),
+        _cls("classification", "OneVsRest")(classifier=LR(maxIter=2)),
+        _cls("fpm", "PrefixSpan")(minSupport=0.5),
+        _cls("classification", "LogisticRegressionModel")(),
+        _cls("pipeline", "PipelineModel")(stages=[]),
+        _cls("classification", "OneVsRestModel")(models=[]),
+    ]
+    for obj in objects:
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            loaded = pickle.loads(pickle.dumps(obj, protocol))
+            assert type(loaded) is type(obj) and loaded.uid == obj.uid, (obj, protocol)
+            assert params(loaded) == params(obj), (obj, protocol)
+    for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+        assert pickle.loads(pickle.dumps(subclass, protocol)).extra == [1], protocol
+
+
 def test_copy_deepcopy_and_pickle_of_a_model_of_no_server_side_object():
     import copy
     import pickle
@@ -243,6 +287,22 @@ def test_copy_deepcopy_and_pickle_of_a_model_of_no_server_side_object():
     model = LRModel()
     for copied in (copy.copy(model), copy.deepcopy(model), pickle.loads(pickle.dumps(model))):
         assert type(copied) is LRModel and copied.uid == model.uid
+
+
+def test_a_model_of_no_server_side_object_has_no_summary_of_pysparks_params_walk():
+    # PySpark's `_summary`, which its fit sets: a model of no server-side object has none, of the
+    # `_java_obj` of its `__init__`, None, and the params walk (`Params.params`), which reads the
+    # attributes of the `dir()` of the object, and so its `explainParams` and `copy`, take it.
+    for model in (
+        _cls("classification", "LogisticRegressionModel")(),
+        _cls("clustering", "KMeansModel")(),
+        _cls("regression", "LinearRegressionModel")(),
+    ):
+        assert not hasattr(model, "_summary") and not model.hasSummary
+        assert model._java_obj is None
+        names = [param.name for param in model.params]
+        assert "maxIter" in names and names == sorted(names), names
+        assert model.copy().uid == model.uid and "maxIter" in model.explainParams()
 
 
 
