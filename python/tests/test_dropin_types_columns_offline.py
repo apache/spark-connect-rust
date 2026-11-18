@@ -638,6 +638,133 @@ def test_the_abstract_types_have_no_proto_nor_arrow_type_as_pysparks():
         assert e.value.getMessageParameters() == {"operation": "data type AtomicType()"}
 
 
+class _AtomicSqlUDT(T.UserDefinedType):
+    """A UserDefinedType whose SQL type holds a type of its class only."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.StructType([T.StructField("v", T.AtomicType())])
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+    def serialize(self, obj):
+        return (obj,)
+
+    def deserialize(self, datum):
+        return datum[0]
+
+
+class _FieldSqlUDT(_AtomicSqlUDT):
+    """A UserDefinedType whose SQL type holds a StructField as a type."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.ArrayType(T.StructField("x", T.IntegerType()))
+
+
+def test_user_defined_types_of_sql_types_without_a_proto_raise_pysparks_errors():
+    # Official PySpark's `pyspark_types_to_proto_types` converts the `sqlType()` of a
+    # user-defined type, and so does its `to_arrow_type`: a type of its class only or a
+    # StructField as a type in it raises the UNSUPPORTED_OPERATION of the plans of a cast, a UDF,
+    # a Java UDF, a table, a UDTF and `DataFrame.to`, and the
+    # UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION of local rows, where the drop-in sent the plans
+    # for the server to refuse and raised a TypeError of the rows. No request is sent. A tree
+    # string does not print the SQL type. The errors are official PySpark 4.3.0's.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.functions import udf, udtf
+
+    class Fn:
+        def eval(self):
+            yield (None,)
+
+    for udt, shown in [
+        (_AtomicSqlUDT(), "AtomicType()"),
+        (_FieldSqlUDT(), "StructField('x', IntegerType(), True)"),
+    ]:
+        operation = f"data type {shown}"
+        schema = T.StructType([T.StructField("a", udt)])
+        with mock_connect_session() as (spark, service):
+            df = spark.range(1)
+            for t in (udt, T.ArrayType(udt), T.MapType(T.StringType(), udt), schema):
+                for cast in (F.col("id").cast, F.col("id").try_cast):
+                    _raises_unsupported_operation(lambda: df.select(cast(t)).schema, operation)
+            requests = [
+                lambda: df.select(udf(lambda x: x, udt, useArrow=False)("id")).schema,
+                lambda: spark.udf.registerJavaFunction("f", "x.Y", udt),
+                lambda: spark.catalog.createTable("t", schema=schema),
+                lambda: udtf(Fn, returnType=schema)().schema,
+                lambda: df.to(schema).collect(),
+            ]
+            for request in requests:
+                _raises_unsupported_operation(request, operation)
+            with pytest.raises(PySparkTypeError) as e:
+                spark.createDataFrame([(1,)], schema)
+            assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION"
+            assert e.value.getMessageParameters() == {"data_type": shown}
+            name = type(udt).__name__.lower()
+            assert schema.treeString() == f"root\n |-- a: {name} (nullable = true)\n"
+            assert service.analyze_requests == [] and service.execute_requests == []
+
+
+class _NoSerializeUDT(T.UserDefinedType):
+    """A UserDefinedType of a SQL type of its class only, which does not serialize."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.AtomicType()
+
+    @classmethod
+    def module(cls):
+        return __name__
+
+
+def test_local_rows_of_a_type_without_an_arrow_type_convert_their_values_first_as_pysparks():
+    # As official PySpark's LocalDataToArrowConversion.convert, which runs the converters of the
+    # columns, a UDT's `serialize` too, before `to_arrow_schema` raises the
+    # UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION of a type of its class only or of a StructField
+    # as a type, depth first with the types that Arrow has none of: the errors of the values come
+    # first, where the drop-in raised that error before it converted them. The errors are
+    # official PySpark 4.3.0's.
+    from pyspark.errors import PySparkNotImplementedError, PySparkTypeError
+
+    def struct(*fields):
+        return T.StructType([T.StructField(name, t) for name, t in fields])
+
+    atomic = ("a", T.AtomicType())
+    with mock_connect_session() as (spark, service):
+        with pytest.raises(PySparkNotImplementedError) as e:
+            spark.createDataFrame([(1,)], struct(("a", _NoSerializeUDT())))
+        assert e.value.getCondition() == "NOT_IMPLEMENTED"
+        assert e.value.getMessageParameters() == {"feature": "toInternal()"}
+        for data, schema in [
+            ([("x", 1)], struct(("d", T.DecimalType()), atomic)),
+            ([(1, "x")], struct(atomic, ("d", T.DecimalType()))),
+            ([(1, 1)], struct(("b", T.BinaryType()), atomic)),
+        ]:
+            with pytest.raises(AssertionError, match="^$"):
+                spark.createDataFrame(data, schema)
+        not_null = T.StructType([T.StructField("a", T.AtomicType(), False)])
+        with pytest.raises(PySparkValueError) as e:
+            spark.createDataFrame([(None,)], not_null)
+        assert str(e.value) == "input for AtomicType() must not be None"
+        field = T.StructField("x", T.IntegerType())
+        for data, schema, shown in [
+            ([("x", 1)], struct(("c", T.CharType(3)), atomic), "CharType(3)"),
+            ([(1, "x")], struct(atomic, ("c", T.CharType(3))), "AtomicType()"),
+            ([1], T.AtomicType(), "AtomicType()"),
+            (iter([(1,)]), struct(atomic), "AtomicType()"),
+            ([(5,)], struct(("a", T.ArrayType(T.AtomicType()))), "AtomicType()"),
+            ([(1,)], struct(("a", field)), "StructField('x', IntegerType(), True)"),
+        ]:
+            with pytest.raises(PySparkTypeError) as e:
+                spark.createDataFrame(data, schema)
+            assert e.value.getCondition() == "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION", schema
+            assert e.value.getMessageParameters() == {"data_type": shown}, schema
+        assert service.analyze_requests == [] and service.execute_requests == []
+
+
 # Types that official PySpark 4.3.0's `pyspark_types_to_proto_types` has no proto of, nested in a
 # struct, and the operation of the UNSUPPORTED_OPERATION that it raises of each.
 UNSENDABLE_TYPES = [

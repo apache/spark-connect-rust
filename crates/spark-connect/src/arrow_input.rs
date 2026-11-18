@@ -458,7 +458,8 @@ pub(crate) fn create_relation(
         Ok(())
     };
     if let Some(schema) = &schema {
-        enqueue(schema.json().into_bytes(), false)?;
+        // PySpark's JSON of the schema, as that of a relation of no cached data.
+        enqueue(schema.json_as_pyspark().into_bytes(), false)?;
     }
     serialize_chunks(&batches, options, &mut |chunk| enqueue(chunk, true))?;
     hashes.extend(block_on(client.cache_artifacts(pending))?);

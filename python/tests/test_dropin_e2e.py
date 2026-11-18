@@ -6607,6 +6607,45 @@ def test_create_dataframe_of_a_type_of_its_class_only_sends_its_json_as_pyspark(
         assert e.value.getMessageParameters() == {"error": "'\"numeric\"'", "hint": ""}
 
 
+def test_create_dataframe_of_a_nested_type_of_its_class_only_sends_pysparks_json(session):
+    # As official PySpark 4.3.0, which sends the json() of the schema of a relation of local data:
+    # a type of its class only and a StructField as a type, nested in the schema of a NumPy
+    # array or of an empty pandas DataFrame, are in it as their own JSON, which the server fails
+    # to parse, and its error shows the JSON as PySpark's, where the drop-in wrote unparsed(...).
+    import numpy as np
+    import pandas as pd
+    from pyspark.errors import ParseException
+    from pyspark.sql.types import AtomicType, NumericType
+
+    numeric = StructType([
+        StructField("i", IntegerType()), StructField("a", ArrayType(NumericType())),
+    ])
+    numeric_json = (
+        '{"fields":[{"metadata":{},"name":"i","nullable":true,"type":"integer"},'
+        '{"metadata":{},"name":"a","nullable":true,'
+        '"type":{"containsNull":true,"elementType":"numeric","type":"array"}}],"type":"struct"}'
+    )
+    field = StructType([StructField("a", StructField("x", IntegerType()))])
+    field_json = (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,'
+        '"type":{"metadata":{},"name":"x","nullable":true,"type":"integer"}}],"type":"struct"}'
+    )
+    atomic = StructType([StructField("a", AtomicType())])
+    atomic_json = (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"atomic"}],"type":"struct"}'
+    )
+    for data, schema, json in [
+        (np.array([[1, 2]]), numeric, numeric_json),
+        (pd.DataFrame({"i": [], "a": []}), numeric, numeric_json),
+        (np.array([[1]]), field, field_json),
+        (np.zeros((0, 1)), atomic, atomic_json),
+    ]:
+        with pytest.raises(ParseException) as e:
+            session.createDataFrame(data, schema).collect()
+        assert e.value.getCondition() == "PARSE_SYNTAX_ERROR"
+        assert json in str(e.value) and "unparsed" not in str(e.value), str(e.value)
+
+
 def test_a_table_of_a_nested_abstract_type_is_not_created_as_pyspark(session):
     # As official PySpark 4.3.0's `CreateTable` plan, which has no proto of the base DataType(),
     # nested too: createTable raises its UNSUPPORTED_OPERATION and creates no table, where the

@@ -1338,7 +1338,7 @@ impl PySparkSession {
         py: Python<'_>,
         data: &Bound<'_, PyAny>,
         spec: Spec,
-        checks: LocalChecks<'_>,
+        checks: LocalChecks,
         options: Option<spark_connect::ArrowInputOptions>,
         schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
@@ -1459,19 +1459,10 @@ impl PySparkSession {
                 infer::row_values(item, &fields)?
             });
         }
-        // As PySpark's converters, which assert the nullable flags of the schema, and have no
-        // Arrow type for a StructField as a type, nor for a type of its class only such as
-        // `AtomicType()`, after the rows are taken apart.
+        // As PySpark's converters, which assert the nullable flags of the schema when they are
+        // made, after the rows are taken apart.
         if checks.non_bool_nullable {
             return Err(pyo3::exceptions::PyAssertionError::new_err(()));
-        }
-        if let Some(field) = checks.nested {
-            return Err(crate::column::raise_pyspark(
-                py,
-                "PySparkTypeError",
-                "UNSUPPORTED_DATA_TYPE_FOR_ARROW_CONVERSION",
-                &[("data_type", &field.repr()?.to_cow()?)],
-            ));
         }
         // Then, as PySpark makes the converters of the fields of the schema: those of a
         // user-defined type hold the type object of the schema, which serializes each value.
@@ -1521,7 +1512,9 @@ impl PySparkSession {
         values.resize_with(row_count, Vec::new);
         // Then, as PySpark, the schema converts to Arrow, a field at a time and depth first,
         // which rejects a null type that is not nullable, and has no char, varchar, year-month
-        // or calendar interval type.
+        // or calendar interval type, nor a type of its class only such as `AtomicType()` or a
+        // `StructField` as a type, also in the SQL type of a user-defined type: the errors of
+        // the converters, of a UDT's `serialize` too, come first.
         if let Some(err) = infer::arrow_schema_error(py, &fields)? {
             return Err(err);
         }
@@ -2196,12 +2189,12 @@ enum Spec {
 }
 
 /// The checks of a schema that PySpark's conversion of non-empty local rows makes after the rows
-/// are taken apart: that each nullable flag is a bool, and that no field is a `StructField` as a
-/// type, the first of which is named. The default makes none.
+/// are taken apart, when it makes its converters: that each nullable flag is a bool. The default
+/// makes none. A type of no Arrow type is refused after the values are converted
+/// (`infer::arrow_schema_error`).
 #[derive(Default)]
-struct LocalChecks<'py> {
+struct LocalChecks {
     non_bool_nullable: bool,
-    nested: Option<Bound<'py, PyAny>>,
 }
 
 /// The `json()` of the type of its class only, such as `AtomicType()`, of an atomic `spec`, which
@@ -2472,15 +2465,11 @@ impl PySparkSession {
         // A type of its class only, such as `AtomicType()`, as the type of the single column: as
         // PySpark, data of no rows is a relation of the `json()` of the type, which the server
         // cannot parse, and the rows of other data have no Arrow type of it.
-        let class_type = match (schema, class_type_json(&spec)) {
-            (Some(schema), Some(json)) => {
-                if data.len().is_ok_and(|n| n == 0) {
-                    return schema_text_dataframe(&self.session, json.to_string());
-                }
-                Some(schema)
+        if let (Some(_), Some(json)) = (schema, class_type_json(&spec)) {
+            if data.len().is_ok_and(|n| n == 0) {
+                return schema_text_dataframe(&self.session, json.to_string());
             }
-            _ => None,
-        };
+        }
         if is_loaded_instance(py, data, "pandas", "DataFrame")? {
             // As PySpark's createDataFrame, which reads every setting of its conversions in one
             // request before it converts a pandas DataFrame that is not empty.
@@ -2760,26 +2749,10 @@ impl PySparkSession {
         }
         // The checks of the schema that PySpark's conversion of non-empty local rows makes, also
         // of rows of no length, such as an iterator's, which the conversion takes apart first.
-        if let Some(class_type) = class_type {
-            let checks = LocalChecks {
-                non_bool_nullable: false,
-                nested: Some(class_type.clone()),
-            };
-            return self.create_from_local(py, data, spec, checks, options, None);
-        }
         let struct_schema = schema.filter(|s| s.is_instance_of::<crate::types::PyStructType>());
         let checks = match struct_schema {
             Some(schema) if !data.len().is_ok_and(|n| n == 0) => LocalChecks {
                 non_bool_nullable: crate::types::has_non_bool_converter_flag(py, schema)?,
-                nested: match &spec {
-                    Spec::Struct(fields) => crate::types::nested_python_type_in(
-                        py,
-                        &DataType::Struct {
-                            fields: fields.clone(),
-                        },
-                    )?,
-                    _ => None,
-                },
             },
             _ => LocalChecks::default(),
         };

@@ -18,7 +18,7 @@ use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
 use crate::session::PySparkSession;
-use crate::types::py_to_data_type;
+use crate::types::py_to_proto_data_type;
 
 /// Build a `proto::SourceCodeLocation` from the (filename, line) pair the Python
 /// `SourceCodeLocation` carries.
@@ -108,8 +108,11 @@ pub fn pipeline_define_output(
 ) -> PyResult<()> {
     // OutputType: 1 MATERIALIZED_VIEW, 2 TABLE carry table details; 4 SINK carries sink details.
     let table_details = if output_type == 1 || output_type == 2 {
+        // As PySpark's `register_output`, which converts the schema with
+        // `pyspark_types_to_proto_types`: a type of no proto, a `StructField` as a type or a type
+        // of its class only such as `AtomicType()`, raises its `UNSUPPORTED_OPERATION`.
         let schema_dt = match schema_data_type {
-            Some(obj) => Some(py_to_data_type(&obj)?),
+            Some(obj) => Some(py_to_proto_data_type(&obj)?),
             None => None,
         };
         Some(TableDetailsSpec {

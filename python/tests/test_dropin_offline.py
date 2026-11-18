@@ -26682,6 +26682,37 @@ def test_connect_registry_defines_a_flow_of_spark_sql_without_running_it(mock_co
     assert 5 in parse_message(parse_message(parse_message(service.execute_requests[-1])[3][0])[2][0])
 
 
+def test_connect_registry_refuses_a_schema_of_types_of_no_proto_as_pyspark(mock_connect):
+    # As PySpark's SparkConnectGraphElementRegistry.register_output, which converts the schema of
+    # a table or a materialized view with pyspark_types_to_proto_types: a type of its class only,
+    # such as AtomicType(), and a StructField as a type, also nested, raise its
+    # UNSUPPORTED_OPERATION at the decorator, and no output is defined.
+    from pyspark import pipelines as dp
+    from pyspark.errors import PySparkValueError
+    from pyspark.pipelines.graph_element_registry import graph_element_registration_context
+    from pyspark.pipelines.spark_connect_graph_element_registry import (
+        SparkConnectGraphElementRegistry,
+    )
+
+    spark, service = mock_connect
+    registry = SparkConnectGraphElementRegistry(spark, "g")
+    nested_field = T.StructField("x", T.IntegerType())
+    for decorator, field_type, shown in [
+        (dp.materialized_view, T.AtomicType(), "AtomicType()"),
+        (dp.table, T.ArrayType(T.NumericType()), "NumericType()"),
+        (dp.materialized_view, nested_field, "StructField('x', IntegerType(), True)"),
+    ]:
+        sent = len(service.execute_requests)
+        with pytest.raises(PySparkValueError) as error:
+            with graph_element_registration_context(registry):
+                @decorator(schema=T.StructType([T.StructField("a", field_type)]))
+                def output():
+                    return spark.range(1)
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert str(error.value) == f"[UNSUPPORTED_OPERATION] data type {shown} is not supported."
+        assert len(service.execute_requests) == sent
+
+
 _REQUESTS_WITHOUT_THE_GIL = {
     "save": lambda spark: spark.range(1).write.format("parquet").save("/tmp/no_such_dir"),
     "saveAsTable": lambda spark: spark.range(1).write.saveAsTable("t"),
@@ -29556,6 +29587,76 @@ def test_reader_parses_a_dataframe_of_strings_as_pyspark(mock_connect, read, for
     assert (reader._format, reader._schema, reader._options) == ("parquet", "a INT", {"sep": ";"})
     reader.csv("p", sep=",")
     assert (reader._format, reader._schema, reader._options) == ("csv", "a INT", {"sep": ","})
+
+
+def test_reader_parse_raises_pysparks_errors_of_a_schema_that_its_json_parse_refuses(mock_connect):
+    # As PySpark's Parse plan, which reads the JSON of the reader's schema with
+    # StructType.fromJson when it is built: a type of its class only, such as AtomicType(), whose
+    # json() is its name, raises CANNOT_PARSE_DATATYPE, and a StructField as a type
+    # UNSUPPORTED_DATA_TYPE, of the type of its JSON. The call of csv, json or xml does not raise;
+    # each request of the DataFrame does, and sends nothing. The messages are official PySpark
+    # 4.3.0's.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    strings = spark.createDataFrame([("1",)], T.StructType([T.StructField("v", T.StringType())]))
+    field = T.StructField("x", T.IntegerType())
+    for schema, message in [
+        (T.StructType([T.StructField("a", T.AtomicType())]),
+         "[CANNOT_PARSE_DATATYPE] Unable to parse datatype. atomic."),
+        (T.StructType([T.StructField("a", T.MapType(T.StringType(), T.DataType()))]),
+         "[CANNOT_PARSE_DATATYPE] Unable to parse datatype. data."),
+        (T.StructType([T.StructField("a", field)]),
+         "[UNSUPPORTED_DATA_TYPE] Unsupported DataType `integer`."),
+        ('{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"atomic"}],"type":"struct"}',
+         "[CANNOT_PARSE_DATATYPE] Unable to parse datatype. atomic."),
+        ('{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"null"}],"type":"struct"}',
+         "[CANNOT_PARSE_DATATYPE] Unable to parse datatype. null."),
+        ('{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"unparsed(\\"atomic\\")"}],'
+         '"type":"struct"}',
+         '[CANNOT_PARSE_DATATYPE] Unable to parse datatype. unparsed("atomic").'),
+    ]:
+        for read in ("csv", "json", "xml"):
+            df = getattr(spark.read.schema(schema), read)(strings)
+            sent = (len(service.execute_requests), len(service.analyze_requests))
+            for request in (lambda: df.schema, df.collect):
+                with pytest.raises(PySparkValueError) as error:
+                    request()
+                assert str(error.value) == message, (schema, read)
+            assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+
+
+def test_local_relations_send_pysparks_json_of_their_schema(mock_connect):
+    # As PySpark's createDataFrame, which sends the json() of its schema with local data: a type
+    # of its class only and a StructField as a type, nested in the schema, are in it as their own
+    # JSON, of a NumPy array, an empty pandas DataFrame and empty rows alike, where the drop-in
+    # wrote unparsed(...) of them. The JSON is official PySpark 4.3.0's.
+    np = pytest.importorskip("numpy")
+    pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
+    numeric = T.StructType([
+        T.StructField("i", T.IntegerType()), T.StructField("a", T.ArrayType(T.NumericType())),
+    ])
+    numeric_json = (
+        '{"fields":[{"metadata":{},"name":"i","nullable":true,"type":"integer"},'
+        '{"metadata":{},"name":"a","nullable":true,'
+        '"type":{"containsNull":true,"elementType":"numeric","type":"array"}}],"type":"struct"}'
+    )
+    field = T.StructType([T.StructField("a", T.StructField("x", T.IntegerType()))])
+    field_json = (
+        '{"fields":[{"metadata":{},"name":"a","nullable":true,'
+        '"type":{"metadata":{},"name":"x","nullable":true,"type":"integer"}}],"type":"struct"}'
+    )
+    for data, schema, expected in [
+        (np.array([[1, 2]]), numeric, numeric_json),
+        (pd.DataFrame({"i": [], "a": []}), numeric, numeric_json),
+        (np.array([[1]]), field, field_json),
+        ([], field, field_json),
+    ]:
+        spark.createDataFrame(data, schema).columns
+        # Relation.local_relation=11 -> LocalRelation.schema=2.
+        local = _sent_relation(service.analyze_requests[-1], 11)
+        assert local[2] == [expected.encode()]
 
 
 def test_reader_and_writer_check_their_arguments_as_pyspark(mock_connect):
