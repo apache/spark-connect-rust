@@ -1706,26 +1706,39 @@ fn progress_from_json<'py>(py: Python<'py>, json: &str) -> PyResult<Bound<'py, P
         .call_method1("fromJson", (loaded,))
 }
 
-/// The timeout of `awaitTermination` and `awaitAnyTermination`, in seconds, as PySpark's take
-/// it: an int or a float, which must be positive, else `VALUE_NOT_POSITIVE` of the name of its
-/// type.
-fn positive_timeout(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<f64>> {
+/// The `timeout_ms` of the `timeout` of `awaitTermination` and `awaitAnyTermination`, in seconds,
+/// as PySpark's computes it, of Python's own operators: an int or a float that is not `<= 0`,
+/// else `VALUE_NOT_POSITIVE` of the name of its type, and then `int(timeout * 1000)`, which the
+/// request sets in its int64 field. So a NaN, which is not `<= 0`, raises the `ValueError` of
+/// `int`, an infinity its `OverflowError`, and a count beyond a long protobuf's `ValueError`, of
+/// the digits of the int; an int is exact, where a float would round it.
+fn pyspark_timeout_ms(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Option<i64>> {
     let Some(timeout) = timeout else {
         return Ok(None);
     };
+    let py = timeout.py();
     let number = timeout.is_instance_of::<pyo3::types::PyInt>()
         || timeout.is_instance_of::<pyo3::types::PyFloat>();
-    match number.then(|| timeout.extract::<f64>()).transpose()? {
-        Some(seconds) if seconds > 0.0 => Ok(Some(seconds)),
-        _ => {
-            let type_name = timeout.get_type().name()?.to_string();
-            Err(crate::column::raise_pyspark(
-                timeout.py(),
-                "PySparkValueError",
-                "VALUE_NOT_POSITIVE",
-                &[("arg_name", "timeout"), ("arg_value", &type_name)],
-            ))
-        }
+    // `not isinstance(timeout, (int, float)) or timeout <= 0`.
+    if !number || timeout.le(0)? {
+        let type_name = timeout.get_type().name()?.to_string();
+        return Err(crate::column::raise_pyspark(
+            py,
+            "PySparkValueError",
+            "VALUE_NOT_POSITIVE",
+            &[("arg_name", "timeout"), ("arg_value", &type_name)],
+        ));
+    }
+    let ms = py
+        .get_type::<pyo3::types::PyInt>()
+        .call1((timeout.mul(1000)?,))?;
+    match ms.extract::<i64>() {
+        Ok(ms) => Ok(Some(ms)),
+        // As protobuf's int64 field, which refuses an int beyond a long.
+        Err(_) => Err(pyo3::exceptions::PyValueError::new_err(format!(
+            "Value out of range: {}",
+            ms.str()?
+        ))),
     }
 }
 
@@ -1923,9 +1936,11 @@ impl PyStreamingQuery {
         py: Python<'_>,
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<bool>> {
-        let timeout = positive_timeout(timeout)?;
+        let timeout_ms = pyspark_timeout_ms(timeout)?;
         interruptible(py, &self.inner.spark_session(), || {
-            self.inner.await_termination(timeout).map_err(Box::new)
+            self.inner
+                .await_termination_ms(timeout_ms)
+                .map_err(Box::new)
         })
     }
 
@@ -2113,9 +2128,11 @@ impl PyStreamingQueryManager {
         py: Python<'_>,
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<bool>> {
-        let timeout = positive_timeout(timeout)?;
+        let timeout_ms = pyspark_timeout_ms(timeout)?;
         interruptible(py, &self.inner.spark_session(), || {
-            self.inner.await_any_termination(timeout).map_err(Box::new)
+            self.inner
+                .await_any_termination_ms(timeout_ms)
+                .map_err(Box::new)
         })
     }
 
