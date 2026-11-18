@@ -73,11 +73,12 @@ fn conf_value(value: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
 }
 
 /// Warn each warning of the server, such as of a deprecated or unsupported configuration, as
-/// PySpark's `RuntimeConf` does with `warnings.warn`.
-pub(crate) fn warn_all(py: Python<'_>, warnings: &[String]) -> PyResult<()> {
-    let warn = py.import("warnings")?.getattr("warn")?;
+/// PySpark's `RuntimeConf` does with `warnings.warn`, of the line `line` of that call in
+/// `pyspark.sql.connect.conf` (see `warn_as_pyspark`).
+pub(crate) fn warn_all(py: Python<'_>, line: u32, warnings: &[String]) -> PyResult<()> {
+    let category = py.get_type::<pyo3::exceptions::PyUserWarning>();
     for warning in warnings {
-        warn.call1((warning,))?;
+        crate::errors::warn_as_pyspark(py, "pyspark.sql.connect.conf", line, warning, &category)?;
     }
     Ok(())
 }
@@ -125,7 +126,8 @@ impl PyRuntimeConf {
                 .set_pairs(&[(key.as_str(), value.as_deref())], None)
                 .map_err(Box::new)
         })?;
-        warn_all(py, &warnings)
+        // Of PySpark's `RuntimeConf.set`.
+        warn_all(py, 45, &warnings)
     }
 
     /// Get a configuration value. With a `default`, which may be None, an unknown key returns
@@ -167,7 +169,8 @@ impl PyRuntimeConf {
         let warnings = interruptible(py, &self.session, || {
             self.conf.unset(&key).map_err(Box::new)
         })?;
-        warn_all(py, &warnings)
+        // Of PySpark's `RuntimeConf.unset`.
+        warn_all(py, 100, &warnings)
     }
 
     /// Whether the given configuration key is modifiable at runtime.

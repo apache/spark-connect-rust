@@ -11,18 +11,24 @@ use spark_connect_core::error::SparkError;
 use crate::dataframe::PyDataFrame;
 use crate::interrupt::interruptible;
 
-/// PySpark's FutureWarning of the deprecated `dbName` of the catalog method `method`.
-fn warn_db_name(py: Python<'_>, method: &str, db_name: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
+/// PySpark's FutureWarning of the deprecated `dbName` of the catalog method `method`, of the line
+/// `line` of its `warnings.warn` in `pyspark.sql.connect.catalog` (see `warn_as_pyspark`).
+fn warn_db_name(
+    py: Python<'_>,
+    method: &str,
+    line: u32,
+    db_name: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
     if db_name.is_some() {
-        py.import("warnings")?.call_method1(
-            "warn",
-            (
-                format!(
-                    "`dbName` has been deprecated since Spark 3.4 and might be removed in a \
-                     future version. Use {method}(`dbName.tableName`) instead."
-                ),
-                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
+        crate::errors::warn_as_pyspark(
+            py,
+            "pyspark.sql.connect.catalog",
+            line,
+            &format!(
+                "`dbName` has been deprecated since Spark 3.4 and might be removed in a \
+                 future version. Use {method}(`dbName.tableName`) instead."
             ),
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
         )?;
     }
     Ok(())
@@ -352,7 +358,7 @@ impl PyCatalog {
         tableName: &Bound<'_, PyAny>,
         dbName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        warn_db_name(py, "tableExists", dbName)?;
+        warn_db_name(py, "tableExists", 218, dbName)?;
         let tableName = crate::str_argument(tableName)?;
         let dbName = dbName.map(crate::str_argument).transpose()?;
         self.detached(py, |catalog| {
@@ -398,7 +404,7 @@ impl PyCatalog {
         functionName: &Bound<'_, PyAny>,
         dbName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
-        warn_db_name(py, "functionExists", dbName)?;
+        warn_db_name(py, "functionExists", 168, dbName)?;
         let functionName = crate::str_argument(functionName)?;
         let dbName = dbName.map(crate::str_argument).transpose()?;
         self.detached(py, |catalog| {
@@ -425,7 +431,7 @@ impl PyCatalog {
         tableName: &Bound<'_, PyAny>,
         dbName: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<Py<PyAny>>> {
-        warn_db_name(py, "listColumns", dbName)?;
+        warn_db_name(py, "listColumns", 195, dbName)?;
         let tableName = crate::str_argument(tableName)?;
         let dbName = dbName.map(crate::str_argument).transpose()?;
         named_tuples(
@@ -590,13 +596,13 @@ impl PyCatalog {
     ) -> PyResult<PyDataFrame> {
         crate::options::check_keyword_keys(options)?;
         check_extra_positional("Catalog.createExternalTable", 4, extra)?;
-        py.import("warnings")?.call_method1(
-            "warn",
-            (
-                "createExternalTable is deprecated since Spark 4.0, please use createTable \
-                 instead.",
-                py.get_type::<pyo3::exceptions::PyFutureWarning>(),
-            ),
+        // Of the line of PySpark's `warnings.warn` in `pyspark.sql.connect.catalog`.
+        crate::errors::warn_as_pyspark(
+            py,
+            "pyspark.sql.connect.catalog",
+            236,
+            "createExternalTable is deprecated since Spark 4.0, please use createTable instead.",
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
         )?;
         // As PySpark's `self.createTable(tableName, path, source, schema, **options)`, which
         // binds a `description` of the options to the parameter of createTable.
@@ -633,14 +639,13 @@ impl PyCatalog {
         f: Bound<'a, PyAny>,
         returnType: Option<Bound<'a, PyAny>>,
     ) -> PyResult<Bound<'a, PyAny>> {
-        let warnings = py.import("warnings")?;
-        let future_warning = py.import("builtins")?.getattr("FutureWarning")?;
-        warnings.call_method1(
-            "warn",
-            (
-                "Deprecated in 2.3.0. Use spark.udf.register instead.",
-                future_warning,
-            ),
+        // Of the line of PySpark's `warnings.warn` in `pyspark.sql.connect.catalog`.
+        crate::errors::warn_as_pyspark(
+            py,
+            "pyspark.sql.connect.catalog",
+            403,
+            "Deprecated in 2.3.0. Use spark.udf.register instead.",
+            &py.get_type::<pyo3::exceptions::PyFutureWarning>(),
         )?;
         let session = crate::session::session_object(py, self.catalog.spark_session())?;
         session

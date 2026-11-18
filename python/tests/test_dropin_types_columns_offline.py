@@ -249,6 +249,79 @@ def test_an_abstract_type_pickles_its_attributes_as_pysparks():
     assert vars(copy.deepcopy(tagged)) == {"tag": "x"}
 
 
+# Official PySpark 4.3.0's pickles at the protocols 2 and 5 of `DecimalType(7, 3)` of an attribute
+# `user` "u" that was set, of `DecimalType(10, 2)` of its `hasPrecisionInfo` set false, and of
+# `IntegerType()` of an attribute `tag` "x": of `copyreg.__newobj__(cls)` and the `__dict__`.
+PYSPARKS_PICKLES_OF_SET_ATTRIBUTES = {
+    ("user", 2): b"\x80\x02cpyspark.sql.types\nDecimalType\nq\x00)\x81q\x01}q\x02(X\t\x00\x00\x00"
+        b"precisionq\x03K\x07X\x05\x00\x00\x00scaleq\x04K\x03X\x10\x00\x00\x00hasPrecisionInfoq"
+        b"\x05\x88X\x04\x00\x00\x00userq\x06X\x01\x00\x00\x00uq\x07ub.",
+    ("user", 5): b"\x80\x05\x95d\x00\x00\x00\x00\x00\x00\x00\x8c\x11pyspark.sql.types\x94\x8c\x0b"
+        b"DecimalType\x94\x93\x94)\x81\x94}\x94(\x8c\tprecision\x94K\x07\x8c\x05scale\x94K\x03\x8c"
+        b"\x10hasPrecisionInfo\x94\x88\x8c\x04user\x94\x8c\x01u\x94ub.",
+    ("precision_info", 2): b"\x80\x02cpyspark.sql.types\nDecimalType\nq\x00)\x81q\x01}q\x02(X\t"
+        b"\x00\x00\x00precisionq\x03K\nX\x05\x00\x00\x00scaleq\x04K\x02X\x10\x00\x00\x00hasPrecisi"
+        b"onInfoq\x05\x89ub.",
+    ("precision_info", 5): b"\x80\x05\x95Y\x00\x00\x00\x00\x00\x00\x00\x8c\x11pyspark.sql.types"
+        b"\x94\x8c\x0bDecimalType\x94\x93\x94)\x81\x94}\x94(\x8c\tprecision\x94K\n\x8c\x05scale"
+        b"\x94K\x02\x8c\x10hasPrecisionInfo\x94\x89ub.",
+    ("tag", 2): b"\x80\x02cpyspark.sql.types\nIntegerType\nq\x00)\x81q\x01}q\x02X\x03\x00\x00\x00"
+        b"tagq\x03X\x01\x00\x00\x00xq\x04sb.",
+    ("tag", 5): b"\x80\x05\x956\x00\x00\x00\x00\x00\x00\x00\x8c\x11pyspark.sql.types\x94\x8c\x0bI"
+        b"ntegerType\x94\x93\x94)\x81\x94}\x94\x8c\x03tag\x94\x8c\x01x\x94sb.",
+}
+
+
+def test_types_of_set_attributes_pickle_and_copy_them_as_pysparks():
+    # PySpark's types pickle, copy and deep-copy as their class and their `__dict__`, of the
+    # attributes that a user set too, which their JSON does not keep, nor a `hasPrecisionInfo`
+    # other than true, nor the `names` and `_needConversion` of a struct that an edit of its fields
+    # makes differ: the drop-in's pickle of such a type of the class's own is PySpark's, byte for
+    # byte, and its copies and pickles keep them, also in the types that hold it.
+    user = T.DecimalType(7, 3)
+    user.user = "u"
+    precision_info = T.DecimalType(10, 2)
+    precision_info.hasPrecisionInfo = False
+    tag = T.IntegerType()
+    tag.tag = "x"
+    try:
+        for (name, protocol), pickled in PYSPARKS_PICKLES_OF_SET_ATTRIBUTES.items():
+            t = {"user": user, "precision_info": precision_info, "tag": tag}[name]
+            assert pickle.dumps(t, protocol=protocol) == pickled
+    finally:
+        # The one instance of the singleton type is of every IntegerType() of the process.
+        del tag.tag
+    for t in (user, precision_info):
+        copies = [copy.copy(t), copy.deepcopy(t)]
+        copies += [pickle.loads(pickle.dumps(t, protocol)) for protocol in range(6)]
+        for copied in copies:
+            assert type(copied) is T.DecimalType and copied == t and vars(copied) == vars(t)
+            assert copied.hasPrecisionInfo is t.hasPrecisionInfo
+    field = T.StructField("f", user, True, {"k": "v"})
+    field.tag = 1
+    struct = T.StructType([field])
+    struct.tag = 2
+    for t, inner in [
+        (T.ArrayType(user), lambda c: c.elementType),
+        (T.MapType(T.StringType(), user), lambda c: c.valueType),
+        (field, lambda c: c.dataType),
+        (struct, lambda c: c.fields[0].dataType),
+    ]:
+        for copied in [copy.deepcopy(t)] + [pickle.loads(pickle.dumps(t, p)) for p in range(6)]:
+            assert type(copied) is type(t) and copied == t and vars(copied) == vars(t)
+            assert inner(copied).user == "u"
+    assert pickle.loads(pickle.dumps(struct)).fields[0].tag == 1
+    renamed = T.StructType([T.StructField("a", T.LongType())])
+    renamed.fields[0].name = "z"
+    for copied in (copy.copy(renamed), copy.deepcopy(renamed), pickle.loads(pickle.dumps(renamed))):
+        assert (copied.names, copied.fields[0].name) == (["a"], "z") and copied == renamed
+    retyped = T.StructType([T.StructField("a", T.LongType())])
+    retyped.fields[0].dataType = T.TimestampType()
+    for copied in (copy.copy(retyped), copy.deepcopy(retyped), pickle.loads(pickle.dumps(retyped))):
+        assert (copied._needConversion, copied._needSerializeAnyField) == ([False], False)
+        assert copied.fields[0].dataType == T.TimestampType() and copied == retyped
+
+
 def test_calendar_interval_type_pickles_of_its_json_name():
     # As the JSON of the type, "interval", which official PySpark's parser reads too.
     t = T.CalendarIntervalType()
@@ -1266,6 +1339,52 @@ def test_python_subclasses_of_the_concrete_types_are_pysparks(
     assert (nullable is t) is not isinstance(t, (T.ArrayType, T.MapType, T.StructType))
 
 
+# Official PySpark 4.3.0's cloudpickles of `class SubLong(LongType): pass` of `__main__`, which it
+# sends by value, of the class and of its instance: they name the metaclass of the class,
+# `pyspark.sql.types.DataTypeSingleton`.
+PYSPARKS_CLOUDPICKLED_SINGLETON_SUBCLASS = (
+    b"\x80\x05\x95\x02\x01\x00\x00\x00\x00\x00\x00\x8c\x1fpyspark.cloudpickle.cloudpickle\x94\x8c"
+    b"\x14_make_skeleton_class\x94\x93\x94(\x8c\x11pyspark.sql.types\x94\x8c\x11DataTypeSingleton"
+    b"\x94\x93\x94\x8c\x07SubLong\x94h\x03\x8c\x08LongType\x94\x93\x94\x85\x94}\x94\x8c\n__module_"
+    b"_\x94\x8c\x08__main__\x94s\x8c 50b6ec2a58624c058b858a5d4aa44b73\x94Nt\x94R\x94h\x00\x8c\x0f_"
+    b"class_setstate\x94\x93\x94h\x0f}\x94(\x8c\x07__doc__\x94N\x8c\n__module__\x94h\x0cu}\x94\x86"
+    b"\x94\x86R0."
+)
+PYSPARKS_CLOUDPICKLED_SINGLETON_SUBCLASS_INSTANCE = (
+    b"\x80\x05\x95\x17\x01\x00\x00\x00\x00\x00\x00\x8c\x1fpyspark.cloudpickle.cloudpickle\x94\x8c"
+    b"\x14_make_skeleton_class\x94\x93\x94(\x8c\x11pyspark.sql.types\x94\x8c\x11DataTypeSingleton"
+    b"\x94\x93\x94\x8c\x07SubLong\x94h\x03\x8c\x08LongType\x94\x93\x94\x85\x94}\x94\x8c\n__module_"
+    b"_\x94\x8c\x08__main__\x94s\x8c 50b6ec2a58624c058b858a5d4aa44b73\x94Nt\x94R\x94h\x00\x8c\x0f_"
+    b"class_setstate\x94\x93\x94h\x0f}\x94(\x8c\x07__doc__\x94N\x8c\n__module__\x94h\x0c\x8c\r__sl"
+    b"otnames__\x94]\x94u}\x94\x86\x94\x86R0)\x81\x94."
+)
+
+
+def test_pysparks_cloudpickles_of_a_subclass_of_a_singleton_type_load_of_its_metaclass():
+    # PySpark's singleton types are classes of its metaclass `DataTypeSingleton`, which its
+    # cloudpickle of a subclass of one of `__main__` names: `pyspark.sql.types` has PySpark's
+    # metaclass, of which such a class loads, of the native class as its base, and keeps the one
+    # instance of the class, which its instance's pickle loads as. The native classes themselves
+    # are of the metaclass `type`.
+    assert type(T.LongType) is type and T.DataTypeSingleton.__bases__ == (type,)
+    sub = pickle.loads(PYSPARKS_CLOUDPICKLED_SINGLETON_SUBCLASS)
+    assert type(sub) is T.DataTypeSingleton and sub.__bases__ == (T.LongType,)
+    assert (sub.__name__, sub.__module__) == ("SubLong", "__main__")
+    t = sub()
+    assert t is sub() and type(t) is sub and t is not T.LongType()
+    assert T.DataTypeSingleton._instances[sub] is t
+    assert (repr(t), t.json(), t.simpleString()) == ("SubLong()", '"sub"', "bigint")
+    assert pickle.loads(PYSPARKS_CLOUDPICKLED_SINGLETON_SUBCLASS_INSTANCE) is t
+    # A class of the metaclass is made as PySpark's, which takes no arguments for its instance.
+    made = T.DataTypeSingleton("Made", (T.IntegerType,), {})
+    assert made() is made() and isinstance(made(), T.IntegerType)
+    with pytest.raises(TypeError) as e:
+        made(1)
+    assert str(e.value) == (
+        "DataTypeSingleton.__call__() takes 1 positional argument but 2 were given"
+    )
+
+
 class _Money(T.DecimalType):
     """A decimal of a currency, a subclass of PySpark's plain class."""
 
@@ -1548,9 +1667,51 @@ def test_field_metadata_is_written_of_its_dict_as_pysparks():
             f'{{"containsNull":true,"elementType":{{"fields":[{sent}],"type":"struct"}},'
             f'"type":"array"}}'
         )
-    # A pickle of the type keeps the ints, of its JSON.
+    # A pickle of the type keeps the ints, of the dict.
     big = T.StructType([T.StructField("a", T.LongType(), True, {"k": 10**30})])
     assert pickle.loads(pickle.dumps(big)).fields[0].metadata == {"k": 10**30}
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [{"k": (1, 2)}, {1: "a"}, {"k": 10**30}, {"b": 1, "a": 2}, {"k": {"n": (1,)}}],
+    ids=["tuple", "int-key", "big-int", "key-order", "nested-tuple"],
+)
+def test_copies_pickles_and_nullable_types_keep_the_metadata_dicts_as_pysparks(metadata):
+    # PySpark's types copy, deep-copy and pickle their `__dict__`, of the metadata dicts of their
+    # fields as they are, which JSON does not keep (a tuple, a key that is not a str, the order of
+    # the keys), and `toNullable` makes each field of `metadata=field.metadata`, the same dict. So
+    # do the drop-in's, also of the types that hold such a struct: they pickle of the types they
+    # are made of, which the Python workers of the server load as PySpark's `StructType(fields)`,
+    # and a type of no metadata of its JSON.
+    decimal = T.DecimalType(10, 2)
+    field = T.StructField("a", decimal, False, metadata)
+    struct = T.StructType([field, T.StructField("b", T.ArrayType(T.LongType(), False), False)])
+    for t, inner in [
+        (struct, lambda c: c),
+        (T.ArrayType(struct, False), lambda c: c.elementType),
+        (T.MapType(T.StringType(), struct, False), lambda c: c.valueType),
+        (T.StructField("s", struct, False), lambda c: c.dataType),
+        (T.StructType([T.StructField("s", struct, False)]), lambda c: c.fields[0].dataType),
+    ]:
+        copies = [copy.copy(t), copy.deepcopy(t)]
+        copies += [pickle.loads(pickle.dumps(t, protocol)) for protocol in range(6)]
+        for copied in copies:
+            assert type(copied) is type(t) and copied == t, repr(t)
+            copied_metadata = inner(copied).fields[0].metadata
+            assert list(copied_metadata.items()) == list(metadata.items())
+            assert repr(copied_metadata) == repr(metadata)
+    assert struct.__reduce__()[0] is T.StructType
+    plain = T.StructType([T.StructField("a", T.LongType())])
+    assert plain.__reduce__()[0] is T._parse_datatype_json_string
+    nullable = struct.toNullable()
+    assert nullable == T.StructType([
+        T.StructField("a", decimal, True, metadata),
+        T.StructField("b", T.ArrayType(T.LongType(), True), True),
+    ])
+    assert nullable.fields[0].metadata is metadata and nullable.fields[0].dataType is decimal
+    assert T.ArrayType(struct).toNullable().elementType.fields[0].metadata is metadata
+    assert T.MapType(T.StringType(), struct).toNullable().valueType.fields[0].metadata is metadata
 
 
 def test_types_of_required_parameters_are_made_as_pysparks():

@@ -55,10 +55,10 @@ fn origin_of(py: Python<'_>, fragment: &str) -> PyResult<Option<Origin>> {
 /// What the client does as a request builds a plan, where PySpark's client runs Python code in
 /// the user's process: it gives the origin of an expression that the plan makes then, of
 /// `_with_origin` at the call site of the request, such as the `__and__` of the conditions of a
-/// join of a list of Columns, and warns of a window of no partitions, with the `warnings.warn`
-/// of PySpark's `WindowExpression.to_plan`, from `pyspark.sql.connect.expressions`. Their
-/// exceptions are those of the request, as PySpark raises them out of its plan build, such as
-/// the `UserWarning` of a filter of `"error"`.
+/// join of a list of Columns, and warns of a window of no partitions, as the `warnings.warn` of
+/// PySpark's `WindowExpression.to_plan` warns, of its line of `pyspark.sql.connect.expressions`
+/// (see `warn_as_pyspark`). Their exceptions are those of the request, as PySpark raises them out
+/// of its plan build, such as the `UserWarning` of a filter of `"error"`.
 struct PlanBuild;
 
 impl spark_connect::plan_build::PlanBuildListener for PlanBuild {
@@ -71,9 +71,14 @@ impl spark_connect::plan_build::PlanBuildListener for PlanBuild {
             return Ok(());
         }
         Python::attach(|py| {
-            py.import("pyspark.sql.connect.expressions")?
-                .call_method0("_warn_no_partition")?;
-            Ok(())
+            crate::errors::warn_as_pyspark(
+                py,
+                "pyspark.sql.connect.expressions",
+                1126,
+                "WARN WindowExpression: No Partition Defined for Window operation! Moving all data \
+                 to a single partition, this can cause serious performance degradation.",
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+            )
         })
         .map_err(crate::errors::callback_error)
     }

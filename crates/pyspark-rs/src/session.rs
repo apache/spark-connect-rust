@@ -493,8 +493,8 @@ impl PySparkSessionBuilder {
         let warnings = interruptible(py, session, || {
             conf.set_pairs(&pairs, Some(true)).map_err(Box::new)
         })?;
-        // As PySpark's `_set_all`, which warns each warning of the server.
-        crate::conf::warn_all(py, &warnings)
+        // As PySpark's `RuntimeConf._set_all`, which warns each warning of the server.
+        crate::conf::warn_all(py, 61, &warnings)
     }
 }
 
@@ -2508,17 +2508,19 @@ impl PySparkSession {
                 &[("arg_name", "data"), ("arg_type", "DataFrame")],
             ));
         }
-        // As PySpark Connect, which ignores both.
-        for (name, value) in [
-            ("samplingRatio", samplingRatio),
-            ("verifySchema", verifySchema),
+        // As PySpark Connect, which ignores both, and warns of each of the line of its
+        // `warnings.warn` in `pyspark.sql.connect.session`.
+        for (name, line, value) in [
+            ("samplingRatio", 484, samplingRatio),
+            ("verifySchema", 487, verifySchema),
         ] {
             if value.is_some_and(|v| !v.is_none()) {
-                py.import("warnings")?.call_method1(
-                    "warn",
-                    (format!(
-                        "'{name}' is ignored. It is not supported with Spark Connect."
-                    ),),
+                crate::errors::warn_as_pyspark(
+                    py,
+                    "pyspark.sql.connect.session",
+                    line,
+                    &format!("'{name}' is ignored. It is not supported with Spark Connect."),
+                    &py.get_type::<pyo3::exceptions::PyUserWarning>(),
                 )?;
             }
         }

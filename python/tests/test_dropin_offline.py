@@ -10277,9 +10277,10 @@ def test_dataframe_arguments_raise_the_errors_of_pyspark_in_its_order(mock_conne
 
 def test_plans_fail_with_the_first_error_of_pysparks_build_order(mock_connect):
     # As PySpark's plans, which build their input before themselves, but for a repartition, which
-    # builds its partitioning first, and set the name of a hint or of an observation before their
-    # expressions, and the name of a column after its Column: of two values that UTF-8 cannot
-    # encode, the request raises the error of the first.
+    # builds its partitioning first, and sets the count of the partitioning of columns after its
+    # input, and set the name of a hint or of an observation before their expressions, and the
+    # name of a column after its Column: of two values that fail, the request raises the error of
+    # the first, such as of a str that UTF-8 cannot encode.
     from pyspark.sql import functions as F
 
     spark, _ = mock_connect
@@ -10293,12 +10294,24 @@ def test_plans_fail_with_the_first_error_of_pysparks_build_order(mock_connect):
         (df.withColumn(second, F.col(first)), "\\ud800"),
         (df.toDF(first).withColumnRenamed(second, "z"), "\\ud800"),
         (df.alias(second).repartition(F.col(first)), "\\ud800"),
+        (df.alias(second).repartition(2**40, F.col(first)), "\\ud800"),
         (df.alias(second).repartitionByRange(3, F.col(first)), "\\ud800"),
+        (df.alias(second).repartitionByRange(2**40, F.col(first)), "\\ud800"),
         (df.alias(second).repartitionById(3, F.col(first)), "\\ud800"),
+        (df.alias(second).repartitionById(2**40, F.col(first)), "\\ud800"),
     ]:
         with pytest.raises(UnicodeEncodeError) as error:
             plan.collect()
         assert f"character '{character}' in position 1" in str(error.value)
+    # The error of a count beyond the int32 of the plan comes after that of its input, of an alias
+    # that protobuf refuses.
+    for repartition in (
+        df.alias(5).repartition, df.alias(5).repartitionByRange, df.alias(5).repartitionById
+    ):
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            repartition(2**40, "id").collect()
+    with pytest.raises(ValueError, match="^Value out of range: 1099511627776$"):
+        df.repartition(2**40, "id").collect()
 
 
 def test_with_columns_asserts_its_mapping_as_pyspark(mock_connect):
@@ -10323,11 +10336,51 @@ def test_with_columns_asserts_its_mapping_as_pyspark(mock_connect):
         plan.collect()
 
 
+def test_the_properties_of_a_plan_that_fails_read_the_column_of_its_schema_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's properties, which read `self._schema`: the property raises the AttributeError
+    # of the plan, of a join on a tuple or on a Row, after which Python gives the `__getattr__` of
+    # the DataFrame, the Column of `_schema`. So `schema` is a deep copy of that Column, `columns`
+    # and `dtypes` iterate its `fields`, a Column, which raises NOT_ITERABLE, and so do the
+    # representation, `dir`, the key completions and `toArrow`, of them; `printSchema` calls
+    # its `treeString`, a Column.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql import Column, Row
+
+    spark, service = mock_connect
+    service.confs = {"spark.sql.repl.eagerEval.enabled": "false",
+                     "spark.sql.repl.eagerEval.maxNumRows": "20",
+                     "spark.sql.repl.eagerEval.truncate": "20"}
+    df = spark.range(1)
+    for failed in (df.join(df, on=(1, 2)), df.join(df, on=[df.id == df.id, Row(a=1)])):
+        schema = failed.schema
+        assert isinstance(schema, Column) and repr(schema) == "Column<'_schema'>"
+        assert failed.schema is not schema
+        for read in (
+            lambda: failed.columns,
+            lambda: failed.dtypes,
+            lambda: repr(failed),
+            lambda: dir(failed),
+            failed._ipython_key_completions_,
+            failed.toArrow,
+        ):
+            with pytest.raises(PySparkTypeError) as error:
+                read()
+            assert error.value.getCondition() == "NOT_ITERABLE"
+            assert error.value.getMessageParameters() == {"objectName": "Column"}
+        with pytest.raises(TypeError, match="^'Column' object is not callable$"):
+            failed.printSchema()
+        with pytest.raises(AttributeError):
+            failed.collect()
+    assert service.analyze_requests == [] and service.execute_requests == []
+
+
 def test_to_keeps_a_schema_that_is_not_a_datatype_as_pyspark_reads_it(mock_connect):
     # As PySpark's `to`, which keeps the schema as it is given: columns and dtypes read the fields
     # of the object, and printSchema its treeString, so an object that lacks them raises what
-    # Python raises for it. columns and the representation fall back to a Column, which the
-    # representation cannot iterate.
+    # Python raises for it. columns and dtypes fall back to a Column, which the representation,
+    # of the dtypes, and `dir`, of the columns, cannot iterate.
     import pyspark.sql.types as T
     from pyspark.errors import PySparkTypeError
 
@@ -10348,9 +10401,11 @@ def test_to_keeps_a_schema_that_is_not_a_datatype_as_pyspark_reads_it(mock_conne
     text = spark.range(1).to("int")
     assert type(text.columns).__name__ == "Column"
     assert type(text.dtypes).__name__ == "Column"
-    with pytest.raises(PySparkTypeError) as error:
-        repr(text)
-    assert error.value.getCondition() == "NOT_ITERABLE"
+    assert type(text._ipython_key_completions_()).__name__ == "Column"
+    for read in (repr, dir):
+        with pytest.raises(PySparkTypeError) as error:
+            read(text)
+        assert error.value.getCondition() == "NOT_ITERABLE"
     with pytest.raises(AttributeError, match="'str' object has no attribute 'treeString'"):
         text.printSchema()
     assert text.schema == "int"
@@ -11150,6 +11205,117 @@ def test_stream_writer_skips_a_false_path_and_table_as_pyspark(mock_connect):
         with pytest.raises(ValueError, match="^ambiguous$"):
             start(Ambiguous())
     assert len(service.execute_requests) == requests
+
+
+def _untyped_group_function(key, data: object) -> object:
+    # Of type hints from which PySpark's applyInPandas and applyInArrow infer no eval type.
+    return data
+
+
+def _warned_grouped_apply(spark):
+    from pyspark.sql.functions import PandasUDFType, pandas_udf
+
+    grouped_map = pandas_udf(lambda pdf: pdf, "id long", PandasUDFType.GROUPED_MAP)
+    return spark.range(1).groupBy("id").apply(grouped_map)
+
+
+def _warned_window(spark):
+    # A request of a window of no partitions, whose plan PySpark builds as it sends it.
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    return spark.range(1).select(F.row_number().over(Window.orderBy("id"))).collect()
+
+
+def _warned_column_key(method):
+    def call(spark):
+        from pyspark.sql import functions as F
+
+        return getattr(F.col("a"), method)(F.col("k"))
+
+    return call
+
+
+# The calls that warn, with the module of `pyspark.sql.connect` and the line of PySpark's
+# `warnings.warn` of each warning, of Apache Spark v4.3.0, and the category of the warning.
+PYSPARKS_WARNINGS = [
+    ("registerTempTable", lambda spark: spark.range(1).registerTempTable("v"),
+     "dataframe", 2259, FutureWarning),
+    ("replace", lambda spark: spark.range(1).replace({1: 2}, value=3), "dataframe", 1541,
+     UserWarning),
+    ("na.replace", lambda spark: spark.range(1).na.replace({1: 2}, 3), "dataframe", 1541,
+     UserWarning),
+    ("getItem", _warned_column_key("getItem"), "column", 527, FutureWarning),
+    ("getField", _warned_column_key("getField"), "column", 537, FutureWarning),
+    ("functionExists", lambda spark: spark.catalog.functionExists("f", "db"), "catalog", 168,
+     FutureWarning),
+    ("listColumns", lambda spark: spark.catalog.listColumns("t", "db"), "catalog", 195,
+     FutureWarning),
+    ("tableExists", lambda spark: spark.catalog.tableExists("t", "db"), "catalog", 218,
+     FutureWarning),
+    ("createExternalTable",
+     lambda spark: spark.catalog.createExternalTable("t", "/tmp/t", "parquet"), "catalog", 236,
+     FutureWarning),
+    ("registerFunction", lambda spark: spark.catalog.registerFunction("f", lambda x: x),
+     "catalog", 403, FutureWarning),
+    ("apply", _warned_grouped_apply, "group", 285, UserWarning),
+    ("applyInPandas",
+     lambda spark: spark.range(1).groupBy("id").applyInPandas(_untyped_group_function, "id long"),
+     "group", 308, UserWarning),
+    ("applyInArrow",
+     lambda spark: spark.range(1).groupBy("id").applyInArrow(_untyped_group_function, "id long"),
+     "group", 495, UserWarning),
+    ("samplingRatio", lambda spark: _local_create_dataframe([(1,)], None, 0.5, session=spark),
+     "session", 484, UserWarning),
+    ("verifySchema",
+     lambda spark: _local_create_dataframe([(1,)], None, None, True, session=spark), "session",
+     487, UserWarning),
+    ("conf.set", lambda spark: spark.conf.set("k", "v"), "conf", 45, UserWarning),
+    ("conf.unset", lambda spark: spark.conf.unset("k"), "conf", 100, UserWarning),
+    ("builder.config",
+     lambda spark: SparkSession.builder.remote("sc://localhost:1").config("k", "v").getOrCreate(),
+     "conf", 61, UserWarning),
+    ("window", _warned_window, "expressions", 1126, UserWarning),
+]
+
+
+@pytest.mark.parametrize(
+    "call, module, line, category",
+    [case[1:] for case in PYSPARKS_WARNINGS],
+    ids=[case[0] for case in PYSPARKS_WARNINGS],
+)
+def test_warnings_are_of_the_module_and_line_of_pysparks_warn(
+    mock_connect, call, module, line, category
+):
+    # As PySpark's `warnings.warn` of each, whose warning is of the frame of its module of
+    # `pyspark.sql.connect`: of that module, of its registry of the warnings that it showed, and of
+    # the line of the call, in the file of the drop-in's module of that name. So the filters of a
+    # module, such as `filterwarnings("ignore", module="pyspark")`, and of a line take it, and the
+    # "default" action shows it once, as PySpark's. The drop-in's module ends before the line, so
+    # the warning shows no source line.
+    import importlib
+    import linecache
+    import warnings
+
+    spark, service = mock_connect
+    service.config_warnings = ["The configuration is deprecated."]
+    shim = importlib.import_module(f"pyspark.sql.connect.{module}")
+
+    def warned(action, *filters):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter(action)
+            for keywords in filters:
+                warnings.filterwarnings("ignore", **keywords)
+            for _ in range(2):
+                with contextlib.suppress(Exception):
+                    call(spark)
+        return [w for w in caught if w.category is category]
+
+    assert {(w.filename, w.lineno) for w in warned("always")} == {(shim.__file__, line)}
+    assert linecache.getline(shim.__file__, line) == ""
+    assert warned("always", {"module": "pyspark"}) == []
+    assert warned("always", {"module": shim.__name__, "lineno": line}) == []
+    assert len(warned("default")) == 1
 
 
 def test_register_temp_table_warns_and_replaces_the_view_as_pyspark(mock_connect):
@@ -25869,11 +26035,12 @@ def test_window_and_lambda_reprs_as_pyspark():
 
 def test_windows_of_no_partitions_warn_at_each_plan_build_as_pyspark(mock_connect):
     # As PySpark's WindowExpression.to_plan, which warns with warnings.warn as it builds the plan
-    # of a window expression of no partitions: a UserWarning of pyspark.sql.connect.expressions
-    # at each request that builds such an expression, for each of them, and none when the
-    # Column or the DataFrame is made, for a window of partitions, or for a pickle, which keeps
-    # the plan objects without building them. A warning of one place, which the default filter
-    # shows once, and which the error filter raises from the request, before it is sent.
+    # of a window expression of no partitions: a UserWarning of pyspark.sql.connect.expressions,
+    # of the line of that call, at each request that builds such an expression, for each of them,
+    # and none when the Column or the DataFrame is made, for a window of partitions, or for a
+    # pickle, which keeps the plan objects without building them. A warning of one place, which
+    # the default filter shows once, and which the error filter raises from the request, before
+    # it is sent.
     import warnings
 
     import cloudpickle
@@ -25898,8 +26065,8 @@ def test_windows_of_no_partitions_warn_at_each_plan_build_as_pyspark(mock_connec
         df.columns
         df.collect()
     assert [str(warning.message) for warning in record] == [message] * 4
-    assert {(warning.category, warning.filename) for warning in record} == {
-        (UserWarning, expressions.__file__)}
+    assert {(warning.category, warning.filename, warning.lineno) for warning in record} == {
+        (UserWarning, expressions.__file__, 1126)}
     with warnings.catch_warnings(record=True) as record:
         warnings.simplefilter("default")
         df.collect()
@@ -28579,6 +28746,10 @@ def test_a_failed_interrupt_during_add_listener_warns_and_drops_the_listener_as_
     assert len(messages) == 1, messages
     assert messages[0].startswith("Failed to add the listener because of exception: ")
     assert "interrupt failed on the server" in messages[0]
+    # Of the line of the `warnings.warn` of PySpark's listener bus in its module.
+    import pyspark.sql.connect.streaming.query as query
+
+    assert [(w.filename, w.lineno) for w in caught] == [(query.__file__, 297)]
     assert spark.streams._sqlb._listener_bus == []
     service.release_listener_registration()
     service.listener_register_blocked = False
@@ -28619,6 +28790,9 @@ def test_a_failed_interrupt_during_remove_listener_warns_and_keeps_the_listener_
         messages = [str(w.message) for w in caught]
         assert len(messages) == 1, messages
         assert messages[0].startswith("Failed to remove the listener because of exception: ")
+        import pyspark.sql.connect.streaming.query as query
+
+        assert [(w.filename, w.lineno) for w in caught] == [(query.__file__, 332)]
         assert "interrupt failed on the server" in messages[0]
         assert spark.streams._sqlb._listener_bus == [listener]
     finally:

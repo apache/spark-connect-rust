@@ -879,10 +879,41 @@ import sys  # noqa: E402
 from array import array  # noqa: E402
 from collections.abc import Iterable  # noqa: E402
 from functools import reduce  # noqa: E402
-from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union, overload  # noqa: E402
+from typing import (  # noqa: E402
+    Any,
+    Callable,
+    ClassVar,
+    Dict,
+    List,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+    overload,
+)
 
 from pyspark.errors import PySparkTypeError, PySparkValueError  # noqa: E402
 from pyspark.util import JVM_INT_MAX  # noqa: E402, F401
+
+
+# PySpark's metaclass of its singleton types, from Apache Spark v4.3.0, so that a class of it is
+# made as PySpark's: such as a subclass of a singleton type of `__main__`, which PySpark's
+# cloudpickle sends by value of the name of this metaclass. The drop-in's singleton types are
+# native classes of the metaclass `type`, whose constructors keep the one instance of each class
+# themselves. The type variable `T` of the annotations of `__call__` is of the stubs only.
+
+# This singleton pattern does not work with pickle, you will get
+# another object after pickle and unpickle
+class DataTypeSingleton(type):
+    """Metaclass for DataType"""
+
+    _instances: ClassVar[Dict[Type["DataTypeSingleton"], "DataTypeSingleton"]] = {}
+
+    def __call__(cls: "Type[T]") -> "T":  # noqa: F821
+        if cls not in cls._instances:  # type: ignore[attr-defined]
+            cls._instances[cls] = super().__call__()  # type: ignore[misc, attr-defined]
+        return cls._instances[cls]  # type: ignore[attr-defined]
+
 
 _atomic_types: List[Type[DataType]] = [
     StringType,

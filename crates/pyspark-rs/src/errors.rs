@@ -71,6 +71,40 @@ pub(crate) fn not_expected_type(value: &Bound<'_, PyAny>, name: &str, expected: 
     )
 }
 
+/// Warn `message` of the warning class `category` as PySpark's `warnings.warn` at the line `line`
+/// of its module `module` warns it, of which the drop-in's module of that name stands for
+/// PySpark's: of the file of the drop-in's module, of PySpark's line, and of the module and its
+/// registry of the warnings that it showed, as `warnings.warn` gives them of PySpark's frame. So
+/// the filters of a module (`filterwarnings("ignore", module="pyspark")`) and of a line, and the
+/// actions of a location (`"default"`, `"module"`), take it as they take PySpark's, where the frame
+/// of the caller is of the user's module. The drop-in's modules end before PySpark's lines, so
+/// the warning shows no source line, where PySpark's shows the line of its call.
+pub(crate) fn warn_as_pyspark(
+    py: Python<'_>,
+    module: &str,
+    line: u32,
+    message: &str,
+    category: &Bound<'_, pyo3::types::PyType>,
+) -> PyResult<()> {
+    let shim = py.import(module)?;
+    let registry = shim.dict().call_method1(
+        pyo3::intern!(py, "setdefault"),
+        ("__warningregistry__", PyDict::new(py)),
+    )?;
+    py.import("warnings")?.call_method1(
+        "warn_explicit",
+        (
+            message,
+            category,
+            shim.getattr("__file__")?,
+            line,
+            module,
+            registry,
+        ),
+    )?;
+    Ok(())
+}
+
 /// Maps a SparkErrorKind to the corresponding pyspark.errors exception class name.
 /// Returns a string that can be used to retrieve the class from the pyspark.errors module.
 fn kind_to_pyspark_class_name(kind: SparkErrorKind) -> &'static str {

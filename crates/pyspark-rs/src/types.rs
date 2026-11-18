@@ -30,11 +30,14 @@ fn type_reduce(py: Python<'_>, json: &str) -> PyResult<(Py<PyAny>, (String,))> {
 }
 
 /// The `__reduce__` of the type object `obj` of `data_type`: by its JSON, as [`type_reduce`],
-/// unless it has a user-defined type, whose JSON need not import its class, or a nullable flag
-/// that is not a bool, which the JSON does not keep (`flagged`). Such a type pickles of the type
-/// objects it is made of, `args()`, as PySpark's types do; the class is that of
-/// `pyspark.sql.types`, also on the Python workers of the server. The JSON is that of PySpark's
-/// `json()`, of the metadata dicts of its fields as they are (see `holds_metadata`).
+/// unless it has a user-defined type, whose JSON need not import its class, a nullable flag that
+/// is not a bool, which the JSON does not keep (`flagged`), a field of metadata (see
+/// `holds_metadata`), whose dict the JSON does not keep as it is: a tuple is a list of JSON, a key
+/// that is not a str a str, and the keys are sorted; or a type of a state that its JSON does not
+/// keep, such as attributes that a user set (see `has_dict_state`). Such a type pickles of the
+/// type objects it is made of, `args()`, as PySpark's types do, so that its copies, deep copies and
+/// pickles keep them as PySpark's pickle of the `__dict__` keeps them, and are equal to it; the
+/// class is that of `pyspark.sql.types`, also on the Python workers of the server.
 fn reduce_with_udts<'py>(
     obj: &Bound<'py, PyAny>,
     data_type: &DataType,
@@ -42,18 +45,17 @@ fn reduce_with_udts<'py>(
     args: impl FnOnce() -> PyResult<Bound<'py, pyo3::types::PyTuple>>,
 ) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
     let py = obj.py();
-    if flagged || has_udt(data_type) {
+    if flagged
+        || has_udt(data_type)
+        || holds_metadata(py, obj)?
+        || keeps_object_of(py, obj, holds_dict_state)?
+    {
         return Ok((
             obj.get_type().into_any().unbind(),
             args()?.into_any().unbind(),
         ));
     }
-    let json = if holds_metadata(py, obj)? {
-        type_json_text(obj)?
-    } else {
-        data_type.json()
-    };
-    let (f, args) = type_reduce(py, &json)?;
+    let (f, args) = type_reduce(py, &data_type.json())?;
     Ok((f, args.into_pyobject(py)?.into_any().unbind()))
 }
 
@@ -273,13 +275,14 @@ fn type_name_of<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     obj.call_method0(pyo3::intern!(obj.py(), "typeName"))
 }
 
-/// The reduce of `obj`, a type of a Python subclass of a type class, as PySpark's plain classes
-/// reduce at every protocol from 2: `copyreg.__newobj__(cls)` and the `__dict__` of the type,
-/// which holds the attributes `parameters` that PySpark's `__init__` sets, in its order, and the
-/// attributes that a user set, of the `__dict__` of `obj`; no state when there are none. So a
-/// copy, a deep copy and a pickle are of the subclass, which `cls.__new__(cls)` makes and
-/// `__setstate__` sets, and PySpark loads it as its own subclass, also on the Python workers of
-/// the server, to which cloudpickle sends a class of `__main__` by value.
+/// The reduce of `obj`, a type of a Python subclass of a type class, or of a state that its JSON
+/// does not keep (see `has_dict_state`), as PySpark's plain classes reduce at every protocol from
+/// 2: `copyreg.__newobj__(cls)` and the `__dict__` of the type, which holds the attributes
+/// `parameters` that PySpark's `__init__` sets, in its order, and the attributes that a user set,
+/// of the `__dict__` of `obj`; no state when there are none. So a copy, a deep copy and a pickle
+/// are of the class, which `cls.__new__(cls)` makes and `__setstate__` sets, and PySpark loads it
+/// as its own class, also on the Python workers of the server, to which cloudpickle sends a class
+/// of `__main__` by value.
 fn subclass_reduce<'py>(
     obj: &Bound<'py, PyAny>,
     parameters: Vec<(&str, Bound<'py, PyAny>)>,
@@ -313,14 +316,47 @@ fn subclass_reduce<'py>(
         .unbind())
 }
 
+/// Whether the type object `obj` is of a state that its JSON does not keep, and PySpark's
+/// `__dict__` holds: attributes that a user set, in its `__dict__`, which PySpark's holds after
+/// its parameters, a `hasPrecisionInfo` other than the `True` of PySpark's `__init__`, or `names`
+/// or a `_needConversion` of a struct other than those of its fields (see
+/// `PyStructType::keeps_other_parts`).
+fn has_dict_state(obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let py = obj.py();
+    if obj.getattr(pyo3::intern!(py, "__dict__"))?.is_truthy()? {
+        return Ok(true);
+    }
+    if let Ok(decimal) = obj.cast::<PyDecimalType>() {
+        let has_precision_info = decimal.borrow().has_precision_info.clone_ref(py);
+        return Ok(!has_precision_info
+            .bind(py)
+            .is(pyo3::types::PyBool::new(py, true)));
+    }
+    if let Ok(st) = obj.cast::<PyStructType>() {
+        return PyStructType::keeps_other_parts(st);
+    }
+    Ok(false)
+}
+
+/// Whether the type object `obj` is, or keeps at any depth of the types that it keeps as their
+/// objects (see `keeps_object_of`), a type of a state that its JSON does not keep (see
+/// [`has_dict_state`]).
+fn holds_dict_state(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(has_dict_state(obj)? || keeps_object_of(py, obj, holds_dict_state)?)
+}
+
 /// The reduce of a type of the class `T` itself, of its JSON `json` (see [`type_reduce`]), or else
-/// of a type of a Python subclass of it, of the attributes `parameters` (see [`subclass_reduce`]).
+/// of its class and PySpark's `__dict__` of it, of the attributes `parameters` (see
+/// [`subclass_reduce`]): of a type of a Python subclass of `T`, and of a type of a state that its
+/// JSON does not keep (see [`has_dict_state`]), such as attributes that a user set, so that its
+/// copies, deep copies and pickles keep it, as PySpark's pickle of the `__dict__` does, also on the
+/// Python workers of the server.
 fn reduce_of<'py, T: pyo3::PyClass>(
     slf: &Bound<'py, T>,
     json: &str,
     parameters: impl FnOnce() -> PyResult<Vec<(&'static str, Bound<'py, PyAny>)>>,
 ) -> PyResult<Py<PyAny>> {
-    if !is_native(slf) {
+    if !is_native(slf) || has_dict_state(slf.as_any())? {
         return subclass_reduce(slf.as_any(), parameters()?);
     }
     let py = slf.py();
@@ -2842,7 +2878,9 @@ impl PyDecimalType {
     ) -> PyResult<Bound<'py, PyAny>> {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
-    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`).
+    /// Of its JSON, and of a Python subclass, of its class and its `__dict__` (see `reduce_of`),
+    /// as of a `hasPrecisionInfo` other than the `True` of PySpark's `__init__`, which the JSON does
+    /// not keep either.
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let this = slf.borrow();
@@ -3522,10 +3560,11 @@ impl PyArrayType {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     /// Of its JSON, or of the types it is made of (see `reduce_with_udts`), and of a Python
-    /// subclass, of its class and its `__dict__` (see `subclass_reduce`).
+    /// subclass or of attributes that a user set, of its class and its `__dict__` (see
+    /// `reduce_of`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        if !is_native(slf) {
+        if !is_native(slf) || has_dict_state(slf.as_any())? {
             let (element_type, contains_null) = {
                 let this = slf.borrow();
                 (
@@ -3629,24 +3668,13 @@ impl PyArrayType {
         ))
     }
 
-    /// A copy with all nullability fields set true (recursively). Mirrors `ArrayType.toNullable()`.
+    /// A copy with all nullability fields set true (recursively), as PySpark's
+    /// `ArrayType.toNullable()`, its `_as_nullable` of the type objects that it holds (see
+    /// `as_nullable`): the metadata dicts of the fields as they are, and a type that the client
+    /// keeps as its object, which its JSON does not tell apart, or of a Python subclass, as it is.
     #[pyo3(name = "toNullable")]
-    fn __at_to_nullable(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let this = slf.borrow();
-        let element_type = this.element_object.live(py, &this.element_type)?;
-        // Of the type objects that it holds, as PySpark's `_as_nullable`, when one is a type that
-        // the client keeps as its object, which its JSON does not tell apart, or a type of a
-        // Python subclass, which it keeps.
-        if holds_objects(&element_type) || kept_holds_subclass_object(py, &this.element_object)? {
-            drop(this);
-            return Ok(as_nullable(slf.as_any())?.unbind());
-        }
-        let dt = (DataType::Array {
-            element_type: Box::new(element_type),
-            contains_null: this.contains_null,
-        })
-        .to_nullable();
-        data_type_to_py(py, &dt)
+    fn __at_to_nullable(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(as_nullable(slf.as_any())?.unbind())
     }
 
     /// Build an ArrayType from its JSON value. Mirrors `ArrayType.fromJson`.
@@ -3757,10 +3785,11 @@ impl PyMapType {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     /// Of its JSON, or of the types it is made of (see `reduce_with_udts`), and of a Python
-    /// subclass, of its class and its `__dict__` (see `subclass_reduce`).
+    /// subclass or of attributes that a user set, of its class and its `__dict__` (see
+    /// `reduce_of`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        if !is_native(slf) {
+        if !is_native(slf) || has_dict_state(slf.as_any())? {
             let (key_type, value_type, value_contains_null) = {
                 let this = slf.borrow();
                 (
@@ -3894,28 +3923,11 @@ impl PyMapType {
         ))
     }
 
-    /// A copy with all nullability fields set true (recursively). Mirrors `MapType.toNullable()`.
+    /// A copy with all nullability fields set true (recursively), as PySpark's
+    /// `MapType.toNullable()`, of the type objects that it holds (see `ArrayType`'s).
     #[pyo3(name = "toNullable")]
-    fn __mt_to_nullable(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let this = slf.borrow();
-        let key_type = this.key_object.live(py, &this.key_type)?;
-        let value_type = this.value_object.live(py, &this.value_type)?;
-        // Of the type objects that it holds, as PySpark's `_as_nullable` (see `ArrayType`'s).
-        if holds_objects(&key_type)
-            || holds_objects(&value_type)
-            || kept_holds_subclass_object(py, &this.key_object)?
-            || kept_holds_subclass_object(py, &this.value_object)?
-        {
-            drop(this);
-            return Ok(as_nullable(slf.as_any())?.unbind());
-        }
-        let dt = (DataType::Map {
-            key_type: Box::new(key_type),
-            value_type: Box::new(value_type),
-            value_contains_null: this.value_contains_null,
-        })
-        .to_nullable();
-        data_type_to_py(py, &dt)
+    fn __mt_to_nullable(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(as_nullable(slf.as_any())?.unbind())
     }
 
     /// Build a MapType from its JSON value. Mirrors `MapType.fromJson`.
@@ -4390,7 +4402,8 @@ impl PyStructField {
     }
     /// A field pickles, as PySpark's does: of its name, type, nullability and metadata, with
     /// the class of `pyspark.sql.types`, also on the Python workers of the server. A field of a
-    /// Python subclass pickles of its class and its `__dict__` (see `subclass_reduce`).
+    /// Python subclass, or of attributes that a user set, pickles of its class and its `__dict__`
+    /// (see `reduce_of`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
         let (name, data_type, nullable, metadata) = {
@@ -4402,7 +4415,7 @@ impl PyStructField {
                 this.metadata.clone_ref(py),
             )
         };
-        if !is_native(slf) {
+        if !is_native(slf) || has_dict_state(slf.as_any())? {
             return subclass_reduce(
                 slf.as_any(),
                 vec![
@@ -4452,6 +4465,31 @@ impl PyStructType {
         Ok(DataType::Struct {
             fields: self.current_fields(py)?,
         })
+    }
+
+    /// Whether the `names` or the `_needConversion` of the struct differ from those that its
+    /// `__init__` makes of its fields as they are now, as an edit of a field in place makes them:
+    /// PySpark's pickle of its `__dict__` keeps them as they are, where its JSON makes them anew.
+    fn keeps_other_parts(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        let py = slf.py();
+        let (fields, names, need_conversion) = {
+            let this = slf.borrow();
+            (
+                this.fields.clone_ref(py),
+                this.names.clone_ref(py),
+                this.need_conversion.clone(),
+            )
+        };
+        let (fields, names) = (fields.bind(py), names.bind(py));
+        if names.len() != fields.len() {
+            return Ok(true);
+        }
+        for (field, name) in fields.iter().zip(names.iter()) {
+            if !field.getattr(pyo3::intern!(py, "name"))?.eq(name)? {
+                return Ok(true);
+            }
+        }
+        Ok(need_conversion_of_fields(py, fields)? != need_conversion)
     }
 }
 
@@ -4535,11 +4573,13 @@ impl PyStructType {
         shim_conversion(slf.as_any(), "_to_internal", obj)
     }
     /// Of its JSON, or of the types it is made of (see `reduce_with_udts`), and of a Python
-    /// subclass, of its class and its `__dict__`, of the `fields`, `names`, `_needConversion` and
-    /// `_needSerializeAnyField` that PySpark's `__init__` sets (see `subclass_reduce`).
+    /// subclass, of attributes that a user set or of `names` and a `_needConversion` that differ
+    /// from those of its fields (see `PyStructType::keeps_other_parts`), of its class and its
+    /// `__dict__`, of the `fields`, `names`, `_needConversion` and `_needSerializeAnyField` that
+    /// PySpark's `__init__` sets (see `reduce_of`).
     fn __reduce__(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         let py = slf.py();
-        if !is_native(slf) {
+        if !is_native(slf) || has_dict_state(slf.as_any())? {
             let (fields, names, need_conversion) = {
                 let this = slf.borrow();
                 (
@@ -4917,19 +4957,12 @@ impl PyStructType {
         text.map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
     }
 
-    /// A copy with all fields made nullable (recursively). Mirrors `StructType.toNullable()`.
+    /// A copy with all fields made nullable (recursively), as PySpark's `StructType.toNullable()`,
+    /// of the type objects that it holds (see `ArrayType`'s): each field of the metadata dict of
+    /// the field, as PySpark's `_as_nullable` passes `metadata=field.metadata`.
     #[pyo3(name = "toNullable")]
-    fn __st_to_nullable(slf: &Bound<'_, Self>, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let data_type = slf.borrow().current_data_type(py)?;
-        // Of the type objects that it holds, as PySpark's `_as_nullable` (see `ArrayType`'s).
-        if holds_objects(&data_type) || keeps_subclass_objects(py, slf.as_any())? {
-            return Ok(as_nullable(slf.as_any())?.unbind());
-        }
-        let fields = match data_type.to_nullable() {
-            DataType::Struct { fields } => fields,
-            _ => slf.borrow().current_fields(py)?,
-        };
-        Ok(py_new_struct(py, fields)?.into_any())
+    fn __st_to_nullable(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(as_nullable(slf.as_any())?.unbind())
     }
 
     /// Build a StructType from its JSON value. Mirrors `StructType.fromJson`.
@@ -6403,8 +6436,9 @@ fn child_simple_string(py: Python<'_>, kept: &KeptType, snapshot: &DataType) -> 
 
 /// As PySpark's `_as_nullable` of the type object `obj`: of an array, a map or a struct, one of
 /// the same types made nullable in turn and of its nullable flags set true, as `toNullable`
-/// returns it; any other type is the object itself, as PySpark's base `_as_nullable` returns
-/// `self`, so that a `UserDefinedType` or a type of its class only stays the object it was.
+/// returns it, whose fields hold the metadata dicts of the fields as they are; any other type is
+/// the object itself, as PySpark's base `_as_nullable` returns `self`, so that a
+/// `UserDefinedType`, a `DecimalType` or a type of its class only stays the object it was.
 fn as_nullable<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let py = obj.py();
     if obj.is_instance_of::<PyArrayType>() {

@@ -146,8 +146,10 @@ impl StreamingQueryListener for PyListenerAdapter {
                 .str()
                 .and_then(|text| Ok(text.to_cow()?.into_owned()))
                 .unwrap_or_else(|_| error.message());
+            // Of PySpark's `_query_event_handler`.
             let _ = warn(
                 py,
+                380,
                 format!(
                     "StreamingQueryListenerBus Handler thread received exception, all client side \
                      listeners are removed and handler thread is terminated. The error is: {}",
@@ -2040,10 +2042,16 @@ impl PyStreamingQueryManager {
 }
 
 /// Warn of `message`, as PySpark Connect's listener bus warns of a failure to add or remove a
-/// listener, rather than raising.
-fn warn(py: Python<'_>, message: String) -> PyResult<()> {
-    py.import("warnings")?.call_method1("warn", (message,))?;
-    Ok(())
+/// listener, rather than raising, of the line `line` of that `warnings.warn` in
+/// `pyspark.sql.connect.streaming.query` (see `warn_as_pyspark`).
+fn warn(py: Python<'_>, line: u32, message: String) -> PyResult<()> {
+    crate::errors::warn_as_pyspark(
+        py,
+        "pyspark.sql.connect.streaming.query",
+        line,
+        &message,
+        &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+    )
 }
 
 /// `StreamingQueryManager._sqlb`, as PySpark Connect's `StreamingQueryListenerBus`, of its
@@ -2182,8 +2190,10 @@ impl PyStreamingQueryManager {
                 if let Some(id) = adapter.id.get() {
                     self.inner.discard_listener(id);
                 }
+                // Of PySpark's `StreamingQueryListenerBus.append`.
                 warn(
                     py,
+                    297,
                     format!(
                         "Failed to add the listener because of exception: {}\n\
                          The listener is not added, please add it again.",
@@ -2247,8 +2257,10 @@ impl PyStreamingQueryManager {
                 Ok(false) => tried.push(id),
                 Ok(true) => return Ok(()),
                 Err(error) => {
+                    // Of PySpark's `StreamingQueryListenerBus.remove`.
                     return warn(
                         py,
+                        332,
                         format!(
                             "Failed to remove the listener because of exception: {}\n\
                              The listener is not removed, please remove it again.",
@@ -2275,8 +2287,10 @@ impl PyStreamingQueryManager {
         if let Err(error) = interruptible_caught(py, &self.inner.spark_session(), || {
             self.inner.close().map_err(Box::new)
         })? {
+            // Of PySpark's `StreamingQueryListenerBus.remove`, which its `close` calls.
             return warn(
                 py,
+                332,
                 format!(
                     "Failed to remove the listener because of exception: {}\n\
                      The listener is not removed, please remove it again.",
