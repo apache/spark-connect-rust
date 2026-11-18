@@ -21,7 +21,8 @@ from typing import Any, Callable
 from pyspark import cloudpickle as _cloudpickle
 from pyspark._pyspark import DataFrame
 from pyspark.sql.connect import _column_reduce
-from pyspark.sql.connect._column_reduce import parse_deep, raise_error
+from pyspark.sql.connect._column_reduce import parse_deep
+from pyspark.sql.connect._column_reduce import raise_error as _raise_error
 from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
 
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
@@ -90,7 +91,7 @@ def _reduce_dataframe(
         request_schema: bool = True,
     ) -> Any:
         if build_error is not None:
-            raise_error(build_error)
+            _raise_error(build_error)
         try:
             from pyspark import _pyspark
         except ImportError:
