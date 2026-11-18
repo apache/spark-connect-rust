@@ -9,7 +9,8 @@
 //!   empty (an empty or invalid value means no proxy, with a warning for an invalid one);
 //! - only the lowercase names are read, as gRPC reads them on POSIX;
 //! - only an `http` proxy is supported; another scheme, or no host, connects directly, with a
-//!   warning, while a host or port that is not valid is an error (where grpcio never connects);
+//!   warning, while a host or port that is not valid is an error (where grpcio does not connect,
+//!   but takes a port past 65535 modulo 65536 and connects to that port);
 //! - the userinfo of the proxy URI, percent-decoded, is sent as `Proxy-Authorization: Basic`;
 //! - a proxy without a port is on port 443;
 //! - `no_grpc_proxy`, or else `no_proxy`, lists the hosts that are not proxied: a host matches
@@ -412,8 +413,9 @@ mod tests {
 
     #[test]
     fn an_http_proxy_at_an_invalid_address_is_an_error() {
-        // grpcio never connects with these (and wraps a port past 65535), so the channel is
-        // an error rather than a direct connection that the user did not ask for.
+        // grpcio does not connect with these, but for a port past 65535, which it takes modulo
+        // 65536 (99999 as 34463). The channel is an error rather than a connection that the user
+        // did not ask for, direct or to another port.
         for uri in [
             "http://:3128",
             "http://p:notaport",

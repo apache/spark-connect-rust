@@ -227,16 +227,20 @@ impl ChannelBuilder {
         self.get(PARAM_USER_ID)
     }
 
-    /// Validates the `session_id` param is a UUID of any version, and returns it as given.
-    /// As `uuid.UUID(session_id, version=4)` in PySpark, which does not check the version.
+    /// Validates the `session_id` param as PySpark's `uuid.UUID(session_id, version=4)`, which
+    /// does not check the version, and returns it as given. So a UUID of any version is taken,
+    /// and so are the other texts that Python's `uuid` reads, such as of `urn:` or `uuid:`,
+    /// braces, or hyphens anywhere, which the server refuses as a handle when a request sends
+    /// one, as it refuses PySpark's. The origin of the error is the text of the `ValueError` of
+    /// `uuid.UUID`.
     pub fn session_id(&self) -> Result<Option<String>> {
         match self.params.get(PARAM_SESSION_ID) {
             None => Ok(None),
-            Some(s) => match uuid::Uuid::parse_str(s) {
-                Ok(_) => Ok(Some(s.clone())),
-                Err(_) => Err(SparkError::value(
+            Some(s) => match python_uuid_error(s) {
+                None => Ok(Some(s.clone())),
+                Some(origin) => Err(SparkError::value(
                     "INVALID_SESSION_UUID_ID",
-                    &[("arg_name", "session_id"), ("origin", "invalid UUID")],
+                    &[("arg_name", "session_id"), ("origin", &origin)],
                 )),
             },
         }
@@ -604,6 +608,145 @@ fn parse_port(text: &str) -> Result<u16> {
             .saturating_add(u64::from(digit - b'0'))
     });
     u16::try_from(port).map_err(|_| SparkError::builtin_value_msg("Port out of range 0-65535"))
+}
+
+/// The text of the `ValueError` of Python's `uuid.UUID(text)`, or `None` when it takes `text`: with
+/// every `urn:` and then every `uuid:` removed, the braces stripped from both ends and every `-`
+/// removed, it must be 32 characters that `int(hex, 16)` reads (see [`python_hex_int`]).
+fn python_uuid_error(text: &str) -> Option<String> {
+    let hex = text.replace("urn:", "").replace("uuid:", "");
+    let hex = hex
+        .trim_matches(|c: char| c == '{' || c == '}')
+        .replace('-', "");
+    if hex.chars().count() != 32 {
+        Some("badly formed hexadecimal UUID string".to_string())
+    } else if python_hex_int(&hex) {
+        None
+    } else {
+        // `int`'s `%.200R`: the repr of the text, cut at 200 characters.
+        let repr: String = python_str_repr(&hex).chars().take(200).collect();
+        Some(format!("invalid literal for int() with base 16: {repr}"))
+    }
+}
+
+/// Whether Python's `int(text, 16)` reads `text`: Python's whitespace, an optional sign, an
+/// optional `0x` or `0X` with one `_` after it, hex digits with single `_` between them, and
+/// whitespace. As `int` (`_PyUnicode_TransformDecimalAndSpaceToASCII`), a non-ASCII character is
+/// read as a space if it is whitespace, as its ASCII digit if it is a decimal digit, and else ends
+/// the literal.
+fn python_hex_int(text: &str) -> bool {
+    let ascii: Vec<u8> = text
+        .chars()
+        .map(|c| match c {
+            c if c.is_ascii() => c as u8,
+            c if c.is_whitespace() => b' ',
+            c => unicode_decimal(c).map_or(b'?', |digit| b'0' + digit),
+        })
+        .collect();
+    let at = |i: usize| ascii.get(i).copied();
+    // `Py_ISSPACE`, whose ASCII whitespace has the vertical tab.
+    let space = |b: Option<u8>| matches!(b, Some(b' ' | b'\t' | b'\n' | 0x0b | 0x0c | b'\r'));
+    let mut i = 0;
+    while space(at(i)) {
+        i += 1;
+    }
+    if matches!(at(i), Some(b'+' | b'-')) {
+        i += 1;
+    }
+    if at(i) == Some(b'0') && matches!(at(i + 1), Some(b'x' | b'X')) {
+        i += 2;
+        if at(i) == Some(b'_') {
+            i += 1;
+        }
+    }
+    // The digits, which may not start nor end with an `_`, nor have two in a row.
+    let start = i;
+    let mut previous = None;
+    while let Some(b) = at(i).filter(|b| b.is_ascii_hexdigit() || *b == b'_') {
+        if b == b'_' && matches!(previous, None | Some(b'_')) {
+            return false;
+        }
+        previous = Some(b);
+        i += 1;
+    }
+    if i == start || previous == Some(b'_') {
+        return false;
+    }
+    while space(at(i)) {
+        i += 1;
+    }
+    i == ascii.len()
+}
+
+/// Whether `c` matches `pattern`, a regex of one character, which `class` keeps compiled.
+fn is_of(class: &'static std::sync::OnceLock<regex::Regex>, pattern: &str, c: char) -> bool {
+    class
+        .get_or_init(|| regex::Regex::new(pattern).expect("a valid class"))
+        .is_match(c.encode_utf8(&mut [0; 4]))
+}
+
+/// The value of `c` as a Unicode decimal digit (`Nd`), whose digits come in runs of ten from 0 to
+/// 9, as Python's `int` reads it, or `None` for another character.
+fn unicode_decimal(c: char) -> Option<u8> {
+    static DECIMAL: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let decimal = |c: char| is_of(&DECIMAL, r"^\p{Nd}$", c);
+    if !decimal(c) {
+        return None;
+    }
+    // The first digit of the digits around `c`, a 0, as runs of ten can be next to each other.
+    let mut first = u32::from(c);
+    while let Some(previous) = first
+        .checked_sub(1)
+        .and_then(char::from_u32)
+        .filter(|&previous| decimal(previous))
+    {
+        first = u32::from(previous);
+    }
+    u8::try_from((u32::from(c) - first) % 10).ok()
+}
+
+/// Python's `repr` of the str `text`: in single quotes, or in double quotes when it has a single
+/// quote and no double one, with a backslash, the quote, a tab, a newline and a carriage return
+/// escaped, and the other characters that Python does not print (of the categories `Cc`, `Cf`,
+/// `Co`, `Cn`, `Zl`, `Zp` and `Zs`, but the space) as `\x`, `\u` or `\U` and their hex digits.
+fn python_str_repr(text: &str) -> String {
+    static UNPRINTABLE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let quote = if text.contains('\'') && !text.contains('"') {
+        '"'
+    } else {
+        '\''
+    };
+    let mut out = String::with_capacity(text.len() + 2);
+    out.push(quote);
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            ' ' => out.push(' '),
+            c if c == quote => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if is_of(
+                &UNPRINTABLE,
+                r"^[\p{Cc}\p{Cf}\p{Co}\p{Cn}\p{Zl}\p{Zp}\p{Zs}]$",
+                c,
+            ) =>
+            {
+                let code = u32::from(c);
+                out.push_str(&match code {
+                    0..=0xff => format!("\\x{code:02x}"),
+                    0x100..=0xffff => format!("\\u{code:04x}"),
+                    _ => format!("\\U{code:08x}"),
+                });
+            }
+            c => out.push(c),
+        }
+    }
+    out.push(quote);
+    out
 }
 
 /// Decode `%XX` percent-escapes (CPython `urllib.parse.unquote`).
@@ -1206,6 +1349,150 @@ mod tests {
             let c = ChannelBuilder::parse(&format!("sc://localhost/;session_id={id}")).unwrap();
             let e = c.session_id().unwrap_err();
             assert_eq!(e.error_class, "INVALID_SESSION_UUID_ID", "{id}");
+            assert_eq!(
+                e.message(),
+                "[INVALID_SESSION_UUID_ID] Parameter value session_id must be a valid UUID \
+                 format: badly formed hexadecimal UUID string"
+            );
         }
+    }
+
+    /// As `uuid.UUID(session_id, version=4)` of Python 3.11, whose `ValueError` texts these are:
+    /// the texts it reads are taken as they are, and the others are refused with its message.
+    #[test]
+    fn session_id_is_checked_as_pythons_uuid() {
+        let u = "550e8400-e29b-41d4-a716-446655440000";
+        let s = u.replace('-', "");
+        let rest = |n: usize| s[n..].to_string();
+        let taken = [
+            u.to_string(),
+            u.to_uppercase(),
+            format!("uuid:{u}"),
+            format!("urn:{u}"),
+            format!("urn:uuid:{u}"),
+            format!("{{{u}}}"),
+            format!("{{{s}}}"),
+            format!("{{{{{u}}}"),
+            format!("uurn:uid:{u}"),
+            s.clone(),
+            format!("0x{}", rest(2)),
+            format!("0X{}", rest(2)),
+            format!("+{}", rest(1)),
+            format!(" {}", rest(1)),
+            format!("\t{}", rest(1)),
+            format!("\u{b}{}", rest(1)),
+            format!("{} ", &s[1..]),
+            format!("\u{3000}{}", rest(1)),
+            format!("\u{85}{}", rest(1)),
+            format!("\u{a0}{}", rest(1)),
+            format!("\n{}", rest(1)),
+            format!("0x_{}", rest(3)),
+            format!("{}_{}", &s[..5], rest(6)),
+            format!("0x-{}0", rest(3)),
+            format!(" +{}", rest(2)),
+            // Decimal digits that Python's `int` reads as ASCII digits: fullwidth, Arabic-Indic
+            // and mathematical, of runs of ten next to each other.
+            "\u{ff11}".repeat(32),
+            format!("{}a", "\u{660}".repeat(31)),
+            format!("{}{}", "\u{1d7cf}".repeat(16), "\u{1d7f6}".repeat(16)),
+        ];
+        for id in taken {
+            assert_eq!(python_uuid_error(&id), None, "{id:?}");
+        }
+        let badly_formed = "badly formed hexadecimal UUID string".to_string();
+        let literal = |repr: &str| format!("invalid literal for int() with base 16: {repr}");
+        let refused = [
+            (
+                "1-2345678-9abc-def0-1234-56789abcdef".to_string(),
+                badly_formed.clone(),
+            ),
+            (format!("-{}", rest(1)), badly_formed.clone()),
+            (format!("+-{}", rest(2)), badly_formed.clone()),
+            ("x".to_string(), badly_formed.clone()),
+            (String::new(), badly_formed.clone()),
+            (format!("_{}", rest(1)), literal(&format!("'_{}'", rest(1)))),
+            (
+                format!("{}__{}", &s[..5], rest(7)),
+                literal(&format!("'{}__{}'", &s[..5], rest(7))),
+            ),
+            (
+                format!("{}_", &s[..31]),
+                literal(&format!("'{}_'", &s[..31])),
+            ),
+            (
+                format!("0x{}", "_".repeat(30)),
+                literal(&format!("'0x{}'", "_".repeat(30))),
+            ),
+            (
+                format!("0x+{}", rest(3)),
+                literal(&format!("'0x+{}'", rest(3))),
+            ),
+            ("z".repeat(32), literal(&format!("'{}'", "z".repeat(32)))),
+            (
+                format!("'{}", "z".repeat(31)),
+                literal(&format!("\"'{}\"", "z".repeat(31))),
+            ),
+            (
+                format!("'\"{}", "z".repeat(30)),
+                literal(&format!("'\\'\"{}'", "z".repeat(30))),
+            ),
+            (
+                format!("\0{}", rest(1)),
+                literal(&format!("'\\x00{}'", rest(1))),
+            ),
+            (
+                format!("\u{e9}{}", rest(1)),
+                literal(&format!("'\u{e9}{}'", rest(1))),
+            ),
+            (
+                format!("\u{7f}{}", rest(1)),
+                literal(&format!("'\\x7f{}'", rest(1))),
+            ),
+            (
+                format!("\\{}", rest(1)),
+                literal(&format!("'\\\\{}'", rest(1))),
+            ),
+            (
+                format!("\u{200b}{}", rest(1)),
+                literal(&format!("'\\u200b{}'", rest(1))),
+            ),
+            (
+                format!("\u{e000}{}", rest(1)),
+                literal(&format!("'\\ue000{}'", rest(1))),
+            ),
+            (
+                format!("\u{378}{}", "a".repeat(31)),
+                literal(&format!("'\\u0378{}'", "a".repeat(31))),
+            ),
+            // Fullwidth letters are not digits; a digit and a character that is not one.
+            (
+                "\u{ff41}".repeat(32),
+                literal(&format!("'{}'", "\u{ff41}".repeat(32))),
+            ),
+            (
+                format!("{}\u{200b}", "\u{1d7cf}".repeat(31)),
+                literal(&format!("'{}\\u200b'", "\u{1d7cf}".repeat(31))),
+            ),
+            // The repr cut at 200 characters, as `%.200R`.
+            (
+                "\u{e0001}".repeat(32),
+                literal(&format!("'{}\\U000e000", "\\U000e0001".repeat(19))),
+            ),
+        ];
+        for (id, message) in refused {
+            assert_eq!(python_uuid_error(&id), Some(message), "{id:?}");
+        }
+        // And the error of the connection string, of a session ID that Python's `uuid` reads.
+        let c = ChannelBuilder::parse(&format!("sc://localhost/;session_id=urn:uuid:{u}")).unwrap();
+        assert_eq!(c.session_id().unwrap(), Some(format!("urn:uuid:{u}")));
+        let c = ChannelBuilder::parse(&format!("sc://localhost/;session_id=_{}", rest(1))).unwrap();
+        assert_eq!(
+            c.session_id().unwrap_err().message(),
+            format!(
+                "[INVALID_SESSION_UUID_ID] Parameter value session_id must be a valid UUID \
+                 format: invalid literal for int() with base 16: '_{}'",
+                rest(1)
+            )
+        );
     }
 }

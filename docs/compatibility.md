@@ -2209,7 +2209,8 @@ The client honors the HTTP proxy of the environment (`grpc_proxy`, `https_proxy`
 `no_grpc_proxy`, `no_proxy`) with grpcio's rules, see [HTTP Proxies](configuration.md#http-proxies),
 with two differences: a loopback host is never proxied, where grpcio proxies `localhost` unless
 `no_proxy` lists it, and a proxy address with an invalid host or port is an error, where grpcio
-cannot connect (and takes a port past 65535 modulo 65536).
+does not connect, but for a port past 65535, which it takes modulo 65536 and connects to (a proxy
+of port 99999 is reached at 34463).
 
 As in grpcio, a connection has 20 s, its connect deadline, to complete: one deadline from its
 start, which the TCP connection, the tunnel of a proxy and the TLS handshake share. One that does

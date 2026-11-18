@@ -2430,6 +2430,52 @@ def test_session_id_of_any_uuid_version_and_the_user_id_of_the_requests(monkeypa
             other.stop()
 
 
+def test_session_id_of_the_connection_string_is_checked_as_pythons_uuid(mock_connect):
+    # As PySpark's ChannelBuilder.session_id, of `uuid.UUID(session_id, version=4)`: the texts
+    # that Python's uuid reads, of `urn:` or `uuid:`, braces, hyphens anywhere, or what `int(hex,
+    # 16)` takes, are sent as given, and the others raise INVALID_SESSION_UUID_ID of the text of
+    # the ValueError of uuid.UUID.
+    import urllib.parse
+    import uuid
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import SparkSession
+
+    _, service = mock_connect
+    u = "550e8400-e29b-41d4-a716-446655440000"
+    s = u.replace("-", "")
+    taken = 0
+    for session_id in (
+        u.upper(), "uuid:" + u, "urn:" + u, "urn:uuid:" + u, "{" + s + "}",
+        "550e-8400e29b41d4a71644665544-0000", "0x" + s[2:], " " + s[1:], "　" + s[1:],
+        "１" * 32, "1-2345678-9abc-def0-1234-56789abcdef", "x", "_" + s[1:], "z" * 32,
+        "'" + "z" * 31, "​" + s[1:], "\U000e0001" * 32,
+    ):
+        try:
+            uuid.UUID(session_id, version=4)
+            origin = None
+        except ValueError as e:
+            origin = str(e)
+        remote = f"{service.remote}/;session_id={urllib.parse.quote(session_id, safe='')}"
+        if origin is not None:
+            with pytest.raises(PySparkValueError) as error:
+                SparkSession.builder.remote(remote).create()
+            assert error.value.getCondition() == "INVALID_SESSION_UUID_ID", session_id
+            assert error.value.getMessageParameters() == {
+                "arg_name": "session_id", "origin": origin}, session_id
+            continue
+        taken += 1
+        other = SparkSession.builder.remote(remote).create()
+        try:
+            assert other.session_id == session_id
+            other.range(1).collect()
+            # ExecutePlanRequest.session_id=1.
+            assert parse_message(service.execute_requests[-1])[1][0].decode() == session_id
+        finally:
+            other.stop()
+    assert taken == 10
+
+
 def test_channel_builder_uses_endpoint():
     # channelBuilder reconstructs an sc:// URL from the builder's host/port (+ params)
     # for the native transport, returning a configured Builder (no longer raises).
