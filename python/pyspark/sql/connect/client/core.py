@@ -23,6 +23,11 @@ __all__ = ["ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConn
 
 from typing import Any
 
+# As PySpark's core, which imports the messages of Spark Connect, so that protobuf's default pool
+# has their files once this module is imported: a pickle of PySpark's PlanObservedMetrics, which
+# imports this module before it makes the Expression.Literal messages of its metrics of their full
+# names (protobuf's `_InternalConstructMessage`), loads in a new process, as with PySpark.
+import pyspark.sql.connect.proto  # noqa: F401
 from pyspark.sql.connect.client import (
     AnalyzeResult,  # noqa: F401
     ChannelBuilder,

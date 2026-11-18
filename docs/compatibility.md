@@ -1315,9 +1315,13 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   reference cycles, so that a collection does not go through the messages of a large message;
 - the pickle of a message of a nested type names its class, which loads without `protobuf`,
   where upb's names protobuf's `_InternalConstructMessage` of the full name of its type, which
-  loads where `protobuf` is installed (as a message of the runtime, whose classes of the protos of
-  Spark Connect are those of protobuf's default symbol database; those of a plugin's files stay
-  `protobuf`'s there, as below);
+  loads where `protobuf` is installed once `pyspark.sql.connect.proto` is imported, as in PySpark,
+  where its generated modules add the files to protobuf's default pool (as a message of the
+  runtime, whose classes of the protos of Spark Connect are those of protobuf's default symbol
+  database; those of a plugin's files stay `protobuf`'s there, as below). As PySpark's,
+  `pyspark.sql.connect.client.core` imports the package, so a pickle of PySpark's
+  `PlanObservedMetrics`, such as one in the `attrs` of a pandas DataFrame of `toPandas`, which
+  imports that module before it makes its messages, loads in a new process;
 - `GetOptions()` of a descriptor gives `protobuf`'s `descriptor_pb2` options, as upb's does, so
   it needs `protobuf`.
 
