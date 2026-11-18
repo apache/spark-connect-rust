@@ -2424,10 +2424,12 @@ impl PySparkSession {
         if is_loaded_instance(py, data, "pyarrow", "Table")? {
             return crate::pyarrow_import::create_dataframe(py, &self.session, data, schema, None);
         }
-        // Empty rows of a struct whose nullable flag is not a bool: PySpark sends the `json()` of
-        // the schema as it is, which the server cannot parse, so the relation carries that text.
-        if data.is_instance_of::<PyList>() && data.len()? == 0 {
-            if let Some(json) = crate::types::raw_struct_json(schema)? {
+        // Data of no rows: PySpark sends the `json()` of the schema object as it is, which the
+        // core's text does not keep of a nullable flag that is not a bool, of metadata, nor of a
+        // type of a Python subclass, and which the server may fail to parse, so the relation
+        // carries that text. PySpark checks the dimensions of an array first.
+        if !is_loaded_instance(py, data, "numpy", "ndarray")? && data.len().is_ok_and(|n| n == 0) {
+            if let Some(json) = crate::types::raw_schema_json(schema)? {
                 return schema_text_dataframe(&self.session, json);
             }
         }

@@ -136,6 +136,21 @@ pub(crate) fn plain_object_state<'py>(
     let py = object.py();
     let attributes = object.getattr(pyo3::intern!(py, "__dict__"))?;
     let attributes = (attributes.len()? > 0).then_some(attributes);
+    let slots = slot_values(object)?;
+    if slots.is_empty() {
+        return Ok(attributes);
+    }
+    let attributes = attributes.unwrap_or_else(|| py.None().into_bound(py));
+    Ok(Some(
+        PyTuple::new(py, [attributes, slots.into_any()])?.into_any(),
+    ))
+}
+
+/// The values of the `__slots__` of the class of `object` that are set, by their names
+/// (`copyreg._slotnames`), which the state of the pickle of a plain object pairs with its
+/// `__dict__`.
+pub(crate) fn slot_values<'py>(object: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyDict>> {
+    let py = object.py();
     let slots = PyDict::new(py);
     let names = py
         .import("copyreg")?
@@ -146,13 +161,7 @@ pub(crate) fn plain_object_state<'py>(
             slots.set_item(name, value)?;
         }
     }
-    if slots.is_empty() {
-        return Ok(attributes);
-    }
-    let attributes = attributes.unwrap_or_else(|| py.None().into_bound(py));
-    Ok(Some(
-        PyTuple::new(py, [attributes, slots.into_any()])?.into_any(),
-    ))
+    Ok(slots)
 }
 
 /// The reduce of `object`, of a native class of no state of its own, as `object.__reduce_ex__`

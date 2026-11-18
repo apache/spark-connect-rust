@@ -2,14 +2,15 @@
 """The drop-in's types and Columns as official PySpark 4.3.0's, without a server: the JSON type
 strings of `_parse_datatype_json_value`, the types that official PySpark pickled, the abstract
 classes of the types (`DataType`, `AtomicType`, ...) as types of their own, and the errors of them
-in the types of UDTFs, Java UDFs, tables and `createDataFrame`, the pickle of a
-CalendarIntervalType, the parameters of the types as attributes, the parameters of the methods of
-the types, the origins of the expressions that Column methods send, the names of `Column.alias`
-and `Column.name`, and the user-set attributes of a Column's copies. The expected values are
-official PySpark's, of the same calls."""
+in the types of UDTFs, Java UDFs, tables and `createDataFrame`, the Python subclasses of the
+concrete types, the metadata of fields, the pickle of a CalendarIntervalType, the parameters of the
+types as attributes, the parameters of the methods of the types, the origins of the expressions
+that Column methods send, the names of `Column.alias` and `Column.name`, and the user-set
+attributes of a Column's copies. The expected values are official PySpark's, of the same calls."""
 
 import base64
 import copy
+import copyreg
 import datetime
 import inspect
 import json
@@ -795,6 +796,39 @@ def test_create_dataframe_of_a_type_of_its_class_only_is_pysparks(schema, shown,
             assert (relation.schema, relation.HasField("data")) == (json_text, False), key
 
 
+def test_create_dataframe_of_no_rows_sends_the_json_of_its_schema_object_as_pysparks():
+    # As official PySpark's createDataFrame of data of no rows, which sends the `json()` of the
+    # schema object, an atomic one as it is: of a type of a Python subclass, of its methods, which
+    # the server fails to parse (`"subinteger"`), and of the metadata dict of a field, of an int
+    # of more than 64 bits as it is.
+    import pandas as pd
+
+    class SubIntegerType(T.IntegerType):
+        pass
+
+    class SchemaType(T.StructType):
+        pass
+
+    def struct(metadata, type_name, struct_name="struct"):
+        return (f'{{"fields":[{{"metadata":{metadata},"name":"a","nullable":true,'
+                f'"type":"{type_name}"}}],"type":"{struct_name}"}}')
+
+    cases = [
+        (SubIntegerType(), '"subinteger"'),
+        (T.StructType([T.StructField("a", SubIntegerType())]), struct("{}", "subinteger")),
+        (SchemaType([T.StructField("a", T.IntegerType())]), struct("{}", "integer", "schema")),
+        (T.StructType([T.StructField("a", T.IntegerType(), True, {"k": 10**30})]),
+         struct('{"k":1000000000000000000000000000000}', "integer")),
+    ]
+    with mock_connect_session() as (spark, service):
+        for schema, sent in cases:
+            for data in ([], (), pd.DataFrame({"a": []})):
+                spark.createDataFrame(data, schema).explain()
+                request = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+                relation = request.explain.plan.root.local_relation
+                assert (relation.schema, relation.HasField("data")) == (sent, False), data
+
+
 def test_create_dataframe_of_rows_of_no_length_checks_the_schema_as_pysparks():
     # As official PySpark, whose conversion of local rows takes the rows of an iterator apart
     # first, and then checks the schema as of a list: a type of no proto nested in it raises
@@ -974,14 +1008,422 @@ def test_python_subclasses_of_the_abstract_types_are_made_as_pysparks():
     assert (Q.typeName(), Q().simpleString(), Q().json()) == ("", "", '""')
     assert repr(R()) == "R()" and vars(S(1)) == {"x": 1}
     assert S(1) == S(1) and S(1) != S(2) and S(1) != T.NumericType()
-    # A native constructor returns an object that exists, or makes one of the class it is called
-    # for, so a Python subclass of IntegralType cannot have the one instance of its own that
-    # PySpark's DataTypeSingleton keeps of each class: it cannot be instantiated.
+    # A Python subclass of IntegralType has the one instance of its own that PySpark's
+    # DataTypeSingleton keeps of each class, and takes no arguments.
     class MyIntegral(T.IntegralType):
         pass
 
-    with pytest.raises(TypeError, match=r"^cannot create 'MyIntegral' instances$"):
-        MyIntegral()
+    assert MyIntegral() is MyIntegral() and MyIntegral() is not T.IntegralType()
+    assert (repr(MyIntegral()), MyIntegral.typeName(), MyIntegral().json()) == (
+        "MyIntegral()", "myinte", '"myinte"'
+    )
+    assert MyIntegral() != T.IntegralType() and T.IntegralType() != MyIntegral()
+    with pytest.raises(TypeError) as e:
+        MyIntegral(1)
+    assert str(e.value) == (
+        "DataTypeSingleton.__call__() takes 1 positional argument but 2 were given"
+    )
+
+
+# PySpark's subclass `class Sub<name>(<name>)` of each concrete type, made of the arguments (of
+# the expressions of the strings): its repr, `typeName()`, `simpleString()` and `json()`, the name
+# that a tree string writes of it, and whether it is of PySpark's `DataTypeSingleton`.
+CONCRETE_SUBCLASSES = [
+    ("NullType", (), "SubNullType()", "void", "void", '"void"', "void", True),
+    ("BooleanType", (), "SubBooleanType()", "subboolean", "subboolean", '"subboolean"',
+     "subboolean", True),
+    ("ByteType", (), "SubByteType()", "subbyte", "tinyint", '"subbyte"', "subbyte", True),
+    ("ShortType", (), "SubShortType()", "subshort", "smallint", '"subshort"', "subshort", True),
+    ("IntegerType", (), "SubIntegerType()", "subinteger", "int", '"subinteger"', "subinteger",
+     True),
+    ("LongType", (), "SubLongType()", "sublong", "bigint", '"sublong"', "sublong", True),
+    ("FloatType", (), "SubFloatType()", "subfloat", "subfloat", '"subfloat"', "subfloat", True),
+    ("DoubleType", (), "SubDoubleType()", "subdouble", "subdouble", '"subdouble"', "subdouble",
+     True),
+    ("BinaryType", (), "SubBinaryType()", "subbinary", "subbinary", '"subbinary"', "subbinary",
+     True),
+    ("DateType", (), "SubDateType()", "subdate", "subdate", '"subdate"', "subdate", True),
+    ("TimestampType", (), "SubTimestampType()", "subtimestamp", "subtimestamp",
+     '"subtimestamp"', "subtimestamp", True),
+    ("TimestampNTZType", (), "SubTimestampNTZType()", "timestamp_ntz", "timestamp_ntz",
+     '"timestamp_ntz"', "timestamp_ntz", True),
+    ("CalendarIntervalType", (), "SubCalendarIntervalType()", "interval", "interval",
+     '"interval"', "interval", True),
+    ("VariantType", (), "SubVariantType()", "subvariant", "subvariant", '"subvariant"',
+     "subvariant", False),
+    ("StringType", ("'UTF8_LCASE'",), "StringType('UTF8_LCASE')", "substring",
+     "string collate UTF8_LCASE", '"string collate UTF8_LCASE"', "substring", False),
+    ("CharType", (5,), "CharType(5)", "subchar", "char(5)", '"char(5)"', "char(5)", False),
+    ("VarcharType", (5,), "VarcharType(5)", "subvarchar", "varchar(5)", '"varchar(5)"',
+     "varchar(5)", False),
+    ("TimeType", (3,), "TimeType(3)", "subtime", "time(3)", '"time(3)"', "time(3)", False),
+    ("DecimalType", (10, 2), "DecimalType(10,2)", "subdecimal", "decimal(10,2)",
+     '"decimal(10,2)"', "decimal(10,2)", False),
+    ("DayTimeIntervalType", (1, 2), "SubDayTimeIntervalType(1, 2)", "subdaytimeinterval",
+     "interval hour to minute", '"interval hour to minute"', "interval hour to minute", False),
+    ("YearMonthIntervalType", (0, 0), "SubYearMonthIntervalType(0, 0)", "subyearmonthinterval",
+     "interval year", '"interval year"', "interval year", False),
+    ("GeometryType", (4326,), "GeometryType(4326)", "subgeometry", "geometry(4326)",
+     '"geometry(OGC:CRS84)"', "subgeometry", False),
+    ("GeographyType", (4326,), "GeographyType(4326)", "subgeography", "geography(4326)",
+     '"geography(OGC:CRS84, SPHERICAL)"', "subgeography", False),
+    ("ArrayType", ("IntegerType()", False), "ArrayType(IntegerType(), False)", "subarray",
+     "array<int>", '{"containsNull":false,"elementType":"integer","type":"subarray"}', "subarray",
+     False),
+    ("MapType", ("StringType()", "IntegerType()", False),
+     "MapType(StringType(), IntegerType(), False)", "submap", "map<string,int>",
+     '{"keyType":"string","type":"submap","valueContainsNull":false,"valueType":"integer"}',
+     "submap", False),
+    ("StructType", ("[StructField('a', IntegerType())]",),
+     "StructType([StructField('a', IntegerType(), True)])", "substruct", "struct<a:int>",
+     '{"fields":[{"metadata":{},"name":"a","nullable":true,"type":"integer"}],'
+     '"type":"substruct"}', "substruct", False),
+    ("StructField", ("'a'", "IntegerType()", False), "StructField('a', IntegerType(), False)",
+     None, "a:int", '{"metadata":{},"name":"a","nullable":false,"type":"integer"}', None, False),
+]
+
+
+@pytest.mark.parametrize(
+    "name, args, shown, type_name, simple, json_text, tree, singleton",
+    CONCRETE_SUBCLASSES,
+    ids=[case[0] for case in CONCRETE_SUBCLASSES],
+)
+def test_python_subclasses_of_the_concrete_types_are_pysparks(
+    name, args, shown, type_name, simple, json_text, tree, singleton
+):
+    # PySpark's types are plain classes, which a user subclasses: the methods of a class call the
+    # methods of the object, so the `typeName()` of a subclass is the name of the subclass, of
+    # which `simpleString()` and `jsonValue()` are where the class has none of its own, and the
+    # `type` of the JSON of an array, a map and a struct; the repr of a type that names its class
+    # names the subclass. A type of a subclass equals only a type of its class (or of a subclass
+    # of it), of the same `__dict__`, and `==` calls the `__eq__` of the subclass first, so a type
+    # of the base class and one of the subclass are not equal in either order. A subclass of a
+    # singleton type is of PySpark's `DataTypeSingleton` too, of one instance of its own.
+    base = getattr(T, name)
+    sub = type("Sub" + name, (base,), {})
+    made = [eval(arg, vars(T)) if isinstance(arg, str) else arg for arg in args]
+    t, again, of_base = sub(*made), sub(*made), base(*made)
+    assert type(t) is sub and isinstance(t, base) and isinstance(t, T.DataType)
+    assert not isinstance(of_base, sub) and issubclass(sub, base)
+    assert (repr(t), str(t), t.simpleString(), t.json()) == (shown, shown, simple, json_text)
+    assert json.dumps(t.jsonValue(), separators=(",", ":"), sort_keys=True) == json_text
+    if type_name is not None:
+        assert (t.typeName(), sub.typeName()) == (type_name, type_name)
+    assert t == again and not (t != again) and hash(t) == hash(again) == hash(shown)
+    assert t != of_base and of_base != t and not (t == of_base) and not (of_base == t)
+    assert (again is t) is singleton
+    if singleton:
+        assert sub() is not base()
+        with pytest.raises(TypeError) as e:
+            sub(1)
+        assert str(e.value) == "DataTypeSingleton.__call__() takes 1 positional argument but 2 " \
+                               "were given"
+    for copied in (copy.copy(t), copy.deepcopy(t)):
+        assert type(copied) is sub and copied == t and (copied is t) is singleton
+    if tree is None:
+        return
+    # Nested in another type, it is the object that the type holds, which names it, writes it
+    # and compares it of its own methods.
+    struct = T.StructType([T.StructField("f", t)])
+    assert struct.fields[0].dataType is t and T.ArrayType(t).elementType is t
+    assert struct.treeString().splitlines()[1] == f" |-- f: {tree} (nullable = true)"
+    assert struct.simpleString() == f"struct<f:{simple}>"
+    # Of a collation, the JSON of a field holds the base class, as PySpark's `removeCollations`.
+    written = "string" if name == "StringType" else t.jsonValue()
+    assert json.loads(struct.json())["fields"][0]["type"] == written
+    assert T.ArrayType(t).simpleString() == f"array<{simple}>"
+    assert repr(T.MapType(T.StringType(), t)) == f"MapType(StringType(), {shown}, True)"
+    assert T.ArrayType(t) == T.ArrayType(again) and T.ArrayType(t) != T.ArrayType(of_base)
+    assert struct != T.StructType([T.StructField("f", of_base)])
+    nullable = T.StructType([T.StructField("f", t, False)]).toNullable().fields[0].dataType
+    assert (nullable is t) is not isinstance(t, (T.ArrayType, T.MapType, T.StructType))
+
+
+class _Money(T.DecimalType):
+    """A decimal of a currency, a subclass of PySpark's plain class."""
+
+    kind = "money"
+
+    def __init__(self, currency, precision=12, scale=2):
+        super().__init__(precision, scale)
+        self.currency = currency
+
+    def describe(self):
+        return f"{self.currency}:{self.simpleString()}"
+
+
+class _Tag(T.IntegerType):
+    pass
+
+
+class _Names(T.StructType):
+    def __init__(self, *names):
+        super().__init__([T.StructField(name, T.StringType()) for name in names])
+
+
+class _Slotted(T.StringType):
+    __slots__ = ("tag",)
+
+
+# Official PySpark 4.3.0's pickles of `_Money("EUR")`, of `_Tag()` and of a `_Slotted("UTF8_LCASE")`
+# of the slot `tag` "x", of their classes of this module, at the protocols 2 and 5.
+PYSPARKS_SUBCLASS_PICKLES = {
+    ("money", 2): b"\x80\x02ctest_dropin_types_columns_offline\n_Money\nq\x00)\x81q\x01}q\x02(X"
+                  b"\t\x00\x00\x00precisionq\x03K\x0cX\x05\x00\x00\x00scaleq\x04K\x02X\x10\x00"
+                  b"\x00\x00hasPrecisionInfoq\x05\x88X\x08\x00\x00\x00currencyq\x06X\x03\x00\x00"
+                  b"\x00EURq\x07ub.",
+    ("money", 5): b"\x80\x05\x95u\x00\x00\x00\x00\x00\x00\x00\x8c!test_dropin_types_columns_"
+                  b"offline\x94\x8c\x06_Money\x94\x93\x94)\x81\x94}\x94(\x8c\tprecision\x94K"
+                  b"\x0c\x8c\x05scale\x94K\x02\x8c\x10hasPrecisionInfo\x94\x88\x8c\x08currency"
+                  b"\x94\x8c\x03EUR\x94ub.",
+    ("tag", 2): b"\x80\x02ctest_dropin_types_columns_offline\n_Tag\nq\x00)\x81q\x01.",
+    ("tag", 5): b"\x80\x05\x951\x00\x00\x00\x00\x00\x00\x00\x8c!test_dropin_types_columns_offline"
+                b"\x94\x8c\x04_Tag\x94\x93\x94)\x81\x94.",
+    ("slotted", 2): b"\x80\x02ctest_dropin_types_columns_offline\n_Slotted\nq\x00)\x81q\x01}q\x02X"
+                    b"\t\x00\x00\x00collationq\x03X\n\x00\x00\x00UTF8_LCASEq\x04s}q\x05X\x03"
+                    b"\x00\x00\x00tagq\x06X\x01\x00\x00\x00xq\x07s\x86q\x08b.",
+    ("slotted", 5): b"\x80\x05\x95a\x00\x00\x00\x00\x00\x00\x00\x8c!test_dropin_types_columns_"
+                    b"offline\x94\x8c\x08_Slotted\x94\x93\x94)\x81\x94}\x94\x8c\tcollation\x94"
+                    b"\x8c\nUTF8_LCASE\x94s}\x94\x8c\x03tag\x94\x8c\x01x\x94s\x86\x94b.",
+}
+
+
+def test_python_subclasses_of_the_types_initialize_and_pickle_as_pysparks():
+    # A subclass's `__init__` takes arguments of its own, which the class's `__new__` takes as
+    # `object.__new__` does, and passes the parameters to the class's `__init__`; its class
+    # attributes, methods and instance attributes are its own. A type of a subclass pickles at
+    # every protocol from 2 as PySpark's plain class: of `copyreg.__newobj__(cls)` and of the
+    # `__dict__` of PySpark's type, its parameters and the attributes that a user set, byte for
+    # byte, so each client loads the other's, and copies of it keep its class and attributes.
+    money = _Money("EUR")
+    assert (repr(money), money.kind, money.describe(), money.currency) == (
+        "DecimalType(12,2)", "money", "EUR:decimal(12,2)", "EUR"
+    )
+    assert _Money(currency="USD", scale=4) == _Money("USD", 12, 4) != _Money("USD")
+    assert money == _Money("EUR") and money != _Money("USD") and money != T.DecimalType(12, 2)
+    assert hash(money) == hash(T.DecimalType(12, 2))
+    # The parameters are of the class, as for its own types, not of the `__dict__`.
+    assert vars(money) == {"currency": "EUR"}
+    state = {"precision": 12, "scale": 2, "hasPrecisionInfo": True, "currency": "EUR"}
+    assert money.__reduce_ex__(2) == (copyreg.__newobj__, (_Money,), state, None, None)
+    slotted = _Slotted("UTF8_LCASE")
+    slotted.tag = "x"
+    for (name, protocol), pickled in PYSPARKS_SUBCLASS_PICKLES.items():
+        t = {"money": money, "tag": _Tag(), "slotted": slotted}[name]
+        assert pickle.dumps(t, protocol=protocol) == pickled
+        assert type(pickle.loads(pickled)) is type(t) and pickle.loads(pickled) == t
+    # The slots of a subclass of `__slots__` are of the state of its pickles and copies.
+    for loaded in (pickle.loads(pickle.dumps(slotted)), copy.copy(slotted), copy.deepcopy(slotted)):
+        assert (type(loaded), loaded.tag, loaded.collation) == (_Slotted, "x", "UTF8_LCASE")
+    for protocol in range(6):
+        loaded = pickle.loads(pickle.dumps(money, protocol=protocol))
+        assert type(loaded) is _Money and loaded == money and vars(loaded) == vars(money)
+    for copied in (copy.copy(money), copy.deepcopy(money)):
+        assert type(copied) is _Money and copied == money and copied.currency == "EUR"
+    # A struct pickles its `fields`, `names` and `_needConversion`, and an array its element of
+    # its own class.
+    names = _Names("a", "b")
+    assert names.names == ["a", "b"] and names.add("c", T.LongType()) is names
+    assert names.fieldNames() == ["a", "b", "c"]
+    for loaded in (pickle.loads(pickle.dumps(names)), copy.deepcopy(names)):
+        assert type(loaded) is _Names and loaded == names and loaded.names == ["a", "b", "c"]
+    assert copy.copy(names).fields is names.fields
+    array = pickle.loads(pickle.dumps(T.ArrayType(_Money("USD"), False)))
+    assert type(array.elementType) is _Money and array.elementType.currency == "USD"
+    # A singleton type of a subclass is the one instance of its class, which `__new__` gives, so
+    # its copies and pickles are that instance too, where PySpark's make another object.
+    assert pickle.loads(pickle.dumps(_Tag())) is _Tag() and copy.deepcopy(_Tag()) is _Tag()
+
+
+def test_python_subclasses_that_do_not_initialize_their_class_have_its_defaults():
+    # PySpark's subclass whose `__init__` does not call the `__init__` of its class has none of
+    # its parameters, and raises the AttributeError of each where it reads it. The drop-in's
+    # type is of the parameters of the native state, of the class's `cls.__new__(cls)`, which
+    # pickle makes too, until they are set. Singletons have no parameters.
+    class Unset(T.StringType):
+        def __init__(self, x):
+            self.x = x
+
+    class Array(T.ArrayType):
+        def __init__(self):
+            self.elementType = T.LongType()
+
+    assert (repr(Unset(1)), Unset(1).collation, vars(Unset(1))) == ("StringType()",
+                                                                     "UTF8_BINARY", {"x": 1})
+    assert Unset(1) == Unset(1) and Unset(1) != Unset(2)
+    assert Array() == Array() and repr(Array()) == "ArrayType(LongType(), True)"
+
+    class Counted(T.IntegerType):
+        made = 0
+
+        def __init__(self):
+            Counted.made += 1
+
+    # The instance is the class's one, and Python calls its `__init__` at each call, where
+    # PySpark's metaclass calls it on the first one.
+    assert Counted() is Counted() and Counted.made == 2
+
+
+def test_python_subclasses_of_two_branches_of_the_type_classes_raise():
+    # PySpark's plain classes make a class of two types of other branches of their hierarchy. The
+    # native state of a type is of one class and the classes it extends, so such a class raises
+    # the TypeError that CPython raises of bases of conflicting layouts; the classes of one branch
+    # make a class, and `__init_subclass__` takes no keyword arguments, as `object`'s.
+    for bases in [
+        (T.StringType, T.IntegerType),
+        (T.ArrayType, T.MapType),
+        (T.IntegralType, T.StringType),
+    ]:
+        with pytest.raises(TypeError) as e:
+            type("Both", bases, {})
+        assert str(e.value) == "multiple bases have instance lay-out conflict"
+    integers = type("Integers", (T.IntegerType, T.NumericType), {})
+    assert integers() is integers() and repr(integers()) == "Integers()"
+
+    # A class whose `__init_subclass__` does not call that of DataType is made, and its
+    # constructor raises.
+    class Quiet(T.StringType):
+        def __init_subclass__(cls, **kwargs):
+            pass
+
+    for bases in [(T.IntegralType, Quiet), (Quiet, T.IntegerType)]:
+        with pytest.raises(TypeError) as e:
+            type("Both", bases, {})()
+        assert str(e.value) == "multiple bases have instance lay-out conflict"
+    with pytest.raises(TypeError) as e:
+        type("Keyed", (T.StringType,), {}, key=1)
+    assert str(e.value) == "Keyed.__init_subclass__() takes no keyword arguments"
+
+
+def test_python_subclasses_nested_in_types_run_their_methods_as_pysparks():
+    # PySpark's array, map and struct call the methods of the type objects that they hold, and a
+    # struct the methods of its fields, so the overrides of a subclass are of their JSON, simple
+    # string, repr, tree string and conversions.
+    class Commented(T.StructField):
+        def jsonValue(self):
+            value = super().jsonValue()
+            value["metadata"] = {"comment": "c"}
+            return value
+
+        def simpleString(self):
+            return "commented"
+
+    class Tagged(T.IntegerType):
+        @classmethod
+        def typeName(cls):
+            return "tagged"
+
+    class Plain(T.IntegerType):
+        def simpleString(self):
+            return "plain"
+
+        def jsonValue(self):
+            return "long"
+
+        def __repr__(self):
+            return "Plain!"
+
+    class Tens(T.IntegerType):
+        def needConversion(self):
+            return True
+
+        def toInternal(self, obj):
+            return None if obj is None else obj * 10
+
+        def fromInternal(self, obj):
+            return None if obj is None else obj // 10
+
+    struct = T.StructType([
+        Commented("a", T.LongType()),
+        T.StructField("b", Tagged()),
+        T.StructField("c", T.ArrayType(Plain())),
+    ])
+    assert json.loads(struct.json())["fields"] == [
+        {"metadata": {"comment": "c"}, "name": "a", "nullable": True, "type": "long"},
+        {"metadata": {}, "name": "b", "nullable": True, "type": "tagged"},
+        {"metadata": {}, "name": "c", "nullable": True,
+         "type": {"containsNull": True, "elementType": "long", "type": "array"}},
+    ]
+    assert struct.simpleString() == "struct<commented,b:int,c:array<plain>>"
+    assert repr(struct) == (
+        "StructType([StructField('a', LongType(), True), StructField('b', Tagged(), True), "
+        "StructField('c', ArrayType(Plain!, True), True)])"
+    )
+    assert struct.treeString() == (
+        "root\n |-- a: long (nullable = true)\n |-- b: tagged (nullable = true)\n"
+        " |-- c: array (nullable = true)\n |    |-- element: p (containsNull = true)\n"
+    )
+    assert (Tagged().simpleString(), Tagged().json(), hash(Plain())) == ("int", '"tagged"',
+                                                                         hash("Plain!"))
+    assert T.MapType(Plain(), Tagged()).json() == (
+        '{"keyType":"long","type":"map","valueContainsNull":true,"valueType":"tagged"}'
+    )
+    assert T.ArrayType(Tens()).needConversion() is True
+    assert T.ArrayType(Tens()).toInternal([1, 2]) == [10, 20]
+    assert T.MapType(T.StringType(), Tens()).toInternal({"x": 1}) == {"x": 10}
+    tens = T.StructType([T.StructField("a", Tens()), T.StructField("b", T.ArrayType(Tens()))])
+    assert tens._needConversion == [True, True] and tens.toInternal((3, [4])) == (30, [40])
+    assert tens.fromInternal((30, [40])) == T.Row(a=3, b=[4])
+    # In a field of collations, PySpark's JSON is of the base classes of its strings, arrays
+    # and maps (`removeCollations`), and of the other types of subclasses.
+    collated = T.StructField("f", T.MapType(T.StringType("UTF8_LCASE"), Tagged()))
+    assert collated.json() == (
+        '{"metadata":{"__COLLATIONS":{"f.key":"spark.UTF8_LCASE"}},"name":"f","nullable":true,'
+        '"type":{"keyType":"string","type":"map","valueContainsNull":true,"valueType":"tagged"}}'
+    )
+    sub_string = type("SubString", (T.StringType,), {})("UTF8_LCASE")
+    assert json.loads(T.StructField("f", T.ArrayType(sub_string)).json())["type"] == {
+        "containsNull": True, "elementType": "string", "type": "array"}
+
+
+@pytest.mark.parametrize(
+    "a, b, equal",
+    [
+        ({"k": 1}, {"k": 1.0}, True),
+        ({"k": True}, {"k": 1}, True),
+        ({"k": 2**64}, {"k": float(2**64)}, True),
+        ({"a": 1, "b": 2}, {"b": 2, "a": 1}, True),
+        ({"k": (1, 2)}, {"k": [1, 2]}, False),
+        ({1: "a"}, {"1": "a"}, False),
+        ({"k": 10**30}, {"k": 10**30 + 1}, False),
+        ({"k": 10**30}, {"k": 1e30}, False),
+        ({"k": -2**63 - 1}, {"k": float(-2**63 - 1)}, False),
+        ({"k": {"x": [1]}}, {"k": {"x": (1,)}}, False),
+    ],
+    ids=["int-float", "bool-int", "2**64-float", "order", "tuple-list", "int-key", "big-int",
+         "big-int-float", "below-i64", "nested-tuple"],
+)
+def test_field_metadata_compares_as_python_compares_the_dicts_as_pysparks(a, b, equal):
+    # PySpark's fields compare their `__dict__`s, so their metadata dicts compare as Python
+    # compares them, also in a struct and a nested type.
+    fa, fb = T.StructField("a", T.LongType(), True, a), T.StructField("a", T.LongType(), True, b)
+    assert (fa == fb, fa != fb) == (equal, not equal)
+    assert (T.StructType([fa]) == T.StructType([fb])) is equal
+    assert (T.ArrayType(T.StructType([fa])) == T.ArrayType(T.StructType([fb]))) is equal
+
+
+def test_field_metadata_is_written_of_its_dict_as_pysparks():
+    # PySpark's `jsonValue` holds the metadata dict of the field, which `json()` writes with
+    # `json.dumps`: an int of any size as it is, and a float as Python writes it.
+    for metadata, text in [
+        ({"k": 10**30}, '{"k":1000000000000000000000000000000}'),
+        ({"k": -2**63 - 1}, '{"k":-9223372036854775809}'),
+        ({"k": [1e16, {"x": 1e-7}]}, '{"k":[1e+16,{"x":1e-07}]}'),
+        ({"k": (1, 2)}, '{"k":[1,2]}'),
+        ({1: "a"}, '{"1":"a"}'),
+    ]:
+        field = T.StructField("a", T.LongType(), True, metadata)
+        assert field.jsonValue()["metadata"] is field.metadata
+        sent = f'{{"metadata":{text},"name":"a","nullable":true,"type":"long"}}'
+        assert field.json() == sent
+        assert T.StructType([field]).json() == f'{{"fields":[{sent}],"type":"struct"}}'
+        assert T.ArrayType(T.StructType([field])).json() == (
+            f'{{"containsNull":true,"elementType":{{"fields":[{sent}],"type":"struct"}},'
+            f'"type":"array"}}'
+        )
+    # A pickle of the type keeps the ints, of its JSON.
+    big = T.StructType([T.StructField("a", T.LongType(), True, {"k": 10**30})])
+    assert pickle.loads(pickle.dumps(big)).fields[0].metadata == {"k": 10**30}
 
 
 def test_types_of_required_parameters_are_made_as_pysparks():
@@ -1018,6 +1460,13 @@ def test_types_of_required_parameters_are_made_as_pysparks():
         (T.VarcharType, [("length", empty)]),
         (T.GeometryType, [("srid", empty)]),
         (T.GeographyType, [("srid", empty)]),
+        # And so are the classes of parameters of defaults, whose `__init__` sets them.
+        (T.StringType, [("collation", "UTF8_BINARY")]),
+        (T.DecimalType, [("precision", 10), ("scale", 0)]),
+        (T.TimeType, [("precision", 6)]),
+        (T.DayTimeIntervalType, [("startField", None), ("endField", None)]),
+        (T.YearMonthIntervalType, [("startField", None), ("endField", None)]),
+        (T.StructType, [("fields", None)]),
     ]:
         assert type(cls.__new__(cls)) is cls
         signature = inspect.signature(cls).parameters.values()
@@ -1027,6 +1476,21 @@ def test_types_of_required_parameters_are_made_as_pysparks():
     field.__init__("b", T.CharType(3), False, {"k": "v"})
     assert array == T.ArrayType(T.LongType(), False)
     assert field == T.StructField("b", T.CharType(3), False, {"k": "v"})
+    string, decimal, struct = T.StringType(), T.DecimalType(), T.StructType()
+    string.__init__("UTF8_LCASE")
+    decimal.__init__(5, scale=2)
+    struct.__init__([field])
+    assert (string, decimal) == (T.StringType("UTF8_LCASE"), T.DecimalType(5, 2))
+    assert struct == T.StructType([field]) and struct.names == ["b"]
+    for make, message in [
+        (lambda: T.DecimalType(foo=1), "DecimalType.__init__() got an unexpected keyword argument "
+                                       "'foo'"),
+        (lambda: T.StructType(fields=1, names=2), "StructType.__init__() got an unexpected "
+                                                  "keyword argument 'names'"),
+    ]:
+        with pytest.raises(TypeError) as e:
+            make()
+        assert str(e.value) == message
 
 
 def test_the_parameters_of_the_methods_of_the_types_are_pysparks():

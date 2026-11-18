@@ -6802,6 +6802,37 @@ def test_udf_and_udtf_pickle_as_pyspark_connect_classes():
     assert (Echo.name, Echo._name, vars(Echo)["name"]) == ("renamed", "Echo", "renamed")
 
 
+def test_udf_return_types_of_python_subclasses_pickle_of_their_class_as_pyspark(mock_connect):
+    # As PySpark's, the command of a UDF pickles its return type object, which the Python worker
+    # of the server makes again, of its class and its `__dict__`: so the worker calls the
+    # `toInternal` of a Python subclass, which keeps the attributes of its `__init__`. The proto of
+    # the type is that of its class.
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.proto import base_pb2
+
+    class Suffixed(T.StringType):
+        def __init__(self, suffix):
+            super().__init__()
+            self.suffix = suffix
+
+        def needConversion(self):
+            return True
+
+        def toInternal(self, obj):
+            return None if obj is None else obj + self.suffix
+
+    spark, service = mock_connect
+    spark.range(1).select(F.udf(lambda x: "a", Suffixed("!"), useArrow=False)("id")).collect()
+    request = base_pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    udf = request.plan.root.project.expressions[0].common_inline_user_defined_function
+    func, return_type = CloudPickleSerializer().loads(udf.python_udf.command)
+    assert type(return_type).__name__ == "Suffixed" and type(return_type).__bases__ == (
+        T.StringType,)
+    assert (return_type.suffix, return_type.toInternal("a"), func(1)) == ("!", "a!", "a")
+    assert udf.python_udf.output_type.WhichOneof("kind") == "string"
+
+
 def test_udtf_call_without_session_raises():
     # As PySpark's, udtf() without a session is not Arrow-optimized, and the call raises the
     # error of SparkSession.active(). In a new interpreter, which has no active session.
@@ -28823,7 +28854,8 @@ def test_apply_in_pandas_with_state_sends_its_relation_as_pyspark(mock_connect):
 
     spark, service = mock_connect
     output = T.StructType([T.StructField("id", T.LongType()), T.StructField("c", T.LongType())])
-    state = T.StructType([T.StructField("c", T.LongType())])
+    # A schema of a Python subclass is sent of its methods, as PySpark sends its `json()`.
+    state = type("StateType", (T.StructType,), {})([T.StructField("c", T.LongType())])
     spark.range(3).groupBy("id").applyInPandasWithState(
         lambda key, frames, s: frames, output, state, "update", "NoTimeout").collect()
     # plan=3 -> root=1 -> apply_in_pandas_with_state=34: func=3, output_schema=4,
@@ -28832,7 +28864,7 @@ def test_apply_in_pandas_with_state_sends_its_relation_as_pyspark(mock_connect):
     assert 34 in root, sorted(root)
     apply = parse_message(root[34][0])
     assert json.loads(apply[4][0]) == output.jsonValue()
-    assert json.loads(apply[5][0]) == state.jsonValue()
+    assert json.loads(apply[5][0]) == state.jsonValue() and state.jsonValue()["type"] == "state"
     assert (apply[6][0], apply[7][0]) == (b"update", b"NoTimeout")
     # CommonInlineUserDefinedFunction.python_udf=4 -> PythonUDF.eval_type=2.
     assert parse_message(parse_message(apply[3][0])[4][0])[2][0] == 208
@@ -28986,11 +29018,20 @@ def test_reader_schema_is_sent_as_pyspark_sends_it(mock_connect, read):
 
     spark, service = mock_connect
     struct = T.StructType([T.StructField("a", T.LongType(), True, {"comment": "key"})])
-    # pyspark sends a StructType as its JSON and a string as is, for the server to parse.
+
+    class SchemaType(T.StructType):
+        pass
+
+    # pyspark sends a StructType as its `json()` and a string as is, for the server to parse: of
+    # a Python subclass, of its methods, and of the metadata dict, which holds an int of more
+    # than 64 bits as it is.
     for schema, sent in [
         (struct, '{"fields":[{"metadata":{"comment":"key"},"name":"a","nullable":true,'
                  '"type":"long"}],"type":"struct"}'),
         ("a long COMMENT 'key'", "a long COMMENT 'key'"),
+        (SchemaType([T.StructField("a", T.LongType(), True, {"k": 10**30})]),
+         '{"fields":[{"metadata":{"k":1000000000000000000000000000000},"name":"a",'
+         '"nullable":true,"type":"long"}],"type":"schema"}'),
     ]:
         read(spark, schema).columns
         assert _sent_read_schema(service.analyze_requests[-1]) == sent

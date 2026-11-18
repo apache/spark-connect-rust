@@ -16,19 +16,18 @@ use crate::errors::ResultExt;
 use crate::interrupt::interruptible;
 use crate::options::DefaultedOption;
 
-/// A schema of `applyInPandasWithState` as PySpark sends it: a `StructType` as its JSON, and
-/// anything else as it is, which protobuf converts as a str when the plan is built. The `Err` is
-/// the error of a value that it does not take, which the plan raises then (see
-/// [`crate::dataframe::unbuildable_str_error`]).
+/// A schema of `applyInPandasWithState` as PySpark sends it: a `StructType` as its `json()`, of
+/// the methods of a Python subclass, and anything else as it is, which protobuf converts as a
+/// str when the plan is built. The `Err` is the error of a value that it does not take, which the
+/// plan raises then (see [`crate::dataframe::unbuildable_str_error`]).
 fn sent_schema(
     py: Python<'_>,
     schema: &Bound<'_, PyAny>,
 ) -> PyResult<Result<String, spark_connect_core::error::SparkError>> {
-    if let Ok(st) = schema.extract::<PyRef<'_, crate::types::PyStructType>>() {
-        return Ok(Ok(spark_connect::types::DataType::Struct {
-            fields: st.current_fields(py)?,
-        }
-        .json()));
+    if schema.is_instance_of::<crate::types::PyStructType>() {
+        return Ok(Ok(schema
+            .call_method0(pyo3::intern!(py, "json"))?
+            .extract()?));
     }
     if let Some(error) = crate::dataframe::unbuildable_str_error(schema)? {
         return Ok(Err(error));
