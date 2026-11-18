@@ -1610,7 +1610,11 @@ instance are the one instance too, where PySpark's `copy.copy`, `copy.deepcopy` 
 another object of the class, as the note of its `DataTypeSingleton` says.
 
 The pickle of a `TableArg`, of `DataFrame.asTable()`, raises a `TypeError`, where PySpark's
-pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's.
+pickles; `copy.copy` and `copy.deepcopy` copy it as PySpark's. Its `_subquery_expr` is an
+expression of `pyspark.sql.connect.expressions`, as a Column's `_expr` is, of PySpark's `to_plan`
+and `repr`, which is made at each access as a property of the native class: `vars()` of the table
+argument does not show it and it cannot be set, where PySpark's is an instance attribute, a
+`SubqueryExpression` with the fields of the subquery. `_is_partitioned()` is PySpark's.
 
 The `__repr__` of a Column of a subquery names its plan by its plan ID,
 `SubqueryExpression(plan=<plan 2>, type=scalar)`, where PySpark's shows the repr of its plan
@@ -1730,14 +1734,15 @@ first, so the error of a plan that fails to build comes first.
 
 The commands that PySpark sends when they are called set their names as protobuf converts them,
 at the call: `registerJavaFunction` and `registerJavaUDAF` (the name, then the class), the
-`register` of `spark.udf` of a UDF and of `spark.udtf`, `interruptTag` and `interruptOperation`
-take bytes of UTF-8, and raise protobuf's `TypeError` "bad argument type for built-in operation"
-of another value; `interruptTag(None)` and `interruptOperation(None)` raise the `AssertionError` of
-PySpark's request. The `register` of a plain function names the function of its UDF first, so a
-name that is not a str raises the `TypeError` of `__name__`, as PySpark's. A function registered
-of the name None is registered as `fun_` and a random hex, as PySpark's client does, and `register`
-returns its UDF. `SparkSession.builder.master` of Spark Connect takes any value and does nothing,
-as PySpark Connect's.
+`register` of `spark.udf` of a UDF and of `spark.udtf`, the `name()` of the class of
+`spark.dataSource.register`, `interruptTag` and `interruptOperation` take bytes of UTF-8, and
+raise protobuf's `TypeError` "bad argument type for built-in operation" of another value;
+`interruptTag(None)` and `interruptOperation(None)` raise the `AssertionError` of PySpark's
+request. The `register` of a plain function names the function of its UDF first, so a name that
+is not a str raises the `TypeError` of `__name__`, as PySpark's. A function registered of the name
+None is registered as `fun_` and a random hex, as PySpark's client does, and `register` returns
+its UDF. `SparkSession.builder.master` of Spark Connect takes any value and does nothing, as
+PySpark Connect's.
 
 So it is for the other values that a plan sets as they are given, which protobuf converts when it
 builds the plan: a string field takes bytes of UTF-8, such as `alias(b"q")`, and refuses another
@@ -1804,17 +1809,23 @@ of `CloudPickleSerializer.dumps`, or `UDTF_SERIALIZATION_ERROR` of a UDTF, and n
 the call that applies it does not fail. The functions are pickled in the order in which PySpark
 builds the plan, the initial state of `transformWithState` before its function and the arguments of
 a UDTF before its handler, and the first error of the build, of a pickling or of a value that the
-plan does not take, such as a str above, is raised. `spark.udf.register` and `spark.udtf.register`
-are commands, which pickle the function when they are called, as PySpark's do. A copy of a Column, a
-DataFrame, grouped data or a table argument holds the functions, which the requests of the copy
-pickle, as PySpark's: `copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo`
-of the call, so a function, a lambda or a closure is the function itself, and a callable object, a
-bound method or a `functools.partial` is a copy, which the copies of one call share, as the two
-Columns of a UDF of `copy.deepcopy([c1, c2])` do. A request warns once of a window of no partitions,
-as PySpark's, though the drop-in builds the plan of a request twice when it has such functions, as
-it pickles them between the two builds: so where a function that does not pickle comes before such a
-window in the build, the drop-in warns of the window before it raises the error of the pickling,
-where PySpark raises it without the warning.
+plan does not take, such as a str above, is raised. The return type of a UDTF is converted after
+its arguments and before its handler is pickled, as PySpark's `PythonUDTF.to_plan` converts it with
+`pyspark_types_to_proto_types`: a value that is neither a DataType nor a str, such as 5, is kept
+by the UDTF as it is, and each request of a call of it raises `UNSUPPORTED_OPERATION` of
+`data type 5`, of the str of the value when the request is built, or the error of that str; so does
+a type that has no proto, such as `AtomicType()`. `spark.udf.register` and `spark.udtf.register`
+are commands, which pickle the function when they are called, as PySpark's do; `spark.udtf.register`
+sets the name and converts the return type first. A copy of a Column, a DataFrame, grouped data or a
+table argument holds the functions, which the requests of the copy pickle, as PySpark's:
+`copy.copy` shares them, and `copy.deepcopy` deep-copies each with the `memo` of the call, so a
+function, a lambda or a closure is the function itself, and a callable object, a bound method or a
+`functools.partial` is a copy, which the copies of one call share, as the two Columns of a UDF of
+`copy.deepcopy([c1, c2])` do. A request warns once of a window of no partitions, as PySpark's,
+though the drop-in builds the plan of a request twice when it has such functions, as it pickles
+them between the two builds: so where a function that does not pickle comes before such a window
+in the build, the drop-in warns of the window before it raises the error of the pickling, where
+PySpark raises it without the warning.
 
 A pickled Column or DataFrame, and a deep copy of a DataFrame into another session, whose session
 copies to another one (of a `memo` that maps it, or another active session of its ID), carry the

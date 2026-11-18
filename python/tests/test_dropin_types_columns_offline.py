@@ -567,6 +567,35 @@ def test_types_of_the_abstract_types_pickle_as_pysparks(made, pickled):
     assert reduced is type(made)
 
 
+def test_pyspark_types_to_proto_types_refuses_values_that_are_not_types_as_pysparks():
+    # As official PySpark's `pyspark_types_to_proto_types`, which converts a DataType only:
+    # another value, a DDL string too, raises UNSUPPORTED_OPERATION of `f"data type {value}"`, so a
+    # value whose str fails raises the error of its str. It sets the string of an UnparsedDataType
+    # as protobuf converts it: bytes of UTF-8 too, and protobuf's TypeError of another value.
+    from pyspark.sql.connect.types import UnparsedDataType, pyspark_types_to_proto_types
+
+    class Unshown:
+        def __str__(self):
+            raise KeyError("no str")
+
+    for value, operation in [
+        (5, "data type 5"),
+        ("int", "data type int"),
+        (b"int", "data type b'int'"),
+        (None, "data type None"),
+    ]:
+        with pytest.raises(PySparkValueError) as e:
+            pyspark_types_to_proto_types(value)
+        assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert e.value.getMessageParameters() == {"operation": operation}
+    with pytest.raises(KeyError, match="no str"):
+        pyspark_types_to_proto_types(Unshown())
+    unparsed = pyspark_types_to_proto_types(UnparsedDataType(b"x int")).unparsed
+    assert unparsed.data_type_string == "x int"
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        pyspark_types_to_proto_types(UnparsedDataType(5))
+
+
 def test_the_abstract_types_have_no_proto_nor_arrow_type_as_pysparks():
     # PySpark's `pyspark_types_to_proto_types` has no proto of a type of its class only, of which
     # it raises UNSUPPORTED_OPERATION, also in a struct, an array or a map. `cast` and `try_cast`

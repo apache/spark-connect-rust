@@ -24,7 +24,7 @@ v4.3.0."""
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from pyspark.errors import PySparkAssertionError
+from pyspark.errors import PySparkAssertionError, PySparkValueError
 from pyspark.sql.types import ArrayType, DataType, NumericType, StructType
 
 if TYPE_CHECKING:
@@ -105,10 +105,18 @@ class UnparsedDataType(DataType):
 
 
 def pyspark_types_to_proto_types(data_type: DataType) -> "pb2.DataType":
-    """The ``spark.connect.DataType`` of ``data_type``, as the client sends the type."""
+    """The ``spark.connect.DataType`` of ``data_type``, as the client sends the type. As PySpark's,
+    a value that is not a DataType, such as an int or a DDL string, raises
+    ``UNSUPPORTED_OPERATION`` of ``f"data type {data_type}"``, and so does a type that has no
+    proto, such as ``AtomicType()``."""
     import pyspark.sql.connect.proto as pb2
     from pyspark._pyspark import _data_type_proto
 
+    if not isinstance(data_type, DataType):
+        raise PySparkValueError(
+            errorClass="UNSUPPORTED_OPERATION",
+            messageParameters={"operation": f"data type {data_type}"},
+        )
     return pb2.DataType.FromString(_data_type_proto(data_type))
 
 

@@ -66,8 +66,9 @@ impl TableArg {
         TableArg { subquery }
     }
 
-    /// Check if partitioning has been applied.
-    fn is_partitioned(&self) -> bool {
+    /// Whether partitioning has been applied, by [`TableArg::partition_by`] or
+    /// [`TableArg::with_single_partition`], as PySpark's `TableArg._is_partitioned`.
+    pub fn is_partitioned(&self) -> bool {
         !self.subquery.partition_spec.is_empty() || self.is_single_partition()
     }
 

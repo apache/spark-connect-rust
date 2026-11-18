@@ -4403,6 +4403,85 @@ def test_udtf_handlers_are_pickled_when_plans_are_built_as_pyspark(mock_connect,
         file_obj.close()
 
 
+def test_udtf_return_types_are_converted_when_plans_are_built_as_pyspark(mock_connect):
+    # As PySpark Connect's UserDefinedTableFunction, which keeps a return type that is neither a
+    # DataType nor a str as it is, and its PythonUDTF.to_plan, which converts the type with
+    # pyspark_types_to_proto_types when it builds the plan: the call gives a DataFrame, and each
+    # request of it raises UNSUPPORTED_OPERATION of the str of the value as it is then, or the
+    # error of that str, after the errors of the arguments and of their UDFs and before the
+    # handler is pickled. The registration, a command, sets the name and then converts the type
+    # before it pickles the handler. The errors are those of official pyspark-client 4.3.0, and
+    # no request is sent.
+    import threading
+
+    from pyspark.errors import PySparkPicklingError, PySparkValueError
+    from pyspark.sql.functions import lit, udf, udtf
+
+    spark, service = mock_connect
+    lock = threading.Lock()
+
+    class Handler:
+        def eval(self, x):
+            yield (x,)
+
+    class Unpicklable:
+        def eval(self, x):
+            lock
+            yield (x,)
+
+    class Shown:
+        text = "shown"
+
+        def __str__(self):
+            return self.text
+
+    class Unshown:
+        def __str__(self):
+            raise KeyError("no str")
+
+    def unsupported(request, operation):
+        with pytest.raises(PySparkValueError) as error:
+            request()
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert error.value.getMessageParameters() == {"operation": operation}
+
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    assert udtf(Handler, returnType=5).returnType == 5
+    df = udtf(Handler, returnType=5)(lit(1))
+    for request in (lambda: df.schema, df.collect, lambda: df.columns):
+        unsupported(request, "data type 5")
+    for value in (b"x int", [1], True, 0):
+        unsupported(lambda: udtf(Handler, returnType=value)(lit(1)).schema, f"data type {value}")
+    shown = Shown()
+    df = udtf(Handler, returnType=shown)(lit(1))
+    shown.text = "later"
+    unsupported(lambda: df.schema, "data type later")
+    df = udtf(Handler, returnType=Unshown())(lit(1))
+    with pytest.raises(KeyError, match="no str"):
+        df.schema
+    df = udtf(Handler, returnType="x\ud800 int")(lit(1))
+    with pytest.raises(UnicodeEncodeError):
+        df.schema
+    with pytest.raises(UnicodeEncodeError):
+        udtf(Handler, returnType=5)("a\ud800").schema
+    with pytest.raises(pickle.PicklingError, match="^Could not serialize object: "):
+        udtf(Handler, returnType=5)(udf(lambda x: (lock, x)[1], T.IntegerType())(lit(1))).schema
+    for value, operation in (
+        (5, "data type 5"),
+        (T.AtomicType(), "data type AtomicType()"),
+        (T.StructType([T.StructField("a", T.AtomicType())]), "data type AtomicType()"),
+    ):
+        unsupported(lambda: udtf(Unpicklable, returnType=value)(lit(1)).schema, operation)
+        unsupported(lambda: spark.udtf.register("f", udtf(Unpicklable, returnType=value)), operation)
+    for name, raised in ((5, TypeError), ("f\ud800", UnicodeEncodeError), (b"\xff", UnicodeDecodeError)):
+        with pytest.raises(raised):
+            spark.udtf.register(name, udtf(Unpicklable, returnType=5))
+    with pytest.raises(PySparkPicklingError) as error:
+        spark.udtf.register("f", udtf(Unpicklable, returnType="x int"))
+    assert error.value.getCondition() == "UDTF_SERIALIZATION_ERROR"
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+
+
 def test_udtfs_are_created_as_pyspark(mock_connect):
     # As PySpark's _create_py_udtf and _create_pyarrow_udtf: a UDTF is not deterministic
     # unless asDeterministic() marks it so, in place; arrow_udtf() makes a PyArrow-native
@@ -5941,15 +6020,17 @@ def test_java_functions_are_registered_of_their_return_types_as_pyspark(mock_con
 def test_registrations_and_interrupts_take_their_names_as_protobuf_as_pyspark(mock_connect):
     # As PySpark's commands, which set their names in the string fields of their requests at the
     # call, as protobuf converts them: registerJavaFunction and registerJavaUDAF (the name, then
-    # the class), the register of spark.udf of a UDF and of spark.udtf, interruptTag and
-    # interruptOperation take bytes of UTF-8, and raise "bad argument type for built-in
-    # operation" of another value, before any request. A function registered of no name is
-    # registered as `fun_` and a random hex, as PySpark's client does, and the interrupts assert a
-    # tag or an ID that is not None. The UNSUPPORTED_OPERATION of a return type names its str as
-    # it is. (The register of a plain function names the function of its wrapper, so of a name
-    # that is not a str it raises that of `__name__`, as PySpark's.)
+    # the class), the register of spark.udf of a UDF and of spark.udtf, the `name()` of the class
+    # of spark.dataSource.register, interruptTag and interruptOperation take bytes of UTF-8, and
+    # raise "bad argument type for built-in operation" of another value, before any request. A
+    # function registered of no name is registered as `fun_` and a random hex, as PySpark's client
+    # does, and the interrupts assert a tag or an ID that is not None. The UNSUPPORTED_OPERATION
+    # of a return type names its str as it is. (The register of a plain function names the
+    # function of its wrapper, so of a name that is not a str it raises that of `__name__`, as
+    # PySpark's.)
     from pyspark.errors import PySparkValueError
     from pyspark.sql.connect.proto import base_pb2
+    from pyspark.sql.datasource import DataSource
     from pyspark.sql.functions import udf, udtf
 
     spark, service = mock_connect
@@ -5961,6 +6042,14 @@ def test_registrations_and_interrupts_take_their_names_as_protobuf_as_pyspark(mo
     class Table:
         def eval(self):
             yield (1,)
+
+    def source(source_name):
+        class Source(DataSource):
+            @classmethod
+            def name(cls):
+                return source_name
+
+        return Source
 
     spark.udf.registerJavaFunction(b"f", b"com.example.F")
     function = command().register_function
@@ -5976,6 +6065,8 @@ def test_registrations_and_interrupts_take_their_names_as_protobuf_as_pyspark(mo
     assert command().register_function.function_name == "h"
     assert spark.udtf.register(b"t", Table) is Table
     assert command().register_table_function.function_name == "t"
+    spark.dataSource.register(source(b"s"))
+    assert command().register_data_source.name == "s"
     spark.interruptOperation(b"y")
     # InterruptRequest.operation_id=6.
     assert parse_message(service.interrupt_requests[-1])[6] == [b"y"]
@@ -5987,11 +6078,17 @@ def test_registrations_and_interrupts_take_their_names_as_protobuf_as_pyspark(mo
         lambda: spark.udf.registerJavaUDAF(None, b"\xff"),
         lambda: spark.udf.register(5, function),
         lambda: spark.udtf.register(None, Table),
+        lambda: spark.dataSource.register(source(5)),
+        lambda: spark.dataSource.register(source(None)),
         lambda: spark.interruptTag(5),
         lambda: spark.interruptOperation(1.5),
     ):
         with pytest.raises(TypeError, match=bad_type):
             call()
+    with pytest.raises(UnicodeEncodeError):
+        spark.dataSource.register(source("s\ud800"))
+    with pytest.raises(UnicodeDecodeError):
+        spark.dataSource.register(source(b"\xff"))
     for call in (lambda: spark.interruptTag(None), lambda: spark.interruptOperation(None)):
         with pytest.raises(AssertionError) as error:
             call()
@@ -6001,9 +6098,13 @@ def test_registrations_and_interrupts_take_their_names_as_protobuf_as_pyspark(mo
         def __str__(self):
             return "lone\ud800"
 
-    with pytest.raises(PySparkValueError) as error:
-        spark.udf.registerJavaFunction("j", "C", Lone())
-    assert error.value.getMessageParameters() == {"operation": "data type lone\ud800"}
+    for register in (
+        lambda: spark.udf.registerJavaFunction("j", "C", Lone()),
+        lambda: spark.udtf.register("t", udtf(Table.func, returnType=Lone())),
+    ):
+        with pytest.raises(PySparkValueError) as error:
+            register()
+        assert error.value.getMessageParameters() == {"operation": "data type lone\ud800"}
     assert (len(service.execute_requests), len(service.interrupt_requests)) == requests
 
 
@@ -6582,10 +6683,13 @@ def test_udtf_construction():
 
     assert isinstance(Echo, UserDefinedTableFunction)
     assert Echo._name == "Echo"
-    # The attributes of PySpark Connect's UDTF, without the pickled handler or the Python version
-    # of the client, which it does not keep.
-    assert sorted(vars(Echo)) == ["_name", "deterministic", "evalType", "func", "returnType"]
+    # The attributes of PySpark Connect's UDTF, in the order in which its __init__ sets them,
+    # without the pickled handler or the Python version of the client, which it does not keep.
+    assert list(vars(Echo)) == ["func", "returnType", "_name", "evalType", "deterministic"]
     assert not hasattr(Echo, "command") and not hasattr(Echo, "python_ver")
+    # As PySpark's, whose returnType has no default.
+    with pytest.raises(TypeError, match=r"missing 1 required positional argument: 'returnType'"):
+        UserDefinedTableFunction(Echo.func)
 
 
 def test_udtf_register_sends_the_udtf_as_pyspark(mock_connect):

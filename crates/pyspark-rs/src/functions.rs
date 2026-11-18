@@ -120,8 +120,8 @@ fn udf_arguments(
 /// - session: the SparkSession the UDTF is evaluated against
 /// - name/return_type/eval_type/command/python_ver: as for `make_udf`
 ///   (eval_type ∈ {300 SQL_TABLE_UDF, 301 SQL_ARROW_TABLE_UDF, 302 SQL_ARROW_UDTF}); a function
-///   for `command` pickles the handler class each time a request builds the plan, as PySpark's
-///   `PythonUDTF.to_plan` does
+///   for `command` converts `return_type` and then pickles the handler class each time a request
+///   builds the plan, as PySpark's `PythonUDTF.to_plan` does (the shim's `_udtf_command`)
 /// - *args: Column arguments
 /// - deterministic: whether the UDTF is deterministic, which a PySpark UDTF is not unless
 ///   `asDeterministic()` makes it so
@@ -140,30 +140,34 @@ fn pyfunc_make_udtf(
     deterministic: bool,
     named_args: Vec<(Bound<'_, pyo3::types::PyString>, Bound<'_, PyAny>)>,
 ) -> PyResult<PyDataFrame> {
+    let py = session.py();
     let col_args = udf_arguments(args, named_args, true)?;
-    // Connect leaves DDL parsing and validation to the server. In particular,
-    // do not use py_to_data_type's eager DDL parser for string return types.
+    let command = crate::udf_command::UdfCommand::of(command);
     // As PySpark's `PythonUDTF.to_plan`, which converts the return type when it builds the plan,
-    // after the arguments: a type that `pyspark_types_to_proto_types` has no proto of, a
-    // `StructField` as a type or a type of its class only such as `AtomicType()`, also nested in
-    // the return type, fails each request of the DataFrame with its `UNSUPPORTED_OPERATION`.
+    // after the arguments and before it pickles the handler class (see `udtf_return_type`): a DDL
+    // string is left to the server to parse, and a type that does not convert, such as a value
+    // that is not a DataType or a type that `pyspark_types_to_proto_types` has no proto of, also
+    // nested, fails each request of the DataFrame with its error, and not the call. A command
+    // pickled at the build converts the type first, as it is then, so the pickling raises that
+    // error in PySpark's order, and the plan has no type in its place; the error of a command of
+    // bytes is recorded in the plan's arguments, after the errors of the arguments.
+    let at_build = matches!(command, crate::udf_command::UdfCommand::AtBuild(_));
     let mut plan_args = crate::plan_args::PlanArgs::new();
-    let rt = return_type
-        .map(|value| -> PyResult<spark_connect::types::DataType> {
-            if let Ok(ddl) = value.extract::<String>() {
-                return Ok(spark_connect::types::DataType::Unparsed {
-                    data_type_string: ddl,
-                });
-            }
-            let data_type = crate::types::py_to_data_type(value)?;
-            if let Some(error) = crate::types::unsendable_type_error(value, &data_type)? {
-                plan_args.record(error);
-            }
-            Ok(data_type)
-        })
-        .transpose()?;
+    let rt = match return_type.map(|value| (value, crate::types::udtf_return_type(value))) {
+        None => None,
+        Some((_, Ok(Some(data_type)))) => Some(data_type),
+        Some(_) if at_build => None,
+        Some((value, Ok(None))) => {
+            plan_args.raised(py, crate::types::not_a_type_error(value))?;
+            None
+        }
+        Some((_, Err(err))) => {
+            plan_args.raised(py, err)?;
+            None
+        }
+    };
     let tvf = session.session.tvf();
-    let df = match crate::udf_command::UdfCommand::of(command) {
+    let df = match command {
         crate::udf_command::UdfCommand::Pickled(bytes) => tvf.udtf(
             &name,
             col_args,

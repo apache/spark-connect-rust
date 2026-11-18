@@ -121,6 +121,28 @@ def test_table_arg_to_plan_is_its_subquery_expression_as_pyspark(spark):
     assert single.subquery_expression.table_arg_options.with_single_partition
 
 
+def test_table_arg_has_the_subquery_expression_and_partitioning_of_pyspark(spark):
+    # As PySpark Connect's TableArg: its _subquery_expr is the expression of its subquery, whose
+    # to_plan is the table argument's and whose repr is that of a SubqueryExpression (of the plan
+    # ID of its plan, see docs/compatibility.md), and _is_partitioned() says whether partitionBy
+    # or withSinglePartition made it, which orderBy keeps.
+    table = spark.range(1).asTable()
+    partitioned = table.partitionBy("id")
+    for arg in (table, partitioned, table.withSinglePartition().orderBy("id")):
+        assert arg._subquery_expr.to_plan(spark.client) == arg.to_plan(spark.client)
+    plan_id = table.to_plan(spark.client).subquery_expression.plan_id
+    assert repr(table._subquery_expr) == f"SubqueryExpression(plan=<plan {plan_id}>, type=table_arg)"
+    assert str(partitioned._subquery_expr) == (
+        f"SubqueryExpression(plan=<plan {plan_id}>, type=table_arg, partition_spec=[id])"
+    )
+    assert [arg._is_partitioned() for arg in (
+        table,
+        partitioned,
+        table.withSinglePartition(),
+        partitioned.orderBy("id"),
+    )] == [False, True, True, True]
+
+
 def test_table_arg_copy_keeps_user_attributes(spark):
     table = _table(spark)
     table.foo = [1, 2]

@@ -3298,16 +3298,8 @@ impl PySparkSession {
             Some(data_type) if data_type.is_instance_of::<crate::types::PyDataType>() => {
                 Some(crate::types::py_to_proto_data_type(data_type)?)
             }
-            Some(other) => {
-                // Of the str of the type as it is, a lone surrogate too, as PySpark formats it.
-                let operation = pyo3::types::PyString::new(py, "data type ").add(other.str()?)?;
-                return Err(crate::errors::raise_pyspark_of(
-                    py,
-                    "PySparkValueError",
-                    "UNSUPPORTED_OPERATION",
-                    &[("operation", &operation)],
-                ));
-            }
+            // Of the str of the type as it is, a lone surrogate too, as PySpark formats it.
+            Some(other) => return Err(crate::types::not_a_type_error(other)),
         };
         interruptible(py, &self.session, || {
             self.session
@@ -3353,7 +3345,9 @@ impl PySparkSession {
     /// Mirrors the reference `client.register_udtf`: the `CommonInlineUserDefinedTableFunction`
     /// of a `PythonUDTF` (cloudpickled handler class, return type and eval type) with NO
     /// arguments, sent as the `register_table_function` command. As for a UDTF call, a DDL
-    /// return type is left to the server to parse.
+    /// return type is left to the server to parse. `command` is the pickled handler class, or a
+    /// function of no arguments that pickles it, which is called after the name and the return
+    /// type are converted.
     #[pyo3(name = "_registerPythonUdtf", signature = (name, return_type, eval_type, command, python_ver, deterministic=false))]
     // SparkError is large, as the core crate allows for its API.
     #[allow(clippy::too_many_arguments, clippy::result_large_err)]
@@ -3363,23 +3357,28 @@ impl PySparkSession {
         name: &Bound<'_, PyAny>,
         return_type: Option<&Bound<'_, PyAny>>,
         eval_type: i32,
-        command: Vec<u8>,
+        command: &Bound<'_, PyAny>,
         python_ver: String,
         deterministic: bool,
     ) -> PyResult<()> {
         // As PySpark's `register_udtf`, which sets the name in the string field of its command
         // first, as protobuf converts it: bytes of UTF-8 too. Its `PythonUDTF.to_plan` converts the
-        // return type after it: a type that `pyspark_types_to_proto_types` has no proto of, also
-        // nested, raises its `UNSUPPORTED_OPERATION`.
+        // return type after it (see `udtf_return_type`), which raises the `UNSUPPORTED_OPERATION`
+        // of a value that is not a DataType and of a type that `pyspark_types_to_proto_types` has
+        // no proto of, also nested, and then pickles the handler class, whose error comes last.
         let name = crate::str_argument(name)?;
-        let return_type = return_type
-            .map(|value| match value.extract::<String>() {
-                Ok(ddl) => Ok(DataType::Unparsed {
-                    data_type_string: ddl,
-                }),
-                Err(_) => crate::types::py_to_proto_data_type(value),
-            })
-            .transpose()?;
+        let return_type = match return_type {
+            None => None,
+            Some(value) => Some(
+                crate::types::udtf_return_type(value)?
+                    .ok_or_else(|| crate::types::not_a_type_error(value))?,
+            ),
+        };
+        let command: Vec<u8> = if command.is_callable() {
+            command.call0()?.extract()?
+        } else {
+            command.extract()?
+        };
         interruptible(py, &self.session, || {
             self.session.register_table_function(
                 &name,
