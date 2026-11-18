@@ -988,6 +988,110 @@ def test_artifact_upload_retries_a_transient_failure_of_each_path(protocol, tmp_
         assert (state["upload_attempts"], state["uploads"]) == (3, 2)
 
 
+def test_artifact_upload_sends_each_path_before_it_parses_the_next(protocol, tmp_path):
+    # As SparkConnectClient.add_artifacts, which gives its ArtifactManager one path at a time, and
+    # so SparkSession.addArtifacts: a path is parsed and uploaded before the next one is parsed,
+    # so the error of a later path, of a missing file or of a format that the flags do not take,
+    # is raised once the paths before it are uploaded, which the server keeps, and the paths
+    # after it are not uploaded.
+    from pyspark.errors import PySparkRuntimeError
+
+    for name in ("first.py", "second.py", "third.py", "note.txt"):
+        (tmp_path / name).write_text("x = 1\n")
+    first, second, third, note = (
+        str(tmp_path / name) for name in ("first.py", "second.py", "third.py", "note.txt"))
+    missing = str(tmp_path / "missing.py")
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        with pytest.raises(FileNotFoundError):
+            spark.addArtifacts(first, missing, third, pyfile=True)
+        assert (sorted(state["cache"]), state["uploads"]) == (["pyfiles/first.py"], 1)
+        with pytest.raises(PySparkRuntimeError) as error:
+            spark.client.add_artifacts(second, note, pyfile=True, archive=False, file=False)
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert error.value.getMessageParameters() == {"operation": f"{note} file format"}
+        assert sorted(state["cache"]) == ["pyfiles/first.py", "pyfiles/second.py"]
+        with pytest.raises(FileNotFoundError):
+            spark.addArtifacts(missing, third, pyfile=True)
+        assert state["uploads"] == 2
+        spark.addArtifacts(third, note, file=True)
+        assert sorted(state["cache"]) == [
+            "files/note.txt", "files/third.py", "pyfiles/first.py", "pyfiles/second.py"]
+        assert state["uploads"] == 4
+
+
+def test_artifact_flags_are_any_objects_as_pyspark(protocol, tmp_path):
+    # As PySpark's SparkSession.addArtifacts (and addArtifact, the same method), which refuses its
+    # flags first with `sum([file, pyfile, archive]) > 1`, as Python adds and compares them, and
+    # SparkConnectClient.add_artifacts, which only tests their truth: an integer, a float or
+    # another object is a flag of its truth, a single flag of 2 is two, and a value that sum does
+    # not add raises its TypeError, also without a path, before anything is sent.
+    import inspect
+    import re
+
+    from pyspark.errors import PySparkValueError
+
+    names = ["a.txt", "b.txt", "c.txt", "d.txt", "m.py"]
+    for name in names:
+        (tmp_path / name).write_text("x = 1\n")
+    a, b, c, d, module = (str(tmp_path / name) for name in names)
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        signature = "(*path, pyfile=False, archive=False, file=False)"
+        assert str(inspect.signature(spark.addArtifacts)) == signature
+        assert str(inspect.signature(spark.addArtifact)) == signature
+        spark.addArtifacts(a, file=1)
+        spark.addArtifact(b, archive=0, file=1)
+        spark.addArtifacts(c, file=0.5)
+        spark.client.add_artifacts(d, pyfile=None, archive="", file=[1])
+        # The client does not check the flags: a path takes the first one that it matches.
+        spark.client.add_artifacts(module, pyfile=1, archive=1, file=0)
+        assert sorted(state["cache"]) == [
+            "files/a.txt", "files/b.txt", "files/c.txt", "files/d.txt", "pyfiles/m.py"]
+        uploads = state["uploads"]
+        for flags in [dict(pyfile=1, file=1), dict(pyfile=2), dict(archive=1.5)]:
+            with pytest.raises(PySparkValueError) as error:
+                spark.addArtifacts(module, **flags)
+            assert error.value.getCondition() == "INVALID_MULTIPLE_ARGUMENT_CONDITIONS"
+        for flags, operand in [
+            (dict(pyfile="yes"), "str"), (dict(pyfile=None), "NoneType"), (dict(file=[1]), "list")
+        ]:
+            message = f"unsupported operand type(s) for +: 'int' and '{operand}'"
+            with pytest.raises(TypeError, match=re.escape(message)):
+                spark.addArtifacts(module, **flags)
+        with pytest.raises(TypeError, match=re.escape("for +: 'int' and 'str'")):
+            spark.addArtifacts(pyfile="yes")
+        assert state["uploads"] == uploads
+
+
+def test_copy_from_local_to_fs_takes_a_path_like_local_path_as_pyspark(
+        protocol, tmp_path, monkeypatch):
+    # As PySpark's `_parse_forward_to_fs_artifacts`, of `Path(local_path).absolute()`: the local
+    # path of SparkSession.copyFromLocalToFs and of SparkConnectClient.copy_from_local_to_fs is a
+    # str or an os.PathLike, such as a pathlib.Path, also a relative one, whose file is uploaded
+    # under the destination, and another value raises the TypeError of Path. A destination that
+    # is not a str stays a TypeError, as the client of PySpark raises one.
+    local = tmp_path / "local.txt"
+    local.write_bytes(b"local artifact")
+    monkeypatch.chdir(tmp_path)
+    with _arrow_input_service(protocol, allow_file_artifacts=True) as (spark, state):
+        spark.copyFromLocalToFs(local, "/wire/a.txt")
+        spark.client.copy_from_local_to_fs(local, "/wire/b.txt")
+        spark.copyFromLocalToFs(Path("local.txt"), "/wire/c.txt")
+        assert state["cache"] == {
+            f"forward_to_fs/wire/{name}.txt": b"local artifact" for name in "abc"}
+        uploads = state["uploads"]
+        for value in (5, str(local).encode()):
+            with pytest.raises(TypeError) as expected:
+                Path(value)
+            with pytest.raises(TypeError) as error:
+                spark.copyFromLocalToFs(value, "/wire/d.txt")
+            assert str(error.value) == str(expected.value)
+        with pytest.raises(AssertionError, match="local path must be a file path."):
+            spark.copyFromLocalToFs(tmp_path / "missing.txt", "/wire/d.txt")
+        with pytest.raises(TypeError):
+            spark.client.copy_from_local_to_fs(local, Path("/wire/d.txt"))
+        assert state["uploads"] == uploads
+
+
 @pytest.mark.parametrize("cached", [False, True], ids=["inline", "cached"])
 @pytest.mark.parametrize("explicit", [False, True], ids=["inferred", "explicit"])
 def test_arrow_input_schema_handoff(protocol, cached, explicit):
