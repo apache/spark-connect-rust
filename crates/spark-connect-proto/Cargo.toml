@@ -15,6 +15,9 @@ workspace = true
 [lib]
 name = "spark_connect_proto"
 
+[features]
+server = []
+
 [dependencies]
 tonic.workspace = true
 tonic-prost.workspace = true

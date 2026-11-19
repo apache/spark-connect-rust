@@ -1,0 +1,100 @@
+#
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+#
+
+name: Server frontend CI
+
+on:
+  pull_request:
+    branches: [master, "branch-*"]
+    paths:
+      - ".github/workflows/server-frontend.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain*"
+      - "crates/spark-connect-server/**"
+      - "crates/spark-connect-proto/**"
+  push:
+    branches: [master, "branch-*"]
+    paths:
+      - ".github/workflows/server-frontend.yml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain*"
+      - "crates/spark-connect-server/**"
+      - "crates/spark-connect-proto/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_BUILD_JOBS: "2"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+  # Strict linting uses the pinned toolchain in lint.yml.
+  RUSTFLAGS: ""
+
+jobs:
+  frontend:
+    name: Frontend (Rust ${{ matrix.rust-version }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        rust-version: [stable, "1.88.0"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        # Use runner-provided rustup to keep actions limited to actions/*.
+        run: |
+          rustup toolchain install ${{ matrix.rust-version }} --profile minimal
+          rustup default ${{ matrix.rust-version }}
+
+      - name: Cache cargo and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-server-frontend-${{ matrix.rust-version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ runner.arch }}-cargo-server-frontend-${{ matrix.rust-version }}-
+
+      - name: Install protobuf compiler
+        # Ubuntu 24.04 provides protoc with proto3 optional support (3.15+).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+          protoc --version
+
+      - name: Test frontend
+        # Protocol and injected-engine tests use local fixtures without an execution backend.
+        run: cargo test --locked -p spark-connect-server
+
+      - name: Check protocol feature combinations
+        run: |
+          cargo check --locked -p apache-spark-connect-proto
+          cargo check --locked -p apache-spark-connect-proto --features server

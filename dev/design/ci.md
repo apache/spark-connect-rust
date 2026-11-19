@@ -16,13 +16,15 @@ The CI consists of these main workflows:
    and macOS universal2 wheels using the release recipe
 4. **Coverage** (`.github/workflows/coverage.yml`) - Rust and Python coverage, with regression
    floors
+5. **Experimental server frontend** (`.github/workflows/server-frontend.yml`) - Test the
+   optional Rust protocol frontend with stable Rust and MSRV 1.88
 
 The other workflows are `lint.yml` (rustfmt, clippy, rustdoc, ruff), `generated-drift.yml`,
 `vendor-drift.yml`, `docs.yml`, `pandas-parity.yml`, `pipelines-parity.yml` and `release.yml`.
 
 Most workflows run on pushes and pull requests targeting `master` and `branch-*`. Several also
-accept manual dispatch. `docs.yml` and `wheel-build-checks.yml` run only when files matching their
-path filters change. The release wheel build checks cover changes to packaged Python sources,
+accept manual dispatch. `docs.yml`, `wheel-build-checks.yml` and `server-frontend.yml` filter push
+and pull-request runs to matching paths. The release wheel build checks cover packaged Python sources,
 protocol definitions, dependencies and build configuration. `release.yml` runs on a schedule and on
 manual dispatch.
 
@@ -68,6 +70,18 @@ The same workflow has four more jobs:
   `RUSTFLAGS` cleared
 
 This job should always pass; failures indicate incomplete implementation or test regressions.
+
+## Experimental server frontend (`server-frontend.yml`)
+
+This focused workflow runs on frontend, protocol, workspace manifest,
+lockfile, Cargo configuration, toolchain and workflow changes. Each stable Rust and Rust
+1.88.0 job has a 45-minute limit, runs `cargo test --locked -p spark-connect-server`,
+and checks the protocol crate with its `server` feature both off and on.
+The existing workspace lint job covers the frontend with its pinned Rust toolchain;
+test jobs do not promote warnings from a floating or older compiler to errors.
+Ubuntu 24.04 supplies a protobuf compiler with
+proto3 optional support. Tests use injected engine fixtures and require no execution backend;
+they cover frontend protocol behavior rather than Spark execution compatibility.
 
 ## Python Connect Parity (`build_python_connect.yml`)
 

@@ -25,6 +25,7 @@ members = [
     "crates/spark-connect-build",
     "crates/pyspark-rs",
     "examples",
+    "crates/spark-connect-server",
 ]
 exclude = [
     "examples/wasm-udfs",
@@ -44,6 +45,8 @@ exclude = [
 # (so `cargo test --workspace` stays green without it). Build them explicitly with
 # `cargo build --manifest-path examples/wasm-udfs/Cargo.toml` (etc) in CI or when
 # the target is installed locally.
+# The experimental protocol frontend is opt-in; build or test it with
+# `-p spark-connect-server`. It is included in workspace lint checks.
 default-members = [
     "crates/spark-connect-proto",
     "crates/spark-connect-core",
@@ -87,11 +90,13 @@ should_implement_trait = "allow"
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+h2 = "0.4"
 prost = "0.14"
 prost-types = "0.14"
 
 # async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio-stream = "0.1"
 futures = "0.3"
 
 # Arrow (result decoding).
