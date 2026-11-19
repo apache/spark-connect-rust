@@ -761,9 +761,6 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   PySpark's is that of its Python function: None, or of a docstring that PySpark Connect's modules
   copy (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
   modules of `pyspark.sql` and `pyspark.errors` are PySpark's (see `docs/compatibility.md`).
-- **The docstrings of `fromInternal` and `needConversion` of `GeographyType` and `GeometryType`**
-  (intentional; the types are native). PySpark's spatial types define their own methods, of no
-  docstring; the drop-in's inherit those of `DataType`, of its docstrings.
 - **Modules of messages** (intentional). pyright warns that `pyspark.sql.connect.proto.base_pb2`
   and the other modules of messages, which the drop-in's protobuf runtime makes at run time, have
   a stub and no source (`reportMissingModuleSource`). The modules of `pyspark.sql.functions`,

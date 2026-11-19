@@ -6569,6 +6569,19 @@ impl PyGeometryType {
     fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyAny>) -> PyResult<()> {
         set_pickled_state(slf.as_any(), state, |key, _| Ok(key == "_crs"))
     }
+    // PySpark's `GeometryType` defines its own `needConversion` and `fromInternal`, of no docstring,
+    // which convert as those of `DataType` (see `_from_internal`): the class has them as PySpark's.
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        PyDataType::__obj_need_conversion(slf.cast::<PyDataType>()?)
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        PyDataType::__obj_from_internal(slf.cast::<PyDataType>()?, obj)
+    }
     // As PySpark's `GeometryType.toInternal(geometry)`: the dict of the SRID and the WKB of a
     // `Geometry` (see `_to_internal`).
     #[pyo3(name = "toInternal")]
@@ -6684,6 +6697,19 @@ impl PyGeographyType {
         set_pickled_state(slf.as_any(), state, |key, _| {
             Ok(matches!(key, "_crs" | "_alg"))
         })
+    }
+    // PySpark's `GeographyType` defines its own `needConversion` and `fromInternal`, of no docstring,
+    // which convert as those of `DataType` (see `_from_internal`): the class has them as PySpark's.
+    #[pyo3(name = "needConversion")]
+    fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        PyDataType::__obj_need_conversion(slf.cast::<PyDataType>()?)
+    }
+    #[pyo3(name = "fromInternal")]
+    fn __obj_from_internal<'py>(
+        slf: &Bound<'py, Self>,
+        obj: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        PyDataType::__obj_from_internal(slf.cast::<PyDataType>()?, obj)
     }
     // As PySpark's `GeographyType.toInternal(geography)`: the dict of the SRID and the WKB of a
     // `Geography` (see `_to_internal`).

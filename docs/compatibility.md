@@ -2105,8 +2105,7 @@ and the `PandasCogroupedOps`, the `MergeIntoWriter` and its clauses, the `Observ
 `StreamingQuery` and its manager), and the others, of the modules of `pyspark.sql.connect`. The
 native classes are built with them, of the source of PySpark at the tracked tag
 (`scripts/gen_connect_docstrings.py`), but for the `__init__` of a native class, the slot of
-CPython, whose docstring is CPython's, and for `fromInternal` and `needConversion` of the spatial
-types, which inherit those of `DataType` (see `dev/parity/known-differences.md`).
+CPython, whose docstring is CPython's (see `dev/parity/known-differences.md`).
 `tests/golden/runtime_docstrings.json` holds the digests of PySpark's, which a test compares with
 the drop-in's. The modules of the DataFrame, the Column, the window, the table argument, the session
 and its client, and of the functions are left out of it: not all of their docstrings are PySpark's

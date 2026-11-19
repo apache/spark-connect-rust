@@ -714,14 +714,6 @@ def test_the_connect_objects_have_the_docstrings_that_pyspark_connect_copies(
         assert ours.__doc__ == theirs.__doc__
 
 
-# The docstrings that are not PySpark's of what a docstring alone cannot change, by their keys of
-# tests/golden/runtime_docstrings.json, with the reason. PySpark's spatial types define their own
-# `fromInternal` and `needConversion`, of no docstring, which the drop-in's inherit of `DataType`.
-DOCSTRINGS_OF_OTHER_DEFINITIONS = {
-    f"pyspark.sql.types:{cls}.{member}": "the drop-in's class inherits the method of DataType"
-    for cls in ("GeographyType", "GeometryType")
-    for member in ("fromInternal", "needConversion")
-}
 # The modules of PySpark that the drop-in does not have (see dev/parity/known-differences.md).
 MODULES_OF_PYSPARK_ONLY = {
     "pyspark.sql.connect.local_server",
@@ -766,6 +758,23 @@ def test_the_docstrings_of_the_modules_are_pysparks():
             if rest.endswith(".__init__") and isinstance(found, types.WrapperDescriptorType):
                 continue
             compared += 1
-            if digest(found.__doc__) != expected and key not in DOCSTRINGS_OF_OTHER_DEFINITIONS:
+            if digest(found.__doc__) != expected:
                 differ.append(key)
     assert compared > 2500 and not differ, (compared, len(differ), differ[:20])
+
+
+def test_the_spatial_types_convert_of_their_own_methods_as_pysparks():
+    # As PySpark's GeographyType and GeometryType (types.py), which define their own
+    # needConversion and fromInternal, of no docstring: the Geography or the Geometry of a dict of
+    # its "srid" and "bytes", None of one without either, and the dict of toInternal back.
+    from pyspark.sql.types import Geography, GeographyType, Geometry, GeometryType
+
+    for cls, value in ((GeographyType, Geography), (GeometryType, Geometry)):
+        for member in ("needConversion", "fromInternal", "toInternal"):
+            assert member in vars(cls) and getattr(cls, member).__doc__ is None, (cls, member)
+        dt = cls(4326)
+        assert dt.needConversion() is True
+        made = dt.fromInternal({"srid": 4326, "bytes": b"\x01"})
+        assert type(made) is value and (made.srid, made.wkb) == (4326, b"\x01")
+        assert dt.fromInternal({"srid": 4326}) is None and dt.fromInternal(None) is None
+        assert dt.toInternal(made) == {"srid": 4326, "wkb": b"\x01"}
