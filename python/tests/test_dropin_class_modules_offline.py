@@ -960,37 +960,28 @@ def test_the_docstrings_of_the_modules_are_pysparks():
     # and of the members of the classes, which the native classes are built with (of
     # scripts/gen_connect_docstrings.py) and the Python ones have. The `__init__` of a native
     # class is CPython's slot, of CPython's docstring; a name that the drop-in does not have is not
-    # compared.
-    import importlib
+    # compared. The sweep imports every module, so it runs in a child interpreter: this process
+    # imports none of them, as a module that keeps the state of its import (the `sys.stdout` of
+    # the progress bar of pyspark.sql.connect.shell.progress) would keep that of this test.
     import json
-    import types
+    import subprocess
+    import sys
     from pathlib import Path
 
-    from _runtime_docstrings import digest, resolve
-
-    golden = json.loads(
-        (Path(__file__).resolve().parents[2] / "tests/golden/runtime_docstrings.json").read_text()
+    tests = Path(__file__).resolve().parent
+    golden_path = tests.parents[1] / "tests/golden/runtime_docstrings.json"
+    assert json.loads(golden_path.read_text())["pyspark"] == "4.3.0"
+    run = subprocess.run(
+        [sys.executable, str(tests / "_runtime_docstrings.py"), str(golden_path)],
+        capture_output=True,
+        text=True,
+        timeout=600,
     )
-    assert golden["pyspark"] == "4.3.0"
-    compared, differ = 0, []
-    for module, entries in golden["modules"].items():
-        try:
-            importlib.import_module(module)
-        except ImportError:
-            assert module in MODULES_OF_PYSPARK_ONLY, module
-            continue
-        for rest, expected in entries.items():
-            key = f"{module}:{rest}" if rest else module
-            try:
-                found = resolve(key)
-            except KeyError:
-                continue
-            if rest.endswith(".__init__") and isinstance(found, types.WrapperDescriptorType):
-                continue
-            compared += 1
-            if digest(found.__doc__) != expected:
-                differ.append(key)
-    assert compared > 2500 and not differ, (compared, len(differ), differ[:20])
+    assert run.returncode == 0, run.stderr
+    result = json.loads(run.stdout.strip().splitlines()[-1])
+    assert set(result["unimported"]) <= MODULES_OF_PYSPARK_ONLY, result["unimported"]
+    differ = result["differ"]
+    assert result["compared"] > 2500 and not differ, (result["compared"], len(differ), differ[:20])
 
 
 def test_the_spatial_types_convert_of_their_own_methods_as_pysparks():
