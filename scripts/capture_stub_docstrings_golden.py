@@ -41,7 +41,7 @@ SAMPLES = [
     "pyspark.sql.avro.functions:from_avro",
     "pyspark.sql.dataframe:DataFrame.select",
     "pyspark.sql.connect.session:SparkSession.builder",
-    "pyspark.sql.column:Column.cast",
+    "pyspark.sql.connect.column:Column.cast",
     "pyspark.ml.connect.classification:LogisticRegression",
     "pyspark.sql.connect.functions.builtin:col",
     "pyspark.ml.stat:Summarizer.mean",

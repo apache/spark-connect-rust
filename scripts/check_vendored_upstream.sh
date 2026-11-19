@@ -174,6 +174,11 @@ VENDORED_FILES=(
   "sql/pandas/group_ops.py"
   "sql/streaming/readwriter.py"
   "sql/streaming/query.py"
+  # PySpark's classic Column and TableArg, of which the native Connect classes are virtual
+  # subclasses (pyspark.sql._classic_bases, which the metaclass of TableValuedFunctionArgument,
+  # their base, makes them of).
+  "sql/column.py"
+  "sql/table_arg.py"
   # PySpark's pyspark.sql.utils, of the helpers and the decorators that its modules import: its
   # is_remote() is True of the remote-only pyspark.util, and its decorators run the functions and
   # the methods of the classes of pyspark.sql.connect, the drop-in's.

@@ -14942,7 +14942,10 @@ def test_connect_import_path_modules_as_pyspark(mock_connect):
             assert pickle.loads(pickle.dumps(function)) is function
     assert str(connect_avro.to_avro("a")) == str(avro.to_avro("a"))
     assert str(connect_protobuf.from_protobuf("a", "M")) == str(protobuf.from_protobuf("a", "M"))
-    assert importlib.import_module("pyspark.sql.connect.table_arg").TableArg is TableArg
+    # As PySpark Connect's: the TableArg of a DataFrame's asTable() is of the class of its module,
+    # a subclass of the classic TableArg, PySpark's (the drop-in's native one, a virtual one).
+    connect_table_arg = importlib.import_module("pyspark.sql.connect.table_arg").TableArg
+    assert connect_table_arg is not TableArg and issubclass(connect_table_arg, TableArg)
     typing_module = importlib.import_module("pyspark.sql.connect._typing")
     assert {"ColumnOrName", "DataTypeOrString", "LiteralType"} <= set(dir(typing_module))
 
@@ -15231,6 +15234,7 @@ import inspect  # noqa: E402
 import pyspark  # noqa: E402
 from pyspark.sql import Column as _Col
 from pyspark.sql import DataFrame as _DF
+from pyspark.sql.connect.column import Column as _ConnectCol  # noqa: E402
 from pyspark.sql.connect.dataframe import DataFrame as _ConnectDF  # noqa: E402
 from pyspark.sql.connect.session import SparkSession as _SS  # noqa: E402
 
@@ -16852,7 +16856,8 @@ def test_pandas_udf_eval_type_inferred_from_type_hints(mock_connect):
     [
         (_DF, "pyspark.sql.dataframe"),
         (_ConnectDF, "pyspark.sql.connect.dataframe"),
-        (_Col, "pyspark.sql.connect.column"),
+        (_Col, "pyspark.sql.column"),
+        (_ConnectCol, "pyspark.sql.connect.column"),
         (_SS, "pyspark.sql.connect.session"),
         (T.DataType, "pyspark.sql.types"),
         (T.IntegerType, "pyspark.sql.types"),

@@ -488,111 +488,11 @@ fn expression_list<'py>(
     pyo3::types::PyList::new(py, items)
 }
 
-/// Python wrapper for the Window static builder, `pyspark.sql.window.Window`. As PySpark's, it is
-/// subclassed by PySpark Connect's `pyspark.sql.connect.window.Window`, a class of its own, and is
-/// a plain class: its objects, and those of a subclass, construct as `object.__new__` makes
-/// PySpark's (see `reduce::check_plain_new`), take attributes and weak references, and pickle and
-/// copy as plain objects.
-#[pyclass(
-    name = "Window",
-    module = "pyspark.sql.window",
-    subclass,
-    weakref,
-    dict
-)]
-pub struct PyWindow;
-
-#[pymethods]
-impl PyWindow {
-    // As `object.__new__` of PySpark's class, of its signature `()`.
-    #[new]
-    #[classmethod]
-    #[pyo3(signature = (*args, **kwargs), text_signature = "()")]
-    fn new(
-        cls: &Bound<'_, pyo3::types::PyType>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
-    ) -> PyResult<Self> {
-        crate::reduce::check_plain_new(cls, args, kwargs)?;
-        Ok(PyWindow)
-    }
-
-    // The reduce of a plain object (see `reduce::plain_reduce`).
-    fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
-        crate::reduce::plain_reduce(slf.as_any())
-    }
-
-    /// The start at or below which `rowsBetween` and `rangeBetween` make a frame unbounded
-    /// preceding, as PySpark's `max(-sys.maxsize, JVM_LONG_MIN)`.
-    #[classattr]
-    fn _PRECEDING_THRESHOLD() -> i64 {
-        PRECEDING_THRESHOLD
-    }
-
-    /// The end at or above which `rowsBetween` and `rangeBetween` make a frame unbounded
-    /// following, as PySpark's `min(sys.maxsize, JVM_LONG_MAX)`.
-    #[classattr]
-    fn _FOLLOWING_THRESHOLD() -> i64 {
-        FOLLOWING_THRESHOLD
-    }
-
-    /// UNBOUNDED PRECEDING sentinel (matches pyspark's integer value).
-    #[classattr]
-    fn unboundedPreceding() -> i64 {
-        UNBOUNDED_PRECEDING
-    }
-
-    /// CURRENT ROW sentinel.
-    #[classattr]
-    fn currentRow() -> i64 {
-        0
-    }
-
-    /// UNBOUNDED FOLLOWING sentinel (matches pyspark's integer value).
-    #[classattr]
-    fn unboundedFollowing() -> i64 {
-        UNBOUNDED_FOLLOWING
-    }
-
-    /// Create a WindowSpec partitioned by the given columns.
-    #[pyo3(signature = (*cols))]
-    #[staticmethod]
-    fn partitionBy(cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let spec = WindowSpec::new().partition_by(to_partition_exprs(cols)?);
-        Ok(PyWindowSpec::new(spec))
-    }
-
-    /// Create a WindowSpec ordered by the given columns.
-    #[pyo3(signature = (*cols))]
-    #[staticmethod]
-    fn orderBy(cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
-        let spec = WindowSpec::new().order_by(to_sort_orders(cols)?);
-        Ok(PyWindowSpec::new(spec))
-    }
-
-    /// Create a WindowSpec with a ROWS frame between the given bounds.
-    #[staticmethod]
-    fn rowsBetween(
-        py: Python<'_>,
-        start: &Bound<'_, PyAny>,
-        end: &Bound<'_, PyAny>,
-    ) -> PyResult<PyWindowSpec> {
-        let (start, end) = frame_bounds(py, start, end, true)?;
-        Ok(PyWindowSpec::new(
-            WindowSpec::new().rows_between(start, end),
-        ))
-    }
-
-    /// Create a WindowSpec with a RANGE frame between the given bounds.
-    #[staticmethod]
-    fn rangeBetween(
-        py: Python<'_>,
-        start: &Bound<'_, PyAny>,
-        end: &Bound<'_, PyAny>,
-    ) -> PyResult<PyWindowSpec> {
-        let (start, end) = frame_bounds(py, start, end, false)?;
-        Ok(PyWindowSpec::new(
-            WindowSpec::new().range_between(start, end),
-        ))
-    }
+/// The window specification of no partitioning, ordering and frame, of which the static methods
+/// of `pyspark.sql.connect.window.Window` start, as PySpark Connect's `Window._spec`. The classic
+/// `pyspark.sql.window.Window` is PySpark's, whose static methods dispatch to those.
+#[pyfunction]
+#[pyo3(name = "_empty_window_spec")]
+pub(crate) fn empty_window_spec() -> PyWindowSpec {
+    PyWindowSpec::new(WindowSpec::new())
 }

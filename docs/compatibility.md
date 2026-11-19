@@ -2954,14 +2954,31 @@ the UDTFs above. Their constructors and methods are those of Spark Classic, as P
 `pyspark.sql.connect.readwriter.DataFrameReader(spark)` are PySpark Connect's.
 `Observation(...)` makes an Observation of `pyspark.sql.connect.observation`, which is not an
 instance of `pyspark.sql.Observation`, as PySpark's `__new__` makes one.
-`pyspark.sql.connect.window.Window` is a subclass of `pyspark.sql.window.Window`, as in PySpark.
-The classic `DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg` name
-PySpark Connect's classes, which in PySpark are their subclasses: `isinstance` is True in both, and
-the MRO of such an object is its native class and `object`. The concrete DataFrame and Column are
-not subclasses of the public `pyspark.sql.DataFrame` and `pyspark.sql.Column`: `isinstance` holds
-by registration, so the MRO of a DataFrame is its native class and `object`, and
-`pyspark.sql.Column` names the concrete class, where PySpark's is the abstract class of the
-concrete one of `pyspark.sql.connect.column`. The readers and writers of PySpark Connect are
+`pyspark.sql.connect.window.Window` is a subclass of `pyspark.sql.window.Window`, as in PySpark, of
+PySpark Connect's code.
+
+The classic `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `Window`, `WindowSpec`,
+`TableArg` and `TableValuedFunctionArgument` are PySpark's classes, of their modules and MROs
+(`pyspark.sql.column` and `pyspark.sql.table_arg` of Apache Spark as they are), which
+`pyspark.sql` names as PySpark's does. Their Connect classes, which the objects of a session are
+of, are native, and a native class cannot have a Python base, so they are their virtual
+subclasses, as the DataFrame is of the public `pyspark.sql.DataFrame`: `isinstance` and
+`issubclass` hold as in PySpark, while the MRO of such an object is its native class and
+`object`, where PySpark's has the classic class and its bases after its Connect class. The
+explicit calls of the classic methods dispatch as PySpark's (`Column.alias(col, "x")` runs the
+Connect class's, and of another object it raises `NOT_IMPLEMENTED`), the classic `Column(...)`
+and `WindowSpec(...)` raise the `ModuleNotFoundError` of `pyspark.sql.classic`, and the others
+construct and subclass as PySpark's plain classes do. A patch of a classic class or of
+`TableValuedFunctionArgument`, such as a method that a library sets on `pyspark.sql.Column`,
+reaches the objects of a session as it reaches PySpark's Connect objects, which inherit it: not
+where the Connect class has the name itself, nor where the objects set it on themselves (`_expr`
+of a Column, `df` of `na`) and the patch is not a data descriptor; deleting it gives the native
+class its own attribute back. What stays different: these classic classes are of an `ABCMeta`
+subclass, of an `_abc_impl` among their attributes, and a class that subclasses one of them is
+of `abc.ABCMeta`, where PySpark's are of `type`; and of a data descriptor without a setter
+patched over such an attribute of the objects, PySpark's `__init__` of a Connect object raises
+its `AttributeError`, where the drop-in's object reads the patch. The readers and writers of
+PySpark Connect are
 subclasses of the `OptionUtils` of `pyspark.sql.connect.readwriter`, a class of private methods
 only, of which the drop-in's native readers and writers are not: their MRO is their class and
 `object`, and `pyspark.sql.connect.readwriter` has no `OptionUtils`.
@@ -2973,11 +2990,7 @@ arguments
 (`SparkSession(connection=...)`, `Catalog(spark)`, `DataFrameReader(spark)`), also a subclass of an
 `__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
 session, which are the active session of its ID, as PySpark's);
-`SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the `Window` of `pyspark.sql.window`
-and of `pyspark.sql.connect.window`, of static methods and of PySpark's class attributes,
-`_PRECEDING_THRESHOLD` and `_FOLLOWING_THRESHOLD` among them, and the `_spec` of the Connect class,
-which a subclass has too: `Window()`, also of a subclass, makes an object of no state, as PySpark's,
-which takes attributes and weak references and pickles as a plain object; and the data types, from
+`SparkSession.Hook`, `StorageLevel` and `PythonEvalType`; and the data types, from
 `StringType` and `DecimalType` to `ArrayType`, `StructField` and `StructType` (see above). A
 session of a subclass is the session that its DataFrames, readers and catalogs give back, as in
 PySpark. The `__init__` of the class gives an object its session, as PySpark's `__init__` sets it:
@@ -2993,7 +3006,8 @@ pickle of PySpark, which makes an object of its class without arguments and then
 (and `_source_name`) of its state, which it sets as its setters do, a catalog of its
 `_sparkSession` and a registration of its `sparkSession`; and the drop-in's pickles of them load in
 PySpark, of their classes, as PySpark's own do: where the session of their ID is active.
-The other native classes cannot be subclassed
+The other native classes, of which the Connect `Column`, `DataFrameNaFunctions`,
+`DataFrameStatFunctions`, `WindowSpec` and `TableArg` are, cannot be subclassed
 (`TypeError: type 'Column' is not an acceptable base type`), and do not construct
 (`TypeError: cannot create '...' instances`): their objects are made of the state of the Rust core,
 a plan, an expression or a query, which the arguments of PySpark's constructors, the Python objects
@@ -3816,8 +3830,8 @@ module of PySpark's signatures, annotations and docstrings (`Summarizer.mean.__m
 the native methods, so `inspect` and `help` give PySpark's and a call binds as PySpark's does
 (`SummaryBuilder.summary() takes from 2 to 3 positional arguments but 4 were given`);
 `Summarizer._check_param` and `_get_single_metric` are PySpark's code over Spark Connect. The
-annotations name the drop-in's `Column`, the class of `pyspark.sql.column.Column`, which is
-`pyspark.sql.connect.column.Column`, and the classes are subclasses of the native classes, which
+annotations name PySpark's classic `Column` of `pyspark.sql.column`, as PySpark's do, of which the
+Columns of a session are instances, and the classes are subclasses of the native classes, which
 their MROs name after them (`ChiSquareTest`, `ChiSquareTest`, `object`), where PySpark's are plain
 classes.
 

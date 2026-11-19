@@ -3913,7 +3913,9 @@ def test_public_dataframe_attribute_dispatch_and_restore(ml_mock, monkeypatch):
     getattr_signature = inspect.signature(DataFrame.__getattr__)
     assert getattr_signature.parameters["name"].annotation is str
     assert getattr_signature.return_annotation is Column
-    assert Column is ConnectColumn
+    # As PySpark's: the classic Column, of the annotation, is not the Connect Column of the
+    # objects, a subclass of it (the drop-in's native one, a virtual one).
+    assert Column is not ConnectColumn and issubclass(ConnectColumn, Column)
     assert "__getattr__" not in vars(ConnectDataFrame)
     assert "__getattr__" in dir(DataFrame)
     assert "_get_column_by_attribute" in dir(ConnectDataFrame)

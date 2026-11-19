@@ -82,16 +82,10 @@ TYPE_ONLY = {
     ),
 }
 
-# The public members of the drop-in's classes that their stubs do not declare, with the reason:
-# the class of a classic import path is PySpark Connect's class, of a member that PySpark's
-# classic class does not have, which type checkers of pyspark-client do not see either.
-_CONNECT_CLASS = (
-    "the class of the classic import path is PySpark Connect's, whose member PySpark's classic "
-    "class, which type checkers see as with pyspark-client, does not have"
-)
-UNDECLARED_MEMBERS = {
-    "pyspark.sql.table_arg.TableArg.to_plan": _CONNECT_CLASS,
-}
+# The public members of the drop-in's classes that their stubs do not declare, with the reason,
+# which type checkers of pyspark-client do not see either. There are none: the classes of the
+# classic import paths are PySpark's (pyspark.sql._classic_bases).
+UNDECLARED_MEMBERS: dict = {}
 
 # Instance attributes that PySpark's classes assign in their methods and declare nowhere else,
 # with the types that mypy reveals of them with the official pyspark-client 4.3.0.

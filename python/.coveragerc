@@ -63,6 +63,8 @@ omit =
     */pyspark/sql/pandas/group_ops.py
     */pyspark/sql/streaming/readwriter.py
     */pyspark/sql/streaming/query.py
+    */pyspark/sql/column.py
+    */pyspark/sql/table_arg.py
     */pyspark/sql/utils.py
     */pyspark/serializers.py
     */pyspark/loose_version.py
