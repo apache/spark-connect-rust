@@ -19,7 +19,7 @@ name: Generated files drift
 
 # Guards the two files that scripts/gen_fn_dispatch.py generates
 # (crates/pyspark-rs/src/dispatch_generated.rs and
-# python/pyspark/sql/functions_generated.py): regenerates them in memory from
+# python/pyspark/sql/connect/functions/_generated.py): regenerates them in memory from
 # crates/spark-connect/src/functions.rs and the PySpark of the tracked Apache Spark
 # tag, and fails with a diff when a checked-in file differs. Catches hand edits to the
 # generated files, and generator or functions.rs changes that were not regenerated.

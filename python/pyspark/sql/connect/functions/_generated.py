@@ -6,10 +6,12 @@ function call has that implementation's signature and body, and the helpers belo
 PySpark Connect's, so it sends the arguments, the defaults and the errors that PySpark
 does. The other functions dispatch to the Rust core through _dispatch.
 
-Before loading this module, functions.py injects _create_wrapper, _dispatch, _UNSET,
-_wrap, _unwrap and _call_function, and lit, column and _invoke_function, which build a
-literal, a column reference and an UnresolvedFunction in the Rust core
-(_invoke_higher_order_function follows once defined). It copies the names of __all__.
+pyspark.sql.connect.functions.builtin runs this code in its own namespace, as PySpark
+Connect's functions are of its module: they call its _create_wrapper, _dispatch, _UNSET,
+_wrap, _unwrap and _call_function, and its lit, column, _invoke_function and
+_invoke_higher_order_function, which build a literal, a column reference, an
+UnresolvedFunction and a higher-order function in the Rust core. __all__ names the
+generated functions.
 """
 import decimal
 import random as py_random

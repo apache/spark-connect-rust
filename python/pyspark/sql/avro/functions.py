@@ -18,13 +18,13 @@
 
 from pyspark.errors import PySparkTypeError
 from pyspark.sql.column import Column
-from pyspark.sql.functions import (
+from pyspark.sql.connect.functions.builtin import (
     _call_function,
     _dict_to_options_column,
     _invoke_function,
     _to_col,
 )
-from pyspark.sql.functions import (
+from pyspark.sql.connect.functions.builtin import (
     lit as _lit,
 )
 

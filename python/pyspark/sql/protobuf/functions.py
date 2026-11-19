@@ -17,9 +17,8 @@
 """Protobuf functions, mirroring ``pyspark.sql.protobuf.functions``."""
 
 # As PySpark's `_to_col`, which raises NOT_EXPECTED_TYPE for a `data` that is not a Column or a str.
-from pyspark.sql.functions import _column_or_name as _to_col
-from pyspark.sql.functions import _dict_to_options_column, _invoke_function
-from pyspark.sql.functions import lit as _lit
+from pyspark.sql.connect.functions.builtin import _dict_to_options_column, _invoke_function, _to_col
+from pyspark.sql.connect.functions.builtin import lit as _lit
 
 
 def _descriptor_set(descFilePath, binaryDescriptorSet):
