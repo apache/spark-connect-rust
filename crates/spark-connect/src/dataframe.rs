@@ -208,12 +208,15 @@ enum RowSource {
     },
     /// Batches are fetched by a background task that keeps one batch buffered
     /// ahead, so the next server fetch overlaps with the caller consuming the
-    /// current batch's rows (`prefetchPartitions=True`).
+    /// current batch's rows (`prefetchPartitions=True`). The channel and the task are of the
+    /// runtime of the generation of the process that started them: in a child of a `fork()`,
+    /// those of the parent are left as they are when the iterator drops, rather than waking the
+    /// task of the parent's runtime (see `spark_connect_core::fork`).
     Prefetch {
-        rx: tokio::sync::mpsc::Receiver<Result<BatchRows>>,
+        rx: spark_connect_core::fork::ForkLocal<tokio::sync::mpsc::Receiver<Result<BatchRows>>>,
         /// The task, to raise its panic (of a progress handler, say) in the caller once its
         /// channel closes, as the on-demand source raises it, instead of ending early.
-        task: Option<tokio::task::JoinHandle<()>>,
+        task: Option<spark_connect_core::fork::ForkLocal<tokio::task::JoinHandle<()>>>,
         /// The execution, which the caller waits for while it waits for the task's batches.
         wait: InflightHandle,
     },
@@ -234,8 +237,8 @@ impl LocalRowIterator {
                 let wait = stream.inflight_handle();
                 let (rx, task) = spawn_prefetch(session, stream, Arc::clone(&schema), observations);
                 RowSource::Prefetch {
-                    rx,
-                    task: Some(task),
+                    rx: spark_connect_core::fork::ForkLocal::new(rx),
+                    task: Some(spark_connect_core::fork::ForkLocal::new(task)),
                     wait,
                 }
             }
@@ -355,8 +358,8 @@ impl LocalRowIterator {
                     // The channel closed: the task ended, or it panicked, which then drops its
                     // sender without an error. Raise the panic here, so the rows are not cut
                     // short silently.
-                    if let Some(task) = task.take() {
-                        if let Err(error) = block_on(task) {
+                    if let Some(mut task) = task.take() {
+                        if let Err(error) = block_on(&mut *task) {
                             if error.is_panic() {
                                 std::panic::resume_unwind(error.into_panic());
                             }
@@ -1267,7 +1270,7 @@ impl DataFrame {
     #[doc(hidden)]
     pub fn prepare_execution(&self) -> Result<PreparedExecution> {
         let request = self.build_execute_request()?;
-        block_on(self.session.client().read_plan_compression());
+        block_on(self.session.client().read_plan_compression())?;
         Ok(PreparedExecution {
             dataframe: self.clone(),
             request,

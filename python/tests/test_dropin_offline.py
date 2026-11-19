@@ -2754,6 +2754,35 @@ def test_query_context_loggers_log_the_grpc_error_of_the_call_as_pyspark():
     assert set(exception["stacktrace"][0]) == {"class", "method", "file", "line"}
     assert type(error.__context__).__name__ == "_MultiThreadedRendezvous"
     assert error.__suppress_context__
+    # Of no call of the transport, of the text of grpcio 1.85: the name of the code and the
+    # details as the debug string.
+    assert exception["msg"].endswith(
+        '\tdebug_error_string = "INTERNAL:[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"\n>'
+    )
+    # Of a call of the transport, grpcio's error of it, of its kind: `_InactiveRpcError` of a
+    # call of one response, such as AnalyzePlan.
+    text = (
+        "<_InactiveRpcError of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+        '\tdetails = "[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"\n'
+        '\tdebug_error_string = "INTERNAL:[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"\n>'
+    )
+    logger.addHandler(handler)
+    try:
+        error = _convert_server_error(
+            classes=["org.apache.spark.SparkArithmeticException", "java.lang.ArithmeticException"],
+            sql_state="22012",
+            error_class="DIVIDE_BY_ZERO", reason=None,
+            message="[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012",
+            message_parameters={"config": '"spark.sql.ansi.enabled"'}, stacktrace=None,
+            display_server_stacktrace=False, contexts=[context], grpc_status_code=13,
+            breaking_change_info=None, rpc_error=(False, text),
+        )
+    finally:
+        logger.removeHandler(handler)
+    exception = json.loads(stream.getvalue().strip().splitlines()[-1])["exception"]
+    assert (exception["class"], exception["msg"]) == ("_InactiveRpcError", text)
+    assert type(error.__context__).__name__ == "_InactiveRpcError"
+    assert str(error.__context__) == text
 
 
 def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
@@ -27769,9 +27798,9 @@ def test_channel_errors_are_logged_to_stderr_as_grpcio_logs_them(capfd, monkeypa
     # As grpcio, whose C core logs a proxy variable that is not an HTTP proxy as an error, on
     # stderr, for each channel that it makes, whatever its host, which is all that PySpark's
     # client shows of it: `E<month><day> <time> <thread> <file>:<line>] <message>`, of the Rust
-    # source of the call here, on the thread of the session. A session of newSession shares the
-    # connection of its session, which is not made again. A GRPC_VERBOSITY of NONE when the
-    # client is imported silences them, as grpcio reads it when it initializes.
+    # source of the call here, on the thread of the session. A session of newSession has a
+    # channel that reads the variable again, as PySpark's, which logs it again. A GRPC_VERBOSITY
+    # of NONE when the client is imported silences them, as grpcio reads it when it initializes.
     import subprocess
     import sys
     import threading
@@ -27790,7 +27819,7 @@ def test_channel_errors_are_logged_to_stderr_as_grpcio_logs_them(capfd, monkeypa
     )
     thread = threading.get_native_id()
     line = rf"E\d{{4}} \d\d:\d\d:\d\d\.\d{{6}} {thread:7d} proxy\.rs:\d+\] {re.escape(message)}\n"
-    assert re.fullmatch(line, logged), logged
+    assert re.fullmatch(line * 2, logged), logged
     spark.client.set_retry_policies([])
     spark.stop()
     silenced = subprocess.run(
@@ -27835,18 +27864,26 @@ def test_spent_retries_warn_where_pyspark_warns(caplog):
     # Of a RetryException past its elapsed time, then of a policy.
     retry_exception, policy = lines
 
-    def warned(call):
+    def warned(call, background=0):
+        # The warnings of `call`, and of the `background` requests that it sends in the
+        # background, which warn from another thread, as PySpark's release of a failed execution.
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             with pytest.raises(SparkConnectGrpcException):
                 call()
+            expected = len(caught) + background
+            deadline = time.monotonic() + 10
+            while len(caught) < expected and time.monotonic() < deadline:
+                time.sleep(0.02)
         return [(w.category, str(w.message), w.filename, w.lineno) for w in caught]
 
     spent = (UserWarning, message, retries.__file__, policy)
     spark = SparkSession.builder.remote("sc://localhost:1").create()
     quick = {"initial_backoff": 1, "max_backoff": 1, "jitter": 0}
     spark.client.set_retry_policies([DefaultPolicy(max_retries=1, **quick)])
-    assert warned(lambda: spark.range(1).count()) == [spent, spent]
+    # The lookup of the plan compression, the execution, and the release of the execution that
+    # failed, in the background.
+    assert warned(lambda: spark.range(1).count(), background=1) == [spent, spent, spent]
     assert warned(lambda: spark.conf.get("spark.x")) == [spent]
     assert warned(lambda: spark.range(1).schema) == [spent]
     assert warned(spark.interruptAll) == [spent]
@@ -27871,6 +27908,8 @@ def test_spent_retries_warn_where_pyspark_warns(caplog):
             spark.sql("select 1")
         assert type(error.value) is UserWarning and str(error.value) == message
         assert error.value._operation_id
+        # The release of the failed execution, whose warning raises on the delivery thread.
+        time.sleep(0.2)
         with pytest.raises(UserWarning) as error:
             spark.conf.get("spark.x")
         assert not hasattr(error.value, "_operation_id")
@@ -27894,7 +27933,6 @@ def test_client_retry_policies_retry_the_rpcs_of_the_transport_as_pyspark(mock_c
     # RetryPolicy retries none, and nothing retries without a policy. The Rust transport retries
     # with the parameters of the policies, which get_retry_policies gives back.
     pytest.importorskip("grpc_status")
-    from pyspark.errors import PySparkNotImplementedError
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException
     from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
 
@@ -27928,23 +27966,1486 @@ def test_client_retry_policies_retry_the_rpcs_of_the_transport_as_pyspark(mock_c
     spark.range(1).collect()
     assert time.monotonic() - started >= 0.3
 
-    # The transport classifies the failures as DefaultPolicy does and waits whole milliseconds:
-    # another classification, or a fractional backoff, is NOT_IMPLEMENTED, of no change.
+    # A policy of its own methods, or a backoff that is not of whole milliseconds, is PySpark's
+    # `Retrying`'s to decide (see the test below), and the policies of the session, of no error.
     class Always(DefaultPolicy):
         def can_retry(self, e):
             return True
 
-    for unsupported in ([Always()], [DefaultPolicy(initial_backoff=0.5)]):
-        with pytest.raises(PySparkNotImplementedError) as error:
-            spark.client.set_retry_policies(unsupported)
-        assert error.value.getCondition() == "NOT_IMPLEMENTED"
-    assert spark.client.get_retry_policies() == policies
+    for own in ([Always()], [DefaultPolicy(initial_backoff=0.5)]):
+        spark.client.set_retry_policies(own)
+        assert spark.client.get_retry_policies() == own
+    spark.client.set_retry_policies(policies)
     # A client of a new session has the default policy, as PySpark's newSession and clone.
     other = spark.client.newSession()
     try:
         assert vars(other.get_retry_policies()[0]) == vars(DefaultPolicy())
     finally:
         other.close()
+
+
+@contextlib.contextmanager
+def _connect_log(level="DEBUG"):
+    # The records of the logger of Spark Connect, which is disabled unless SPARK_CONNECT_LOG_LEVEL
+    # is set, at `level`.
+    import logging
+
+    from pyspark.sql.connect.logging import logger
+
+    records = []
+
+    class Recorder(logging.Handler):
+        def emit(self, record):
+            records.append(record)
+
+    handler = Recorder()
+    state = (logger.disabled, logger.level, logger.handlers[:], logger.propagate)
+    logger.disabled, logger.propagate = False, False
+    logger.handlers = [handler]
+    logger.setLevel(level)
+    try:
+        yield records
+    finally:
+        logger.disabled, level, logger.handlers, logger.propagate = state
+        logger.setLevel(level)
+
+
+@contextlib.contextmanager
+def _grpc_server_answering(response):
+    # A gRPC server whose every call is answered with the bytes `response`, of any method, of one
+    # message: the remote of it.
+    grpc = pytest.importorskip("grpc")
+
+    class Answering(grpc.GenericRpcHandler):
+        def service(self, details):
+            return grpc.unary_unary_rpc_method_handler(lambda request, context: response)
+
+    server = grpc.server(
+        ThreadPoolExecutor(max_workers=4), options=[("grpc.max_send_message_length", -1)]
+    )
+    server.add_generic_rpc_handlers((Answering(),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        yield f"sc://127.0.0.1:{port}"
+    finally:
+        server.stop(0).wait()
+
+
+def _rpc_error_view(error):
+    # The class name, code, details and debug_error_string of grpcio's error: that of the state of
+    # a `_MultiThreadedRendezvous`, whose `debug_error_string()` waits for one while it is None.
+    state = getattr(error, "_state", None)
+    if type(error).__name__ == "_MultiThreadedRendezvous" and state is not None:
+        debug = state.debug_error_string
+    else:
+        debug = error.debug_error_string()
+    return type(error).__name__, error.code().name, error.details(), debug
+
+
+def test_the_errors_of_a_response_that_does_not_decode_are_grpcio_s_of_no_debug_error_string():
+    # As grpcio's error of a response that it fails to deserialize: "Exception deserializing
+    # response!", of no debug_error_string, whose text reads "None", in what a policy is asked of,
+    # the logged error, the warning of a release that fails in the background, and the errors of
+    # the calls that PySpark leaves to grpc, as of the errors that the calls raise.
+    pytest.importorskip("grpc_status")
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    seen = []
+
+    class Recording(DefaultPolicy):
+        def can_retry(self, error):
+            seen.append(_rpc_error_view(error))
+            return super().can_retry(error)
+
+    details = "Exception deserializing response!"
+    text = (
+        "<{} of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+        f'\tdetails = "{details}"\n\tdebug_error_string = "None"\n>'
+    )
+    with _grpc_server_answering(b"\xff\xff\xff\xff\xff") as remote:
+        spark = SparkSession.builder.remote(remote).create()
+        try:
+            spark.client.set_retry_policies([Recording(max_retries=0)])
+            with _connect_log("WARNING") as records:
+                with pytest.raises(SparkConnectGrpcException) as error:
+                    spark.range(3).schema
+                assert error.value.getMessage() == text.format("_InactiveRpcError")
+                with pytest.raises(SparkConnectGrpcException) as error:
+                    spark.range(3).collect()
+                assert error.value.getMessage() == text.format("_MultiThreadedRendezvous")
+                deadline = time.monotonic() + 10
+                while time.monotonic() < deadline and not any(
+                    "ReleaseExecute failed" in record.getMessage() for record in records
+                ):
+                    time.sleep(0.05)
+            assert ("_InactiveRpcError", "INTERNAL", details, None) in seen
+            assert ("_MultiThreadedRendezvous", "INTERNAL", details, None) in seen
+            logged = [
+                _rpc_error_view(record.exc_info[1])
+                for record in records
+                if record.getMessage() == "GRPC Error received"
+            ]
+            assert ("_InactiveRpcError", "INTERNAL", details, None) in logged
+            assert ("_MultiThreadedRendezvous", "INTERNAL", details, None) in logged
+            warned = [
+                record.getMessage()
+                for record in records
+                if record.getMessage().startswith("ReleaseExecute failed")
+            ]
+            assert warned == [
+                f"ReleaseExecute failed with exception: {text.format('_InactiveRpcError')}."
+            ], warned
+            # A call that PySpark leaves to grpc raises grpcio's error itself.
+            with pytest.raises(Exception) as error:
+                spark.cloneSession()
+            assert _rpc_error_view(error.value) == ("_InactiveRpcError", "INTERNAL", details, None)
+        finally:
+            spark.stop()
+
+
+def test_a_policy_of_a_stream_that_does_not_decode_is_asked_apart_from_the_delivery_thread():
+    # grpcio's error of a stream whose response it fails to deserialize waits forever in
+    # `debug_error_string()`, as nothing sets one, as grpcio's does: a policy of such an error of a
+    # stream that the client reads in the background, as the events of the listeners, is asked on
+    # a thread of its own, where a wait holds only its call, as in grpcio, rather than on the
+    # delivery thread, which goes on with the Python of the other requests in the background.
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    grpc = pytest.importorskip("grpc")
+    added = pb2.ExecutePlanResponse(
+        streaming_query_listener_events_result=pb2.StreamingQueryListenerEventsResult(
+            listener_bus_listener_added=True
+        )
+    ).SerializeToString()
+
+    def execute(request, context):
+        # The acknowledgement of a listener, then a response that does not decode.
+        yield added
+        time.sleep(0.2)
+        yield b"\xff\xff\xff\xff\xff"
+
+    class Answering(grpc.GenericRpcHandler):
+        def service(self, details):
+            if details.method.endswith("/ExecutePlan"):
+                return grpc.unary_stream_rpc_method_handler(execute)
+            answer = b"\xff\xff\xff\xff\xff" if details.method.endswith("/ReleaseExecute") else b""
+            return grpc.unary_unary_rpc_method_handler(lambda request, context: answer)
+
+    def thread_name():
+        try:
+            with open(f"/proc/self/task/{threading.get_native_id()}/comm") as comm:
+                return comm.read().strip()
+        except OSError:
+            return threading.current_thread().name
+
+    asked = []
+    released = threading.Event()
+
+    class Waiting(DefaultPolicy):
+        def can_retry(self, error):
+            asked.append((type(error).__name__, threading.get_ident(), thread_name()))
+            if type(error).__name__ == "_MultiThreadedRendezvous" and not on_caller():
+                # As a policy that waits on such an error, as on its `debug_error_string()`.
+                released.wait(30)
+            return False
+
+    caller = threading.get_ident()
+
+    def on_caller():
+        return threading.get_ident() == caller
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=8))
+    server.add_generic_rpc_handlers((Answering(),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+    other = spark.newSession()
+    try:
+        spark.client.set_retry_policies([Waiting()])
+        other.client.set_retry_policies([Waiting()])
+        with _connect_log("WARNING") as records:
+            spark.streams.addListener(Listener())
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not asked:
+                time.sleep(0.05)
+            # The policy of the events of the listener waits, in the background.
+            assert [name for name, ident, _ in asked] == ["_MultiThreadedRendezvous"], asked
+            assert asked[0][1] != caller
+            # The Python of another request in the background, the warning of a release that
+            # fails, is delivered meanwhile.
+            with pytest.raises(SparkConnectGrpcException, match="Exception deserializing"):
+                other.range(1).collect()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not any(
+                record.getMessage().startswith("ReleaseExecute failed") for record in records
+            ):
+                time.sleep(0.05)
+            assert not released.is_set()
+            assert any(
+                record.getMessage().startswith("ReleaseExecute failed") for record in records
+            ), [record.getMessage() for record in records]
+        if os.path.isdir("/proc/self/task"):
+            assert asked[0][2] == "pyspark-apart", asked
+    finally:
+        import warnings
+
+        # The bus warns of the failure of its events, as PySpark's, once the policy returns.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            released.set()
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not any(
+                "StreamingQueryListenerBus" in str(warning.message) for warning in caught
+            ):
+                time.sleep(0.05)
+        other.stop()
+        spark.stop()
+        server.stop(0).wait()
+
+
+def test_the_log_of_the_error_of_a_stream_in_the_background_precedes_what_follows_it():
+    # As PySpark's listener bus, whose handler thread logs the error of its stream
+    # (`GRPC Error received`) as it handles it, before it warns that the bus ends: the log of a
+    # stream that the client reads in the background is delivered before the stream goes on with
+    # its error, of a response that does not decode, whose log is made apart.
+    import threading
+    import warnings
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.streaming import StreamingQueryListener
+
+    grpc = pytest.importorskip("grpc")
+    added = pb2.ExecutePlanResponse(
+        streaming_query_listener_events_result=pb2.StreamingQueryListenerEventsResult(
+            listener_bus_listener_added=True
+        )
+    ).SerializeToString()
+
+    def execute(request, context):
+        yield added
+        time.sleep(0.2)
+        yield b"\xff\xff\xff\xff\xff"
+
+    class Answering(grpc.GenericRpcHandler):
+        def service(self, details):
+            if details.method.endswith("/ExecutePlan"):
+                return grpc.unary_stream_rpc_method_handler(execute)
+            return grpc.unary_unary_rpc_method_handler(lambda request, context: b"")
+
+    class Listener(StreamingQueryListener):
+        def onQueryStarted(self, event):
+            pass
+
+        def onQueryProgress(self, event):
+            pass
+
+        def onQueryIdle(self, event):
+            pass
+
+        def onQueryTerminated(self, event):
+            pass
+
+    server = grpc.server(ThreadPoolExecutor(max_workers=8))
+    server.add_generic_rpc_handlers((Answering(),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    import logging
+
+    from pyspark.sql.connect.logging import logger
+
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+    events = []
+    lock = threading.Lock()
+
+    class Recording(logging.Handler):
+        def emit(self, record):
+            with lock:
+                events.append(("log", record.getMessage()))
+
+    try:
+        with _connect_log("ERROR"), warnings.catch_warnings():
+            warnings.simplefilter("always")
+
+            def shown(message, category, *args, **kwargs):
+                with lock:
+                    events.append(("warning", str(message)))
+
+            warnings.showwarning = shown
+            logger.addHandler(Recording())
+            spark.streams.addListener(Listener())
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and not any(kind == "warning" for kind, _ in events):
+                time.sleep(0.05)
+    finally:
+        spark.stop()
+        server.stop(0).wait()
+    kinds = [
+        kind
+        for kind, text in events
+        if text == "GRPC Error received" or "StreamingQueryListenerBus" in text
+    ]
+    assert kinds == ["log", "warning"], events
+
+
+def test_metadata_of_a_response_past_grpc_s_limits_fails_its_call_as_grpcio():
+    # As grpcio's channel of PySpark, of gRPC's limits of the metadata that a call receives, of
+    # 16 KiB at most (`grpc.absolute_max_metadata_size`), and of 8 KiB (`grpc.max_metadata_size`)
+    # past which a call fails at random: RESOURCE_EXHAUSTED of gRPC core's text, at once also of
+    # metadata far larger, of the trailers of a status, and of the headers of a response, of a
+    # call of one response and of a stream alike.
+    grpc = pytest.importorskip("grpc")
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    mode = {"trailer": 0, "header": 0}
+
+    class Handler(grpc.GenericRpcHandler):
+        def service(self, details):
+            def unary(request, context):
+                if mode["header"]:
+                    context.send_initial_metadata((("x-big", "a" * mode["header"]),))
+                    return b""
+                context.set_trailing_metadata((("x-big", "a" * mode["trailer"]),))
+                context.abort(grpc.StatusCode.INTERNAL, "failed")
+
+            def stream(request, context):
+                unary(request, context)
+                yield b""
+
+            if details.method.endswith("/ExecutePlan"):
+                return grpc.unary_stream_rpc_method_handler(stream)
+            return grpc.unary_unary_rpc_method_handler(unary)
+
+    server = grpc.server(
+        ThreadPoolExecutor(max_workers=4), options=[("grpc.max_metadata_size", 64 << 20)]
+    )
+    server.add_generic_rpc_handlers((Handler(),))
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+
+    def failures(**sizes):
+        mode.update({"trailer": 0, "header": 0, **sizes})
+        out = []
+        for call in (lambda: spark.conf.get("k"), lambda: spark.range(1).collect()):
+            started = time.monotonic()
+            with pytest.raises(SparkConnectGrpcException) as error:
+                call()
+            assert time.monotonic() - started < 5
+            out.append((error.value.getGrpcStatusCode().name, error.value.getMessage()))
+        return out
+
+    def text(call, details):
+        return (
+            f"<{call} of RPC that terminated with:\n\tstatus = StatusCode.RESOURCE_EXHAUSTED\n"
+            f'\tdetails = "{details}"\n\tdebug_error_string = "RESOURCE_EXHAUSTED:{details}"\n>'
+        )
+
+    def both(details):
+        return [
+            ("RESOURCE_EXHAUSTED", text("_InactiveRpcError", details)),
+            ("RESOURCE_EXHAUSTED", text("_MultiThreadedRendezvous", details)),
+        ]
+
+    hard = "Stream removed (received metadata size exceeds hard limit ({}))"
+    try:
+        spark.client.set_retry_policies([])
+        assert failures(trailer=20000) == both(hard.format("value length 20000 vs. 16384"))
+        assert failures(trailer=400000) == both(hard.format("value length 400000 vs. 16384"))
+        assert failures(header=20000) == both(hard.format("value length 20000 vs. 16384"))
+        assert failures(trailer=16320) == both(
+            "Stream removed (received metadata size exceeds hard limit (16554 vs. 16384);  "
+            ":status:42B content-type:60B grpc-status:45B grpc-message:50B x-big:16357B)"
+        )
+        # Past the soft limit, at random, here of a chance of 4042 in 8192 each.
+        mode.update({"trailer": 12000, "header": 0})
+        seen = set()
+        for _ in range(60):
+            with pytest.raises(SparkConnectGrpcException) as error:
+                spark.conf.get("k")
+            seen.add(error.value.getMessage().split("details = ")[1].split("\n")[0])
+        assert seen == {
+            '"failed"',
+            '"Stream removed (received metadata size exceeds soft limit (12234 vs. 8192);  '
+            ':status:42B content-type:60B grpc-status:45B grpc-message:50B x-big:12037B)"',
+        }, seen
+    finally:
+        spark.stop()
+        server.stop(0).wait()
+
+
+def test_a_status_whose_details_do_not_match_it_raises_grpc_status_s_value_error(mock_connect):
+    # As `grpc_status.rpc_status.from_call`, which PySpark's client calls of grpcio's error of
+    # each failure that it reads, as metadata past gRPC's soft limit gives one of the details of
+    # an error of the server: grpc_status's ValueError, raised as grpcio's error is handled, its
+    # context, and of the operation ID of an execution. Its `DefaultPolicy` reads the status of a
+    # failure that it does not retry, and the iterator of a reattachable execution reads it first,
+    # so the failure is not logged then, where `_handle_rpc_error` logs it before it reads it; the
+    # wait of a failure that the policy retries reads it out of any handling, of no context.
+    grpc = pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    spark, service = mock_connect
+    spark.range(1).collect()
+    code = (
+        "Code in Status proto (StatusCode.INTERNAL) doesn't match status code "
+        "(StatusCode.{})"
+    )
+
+    def failure(call):
+        with _connect_log() as records:
+            with pytest.raises(ValueError) as error:
+                call()
+        context = error.value.__context__
+        logged = "GRPC Error received" in [record.getMessage() for record in records]
+        return error.value, context, logged
+
+    def conf():
+        return spark.conf.get("spark.sql.shuffle.partitions")
+
+    try:
+        for policies, logged in [([DefaultPolicy()], False), ([], True)]:
+            spark.client.set_retry_policies(policies)
+            service.mismatched_status = ("RESOURCE_EXHAUSTED", 13, "failed", "failed")
+            error, context, was_logged = failure(conf)
+            assert str(error) == code.format("RESOURCE_EXHAUSTED")
+            assert type(context).__name__ == "_InactiveRpcError"
+            assert (context.code(), context.details()) == (
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                "failed",
+            )
+            assert [key for key, _ in context.trailing_metadata()] == ["grpc-status-details-bin"]
+            assert was_logged == logged
+            assert not hasattr(error, "_operation_id")
+            error, context, was_logged = failure(lambda: spark.range(1).collect())
+            assert str(error) == code.format("RESOURCE_EXHAUSTED")
+            assert type(context).__name__ == "_MultiThreadedRendezvous"
+            assert not was_logged
+            assert error._operation_id
+            # Of an execution that is not reattachable, as of a call of one response.
+            spark.client.disable_reattachable_execute()
+            try:
+                error, context, was_logged = failure(lambda: spark.range(1).collect())
+            finally:
+                spark.client.enable_reattachable_execute()
+            assert type(context).__name__ == "_MultiThreadedRendezvous"
+            assert was_logged == logged
+            # Of the details of the status, and of a code that is not one of gRPC's.
+            service.mismatched_status = ("INTERNAL", 13, "failed", "other")
+            error, context, _ = failure(conf)
+            assert str(error) == (
+                "Message in Status proto (other) doesn't match status details (failed)"
+            )
+            service.mismatched_status = ("INTERNAL", 99, "failed", "failed")
+            error, context, _ = failure(conf)
+            assert str(error) == "Invalid status code 99"
+            assert type(context) is KeyError and context.args == (99,)
+            assert type(context.__context__).__name__ == "_InactiveRpcError"
+        # A failure that the policy retries, of the wait between its attempts.
+        spark.client.set_retry_policies([DefaultPolicy()])
+        service.mismatched_status = ("UNAVAILABLE", 13, "failed", "failed")
+        error, context, was_logged = failure(conf)
+        assert str(error) == code.format("UNAVAILABLE")
+        assert context is None and not was_logged
+        # But the iterator of a reattachable execution reads it first.
+        error, context, was_logged = failure(lambda: spark.range(1).collect())
+        assert type(context).__name__ == "_MultiThreadedRendezvous" and not was_logged
+    finally:
+        service.mismatched_status = None
+        spark.client.set_retry_policies([DefaultPolicy()])
+    assert spark.range(1).collect() == []
+
+
+def _resetting_server(reason):
+    # A server of HTTP/2 that resets the stream of each call with the error code `reason` before
+    # any response, as Spark's server of grpc-java resets a call whose metadata the client's
+    # settings do not take: its port.
+    import socket
+    import struct
+    import threading
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(8)
+
+    def frame(kind, flags, stream, payload=b""):
+        return struct.pack(">I", len(payload))[1:] + bytes([kind, flags]) + struct.pack(
+            ">I", stream
+        ) + payload
+
+    def serve(connection):
+        with connection:
+            buffer = b""
+
+            def need(count):
+                nonlocal buffer
+                while len(buffer) < count:
+                    data = connection.recv(65536)
+                    if not data:
+                        raise EOFError
+                    buffer += data
+
+            try:
+                connection.sendall(frame(4, 0, 0))
+                need(24)
+                buffer = buffer[24:]
+                while True:
+                    need(9)
+                    length = int.from_bytes(buffer[:3], "big")
+                    kind, flags = buffer[3], buffer[4]
+                    stream = struct.unpack(">I", buffer[5:9])[0] & 0x7FFFFFFF
+                    need(9 + length)
+                    buffer = buffer[9 + length :]
+                    if kind == 4 and not flags & 1:
+                        connection.sendall(frame(4, 1, 0))
+                    elif kind == 1:
+                        connection.sendall(frame(3, 0, stream, struct.pack(">I", reason)))
+            except (EOFError, OSError):
+                pass
+
+    def accept():
+        while True:
+            try:
+                connection, _ = listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=serve, args=(connection,), daemon=True).start()
+
+    threading.Thread(target=accept, daemon=True).start()
+    return listener
+
+
+def test_a_stream_that_the_server_resets_fails_as_grpcio_s():
+    # As grpcio's channel: of the code of the reason of the reset, as gRPC's core gives it, and of
+    # its text, of a call of one response and of a stream alike.
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    for reason, code in [(1, "INTERNAL"), (11, "RESOURCE_EXHAUSTED")]:
+        listener = _resetting_server(reason)
+        port = listener.getsockname()[1]
+        spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+        try:
+            spark.client.set_retry_policies([])
+            details = f"Stream removed (RST_STREAM (Received RST_STREAM with error code {reason}))"
+            for call, name in [
+                (lambda: spark.conf.get("k"), "_InactiveRpcError"),
+                (lambda: spark.range(1).collect(), "_MultiThreadedRendezvous"),
+            ]:
+                with pytest.raises(SparkConnectGrpcException) as error:
+                    call()
+                assert error.value.getGrpcStatusCode().name == code
+                assert error.value.getMessage() == (
+                    f"<{name} of RPC that terminated with:\n\tstatus = StatusCode.{code}\n"
+                    f'\tdetails = "{details}"\n\tdebug_error_string = "{code}:{details}"\n>'
+                )
+        finally:
+            spark.stop()
+            listener.close()
+
+
+def test_a_message_over_the_size_limit_of_a_call_is_grpcio_s_resource_exhausted():
+    # As grpcio's channel of PySpark, of grpc.max_{receive,send}_message_length of 128 MiB: a
+    # response over the limit fails its call with RESOURCE_EXHAUSTED, of the details of gRPC's
+    # core, as does a request over it, which is not sent, of a call of one response and of a
+    # stream alike, in the error that the call raises and in what a policy is asked of.
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    seen = []
+
+    class Recording(DefaultPolicy):
+        def can_retry(self, error):
+            seen.append(_rpc_error_view(error))
+            return super().can_retry(error)
+
+    limit = 128 * 1024 * 1024
+    received = f"Stream removed (CLIENT: Received message larger than max ({limit + 1} vs. {limit}))"
+    text = (
+        "<{} of RPC that terminated with:\n\tstatus = StatusCode.RESOURCE_EXHAUSTED\n"
+        '\tdetails = "{}"\n\tdebug_error_string = "RESOURCE_EXHAUSTED:{}"\n>'
+    )
+    with _grpc_server_answering(b"\x00" * (limit + 1)) as remote:
+        spark = SparkSession.builder.remote(remote).create()
+        try:
+            spark.client.set_retry_policies([Recording(max_retries=0)])
+            with pytest.raises(SparkConnectGrpcException) as error:
+                spark.conf.get("spark.sql.shuffle.partitions")
+            assert error.value.getMessage() == text.format("_InactiveRpcError", received, received)
+            assert error.value.getGrpcStatusCode().name == "RESOURCE_EXHAUSTED"
+            with pytest.raises(SparkConnectGrpcException) as error:
+                spark.range(1).collect()
+            assert error.value.getMessage() == text.format(
+                "_MultiThreadedRendezvous", received, received
+            )
+            debug = f"RESOURCE_EXHAUSTED:{received}"
+            assert ("_InactiveRpcError", "RESOURCE_EXHAUSTED", received, debug) in seen
+            assert ("_MultiThreadedRendezvous", "RESOURCE_EXHAUSTED", received, debug) in seen
+            big = "x" * limit
+            with pytest.raises(SparkConnectGrpcException) as error:
+                spark.sql(f"SELECT '{big}'").collect()
+            message = error.value.getMessage()
+            sent = re.search(
+                r'details = "(CLIENT: Sent message larger than max \((\d+) vs\. (\d+)\))"', message
+            )
+            assert sent is not None, message[:300]
+            assert int(sent.group(2)) > limit and int(sent.group(3)) == limit
+            assert message == text.format("_MultiThreadedRendezvous", sent.group(1), sent.group(1))
+        finally:
+            spark.stop()
+
+
+def test_retry_policies_of_methods_of_their_own_are_asked_as_pyspark_asks_them(mock_connect):
+    # As PySpark Connect's `Retrying`: a policy that the transport does not retry with itself, of
+    # a `can_retry` or a `to_state` of its own, or of a backoff that is not of whole milliseconds,
+    # is asked of each failed RPC, of grpcio's error of the call, twice (`accept_exception`, then
+    # `_wait`), of the states of its `to_state` of each call; PySpark's `Retrying` waits, warns and
+    # raises, the warning of a filter of "error" and the exception of a policy in place of the
+    # failure.
+    grpc = pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    import warnings
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
+
+    spark, service = mock_connect
+    seen = []
+
+    class Counting(RetryPolicy):
+        def can_retry(self, e):
+            seen.append(("can_retry", type(e).__name__, e.code(), e.details()))
+            return isinstance(e, grpc.RpcError) and e.code() == grpc.StatusCode.UNAVAILABLE
+
+        def to_state(self):
+            seen.append(("to_state",))
+            return super().to_state()
+
+    service.execute_failure = ("UNAVAILABLE", "down")
+    spark.client.set_retry_policies([Counting(max_retries=2, initial_backoff=1)])
+    before = service.execute_calls
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(SparkConnectGrpcException) as error:
+            spark.range(1).collect()
+    assert "details = \"down\"" in str(error.value)
+    assert service.execute_calls - before == 3
+    asked = [entry for entry in seen if entry[:2] == ("can_retry", "_MultiThreadedRendezvous")]
+    # Of each of the three failures, twice; the last is the one whose retries are spent.
+    assert asked == [("can_retry", "_MultiThreadedRendezvous", grpc.StatusCode.UNAVAILABLE,
+                      "down")] * 6
+    assert ("to_state",) in seen
+    assert [str(w.message) for w in caught].count(
+        "[RETRIES_EXCEEDED] The maximum number of retries has been exceeded.") == 1
+    # A failure that no policy retries is the error as it is, of no warning.
+    service.execute_failure = ("INVALID_ARGUMENT", "bad")
+    before = service.execute_calls
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        with pytest.raises(SparkConnectGrpcException):
+            spark.range(1).collect()
+    assert service.execute_calls - before == 1 and caught == []
+    # A backoff that is not of whole milliseconds, which `Retrying` waits as PySpark's.
+    service.execute_failure = ("UNAVAILABLE", "down")
+    spark.client.set_retry_policies([DefaultPolicy(max_retries=1, initial_backoff=0.5, jitter=0)])
+    before = service.execute_calls
+    with pytest.raises(SparkConnectGrpcException):
+        spark.range(1).collect()
+    assert service.execute_calls - before == 2
+
+    # The exception of a policy, and the warning of a filter of "error", replace the failure.
+    class Raising(RetryPolicy):
+        def can_retry(self, e):
+            raise KeyError("of can_retry")
+
+    spark.client.set_retry_policies([Raising()])
+    with pytest.raises(KeyError, match="of can_retry"):
+        spark.range(1).collect()
+    spark.client.set_retry_policies([Counting(max_retries=0)])
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message=".*RETRIES_EXCEEDED.*")
+        with pytest.raises(UserWarning, match="RETRIES_EXCEEDED"):
+            spark.range(1).collect()
+
+
+def test_the_retries_and_the_errors_of_grpc_are_logged_as_pyspark(mock_connect):
+    # As PySpark Connect's client, of the logger of Spark Connect: the deadlines of a new client,
+    # each retry and the failure that ends the retries of its `Retrying._wait`, and each error of
+    # grpc that its `_handle_rpc_error` converts, of grpcio's error of the call.
+    grpc = pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    import logging
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    spark, service = mock_connect
+    service.execute_failure = ("UNAVAILABLE", "down")
+    with _connect_log() as records:
+        spark.client.set_retry_policies([DefaultPolicy(max_retries=1, initial_backoff=1, jitter=0)])
+        with pytest.raises(SparkConnectGrpcException):
+            spark.range(1).collect()
+        other = spark.newSession()
+        other.stop()
+    error = (
+        '<_MultiThreadedRendezvous of RPC that terminated with:\n\tstatus = StatusCode.UNAVAILABLE'
+        '\n\tdetails = "down"\n\tdebug_error_string = "UNAVAILABLE:down"\n>'
+    )
+    messages = [(record.levelno, record.getMessage()) for record in records]
+    assert (logging.DEBUG, f"Got error: {error}. Will retry after 1 ms (policy: DefaultPolicy)") in (
+        messages)
+    assert (logging.DEBUG, f"Given up on retrying. error: {error}") in messages
+    (received,) = [
+        record
+        for record in records
+        if record.getMessage() == "GRPC Error received" and "down" in str(record.exc_info[1])
+    ]
+    assert received.levelno == logging.ERROR
+    exception = received.exc_info[1]
+    assert isinstance(exception, grpc.RpcError) and str(exception) == error
+    assert exception.code() == grpc.StatusCode.UNAVAILABLE
+    assert (logging.INFO, "Spark Connect RPC deadlines: RpcDeadlines(reattachable_execute_plan=600, "
+            "reattach_execute=600, analyze_plan=3600, add_artifacts=3600, config=600, "
+            "interrupt=600, release_session=600, artifact_status=600, clone_session=600, "
+            "get_status=600, fetch_error_details=600)") in messages
+
+
+def test_a_signal_that_a_log_of_the_client_takes_interrupts_the_call_as_pyspark(mock_connect):
+    # The handler of SIGINT raises its KeyboardInterrupt in whatever Python code runs on the main
+    # thread when the signal comes, as a log of the retries of a call that the client writes:
+    # the call is interrupted, as PySpark's wait raises it there, rather than retried on. A handler
+    # of the logger raises it here in place of the signal's.
+    import logging
+    import time
+
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+    from pyspark.sql.connect.logging import logger
+
+    spark, service = mock_connect
+    service.execute_failure = ("UNAVAILABLE", "down")
+
+    class Interrupting(logging.Handler):
+        def emit(self, record):
+            if record.getMessage().startswith("Got error"):
+                raise KeyboardInterrupt
+
+    with _connect_log():
+        logger.addHandler(Interrupting())
+        spark.client.set_retry_policies(
+            [DefaultPolicy(max_retries=30, initial_backoff=1000, max_backoff=1000, jitter=0)]
+        )
+        started = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(1).collect()
+        assert time.monotonic() - started < 15
+
+
+def test_the_transport_retries_with_the_parameters_of_pyspark_s_own_policies_only():
+    # The transport retries with the parameters of PySpark's DefaultPolicy and RetryPolicy, as
+    # PySpark's `Retrying` retries with them: of the first DefaultPolicy, and of none without one,
+    # as a RetryPolicy retries no failure. PySpark's `Retrying` decides the others: a subclass, and
+    # parameters that the transport does not wait, as a fraction of a millisecond.
+    from pyspark.sql.connect import client as connect_client
+    from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
+
+    parameters = connect_client._retry_parameters
+    assert parameters([]) == {"max_retries": 0, "retries_failures": False}
+    assert parameters([RetryPolicy()]) == {"max_retries": 0, "retries_failures": False}
+    native = parameters(
+        [RetryPolicy(), DefaultPolicy(max_retries=2.5, max_backoff=None), DefaultPolicy()]
+    )
+    assert native["max_retries"] == 3 and native["max_backoff"] is None
+    assert native["initial_backoff"] == 50 and native["retries_failures"] is True
+    # A policy of no bound on its retries retries without one, as PySpark's.
+    assert parameters([DefaultPolicy(max_retries=None)])["max_retries"] is None
+
+    class Mine(DefaultPolicy):
+        pass
+
+    for policies in (
+        [Mine()],
+        [DefaultPolicy(initial_backoff=0.5)],
+        [DefaultPolicy(jitter=-1)],
+        [DefaultPolicy(max_retries="3")],
+        [DefaultPolicy(max_retries=True)],
+        [DefaultPolicy(backoff_multiplier=float("nan"))],
+    ):
+        assert parameters(policies) is None, policies
+
+
+def test_pyspark_s_retrying_of_a_call_decides_as_pyspark_s_does():
+    # `_CallRetries`, PySpark's `Retrying` of the policies of a call, which the transport asks of
+    # each failed RPC: the wait of the policy that retries it, None once no policy does, and the
+    # error of a wait that `time.sleep` refuses, as PySpark's sleep raises it.
+    pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    from pyspark.sql.connect import client as connect_client
+    from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
+
+    unavailable = (False, 14, "down", "UNAVAILABLE:down", [])
+    retries = connect_client._CallRetries(
+        [DefaultPolicy(max_retries=1, initial_backoff=20, jitter=0)]
+    )
+    assert retries.decide(*unavailable) == 0.02
+    with pytest.warns(UserWarning, match="RETRIES_EXCEEDED"):
+        assert retries.decide(*unavailable) is None
+    assert connect_client._CallRetries([RetryPolicy()]).decide(*unavailable) is None
+    negative = connect_client._CallRetries(
+        [DefaultPolicy(max_retries=1, initial_backoff=-1000, jitter=0)]
+    )
+    with pytest.raises(ValueError):
+        negative.decide(*unavailable)
+
+
+def test_the_logs_of_grpc_of_the_client_are_written_as_grpcio_writes_them(monkeypatch, capfd):
+    # The error of a log of a failed RPC is of grpcio's class, or of its name and its text without
+    # grpcio; and the line of gRPC's core of what a channel logs, which the client writes from
+    # Python where it does not write it from Rust, is of grpcio's form, on stderr.
+    import logging
+    import re
+
+    from pyspark.sql.connect import client as connect_client
+
+    def no_grpcio(*args):
+        raise ImportError("No module named 'grpc'")
+
+    monkeypatch.setattr(connect_client, "_grpc_error", no_grpcio)
+    text = "<_MultiThreadedRendezvous of RPC that terminated with: ...>"
+    with _connect_log("ERROR") as records:
+        connect_client._log_rpc_error(True, 14, "down", "UNAVAILABLE:down", [], text)
+        connect_client._log_rpc_error(False, 14, "down", "UNAVAILABLE:down", [], text)
+    assert [record.getMessage() for record in records] == ["GRPC Error received"] * 2
+    assert [type(record.exc_info[1]).__name__ for record in records] == [
+        "_MultiThreadedRendezvous",
+        "_InactiveRpcError",
+    ]
+    assert all(str(record.exc_info[1]) == repr(record.exc_info[1]) == text for record in records)
+    assert all(record.levelno == logging.ERROR for record in records)
+    # Nothing is made of an error that the logger does not log.
+    with _connect_log("CRITICAL") as records:
+        connect_client._log_rpc_error(False, 14, "down", "UNAVAILABLE:down", [], text)
+    assert records == []
+
+    connect_client._log_grpc_error("connector.rs", 1205, "Handshake failed with error ...", "I")
+    connect_client._log_grpc_error("proxy.rs", 100, "not using a proxy")
+    lines = capfd.readouterr().err.splitlines()
+    pattern = r"{}\d{{4}} \d{{2}}:\d{{2}}:\d{{2}}\.\d{{6}} +\d+ {}\] {}"
+    assert re.fullmatch(
+        pattern.format("I", "connector.rs:1205", re.escape("Handshake failed with error ...")),
+        lines[-2],
+    ), lines
+    assert re.fullmatch(pattern.format("E", "proxy.rs:100", "not using a proxy"), lines[-1]), lines
+
+    # As gRPC's core, which goes on when stderr is closed.
+    def closed(fd, data):
+        raise OSError(9, "Bad file descriptor")
+
+    monkeypatch.setattr(connect_client.os, "write", closed)
+    connect_client._log_grpc_error("proxy.rs", 100, "not using a proxy")
+
+
+def test_the_warning_of_spent_retries_is_of_the_location_of_pyspark_s_or_of_the_client_s(
+    monkeypatch,
+):
+    # `_warn_retries_exceeded`, which the transport calls once the retries of a call are spent:
+    # of the lines of the two `warnings.warn` of PySpark's `Retrying._wait`, read of the source of
+    # its module, the first of a RetryException and the second of a policy; and of the client's
+    # own location of a module of no such source, whose lines cannot be told. The bound of the
+    # retries of a RetryException is None of an infinite one and 0 of a negative one.
+    import warnings
+
+    from pyspark.sql.connect import client as connect_client
+
+    locations = connect_client._retries_exceeded_locations
+    locations.cache_clear()
+    try:
+        filename, retry_exception_line, policy_line = locations()
+        lines = open(filename).read().split("\n")
+        for line in (retry_exception_line, policy_line):
+            assert lines[line - 1].strip() == (
+                f'warnings.warn("{connect_client._RETRIES_EXCEEDED}")'
+            )
+        assert retry_exception_line < policy_line
+        for exceeded, line in ((True, retry_exception_line), (False, policy_line)):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                connect_client._warn_retries_exceeded(exceeded)
+            assert [(w.filename, w.lineno) for w in caught] == [(filename, line)]
+        # A module of no source, and one whose source has not the two calls.
+        monkeypatch.setattr(connect_client, "_RETRIES_MODULE", "pyspark_no_such_module_x")
+        locations.cache_clear()
+        assert locations() is None
+        monkeypatch.setattr(connect_client, "_RETRIES_MODULE", "pyspark.sql.connect.client")
+        locations.cache_clear()
+        assert locations() is None
+        with pytest.warns(UserWarning, match=r"RETRIES_EXCEEDED") as caught:
+            connect_client._warn_retries_exceeded(False)
+        # Of the client's own call of `warnings.warn`.
+        assert caught[0].filename == connect_client.__file__
+    finally:
+        monkeypatch.undo()
+        locations.cache_clear()
+    assert connect_client._elapsed_time_bound(float("inf")) is None
+    assert connect_client._elapsed_time_bound(-1) == 0.0
+    assert connect_client._elapsed_time_bound(2) == 2.0
+
+
+def test_a_session_and_its_queries_import_no_grpc_unless_a_log_needs_it(mock_connect):
+    # The drop-in imports grpc, whose import is slow, only where it is needed: to log what PySpark
+    # logs of its client of grpc's objects, such as its `RpcDeadlines` when a client is made, or to
+    # make grpcio's error of a call. A session, and a query of it, of the logger of Spark Connect
+    # disabled, import none. (A `newSession()` reads the attributes of the client in
+    # `pyspark.sql.connect.client`, whose exceptions are of `grpc.StatusCode`.)
+    import subprocess
+    import sys
+
+    _, service = mock_connect
+    child = (
+        "import sys\n"
+        "from pyspark.sql import SparkSession\n"
+        f"spark = SparkSession.builder.remote({service.remote!r}).getOrCreate()\n"
+        "spark.range(1).collect()\n"
+        "print('grpc' in sys.modules)\n"
+        "if len(sys.argv) > 1:\n"
+        "    spark.newSession().range(1).collect()\n"
+    )
+    env = {key: value for key, value in os.environ.items() if key != "SPARK_CONNECT_LOG_LEVEL"}
+    quiet = subprocess.run(
+        [sys.executable, "-c", child], env=env, capture_output=True, text=True, timeout=120
+    )
+    assert quiet.stdout.strip() == "False", quiet.stderr
+
+    def logged(*args):
+        return subprocess.run(
+            [sys.executable, "-c", child, *args],
+            env={**env, "SPARK_CONNECT_LOG_LEVEL": "info"},
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+
+    alone, with_new = logged(), logged("new")
+    assert alone.stdout.strip() == "True", alone.stderr
+    # Of each client that is made, as PySpark's each logs them: the session's, and the new one's.
+    deadlines = "Spark Connect RPC deadlines: RpcDeadlines("
+    assert alone.stderr.count(deadlines) > 0, alone.stderr
+    assert with_new.stderr.count(deadlines) == 2 * alone.stderr.count(deadlines), with_new.stderr
+
+
+def test_a_base_exception_of_a_retry_policy_goes_out_of_what_pyspark_catches(mock_connect):
+    # As the `except Exception` of PySpark's lookup of the plan compression settings, which
+    # catches the exception of a retry policy, but lets a `BaseException` only out, such as the
+    # KeyboardInterrupt of Ctrl-C, which a signal handler raises in the Python of the policy: the
+    # call raises it, where another exception of the policy leaves the lookup failed and the call
+    # goes on. The mock's lookup fails, so the policy is asked of its failure.
+    from pyspark.sql.connect.client.retries import RetryPolicy
+
+    spark, service = mock_connect
+
+    class Raising(RetryPolicy):
+        def __init__(self, exception):
+            super().__init__()
+            self.exception = exception
+            self.asked = 0
+
+        def can_retry(self, error):
+            self.asked += 1
+            raise self.exception
+
+    caught = Raising(RuntimeError("of the policy"))
+    session = spark.newSession()
+    session.client.set_retry_policies([caught])
+    # The mock answers the execution with no rows.
+    assert session.range(1).collect() == []
+    assert caught.asked >= 1
+    for exception in (KeyboardInterrupt("of the policy"), SystemExit(3)):
+        raising = Raising(exception)
+        session = spark.newSession()
+        session.client.set_retry_policies([raising])
+        with pytest.raises(type(exception)) as raised:
+            session.range(1).collect()
+        assert raised.value is exception
+        assert raising.asked == 1
+
+
+def test_a_signal_whose_handler_raises_in_a_log_runs_its_handler_once(mock_connect):
+    # The handler of SIGINT runs once for a signal, as in PySpark, also of a signal that comes
+    # while the client writes a log, in whose Python the handler raises: its exception is raised
+    # from the call, and nothing is left pending after it.
+    import logging
+    import signal
+    import threading
+    import time
+
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    spark, service = mock_connect
+    service.execute_failure = ("UNAVAILABLE", "down")
+    calls = []
+
+    def handler(signum, frame):
+        calls.append(signum)
+        raise KeyboardInterrupt(f"handler call #{len(calls)}")
+
+    class Slow(logging.Handler):
+        def emit(self, record):
+            if "Will retry" in record.getMessage():
+                time.sleep(1.0)
+
+    previous = signal.signal(signal.SIGINT, handler)
+    try:
+        with _connect_log() as records:
+            from pyspark.sql.connect.logging import logger
+
+            logger.addHandler(Slow())
+            spark.client.set_retry_policies(
+                [DefaultPolicy(max_retries=30, initial_backoff=10, max_backoff=10, jitter=0)]
+            )
+            timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+            timer.start()
+            started = time.monotonic()
+            with pytest.raises(KeyboardInterrupt, match="handler call #1"):
+                spark.range(1).collect()
+            assert time.monotonic() - started < 15
+            timer.join()
+            # Nothing is pending: the next Python runs as it does.
+            for _ in range(20):
+                time.sleep(0.01)
+        assert calls == [signal.SIGINT]
+        assert any("Will retry" in record.getMessage() for record in records)
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def test_grpcio_s_error_of_a_call_is_of_grpc_s_public_classes_where_its_own_cannot_be_made(
+    monkeypatch,
+):
+    # The error of a failed call, which PySpark's retry policies are asked of, and which the calls
+    # that PySpark leaves to grpc raise, is made of grpcio's private classes, as grpcio makes it:
+    # of another signature of them, as of another version of grpcio, it is one of the public
+    # classes of grpc, `RpcError` and `Call`, of grpcio's text, code, details and metadata.
+    grpc = pytest.importorskip("grpc")
+    from grpc import _channel
+    from pyspark.sql.connect import client as connect_client
+
+    class Changed(_channel._RPCState):
+        def __init__(self, due, initial_metadata, trailing_metadata, code, details, extra):
+            super().__init__(due, initial_metadata, trailing_metadata, code, details)
+
+    monkeypatch.setattr(_channel, "_RPCState", Changed)
+    text = (
+        '<_InactiveRpcError of RPC that terminated with:\n\tstatus = StatusCode.UNAVAILABLE\n'
+        '\tdetails = "down"\n\tdebug_error_string = "UNAVAILABLE:down"\n>'
+    )
+    metadata = [("x-key", b"value"), ("x-bin", b"\x00")]
+    error = connect_client._grpc_error(False, 14, "down", "UNAVAILABLE:down", metadata, text)
+    assert isinstance(error, grpc.RpcError) and isinstance(error, grpc.Call)
+    assert type(error).__name__ == "_InactiveRpcError"
+    assert (error.code(), error.details(), error.debug_error_string()) == (
+        grpc.StatusCode.UNAVAILABLE,
+        "down",
+        "UNAVAILABLE:down",
+    )
+    assert error.trailing_metadata() == (("x-key", "value"), ("x-bin", b"\x00"))
+    assert str(error) == repr(error) == text
+    assert error.initial_metadata() == () and not error.is_active() and not error.cancel()
+    stream = connect_client._grpc_error(True, 14, "down", "UNAVAILABLE:down", [])
+    assert type(stream).__name__ == "_MultiThreadedRendezvous"
+    assert str(stream) == text.replace("_InactiveRpcError", "_MultiThreadedRendezvous")
+    # The log of an error that cannot be made at all is of the client's stand-in.
+    monkeypatch.setattr(
+        connect_client, "_grpc_error", lambda *args: (_ for _ in ()).throw(ValueError("no"))
+    )
+    with _connect_log("ERROR") as records:
+        connect_client._log_rpc_error(False, 14, "down", "UNAVAILABLE:down", [], text)
+    assert [type(record.exc_info[1]).__name__ for record in records] == ["_InactiveRpcError"]
+    assert str(records[0].exc_info[1]) == text
+
+
+def test_a_clone_of_a_session_logs_the_proxy_of_its_channel_once(mock_connect, capfd, monkeypatch):
+    # As grpcio, which logs a proxy variable that is not an HTTP proxy for each channel that it
+    # makes: the clone of a session makes one channel, so it is logged once.
+    if os.environ.get("GRPC_VERBOSITY", "").upper() == "NONE":
+        pytest.skip("GRPC_VERBOSITY=NONE silences the errors of the channels")
+    spark, service = mock_connect
+    for name in ("grpc_proxy", "https_proxy", "http_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("https_proxy", "socks5://proxy.example:1080")
+    capfd.readouterr()
+    clone = spark.cloneSession()
+    other = spark.newSession()
+    logged = capfd.readouterr().err
+    message = "the 'socks5' scheme of the proxy URI is not supported in https_proxy"
+    assert logged.count(message) == 2, logged
+    clone.stop()
+    other.stop()
+
+
+def test_a_child_of_a_fork_runs_queries_of_its_sessions_and_of_its_parent_s(mock_connect):
+    # As grpcio's fork support, which makes the threads of a child of `os.fork()` again and resets
+    # the channels of its parent there: the child has a runtime, a delivery thread and channels
+    # of its own, so that a session of its own and its parent's session run queries there, which
+    # would wait forever on the threads of the parent, and the parent's session goes on.
+    import subprocess
+    import sys
+    import textwrap
+
+    _, service = mock_connect
+    script = textwrap.dedent(
+        f"""
+        import os, signal
+        from pyspark.sql import SparkSession
+        spark = SparkSession.builder.remote({service.remote!r}).getOrCreate()
+        spark.range(1).collect()
+        pid = os.fork()
+        if pid == 0:
+            signal.alarm(30)
+            try:
+                child = SparkSession.builder.remote({service.remote!r}).create()
+                child.range(1).collect()
+                spark.range(1).collect()
+                print("child ok", flush=True)
+            finally:
+                os._exit(0)
+        _, status = os.waitpid(pid, 0)
+        spark.range(1).collect()
+        print("parent ok", status, flush=True)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    assert result.stdout.splitlines() == ["child ok", "parent ok 0"], result.stderr
+
+
+class _Forwarder:
+    """A TCP forwarder of 127.0.0.1 to `port`, which listens once `listen` is called, and counts
+    the connections that it accepts."""
+
+    def __init__(self, port):
+        import socket
+
+        self.target = port
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        self.port = probe.getsockname()[1]
+        probe.close()
+        self.accepted = 0
+        self._listener = None
+
+    def listen(self):
+        import socket
+        import threading
+
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind(("127.0.0.1", self.port))
+        self._listener.listen(16)
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        import socket
+        import threading
+
+        def pump(source, sink):
+            try:
+                while data := source.recv(65536):
+                    sink.sendall(data)
+            except OSError:
+                pass
+            for end in (source, sink):
+                try:
+                    end.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        while True:
+            try:
+                accepted, _ = self._listener.accept()
+            except OSError:
+                return
+            self.accepted += 1
+            upstream = socket.create_connection(("127.0.0.1", self.target))
+            for ends in ((accepted, upstream), (upstream, accepted)):
+                threading.Thread(target=pump, args=ends, daemon=True).start()
+
+    def close(self):
+        if self._listener is not None:
+            self._listener.close()
+
+
+def test_a_child_of_a_fork_that_frees_a_session_of_its_parent_leaves_the_parent_its_connection(
+    mock_connect,
+):
+    # As grpcio's fork support, which leaves the channels of a parent to the parent: a child of
+    # `os.fork()` that frees a session of its parent, whose channel holds a connection that it
+    # made in the background, does not take that connection from the parent, which still reads
+    # it, so that the parent's next call takes it, at once. The child leaves the objects of its
+    # parent as they are, rather than removing the socket of the connection from the epoll
+    # instance that it shares with the parent, as a drop of the session there did, after which
+    # the parent's next call waited forever.
+    import subprocess
+    import sys
+    import textwrap
+
+    _, service = mock_connect
+    forwarder = _Forwarder(int(service.remote.rsplit(":", 1)[1]))
+    script = textwrap.dedent(
+        f"""
+        import gc, os, signal, sys, weakref
+        from pyspark.sql import SparkSession
+        signal.alarm(120)
+        main = SparkSession.builder.remote({service.remote!r}).getOrCreate()
+        # A session of a token has a connection of its own, which this one holds alone.
+        s = SparkSession.builder.remote("sc://localhost:{forwarder.port}/;token=T").create()
+        s.client.set_retry_policies([])
+        try:
+            s.range(1).collect()
+        except Exception as e:
+            print("failed", type(e).__name__, flush=True)
+        # The channel connects again in the background once the forwarder listens, and holds
+        # the connection for the next call.
+        sys.stdin.readline()
+        freed = weakref.ref(s)
+        pid = os.fork()
+        if pid == 0:
+            try:
+                del s
+                gc.collect()
+                print("child freed", freed() is None, flush=True)
+            finally:
+                os._exit(0)
+        os.waitpid(pid, 0)
+        signal.alarm(30)
+        s.range(5).collect()
+        print("parent ok", flush=True)
+        """
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdout.readline().split()[0] == "failed"
+        forwarder.listen()
+        deadline = time.monotonic() + 30
+        while forwarder.accepted == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        # The settings of the server are read with the connection, which is then held.
+        time.sleep(1)
+        process.stdin.write("fork\n")
+        process.stdin.flush()
+        out, err = process.communicate(timeout=120)
+    finally:
+        process.kill()
+        forwarder.close()
+    assert out.splitlines() == ["child freed True", "parent ok"], err
+    # The parent's call took the connection that the channel held.
+    assert forwarder.accepted == 1
+
+
+def test_a_child_of_a_fork_closes_the_descriptors_of_the_connections_and_runtime_of_its_parent(
+    mock_connect,
+):
+    # As grpcio's fork support, which closes the descriptors of the event engine of a parent in
+    # the child: the sockets of the connections of the parent and the epoll instances of its
+    # runtime are closed in a child of `os.fork()`, so that the parent's connection ends on the
+    # server with the parent, and a child of a child of ... holds no more of them than its parent.
+    # The eventfd of the runtime of a parent stays, an eventfd of the child's own, which an object
+    # of the parent writes to when it wakes a task of that runtime: one descriptor of each
+    # generation.
+    import subprocess
+    import sys
+    import textwrap
+
+    if not os.path.isdir("/proc/self/fd"):
+        pytest.skip("the descriptors of a process are those of /proc/self/fd")
+    _, service = mock_connect
+    script = textwrap.dedent(
+        f"""
+        import os, signal
+        from pyspark.sql import SparkSession
+
+        def kinds():
+            counts = {{"socket": 0, "eventpoll": 0, "eventfd": 0, "all": 0}}
+            for name in os.listdir("/proc/self/fd"):
+                try:
+                    link = os.readlink(f"/proc/self/fd/{{name}}")
+                except OSError:
+                    continue
+                counts["all"] += 1
+                for kind in ("socket", "eventpoll", "eventfd"):
+                    counts[kind] += kind in link
+            return counts
+
+        spark = SparkSession.builder.remote({service.remote!r}).getOrCreate()
+        for level in range(3):
+            spark.range(1).collect()
+            counts = kinds()
+            print("level", level, counts["socket"], counts["eventpoll"], counts["all"], flush=True)
+            pid = os.fork()
+            if pid:
+                _, status = os.waitpid(pid, 0)
+                os._exit(os.WEXITSTATUS(status) if os.WIFEXITED(status) else 99)
+            signal.alarm(30)
+            inherited = kinds()
+            print("inherited", inherited["socket"], inherited["eventpoll"], flush=True)
+        os._exit(0)
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120
+    )
+    lines = [line.split() for line in result.stdout.splitlines()]
+    assert [line[0] for line in lines] == ["level", "inherited"] * 3, result.stderr
+    levels = [list(map(int, line[2:])) for line in lines if line[0] == "level"]
+    # One socket of a connection of its own and the two descriptors of the epoll instance of its
+    # runtime, at every level.
+    assert [level[:2] for level in levels] == [[1, 2]] * 3, levels
+    # None of those of the parent in a child, before it calls.
+    assert [line[1:] for line in lines if line[0] == "inherited"] == [["0", "0"]] * 3, lines
+    # One descriptor more of each generation, the eventfd of its parent's runtime.
+    assert [b[2] - a[2] for a, b in zip(levels, levels[1:])] == [1, 1], levels
+
+
+def test_the_failures_of_the_calls_that_pyspark_leaves_to_grpc_are_its_rpc_errors(mock_connect):
+    # As PySpark Connect's `clone`, which does not convert the failure of its CloneSession: the
+    # error is grpcio's `_InactiveRpcError` of the call, which the client does not log.
+    grpc = pytest.importorskip("grpc")
+
+    spark, service = mock_connect
+    service.clone_failure = ("INVALID_ARGUMENT", "no clone")
+    spark.client.set_retry_policies([])
+    with _connect_log() as records:
+        with pytest.raises(grpc.RpcError) as error:
+            spark.client.clone()
+        with pytest.raises(grpc.RpcError):
+            spark.cloneSession()
+    assert type(error.value).__name__ == "_InactiveRpcError"
+    assert (error.value.code(), error.value.details()) == (
+        grpc.StatusCode.INVALID_ARGUMENT, "no clone")
+    assert error.value.debug_error_string() == "INVALID_ARGUMENT:no clone"
+    assert [record.getMessage() for record in records] == []
+
+
+def test_the_requests_sent_in_the_background_warn_and_log_their_failures_as_pyspark(mock_connect):
+    # As PySpark Connect's releases of the results of an execution, of the thread that sends them:
+    # once their retries are spent, `Retrying` warns, and the failure is logged as a warning.
+    pytest.importorskip("grpc_status")
+    import warnings
+
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    spark, service = mock_connect
+    service.release_failure = ("UNAVAILABLE", "no release")
+    spark.client.set_retry_policies([DefaultPolicy(max_retries=1, initial_backoff=1, jitter=0)])
+    with _connect_log() as records, warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        spark.range(1).collect()
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not any(
+            record.getMessage().startswith("ReleaseExecute failed") for record in records
+        ):
+            time.sleep(0.05)
+    failed = [record for record in records if record.getMessage().startswith("ReleaseExecute")]
+    assert failed and failed[0].getMessage() == (
+        "ReleaseExecute failed with exception: <_InactiveRpcError of RPC that terminated with:\n"
+        '\tstatus = StatusCode.UNAVAILABLE\n\tdetails = "no release"\n'
+        '\tdebug_error_string = "UNAVAILABLE:no release"\n>.'
+    )
+    assert "[RETRIES_EXCEEDED] The maximum number of retries has been exceeded." in [
+        str(w.message) for w in caught]
+
+
+def test_the_user_agent_of_the_requests_is_pyspark_s(mock_connect, monkeypatch):
+    # As PySpark Connect's `ChannelBuilder.userAgent`, which each request reads as it is built:
+    # of `SPARK_CONNECT_USER_AGENT` in the environment then, and of the version of Python; and the
+    # user ID of the property of a channel builder of its own, as PySpark's client reads it.
+    import platform
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client import DefaultChannelBuilder
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = mock_connect
+
+    def last_client_type():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).client_type
+
+    monkeypatch.delenv("SPARK_CONNECT_USER_AGENT", raising=False)
+    spark.range(1).collect()
+    assert last_client_type().endswith(f" python/{platform.python_version()}")
+    assert last_client_type().startswith("_SPARK_CONNECT_PYTHON spark/4.3.0 os/")
+    monkeypatch.setenv("SPARK_CONNECT_USER_AGENT", "agent_of_now")
+    spark.range(1).collect()
+    assert last_client_type().startswith("agent_of_now spark/4.3.0 os/")
+
+    class Builder(DefaultChannelBuilder):
+        @property
+        def userId(self):
+            return "of_the_property"
+
+    other = SparkSession.builder.channelBuilder(Builder(service.remote)).create()
+    try:
+        other.range(1).collect()
+        sent = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        assert sent.user_context.user_id == "of_the_property"
+    finally:
+        other.stop()
+
+
+def test_a_connection_that_fails_fails_the_next_calls_at_once_as_grpcio(monkeypatch):
+    # As grpcio's channel in TRANSIENT_FAILURE: the failure of a connection is the error of the
+    # calls that follow it at once, of gRPC core's text, while the channel connects again in the
+    # background.
+    import socket
+
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql import SparkSession
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+    try:
+        spark.client.set_retry_policies([])
+        texts = []
+        for _ in range(3):
+            started = time.monotonic()
+            with pytest.raises(SparkConnectGrpcException) as error:
+                spark.range(1).schema
+            texts.append(str(error.value))
+            assert time.monotonic() - started < 5
+        assert texts[0] == texts[1] == texts[2]
+        assert (
+            "failed to connect to all addresses; last error: UNKNOWN: "
+            f"ipv4:127.0.0.1:{port}: Failed to connect to remote host: Connection refused"
+        ) in texts[0]
+    finally:
+        spark.stop()
 
 
 def test_client_of_a_connection_as_pyspark(monkeypatch):

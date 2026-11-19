@@ -75,6 +75,18 @@ def abort_with_error_info(context, error):
     context.abort(grpc.StatusCode.INTERNAL, message)
 
 
+def abort_with_mismatched_status(context, mismatched):
+    # Abort the call of `context` with the status (code name, google.rpc.Status code, message,
+    # google.rpc.Status message) `mismatched`, whose grpc-status-details-bin is a status of its
+    # own code and message, as of metadata that gRPC's core refuses at its soft limit.
+    import grpc
+
+    code, proto_code, message, proto_message = mismatched
+    status = varint_field(1, proto_code) + message_field(2, proto_message)
+    context.set_trailing_metadata((("grpc-status-details-bin", status),))
+    context.abort(getattr(grpc.StatusCode, code), message)
+
+
 def parse_message(data):
     """Decode protobuf wire bytes into {field: [value, ...]}: varints as ints and
     length-delimited fields as bytes (decode nested messages with another call)."""
@@ -276,8 +288,9 @@ def struct_schema(name="id"):
     return message_field(21, message_field(1, field))
 
 
-def retry_info_status(code, delay_ms):
-    """The grpc-status-details-bin of a failure of `code` with a RetryInfo of `delay_ms`."""
+def retry_info_status(code, delay_ms, message="retry later"):
+    """The grpc-status-details-bin of a failure of `code` and `message` with a RetryInfo of
+    `delay_ms`, of the code and the message of the failure, as a server sends it."""
     import grpc
 
     # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
@@ -285,7 +298,7 @@ def retry_info_status(code, delay_ms):
     delay = varint_field(1, delay_ms // 1000) + varint_field(2, (delay_ms % 1000) * 1_000_000)
     return (
         varint_field(1, getattr(grpc.StatusCode, code).value[0])
-        + message_field(2, "retry later")
+        + message_field(2, message)
         + message_field(
             3,
             message_field(1, "type.googleapis.com/google.rpc.RetryInfo")
@@ -387,6 +400,7 @@ def serve(connection):
             self.query_payload = None
             self.execute_failure = None
             self.execute_error = None
+            self.mismatched_status = None
             self.get_status_error = None
             self.fetch_error_details_requests = []
             self.stream_failure = None
@@ -417,6 +431,9 @@ def serve(connection):
             self.rpc_events = []
             self.set_confs = []
             self.clone_requests = []
+            # The (code, message) that CloneSession and ReleaseExecute abort with, if any.
+            self.clone_failure = None
+            self.release_failure = None
             # The GetStatusRequests of each GetStatus.
             self.get_status_requests = []
             # The session and the first request of each AddArtifacts.
@@ -584,6 +601,10 @@ def serve(connection):
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
         execute_error = None
+        # With `mismatched_status` set to (code name, google.rpc.Status code, message,
+        # google.rpc.Status message), Config, but the plan compression lookup, and ExecutePlan
+        # fail with that code and message, of the details of a google.rpc.Status of the others.
+        mismatched_status = None
         # Each (code name, delay in ms) of this list fails an ExecutePlan of a session that is not
         # forgotten, once, as the server does for a failure with a google.rpc.RetryInfo that asks
         # for the delay.
@@ -837,6 +858,8 @@ def serve(connection):
                 context.abort(getattr(grpc.StatusCode, code), message)
             if self.execute_error:
                 abort_with_error_info(context, self.execute_error)
+            if self.mismatched_status:
+                abort_with_mismatched_status(context, self.mismatched_status)
             # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
             # response_id=13, result_complete=14.
             operation_id = parse_message(request).get(6, [b""])[0]
@@ -872,7 +895,7 @@ def serve(connection):
                     else (self.stream_failure, None)
                 )
                 if delay_ms is not None:
-                    status = retry_info_status(code, delay_ms)
+                    status = retry_info_status(code, delay_ms, "stream dropped")
                     context.set_trailing_metadata((("grpc-status-details-bin", status),))
                 context.abort(getattr(grpc.StatusCode, code), "stream dropped")
             if self.stream_error:
@@ -905,6 +928,9 @@ def serve(connection):
         def release_execute(self, request, context):
             if self.is_recorded(request, "release_execute"):
                 self.release_execute_requests.append(request)
+                if self.release_failure:
+                    code, message = self.release_failure
+                    context.abort(getattr(grpc.StatusCode, code), message)
             return b""
 
         def wait_for_response(self, gate, operation_id, timeout):
@@ -948,6 +974,9 @@ def serve(connection):
         def clone_session(self, request, context):
             if self.is_recorded(request, "clone"):
                 self.clone_requests.append(request)
+                if self.clone_failure:
+                    code, message = self.clone_failure
+                    context.abort(getattr(grpc.StatusCode, code), message)
             if self.clone_error:
                 abort_with_error_info(context, self.clone_error)
             # CloneSessionRequest.session_id=1, new_session_id=4; CloneSessionResponse
@@ -1006,6 +1035,8 @@ def serve(connection):
                 )
             if not lookup and self.config_failure:
                 context.abort(grpc.StatusCode.INVALID_ARGUMENT, self.config_failure)
+            if not lookup and self.mismatched_status:
+                abort_with_mismatched_status(context, self.mismatched_status)
             request = parse_message(request)
             operation = parse_message(request[3][0])
             if 1 in operation:

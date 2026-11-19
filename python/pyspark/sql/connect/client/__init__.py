@@ -643,6 +643,8 @@ class SparkConnectClient:
             preferred_arrow_chunk_size,
             deadlines,
         )
+        # As PySpark's client, which logs the deadlines that it was given as it is made.
+        _log_rpc_deadlines(rpc_deadlines if rpc_deadlines is not None else RpcDeadlines())
         _init_client_state(session, builder, user_id)
         self._init_of_session(session)
         if not use_reattachable_execute:
@@ -1564,10 +1566,10 @@ class SparkConnectClient:
         )
 
     def newSession(self) -> "SparkConnectClient":
-        """A client of a new session of the same connection, as SparkConnectClient's
-        ``newSession``: of none of the state of this session, of its hooks, its deadlines and
-        whether its executions are reattachable, of the user of ``_user_id`` unless the
-        connection has one, and of the default retry policy."""
+        """A client of a new session of the same connection string, over the connection of the
+        process to its server, as SparkConnectClient's ``newSession``: of none of the state of this
+        session, of its hooks, its deadlines and whether its executions are reattachable, of the
+        user of ``_user_id`` unless the connection has one, and of the default retry policy."""
         session = _new_session_of(self._session, client_state=self.__dict__)
         # A client that no session object owns, as PySpark's, lives until the exit.
         client = SparkConnectClient._of_session(session)
@@ -1618,9 +1620,10 @@ class SparkConnectClient:
         """Set the retry policies of the RPCs of the session, as SparkConnectClient's
         ``set_retry_policies``: a failure is retried by the first of ``policies`` that can retry
         it, with its backoff, until its retries are spent. The Rust transport retries with the
-        parameters of the policies as they are now, and classifies the failures as PySpark's
-        ``DefaultPolicy.can_retry`` does, which a ``RetryPolicy`` never retries, so a policy of
-        another ``can_retry`` or ``to_state`` raises ``NOT_IMPLEMENTED``."""
+        parameters of PySpark's own ``DefaultPolicy`` and ``RetryPolicy`` as they are now, of
+        whole milliseconds, without Python; any other policy, as a subclass of its own
+        ``can_retry`` or ``to_state``, is asked by PySpark's ``Retrying`` of each call, as
+        PySpark's client asks it, of the ``grpc.RpcError`` of each failed RPC."""
         self._set_retry_policies(list(policies), None)
 
     def get_retry_policies(self) -> list["RetryPolicy"]:
@@ -1649,10 +1652,16 @@ class SparkConnectClient:
             parameters["max_retry_exception_elapsed_time"] = _elapsed_time_bound(
                 max_retry_exception_elapsed_time
             )
+        native = None
         if policies is not None:
-            parameters.update(_retry_parameters(policies))
+            native = _retry_parameters(policies)
+            if native is not None:
+                parameters.update(native)
         self._session._set_retry_policy(**parameters)
         if policies is not None:
+            # Policies that the transport does not retry with as they are, PySpark's `Retrying`
+            # decides, of a copy of the list, as PySpark's client keeps one.
+            self._session._set_retry_decider(None if native is not None else list(policies))
             _RETRY_POLICIES[self._context] = policies
 
     def release_session(self) -> None:
@@ -2217,77 +2226,289 @@ def _plan_of_command(command: Any) -> "pb2.Plan":
     return sent
 
 
-def _retry_parameters(policies: list[Any]) -> dict[str, Any]:
+def _retry_parameters(policies: list[Any]) -> Optional[dict[str, Any]]:
     """The parameters of ``policies`` that the Rust transport retries with, as PySpark's
     ``Retrying`` retries with them: a failure is retried by the first policy that can retry it, a
     ``DefaultPolicy`` of the failures that the transport retries, as a ``RetryPolicy`` can retry
     none, so those of the first ``DefaultPolicy`` retry, and without one no failure is retried,
-    nor are retries spent, of which ``Retrying`` warns. A policy of another ``can_retry``, of the
-    failures that it retries, or of another ``to_state``, of the waits of its retries, raises
-    ``NOT_IMPLEMENTED``: the transport cannot call them."""
+    nor are retries spent, of which ``Retrying`` warns. None for policies that the transport does
+    not retry with as they are, which PySpark's ``Retrying`` decides (see ``_CallRetries``): any
+    that is not exactly a ``DefaultPolicy`` or a ``RetryPolicy`` of PySpark, of methods or a name
+    that may be its own, and a ``DefaultPolicy`` of a backoff, a jitter or a delay that is not a
+    whole number of milliseconds that the transport waits."""
     from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
 
-    effective = None
-    for policy in policies:
-        can_retry = getattr(getattr(policy, "can_retry", None), "__func__", None)
-        to_state = getattr(getattr(policy, "to_state", None), "__func__", None)
-        if to_state is not RetryPolicy.to_state or can_retry not in (
-            DefaultPolicy.can_retry,
-            RetryPolicy.can_retry,
-        ):
-            raise PySparkNotImplementedError(
-                errorClass="NOT_IMPLEMENTED",
-                messageParameters={
-                    "feature": f"The retry policy {type(policy).__name__} of its own can_retry "
-                    "or to_state"
-                },
-            )
-        if effective is None and can_retry is DefaultPolicy.can_retry:
-            effective = policy
+    if any(type(policy) not in (DefaultPolicy, RetryPolicy) for policy in policies):
+        return None
+    effective = next((policy for policy in policies if type(policy) is DefaultPolicy), None)
     if effective is None:
         return {"max_retries": 0, "retries_failures": False}
     max_retries = effective.max_retries
     if max_retries is not None:
+        if (
+            not isinstance(max_retries, (int, float))
+            or isinstance(max_retries, bool)
+            or not math.isfinite(max_retries)
+        ):
+            return None
         # As RetryPolicyState, which retries while the attempts are fewer than it.
         max_retries = min(max(math.ceil(max_retries), 0), 2**32 - 1)
-    max_backoff = effective.max_backoff
-    max_server_retry_delay = effective.max_server_retry_delay
+    milliseconds = {
+        name: getattr(effective, name)
+        for name in (
+            "initial_backoff",
+            "max_backoff",
+            "jitter",
+            "min_jitter_threshold",
+            "max_server_retry_delay",
+        )
+    }
+    optional = ("max_backoff", "max_server_retry_delay")
+    multiplier = effective.backoff_multiplier
+    if (
+        not all(
+            (value is None and name in optional) or _whole_milliseconds(value)
+            for name, value in milliseconds.items()
+        )
+        or not isinstance(multiplier, (int, float))
+        or isinstance(multiplier, bool)
+        or not math.isfinite(multiplier)
+    ):
+        return None
     return {
         "max_retries": max_retries,
-        "initial_backoff": _milliseconds("initial_backoff", effective.initial_backoff),
-        "max_backoff": None if max_backoff is None else _milliseconds("max_backoff", max_backoff),
-        "backoff_multiplier": float(effective.backoff_multiplier),
-        "jitter": _milliseconds("jitter", effective.jitter),
-        "min_jitter_threshold": _milliseconds(
-            "min_jitter_threshold", effective.min_jitter_threshold
-        ),
+        **{name: None if value is None else int(value) for name, value in milliseconds.items()},
+        "backoff_multiplier": float(multiplier),
         "recognize_server_retry_delay": bool(effective.recognize_server_retry_delay),
-        "max_server_retry_delay": (
-            None
-            if max_server_retry_delay is None
-            else _milliseconds("max_server_retry_delay", max_server_retry_delay)
-        ),
         "retries_failures": True,
     }
 
 
-def _milliseconds(name: str, value: Any) -> int:
-    """The milliseconds ``value`` of the parameter ``name`` of a retry policy, a whole number of
-    them, which the Rust transport waits: ``NOT_IMPLEMENTED`` for a negative or fractional one."""
-    if (
+def _whole_milliseconds(value: Any) -> bool:
+    """Whether ``value``, a parameter of a retry policy, is a whole number of milliseconds that
+    the Rust transport waits."""
+    return (
         isinstance(value, (int, float))
+        and not isinstance(value, bool)
         and math.isfinite(value)
-        and value >= 0
+        and 0 <= value < 2**63
         and value == int(value)
-    ):
-        return int(value)
-    raise PySparkNotImplementedError(
-        errorClass="NOT_IMPLEMENTED",
-        messageParameters={
-            "feature": f"The {name} {value!r} of a retry policy, which is not a whole number of "
-            "milliseconds,"
-        },
     )
+
+
+class _CallRetries:
+    """PySpark's ``Retrying`` of the retry policies of a client, of one call, which the Rust
+    transport asks what to do of each failed attempt of the call, of policies that it does not
+    retry with itself (see ``_retry_parameters``): as PySpark's client makes one ``Retrying`` of
+    each call, which calls the ``to_state`` of the policies, and asks it, of the exception of each
+    failed attempt, whether to retry it (``accept_exception``, which calls their ``can_retry``),
+    and then for the wait before the retry (``_wait``, which calls the ``next_attempt`` of the
+    state of the policy that retries it, logs, and warns and raises once its retries are spent).
+    Its ``sleep`` keeps the wait, which the transport waits."""
+
+    def __init__(self, policies: list[Any]) -> None:
+        from pyspark.sql.connect.client.retries import Retrying
+
+        self._waits: list[float] = []
+        self._retrying = Retrying(policies, sleep=self._waits.append)
+
+    def decide(
+        self,
+        streaming: bool,
+        code: int,
+        details: str,
+        debug_error_string: Optional[str],
+        trailing_metadata: list[tuple[str, bytes]],
+        text: Optional[str] = None,
+    ) -> Optional[float]:
+        """The wait in seconds before the retry of the attempt that failed of the gRPC error of
+        ``code``, ``details``, ``debug_error_string`` (None of a response that the transport
+        failed to decode, as grpcio's) and ``trailing_metadata``, of grpcio's text
+        ``text``, of a call of a stream of responses if ``streaming``, or None when the failure is
+        the error of the call: no policy retries it, or their retries are spent, of which
+        ``Retrying`` warned. The exception that ``Retrying`` raises in place of the failure, as
+        that of a filter of "error" of its warning, is raised."""
+        exception = _grpc_error(
+            streaming, code, details, debug_error_string, trailing_metadata, text
+        )
+        if not self._retrying.accept_exception(exception):
+            return None
+        try:
+            self._retrying._wait()
+        except BaseException as raised:
+            if raised is exception:
+                return None
+            raise
+        wait = self._waits.pop()
+        # A wait that `time.sleep` refuses, negative, NaN or past its nanoseconds of 64 bits,
+        # raises its error at once, as PySpark's sleep does.
+        if not (0 <= wait < 9223372036.854775):
+            import time
+
+            time.sleep(wait)
+        return wait
+
+
+class _InactiveRpcError(Exception):
+    """The error of a failed call of one response, of grpcio's class name and text, where grpcio
+    is not installed, of which ``_grpc_error`` makes grpcio's own."""
+
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self._text = text
+
+    def __str__(self) -> str:
+        return self._text
+
+    __repr__ = __str__
+
+
+class _MultiThreadedRendezvous(_InactiveRpcError):
+    """As ``_InactiveRpcError``, of a call of a stream of responses."""
+
+
+def _log_rpc_error(
+    streaming: bool,
+    code: int,
+    details: str,
+    debug_error_string: Optional[str],
+    trailing_metadata: list[tuple[str, bytes]],
+    text: str,
+) -> None:
+    """Log the gRPC error of a failed call of the Rust transport, as PySpark's
+    ``_handle_rpc_error`` logs each that it converts, of the exception (``logger.exception("GRPC
+    Error received")``): grpcio's ``RpcError`` of the call (see ``_grpc_error``), or, without
+    grpcio, an exception of its class name and its text, of no frames of PySpark's client."""
+    if not logger.isEnabledFor(logging.ERROR):
+        return
+    try:
+        error = _grpc_error(streaming, code, details, debug_error_string, trailing_metadata, text)
+    except Exception:
+        error = (_MultiThreadedRendezvous if streaming else _InactiveRpcError)(text)
+    logger.error("GRPC Error received", exc_info=error)
+
+
+def _log_rpc_deadlines(deadlines: Optional["RpcDeadlines"] = None, **seconds: Any) -> None:
+    """Log the RPC deadlines of a new client, ``deadlines``, else of ``seconds``, as PySpark's
+    ``SparkConnectClient`` logs them when it is made."""
+    if logger.isEnabledFor(logging.INFO):
+        logger.info(
+            "Spark Connect RPC deadlines: %s",
+            deadlines if deadlines is not None else RpcDeadlines(**seconds),
+        )
+
+
+def _grpc_error(
+    streaming: bool,
+    code: int,
+    details: str,
+    debug_error_string: Optional[str],
+    trailing_metadata: list[tuple[str, bytes]],
+    text: Optional[str] = None,
+) -> Any:
+    """grpcio's ``RpcError`` of a failed call, as PySpark's client sees it: a
+    ``_MultiThreadedRendezvous`` of a call of a stream of responses, ``ExecutePlan`` and
+    ``ReattachExecute``, else an ``_InactiveRpcError``, of the code ``code``, the details
+    ``details``, the ``debug_error_string`` ``debug_error_string`` and the trailing metadata
+    ``trailing_metadata``, whose binary entries are bytes, as ``grpc_status.rpc_status`` reads
+    them. The ``debug_error_string`` of a response that the transport failed to decode is None,
+    as grpcio's of a response that it fails to deserialize: ``debug_error_string()`` of such a
+    ``_MultiThreadedRendezvous`` waits for one, which nothing sets, as grpcio's does. Those classes are grpcio's private ones, made of its private ``_RPCState``: where they
+    cannot be made so, as of another version of grpcio, the error is of the public classes of
+    grpc of the same names, of grpcio's text of the call, ``text`` (see ``_rpc_error_classes``).
+    Raises ImportError without grpcio."""
+    import grpc
+
+    status = next(
+        (member for member in grpc.StatusCode if member.value[0] == code), grpc.StatusCode.UNKNOWN
+    )
+    metadata = tuple(
+        (key, value if key.endswith("-bin") else value.decode("latin-1"))
+        for key, value in trailing_metadata
+    )
+    try:
+        from grpc import _channel
+
+        state = _channel._RPCState((), (), metadata, status, details)
+        state.debug_error_string = debug_error_string
+        if streaming:
+            return _channel._MultiThreadedRendezvous(state, None, None, None)
+        return _channel._InactiveRpcError(state)
+    except Exception:
+        inactive, rendezvous = _rpc_error_classes()
+        return (rendezvous if streaming else inactive)(
+            status, details, debug_error_string, metadata, text
+        )
+
+
+@functools.cache
+def _rpc_error_classes() -> tuple[type, type]:
+    """The ``RpcError`` of a failed call of the public classes of grpc, ``grpc.RpcError`` and
+    ``grpc.Call``, where grpcio's own cannot be made (see ``_grpc_error``): of the names of
+    grpcio's ``_InactiveRpcError`` and ``_MultiThreadedRendezvous``, of the code, the details,
+    the ``debug_error_string`` and the trailing metadata of the call, and of grpcio's text of it,
+    as ``str()`` and ``repr()`` give it."""
+    import grpc
+
+    class _InactiveRpcError(grpc.RpcError, grpc.Call):  # type: ignore[misc]
+        def __init__(
+            self,
+            code: Any,
+            details: str,
+            debug_error_string: Optional[str],
+            trailing_metadata: tuple,
+            text: Optional[str],
+        ) -> None:
+            super().__init__()
+            self._code = code
+            self._details = details
+            self._debug_error_string = debug_error_string
+            self._trailing_metadata = trailing_metadata
+            self._text = (
+                text
+                if text is not None
+                else (
+                    f"<{type(self).__name__} of RPC that terminated with:\n\tstatus = {code}\n"
+                    f'\tdetails = "{details}"\n\tdebug_error_string = "{debug_error_string}"\n>'
+                )
+            )
+
+        def initial_metadata(self) -> tuple:
+            return ()
+
+        def trailing_metadata(self) -> tuple:
+            return self._trailing_metadata
+
+        def code(self) -> Any:
+            return self._code
+
+        def details(self) -> str:
+            return self._details
+
+        def debug_error_string(self) -> Optional[str]:
+            return self._debug_error_string
+
+        def is_active(self) -> bool:
+            return False
+
+        def time_remaining(self) -> Optional[float]:
+            return None
+
+        def cancel(self) -> bool:
+            return False
+
+        def add_callback(self, callback: Any) -> bool:
+            return False
+
+        def __str__(self) -> str:
+            return self._text
+
+        __repr__ = __str__
+
+    class _MultiThreadedRendezvous(_InactiveRpcError):
+        pass
+
+    return _InactiveRpcError, _MultiThreadedRendezvous
 
 
 def _elapsed_time_bound(seconds: float) -> Optional[float]:
@@ -2362,18 +2583,22 @@ def _warn_retries_exceeded(retry_exception: bool) -> None:
     )
 
 
-def _log_grpc_error(file: str, line: int, message: str) -> None:
-    """Log an error of a channel that the client goes on from as grpcio does, for the Rust
-    transport, which calls this on the thread of the channel: a proxy variable that is not an HTTP
-    proxy, or a file of TLS roots that cannot be read. PySpark's client shows them only as the
-    line that gRPC's C core writes to the stderr of the process for an error, of the form
-    ``E<month><day> <time> <thread> <file>:<line>] <message>``, where ``file`` and ``line`` are of
-    the Rust source of the call here."""
+def _log_grpc_error(file: str, line: int, message: str, severity: str = "E") -> None:
+    """Log what a channel logs as grpcio does, for the Rust transport, which calls this on the
+    thread of the channel, or on its delivery thread: an error of a channel that the client goes
+    on from, such as a proxy variable that is not an HTTP proxy, a file of TLS roots that cannot
+    be read or a proxy that refused a tunnel, or the information of a TLS handshake that failed
+    (``severity`` ``"I"``). PySpark's client shows them only as the line that gRPC's C core writes
+    to the stderr of the process, of the form ``E<month><day> <time> <thread> <file>:<line>]
+    <message>``, where ``file`` and ``line`` are of the Rust source of the call here."""
     import datetime
     import threading
 
     now = datetime.datetime.now()
-    entry = f"E{now:%m%d %H:%M:%S.%f} {threading.get_native_id():7d} {file}:{line}] {message}\n"
+    entry = (
+        f"{severity}{now:%m%d %H:%M:%S.%f} {threading.get_native_id():7d} {file}:{line}] "
+        f"{message}\n"
+    )
     try:
         os.write(2, entry.encode())
     except OSError:

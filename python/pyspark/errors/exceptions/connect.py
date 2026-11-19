@@ -26,6 +26,7 @@
 # ``grpc.StatusCode``.
 import enum
 import json
+import threading
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
@@ -87,32 +88,52 @@ if TYPE_CHECKING:
     from google.rpc.error_details_pb2 import ErrorInfo
 
 
-class _MultiThreadedRendezvous(Exception):
-    """The gRPC error of a call that the server ended with an error, as the ``grpc`` package's
-    ``_MultiThreadedRendezvous``, of its status code and details: PySpark Connect builds its
-    exception of an error of the server as it handles it, so the DataFrame and SQL query context
-    loggers log it as the exception, of its class, its ``str`` and its traceback."""
+class _RpcError(Exception):
+    """The gRPC error of a call that the server ended with an error, as grpcio's, of its text:
+    PySpark Connect builds its exception of an error of the server as it handles grpcio's error of
+    the call, so the DataFrame and SQL query context loggers log that error as the exception, of
+    its class, its ``str`` and its traceback."""
 
-    def __init__(self, code: Any, details: str) -> None:
-        super().__init__(code, details)
-        self._code = code
-        self._details = details
+    def __init__(self, text: str) -> None:
+        super().__init__(text)
+        self._text = text
 
     def __str__(self) -> str:
-        grpc_status = self._code.value[0] if isinstance(self._code.value, tuple) else self._code
-        debug = "UNKNOWN:Error received from peer {grpc_message:%s, grpc_status:%s}" % (
-            json.dumps(self._details),
-            grpc_status,
-        )
-        return (
-            "<_MultiThreadedRendezvous of RPC that terminated with:\n"
-            "\tstatus = %s\n"
-            '\tdetails = "%s"\n'
-            '\tdebug_error_string = "%s"\n'
-            ">" % (self._code, self._details, debug)
-        )
+        return self._text
 
     __repr__ = __str__
+
+
+class _InactiveRpcError(_RpcError):
+    """grpcio's error of a call of one response, such as ``AnalyzePlan`` (see ``_RpcError``)."""
+
+
+class _MultiThreadedRendezvous(_RpcError):
+    """grpcio's error of a call of a stream of responses, ``ExecutePlan`` and
+    ``ReattachExecute`` (see ``_RpcError``)."""
+
+    @classmethod
+    def of(cls, code: Any, details: str) -> "_MultiThreadedRendezvous":
+        """The error of the status code ``code`` and the details ``details``, of the text of
+        grpcio 1.85, of an exception that no call of the transport failed with."""
+        name = getattr(code, "name", code)
+        return cls(
+            "<_MultiThreadedRendezvous of RPC that terminated with:\n"
+            f"\tstatus = {code}\n"
+            f'\tdetails = "{details}"\n'
+            f'\tdebug_error_string = "{name}:{details}"\n'
+            ">"
+        )
+
+
+class _RpcErrorOfConversion(threading.local):
+    """grpcio's error of the call whose error ``_convert_server_error`` converts, which the
+    exception that it builds logs, of the transport (see ``_RpcError``)."""
+
+    error: Optional[_RpcError] = None
+
+
+_RPC_ERROR = _RpcErrorOfConversion()
 
 
 class SparkConnectException(PySparkException):
@@ -375,9 +396,12 @@ class SparkConnectGrpcException(SparkConnectException):
             # PySpark Connect builds this exception as it handles the gRPC error of the call,
             # which its query context loggers log as the exception. The Rust transport has no
             # such error in Python, so its stand-in is handled as this logs.
+            rpc_error_of_call = _RPC_ERROR.error or _MultiThreadedRendezvous.of(
+                self._grpc_status_code, self._message
+            )
             try:
-                raise _MultiThreadedRendezvous(self._grpc_status_code, self._message)
-            except _MultiThreadedRendezvous as rpc_error:
+                raise rpc_error_of_call
+            except _RpcError as rpc_error:
                 self._log_exception()
                 rpc_error.__traceback__ = None
                 # As PySpark Connect raises this exception from None, as it handles that error.
@@ -704,10 +728,43 @@ def _convert_server_error(
     contexts: Optional[List[Dict[str, Any]]],
     grpc_status_code: int,
     breaking_change_info: Optional[Dict[str, Any]],
+    rpc_error: Optional[tuple[bool, str]] = None,
 ) -> SparkConnectException:
     """The exception for an error that the server raised, from what the Rust transport read of
     its ``ErrorInfo`` and ``FetchErrorDetails``. Picks and builds it as ``convert_exception``
-    does once ``_convert_exception`` has read them."""
+    does once ``_convert_exception`` has read them, as it handles grpcio's error of the call that
+    failed, of the kind (a call of a stream of responses if the first of ``rpc_error``) and the
+    text of ``rpc_error``, which an exception of query contexts logs."""
+    if rpc_error is None:
+        return _convert_server_error_of(
+            classes, sql_state, error_class, reason, message, message_parameters, stacktrace,
+            display_server_stacktrace, contexts, grpc_status_code, breaking_change_info,
+        )
+    streaming, text = rpc_error
+    _RPC_ERROR.error = (_MultiThreadedRendezvous if streaming else _InactiveRpcError)(text)
+    try:
+        return _convert_server_error_of(
+            classes, sql_state, error_class, reason, message, message_parameters, stacktrace,
+            display_server_stacktrace, contexts, grpc_status_code, breaking_change_info,
+        )
+    finally:
+        _RPC_ERROR.error = None
+
+
+def _convert_server_error_of(
+    classes: List[str],
+    sql_state: Optional[str],
+    error_class: Optional[str],
+    reason: Optional[str],
+    message: str,
+    message_parameters: Optional[Dict[str, str]],
+    stacktrace: Optional[str],
+    display_server_stacktrace: bool,
+    contexts: Optional[List[Dict[str, Any]]],
+    grpc_status_code: int,
+    breaking_change_info: Optional[Dict[str, Any]],
+) -> SparkConnectException:
+    """As ``_convert_server_error``, of no error of the call."""
     grpc_status_code = _status_code(grpc_status_code)  # type: ignore[assignment]
     if contexts is not None:
         contexts = [  # type: ignore[misc]

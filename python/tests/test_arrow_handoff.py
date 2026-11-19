@@ -1077,15 +1077,16 @@ def test_cached_arrow_upload_retries_a_transient_failure_from_the_status_check(p
 
 
 def test_cached_arrow_upload_does_not_retry_another_failure(protocol):
-    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
-
+    # As PySpark's SparkConnectClient.cache_artifacts, which leaves the failure of its RPC to
+    # grpc: createDataFrame raises grpcio's RpcError of the upload, unconverted.
     table = pa.table({"id": range(10_000)})
     with _arrow_input_service(protocol, **{
         "spark.sql.session.localRelationCacheThreshold": "0",
     }) as (spark, state):
         state["upload_failures"].append(grpc.StatusCode.PERMISSION_DENIED)
-        with pytest.raises(SparkConnectGrpcException, match="artifact upload unavailable"):
+        with pytest.raises(grpc.RpcError, match="artifact upload unavailable") as raised:
             spark.createDataFrame(table)
+        assert raised.value.code() == grpc.StatusCode.PERMISSION_DENIED
         assert state["upload_attempts"] == 1 and state["uploads"] == 0
 
 
