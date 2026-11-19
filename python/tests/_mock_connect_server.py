@@ -389,6 +389,8 @@ def serve(connection):
             self.clone_requests = []
             # The GetStatusRequests of each GetStatus.
             self.get_status_requests = []
+            # The session and the first request of each AddArtifacts.
+            self.add_artifacts_requests = []
             # The DDL of the JSON of each JsonToDDL.
             self.ddl_string = ""
             with self.listener_condition:
@@ -593,6 +595,8 @@ def serve(connection):
             session_id = b""
             for request in requests:
                 session_id = parse_message(request).get(1, [b""])[0]
+                # The first request of each AddArtifacts, of the session that sent it.
+                self.add_artifacts_requests.append((session_id.decode(), bytes(request)))
                 break
             if self.block_add_artifacts and not self.add_artifacts_gate.wait(15):
                 context.abort(

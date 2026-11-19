@@ -7826,7 +7826,7 @@ pub(crate) fn execution_metrics<'py>(
         }
     }
     let observed_cls = py
-        .import("pyspark.sql.connect.client")?
+        .import("pyspark.sql.connect.client.core")?
         .getattr("PlanObservedMetrics")?;
     // The metrics as PySpark's client keeps them, the `Expression.Literal` messages that the
     // server sent, of `pyspark.sql.connect.proto`, which `PlanObservedMetrics.pairs` converts
