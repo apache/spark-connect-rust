@@ -2,6 +2,8 @@
 
 import signal
 
+import pytest
+
 # A pytest that a non-interactive shell starts in the background (`pytest ... &`, `nohup ... &`)
 # inherits SIGINT as ignored, and Python then leaves it ignored: the SIGINT that the tests of the
 # interrupts send would be dropped, and each of them would wait out its fallback (the retry
@@ -10,6 +12,22 @@ import signal
 # signal that a handler catches.
 if signal.getsignal(signal.SIGINT) == signal.SIG_IGN:
     signal.signal(signal.SIGINT, signal.default_int_handler)
+
+
+@pytest.fixture(autouse=True)
+def _debugging_cache_of_each_test():
+    # PySpark's is_debugging_enabled keeps its first answer of
+    # spark.python.sql.dataFrameDebugging.enabled for the interpreter
+    # (pyspark.errors.utils._enable_debugging_cache), and the first Column method of a test that
+    # has an active session reads it: True of a mock server, which takes the default. Each test
+    # leaves the cache as it found it, so that a test does not decide the call-site origins that
+    # the expressions of the tests after it carry, whatever the order of the files (see
+    # _debugging_read_without_a_session of test_dropin_offline.py).
+    import pyspark.errors.utils as errors_utils
+
+    cached = errors_utils._enable_debugging_cache
+    yield
+    errors_utils._enable_debugging_cache = cached
 
 
 def pytest_sessionfinish(session, exitstatus):

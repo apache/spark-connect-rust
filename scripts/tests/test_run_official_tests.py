@@ -294,5 +294,46 @@ class DropinDeselectPluginTests(unittest.TestCase):
         config.hook.pytest_deselected.assert_not_called()
 
 
+class ParseCountsTests(unittest.TestCase):
+    def counts(self, passed=0, failed=0, error=0, skipped=0):
+        return {"passed": passed, "failed": failed, "error": error, "skipped": skipped}
+
+    def test_the_summary_line_of_pytest_is_read_and_not_the_lines_after_it(self):
+        # The warning of PySpark's listener bus, which its handler thread writes to stderr when
+        # the session stops, after pytest's summary on stdout (connect/streaming/query.py).
+        warning = (
+            "/spark/python/pyspark/sql/connect/streaming/query.py:380: UserWarning: "
+            "StreamingQueryListenerBus Handler thread received exception, all client side "
+            "listeners are removed and handler thread is terminated. The error is: "
+            "[NO_ACTIVE_SESSION] No active Spark session found. 1 error"
+        )
+        stdout = "..s.F\nFAILED pyspark/x/test_a.py::A::test_b - assert 1 failed\n"
+        stdout += "1 failed, 3 passed, 1 skipped, 2 warnings in 12.34s\n"
+        text = stdout + "\n" + warning + "\n  warnings.warn(\n"
+        self.assertEqual(runner.parse_counts(text), self.counts(passed=3, failed=1, skipped=1))
+
+    def test_the_forms_of_the_summary_line(self):
+        for line, expected in [
+            ("3 passed in 0.12s", self.counts(passed=3)),
+            (
+                "===== 1 failed, 2 passed, 3 errors in 61.00s (0:01:01) =====",
+                self.counts(passed=2, failed=1, error=3),
+            ),
+            ("\x1b[32m1 error\x1b[0m\x1b[32m in 0.50s\x1b[0m", self.counts(error=1)),
+            (
+                "320 passed, 14 warnings, 5 subtests passed in 473.69s (0:07:53)",
+                self.counts(passed=320),
+            ),
+            ("2 xfailed, 1 xpassed, 4 deselected in 0.01s", self.counts()),
+            ("no tests ran in 0.01s", self.counts()),
+        ]:
+            with self.subTest(line=line):
+                self.assertEqual(runner.parse_counts("collected\n" + line + "\n"), expected)
+
+    def test_output_without_a_summary_line_has_no_counts(self):
+        text = "ImportError while importing test module\nE   1 failed import\nThe error is: x\n"
+        self.assertEqual(runner.parse_counts(text), self.counts())
+
+
 if __name__ == "__main__":
     unittest.main()

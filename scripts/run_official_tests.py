@@ -115,6 +115,13 @@ _COUNT_RE = {
     k: re.compile(rf"(\d+) {k}{'s?' if k == 'error' else ''}\b")
     for k in ("passed", "failed", "error", "skipped")
 }
+# pytest's summary line: its counts ("1 failed, 2 passed, 3 warnings", "5 subtests passed") or
+# "no tests ran", the duration, and the "=" rule around it unless -q drops it.
+_SUMMARY_RE = re.compile(
+    r"^=*\s*((?:\d+ [a-z ]+?)(?:, \d+ [a-z ]+?)*|no tests ran)"
+    r" in \d+(?:\.\d+)?s(?: \(\d+:\d{2}:\d{2}\))?\s*=*$"
+)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def discover(spark_py: Path):
@@ -210,15 +217,19 @@ def load_manifest(path: Path):
 
 
 def parse_counts(text: str):
+    """The counts of pytest's last summary line in `text`, such as "3 passed, 1 skipped in
+    0.12s" (of -q) or "==== 1 failed, 2 passed in 61.00s (0:01:01) ====", or zeros without
+    one. Only that line is read: the output also has other lines with these words, such as
+    the warning of PySpark's listener bus ("... The error is: ...") on stderr after it."""
     c = {"passed": 0, "failed": 0, "error": 0, "skipped": 0}
     for line in reversed(text.strip().splitlines()):
-        if any(w in line for w in (" passed", " failed", " error", " skipped")):
+        summary = _SUMMARY_RE.match(_ANSI_RE.sub("", line).strip())
+        if summary:
             for k, rx in _COUNT_RE.items():
-                m = rx.search(line)
+                m = rx.search(summary.group(1))
                 if m:
                     c[k] = int(m.group(1))
-            if any(w in line for w in ("passed", "failed", "error")):
-                break
+            break
     return c
 
 
