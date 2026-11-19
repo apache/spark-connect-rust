@@ -155,7 +155,10 @@ impl PyDataFrame {
     /// first plan of the session reads the plan compression settings then; then
     /// `SparkConnectClient.to_pandas` reads the settings of the conversion, in one request,
     /// and sends the plan; the Arrow result with the schema that the server sends is converted
-    /// by `pyspark.sql.connect.client._to_pandas`.
+    /// by `pyspark.sql.connect.client._to_pandas`. The DataFrame keeps the information of the
+    /// execution once the result is converted, as `_to_pandas` sets `_execution_info` after
+    /// `SparkConnectClient.to_pandas` returns: a conversion that fails leaves `executionInfo` as
+    /// it was.
     pub(crate) fn to_pandas(
         &self,
         py: Python<'_>,
@@ -172,9 +175,9 @@ impl PyDataFrame {
                 "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
             ])
         })?;
-        let (batches, schema) = interruptible(py, &session, || {
+        let (batches, schema, info) = interruptible(py, &session, || {
             execution
-                .collect_record_batches_checked(check_schema_at_receipt)
+                .collect_record_batches_and_info(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
         check_schema_conversion(py, schema.as_ref())?;
@@ -191,13 +194,7 @@ impl PyDataFrame {
             Some(schema) => crate::types::schema_to_py(py, schema)?,
             None => py.None(),
         };
-        let (metrics, observed) = match self.dataframe.execution_info() {
-            Ok(info) => execution_metrics(py, &info)?,
-            Err(_) => (
-                pyo3::types::PyList::empty(py),
-                pyo3::types::PyList::empty(py),
-            ),
-        };
+        let (metrics, observed) = execution_metrics(py, &info)?;
         let kwargs = pyo3::types::PyDict::new(py);
         kwargs.set_item("timezone", &settings[0])?;
         match struct_handling_mode {
@@ -210,6 +207,7 @@ impl PyDataFrame {
             (table, schema, metrics, observed),
             Some(&kwargs),
         )?;
+        self.dataframe.keep_execution_info(info);
         Ok(pdf.unbind())
     }
 
@@ -4638,8 +4636,11 @@ type MergeClause = (
 /// which asserts a str and sets it in a string field, and then its value, whose `to_plan` an
 /// object that is not a Column lacks; and then the condition. A Column that does not build raises
 /// its error there, such as a str that UTF-8 cannot encode, or the `RecursionError` of PySpark's
-/// serializer of one too deep to be sent, and the clause is not added. The merge builds them again
-/// when it runs. The assignments keep their order, in which the merge sends them.
+/// serializer of one too deep to be sent, and the clause is not added. The clause keeps them as
+/// they were built then ([`built_column`]), which the merge sends, as PySpark's merge sends the
+/// protos that its clause built: so the functions of their UDFs are pickled once, when the clause
+/// is added, and the warning of a window of no partitions is given then. The assignments keep
+/// their order, in which the merge sends them.
 fn merge_clause(
     py: Python<'_>,
     condition: &ClauseCondition,
@@ -4660,23 +4661,28 @@ fn merge_clause(
                     return Err(not_column(&value, "value"));
                 }
             };
-            value.try_to_proto().to_pyerr()?;
-            built.push((key, value));
+            built.push((key, built_column(&value)?));
         }
     }
     let condition = match condition {
         ClauseCondition::None => None,
-        ClauseCondition::Column(column) => Some(column.clone()),
+        ClauseCondition::Column(column) => Some(built_column(column)?),
         ClauseCondition::Object(object) => {
             let object = object.bind(py);
             object.getattr("to_plan")?;
             return Err(not_column(object, "condition"));
         }
     };
-    if let Some(condition) = &condition {
-        condition.try_to_proto().to_pyerr()?;
-    }
     Ok((condition, built))
+}
+
+/// The Column of the `spark.connect.Expression` of `column` as a request builds it now, of its
+/// rendering and its levels, which sends that expression as it is (`Column::sent`), as the
+/// `MergeAction` that PySpark's `_build_merge_action` builds holds the protos of its Columns; or
+/// the error of the build.
+fn built_column(column: &spark_connect::column::Column) -> PyResult<spark_connect::column::Column> {
+    let (expression, levels) = column.try_to_proto_with_levels().to_pyerr()?;
+    spark_connect::column::Column::sent(expression, column.expression().render(), levels).to_pyerr()
 }
 
 #[pymethods]

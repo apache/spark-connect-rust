@@ -4914,6 +4914,57 @@ def test_udtf_return_types_are_converted_when_plans_are_built_as_pyspark(mock_co
     assert (len(service.analyze_requests), len(service.execute_requests)) == sent
 
 
+def test_pickles_of_types_that_do_not_convert_fail_where_the_plan_is_built_as_pyspark(
+        mock_connect):
+    # As PySpark's pickles of a Column, a DataFrame and a table argument, which keep the output
+    # type of a UDF and the return type of a UDTF as they are, and convert them when a plan of the
+    # unpickled object is built: a type that pyspark_types_to_proto_types does not convert, such
+    # as AtomicType() of a UDF without Arrow or a StructType changed to hold it after the call,
+    # pickles, and raises its UNSUPPORTED_OPERATION at the requests of the unpickled Column and
+    # table argument, and at the unpickle of a DataFrame, which builds its plan. A function that
+    # does not pickle still raises at the pickle (see "UDFs" in known-differences.md).
+    import threading
+
+    import cloudpickle
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+    from pyspark.sql import types as T
+
+    spark, service = mock_connect
+    lock = threading.Lock()
+
+    class Handler:
+        def eval(self, x):
+            yield (x,)
+
+    def unsupported(call, operation):
+        with pytest.raises(PySparkValueError) as error:
+            call()
+        assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert error.value.getMessageParameters() == {"operation": operation}
+
+    df = spark.range(2)
+    mutated = T.StructType([T.StructField("a", T.LongType())])
+    columns = [F.udf(lambda x: x, T.AtomicType(), useArrow=False)("id"),
+               F.udf(lambda x: x, mutated)("id")]
+    mutated.fields[0].dataType = T.AtomicType()
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    for column in columns:
+        for dumps, loads in ((pickle.dumps, pickle.loads),
+                             (cloudpickle.dumps, cloudpickle.loads)):
+            restored = loads(dumps(column))
+            assert repr(restored) == repr(column)
+            unsupported(lambda: df.select(restored).schema, "data type AtomicType()")
+    frame = F.udtf(Handler, returnType=5)(F.lit(1))
+    data = cloudpickle.dumps(frame)
+    unsupported(lambda: cloudpickle.loads(data), "data type 5")
+    table = pickle.loads(pickle.dumps(frame.asTable()))
+    unsupported(lambda: F.udtf(Handler, returnType="x int")(table).schema, "data type 5")
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+    with pytest.raises(pickle.PicklingError):
+        pickle.dumps(F.udf(lambda x: (lock, x)[1], "long")("id"))
+
+
 def test_udtfs_are_created_as_pyspark(mock_connect):
     # As PySpark's _create_py_udtf and _create_pyarrow_udtf: a UDTF is not deterministic
     # unless asDeterministic() marks it so, in place; arrow_udtf() makes a PyArrow-native
@@ -8719,7 +8770,9 @@ def test_decimal_type_methods():
 def test_columns_pickle_as_their_expressions_as_pyspark():
     # As PySpark Connect's Columns, which pickle their expressions: pickle, cloudpickle and
     # deepcopy give back a Column of the expression as it was sent, of its repr, and the
-    # expressions over it are those over the original.
+    # expressions over it are those over the original. The expression of a Column, `_expr`,
+    # pickles too, as PySpark's expression, a Python object, pickles its fields: as the
+    # expression of the unpickled Column.
     import copy
 
     from pyspark.serializers import CloudPickleSerializer
@@ -8744,6 +8797,90 @@ def test_columns_pickle_as_their_expressions_as_pyspark():
             over, over_original = F.coalesce(restored, F.lit(0)), F.coalesce(column, F.lit(0))
             assert repr(over) == repr(over_original)
             assert over.to_plan(None) == over_original.to_plan(None)
+        expression = column._expr
+        for protocol in range(pickle.HIGHEST_PROTOCOL + 1):
+            restored = pickle.loads(pickle.dumps(expression, protocol))
+            assert type(restored) is type(expression)
+            assert repr(restored) == repr(expression)
+            assert restored.to_plan(None) == expression.to_plan(None)
+        restored = serializer.loads(serializer.dumps(expression))
+        assert restored.to_plan(None) == expression.to_plan(None)
+
+
+def test_sent_plans_of_pickled_relations_send_them_as_they_were_sent():
+    # The plan that a pickled subquery Column or table argument makes of a relation that it sent,
+    # on a Python worker of the server, whose PySpark Connect builds the request of its plan: the
+    # plan sends a copy of the relation as it was sent, of its plan ID, which the subquery refers
+    # to, or raises the error of a plan that did not build, as the client raised it.
+    from pyspark.errors import PySparkTypeError
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect._column_reduce import sent_plan
+
+    relation = proto.Relation()
+    relation.common.plan_id = 7
+    relation.range.end = 3
+    plan = sent_plan(relation)
+    assert plan._root_plan_id == 7
+    sent = plan.plan(None)
+    assert sent == relation and sent is not relation
+    unnumbered = proto.Relation()
+    unnumbered.range.end = 3
+    assert sent_plan(unnumbered).plan(None) == unnumbered
+    with pytest.raises(ValueError, match="^bad count$"):
+        sent_plan(relation, ("ValueError", "bad count", None)).plan(None)
+    with pytest.raises(PySparkTypeError) as error:
+        sent_plan(relation, ("PySparkTypeError", "NOT_ITERABLE", {"objectName": "Column"})).plan(
+            None
+        )
+    assert error.value.getCondition() == "NOT_ITERABLE"
+
+
+def test_pickled_columns_of_subqueries_send_the_plans_of_their_subqueries_as_pyspark(
+        mock_connect):
+    # As PySpark's pickle of a Column of a subquery, of `scalar()`, `exists()`, `isin` of a
+    # DataFrame or of a table argument, which keeps the plan objects of its subqueries, of their
+    # plan IDs: the plan of the unpickled Column sends their relations in its WithRelations, as
+    # the plan of the Column does, also of an expression over it and of its pickle in turn; and
+    # the unpickled `_expr` of the Column and `_subquery_expr` of a table argument build the
+    # expressions of the originals.
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+    df = spark.range(3)
+    scalar = spark.range(5).select(F.max("id")).scalar()
+
+    def sent(column):
+        # The relations that the schema request of a select of `column` sends with it.
+        df.select(column).schema
+        request = base_pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+        return list(request.schema.plan.root.with_relations.references)
+
+    for column in [
+        scalar,
+        spark.range(1).where(F.col("id") > 10).exists(),
+        F.col("id").isin(spark.range(2)),
+        (F.col("id") + scalar).alias("plus"),
+        F.col("id") + spark.range(5).select(F.max("id") + scalar).scalar(),
+    ]:
+        relations = sent(column)
+        assert relations
+        unpickled = pickle.loads(pickle.dumps(column))
+        for restored in (
+            unpickled,
+            serializer.loads(serializer.dumps(column)),
+            pickle.loads(pickle.dumps(unpickled)),
+        ):
+            assert repr(restored) == repr(column)
+            assert sent(restored) == relations
+            assert sent(F.coalesce(restored, F.lit(0))) == sent(F.coalesce(column, F.lit(0)))
+        expression = pickle.loads(pickle.dumps(column._expr))
+        assert expression.to_plan(None) == column._expr.to_plan(None)
+    table = spark.range(4).asTable()
+    expression = pickle.loads(pickle.dumps(table._subquery_expr))
+    assert expression.to_plan(None) == table._subquery_expr.to_plan(None)
 
 
 def test_column_repr_and_operations():
@@ -15571,6 +15708,43 @@ def test_execution_info_is_one_object_until_another_execution_as_pyspark(mock_co
     del df, info, again
     gc.collect()
     assert frame() is None
+
+
+def test_a_to_pandas_that_fails_to_convert_leaves_the_execution_info_as_pyspark(
+        mock_connect, monkeypatch):
+    # As PySpark's `_to_pandas`, which sets `_execution_info` once `SparkConnectClient.to_pandas`
+    # has converted the result: a toPandas that fails after its execution, in its conversion,
+    # leaves `executionInfo` as it was, None or the object of the last execution, and one that
+    # converts sets that of its execution. `collect` sets it before it converts its rows, as
+    # PySpark's `_to_table` does.
+    import pyspark.sql.connect.client as client
+
+    spark, service = mock_connect
+    # The settings that toPandas reads.
+    service.confs = {"spark.sql.session.timeZone": "UTC",
+                     "spark.sql.execution.pandas.structHandlingMode": "legacy",
+                     "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false"}
+    _two_row_range_results(service)
+    convert = client._to_pandas
+
+    def fails(*args, **kwargs):
+        raise ValueError("conversion")
+
+    monkeypatch.setattr(client, "_to_pandas", fails)
+    df = spark.range(2)
+    with pytest.raises(ValueError, match="conversion"):
+        df.toPandas()
+    assert df.executionInfo is None
+    df.collect()
+    info = df.executionInfo
+    assert info.operation_id == _request_operation_id(service.execute_requests[-1])
+    with pytest.raises(ValueError, match="conversion"):
+        df.toPandas()
+    assert df.executionInfo is info
+    monkeypatch.setattr(client, "_to_pandas", convert)
+    assert len(df.toPandas()) == 2
+    assert df.executionInfo is not info
+    assert df.executionInfo.operation_id == _request_operation_id(service.execute_requests[-1])
 
 
 def test_copies_and_unpickled_dataframes_keep_support_repr_html_as_pyspark(mock_connect):
@@ -26933,6 +27107,79 @@ def test_windows_of_no_partitions_warn_once_a_request_of_udfs_as_pyspark(mock_co
         assert sum("No Partition Defined" in str(warning.message) for warning in record) == 2
 
 
+def test_windows_of_no_partitions_warn_in_turn_with_the_picklings_of_udfs_as_pyspark(mock_connect):
+    # As PySpark's client, which builds the plan of a request once, in its order, the child of a
+    # plan before its own expressions and the arguments of a UDF before its function, and pickles
+    # the function of each UDF and warns of each window of no partitions as it builds them: a
+    # pickling that fails ends the build, so a window after it does not warn, and the "error"
+    # filter raises the warning of a window before the functions after it are pickled. The
+    # drop-in builds a plan of UDFs twice, and warns of a window after a UDF in its turn among the
+    # picklings (pyspark-client 4.3.0 gives these sequences).
+    import pickle
+    import warnings
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    log = []
+
+    class Traced:
+        def __init__(self, tag, fails=False):
+            self.tag, self.fails = tag, fails
+
+        def __call__(self, x):
+            return x
+
+        def __reduce__(self):
+            log.append("P:" + self.tag)
+            if self.fails:
+                raise TypeError("cannot pickle " + self.tag)
+            return (Traced, (self.tag,))
+
+    def udf(tag, fails=False):
+        return F.udf(Traced(tag, fails), "long")
+
+    def window(name):
+        return F.row_number().over(Window.orderBy("id")).alias(name)
+
+    def show(message, category, filename, lineno, file=None, line=None):
+        log.append("W")
+
+    df = spark.range(2)
+    cases = [
+        (lambda: df.select(udf("a")("id"), window("w"), udf("bad", True)("id")),
+         (pickle.PicklingError, "P:a W P:bad"), (UserWarning, "P:a")),
+        (lambda: df.select(udf("bad", True)("id"), window("w")),
+         (pickle.PicklingError, "P:bad"), (pickle.PicklingError, "P:bad")),
+        (lambda: df.select(window("w1"), udf("a")("id"), window("w2"), udf("b")("id"), window("w3")),
+         (None, "W P:a W P:b W"), (UserWarning, "")),
+        (lambda: df.select(
+            window("w1"), udf("a")("id"), window("w2"), udf("bad", True)("id"), window("w3")),
+         (pickle.PicklingError, "W P:a W P:bad"), (UserWarning, "")),
+        (lambda: df.select(udf("bad", True)(F.row_number().over(Window.orderBy("id")))),
+         (pickle.PicklingError, "W P:bad"), (UserWarning, "")),
+        (lambda: df.select(udf("a")("id").alias("g"), window("r"))
+         .select("g", udf("bad", True)("g"), window("w")),
+         (pickle.PicklingError, "P:a W P:bad"), (UserWarning, "P:a")),
+    ]
+    for make, always, error in cases:
+        for action, (raised, sequence) in (("always", always), ("error", error)):
+            # Made first: `udf` warns of pandas 3, as PySpark's does.
+            frame = make()
+            del log[:]
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                warnings.filterwarnings(action, message="WARN WindowExpression")
+                warnings.showwarning = show
+                if raised is None:
+                    frame.schema
+                else:
+                    with pytest.raises(raised):
+                        frame.schema
+            assert " ".join(log) == sequence, (action, sequence)
+
+
 def test_chained_partition_by_and_order_by_replace_the_spec_as_pyspark():
     # As PySpark's WindowSpec.partitionBy and orderBy (connect/window.py), which make a spec of the
     # new partitioning or ordering in place of the old one and keep the other parts, as Spark's
@@ -31771,6 +32018,55 @@ def test_merge_builders_keep_their_conditions_and_build_their_clauses_as_pyspark
         of_row.merge()
     assert error.value.getCondition() == "ATTRIBUTE_NOT_SUPPORTED"
     assert error.value.getMessageParameters() == {"attr_name": "to_plan"}
+    assert len(service.execute_requests) == requests
+
+
+def test_merges_send_the_clauses_as_their_actions_built_them_as_pyspark(mock_connect):
+    # As PySpark's MergeIntoWriter, whose clause actions keep the `MergeAction` protos that
+    # `_build_merge_action` builds, which the merge sends: the functions of the UDFs of a clause
+    # are pickled once, when its action adds it, so a value that a function reads, changed after
+    # that, is not that of the merge, of a copy of the builder either; and a window of no
+    # partitions of a clause warns once, at its action. The condition of mergeInto is built by
+    # the merge. A clause of a function that does not pickle raises at its action.
+    import copy
+    import threading
+    import warnings
+
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    state = ["<clause>"]
+    df = spark.range(3)
+    merge = df.mergeInto("t", F.udf(lambda x: state[0] == "", "boolean")("id"))
+    merge.whenMatched(F.udf(lambda x: state[0] == "", "boolean")("id")).update(
+        {"v": F.udf(lambda x: state[0], "string")("id")})
+    state[0] = "<merge>"
+    for writer in (merge, copy.copy(merge)):
+        writer.merge()
+        command = base_pb2.ExecutePlanRequest.FromString(
+            service.execute_requests[-1]).plan.command.merge_into_table_command
+        action = command.match_actions[0].merge_action
+        for sent in (action.condition, action.assignments[0].value):
+            udf = sent.common_inline_user_defined_function.python_udf.command
+            assert b"<clause>" in udf and b"<merge>" not in udf
+        condition = command.merge_condition.common_inline_user_defined_function.python_udf.command
+        assert b"<merge>" in condition
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        clause = df.mergeInto("t", F.lit(True)).whenMatched(
+            F.row_number().over(Window.orderBy("id")) > 0)
+        assert record == []
+        writer = clause.delete()
+        assert len(record) == 1
+        writer.merge()
+        assert len(record) == 1
+    lock = threading.Lock()
+    requests = len(service.execute_requests)
+    with pytest.raises(pickle.PicklingError):
+        df.mergeInto("t", F.lit(True)).whenMatched(
+            F.udf(lambda x: bool(lock), "boolean")("id")).delete()
     assert len(service.execute_requests) == requests
 
 

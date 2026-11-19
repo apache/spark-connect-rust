@@ -372,6 +372,15 @@ Code that constructs the variant directly sets it to `None`; `profile_id` is sen
 of the schema of the Python client's `DataFrame.to`, which a request calls when it builds the plan,
 as PySpark converts the schema object then. Code that constructs the variant directly sets it to
 `None`; `DataFrame::to` sends its schema as before.
+`SentExpression`, the expression of a pickled Column (`ExpressionNode::Sent`), adds a `subqueries`
+field: the plans that its subqueries refer to, of `Expression::sent_with_subqueries`, which the
+relation that holds the expression sends in its `WithRelations`, as it sends the plan of a
+`SubqueryExpression`. Code that constructs the struct directly sets it to
+`SentSubqueries::default()`, of no plans, as `Expression::sent` gives it.
+`PreparedExecution::collect_record_batches_checked`, which is not a stable API, is
+`collect_record_batches_and_info`: it gives the `ExecutionInfo` of the execution too, which the
+DataFrame keeps once `DataFrame::keep_execution_info` is given it, as PySpark's `toPandas` sets
+the information of the execution once it has converted the result.
 
 `CoGroupedData::input_columns` is removed. It gave the columns of both sides for the arguments of
 the function of a cogroup, but that function binds no columns, as PySpark's `CoGroupMap` builds it:
@@ -2646,11 +2655,12 @@ function, a lambda or a closure is the function itself, and a callable object, a
 `copy.deepcopy([c1, c2])` do. `copy.copy` shares the output type of a UDF and the return type of a
 UDTF too, and `copy.deepcopy` copies them, as PySpark's copy of the plan does: a type changed in
 place after a deep copy is not that of the copy, nor one changed after a pickle that of the
-unpickled DataFrame. A request warns once of a window of no partitions, as PySpark's,
-though the drop-in builds the plan of a request twice when it has such functions, as it pickles
-them between the two builds: so where a function that does not pickle comes before such a window
-in the build, the drop-in warns of the window before it raises the error of the pickling, where
-PySpark raises it without the warning.
+unpickled DataFrame. A request warns once of a window of no partitions, as PySpark's, in the order
+of the build, though the drop-in builds the plan of a request twice when it has such functions, as
+it pickles them between the two builds: a window that comes after a function in the build warns in
+its turn among the picklings, so a function before it that does not pickle raises the error of its
+pickling without the warning, and the error of the warning, of an `"error"` filter of the
+warnings, is raised before the functions after the window are pickled, as PySpark's.
 
 A pickled Column or DataFrame, and a deep copy of a DataFrame into another session, whose session
 copies to another one (of a `memo` that maps it, or another active session of its ID), carry the
@@ -2661,8 +2671,21 @@ copy, and by its unpickled Column of a function that `pickle` pickles by referen
 function of `__main__`, but not by the drop-in's. `pickle.dumps` of a Column of a UDF of a function
 that does not pickle by value raises the `PicklingError` of its command, where PySpark's pickles a
 module-level function by reference, and `pickle.dumps` of the Column of a UDF of a lambda pickles,
-where PySpark's raises the `PicklingError` of the lambda. `CloudPickleSerializer.dumps` of such a
-Column raises the same error in both.
+where PySpark's raises the `PicklingError` of the lambda, as a pickle of the functions would here
+too (see "UDFs" in `dev/parity/known-differences.md`). `CloudPickleSerializer.dumps` of such a
+Column raises the same error in both. An output type of a UDF or a return type of a UDTF that the
+build of the plan does not convert, such as `AtomicType()` of a UDF without Arrow, or a
+`StructType` changed to hold it after the call, does not fail the pickle: as PySpark's, which keeps
+the type object, the requests of the unpickled Column and table argument raise its
+`UNSUPPORTED_OPERATION`, and so does the unpickle of a DataFrame, which builds its plan.
+
+A pickled Column of subqueries, of `scalar()`, `exists()`, `isin` of a DataFrame or a table
+argument, carries the relations of the plans that they refer to, of their plan IDs, as PySpark's
+carries the plan objects of its subqueries, which keep their `_plan_id`: a plan of the unpickled
+Column sends them in its `WithRelations`, as a plan of the Column does, also on the server's Python
+worker, where the Column is PySpark Connect's. `Column._expr` pickles as the expression of the
+unpickled Column, and `TableArg._subquery_expr` as that of a Column of its subquery, as PySpark's
+expressions pickle their fields.
 
 A DataFrame or a Column reports the functions of its UDFs to Python's garbage collector, as
 PySpark's plan of Python objects is seen by it, so a reference cycle through a function and the
@@ -2680,21 +2703,24 @@ flags and the metadata dict that they hold, and the lists of a struct, as PySpar
 them, so a cycle through a type that one holds, such as a `DecimalType` with an attribute that keeps
 the struct, is collected. A function that a Column and a DataFrame of it share, or two DataFrames,
 or a DataFrame and a table argument of it, which holds its plan and not the DataFrame, as PySpark's
-does, is reported by neither, so that no reference is counted twice: a cycle through it is freed
-only when it is broken, where PySpark collects it. A stream writer holds its DataFrame, where
-PySpark's holds the plan, so a DataFrame that keeps its stream writer is freed by the collector,
-where PySpark frees it with its last reference. The functions of `foreachBatch` and `foreach` are
-kept as their pickles, as PySpark's stream writer keeps them, so a function that keeps its writer
-is freed with its last reference, and a copy or a pickle of the writer carries the pickle of the
-call. The registration of `dataSource` reports its session, and the builder of
+does, is reported by neither: they share one reference to it, which the collector would count as
+that of the one that reports it, so it could free the function with that one while the other lives
+and reaches it. A cycle through such a function is freed only when it is broken, where PySpark
+collects it. A stream writer holds its DataFrame, where PySpark's holds the plan, so a DataFrame
+that keeps its stream writer is freed by the collector, where PySpark frees it with its last
+reference. The functions of `foreachBatch` and `foreach` are kept as their pickles, as PySpark's
+stream writer keeps them, so a function that keeps its writer is freed with its last reference, and
+a copy or a pickle of the writer carries the pickle of the call. The registration of `dataSource` reports its session, and the builder of
 `pyspark.sql.connect.session.SparkSession` its channel builder and the list of its hook factories,
 which its shallow copies share, as PySpark's plain objects hold them, so a session that keeps its
 `dataSource`, or a channel builder or a hook factory that keeps its builder or a copy of it, is
 collected.
 
-The condition and the assignments of a clause of `mergeInto` are pickled when the clause is added,
-which raises there, as PySpark's, and again when the merge runs, whose request carries the later
-pickle, where PySpark's carries the one of the clause.
+The condition and the assignments of a clause of `mergeInto` are built, and the functions of their
+UDFs pickled, when the clause is added, which raises there, and the merge sends them as they were
+built then, as PySpark's sends the protos that `_build_merge_action` built for the clause: so a
+value that a function reads, changed after the clause, is not that of the merge, also of a copy of
+the builder, and a window of no partitions of a clause warns once, at the clause.
 
 The drop-in has one class for each UDF and UDTF, the Connect class of `pyspark.sql.connect.udf`
 and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDefinedFunction` and
