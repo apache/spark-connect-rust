@@ -365,3 +365,94 @@ def test_every_native_class_has_its_bare_name_as_its_c_name(objects):
         assert f"{cls.__module__}.{cls.__name__}" not in str(error.value), str(error.value)
         checked.add(cls.__name__)
     assert len(checked) > 50 and "_ExitHook" in checked
+
+
+# The methods of the classes of PySpark Connect's modules whose docstrings the module copies of
+# those of PySpark's classic class of the same name (`register.__doc__ =
+# PySparkUDFRegistration.register.__doc__`), by the modules of the two classes; None for the
+# docstring of the class.
+COPIED_DOCSTRINGS = {
+    ("pyspark.sql.connect.udf", "pyspark.sql.udf", "UDFRegistration"): [
+        "register",
+        "registerJavaFunction",
+        "registerJavaUDAF",
+    ],
+    ("pyspark.sql.connect.udtf", "pyspark.sql.udtf", "UDTFRegistration"): ["register"],
+    ("pyspark.sql.connect.streaming.query", "pyspark.sql.streaming.query", "StreamingQuery"): [
+        "id",
+        "runId",
+        "name",
+        "isActive",
+        "awaitTermination",
+        "status",
+        "recentProgress",
+        "lastProgress",
+        "processAllAvailable",
+        "stop",
+        "explain",
+        "exception",
+    ],
+    (
+        "pyspark.sql.connect.streaming.query",
+        "pyspark.sql.streaming.query",
+        "StreamingQueryManager",
+    ): ["active", "get", "awaitAnyTermination", "resetTerminated", "addListener", "removeListener"],
+    (
+        "pyspark.sql.connect.streaming.readwriter",
+        "pyspark.sql.streaming.readwriter",
+        "DataStreamReader",
+    ): [
+        None,
+        "format",
+        "schema",
+        "option",
+        "options",
+        "name",
+        "load",
+        "json",
+        "orc",
+        "parquet",
+        "text",
+        "csv",
+        "xml",
+        "table",
+        "changes",
+    ],
+    (
+        "pyspark.sql.connect.streaming.readwriter",
+        "pyspark.sql.streaming.readwriter",
+        "DataStreamWriter",
+    ): [
+        "outputMode",
+        "format",
+        "option",
+        "options",
+        "partitionBy",
+        "clusterBy",
+        "queryName",
+        "trigger",
+        "foreach",
+        "foreachBatch",
+        "start",
+        "toTable",
+    ],
+}
+
+
+@pytest.mark.parametrize(
+    "connect, classic, cls, name",
+    [(*key, name) for key, names in COPIED_DOCSTRINGS.items() for name in names],
+)
+def test_the_connect_classes_have_the_docstrings_that_pyspark_connect_copies(
+    connect, classic, cls, name
+):
+    # As PySpark Connect's modules, which give these members, and the class of None, the
+    # docstrings of PySpark's classic class: the registrations, Python classes, assign them, and
+    # the streaming classes, native, are built with them (scripts/gen_connect_docstrings.py).
+    import importlib
+
+    ours = getattr(importlib.import_module(connect), cls)
+    theirs = getattr(importlib.import_module(classic), cls)
+    if name is not None:
+        ours, theirs = getattr(ours, name), getattr(theirs, name)
+    assert theirs.__doc__ and ours.__doc__ == theirs.__doc__

@@ -35,6 +35,8 @@ from pyspark.sql.types import StructType
 # as PySpark Connect's module imports them: a handler that the client pickles may capture them,
 # and the Python worker of the server unpickles them as PySpark's.
 from pyspark.sql.udtf import AnalyzeArgument, AnalyzeResult, _validate_udtf_handler
+# As PySpark Connect's, whose registration takes the docstrings of PySpark's classic one.
+from pyspark.sql.udtf import UDTFRegistration as _PySparkUDTFRegistration
 
 __all__ = ["AnalyzeArgument", "AnalyzeResult", "UDTFRegistration", "UserDefinedTableFunction"]
 
@@ -283,8 +285,8 @@ class UDTFRegistration:
         name: str,
         f: "UserDefinedTableFunction",
     ) -> "UserDefinedTableFunction":
-        """Register the UDTF ``f`` as ``name`` on the server, so that SQL calls it, and return
-        ``f``. As PySpark's, ``f`` is a UDTF of ``udtf()`` or ``arrow_udtf()``."""
+        # Register the UDTF ``f`` as ``name`` on the server, so that SQL calls it, and return
+        # ``f``. As PySpark's, ``f`` is a UDTF of ``udtf()`` or ``arrow_udtf()``.
         if not isinstance(f, UserDefinedTableFunction):
             raise PySparkTypeError(
                 errorClass="CANNOT_REGISTER_UDTF",
@@ -314,3 +316,5 @@ class UDTFRegistration:
             f.deterministic,
         )
         return f
+
+    register.__doc__ = _PySparkUDTFRegistration.register.__doc__

@@ -31,7 +31,9 @@ from typing import Callable, Optional, Any
 from pyspark.errors import PySparkRuntimeError, PySparkTypeError
 from pyspark.sql.types import DataType, StringType
 # As PySpark Connect's, which checks the return type of a UDF for its eval type with the
-# static method of PySpark's classic class (its PySparkUserDefinedFunction).
+# static method of PySpark's classic class (its PySparkUserDefinedFunction), and whose
+# registration takes the docstrings of the methods of PySpark's classic registration.
+from pyspark.sql.udf import UDFRegistration as _PySparkUDFRegistration
 from pyspark.sql.udf import UserDefinedFunction as _PySparkUserDefinedFunction
 # As PySpark's module, of whose namespace it is (see the stubs).
 from pyspark.serializers import CloudPickleSerializer  # noqa: F401
@@ -353,30 +355,9 @@ class UDFRegistration:
         f: Callable[..., Any],
         returnType: Optional[DataType] = None,
     ) -> Any:
-        """
-        Register a Python UDF with the given name.
-
-        Parameters
-        ----------
-        name : str
-            Name to register the UDF with.
-        f : callable
-            The Python function to register.
-        returnType : DataType, optional
-            The return type of the UDF. Defaults to StringType().
-
-        Returns
-        -------
-        function
-            The registered UDF that can be called with columns: ``f`` if it is a UDF,
-            or the function wrapper of the UDF of ``f``, as PySpark returns.
-
-        Examples
-        --------
-        >>> from pyspark.sql.types import IntegerType
-        >>> spark.udf.register("inc_id", lambda x: x + 1, IntegerType())
-        >>> result = spark.sql("SELECT inc_id(id) AS incremented FROM range(3)")
-        """
+        # The registered UDF that can be called with columns: ``f`` if it is a UDF, or the
+        # function wrapper of the UDF of ``f``, as PySpark returns.
+        #
         # As PySpark Connect's: a UDF (from udf() or pandas_udf()) is registered with its
         # eval type, and a plain Python function as a SQL_BATCHED_UDF of `name`. The
         # registration is a RegisterFunction command carrying the cloudpickled PythonUDF
@@ -426,29 +407,21 @@ class UDFRegistration:
             self.sparkSession._client.register_udf(py_udf.func, returnType, name)
             return py_udf
 
+    register.__doc__ = _PySparkUDFRegistration.register.__doc__
+
     def registerJavaFunction(
         self,
         name: str,
         javaClassName: str,
         returnType: Optional[DataType] = None,
     ) -> None:
-        """Register a Java UDF by fully-qualified class name so it is callable by
-        ``name`` in SQL. Mirrors ``UDFRegistration.registerJavaFunction``.
-
-        Parameters
-        ----------
-        name : str
-            Name to register the function with.
-        javaClassName : str
-            Fully-qualified name of the Java class implementing the UDF.
-        returnType : DataType or str, optional
-            Return type: a DataType, or a DDL string, which the server parses, as PySpark
-            sends it. Defaults to the class's own type.
-        """
+        # The return type is a DataType, or a DDL string, which the server parses, as PySpark
+        # sends it; the class's own type without one.
         self.sparkSession._client.register_java(name, javaClassName, returnType)
 
+    registerJavaFunction.__doc__ = _PySparkUDFRegistration.registerJavaFunction.__doc__
+
     def registerJavaUDAF(self, name: str, javaClassName: str) -> None:
-        """Register a Java user-defined aggregate function (UDAF) by class name.
-        Mirrors ``UDFRegistration.registerJavaUDAF``.
-        """
         self.sparkSession._client.register_java(name, javaClassName, aggregate=True)
+
+    registerJavaUDAF.__doc__ = _PySparkUDFRegistration.registerJavaUDAF.__doc__
