@@ -36,7 +36,8 @@ pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<Strin
     }
 }
 
-/// Python wrapper for a Spark Column.
+// Python wrapper for a Spark Column.
+#[doc = connect_doc!(Column)]
 #[pyclass(
     frozen,
     name = "Column",
@@ -281,10 +282,11 @@ pub(crate) fn expression_message(py: Python<'_>, column: &Column) -> PyResult<Py
 
 #[pymethods]
 impl PyColumn {
-    /// Alias the column with each given name, optionally attaching column metadata (a
-    /// dict). Mirrors `Column.alias(*alias, **kwargs)`, which names a generator's columns in
-    /// order, takes metadata for a single name only, and sends it as `json.dumps(metadata)`.
+    // Alias the column with each given name, optionally attaching column metadata (a
+    // dict). Mirrors `Column.alias(*alias, **kwargs)`, which names a generator's columns in
+    // order, takes metadata for a single name only, and sends it as `json.dumps(metadata)`.
     #[pyo3(signature = (*alias, **kwargs))]
+    #[doc = connect_doc!(Column.alias)]
     pub(crate) fn alias(
         &self,
         py: Python<'_>,
@@ -363,7 +365,7 @@ impl PyColumn {
         )))
     }
 
-    /// Alias for `alias` (pyspark `Column.name`).
+    // Alias for `alias` (pyspark `Column.name`).
     #[pyo3(signature = (*alias, **kwargs))]
     fn name(
         &self,
@@ -375,23 +377,26 @@ impl PyColumn {
         self.alias(py, alias, kwargs)
     }
 
-    /// Apply a transformation function to this column. Mirrors `Column.transform(f)`,
-    /// which is simply `f(self)`.
+    // Apply a transformation function to this column. Mirrors `Column.transform(f)`,
+    // which is simply `f(self)`.
+    #[doc = connect_doc!(Column.transform)]
     fn transform<'py>(slf: Bound<'py, Self>, f: Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let _origin = crate::origin::with_origin("transform")?;
         f.call1((slf,))
     }
 
-    /// Mark this column as an outer reference (for correlated subqueries / lateral
-    /// joins). Mirrors `Column.outer()`, which returns the same expression — outer
-    /// resolution is performed server-side via the plan id.
+    // Mark this column as an outer reference (for correlated subqueries / lateral
+    // joins). Mirrors `Column.outer()`, which returns the same expression — outer
+    // resolution is performed server-side via the plan id.
+    #[doc = connect_doc!(Column.outer)]
     fn outer(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("outer")?;
         Ok(PyColumn::new(self.column.clone()))
     }
 
-    /// Cast to a different type. Accepts a `DataType` or a DDL type string,
-    /// matching `pyspark.sql.Column.cast`.
+    // Cast to a different type. Accepts a `DataType` or a DDL type string,
+    // matching `pyspark.sql.Column.cast`.
+    #[doc = connect_doc!(Column.cast)]
     fn cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("cast")?;
         // As PySpark's, of a DataType or a str.
@@ -405,15 +410,16 @@ impl PyColumn {
         cast_column(&self.column, dataType, false)
     }
 
-    /// Alias for `cast` (pyspark `Column.astype`).
+    // Alias for `cast` (pyspark `Column.astype`).
     fn astype(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("astype")?;
         self.cast(dataType)
     }
 
-    /// Try to cast, yielding NULL on failure. Accepts a `DataType` or DDL string.
-    /// Mirrors `pyspark.sql.Column.try_cast`.
+    // Try to cast, yielding NULL on failure. Accepts a `DataType` or DDL string.
+    // Mirrors `pyspark.sql.Column.try_cast`.
     #[pyo3(name = "try_cast")]
+    #[doc = connect_doc!(Column.try_cast)]
     fn try_cast(&self, dataType: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("try_cast")?;
         // As PySpark's: a DataType or a str, else NOT_EXPECTED_TYPE.
@@ -429,10 +435,11 @@ impl PyColumn {
         cast_column(&self.column, dataType, true)
     }
 
-    /// Get an item from a list/map by key (pyspark `Column.getItem`), with PySpark's
-    /// FutureWarning for a Column as the key, of the line of its `warnings.warn` in
-    /// `pyspark.sql.connect.column` (see `warn_as_pyspark`).
+    // Get an item from a list/map by key (pyspark `Column.getItem`), with PySpark's
+    // FutureWarning for a Column as the key, of the line of its `warnings.warn` in
+    // `pyspark.sql.connect.column` (see `warn_as_pyspark`).
     #[pyo3(name = "getItem")]
+    #[doc = connect_doc!(Column.getItem)]
     fn get_item(&self, key: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("getItem")?;
         if key.extract::<PyRef<'_, PyColumn>>().is_ok() {
@@ -454,21 +461,24 @@ impl PyColumn {
         self.__getitem__(key)
     }
 
-    /// Check if NULL.
+    // Check if NULL.
     #[pyo3(name = "isNull")]
+    #[doc = connect_doc!(Column.isNull)]
     fn is_null(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("isNull")?;
         Ok(PyColumn::new(self.column.clone().is_null()))
     }
 
-    /// Check if NOT NULL.
+    // Check if NOT NULL.
     #[pyo3(name = "isNotNull")]
+    #[doc = connect_doc!(Column.isNotNull)]
     fn is_not_null(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("isNotNull")?;
         Ok(PyColumn::new(self.column.clone().is_not_null()))
     }
 
-    /// Substring extraction (start and length as columns).
+    // Substring extraction (start and length as columns).
+    #[doc = connect_doc!(Column.substr)]
     fn substr(&self, startPos: &Bound<'_, PyAny>, length: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("substr")?;
         // As PySpark: the arguments, as values of an Enum, must be of one type, a Column or
@@ -514,79 +524,91 @@ impl PyColumn {
         ))
     }
 
-    /// Pattern matching with LIKE, of any value, as PySpark's `_bin_op("like", ...)`.
+    // Pattern matching with LIKE, of any value, as PySpark's `_bin_op("like", ...)`.
+    #[doc = connect_doc!(Column.like)]
     fn like(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("like")?;
         binary_function("like", &self.column, other)
     }
 
-    /// Pattern matching with RLIKE (regex).
+    // Pattern matching with RLIKE (regex).
+    #[doc = connect_doc!(Column.rlike)]
     fn rlike(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("rlike")?;
         binary_function("rlike", &self.column, other)
     }
 
-    /// Check if contains another column value.
+    // Check if contains another column value.
+    #[doc = connect_doc!(Column.contains)]
     fn contains(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("contains")?;
         let other_col = operand_column(other)?;
         Ok(PyColumn::new(self.column.clone().contains(other_col)))
     }
 
-    /// Check if starts with another column value.
+    // Check if starts with another column value.
+    #[doc = connect_doc!(Column.startswith)]
     fn startswith(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("startswith")?;
         let other_col = operand_column(other)?;
         Ok(PyColumn::new(self.column.clone().startswith(other_col)))
     }
 
-    /// Check if ends with another column value.
+    // Check if ends with another column value.
+    #[doc = connect_doc!(Column.endswith)]
     fn endswith(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("endswith")?;
         let other_col = operand_column(other)?;
         Ok(PyColumn::new(self.column.clone().endswith(other_col)))
     }
 
-    /// Ascending sort.
+    // Ascending sort.
+    #[doc = connect_doc!(Column.asc)]
     fn asc(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("asc")?;
         // As PySpark's `asc`, which is its `asc_nulls_first`, of the origin of that.
         self.asc_nulls_first()
     }
 
-    /// Ascending sort with nulls first.
+    // Ascending sort with nulls first.
+    #[doc = connect_doc!(Column.asc_nulls_first)]
     fn asc_nulls_first(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("asc_nulls_first")?;
         Ok(PyColumn::new(self.column.clone().asc_nulls_first()))
     }
 
-    /// Ascending sort with nulls last.
+    // Ascending sort with nulls last.
+    #[doc = connect_doc!(Column.asc_nulls_last)]
     fn asc_nulls_last(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("asc_nulls_last")?;
         Ok(PyColumn::new(self.column.clone().asc_nulls_last()))
     }
 
-    /// Descending sort.
+    // Descending sort.
+    #[doc = connect_doc!(Column.desc)]
     fn desc(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("desc")?;
         // As PySpark's `desc`, which is its `desc_nulls_last`, of the origin of that.
         self.desc_nulls_last()
     }
 
-    /// Descending sort with nulls first.
+    // Descending sort with nulls first.
+    #[doc = connect_doc!(Column.desc_nulls_first)]
     fn desc_nulls_first(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("desc_nulls_first")?;
         Ok(PyColumn::new(self.column.clone().desc_nulls_first()))
     }
 
-    /// Descending sort with nulls last.
+    // Descending sort with nulls last.
+    #[doc = connect_doc!(Column.desc_nulls_last)]
     fn desc_nulls_last(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("desc_nulls_last")?;
         Ok(PyColumn::new(self.column.clone().desc_nulls_last()))
     }
 
-    /// A branch more of a CASE WHEN. Mirrors `Column.when`: the condition is a Column, and
-    /// the column a `when()` without `otherwise()` (`INVALID_WHEN_USAGE`).
+    // A branch more of a CASE WHEN. Mirrors `Column.when`: the condition is a Column, and
+    // the column a `when()` without `otherwise()` (`INVALID_WHEN_USAGE`).
+    #[doc = connect_doc!(Column.when)]
     fn when(&self, condition: &Bound<'_, PyAny>, value: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("when")?;
         let py = condition.py();
@@ -620,8 +642,9 @@ impl PyColumn {
         ))
     }
 
-    /// The value of a CASE WHEN when no branch holds. Mirrors `Column.otherwise`, which
-    /// raises PySparkTypeError for a column that is not a `when()`, or one that has one.
+    // The value of a CASE WHEN when no branch holds. Mirrors `Column.otherwise`, which
+    // raises PySparkTypeError for a column that is not a `when()`, or one that has one.
+    #[doc = connect_doc!(Column.otherwise)]
     fn otherwise(&self, value: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("otherwise")?;
         let message = match self.column.expression().node() {
@@ -825,8 +848,9 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().neg()))
     }
 
-    /// Get field by name (for struct/nested types).
+    // Get field by name (for struct/nested types).
     #[pyo3(name = "getField")]
+    #[doc = connect_doc!(Column.getField)]
     fn get_field(&self, name: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("getField")?;
         // As PySpark's, `self[name]`, with a FutureWarning for a Column, of the line of its
@@ -848,7 +872,8 @@ impl PyColumn {
         self.__getitem__(name)
     }
 
-    /// Apply a window function over a window specification.
+    // Apply a window function over a window specification.
+    #[doc = connect_doc!(Column.over)]
     fn over(&self, window: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("over")?;
         let Ok(window) = window.extract::<PyRef<'_, crate::window::PyWindowSpec>>() else {
@@ -875,8 +900,8 @@ impl PyColumn {
         PyColumnExpression::new(self.column.clone())
     }
 
-    /// The `spark.connect.Expression` of this column, as PySpark Connect's `Column.to_plan`: that
-    /// of its expression, of `pyspark.sql.connect.proto`.
+    // The `spark.connect.Expression` of this column, as PySpark Connect's `Column.to_plan`: that
+    // of its expression, of `pyspark.sql.connect.proto`.
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         self._expr().to_plan(py, session)
     }
@@ -1245,6 +1270,7 @@ impl PyColumn {
     }
 
     // --- named Column methods (PySpark camelCase) ---
+    #[doc = connect_doc!(Column.between)]
     fn between(
         &self,
         py: Python<'_>,
@@ -1259,39 +1285,46 @@ impl PyColumn {
         lower.__and__(py, upper)
     }
     #[pyo3(name = "bitwiseAND")]
+    #[doc = connect_doc!(Column.bitwiseAND)]
     fn bitwise_and(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("bitwiseAND")?;
         let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_and(o)))
     }
     #[pyo3(name = "bitwiseOR")]
+    #[doc = connect_doc!(Column.bitwiseOR)]
     fn bitwise_or(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("bitwiseOR")?;
         let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_or(o)))
     }
     #[pyo3(name = "bitwiseXOR")]
+    #[doc = connect_doc!(Column.bitwiseXOR)]
     fn bitwise_xor(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("bitwiseXOR")?;
         let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().bitwise_xor(o)))
     }
+    #[doc = connect_doc!(Column.ilike)]
     fn ilike(&self, other: &Bound<'_, PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("ilike")?;
         binary_function("ilike", &self.column, other)
     }
     #[pyo3(name = "isNaN")]
+    #[doc = connect_doc!(Column.isNaN)]
     fn is_nan(&self) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("isNaN")?;
         Ok(PyColumn::new(self.column.clone().is_nan()))
     }
     #[pyo3(name = "eqNullSafe")]
+    #[doc = connect_doc!(Column.eqNullSafe)]
     fn eq_null_safe(&self, py: Python<'_>, other: Py<PyAny>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("eqNullSafe")?;
         let o = operand_column(other.bind(py))?;
         Ok(PyColumn::new(self.column.clone().eq_null_safe(o)))
     }
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(Column.isin)]
     fn isin(&self, py: Python<'_>, cols: Vec<Py<PyAny>>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("isin")?;
         // As pyspark's, a single DataFrame makes an IN subquery of it.
@@ -1328,6 +1361,7 @@ impl PyColumn {
         Ok(PyColumn::new(self.column.clone().isin(vals)))
     }
     #[pyo3(name = "withField")]
+    #[doc = connect_doc!(Column.withField)]
     fn with_field(
         &self,
         fieldName: &Bound<'_, PyAny>,
@@ -1353,6 +1387,7 @@ impl PyColumn {
         ))
     }
     #[pyo3(name = "dropFields", signature = (*fieldNames))]
+    #[doc = connect_doc!(Column.dropFields)]
     fn drop_fields(&self, py: Python<'_>, fieldNames: Vec<Bound<'_, PyAny>>) -> PyResult<PyColumn> {
         let _origin = crate::origin::with_origin("dropFields")?;
         // As PySpark's, of strings, at least one, which each `DropField` sets when it builds the

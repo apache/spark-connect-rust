@@ -789,3 +789,12 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   PySpark's is that of its Python function: None, or of a docstring that PySpark Connect's modules
   copy (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
   modules of `pyspark.sql` and `pyspark.errors` are PySpark's (see `docs/compatibility.md`).
+- **The docstrings of the native Column, WindowSpec, TableArg, `DataFrameNaFunctions` and
+  `DataFrameStatFunctions` of Spark Connect** (inherent; a virtual subclass inherits no docstring).
+  PySpark Connect's classes are subclasses of the classic ones, and neither they nor their members
+  have docstrings of their own, so `inspect.getdoc` and `help()` show those of the classic class.
+  The native classes are virtual subclasses of the classic ones, which are not in their MRO: they
+  and their members carry the classic docstrings, so that `inspect.getdoc` and `help()` show
+  PySpark's text, as `pyspark-client`'s inherited ones do. Their `__doc__` is that text, where
+  PySpark Connect's own is None. So is that of `Read.print` of `pyspark.sql.connect.plan`, of
+  PySpark Connect's `LogicalPlan.print`, which the drop-in's `LogicalPlan` does not have.

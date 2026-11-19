@@ -194,7 +194,22 @@ class Read(LogicalPlan):
             plan.read.named_table.options[k] = v
         return plan
 
+    # The docstring of PySpark Connect's `LogicalPlan.print`, which `inspect.getdoc` and `help()`
+    # find of its `Read.print`, of none of its own: the `LogicalPlan` here has no `print`.
     def print(self, indent: int = 0) -> str:
+        """
+        Print the simple string representation of the current :class:`LogicalPlan`.
+
+        Parameters
+        ----------
+        indent : int
+            The number of leading spaces for the output string.
+
+        Returns
+        -------
+        str
+            Simple string representation of this :class:`LogicalPlan`.
+        """
         return f"{' ' * indent}<Read table_name={self.table_name}>\n"
 
 

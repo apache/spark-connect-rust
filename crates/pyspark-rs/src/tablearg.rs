@@ -9,9 +9,10 @@ use crate::errors::ResultExt;
 use crate::group::copy_instance_state;
 use crate::window::window_columns;
 
-/// A table argument for a table-valued function, mirroring
-/// `pyspark.sql.connect.table_arg.TableArg`. Built via `df.asTable()`, then optionally
-/// `partitionBy`/`orderBy`/`withSinglePartition` (each returns a new TableArg).
+// A table argument for a table-valued function, mirroring
+// `pyspark.sql.connect.table_arg.TableArg`. Built via `df.asTable()`, then optionally
+// `partitionBy`/`orderBy`/`withSinglePartition` (each returns a new TableArg).
+#[doc = connect_doc!(TableArg)]
 #[pyclass(
     name = "TableArg",
     module = "pyspark.sql.connect.table_arg",
@@ -47,9 +48,10 @@ impl PyTableArg {
 
 #[pymethods]
 impl PyTableArg {
-    /// Partition the table argument by the given columns.
+    // Partition the table argument by the given columns.
     #[pyo3(signature = (*cols))]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(TableArg.partitionBy)]
     fn partitionBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyTableArg> {
         // PySpark checks the partitioning before it converts the columns.
         self.inner.check_partition_by().to_pyerr()?;
@@ -57,9 +59,10 @@ impl PyTableArg {
         Ok(self.of_same_session(self.inner.clone().partition_by(columns).to_pyerr()?))
     }
 
-    /// Order the (partitioned) table argument by the given columns.
+    // Order the (partitioned) table argument by the given columns.
     #[pyo3(signature = (*cols))]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(TableArg.orderBy)]
     fn orderBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyTableArg> {
         // PySpark checks the partitioning before it converts the columns.
         self.inner.check_order_by().to_pyerr()?;
@@ -67,9 +70,9 @@ impl PyTableArg {
         Ok(self.of_same_session(self.inner.clone().order_by(columns).to_pyerr()?))
     }
 
-    /// The `spark.connect.Expression` of the table argument, as PySpark Connect's
-    /// `TableArg.to_plan`: that of its subquery expression, of `pyspark.sql.connect.proto`, of
-    /// its plan ID, its partitioning, its ordering and its single partition.
+    // The `spark.connect.Expression` of the table argument, as PySpark Connect's
+    // `TableArg.to_plan`: that of its subquery expression, of `pyspark.sql.connect.proto`, of
+    // its plan ID, its partitioning, its ordering and its single partition.
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let _ = session;
         crate::column::expression_message(py, &self.inner.to_column())
@@ -90,8 +93,9 @@ impl PyTableArg {
         self.inner.is_partitioned()
     }
 
-    /// Mark the table argument as requiring a single partition.
+    // Mark the table argument as requiring a single partition.
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(TableArg.withSinglePartition)]
     fn withSinglePartition(&self) -> PyResult<PyTableArg> {
         Ok(self.of_same_session(self.inner.clone().with_single_partition().to_pyerr()?))
     }

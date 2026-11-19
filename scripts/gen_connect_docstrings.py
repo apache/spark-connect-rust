@@ -14,8 +14,13 @@ as PySpark has it at run time, which the Rust definitions take
 ``CLASS_MODULES``, whose classes are native here too (``pyspark.sql.types``), and of each public
 member of it, its own or of a base of it in PySpark, as Python finds it on the class
 (``connect_doc!(IntegerType.fromInternal)`` is that of ``DataType.fromInternal``); an object of no
-docstring has none, of which the Rust definitions take no ``#[doc]``. The docstrings are worked out
-of PySpark's source as scripts/gen_type_stubs.py works them out for the stubs (its ``Docs``).
+docstring has none, of which the Rust definitions take no ``#[doc]``. Last, it gives each class of
+``INHERITING`` and each public member of it the docstring that ``inspect.getdoc`` and ``help()``
+find of it in PySpark: PySpark Connect's class is a subclass of the classic one, and neither has a
+docstring of its own, so they find that of the classic class (``connect_doc!(Column.alias)`` is that
+of the classic ``Column.alias``), which the native class, a virtual subclass of it, does not
+inherit. The docstrings are worked out of PySpark's source as scripts/gen_type_stubs.py works them
+out for the stubs (its ``Docs``).
 
 Usage, from anywhere:
 
@@ -60,6 +65,17 @@ MODULES = (
 # The modules of PySpark whose classes are native in the drop-in, of the docstrings of all their
 # classes and public members, as Python finds them on each class.
 CLASS_MODULES = ("pyspark.sql.types",)
+
+# The classes of PySpark Connect, by their modules, that are subclasses of PySpark's classic
+# classes and whose classes are native in the drop-in, virtual subclasses of the classic ones: of
+# the docstrings that `inspect.getdoc` and `help()` find of them and of their members in PySpark,
+# those of the classic class.
+INHERITING = {
+    "pyspark.sql.connect.column": ("Column",),
+    "pyspark.sql.connect.window": ("WindowSpec",),
+    "pyspark.sql.connect.table_arg": ("TableArg",),
+    "pyspark.sql.connect.dataframe": ("DataFrameNaFunctions", "DataFrameStatFunctions"),
+}
 
 
 def docstrings(pyspark_src: str) -> dict[str, str]:
@@ -147,6 +163,56 @@ def class_docstrings(pyspark_src: str) -> dict[str, str]:
     return found
 
 
+def _first_docstring(docs: Docs, classes: list[tuple[str, str]], member: str) -> str | None:
+    """The docstring of `member` (the class itself of "") of the first of `classes`, (module,
+    class) of an MRO, that defines it with one, as ``inspect.getdoc`` looks the classes up."""
+    for module, cls in classes:
+        qualname = f"{cls}.{member}" if member else cls
+        if member and qualname not in docs.source(module).defs:
+            continue
+        doc = docs.raw(module, qualname)
+        if doc is not None:
+            return doc
+    return None
+
+
+def inherited_docstrings(pyspark_src: str) -> dict[str, str]:
+    """The docstring that ``inspect.getdoc`` finds in PySpark of each class of ``INHERITING`` and of
+    each public member of it, as Python finds the member on the class: its own, or of the first
+    class of the MRO of the class that defines it that has one, of the classic class. An alias of a
+    member (``name = alias`` of PySpark Connect's Column) has none: the decorator of the class wraps
+    it apart from the member whose name it keeps, of which ``inspect.getdoc`` finds no docstring.
+    An object of no docstring is left out."""
+    docs = Docs(Path(pyspark_src))
+    found: dict[str, str] = {}
+    for module, classes in INHERITING.items():
+        if docs.source(module) is None:
+            raise SystemExit(f"error: {module} not found in {pyspark_src}")
+        for cls in classes:
+            mro = docs.mro(module, cls)
+            doc = _first_docstring(docs, mro, "")
+            if doc is not None:
+                found[cls] = doc
+            seen: set[str] = set()
+            for i, (base_module, base) in enumerate(mro):
+                for qualname, node in docs.source(base_module).defs.items():
+                    member = qualname[len(base) + 1 :]
+                    if (
+                        not qualname.startswith(base + ".")
+                        or "." in member
+                        or member.startswith("_")
+                        or member in seen
+                    ):
+                        continue
+                    seen.add(member)
+                    if i == 0 and isinstance(node, ast.Assign):
+                        continue  # an alias, of no docstring
+                    doc = _first_docstring(docs, mro[i:], member)
+                    if doc is not None:
+                        found[f"{cls}.{member}"] = doc
+    return found
+
+
 def _raw_string(text: str) -> str:
     """`text` as a Rust raw string literal, of as few hashes as it needs."""
     hashes = 1
@@ -166,7 +232,10 @@ def generate(pyspark_src: str) -> str:
         "//! The docstrings that PySpark Connect's modules give the methods of their classes of",
         "//! PySpark's classic classes (`format.__doc__ = PySparkDataStreamReader.format.__doc__`),",
         "//! of the classes of those modules that are native here, which take them of their `#[doc]`",
-        "//! attributes.",
+        "//! attributes; those of the native types of `pyspark.sql.types`; and those that",
+        "//! `inspect.getdoc` finds of the classic classes of PySpark Connect's subclasses of them,",
+        "//! of no docstrings of their own (`Column.alias`), of which the native classes are virtual",
+        "//! subclasses.",
         "",
         "/// The docstring of the object `$name` of PySpark Connect's module, as PySpark has it at",
         "/// run time: `connect_doc!(DataStreamReader.format)`, of the textual scope of the modules",
@@ -175,7 +244,16 @@ def generate(pyspark_src: str) -> str:
         "#[rustfmt::skip]",
         "macro_rules! connect_doc {",
     ]
-    for qualname, doc in [*docstrings(pyspark_src).items(), *of_classes.items()]:
+    arms = [
+        *docstrings(pyspark_src).items(),
+        *of_classes.items(),
+        *inherited_docstrings(pyspark_src).items(),
+    ]
+    names = [qualname for qualname, _ in arms]
+    if len(set(names)) != len(names):
+        twice = sorted({name for name in names if names.count(name) > 1})
+        raise SystemExit(f"error: the docstrings of {twice} of two sources")
+    for qualname, doc in arms:
         pattern = " . ".join(qualname.split("."))
         if doc.startswith("@"):
             # A member that the class inherits, or an alias, of the docstring of the member that

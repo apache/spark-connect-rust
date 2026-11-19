@@ -4163,7 +4163,8 @@ impl PyDataFrame {
     }
 }
 
-/// Python wrapper for `DataFrameNaFunctions` (`df.na`).
+// Python wrapper for `DataFrameNaFunctions` (`df.na`).
+#[doc = connect_doc!(DataFrameNaFunctions)]
 #[pyclass(
     name = "DataFrameNaFunctions",
     module = "pyspark.sql.connect.dataframe",
@@ -4245,12 +4246,13 @@ impl PyDataFrameNaFunctions {
         self.frame.clone_ref(py)
     }
 
-    /// Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
-    /// `DataFrame.dropna`.
+    // Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
+    // `DataFrame.dropna`.
     #[pyo3(
         signature = (how=None, thresh=None, subset=None),
         text_signature = "($self, how='any', thresh=None, subset=None)"
     )]
+    #[doc = connect_doc!(DataFrameNaFunctions.drop)]
     fn drop(
         &self,
         how: Option<&Bound<'_, PyAny>>,
@@ -4260,8 +4262,9 @@ impl PyDataFrameNaFunctions {
         crate::stat_arguments::dropna(&self.df, how, thresh, subset)
     }
 
-    /// Fill nulls, as PySpark's `DataFrameNaFunctions.fill`, which is `DataFrame.fillna`.
+    // Fill nulls, as PySpark's `DataFrameNaFunctions.fill`, which is `DataFrame.fillna`.
     #[pyo3(signature = (value, subset=None))]
+    #[doc = connect_doc!(DataFrameNaFunctions.fill)]
     fn fill(
         &self,
         value: &Bound<'_, PyAny>,
@@ -4270,9 +4273,10 @@ impl PyDataFrameNaFunctions {
         crate::stat_arguments::fillna(&self.df, value, subset)
     }
 
-    /// Replace values, as PySpark's `DataFrameNaFunctions.replace`, which is
-    /// `DataFrame.replace`.
+    // Replace values, as PySpark's `DataFrameNaFunctions.replace`, which is
+    // `DataFrame.replace`.
     #[pyo3(signature = (to_replace, value=ReplaceValue::Omitted, subset=None))]
+    #[doc = connect_doc!(DataFrameNaFunctions.replace)]
     fn replace(
         &self,
         to_replace: &Bound<'_, PyAny>,

@@ -2205,10 +2205,15 @@ and the `PandasCogroupedOps`, the `MergeIntoWriter` and its clauses, the `Observ
 native classes are built with them, of the source of PySpark at the tracked tag
 (`scripts/gen_connect_docstrings.py`), but for the `__init__` of a native class, the slot of
 CPython, whose docstring is CPython's (see `dev/parity/known-differences.md`).
-`tests/golden/runtime_docstrings.json` holds the digests of PySpark's, which a test compares with
-the drop-in's. The modules of the DataFrame, the Column, the window, the table argument, the session
-and its client, and of the functions are left out of it: not all of their docstrings are PySpark's
-yet.
+The Column, the WindowSpec, the TableArg, the `DataFrameNaFunctions` and the
+`DataFrameStatFunctions` of Spark Connect and their members have the docstrings of PySpark's classic
+classes, which `inspect.getdoc` and `help()` show of PySpark Connect's, whose own are None (see
+`dev/parity/known-differences.md`). `tests/golden/runtime_docstrings.json` holds the digests of
+PySpark's, which a test compares with the drop-in's: of the `__doc__` of each object, or of the
+`inspect.getdoc` of one of no docstring of its own that inherits one. The DataFrame class of the
+two DataFrame modules, with the docstrings of these modules and those that the classic
+`DataFrameNaFunctions` and `DataFrameStatFunctions` copy of the DataFrame's, and the modules of the
+session and its client are left out of it: not all of their docstrings are PySpark's yet.
 A default of an object, which the text signature of a native method cannot hold (`inspect` takes
 only literals there), shows as `Ellipsis`: the `StorageLevel(True, True, False, True, 1)` of
 `DataFrame.persist`, and the `<no value>` (`pyspark._globals._NoValue`) of the `value` of

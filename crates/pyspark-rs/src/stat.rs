@@ -6,7 +6,8 @@ use spark_connect::group::StatFunctions;
 use crate::dataframe::{python_random_seed, PyDataFrame};
 use crate::errors::ResultExt;
 
-/// Python wrapper for DataFrame statistical functions.
+// Python wrapper for DataFrame statistical functions.
+#[doc = connect_doc!(DataFrameStatFunctions)]
 #[pyclass(
     name = "DataFrameStatFunctions",
     module = "pyspark.sql.connect.dataframe",
@@ -86,13 +87,14 @@ impl PyStatFunctions {
         }
     }
 
-    /// Pearson correlation between two numeric columns, as PySpark's, whose `method` is only
-    /// "pearson".
-    ///
-    /// `corr`/`cov` execute a plan (server round-trip via `scalar()`), so they release
-    /// the GIL across the call - otherwise a Python thread is blocked for the whole
-    /// RPC.
+    // Pearson correlation between two numeric columns, as PySpark's, whose `method` is only
+    // "pearson".
+    //
+    // `corr`/`cov` execute a plan (server round-trip via `scalar()`), so they release
+    // the GIL across the call - otherwise a Python thread is blocked for the whole
+    // RPC.
     #[pyo3(signature = (col1, col2, method=None))]
+    #[doc = connect_doc!(DataFrameStatFunctions.corr)]
     fn corr(
         &self,
         py: Python<'_>,
@@ -103,7 +105,8 @@ impl PyStatFunctions {
         crate::stat_arguments::corr(py, &self.stat, col1, col2, method)
     }
 
-    /// Sample covariance between two numeric columns.
+    // Sample covariance between two numeric columns.
+    #[doc = connect_doc!(DataFrameStatFunctions.cov)]
     fn cov(
         &self,
         py: Python<'_>,
@@ -113,13 +116,15 @@ impl PyStatFunctions {
         crate::stat_arguments::cov(py, &self.stat, col1, col2)
     }
 
-    /// Contingency table (cross-tabulation) of two columns.
+    // Contingency table (cross-tabulation) of two columns.
+    #[doc = connect_doc!(DataFrameStatFunctions.crosstab)]
     fn crosstab(&self, col1: &Bound<'_, PyAny>, col2: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         crate::stat_arguments::crosstab(&self.stat, col1, col2)
     }
 
-    /// Frequent items for the given columns.
+    // Frequent items for the given columns.
     #[pyo3(name = "freqItems", signature = (cols, support=None))]
+    #[doc = connect_doc!(DataFrameStatFunctions.freqItems)]
     fn freq_items(
         &self,
         cols: &Bound<'_, PyAny>,
@@ -128,9 +133,10 @@ impl PyStatFunctions {
         crate::stat_arguments::freq_items(&self.stat, cols, support)
     }
 
-    /// Stratified sample without replacement. Mirrors `DataFrameStatFunctions.sampleBy(
-    /// col, fractions, seed)`; `fractions` maps stratum values to sampling fractions.
+    // Stratified sample without replacement. Mirrors `DataFrameStatFunctions.sampleBy(
+    // col, fractions, seed)`; `fractions` maps stratum values to sampling fractions.
     #[pyo3(name = "sampleBy", signature = (col, fractions, seed=None))]
+    #[doc = connect_doc!(DataFrameStatFunctions.sampleBy)]
     fn sample_by(
         &self,
         col: &Bound<'_, PyAny>,
@@ -151,9 +157,10 @@ impl PyStatFunctions {
         }))
     }
 
-    /// Approximate quantiles of a column, or of each of a list or tuple of columns, at the
-    /// given probabilities, as PySpark's `DataFrameStatFunctions.approxQuantile`.
+    // Approximate quantiles of a column, or of each of a list or tuple of columns, at the
+    // given probabilities, as PySpark's `DataFrameStatFunctions.approxQuantile`.
     #[pyo3(name = "approxQuantile")]
+    #[doc = connect_doc!(DataFrameStatFunctions.approxQuantile)]
     fn approx_quantile(
         &self,
         py: Python<'_>,
