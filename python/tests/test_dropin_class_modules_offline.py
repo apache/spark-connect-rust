@@ -394,6 +394,15 @@ print("ok")
     assert result.returncode == 0 and result.stdout.strip() == "utils", result.stderr
 
 
+def test_the_ml_connect_package_has_check_dependencies_as_pysparks():
+    # As PySpark's pyspark.ml.connect, whose __init__ imports the check_dependencies of
+    # pyspark.sql.connect.utils (and runs it, which the drop-in's does not; see the test above).
+    import pyspark.ml.connect as ml_connect
+    from pyspark.sql.connect import utils
+
+    assert ml_connect.check_dependencies is utils.check_dependencies
+
+
 def test_the_udf_functions_are_names_of_the_functions_modules_as_pysparks():
     # The functions of UDFs and UDTFs that pyspark.sql.functions reads when they are asked for are
     # names of it and of its builtin module, which dir() lists, and a name that neither has raises

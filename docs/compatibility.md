@@ -2834,7 +2834,8 @@ methods of the classes of Spark Connect, which an object of another class does n
 `check_dependencies` and `utils`, which its `__init__` imports, and importing `pyspark` imports no
 module of it, as in PySpark: `udf`, `udtf` and `arrow_udtf` of `pyspark.sql.functions` are read of
 `pyspark.sql.connect.udf` and `pyspark.sql.connect.udtf` when they are first asked for. Its import
-does not run `check_dependencies`, which PySpark's does (see `dev/parity/known-differences.md`).
+does not run `check_dependencies`, which PySpark's does, nor does the import of `pyspark.ml.connect`,
+which has the name too, as PySpark's (see `dev/parity/known-differences.md`).
 
 `pyspark.sql.SparkSession` is PySpark's classic class, the module `pyspark.sql.session` of Apache
 Spark as it is, as in PySpark. Its builder reads `spark.remote` or `SPARK_REMOTE`, raises
