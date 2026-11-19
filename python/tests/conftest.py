@@ -30,6 +30,19 @@ def _debugging_cache_of_each_test():
     errors_utils._enable_debugging_cache = cached
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _debugging_cache_of_each_module():
+    # As _debugging_cache_of_each_test, of the fixtures of a module's scope: pytest sets them up
+    # before the fixtures of each test, so a session that such a fixture makes reads the cache
+    # before _debugging_cache_of_each_test records it (the objects of
+    # test_dropin_class_modules_offline.py). Each module leaves the cache as it found it too.
+    import pyspark.errors.utils as errors_utils
+
+    cached = errors_utils._enable_debugging_cache
+    yield
+    errors_utils._enable_debugging_cache = cached
+
+
 def pytest_sessionfinish(session, exitstatus):
     # The exit of this process sends the ML cache clean of each session that is not stopped, and
     # waits on its retries when the server is gone, as PySpark's exit does. A session that the
