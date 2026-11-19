@@ -28,7 +28,10 @@ difference is intentional or tracked for a fix.
   local rows are typed, where PySpark's conversion takes Arrow's types: a named Row is a struct,
   not an array, a dict a map, not a struct, nested Decimals take precision 38 (see below), an
   object column of naive datetimes is a timestamp, not a timestamp_ntz, nanoseconds are
-  truncated without the error of a safe cast, and its errors are its own. This fallback covers
+  dropped as those of local rows are, to the microsecond below, without the error of a safe cast
+  (PySpark's unsafe cast of a `datetime64[ns]` column rounds a time before 1970 toward 1970:
+  `1969-12-31 23:59:59.999999999` is `1970-01-01 00:00:00` there, and `1969-12-31 23:59:59.999999`
+  here and in local rows), and its errors are its own. This fallback covers
   unavailable modules detected by `pyarrow_available`, not an installed PyArrow module that
   fails during import. The row path also converts a frame, with PyArrow, when the type names
   that the conversion and the importer resolve are rebound, or when the class of the struct of

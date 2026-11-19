@@ -21,7 +21,7 @@ drop-in uses a native Rust transport instead of the Python gRPC client, the
 ``PipelineCommand`` construction + execution live in the Rust core
 (``pyspark._pyspark.pipeline_*``); these functions are thin wrappers over them.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator, Mapping, Optional, Sequence
 
 from pyspark.sql import SparkSession
@@ -50,14 +50,21 @@ def create_dataflow_graph(
     )
 
 
+# The epoch of the microseconds of the timestamps of the events of a run.
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
 def handle_pipeline_events(iter: Iterator[Any]) -> None:
     """Print out the pipeline events received from the Spark Connect server.
 
-    The Rust run stream yields ``(message, timestamp_micros)`` per pipeline event and
-    raises the mapped pyspark exception (e.g. ``AnalysisException``) if the run fails.
+    The Rust run stream yields ``(message, timestamp_micros)`` per pipeline event, the
+    microseconds of the event's Timestamp since the epoch, of its nanoseconds truncated, and
+    raises the mapped pyspark exception (e.g. ``AnalysisException``) if the run fails. The time
+    of an event is exact, as PySpark's ``event.timestamp.ToDatetime()`` in UTC: a float of its
+    seconds would round the microseconds of a time far from 1970, into the next second too.
     """
     for message, timestamp_micros in iter:
-        dt = datetime.fromtimestamp(timestamp_micros / 1_000_000, tz=timezone.utc)
+        dt = _EPOCH + timedelta(microseconds=timestamp_micros)
         log_with_provided_timestamp(message, dt)
 
 
