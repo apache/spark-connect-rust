@@ -477,14 +477,11 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   `GroupMap` and `CoGroupMap`, the root and references of a `WithRelations`, so the views of `SQL`),
   as the relation of each command that holds one (writes, views, streams, `SqlCommand`, checkpoints,
   `MergeIntoTableCommand`, the flows of pipelines), as the dataset and the fetched arguments of the
-  ML commands, and anywhere in the message of the extension of a relation or of a command (a
-  plugin's, as Delta Lake's `merge`) that holds it as `plan(session)` gives it. The core does not
-  decode the expressions of such a plan, which hold no relation, so as not to decode every
-  expression of each plan for what only a plugin's expression extension could hold, and it takes a
-  placeholder in an extension's message by its encoding, which a change alters: so a placeholder in
-  an expression's extension is sent as it is, and so is one that the message of an extension changes
-  (`plan.common.plan_id = ...`), whose change the core does not apply to the relation; the server
-  rejects them with `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`.
+  ML commands, anywhere in the message of the extension of a relation or of a command (a
+  plugin's, as Delta Lake's `merge`), and in the extensions of the expressions of the relations and
+  the commands built in Python, which the core finds by the type URL of the placeholder in the
+  encoding of their fields (`plan::resolve_own_fields`). A placeholder whose `common` a plan changes
+  (`plan.common.plan_id = ...`) is sent with that `common` merged, as PySpark's changed relation.
 - **A channel builder without a host** (intentional; the transport is native). The builders of
   `pyspark.sql.SparkSession` and `pyspark.sql.connect.session.SparkSession` are PySpark's two
   builders, with its errors: `CONNECT_URL_NOT_SET`, a `PySparkRuntimeError`, and
@@ -652,9 +649,7 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   `DataFrame._plan.plan(session)` gives, in the message of an extension too. What stays different
   (see `docs/compatibility.md`):
   - the core replaces that placeholder where it replaces the plan of a DataFrame (see "Plans of a
-    DataFrame's relation" above). One that a plugin changes in the message of an extension reaches
-    the server as a placeholder, which it refuses, where PySpark's plugins send the relation: the
-    core takes a placeholder there by its encoding, which the change alters;
+    DataFrame's relation" above), also one whose `common` the plugin changes, with the change;
   - its classes are the runtime's, not subclasses of `google.protobuf.message.Message`, while its
     `DESCRIPTOR`, its `_*` descriptors, its extensions and services stay `protobuf`'s, and
     `protobuf`'s `message_factory` and `symbol_database` give `protobuf`'s classes of its types,

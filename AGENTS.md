@@ -150,9 +150,10 @@ placeholder that `DataFrame._plan.plan(session)` gives, of one level, which hold
 the DataFrame encoded, built at the call, and which the core replaces wherever a plan, a command or
 an analysis built in Python holds a relation: every input of every relation
 (`plan::relation_inputs_of`), the relation of each command that holds one, the inputs of the plans
-of `pyspark.ml`, and the messages of the extensions of a plugin's relations and commands
-(`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), but not in an expression's
-extension: "Plans of a DataFrame's relation" in `dev/parity/known-differences.md`.
+of `pyspark.ml`, the messages of the extensions of a plugin's relations and commands
+(`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), and those of the extensions of
+the expressions of the relations and commands built in Python (`plan::resolve_own_fields`): "Plans
+of a DataFrame's relation" in `dev/parity/known-differences.md`.
 
 ## 3. Close API gaps (three layers)
 
