@@ -14,12 +14,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Window / WindowSpec under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.window``: its ``Window`` is a class of its own, a subclass of PySpark's
-classic ``pyspark.sql.window.Window``, and its ``WindowSpec`` is the native class of the window
-specifications (whose ``_frame`` is a ``WindowFrame``), a virtual subclass of the classic
-``pyspark.sql.window.WindowSpec``, as PySpark Connect's is its subclass
-(pyspark.sql._classic_bases)."""
+# Window / WindowSpec under the connect import path, as PySpark Connect's
+# ``pyspark.sql.connect.window``: its ``Window`` is a class of its own, a subclass of PySpark's
+# classic ``pyspark.sql.window.Window``, and its ``WindowSpec`` is the native class of the window
+# specifications (whose ``_frame`` is a ``WindowFrame``), a virtual subclass of the classic
+# ``pyspark.sql.window.WindowSpec``, as PySpark Connect's is its subclass
+# (pyspark.sql._classic_bases).
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Union
 

@@ -3,7 +3,11 @@
 exact text, of scripts/capture_runtime_docstrings_golden.py (of official PySpark) and of the test of
 the drop-in's (test_dropin_class_modules_offline.py): of each module, of each public class and
 function that the module defines, and of each public member (and ``__init__``) of such a class,
-as Python finds it on the class, by "module", "module:Name" and "module:Class.member".
+as Python finds it on the class, by "module", "module:Name" and "module:Class.member". The digest
+is of the kind ``doc``, of ``__doc__`` (None of none), but of an object of no ``__doc__`` of its own
+that inherits a docstring, of the kind ``getdoc``, of ``inspect.getdoc``, which ``help()`` shows
+(``{"getdoc": digest}``): such as of a member of PySpark Connect's ``Column``, a subclass of the
+classic ``Column``, of no docstring of its own, which finds that of the classic class (``KINDS``).
 
 The sweep imports every module of them, some of which keep the state of the process at their
 import, such as the ``sys.stdout`` that ``pyspark.sql.connect.shell.progress`` binds as the default
@@ -19,23 +23,48 @@ import sys
 import types
 import warnings
 
-# The modules of others' work, which the golden leaves out: pyspark.sql.functions (and its
-# modules), and those of the classes of the session, the client, the DataFrame, the Column, the
-# window and the table argument, whose docstrings are not all PySpark's yet.
+# The golden leaves out the docstrings that are not all PySpark's yet: those of the DataFrame class
+# of both DataFrame modules, and of the modules of the session and its client
+# (pyspark.sql.connect.session and pyspark.sql.connect.client), which are left out here as a whole.
 EXCLUDED = (
-    "pyspark.sql.functions",
-    "pyspark.sql.connect.functions",
-    "pyspark.sql.column",
-    "pyspark.sql.connect.column",
-    "pyspark.sql.dataframe",
-    "pyspark.sql.connect.dataframe",
-    "pyspark.sql.window",
-    "pyspark.sql.connect.window",
-    "pyspark.sql.table_arg",
-    "pyspark.sql.connect.table_arg",
     "pyspark.sql.connect.session",
     "pyspark.sql.connect.client",
 )
+# Of the two DataFrame modules, the golden leaves out the DataFrame class, and the docstrings that
+# can only match PySpark's once those of the class do: the docstrings of both modules, and those
+# that the classic `DataFrameNaFunctions` and `DataFrameStatFunctions` copy of the class
+# (`drop.__doc__ = DataFrame.dropna.__doc__`). Their other docstrings are compared.
+DATAFRAME_MODULES = ("pyspark.sql.dataframe", "pyspark.sql.connect.dataframe")
+COPIES_OF_THE_DATAFRAME = {
+    "DataFrameNaFunctions.drop",
+    "DataFrameNaFunctions.fill",
+    "DataFrameNaFunctions.replace",
+    "DataFrameStatFunctions.approxQuantile",
+    "DataFrameStatFunctions.corr",
+    "DataFrameStatFunctions.cov",
+    "DataFrameStatFunctions.crosstab",
+    "DataFrameStatFunctions.freqItems",
+    "DataFrameStatFunctions.sampleBy",
+}
+
+
+def of_the_dataframe(module_name, rest):
+    """Whether the key of `rest` of the module `module_name` is of the DataFrame class, of a
+    DataFrame module: the module, the class, its members, and the classic copies of them."""
+    if module_name not in DATAFRAME_MODULES:
+        return False
+    if rest in ("", "DataFrame") or rest.startswith("DataFrame."):
+        return True
+    return module_name == "pyspark.sql.dataframe" and rest in COPIES_OF_THE_DATAFRAME
+
+# The kinds of the digests of the golden, which its note gives.
+KINDS = {
+    "doc": "a digest, or null: of the __doc__ of the object",
+    "getdoc": (
+        '{"getdoc": digest}: of the inspect.getdoc of an object of no __doc__ of its own that '
+        "inherits a docstring, which help() shows"
+    ),
+}
 
 
 def digest(doc):
@@ -45,6 +74,18 @@ def digest(doc):
     if not isinstance(doc, str):
         return "not a str: " + type(doc).__name__
     return hashlib.sha256(doc.encode("utf-8", "surrogatepass")).hexdigest()[:16]
+
+
+def entry(obj):
+    """The digest of the docstring of `obj` of the golden, of its kind (``KINDS``): of its
+    ``__doc__``, or ``{"getdoc": digest}`` of ``inspect.getdoc`` of one of no ``__doc__`` of its own
+    that inherits a docstring."""
+    doc = getattr(obj, "__doc__", None)
+    if doc is None:
+        found = inspect.getdoc(obj)
+        if found is not None:
+            return {"getdoc": digest(found)}
+    return digest(doc)
 
 
 def module_names():
@@ -65,7 +106,17 @@ def module_names():
 
 
 def docstrings(module_name):
-    """The digests of the docstrings of the module `module_name`, by their keys."""
+    """The digests of the docstrings of the module `module_name`, by their keys, but those of the
+    DataFrame class (``of_the_dataframe``)."""
+    out = _docstrings(module_name)
+    return {
+        key: value
+        for key, value in out.items()
+        if not of_the_dataframe(module_name, key.partition(":")[2])
+    }
+
+
+def _docstrings(module_name):
     warnings.simplefilter("ignore")
     module = importlib.import_module(module_name)
     out = {module_name: digest(module.__doc__)}
@@ -76,7 +127,7 @@ def docstrings(module_name):
             continue
         if getattr(obj, "__module__", None) != module_name:
             continue
-        out[f"{module_name}:{attr}"] = digest(getattr(obj, "__doc__", None))
+        out[f"{module_name}:{attr}"] = entry(obj)
         if not inspect.isclass(obj):
             continue
         for member in sorted(set(dir(obj))):
@@ -86,10 +137,10 @@ def docstrings(module_name):
             if member != "__init__" and (definer is None or definer.__module__ in ("builtins", "abc", "typing", "enum", "collections")):
                 continue
             try:
-                doc = getattr(obj, member).__doc__
+                found = entry(getattr(obj, member))
             except Exception as e:  # noqa: BLE001
-                doc = "error: " + type(e).__name__
-            out[f"{module_name}:{attr}.{member}"] = digest(doc)
+                found = digest("error: " + type(e).__name__)
+            out[f"{module_name}:{attr}.{member}"] = found
     return out
 
 
@@ -106,9 +157,10 @@ def resolve(key):
 
 def compare(golden):
     """The comparison of the drop-in's docstrings with those of `golden`, the golden of
-    capture_runtime_docstrings_golden.py: the number compared, the keys that differ, and the
-    modules of the golden that do not import. The `__init__` of a native class is CPython's slot,
-    of CPython's docstring, and a name that the drop-in does not have is not compared."""
+    capture_runtime_docstrings_golden.py, each of its kind: the number compared, the keys that
+    differ, and the modules of the golden that do not import. The `__init__` of a native class is
+    CPython's slot, of CPython's docstring, and a name that the drop-in does not have is not
+    compared."""
     compared, differ, unimported = 0, [], []
     for module, entries in golden["modules"].items():
         try:
@@ -125,7 +177,11 @@ def compare(golden):
             if rest.endswith(".__init__") and isinstance(found, types.WrapperDescriptorType):
                 continue
             compared += 1
-            if digest(found.__doc__) != expected:
+            if isinstance(expected, dict):
+                doc, expected = inspect.getdoc(found), expected["getdoc"]
+            else:
+                doc = found.__doc__
+            if digest(doc) != expected:
                 differ.append(key)
     return {"compared": compared, "differ": differ, "unimported": unimported}
 

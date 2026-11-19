@@ -277,7 +277,8 @@ impl PyFrameBound {
     }
 }
 
-/// Python wrapper for a WindowSpec.
+// Python wrapper for a WindowSpec.
+#[doc = connect_doc!(WindowSpec)]
 #[pyclass(
     name = "WindowSpec",
     module = "pyspark.sql.connect.window",
@@ -311,21 +312,24 @@ impl Clone for PyWindowSpec {
 
 #[pymethods]
 impl PyWindowSpec {
-    /// Partition the window by the given columns.
+    // Partition the window by the given columns.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(WindowSpec.partitionBy)]
     fn partitionBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
         let new_spec = self.spec.clone().partition_by(to_partition_exprs(cols)?);
         Ok(PyWindowSpec::new(new_spec))
     }
 
-    /// Order the window by the given columns.
+    // Order the window by the given columns.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(WindowSpec.orderBy)]
     fn orderBy(&self, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyWindowSpec> {
         let new_spec = self.spec.clone().order_by(to_sort_orders(cols)?);
         Ok(PyWindowSpec::new(new_spec))
     }
 
-    /// Define a ROWS frame between start and end bounds (ints or FrameBounds).
+    // Define a ROWS frame between start and end bounds (ints or FrameBounds).
+    #[doc = connect_doc!(WindowSpec.rowsBetween)]
     fn rowsBetween(
         &self,
         py: Python<'_>,
@@ -337,7 +341,8 @@ impl PyWindowSpec {
         Ok(PyWindowSpec::new(new_spec))
     }
 
-    /// Define a RANGE frame between start and end bounds (ints or FrameBounds).
+    // Define a RANGE frame between start and end bounds (ints or FrameBounds).
+    #[doc = connect_doc!(WindowSpec.rangeBetween)]
     fn rangeBetween(
         &self,
         py: Python<'_>,

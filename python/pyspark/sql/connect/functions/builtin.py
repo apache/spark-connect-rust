@@ -14,14 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.functions.builtin``,
-which the Rust core builds.
-
-As in PySpark, ``pyspark.sql.functions`` is PySpark's package, whose functions run these when the
-session is remote (``try_remote_functions`` of ``pyspark.sql.utils``). The functions that
-scripts/gen_fn_dispatch.py generates in ``_generated.py`` are defined in this module, which runs
-the code of that file; see its header.
-"""
+# The functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.functions.builtin``,
+# which the Rust core builds.
+#
+# As in PySpark, ``pyspark.sql.functions`` is PySpark's package, whose functions run these when the
+# session is remote (``try_remote_functions`` of ``pyspark.sql.utils``). The functions that
+# scripts/gen_fn_dispatch.py generates in ``_generated.py`` are defined in this module, which runs
+# the code of that file; see its header.
 
 # sys and random as py_random: of PySpark Connect's module, whose namespace the official doctests
 # of the functions take as their globals, and whose examples use them (try_add, try_multiply, ...).

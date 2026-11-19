@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Rust-backed Column under the connect import path (pandas-on-Spark and connect tests import ConnectColumn from here)."""
+# Rust-backed Column under the connect import path (pandas-on-Spark and connect tests import ConnectColumn from here).
 from typing import Any, Callable, Optional
 
 from pyspark import cloudpickle as _cloudpickle
