@@ -348,6 +348,21 @@ def test_the_relations_of_the_plans_of_dataframes_are_sent_after_the_dataframes_
     assert client.schema(plan).simpleString() == "struct<id:bigint>"
 
 
+def test_the_relation_of_a_dataframes_plan_is_sent_with_its_changed_plan_id_as_pyspark(session):
+    # As PySpark's relation of df._plan.plan(client), whose plan ID a plan changes: the server
+    # resolves a column of that plan ID against it.
+    import pyspark.sql.connect.proto as pb2
+
+    client = session.client
+    plan = pb2.Plan()
+    plan.root.project.input.CopyFrom(session.range(3)._plan.plan(client))
+    plan.root.project.input.common.plan_id = 424242
+    column = plan.root.project.expressions.add().unresolved_attribute
+    column.unparsed_identifier = "id"
+    column.plan_id = 424242
+    assert client.to_table(plan, {})[0].to_pydict() == {"id": [0, 1, 2]}
+
+
 def test_the_plans_of_dataframes_give_the_client_their_observations_as_pyspark(session):
     # As PySpark Connect's DataFrame._plan, whose observations are the Observations of the plan
     # by their names, which its DataFrame gives the executions of its client: an execution of

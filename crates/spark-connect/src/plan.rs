@@ -1082,10 +1082,10 @@ fn relation_inputs_mut(relation: &mut proto::Relation) -> Vec<&mut proto::Relati
 /// DataFrames, wherever PySpark's plan would hold the relation of such a DataFrame: `relation`
 /// itself, the inputs of every relation of Spark Connect under it (see [`relation_inputs_of`]),
 /// those of the relations of `pyspark.ml` (an `ml_relation`'s inputs and fetched arguments), and
-/// the messages of the extensions of a plugin there (see [`resolve_extension`]). Each replacement
-/// is the relation of a DataFrame of the core, which has no placeholder. An expression holds no
-/// relation, as a subquery refers to its plan by its ID in a `with_relations`, so the core does not
-/// look into expressions, nor into the extension of one.
+/// the messages of the extensions of a plugin there (see [`resolve_extension`]), and those of the
+/// extensions of the expressions of the relations built in Python, as a plugin's expression may
+/// hold the relation of a DataFrame in its message (see [`resolve_own_fields`]). Each replacement
+/// is the relation of a DataFrame of the core, which has no placeholder.
 pub(crate) fn resolve_relation(relation: &mut proto::Relation) -> Result<()> {
     resolve_relation_at(relation, 1).map(|_| ())
 }
@@ -1103,7 +1103,13 @@ pub(crate) fn resolve_relation_levels(relation: &mut proto::Relation) -> Result<
 fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<usize> {
     if let Some(proto::relation::RelType::Extension(any)) = &relation.rel_type {
         if any.type_url == PLACEHOLDER_TYPE_URL {
-            let (resolved, levels) = placeholder_contents(&any.value)?;
+            let (mut resolved, levels) = placeholder_contents(&any.value)?;
+            // A `common` that the plan set on the placeholder, as on PySpark's relation of
+            // `plan(session)` (`relation.common.plan_id = ...`), merged into the relation's.
+            if let Some(common) = &relation.common {
+                use prost::Message;
+                merge_common(&mut resolved, &common.encode_to_vec())?;
+            }
             *relation = resolved;
             // The relation of the DataFrame takes the place of the placeholder, at its level.
             return Ok(level - 1 + levels);
@@ -1138,14 +1144,168 @@ fn resolve_relation_at(relation: &mut proto::Relation, level: usize) -> Result<u
         // Every input of a relation of Spark Connect, as PySpark's plans hold the relations of
         // their children's DataFrames: those of `pyspark.sql.connect.plan` (a `SubqueryAlias`
         // and the views of a `SQL`, references of a `WithRelations`), of a plugin (Delta Lake's
-        // `DeltaTable.alias`) and of the messages that `SparkSession.client` is given.
+        // `DeltaTable.alias`) and of the messages that `SparkSession.client` is given; and the
+        // extensions of the expressions of the relation (see [`resolve_own_fields`]).
         _ => {
+            if holds_expressions(relation) {
+                resolve_own_fields(relation, relation_inputs_mut)?;
+            }
             for input in relation_inputs_mut(relation) {
                 below(input)?;
             }
         }
     }
     Ok(deepest)
+}
+
+/// Whether `relation` holds expressions of its own (or a function, whose arguments are), whose
+/// extensions may hold a placeholder, of each type of relation of Spark Connect: so the fields of
+/// one that holds none, such as a `Limit` or the data of a `LocalRelation`, are not encoded to look
+/// for one, as a literal (of `FillNa` or `Replace`) holds no extension.
+fn holds_expressions(relation: &proto::Relation) -> bool {
+    use proto::relation::RelType;
+    match &relation.rel_type {
+        Some(
+            RelType::Project(_)
+            | RelType::Filter(_)
+            | RelType::Join(_)
+            | RelType::Sort(_)
+            | RelType::Aggregate(_)
+            | RelType::Sql(_)
+            | RelType::RepartitionByExpression(_)
+            | RelType::WithColumns(_)
+            | RelType::Hint(_)
+            | RelType::Unpivot(_)
+            | RelType::Drop(_)
+            | RelType::MapPartitions(_)
+            | RelType::CollectMetrics(_)
+            | RelType::GroupMap(_)
+            | RelType::CoGroupMap(_)
+            | RelType::ApplyInPandasWithState(_)
+            | RelType::CommonInlineUserDefinedTableFunction(_)
+            | RelType::UnresolvedTableValuedFunction(_)
+            | RelType::AsOfJoin(_)
+            | RelType::LateralJoin(_)
+            | RelType::NearestByJoin(_)
+            | RelType::Transpose(_)
+            | RelType::SampleBy(_),
+        ) => true,
+        Some(
+            RelType::Read(_)
+            | RelType::SetOp(_)
+            | RelType::Limit(_)
+            | RelType::Sample(_)
+            | RelType::Offset(_)
+            | RelType::Deduplicate(_)
+            | RelType::SubqueryAlias(_)
+            | RelType::Repartition(_)
+            | RelType::ToDf(_)
+            | RelType::WithColumnsRenamed(_)
+            | RelType::ShowString(_)
+            | RelType::Tail(_)
+            | RelType::ToSchema(_)
+            | RelType::Parse(_)
+            | RelType::WithWatermark(_)
+            | RelType::HtmlString(_)
+            | RelType::WithRelations(_)
+            | RelType::Zip(_)
+            | RelType::FillNa(_)
+            | RelType::DropNa(_)
+            | RelType::Replace(_)
+            | RelType::Summary(_)
+            | RelType::Crosstab(_)
+            | RelType::Describe(_)
+            | RelType::Cov(_)
+            | RelType::Corr(_)
+            | RelType::ApproxQuantile(_)
+            | RelType::FreqItems(_)
+            | RelType::LocalRelation(_)
+            | RelType::Range(_)
+            | RelType::CachedLocalRelation(_)
+            | RelType::CachedRemoteRelation(_)
+            | RelType::CommonInlineUserDefinedDataSource(_)
+            | RelType::ChunkedCachedLocalRelation(_)
+            | RelType::RelationChanges(_)
+            | RelType::Catalog(_)
+            | RelType::MlRelation(_)
+            | RelType::Extension(_)
+            | RelType::Unknown(_),
+        )
+        | None => false,
+    }
+}
+
+/// Merge `common`, the encoding of the `common` that a plan built in Python set on a placeholder,
+/// into the `common` of `resolved`, the relation of the placeholder, as protobuf's `MergeFrom`
+/// would set its fields on PySpark's relation of `plan(session)`.
+fn merge_common(resolved: &mut proto::Relation, common: &[u8]) -> Result<()> {
+    use prost::Message;
+    resolved
+        .common
+        .get_or_insert_with(Default::default)
+        .merge(common)
+        .map_err(|error| SparkError::value_msg(error.to_string()))
+}
+
+/// The stack that the encode and the decode of the fields of a relation or a command built in
+/// Python keep free, and the stack segment that they add when less is left: prost recurses once per
+/// level of their expressions, with frames of a few hundred bytes in a release build and more in a
+/// debug one, and the expressions have at most `MAX_EXPRESSION_DEPTH` levels.
+const OWN_FIELDS_RED_ZONE: usize = if cfg!(debug_assertions) {
+    4 << 20
+} else {
+    1 << 20
+};
+const OWN_FIELDS_STACK: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+/// Replace the placeholders in the fields of `message`, a relation or a command built in Python,
+/// other than the relations that `inputs` gives of it, which the caller resolves: the extensions of
+/// its expressions, of a plugin's messages, whose relations PySpark's plan sends as it built them.
+/// The core does not walk the expressions of the message: the fields are encoded with the inputs
+/// taken out, and only when that encoding holds the type URL of a placeholder, as an extension
+/// that holds one does, are they resolved as any message (see [`resolve_encoded`]) and decoded
+/// back. So a plan of no such extension costs an encoding of the fields of its relations built in
+/// Python, without their inputs: a relation that the core builds, such as that of a placeholder,
+/// is not encoded.
+fn resolve_own_fields<M: prost::Message + Default>(
+    message: &mut M,
+    inputs: impl Fn(&mut M) -> Vec<&mut proto::Relation>,
+) -> Result<()> {
+    let taken: Vec<proto::Relation> = inputs(message).into_iter().map(std::mem::take).collect();
+    // The fields may nest expressions of many levels, which the encode and the decode recurse
+    // once per level of: a stack that holds those of `MAX_EXPRESSION_DEPTH` levels.
+    let encoded = stacker::maybe_grow(OWN_FIELDS_RED_ZONE, OWN_FIELDS_STACK, || {
+        message.encode_to_vec()
+    });
+    let resolved = resolve_encoded(&encoded);
+    let restore = |message: &mut M, taken: Vec<proto::Relation>| {
+        for (input, taken) in inputs(message).into_iter().zip(taken) {
+            *input = taken;
+        }
+    };
+    match resolved {
+        Ok(Some(bytes)) => match stacker::maybe_grow(OWN_FIELDS_RED_ZONE, OWN_FIELDS_STACK, || {
+            M::decode(bytes.as_slice())
+        }) {
+            Ok(decoded) => {
+                *message = decoded;
+                restore(message, taken);
+                Ok(())
+            }
+            Err(error) => {
+                restore(message, taken);
+                Err(SparkError::value_msg(error.to_string()))
+            }
+        },
+        other => {
+            restore(message, taken);
+            other.map(|_| ())
+        }
+    }
 }
 
 /// Replace the placeholders that `extension`, the `Any` of the extension of a relation or of a
@@ -1162,68 +1322,128 @@ fn resolve_extension(extension: &mut prost_types::Any) -> Result<()> {
     Ok(())
 }
 
-/// Whether `relation` is a placeholder.
-fn is_placeholder(relation: &proto::Relation) -> bool {
-    matches!(
-        &relation.rel_type,
-        Some(proto::relation::RelType::Extension(any)) if any.type_url == PLACEHOLDER_TYPE_URL
-    )
-}
-
-/// The start of the encoding of a placeholder as `placeholder_relation` and
-/// `standalone_placeholder_relation` give it, of no `common`: the key of the extension of a
-/// relation, its first field.
-static PLACEHOLDER_START: LazyLock<Vec<u8>> = LazyLock::new(|| {
-    use prost::Message;
-    // A relation of an empty extension encodes the key of the extension and the length 0.
-    let mut start = proto::Relation {
-        common: None,
-        rel_type: Some(proto::relation::RelType::Extension(
-            prost_types::Any::default(),
-        )),
-    }
-    .encode_to_vec();
-    start.pop();
-    start
-});
-
 /// `encoded`, the encoding of a message of a type that the core need not know, with the
 /// placeholders that it holds replaced by the relations of their DataFrames; None when it holds
 /// none, as an encoding that does not hold the type URL of a placeholder does not. An encoding of
-/// a placeholder is replaced by that of the relation of its DataFrame; an encoding of fields is
-/// read as a message: the value of each field of it that may be a message (of the wire type of
-/// length-delimited values) is resolved in turn, and the other fields stay as they are. An
-/// encoding that does not read as a message, such as that of a string that holds the type URL,
-/// holds no placeholder.
+/// a placeholder, as `plan(session)` gives it or with a `common` that the plan set on it, is
+/// replaced by that of the relation of its DataFrame, with that `common` merged; an encoding of
+/// fields is read as a message: the value of each field of it that may be a message (of the wire
+/// type of length-delimited values) and holds the type URL is resolved in turn, and the other
+/// fields stay as they are. An encoding that does not read as a message, such as that of a string
+/// that holds the type URL, holds no placeholder.
+///
+/// It takes a time of the length of the encoding, however deep its messages nest: the offsets of
+/// the type URL are found once, a field is read only when its value holds one of them, and the
+/// resolved encoding is written once, of the lengths of its changed fields, computed first.
 fn resolve_encoded(encoded: &[u8]) -> Result<Option<Vec<u8>>> {
-    use prost::encoding::{decode_varint, encode_varint};
-    use prost::Message;
-
-    let url = PLACEHOLDER_TYPE_URL.as_bytes();
-    if !encoded.windows(url.len()).any(|window| window == url) {
+    let offsets = url_offsets(encoded);
+    if offsets.is_empty() {
         return Ok(None);
     }
-    if encoded.starts_with(&PLACEHOLDER_START) {
-        if let Ok(mut relation) = proto::Relation::decode(encoded) {
-            if is_placeholder(&relation) && relation.encode_to_vec() == encoded {
-                let stack = raw_relation_stack(resolve_relation_levels(&mut relation)?);
-                return Ok(Some(stacker::maybe_grow(stack, stack, move || {
-                    relation.encode_to_vec()
-                })));
+    let Some(change) = resolve_change(encoded, 0, &offsets)? else {
+        return Ok(None);
+    };
+    let mut resolved = Vec::with_capacity(change.len());
+    change.write(encoded, &mut resolved);
+    Ok(Some(resolved))
+}
+
+/// The offsets in `encoded` at which the type URL of a placeholder starts, in order.
+fn url_offsets(encoded: &[u8]) -> Vec<usize> {
+    let url = PLACEHOLDER_TYPE_URL.as_bytes();
+    encoded
+        .windows(url.len())
+        .enumerate()
+        .filter(|(_, window)| *window == url)
+        .map(|(offset, _)| offset)
+        .collect()
+}
+
+/// Whether the bytes `start..end` of the encoding of `offsets` hold the type URL of a placeholder
+/// whole.
+fn holds_url(offsets: &[usize], start: usize, end: usize) -> bool {
+    let first = offsets.partition_point(|&offset| offset < start);
+    offsets
+        .get(first)
+        .is_some_and(|&offset| offset + PLACEHOLDER_TYPE_URL.len() <= end)
+}
+
+/// The change of an encoding that [`resolve_encoded`] makes.
+enum Change {
+    /// The encoding of a placeholder, replaced by that of the relation of its DataFrame.
+    Replaced(Vec<u8>),
+    /// The fields of a message whose values change, in order, and the length of the encoding with
+    /// the changes.
+    Fields(Vec<ChangedField>, usize),
+}
+
+/// A field of a message whose value changes: the offsets in the message of the end of its key, the
+/// start of its value and its end, and the change of its value.
+struct ChangedField {
+    key_end: usize,
+    value_start: usize,
+    end: usize,
+    change: Change,
+}
+
+impl Change {
+    /// The length of the changed encoding.
+    fn len(&self) -> usize {
+        match self {
+            Change::Replaced(bytes) => bytes.len(),
+            Change::Fields(_, len) => *len,
+        }
+    }
+
+    /// Write the changed encoding of `encoded`, the encoding that changes, into `out`.
+    fn write(&self, encoded: &[u8], out: &mut Vec<u8>) {
+        match self {
+            Change::Replaced(bytes) => out.extend_from_slice(bytes),
+            Change::Fields(fields, _) => {
+                let mut at = 0;
+                for field in fields {
+                    out.extend_from_slice(&encoded[at..field.key_end]);
+                    prost::encoding::encode_varint(field.change.len() as u64, out);
+                    let value = &encoded[field.value_start..field.end];
+                    crate::expression::with_stack_for_a_level(|| field.change.write(value, out));
+                    at = field.end;
+                }
+                out.extend_from_slice(&encoded[at..]);
             }
         }
     }
-    let mut resolved = Vec::with_capacity(encoded.len());
-    let mut replaced = false;
+}
+
+/// The change of `encoded`, the bytes at `base` of the encoding of `offsets`, as
+/// [`resolve_encoded`] resolves it, or None when it holds no placeholder.
+fn resolve_change(encoded: &[u8], base: usize, offsets: &[usize]) -> Result<Option<Change>> {
+    use prost::encoding::{decode_varint, encoded_len_varint};
+
+    if !holds_url(offsets, base, base + encoded.len()) {
+        return Ok(None);
+    }
+    if let Some((common, value)) = placeholder_parts(encoded) {
+        let (mut relation, levels) = placeholder_contents(value)?;
+        if let Some(common) = common {
+            merge_common(&mut relation, common)?;
+        }
+        let stack = raw_relation_stack(levels);
+        let bytes = stacker::maybe_grow(stack, stack, move || {
+            use prost::Message;
+            relation.encode_to_vec()
+        });
+        return Ok(Some(Change::Replaced(bytes)));
+    }
+    let mut fields = Vec::new();
+    let mut len = encoded.len();
     let mut rest = encoded;
     while !rest.is_empty() {
-        let field = rest;
         let Ok(key) = decode_varint(&mut rest) else {
             return Ok(None);
         };
-        let tag = &field[..field.len() - rest.len()];
+        let key_end = encoded.len() - rest.len();
         let wire_type = key & 7;
-        let len = match wire_type {
+        let value_len = match wire_type {
             0 => match decode_varint(&mut rest) {
                 Ok(_) => 0,
                 Err(_) => return Ok(None),
@@ -1237,65 +1457,121 @@ fn resolve_encoded(encoded: &[u8]) -> Result<Option<Vec<u8>>> {
             // A group, which a proto3 file has none of, is not read.
             _ => return Ok(None),
         };
-        if key >> 3 == 0 || len > rest.len() {
+        if key >> 3 == 0 || value_len > rest.len() {
             return Ok(None);
         }
-        let (value, after) = rest.split_at(len);
-        rest = after;
-        if wire_type == 2 {
-            let below = crate::expression::with_stack_for_a_level(|| resolve_encoded(value))?;
-            if let Some(bytes) = below {
-                resolved.extend_from_slice(tag);
-                encode_varint(bytes.len() as u64, &mut resolved);
-                resolved.extend_from_slice(&bytes);
-                replaced = true;
-                continue;
+        let value_start = encoded.len() - rest.len();
+        rest = &rest[value_len..];
+        let end = value_start + value_len;
+        if wire_type == 2 && holds_url(offsets, base + value_start, base + end) {
+            let value = &encoded[value_start..end];
+            let below = crate::expression::with_stack_for_a_level(|| {
+                resolve_change(value, base + value_start, offsets)
+            })?;
+            if let Some(change) = below {
+                len =
+                    len - (end - key_end) + encoded_len_varint(change.len() as u64) + change.len();
+                fields.push(ChangedField {
+                    key_end,
+                    value_start,
+                    end,
+                    change,
+                });
             }
         }
-        resolved.extend_from_slice(&field[..field.len() - rest.len()]);
     }
-    Ok(replaced.then_some(resolved))
+    Ok((!fields.is_empty()).then_some(Change::Fields(fields, len)))
+}
+
+/// The `common` and the value of the extension of `encoded`, when it is the encoding of a
+/// placeholder: a relation of no other field than an extension of the type URL of a placeholder,
+/// as `plan(session)` gives it, and a `common`, which a plan may set on it, each once. Read of
+/// the keys of the fields alone, so that an encoding that is not one costs no decoding.
+fn placeholder_parts(encoded: &[u8]) -> Option<(Option<&[u8]>, &[u8])> {
+    let fields = top_level_fields(encoded)?;
+    let (mut common, mut extension) = (None, None);
+    for (number, value) in fields {
+        let slot = match number {
+            COMMON_FIELD => &mut common,
+            EXTENSION_FIELD => &mut extension,
+            _ => return None,
+        };
+        if slot.replace(value).is_some() {
+            return None;
+        }
+    }
+    let (mut type_url, mut value) = (None, None);
+    for (number, field) in top_level_fields(extension?)? {
+        let slot = match number {
+            1 => &mut type_url,
+            2 => &mut value,
+            _ => return None,
+        };
+        if slot.replace(field).is_some() {
+            return None;
+        }
+    }
+    (type_url? == PLACEHOLDER_TYPE_URL.as_bytes()).then_some((common, value.unwrap_or_default()))
+}
+
+/// The number of the field of the `common` of a relation, and of its extension.
+const COMMON_FIELD: u64 = 1;
+const EXTENSION_FIELD: u64 = 998;
+
+/// The fields of `encoded`, a message whose fields are all length-delimited, by their numbers and
+/// values; None when it is not such a message.
+fn top_level_fields(encoded: &[u8]) -> Option<Vec<(u64, &[u8])>> {
+    use prost::encoding::decode_varint;
+    let mut fields = Vec::new();
+    let mut rest = encoded;
+    while !rest.is_empty() {
+        let key = decode_varint(&mut rest).ok()?;
+        if key & 7 != 2 || key >> 3 == 0 {
+            return None;
+        }
+        let len = usize::try_from(decode_varint(&mut rest).ok()?).ok()?;
+        if len > rest.len() {
+            return None;
+        }
+        let (value, after) = rest.split_at(len);
+        fields.push((key >> 3, value));
+        rest = after;
+    }
+    Some(fields)
 }
 
 /// Replace the placeholders of the relations of `command`, a command built in Python, as
 /// `resolve_relation`: the relation of a command that holds one, as PySpark's commands hold the
 /// relations of their DataFrames (the input of a write, of a view, of a stream or of a SQL
 /// statement, the relation of a checkpoint, the source of a `MERGE INTO`, the relation of a
-/// pipeline's flow), the datasets and the fetched arguments of the ML commands, and the message of
-/// the extension of a plugin's command.
+/// pipeline's flow), the datasets and the fetched arguments of the ML commands, the message of the
+/// extension of a plugin's command, and the messages of the extensions of the expressions of the
+/// command (see [`resolve_own_fields`]).
 pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
     use proto::command::CommandType;
-    use proto::pipeline_command::define_flow::Details;
     use proto::pipeline_command::CommandType as PipelineCommandType;
-    let relation = match command.command_type.as_mut() {
+    match command.command_type.as_mut() {
         Some(CommandType::Extension(extension)) => return resolve_extension(extension),
-        Some(CommandType::MlCommand(_)) => None,
-        Some(CommandType::WriteOperation(write)) => write.input.as_mut(),
-        Some(CommandType::CreateDataframeView(view)) => view.input.as_mut(),
-        Some(CommandType::WriteOperationV2(write)) => write.input.as_mut(),
-        Some(CommandType::SqlCommand(sql)) => sql.input.as_mut(),
-        Some(CommandType::WriteStreamOperationStart(write)) => write.input.as_mut(),
-        Some(CommandType::CheckpointCommand(checkpoint)) => checkpoint.relation.as_mut(),
-        Some(CommandType::MergeIntoTableCommand(merge)) => merge.source_table_plan.as_mut(),
-        Some(CommandType::PipelineCommand(pipeline)) => match pipeline.command_type.as_mut() {
-            Some(PipelineCommandType::DefineFlow(flow)) => match flow.details.as_mut() {
-                Some(Details::RelationFlowDetails(details)) => details.relation.as_mut(),
-                _ => None,
-            },
-            Some(PipelineCommandType::DefineFlowQueryFunctionResult(result)) => {
-                result.relation.as_mut()
-            }
-            Some(PipelineCommandType::Extension(extension)) => return resolve_extension(extension),
-            _ => None,
-        },
-        _ => return Ok(()),
-    };
-    if let Some(relation) = relation {
-        return resolve_relation(relation);
+        Some(CommandType::PipelineCommand(proto::PipelineCommand {
+            command_type: Some(PipelineCommandType::Extension(extension)),
+        })) => return resolve_extension(extension),
+        Some(CommandType::MlCommand(ml)) => return resolve_ml_command(ml),
+        None => return Ok(()),
+        Some(_) => {}
     }
-    let Some(CommandType::MlCommand(ml)) = command.command_type.as_mut() else {
-        return Ok(());
-    };
+    if let Some(relation) = command_relation_mut(command) {
+        resolve_relation(relation)?;
+    }
+    // The extensions of the expressions of the command, such as of the conditions and the
+    // assignments of a `MergeIntoTableCommand` and the partitioning of a `WriteOperationV2`.
+    resolve_own_fields(command, |command| {
+        command_relation_mut(command).into_iter().collect()
+    })
+}
+
+/// Replace the placeholders of the datasets and of the fetched arguments of `ml`, an ML command
+/// built in Python.
+fn resolve_ml_command(ml: &mut proto::MlCommand) -> Result<()> {
     let dataset = match ml.command.as_mut() {
         Some(proto::ml_command::Command::Fit(fit)) => fit.dataset.as_mut(),
         Some(proto::ml_command::Command::Evaluate(evaluate)) => evaluate.dataset.as_mut(),
@@ -1308,6 +1584,31 @@ pub(crate) fn resolve_command(command: &mut proto::Command) -> Result<()> {
     match dataset {
         Some(dataset) => resolve_relation(dataset),
         None => Ok(()),
+    }
+}
+
+/// The relation of `command`, of the commands that hold one, as `resolve_command` resolves it.
+fn command_relation_mut(command: &mut proto::Command) -> Option<&mut proto::Relation> {
+    use proto::command::CommandType;
+    use proto::pipeline_command::define_flow::Details;
+    use proto::pipeline_command::CommandType as PipelineCommandType;
+    match command.command_type.as_mut()? {
+        CommandType::WriteOperation(write) => write.input.as_mut(),
+        CommandType::CreateDataframeView(view) => view.input.as_mut(),
+        CommandType::WriteOperationV2(write) => write.input.as_mut(),
+        CommandType::SqlCommand(sql) => sql.input.as_mut(),
+        CommandType::WriteStreamOperationStart(write) => write.input.as_mut(),
+        CommandType::CheckpointCommand(checkpoint) => checkpoint.relation.as_mut(),
+        CommandType::MergeIntoTableCommand(merge) => merge.source_table_plan.as_mut(),
+        CommandType::PipelineCommand(pipeline) => match pipeline.command_type.as_mut()? {
+            PipelineCommandType::DefineFlow(flow) => match flow.details.as_mut()? {
+                Details::RelationFlowDetails(details) => details.relation.as_mut(),
+                _ => None,
+            },
+            PipelineCommandType::DefineFlowQueryFunctionResult(result) => result.relation.as_mut(),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -4735,6 +5036,172 @@ mod placeholder_tests {
                 value: message.encode_to_vec(),
             })),
         }
+    }
+
+    /// A relation of a project over a range, of the expressions `expressions`.
+    fn project_of(expressions: Vec<proto::Expression>) -> proto::Relation {
+        proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Project(Box::new(
+                proto::Project {
+                    input: Some(Box::new(proto::Relation {
+                        common: None,
+                        rel_type: Some(proto::relation::RelType::Range(proto::Range {
+                            end: 1,
+                            ..Default::default()
+                        })),
+                    })),
+                    expressions,
+                },
+            ))),
+        }
+    }
+
+    /// An expression of a plugin, whose message is `message`.
+    fn expression_extension_of(message: &impl Message) -> proto::Expression {
+        proto::Expression {
+            common: None,
+            expr_type: Some(proto::expression::ExprType::Extension(prost_types::Any {
+                type_url: "type.googleapis.com/tests.PluginExpression".to_string(),
+                value: message.encode_to_vec(),
+            })),
+        }
+    }
+
+    #[test]
+    fn placeholders_resolve_in_the_extensions_of_expressions() {
+        // As PySpark's plan sends the relation of a DataFrame that a plugin's expression holds in
+        // its message: in a relation built in Python, also nested in an expression, and in a
+        // command. Spark's SubqueryAlias stands for the plugin's message here.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids).unwrap();
+        let standalone = placeholder(&node, &ids);
+        let message = |input: &proto::Relation| proto::SubqueryAlias {
+            input: Some(Box::new(input.clone())),
+            alias: "s".to_string(),
+            qualifier: Vec::new(),
+        };
+        let nested = |input: &proto::Relation| proto::Expression {
+            common: None,
+            expr_type: Some(proto::expression::ExprType::Alias(Box::new(
+                proto::expression::Alias {
+                    expr: Some(Box::new(expression_extension_of(&message(input)))),
+                    name: vec!["a".to_string()],
+                    metadata: None,
+                },
+            ))),
+        };
+        let mut plan = project_of(vec![
+            expression_extension_of(&message(&standalone)),
+            nested(&standalone),
+        ]);
+        resolve_relation(&mut plan).unwrap();
+        assert_eq!(
+            plan,
+            project_of(vec![
+                expression_extension_of(&message(&relation)),
+                nested(&relation)
+            ])
+        );
+        // The merge condition of a command.
+        let merge = |condition: proto::Expression| proto::Command {
+            command_type: Some(proto::command::CommandType::MergeIntoTableCommand(
+                proto::MergeIntoTableCommand {
+                    target_table_name: "t".to_string(),
+                    source_table_plan: Some(relation.clone()),
+                    merge_condition: Some(condition),
+                    ..Default::default()
+                },
+            )),
+        };
+        let mut command = merge(expression_extension_of(&message(&standalone)));
+        resolve_command(&mut command).unwrap();
+        assert_eq!(command, merge(expression_extension_of(&message(&relation))));
+        // A plan of no placeholder is left as it is.
+        let mut plain = project_of(vec![expression_extension_of(&message(&relation))]);
+        let before = plain.clone();
+        resolve_relation(&mut plain).unwrap();
+        assert_eq!(plain, before);
+    }
+
+    #[test]
+    fn a_placeholder_that_a_plan_changes_is_sent_with_the_change() {
+        // As PySpark's relation of `plan(session)`, whose `common` a plan or a plugin sets
+        // (`relation.common.plan_id = ...`): the relation is sent with the `common` merged into
+        // its own, as a relation of a plan and in the message of an extension.
+        let ids = Arc::new(PlanIds::new());
+        let node = Arc::new(range(0, 3, 1));
+        let relation = relation_with_ids(&node, &ids).unwrap();
+        let mut changed = placeholder(&node, &ids);
+        changed.common = Some(proto::RelationCommon {
+            plan_id: Some(424242),
+            ..Default::default()
+        });
+        let mut expected = relation.clone();
+        expected.common.get_or_insert_with(Default::default).plan_id = Some(424242);
+        assert_ne!(expected, relation);
+
+        let mut plan = transform_of(changed.clone());
+        resolve_relation(&mut plan).unwrap();
+        assert_eq!(plan, transform_of(expected.clone()));
+
+        let alias = |input: &proto::Relation| proto::SubqueryAlias {
+            input: Some(Box::new(input.clone())),
+            alias: "s".to_string(),
+            qualifier: Vec::new(),
+        };
+        let mut plan = extension_of(&alias(&changed));
+        resolve_relation(&mut plan).unwrap();
+        assert_eq!(plan, extension_of(&alias(&expected)));
+    }
+
+    #[test]
+    fn deep_messages_of_extensions_resolve_in_a_time_of_their_length() {
+        // A crafted message of an extension nests 30,000 messages, of a placeholder at the bottom
+        // and of none: each is resolved once, in a time of its length, not of its length times
+        // its depth, which took about a minute in a debug build.
+        let run = || {
+            let ids = Arc::new(PlanIds::new());
+            let node = Arc::new(range(0, 3, 1));
+            let relation = relation_with_ids(&node, &ids).unwrap();
+            let standalone = placeholder(&node, &ids).encode_to_vec();
+            let nested = |depth: usize, inner: &[u8]| {
+                let mut data = inner.to_vec();
+                for _ in 0..depth {
+                    let mut level = vec![0x0a];
+                    prost::encoding::encode_varint(data.len() as u64, &mut level);
+                    level.extend_from_slice(&data);
+                    data = level;
+                }
+                data
+            };
+            let extension = |value: Vec<u8>| proto::Relation {
+                common: None,
+                rel_type: Some(proto::relation::RelType::Extension(prost_types::Any {
+                    type_url: "type.googleapis.com/tests.Crafted".to_string(),
+                    value,
+                })),
+            };
+            let started = std::time::Instant::now();
+            let mut plan = extension(nested(30_000, &standalone));
+            resolve_relation(&mut plan).unwrap();
+            assert_eq!(plan, extension(nested(30_000, &relation.encode_to_vec())));
+            let mut plain = extension(nested(30_000, b"\x08\x01"));
+            resolve_relation(&mut plain).unwrap();
+            assert_eq!(plain, extension(nested(30_000, b"\x08\x01")));
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(10),
+                "{:?}",
+                started.elapsed()
+            );
+        };
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(run)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 
     #[test]

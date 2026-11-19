@@ -1736,10 +1736,9 @@ holds the relation of the DataFrame (see "SparkSession.client" below), as in the
 `pyspark.ml`: the core replaces it when the plan or the command reaches it, so the server receives
 the relation, as PySpark's plugins send it: also anywhere in the message of the extension of a
 relation or of a command, of a type that it does not know, as long as the message holds the
-placeholder as `plan(session)` gives it. "SparkSession.client" below lists the places where the core
-replaces it: under any relation and in any command that holds one, but not one that a plugin changes
-(`plan.common.plan_id = ...`) in the message of an extension, which is sent as it is and which the
-server refuses.
+placeholder as `plan(session)` gives it, or with the `common` that the plugin sets on it.
+"SparkSession.client" below lists the places where the core replaces it: under any relation, in
+any command that holds one, and in the extension of an expression.
 Its classes are the runtime's, as those of the package (not `google.protobuf.message.Message`'s),
 and the rest of such a module is `protobuf`'s:
 
@@ -1905,18 +1904,19 @@ of a DataFrame:
   `MergeIntoTableCommand`, and the flow of a pipeline), and as the dataset of the ML commands
   (`Fit`, `Evaluate`, `CreateSummary`) and the arguments of a `Fetch`;
 - anywhere in the message of the extension of a relation or of a command, a plugin's message such
-  as Delta Lake's `MergeIntoTable` (see the Delta Lake paragraph above), where the message holds it
-  as `plan(session)` gives it.
+  as Delta Lake's `MergeIntoTable` (see the Delta Lake paragraph above), and of the extension of an
+  expression of a relation or a command built in Python, such as a plugin's expression that holds
+  the relation of a DataFrame.
 
-The core does not decode the expressions of a plan built in Python, which hold no relation of Spark
-Connect (a subquery refers to its plan by its plan ID in a `WithRelations`), so as not to decode
-every expression of each such plan for a relation that only the extension of an expression of a
-plugin could hold; and it takes a placeholder in the message of an extension by its encoding, as
-`plan(session)` gives it, which a change of the placeholder alters, and does not apply that change
-to the relation that the placeholder holds. So a placeholder in the extension of an expression is
-sent as it is, and so is one that the message of an extension changes (`plan.common.plan_id = ...`):
-the server rejects them with `CONNECT_INVALID_PLAN.NO_HANDLER_FOR_EXTENSION`, where PySpark sends
-the relation. Delta Lake's plans hold neither.
+A placeholder whose `common` a plan or a plugin's message changes (`plan.common.plan_id = ...`), as
+PySpark's relation of `plan(session)` is changed, is replaced by the relation with that `common`
+merged into its own, as protobuf's `MergeFrom` sets the fields, so its plan ID is the one set, also
+in the message of an extension. The core does not walk the expressions of a plan built in Python: of
+each relation of the plan of a kind that holds expressions (a projection, a filter, a join, an
+aggregation, ...), it encodes the fields other than its inputs, and reads them for a placeholder
+only when the encoding holds the type URL of one, so a plan of no such extension costs that
+encoding; the relations that the core builds, such as that of a placeholder, are not encoded. The
+messages of extensions are read in a time of their length, however deep they nest.
 
 The `observations` of a DataFrame's plan (`df._plan.observations`) are the Observations of the
 DataFrame by their names, as PySpark's `LogicalPlan.observations`: those of `observe` on it and on

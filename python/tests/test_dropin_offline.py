@@ -22459,6 +22459,57 @@ def test_the_relations_of_the_plans_of_dataframes_are_built_when_they_are_given_
     assert len(service.execute_requests) == requests
 
 
+def test_the_relations_of_dataframes_in_expressions_and_changed_ones_are_sent_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's df._plan.plan(session), a relation that a plan holds wherever it holds it, and
+    # with what the plan changes of it: the server receives the relation of the DataFrame in the
+    # extension of a plugin's expression, also nested, and one whose common a plan or a plugin's
+    # message changes (relation.common.plan_id = ...) with that change, in the message of an
+    # extension and as a relation of a plan.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto import example_plugins_pb2 as plugins
+
+    spark, service = mock_connect
+    client = spark.client
+    source = spark.range(3).withColumnRenamed("id", "k")
+    relation = pb2.Relation.FromString(source._relation_bytes())
+
+    def sent():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan
+
+    plan = pb2.Plan()
+    plan.root.project.input.range.end = 1
+    plan.root.project.expressions.add().extension.Pack(
+        plugins.ExamplePluginRelation(input=source._plan.plan(client)))
+    alias = plan.root.project.expressions.add().alias
+    alias.name.append("a")
+    alias.expr.extension.Pack(plugins.ExamplePluginRelation(input=source._plan.plan(client)))
+    list(client.to_table_as_iterator(plan, {}))
+    message = plugins.ExamplePluginRelation()
+    expressions = sent().root.project.expressions
+    for extension in (expressions[0].extension, expressions[1].alias.expr.extension):
+        assert extension.Unpack(message) and message.input == relation
+
+    changed = source._plan.plan(client)
+    changed.common.plan_id = 424242
+    expected = pb2.Relation()
+    expected.CopyFrom(relation)
+    expected.common.plan_id = 424242
+    plan = pb2.Plan()
+    plan.root.extension.Pack(plugins.ExamplePluginRelation(input=changed))
+    list(client.to_table_as_iterator(plan, {}))
+    assert sent().root.extension.Unpack(message) and message.input == expected
+
+    plan = pb2.Plan()
+    plan.root.limit.input.CopyFrom(source._plan.plan(client))
+    plan.root.limit.input.common.plan_id = 525252
+    plan.root.limit.limit = 1
+    list(client.to_table_as_iterator(plan, {}))
+    expected.common.plan_id = 525252
+    assert sent().root.limit.input == expected
+
+
 def test_plans_of_plugins_send_the_relations_of_their_dataframes_in_their_extensions(
     mock_connect,
 ):
