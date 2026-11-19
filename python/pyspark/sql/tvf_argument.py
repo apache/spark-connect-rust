@@ -14,14 +14,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# ``TableValuedFunctionArgument`` of PySpark, the base of the arguments of table-valued
-# functions, of which a ``Column`` and a ``TableArg`` are instances. The drop-in's are Rust-backed
-# classes, so they are its virtual subclasses.
 
-import abc
+# The drop-in's: of the metaclass of the classic classes of native Connect classes
+# (pyspark.sql._classic_bases), so that the native Column and TableArg are its virtual subclasses,
+# as PySpark Connect's are its subclasses, and so that PySpark's Column and TableArg, which
+# subclass it, are of the metaclass too. PySpark's class is of `type`.
+from pyspark.sql._classic_bases import _ClassicMeta
 
 
-class TableValuedFunctionArgument(abc.ABC):
+class TableValuedFunctionArgument(metaclass=_ClassicMeta):
     """
     Base class for arguments passed to Table-Valued Functions.
 
@@ -32,9 +33,9 @@ class TableValuedFunctionArgument(abc.ABC):
     pass
 
 
+# Of the native classes, also before pyspark.sql.column and pyspark.sql.table_arg are imported.
 from pyspark._pyspark import Column as _Column, TableArg as _TableArg  # noqa: E402
 
 TableValuedFunctionArgument.register(_Column)
 TableValuedFunctionArgument.register(_TableArg)
-
-__all__ = ["TableValuedFunctionArgument"]
+del _Column, _TableArg

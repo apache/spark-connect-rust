@@ -33,17 +33,18 @@ from types import (
     MethodDescriptorType,
     WrapperDescriptorType,
 )
-from typing import TYPE_CHECKING, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple, Union, overload
 
-from pyspark._pyspark import (
-    Column,
-    DataFrameNaFunctions,
-    DataFrameStatFunctions,
-    TableArg,
-)
+from pyspark import _NoValue
+from pyspark._globals import _NoValueType
 from pyspark._pyspark import (
     DataFrame as _NativeDataFrame,
 )
+from pyspark.sql._classic_bases import _ClassicMeta
+
+# PySpark's, of the annotations of the classes of this module, as its module imports them.
+from pyspark.sql.column import Column
+from pyspark.sql.table_arg import TableArg
 
 # Of PySpark's pyspark.sql.dataframe, whose namespace the official doctests of the DataFrame take
 # as their globals (pyspark.sql.connect.dataframe._test), and whose examples use these names.
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
 
     from pyspark.core.context import SparkContext
     from pyspark.core.rdd import RDD
+    from pyspark.sql._typing import LiteralType, OptionalPrimitiveType
     from pyspark.sql.context import SQLContext
     from pyspark.sql.pandas._typing import DataFrameLike as PandasDataFrameLike
     from pyspark.sql.session import SparkSession
@@ -418,3 +420,149 @@ DataFrame.register(_NativeDataFrame)
 _public_dataframe = DataFrame
 
 del _name, _attribute, _public_attribute
+
+
+# PySpark's classic classes of `df.na` and `df.stat`, of its module: the native Connect classes of
+# pyspark.sql.connect.dataframe are their virtual subclasses, as PySpark Connect's are their
+# subclasses (pyspark.sql._classic_bases), and their explicit calls dispatch as PySpark's
+# dispatch_df_method does. PySpark's classes are of `type`.
+from pyspark.sql.utils import dispatch_df_method  # noqa: E402
+
+
+class DataFrameNaFunctions(metaclass=_ClassicMeta):
+    """Functionality for working with missing data in :class:`DataFrame`.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    """
+
+    def __init__(self, df: DataFrame):
+        self.df = df
+
+    @dispatch_df_method
+    def drop(
+        self,
+        how: str = "any",
+        thresh: Optional[int] = None,
+        subset: Optional[Union[str, Tuple[str, ...], List[str]]] = None,
+    ) -> DataFrame: ...
+
+    drop.__doc__ = DataFrame.dropna.__doc__
+
+    @overload
+    def fill(self, value: "LiteralType", subset: Optional[List[str]] = ...) -> DataFrame: ...
+
+    @overload
+    def fill(self, value: Dict[str, "LiteralType"]) -> DataFrame: ...
+
+    @dispatch_df_method
+    def fill(
+        self,
+        value: Union["LiteralType", Dict[str, "LiteralType"]],
+        subset: Optional[List[str]] = None,
+    ) -> DataFrame: ...
+
+    fill.__doc__ = DataFrame.fillna.__doc__
+
+    @overload
+    def replace(
+        self,
+        to_replace: List["LiteralType"],
+        value: List["OptionalPrimitiveType"],
+        subset: Optional[List[str]] = ...,
+    ) -> DataFrame: ...
+
+    @overload
+    def replace(
+        self,
+        to_replace: Dict["LiteralType", "OptionalPrimitiveType"],
+        subset: Optional[List[str]] = ...,
+    ) -> DataFrame: ...
+
+    @overload
+    def replace(
+        self,
+        to_replace: List["LiteralType"],
+        value: "OptionalPrimitiveType",
+        subset: Optional[List[str]] = ...,
+    ) -> DataFrame: ...
+
+    @dispatch_df_method  # type: ignore[misc]
+    def replace(
+        self,
+        to_replace: Union[List["LiteralType"], Dict["LiteralType", "OptionalPrimitiveType"]],
+        value: Optional[
+            Union["OptionalPrimitiveType", List["OptionalPrimitiveType"], _NoValueType]
+        ] = _NoValue,
+        subset: Optional[List[str]] = None,
+    ) -> DataFrame: ...
+
+    replace.__doc__ = DataFrame.replace.__doc__
+
+
+class DataFrameStatFunctions(metaclass=_ClassicMeta):
+    """Functionality for statistic functions with :class:`DataFrame`.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    """
+
+    def __init__(self, df: DataFrame):
+        self.df = df
+
+    @overload
+    def approxQuantile(
+        self,
+        col: str,
+        probabilities: Union[List[float], Tuple[float]],
+        relativeError: float,
+    ) -> List[float]: ...
+
+    @overload
+    def approxQuantile(
+        self,
+        col: Union[List[str], Tuple[str]],
+        probabilities: Union[List[float], Tuple[float]],
+        relativeError: float,
+    ) -> List[List[float]]: ...
+
+    @dispatch_df_method
+    def approxQuantile(
+        self,
+        col: Union[str, List[str], Tuple[str]],
+        probabilities: Union[List[float], Tuple[float]],
+        relativeError: float,
+    ) -> Union[List[float], List[List[float]]]: ...
+
+    approxQuantile.__doc__ = DataFrame.approxQuantile.__doc__
+
+    @dispatch_df_method
+    def corr(self, col1: str, col2: str, method: Optional[str] = None) -> float: ...
+
+    corr.__doc__ = DataFrame.corr.__doc__
+
+    @dispatch_df_method
+    def cov(self, col1: str, col2: str) -> float: ...
+
+    cov.__doc__ = DataFrame.cov.__doc__
+
+    @dispatch_df_method
+    def crosstab(self, col1: str, col2: str) -> DataFrame: ...
+
+    crosstab.__doc__ = DataFrame.crosstab.__doc__
+
+    @dispatch_df_method
+    def freqItems(self, cols: List[str], support: Optional[float] = None) -> DataFrame: ...
+
+    freqItems.__doc__ = DataFrame.freqItems.__doc__
+
+    @dispatch_df_method
+    def sampleBy(
+        self, col: str, fractions: Dict[Any, float], seed: Optional[int] = None
+    ) -> DataFrame: ...
+
+    sampleBy.__doc__ = DataFrame.sampleBy.__doc__

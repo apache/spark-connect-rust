@@ -258,7 +258,16 @@ difference is intentional or tracked for a fix.
   `pyspark.sql.connect.dataframe.DataFrame`, implemented by the Rust extension. It is
   registered as a virtual subclass of the public base: `isinstance` and `issubclass`
   recognize it, while its actual MRO stays native. Consequently, `super` and MRO
-  introspection do not treat a native frame as inheriting from the public base.
+  introspection do not treat a native frame as inheriting from the public base. So it is of the
+  Connect `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg`,
+  native classes too, and of PySpark's classic classes of their names (`pyspark.sql.column`,
+  `pyspark.sql.table_arg` of Apache Spark as they are, and PySpark's classes of
+  `pyspark.sql.window` and `pyspark.sql.dataframe`), and of `TableValuedFunctionArgument`, whose
+  metaclass, of `pyspark.sql._classic_bases`, registers each native class with its classic class
+  and forwards a patch of them to it where PySpark's Connect objects inherit the patch (see
+  "Public class mutation and dispatch" and `docs/compatibility.md`). Of a data descriptor without
+  a setter patched over an attribute that PySpark's Connect `__init__` sets (`_expr`, `df`),
+  PySpark's objects do not construct, where the drop-in's, which no `__init__` makes, read it.
 
 - **Metaclass and subclass serialization.** The public base uses an `ABCMeta`
   subclass for virtual registration and attribute forwarding, while official
@@ -270,7 +279,10 @@ difference is intentional or tracked for a fix.
   requirements. A local subclass and a closure capturing that subclass were
   cloudpickled by the native client and reconstructed and exercised in an
   official-only Python process without importing the native extension. This does
-  not establish portability of instances, explicit user metaclasses or server UDFs.
+  not establish portability of instances, explicit user metaclasses or server UDFs. The classic
+  `Column`, `DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec`, `TableArg` and
+  `TableValuedFunctionArgument` are of such an `ABCMeta` subclass too, of an `_abc_impl` and a
+  `register()`, and their user subclasses of `abc.ABCMeta`, where PySpark's are of `type`.
 
 - **Public class mutation and dispatch.** The native class stands for PySpark's Connect
   DataFrame, a subclass of the public base that defines every public name of the base itself
@@ -606,8 +618,9 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   (but those of a session, which are the active session of its ID, as PySpark's), and PySpark's
   pickle of a reader, a catalog or a registration, which makes it of its class without
   arguments, loads in the drop-in. The `Window` of `pyspark.sql.window` and of
-  `pyspark.sql.connect.window` is subclassed, of its static methods, and it and a subclass make
-  objects of no state, as PySpark's. The session, the readers and the catalog are of the native
+  `pyspark.sql.connect.window`, and the classic `Column`, `DataFrameNaFunctions`,
+  `DataFrameStatFunctions`, `WindowSpec` and `TableArg`, are PySpark's classes, which construct
+  and subclass as PySpark's. The session, the readers and the catalog are of the native
   state of a session, which the `__init__` of the class, of PySpark's arguments, gives them: one
   whose `__init__` never ran, as of a subclass whose `__init__` does not call it, is of the
   session of no server, whose requests raise `NO_ACTIVE_SESSION` and whose `is_stopped` is True,

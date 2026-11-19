@@ -127,15 +127,15 @@ RUFF_BLOCK_END = "    # --- generated type stubs: END ---\n"
 # .pyi for .py (pyspark/sql/connect/functions/__init__.pyi for the package
 # pyspark.sql.connect.functions).
 STUB_MODULES = (
-    # The modules of the native classes, which re-export them from pyspark._pyspark. Not the
-    # modules of the classic classes of PySpark, such as pyspark.sql.catalog, readwriter, udf,
-    # udtf, group, conf, merge, observation and tvf, pyspark.sql.pandas.group_ops and the streaming
-    # query and readwriter, PySpark's annotated modules, vendored as they are
-    # (scripts/check_vendored_upstream.sh), which a stub would shadow.
+    # The modules of the native classes, which re-export them from pyspark._pyspark, and
+    # pyspark.sql.dataframe, whose public DataFrame is made at import time, and pyspark.sql.window,
+    # PySpark's of the native FrameBound. Not the modules of the classic classes of PySpark, such
+    # as pyspark.sql.column, table_arg, catalog, readwriter, udf, udtf, group, conf, merge,
+    # observation and tvf, pyspark.sql.pandas.group_ops and the streaming query and readwriter,
+    # PySpark's annotated modules, vendored as they are (scripts/check_vendored_upstream.sh), which
+    # a stub would shadow.
     "pyspark.storagelevel",
-    "pyspark.sql.column",
     "pyspark.sql.dataframe",
-    "pyspark.sql.table_arg",
     "pyspark.sql.types",
     "pyspark.sql.window",
     # The functions of Avro and Protobuf, unannotated calls of the Rust core. Not

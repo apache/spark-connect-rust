@@ -85,7 +85,7 @@ use types::{
     PyStructType, PyTimeType, PyTimestampLTZNanosType, PyTimestampNTZNanosType, PyTimestampNTZType,
     PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
 };
-use window::{PyFrameBound, PyWindow, PyWindowSpec};
+use window::{PyFrameBound, PyWindowSpec};
 
 /// The stack that the encode, the decode and the drop of a protobuf of a pickled Column,
 /// DataFrame or hook request take on the thread that unpickles or sends it. Prost recurses once
@@ -241,7 +241,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     values::register(m)?;
 
     // Register Window classes
-    m.add_class::<PyWindow>()?;
+    m.add_function(wrap_pyfunction!(window::empty_window_spec, m)?)?;
     m.add_class::<PyWindowSpec>()?;
     m.add_class::<PyFrameBound>()?;
 

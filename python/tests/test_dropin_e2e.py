@@ -6249,6 +6249,116 @@ def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
     assert [tuple(r) for r in df.collect()] == [(1, 0.5, True, 1)]
 
 
+def test_the_classic_column_window_and_table_arg_classes_are_pysparks(session):
+    # As official PySpark 4.3.0: pyspark.sql.Column, DataFrameNaFunctions,
+    # DataFrameStatFunctions, Window, WindowSpec and TableArg are PySpark's classic classes, of
+    # its modules and MROs, of which the Connect objects of a session are instances, of other
+    # classes; the explicit calls of their methods dispatch to the Connect class's, a patch of
+    # them reaches the objects, and the classic Column builds no object on Spark Connect.
+    import pyspark.sql.column
+    import pyspark.sql.connect.column
+    import pyspark.sql.connect.window
+    import pyspark.sql.dataframe
+    import pyspark.sql.table_arg
+    import pyspark.sql.window
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql import Window
+
+    df = session.range(3)
+    window = Window.partitionBy("id").orderBy("id")
+    for obj, classic, mro in [
+        (F.col("id"), pyspark.sql.column.Column, 3),
+        (df.na, pyspark.sql.dataframe.DataFrameNaFunctions, 2),
+        (df.stat, pyspark.sql.dataframe.DataFrameStatFunctions, 2),
+        (window, pyspark.sql.window.WindowSpec, 2),
+        (df.asTable(), pyspark.sql.table_arg.TableArg, 3),
+    ]:
+        assert isinstance(obj, classic) and type(obj) is not classic, classic
+        assert issubclass(type(obj), classic) and len(classic.__mro__) == mro
+        assert type(obj).__module__.startswith("pyspark.sql.connect.")
+    assert pyspark.sql.Column is pyspark.sql.column.Column
+    assert pyspark.sql.connect.column.Column is not pyspark.sql.Column
+    assert pyspark.sql.connect.window.Window.__bases__ == (pyspark.sql.window.Window,)
+    assert repr(pyspark.sql.Column.alias(F.col("id"), "x")) == "Column<'id AS x'>"
+    with pytest.raises(PySparkNotImplementedError):
+        pyspark.sql.Column.alias(object(), "x")
+    with pytest.raises(ModuleNotFoundError):
+        pyspark.sql.Column("id")
+    pyspark.sql.Column.c14_twice = lambda self: self * 2
+    try:
+        assert [r[0] for r in df.select(F.col("id").c14_twice()).collect()] == [0, 2, 4]
+    finally:
+        del pyspark.sql.Column.c14_twice
+    rows = df.select("id", F.row_number().over(window).alias("n")).orderBy("id").collect()
+    assert [(r.id, r.n) for r in rows] == [(0, 1), (1, 1), (2, 1)]
+    na = pyspark.sql.dataframe.DataFrameNaFunctions(df)
+    assert na.df is df and vars(na) == {"df": df}
+    assert pyspark.sql.dataframe.DataFrameNaFunctions.drop(df).count() == 3
+
+
+def test_subclasses_of_the_classic_classes_run_in_the_python_workers_as_pysparks(session):
+    # As official PySpark 4.3.0: a subclass of a classic class that a UDF uses is pickled by value,
+    # of its metaclass and its bases, which the server's Python worker, of PySpark, imports to make
+    # the class again.
+    from pyspark.sql import Column
+    from pyspark.sql.table_arg import TableArg
+    from pyspark.sql.window import WindowSpec
+
+    class MyColumn(Column):
+        pass
+
+    class MySpec(WindowSpec):
+        pass
+
+    class MyTableArg(TableArg):
+        pass
+
+    @F.udf("string")
+    def bases(x):
+        return " ".join(
+            f"{c.__name__}:{c.__bases__[0].__module__}.{c.__bases__[0].__qualname__}"
+            for c in (MyColumn, MySpec, MyTableArg)
+        )
+
+    assert session.range(1).select(bases("id")).first()[0] == (
+        "MyColumn:pyspark.sql.column.Column MySpec:pyspark.sql.window.WindowSpec "
+        "MyTableArg:pyspark.sql.table_arg.TableArg"
+    )
+
+
+def test_columns_and_table_args_that_udfs_use_load_in_the_python_workers_as_pysparks(session):
+    # As official PySpark 4.3.0: a Column and a table argument that a UDF uses unpickle in the
+    # server's Python worker as PySpark Connect's, instances of the classic classes there. PySpark
+    # 4.3.0's pyspark.sql.connect.table_arg imports itself through pyspark.sql.connect.functions,
+    # so a worker that loads it first fails, as with pyspark-client: the function's tuple loads
+    # the functions first, as the items of a tuple unpickle in order.
+    import pyspark.sql.connect.functions as connect_functions
+    from pyspark.sql import Column
+    from pyspark.sql.table_arg import TableArg
+
+    column = (F.col("id") + 1).alias("x")
+    captured = (connect_functions, session.range(3).asTable().partitionBy("id"))
+
+    @F.udf("string")
+    def of_column(x):
+        return f"{type(column).__module__}.{type(column).__qualname__} " + (
+            f"{isinstance(column, Column)} {column!r}"
+        )
+
+    @F.udf("string")
+    def of_table(x):
+        table = captured[1]
+        return f"{type(table).__module__}.{type(table).__qualname__} " + (
+            f"{isinstance(table, TableArg)} {table._is_partitioned()}"
+        )
+
+    row = session.range(1).select(of_column("id"), of_table("id")).first()
+    assert tuple(row) == (
+        "pyspark.sql.connect.column.Column True Column<'+(id, 1) AS x'>",
+        "pyspark.sql.connect.table_arg.TableArg True True",
+    )
+
+
 def test_the_objects_of_a_session_are_not_of_the_classic_classes_as_pysparks(session):
     # As official PySpark 4.3.0: the classic modules are PySpark's, of the JVM of Spark Classic,
     # whose classes the objects of a session of Spark Connect are not instances of; they are of

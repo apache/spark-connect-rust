@@ -19,11 +19,13 @@ from collections.abc import Iterator
 from typing import Any, Callable
 
 from pyspark import cloudpickle as _cloudpickle
-from pyspark._pyspark import DataFrame
+
+# The native Connect classes, as PySpark Connect's: virtual subclasses of the classic classes of
+# pyspark.sql.dataframe (pyspark.sql._classic_bases).
+from pyspark._pyspark import DataFrame, DataFrameNaFunctions, DataFrameStatFunctions
 from pyspark.sql.connect import _column_reduce
 from pyspark.sql.connect._column_reduce import parse_deep
 from pyspark.sql.connect._column_reduce import raise_error as _raise_error
-from pyspark.sql.dataframe import DataFrameNaFunctions, DataFrameStatFunctions
 
 __all__ = ["DataFrame", "DataFrameNaFunctions", "DataFrameStatFunctions"]
 

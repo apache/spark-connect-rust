@@ -225,11 +225,13 @@ Rigorously classify before touching anything (diff our dir vs the version tag):
   classic modules of the objects of a session (`sql/{catalog,conf,readwriter,udf,udtf,group}.py`,
   `sql/streaming/{query,readwriter}.py`, `sql/pandas/group_ops.py` and others), whose objects on
   Spark Connect are of the classes of `sql/connect/*`, as in PySpark, `sql/utils.py`, whose
-  decorators run those of Spark Connect, and the package `sql/functions/` (with
+  decorators run those of Spark Connect, the package `sql/functions/` (with
   `sql/connect/functions/partitioning.py`), whose functions run those of
   `sql/connect/functions/builtin.py`, the drop-in's, which `_generated.py` there and the Rust
-  core implement: `VENDORED_DIRS` and `VENDORED_FILES` of `scripts/check_vendored_upstream.sh`
-  list every vendored file.
+  core implement, and `sql/column.py` and `sql/table_arg.py`, whose classes the metaclass of
+  `sql/_classic_bases.py` (the one of `sql/tvf_argument.py`, their base) makes the native Connect
+  classes virtual subclasses of: `VENDORED_DIRS` and `VENDORED_FILES` of
+  `scripts/check_vendored_upstream.sh` list every vendored file.
 
 Subtree conversion (serial, needs a **clean working tree**, one dir at a time):
 ```

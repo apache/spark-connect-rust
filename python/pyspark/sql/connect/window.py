@@ -15,13 +15,22 @@
 # limitations under the License.
 #
 """Window / WindowSpec under the connect import path, as PySpark Connect's
-``pyspark.sql.connect.window``: its ``Window`` is a class of its own, a subclass of
-``pyspark.sql.window.Window``, and its ``WindowSpec`` the class of the window specifications,
-whose ``_frame`` is a ``WindowFrame``."""
+``pyspark.sql.connect.window``: its ``Window`` is a class of its own, a subclass of PySpark's
+classic ``pyspark.sql.window.Window``, and its ``WindowSpec`` is the native class of the window
+specifications (whose ``_frame`` is a ``WindowFrame``), a virtual subclass of the classic
+``pyspark.sql.window.WindowSpec``, as PySpark Connect's is its subclass
+(pyspark.sql._classic_bases)."""
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Union
+
+from pyspark import _pyspark
 from pyspark import cloudpickle as _cloudpickle
+from pyspark._pyspark import WindowSpec
 from pyspark.sql.connect import _window_reduce
 from pyspark.sql.window import Window as _ParentWindow
-from pyspark.sql.window import WindowSpec
+
+if TYPE_CHECKING:
+    from pyspark.sql.connect._typing import ColumnOrName
 
 __all__ = ["Window", "WindowSpec"]
 
@@ -46,12 +55,27 @@ class WindowFrame:
             return f"WindowFrame(RANGE_FRAME, {self._start}, {self._end})"
 
 
-# As PySpark Connect's Window, a subclass of pyspark.sql.window.Window, of its static methods and
-# attributes, which make the WindowSpecs of this module, and of `_spec`, the specification of no
-# partitioning, ordering and frame, of which PySpark's builders start. No docstring, as PySpark's
-# has none.
+# Verbatim from PySpark Connect (pyspark.sql.connect.window.Window): a subclass of PySpark's classic
+# Window, whose static methods dispatch to these, and of `_spec`, the specification of no
+# partitioning, ordering and frame, here the native one, of which its builders start.
 class Window(_ParentWindow):
-    _spec = _ParentWindow.partitionBy()
+    _spec = _pyspark._empty_window_spec()
+
+    @staticmethod
+    def partitionBy(*cols: Union["ColumnOrName", Sequence["ColumnOrName"]]) -> "WindowSpec":
+        return Window._spec.partitionBy(*cols)
+
+    @staticmethod
+    def orderBy(*cols: Union["ColumnOrName", Sequence["ColumnOrName"]]) -> "WindowSpec":
+        return Window._spec.orderBy(*cols)
+
+    @staticmethod
+    def rowsBetween(start: int, end: int) -> "WindowSpec":
+        return Window._spec.rowsBetween(start, end)
+
+    @staticmethod
+    def rangeBetween(start: int, end: int) -> "WindowSpec":
+        return Window._spec.rangeBetween(start, end)
 
 
 _cloudpickle.register_pickle_by_value(_window_reduce)
