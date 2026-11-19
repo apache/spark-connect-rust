@@ -51,6 +51,15 @@ pub trait MetricsMirror: Send + Sync {
         Ok(())
     }
 
+    /// The name of the observation of the binding as it is now, which a plan of it is built of,
+    /// as PySpark's `CollectMetrics` sets the `str` of the `_name` of its Observation each time it
+    /// builds the plan, and by which the metrics of the plan are set: its error, as that of a name
+    /// that the plan does not take, is that of the request. None, unless the binding gives it, for
+    /// the name of the observation.
+    fn name(&self) -> Option<Result<String>> {
+        None
+    }
+
     /// This mirror, by which the binding finds its own type.
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -174,6 +183,14 @@ impl Observation {
             Some(mirror) => mirror.is_used(),
             None => Ok(true),
         }
+    }
+
+    /// The name that a plan of this observation is built of now: the name that the mirror of a
+    /// binding gives, if it gives one (see [`MetricsMirror::name`]), of its error, else none, for
+    /// the name of the observation. Not a stable API.
+    #[doc(hidden)]
+    pub fn name_of_plan(&self) -> Option<Result<String>> {
+        self.metrics_mirror()?.name()
     }
 
     /// The mirror of the state of this observation that a binding set (see
@@ -563,6 +580,74 @@ mod tests {
 
     fn told(mirror: &Arc<dyn MetricsMirror>) -> Vec<String> {
         recorded(mirror).told.lock().unwrap().clone()
+    }
+
+    /// A mirror that gives the name of the observation of its binding as it is now.
+    struct Named(Mutex<Result<String>>);
+
+    impl MetricsMirror for Named {
+        fn is_used(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn update(&self, _keys: &[String], _values: &[proto::expression::Literal]) -> Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> Option<Result<String>> {
+            Some(self.0.lock().unwrap().clone())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[test]
+    fn a_plan_of_an_observation_is_built_of_the_name_that_its_mirror_gives_then() {
+        let built_name = |plan: &crate::plan::LogicalPlan| match plan.try_to_proto() {
+            Ok(proto::Relation {
+                rel_type: Some(proto::relation::RelType::CollectMetrics(metrics)),
+                ..
+            }) => Ok(metrics.name),
+            Ok(other) => panic!("a CollectMetrics, not {other:?}"),
+            Err(error) => Err(error),
+        };
+        let names = |plan: &crate::plan::LogicalPlan| -> Vec<String> {
+            plan.observations()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let obs = Observation::used("first");
+        let plan = crate::plan::LogicalPlan::Observe {
+            input: Arc::new(crate::plan::range(0, 3, 1)),
+            name: "first".to_string(),
+            exprs: vec![crate::expression::Expression::column("id")],
+            observation: Some(obs.clone()),
+        };
+        // Without a mirror of a name, the plan is of the name of the observation.
+        assert!(obs.name_of_plan().is_none());
+        assert_eq!(built_name(&plan).unwrap(), "first");
+        assert_eq!(names(&plan), vec!["first"]);
+
+        // With one, of the name that it gives at each build, by which the plan names it.
+        let mirror = Arc::new(Named(Mutex::new(Ok("now".to_string()))));
+        assert!(obs
+            .set_metrics_mirror(Arc::clone(&mirror) as Arc<dyn MetricsMirror>)
+            .is_some());
+        assert_eq!(built_name(&plan).unwrap(), "now");
+        assert_eq!(names(&plan), vec!["now"]);
+
+        // Its error is that of each build, until it gives a name again.
+        *mirror.0.lock().unwrap() = Err(SparkError::connect_msg("no name"));
+        for _ in 0..2 {
+            let error = built_name(&plan).unwrap_err();
+            assert!(error.message().contains("no name"), "{error}");
+        }
+        *mirror.0.lock().unwrap() = Ok("again".to_string());
+        assert_eq!(built_name(&plan).unwrap(), "again");
+        assert_eq!(names(&plan), vec!["again"]);
     }
 
     #[test]

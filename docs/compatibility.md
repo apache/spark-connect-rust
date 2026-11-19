@@ -1931,7 +1931,12 @@ fails the execution with PySpark's `AssertionError` when those metrics arrive.
 
 As PySpark's, `_name`, `_result` and `_error` are the attributes of an Observation, which `vars()`
 shows and a program sets and deletes, and `DataFrame.observe` of an Observation gives what its `_on`
-gives, of a subclass too. The `get` of an Observation raises its `_error` if it is not
+gives, of a subclass too. Each build of a plan of the Observation, at each request of its
+DataFrames, reads its `_name`, as PySpark's `CollectMetrics` does: the plan is of `str(_name)`, by
+which the metrics are set, so an Observation renamed after `observe` is observed by its new name,
+and a name whose `__str__` raises, or a str that UTF-8 cannot encode, fails each request with that
+error until it is renamed again; `observe` does not read it. A deep copy of a DataFrame holds a copy
+of the Observation, of its name then. The `get` of an Observation raises its `_error` if it is not
 None, and is its `_result` otherwise: one dict, which the executions that set its metrics update in
 place, as it is then, so a dict read before an action has the metrics once the action ran, what is
 set on it stays, and a `copy.copy` of the Observation shares it. `_result` is None before the

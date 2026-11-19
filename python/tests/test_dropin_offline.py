@@ -15625,6 +15625,68 @@ def test_observe_gives_the_dataframe_of_the_on_of_an_observation_as_pyspark(mock
     assert vars(observation) == {"_name": "m", "_result": None, "_error": None}
 
 
+def test_the_plan_of_an_observation_is_built_of_its_name_as_it_is_then_as_pyspark(mock_connect):
+    # As PySpark's CollectMetrics, which sets the str() of the _name of its Observation each time
+    # it builds the plan, after its input, and whose observations name it so: a request of an
+    # Observation renamed after observe carries its new name, of any object, by which its metrics
+    # are set, and a name whose __str__ raises, or a str that UTF-8 cannot encode, fails each
+    # request with that error, until it is renamed again. Observation._on does not read the name.
+    # A deep copy of the DataFrame holds a copy of the Observation, of its name then, whose metrics
+    # its actions set, as PySpark's deep copy of the plan.
+    import copy
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation
+
+    class Unnamed:
+        def __str__(self):
+            raise ValueError("no name")
+
+    def sent_name():
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        return request.plan.root.collect_metrics.name
+
+    spark, service = mock_connect
+    observation = Observation("before")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    observation._name = "after"
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    assert sent_name() == "after"
+    service.execute_payload = batch + metrics("after", varint_field(7, 3), "c")
+    df.collect()
+    assert observation.get == {"c": 3}
+    for name, text in ((5, "5"), (None, "None"), (b"n", "b'n'")):
+        observation._name = name
+        df.collect()
+        assert sent_name() == text
+    sent = len(service.execute_requests)
+    for name, error in (("lone \ud800", UnicodeEncodeError), (Unnamed(), ValueError)):
+        observation._name = name
+        with pytest.raises(error):
+            df.collect()
+    assert len(service.execute_requests) == sent
+    observation._name = "again"
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    assert sent_name() == "again"
+    service.execute_payload = batch + metrics("again", varint_field(7, 4), "c")
+    df.collect()
+    assert observation.get == {"c": 4}
+    copied = copy.deepcopy(df)
+    (held,) = copied._plan.observations.values()
+    assert held is not observation and list(copied._plan.observations) == ["again"]
+    service.execute_payload = batch + metrics("again", varint_field(7, 5), "c")
+    copied.collect()
+    assert held.get == {"c": 5} and observation.get == {"c": 4}
+    unnamed = Observation("unnamed")
+    unnamed._name = Unnamed()
+    observed = spark.range(3).observe(unnamed, F.count(F.lit(1)).alias("c"))
+    sent = len(service.execute_requests)
+    with pytest.raises(ValueError, match="no name"):
+        observed.collect()
+    assert len(service.execute_requests) == sent
+
+
 def test_an_observation_in_a_cycle_through_its_result_is_collected_as_pyspark(mock_connect):
     # As PySpark's Observation, whose result dict is an attribute of its __dict__, which Python's
     # garbage collector sees: an observation that its result refers to is freed with it.

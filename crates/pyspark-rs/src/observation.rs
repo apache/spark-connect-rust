@@ -270,6 +270,26 @@ impl MetricsMirror for PyObservationMirror {
         })
     }
 
+    fn name(&self) -> Option<Result<String, SparkError>> {
+        Python::attach(|py| {
+            let observation = self.observation(py)?;
+            // As PySpark's `CollectMetrics`, which sets `str(_name)` in the string field of its
+            // name each time it builds the plan: a str that UTF-8 cannot encode fails the request
+            // with protobuf's error, and an error of reading the name, or of its `__str__`, as it
+            // is.
+            let name = || -> PyResult<Result<String, SparkError>> {
+                let name = observation.getattr(intern!(py, "_name"))?.str()?;
+                Ok(
+                    match crate::dataframe::unbuildable_str_error(name.as_any())? {
+                        Some(error) => Err(error),
+                        None => Ok(name.extract()?),
+                    },
+                )
+            };
+            Some(name().unwrap_or_else(|error| Err(crate::errors::callback_error(error))))
+        })
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
@@ -460,7 +480,7 @@ pub(crate) fn observe(
     py: Python<'_>,
     frame: &PyDataFrame,
     observation: &Bound<'_, PyObservation>,
-    mut exprs: Vec<Expression>,
+    exprs: Vec<Expression>,
 ) -> PyResult<PyDataFrame> {
     let df = &frame.dataframe;
     if !observation.getattr(intern!(py, "_result"))?.is_none() {
@@ -476,13 +496,12 @@ pub(crate) fn observe(
         name = py.import("uuid")?.call_method0("uuid4")?.str()?.into_any();
         observation.setattr(intern!(py, "_name"), &name)?;
     }
-    // A name that protobuf does not take, as one that UTF-8 cannot encode, fails the requests of
-    // the DataFrame, as PySpark's `CollectMetrics` sets it when it builds the plan, before the
-    // metrics.
-    let mut args = crate::plan_args::PlanArgs::new();
-    let name = args.str(&name)?;
-    let args = args.before(&mut exprs);
-    observation.borrow_mut().inner = Observation::new(&name);
+    // The plans of the DataFrame read the `_name` of the observation each time they are built (see
+    // `PyObservationMirror::name`), as PySpark's `CollectMetrics` sets `str(_name)` when it builds
+    // the plan, after its input, and `_on` does not read it: a name whose `__str__` raises, or a
+    // str that UTF-8 cannot encode, fails each request, not `observe`. The state of the core is of
+    // the text of a str name, in the place of the name of a plan without the mirror.
+    observation.borrow_mut().inner = Observation::new(&crate::plan_args::rendered(&name)?);
     let inner = held_by_the_plan(observation);
     // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once.
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
@@ -494,7 +513,7 @@ pub(crate) fn observe(
     // deep copy of the plan copies with the memo of the call. The clones of its state that do not
     // keep it alive find it by its weak reference.
     keep_handle(observation)?;
-    Ok(PyDataFrame::new(args.plan(observed)))
+    Ok(PyDataFrame::new(observed))
 }
 
 /// Have the executions of `session` convert the metrics of the Observations of their plans as
