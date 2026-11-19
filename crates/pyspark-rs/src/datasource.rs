@@ -9,13 +9,14 @@ use crate::dataframe::{py_cloudpickle, py_version};
 use crate::interrupt::interruptible;
 use crate::session::PySparkSession;
 
-/// Python accessor for data source registration.
-///
-/// Exposed as `SparkSession.dataSource` to register custom data sources. It is PySpark Connect's
-/// class, `pyspark.sql.connect.datasource.DataSourceRegistration`, which that module re-exports:
-/// `pyspark.sql.datasource.DataSourceRegistration` is PySpark's classic class, of which it is not.
-/// As PySpark's plain class, it is subclassed: a subclass constructs of the arguments of its own
-/// `__init__`, and its copies and pickles are of its class.
+// Python accessor for data source registration.
+//
+// Exposed as `SparkSession.dataSource` to register custom data sources. It is PySpark Connect's
+// class, `pyspark.sql.connect.datasource.DataSourceRegistration`, which that module re-exports:
+// `pyspark.sql.datasource.DataSourceRegistration` is PySpark's classic class, of which it is not.
+// As PySpark's plain class, it is subclassed: a subclass constructs of the arguments of its own
+// `__init__`, and its copies and pickles are of its class.
+#[doc = connect_doc!(DataSourceRegistration)]
 #[pyclass(
     name = "DataSourceRegistration",
     module = "pyspark.sql.connect.datasource",

@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""``TableValuedFunctionArgument`` of PySpark, the base of the arguments of table-valued
-functions, of which a ``Column`` and a ``TableArg`` are instances. The drop-in's are Rust-backed
-classes, so they are its virtual subclasses."""
+# ``TableValuedFunctionArgument`` of PySpark, the base of the arguments of table-valued
+# functions, of which a ``Column`` and a ``TableArg`` are instances. The drop-in's are Rust-backed
+# classes, so they are its virtual subclasses.
 
 import abc
 

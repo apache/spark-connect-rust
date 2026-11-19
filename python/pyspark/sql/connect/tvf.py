@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""TableValuedFunction under the connect import path (mirrors pyspark.sql.connect.tvf)."""
+# TableValuedFunction under the connect import path (mirrors pyspark.sql.connect.tvf).
 from pyspark._pyspark import TableValuedFunction
 
 __all__ = ["TableValuedFunction"]

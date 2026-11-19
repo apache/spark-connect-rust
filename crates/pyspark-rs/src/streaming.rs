@@ -1245,7 +1245,7 @@ fn trigger_of(kind: &str, value: Option<String>) -> PyResult<Trigger> {
     }
 }
 
-/// Python wrapper for DataStreamWriter.
+// Python wrapper for DataStreamWriter.
 #[pyclass(
     name = "DataStreamWriter",
     module = "pyspark.sql.connect.streaming.readwriter",
@@ -1923,7 +1923,7 @@ fn streaming_function_command(
     }
 }
 
-/// Python wrapper for StreamingQuery.
+// Python wrapper for StreamingQuery.
 #[pyclass(
     name = "StreamingQuery",
     module = "pyspark.sql.connect.streaming.query",
@@ -2121,7 +2121,7 @@ impl PyStreamingQuery {
     }
 }
 
-/// Python wrapper for StreamingQueryManager, of the listener bus of its session.
+// Python wrapper for StreamingQueryManager, of the listener bus of its session.
 #[pyclass(
     name = "StreamingQueryManager",
     module = "pyspark.sql.connect.streaming.query",
@@ -2391,9 +2391,9 @@ impl PyStreamingQueryManager {
         }
     }
 
-    /// Remove all client-side listeners and stop the dispatch thread. Mirrors
-    /// `StreamingQueryManager.close`. A server removal failure warns and keeps the
-    /// listeners registered, as PySpark Connect's does, so close can be retried.
+    // Remove all client-side listeners and stop the dispatch thread. Mirrors
+    // `StreamingQueryManager.close`. A server removal failure warns and keeps the
+    // listeners registered, as PySpark Connect's does, so close can be retried.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         if let Err(error) = interruptible_caught(py, &self.inner.spark_session(), || {
             self.inner.close().map_err(Box::new)

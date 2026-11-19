@@ -1361,6 +1361,13 @@ macro_rules! connect_doc {
             The data source class to be registered. It should be a subclass of DataSource.
         "#
     };
+    (DataSourceRegistration) => {
+        r#"
+    Wrapper for data source registration.
+
+    .. versionadded:: 4.0.0
+    "#
+    };
     (GroupedData . agg) => {
         r#"Compute aggregates and returns the result as a :class:`DataFrame`.
 
@@ -2672,6 +2679,7 @@ macro_rules! connect_doc {
         Support Spark Connect.
     "#
     };
+    (GroupedData . mean) => { connect_doc!(GroupedData . avg) };
     (MergeIntoWriter . whenMatched) => {
         r#"
         Initialize a `WhenMatched` action with a condition.
@@ -5118,6 +5126,12 @@ macro_rules! connect_doc {
         >>> spark.streams.removeListener(test_listener)
         "#
     };
+    (StreamingQueryListenerBus) => {
+        r#"
+    A client side listener bus that is responsible for buffering client side listeners,
+    receive listener events and invoke correct listener call backs.
+    "#
+    };
     (DataStreamReader . format) => {
         r#"Specifies the input data source format.
 
@@ -6961,6 +6975,1039 @@ macro_rules! connect_doc {
         +-------+-----------------+---------------------+----------------+
         |WARNING|This is a warning|{func_name -> my_udf}|my_custom_logger|
         +-------+-----------------+---------------------+----------------+
+        "#
+    };
+    (DataType) => {
+        r#"Base class for data types."#
+    };
+    ("DataType") => { connect_doc!(DataType) };
+    (DataType . needConversion) => {
+        r#"
+        Does this type needs conversion between Python object and internal SQL object.
+
+        This is used to avoid the unnecessary conversion for ArrayType/MapType/StructType.
+        "#
+    };
+    (DataType . toInternal) => {
+        r#"
+        Converts a Python object into an internal SQL object.
+        "#
+    };
+    (DataType . fromInternal) => {
+        r#"
+        Converts an internal SQL object into a native Python object.
+        "#
+    };
+    (DataType . fromDDL) => {
+        r#"
+        Creates :class:`DataType` for a given DDL-formatted string.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        ddl : str
+            DDL-formatted string representation of types, e.g.
+            :class:`pyspark.sql.types.DataType.simpleString`, except that top level struct
+            type can omit the ``struct<>`` for the compatibility reason with
+            ``spark.createDataFrame`` and Python UDFs.
+
+        Returns
+        -------
+        :class:`DataType`
+
+        Examples
+        --------
+        Create a StructType by the corresponding DDL formatted string.
+
+        >>> from pyspark.sql.types import DataType
+        >>> DataType.fromDDL("b string, a int")
+        StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])
+
+        Create a single DataType by the corresponding DDL formatted string.
+
+        >>> DataType.fromDDL("decimal(10,10)")
+        DecimalType(10,10)
+
+        Create a StructType by the legacy string format.
+
+        >>> DataType.fromDDL("b: string, a: int")
+        StructType([StructField('b', StringType(), True), StructField('a', IntegerType(), True)])
+        "#
+    };
+    (DataTypeSingleton) => {
+        r#"Metaclass for DataType"#
+    };
+    ("DataTypeSingleton") => { connect_doc!(DataTypeSingleton) };
+    (NullType) => {
+        r#"Null type.
+
+    The data type representing None, used for the types that cannot be inferred.
+    "#
+    };
+    ("NullType") => { connect_doc!(NullType) };
+    (NullType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (NullType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (NullType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (NullType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (AtomicType) => {
+        r#"An internal type used to represent everything that is not
+    null, UDTs, arrays, structs, and maps."#
+    };
+    ("AtomicType") => { connect_doc!(AtomicType) };
+    (AtomicType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (AtomicType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (AtomicType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (AtomicType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (NumericType) => {
+        r#"Numeric data types."#
+    };
+    ("NumericType") => { connect_doc!(NumericType) };
+    (NumericType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (NumericType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (NumericType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (NumericType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (IntegralType) => {
+        r#"Integral data types."#
+    };
+    ("IntegralType") => { connect_doc!(IntegralType) };
+    (IntegralType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (IntegralType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (IntegralType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (IntegralType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (FractionalType) => {
+        r#"Fractional data types."#
+    };
+    ("FractionalType") => { connect_doc!(FractionalType) };
+    (FractionalType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (FractionalType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (FractionalType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (FractionalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (StringType) => {
+        r#"String data type.
+
+    Parameters
+    ----------
+    collation : str
+        name of the collation, default is UTF8_BINARY.
+    "#
+    };
+    ("StringType") => { connect_doc!(StringType) };
+    (StringType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (StringType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (StringType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (StringType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (CharType) => {
+        r#"Char data type
+
+    Parameters
+    ----------
+    length : int
+        the length limitation.
+    "#
+    };
+    ("CharType") => { connect_doc!(CharType) };
+    (CharType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (CharType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (CharType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (CharType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (VarcharType) => {
+        r#"Varchar data type
+
+    Parameters
+    ----------
+    length : int
+        the length limitation.
+    "#
+    };
+    ("VarcharType") => { connect_doc!(VarcharType) };
+    (VarcharType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (VarcharType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (VarcharType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (VarcharType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (BinaryType) => {
+        r#"Binary (byte array) data type."#
+    };
+    ("BinaryType") => { connect_doc!(BinaryType) };
+    (BinaryType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (BinaryType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (BinaryType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (BinaryType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (BooleanType) => {
+        r#"Boolean data type."#
+    };
+    ("BooleanType") => { connect_doc!(BooleanType) };
+    (BooleanType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (BooleanType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (BooleanType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (BooleanType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DatetimeType) => {
+        r#"Super class of all datetime data type."#
+    };
+    ("DatetimeType") => { connect_doc!(DatetimeType) };
+    (DatetimeType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (DatetimeType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (DatetimeType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (DatetimeType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DateType) => {
+        r#"Date (datetime.date) data type."#
+    };
+    ("DateType") => { connect_doc!(DateType) };
+    (DateType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (AnyTimeType) => {
+        r#"A TIME type of any valid precision."#
+    };
+    ("AnyTimeType") => { connect_doc!(AnyTimeType) };
+    (AnyTimeType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (AnyTimeType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (AnyTimeType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (AnyTimeType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (TimeType) => {
+        r#"
+    Time (datetime.time) data type.
+
+    .. versionadded:: 4.1.0
+    "#
+    };
+    ("TimeType") => { connect_doc!(TimeType) };
+    (TimeType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (TimestampType) => {
+        r#"Timestamp (datetime.datetime) data type."#
+    };
+    ("TimestampType") => { connect_doc!(TimestampType) };
+    (TimestampType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (TimestampNTZType) => {
+        r#"Timestamp (datetime.datetime) data type without timezone information."#
+    };
+    ("TimestampNTZType") => { connect_doc!(TimestampNTZType) };
+    (TimestampNTZType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DecimalType) => {
+        r#"Decimal (decimal.Decimal) data type.
+
+    The DecimalType must have fixed precision (the maximum total number of digits)
+    and scale (the number of digits on the right of dot). For example, (5, 2) can
+    support the value from [-999.99 to 999.99].
+
+    The precision can be up to 38, the scale must be less or equal to precision.
+
+    When creating a DecimalType, the default precision and scale is (10, 0). When inferring
+    schema from decimal.Decimal objects, it will be DecimalType(38, 18).
+
+    Parameters
+    ----------
+    precision : int, optional
+        the maximum (i.e. total) number of digits (default: 10)
+    scale : int, optional
+        the number of digits on right side of dot. (default: 0)
+    "#
+    };
+    ("DecimalType") => { connect_doc!(DecimalType) };
+    (DecimalType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (DecimalType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (DecimalType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (DecimalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DoubleType) => {
+        r#"Double data type, representing double precision floats."#
+    };
+    ("DoubleType") => { connect_doc!(DoubleType) };
+    (DoubleType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (DoubleType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (DoubleType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (DoubleType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (FloatType) => {
+        r#"Float data type, representing single precision floats."#
+    };
+    ("FloatType") => { connect_doc!(FloatType) };
+    (FloatType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (FloatType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (FloatType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (FloatType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (SpatialType) => {
+        r#"Super class of all spatial data types: GeographyType and GeometryType."#
+    };
+    ("SpatialType") => { connect_doc!(SpatialType) };
+    (SpatialType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (SpatialType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (SpatialType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (SpatialType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (GeographyType) => {
+        r#"
+    The data type representing GEOGRAPHY values which are spatial objects, as defined in the Open
+    Geospatial Consortium (OGC) Simple Feature Access specification
+    (https://portal.ogc.org/files/?artifact_id=25355), with a geographic coordinate system.
+
+    .. versionadded:: 4.1.0
+    "#
+    };
+    ("GeographyType") => { connect_doc!(GeographyType) };
+    (GeographyType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (GeometryType) => {
+        r#"
+    The data type representing GEOMETRY values which are spatial objects, as defined in the Open
+    Geospatial Consortium (OGC) Simple Feature Access specification
+    (https://portal.ogc.org/files/?artifact_id=25355), with a Cartesian coordinate system.
+
+    Parameters
+    ----------
+    srid : int or str
+        The Spatial Reference System Identifier (SRID) value for the GEOMETRY.
+
+    .. versionadded:: 4.1.0
+    "#
+    };
+    ("GeometryType") => { connect_doc!(GeometryType) };
+    (GeometryType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (ByteType) => {
+        r#"Byte data type, representing signed 8-bit integers."#
+    };
+    ("ByteType") => { connect_doc!(ByteType) };
+    (ByteType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (ByteType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (ByteType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (ByteType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (IntegerType) => {
+        r#"Int data type, representing signed 32-bit integers."#
+    };
+    ("IntegerType") => { connect_doc!(IntegerType) };
+    (IntegerType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (IntegerType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (IntegerType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (IntegerType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (LongType) => {
+        r#"Long data type, representing signed 64-bit integers.
+
+    If the values are beyond the range of [-9223372036854775808, 9223372036854775807],
+    please use :class:`DecimalType`.
+    "#
+    };
+    ("LongType") => { connect_doc!(LongType) };
+    (LongType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (LongType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (LongType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (LongType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (ShortType) => {
+        r#"Short data type, representing signed 16-bit integers."#
+    };
+    ("ShortType") => { connect_doc!(ShortType) };
+    (ShortType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (ShortType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (ShortType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (ShortType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (AnsiIntervalType) => {
+        r#"The interval type which conforms to the ANSI SQL standard."#
+    };
+    ("AnsiIntervalType") => { connect_doc!(AnsiIntervalType) };
+    (AnsiIntervalType . needConversion) => { connect_doc!(DataType . needConversion) };
+    (AnsiIntervalType . toInternal) => { connect_doc!(DataType . toInternal) };
+    (AnsiIntervalType . fromInternal) => { connect_doc!(DataType . fromInternal) };
+    (AnsiIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (DayTimeIntervalType) => {
+        r#"DayTimeIntervalType (datetime.timedelta)."#
+    };
+    ("DayTimeIntervalType") => { connect_doc!(DayTimeIntervalType) };
+    (DayTimeIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (YearMonthIntervalType) => {
+        r#"YearMonthIntervalType, represents year-month intervals of the SQL standard
+
+    Notes
+    -----
+    This data type doesn't support collection: df.collect/take/head.
+    "#
+    };
+    ("YearMonthIntervalType") => { connect_doc!(YearMonthIntervalType) };
+    (YearMonthIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (CalendarIntervalType) => {
+        r#"The data type representing calendar intervals.
+
+    The calendar interval is stored internally in three components:
+    - an integer value representing the number of `months` in this interval.
+    - an integer value representing the number of `days` in this interval.
+    - a long value representing the number of `microseconds` in this interval.
+    "#
+    };
+    ("CalendarIntervalType") => { connect_doc!(CalendarIntervalType) };
+    (CalendarIntervalType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (ArrayType) => {
+        r#"Array data type.
+
+    Parameters
+    ----------
+    elementType : :class:`DataType`
+        :class:`DataType` of each element in the array.
+    containsNull : bool, optional
+        whether the array can contain null (None) values.
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import ArrayType, StringType, StructField, StructType
+
+    The below example demonstrates how to create class:`ArrayType`:
+
+    >>> arr = ArrayType(StringType())
+
+    The array can contain null (None) values by default:
+
+    >>> ArrayType(StringType()) == ArrayType(StringType(), True)
+    True
+    >>> ArrayType(StringType(), False) == ArrayType(StringType())
+    False
+    "#
+    };
+    ("ArrayType") => { connect_doc!(ArrayType) };
+    (ArrayType . toNullable) => {
+        r#"
+        Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`ArrayType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> ArrayType(IntegerType(), containsNull=False).toNullable()
+        ArrayType(IntegerType(), True)
+
+        Example 2: Nested nullability conversion
+
+        >>> ArrayType(
+        ...     StructType([
+        ...         StructField("b", IntegerType(), nullable=False),
+        ...         StructField("c", ArrayType(IntegerType(), containsNull=False))
+        ...     ]),
+        ...     containsNull=False
+        ... ).toNullable()
+        ArrayType(StructType([StructField('b', IntegerType(), True),
+        StructField('c', ArrayType(IntegerType(), True), True)]), True)
+        "#
+    };
+    (ArrayType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (MapType) => {
+        r#"Map data type.
+
+    Parameters
+    ----------
+    keyType : :class:`DataType`
+        :class:`DataType` of the keys in the map.
+    valueType : :class:`DataType`
+        :class:`DataType` of the values in the map.
+    valueContainsNull : bool, optional
+        indicates whether values can contain null (None) values.
+
+    Notes
+    -----
+    Keys in a map data type are not allowed to be null (None).
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import IntegerType, FloatType, MapType, StringType
+
+    The below example demonstrates how to create class:`MapType`:
+
+    >>> map_type = MapType(StringType(), IntegerType())
+
+    The values of the map can contain null (``None``) values by default:
+
+    >>> (MapType(StringType(), IntegerType())
+    ...        == MapType(StringType(), IntegerType(), True))
+    True
+    >>> (MapType(StringType(), IntegerType(), False)
+    ...        == MapType(StringType(), FloatType()))
+    False
+    "#
+    };
+    ("MapType") => { connect_doc!(MapType) };
+    (MapType . toNullable) => {
+        r#"
+        Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`MapType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> MapType(IntegerType(), StringType(), valueContainsNull=False).toNullable()
+        MapType(IntegerType(), StringType(), True)
+
+        Example 2: Nested nullability conversion
+
+        >>> MapType(
+        ...     StringType(),
+        ...     MapType(
+        ...         IntegerType(),
+        ...         ArrayType(IntegerType(), containsNull=False),
+        ...         valueContainsNull=False
+        ...     ),
+        ...     valueContainsNull=False
+        ... ).toNullable()
+        MapType(StringType(), MapType(IntegerType(), ArrayType(IntegerType(), True), True), True)
+        "#
+    };
+    (MapType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (StructField) => {
+        r#"A field in :class:`StructType`.
+
+    Parameters
+    ----------
+    name : str
+        name of the field.
+    dataType : :class:`DataType`
+        :class:`DataType` of the field.
+    nullable : bool, optional
+        whether the field can be null (None) or not.
+    metadata : dict, optional
+        a dict from string to simple type that can be toInternald to JSON automatically
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import StringType, StructField
+    >>> (StructField("f1", StringType(), True)
+    ...      == StructField("f1", StringType(), True))
+    True
+    >>> (StructField("f1", StringType(), True)
+    ...      == StructField("f2", StringType(), True))
+    False
+    "#
+    };
+    ("StructField") => { connect_doc!(StructField) };
+    (StructField . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (StructType) => {
+        r#"Struct type, consisting of a list of :class:`StructField`.
+
+    This is the data type representing a :class:`Row`.
+
+    Iterating a :class:`StructType` will iterate over its :class:`StructField`\s.
+    A contained :class:`StructField` can be accessed by its name or position.
+
+    Examples
+    --------
+    >>> from pyspark.sql.types import *
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct1["f1"]
+    StructField('f1', StringType(), True)
+    >>> struct1[0]
+    StructField('f1', StringType(), True)
+
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct2 = StructType([StructField("f1", StringType(), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", CharType(10), True)])
+    >>> struct2 = StructType([StructField("f1", CharType(10), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", VarcharType(10), True)])
+    >>> struct2 = StructType([StructField("f1", VarcharType(10), True)])
+    >>> struct1 == struct2
+    True
+    >>> struct1 = StructType([StructField("f1", StringType(), True)])
+    >>> struct2 = StructType([StructField("f1", StringType(), True),
+    ...     StructField("f2", IntegerType(), False)])
+    >>> struct1 == struct2
+    False
+
+    The below example demonstrates how to create a DataFrame based on a struct created
+    using class:`StructType` and class:`StructField`:
+
+    >>> data = [("Alice", ["Java", "Scala"]), ("Bob", ["Python", "Scala"])]
+    >>> schema = StructType([
+    ...     StructField("name", StringType()),
+    ...     StructField("languagesSkills", ArrayType(StringType())),
+    ... ])
+    >>> df = spark.createDataFrame(data=data, schema=schema)
+    >>> df.printSchema()
+    root
+     |-- name: string (nullable = true)
+     |-- languagesSkills: array (nullable = true)
+     |    |-- element: string (containsNull = true)
+    >>> df.show()
+    +-----+---------------+
+    | name|languagesSkills|
+    +-----+---------------+
+    |Alice|  [Java, Scala]|
+    |  Bob|[Python, Scala]|
+    +-----+---------------+
+    "#
+    };
+    ("StructType") => { connect_doc!(StructType) };
+    (StructType . add) => {
+        r#"
+        Construct a :class:`StructType` by adding new elements to it, to define the schema.
+        The method accepts either:
+
+            a) A single parameter which is a :class:`StructField` object.
+            b) Between 2 and 4 parameters as (name, data_type, nullable (optional),
+               metadata(optional). The data_type parameter may be either a String or a
+               :class:`DataType` object.
+
+        Parameters
+        ----------
+        field : str or :class:`StructField`
+            Either the name of the field or a :class:`StructField` object
+        data_type : :class:`DataType`, optional
+            If present, the DataType of the :class:`StructField` to create
+        nullable : bool, optional
+            Whether the field to add should be nullable (default True)
+        metadata : dict, optional
+            Any additional metadata (default None)
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import IntegerType, StringType, StructField, StructType
+        >>> struct1 = StructType().add("f1", StringType(), True).add("f2", StringType(), True, None)
+        >>> struct2 = StructType([StructField("f1", StringType(), True),
+        ...     StructField("f2", StringType(), True, None)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add(StructField("f1", StringType(), True))
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        >>> struct1 = StructType().add("f1", "string", True)
+        >>> struct2 = StructType([StructField("f1", StringType(), True)])
+        >>> struct1 == struct2
+        True
+        "#
+    };
+    (StructType . toNullable) => {
+        r#"
+        Returns the same data type but set all nullability fields are true
+        (`StructField.nullable`, `ArrayType.containsNull`, and `MapType.valueContainsNull`).
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        Example 1: Simple nullability conversion
+
+        >>> StructType([StructField("a", IntegerType(), nullable=False)]).toNullable()
+        StructType([StructField('a', IntegerType(), True)])
+
+        Example 2: Nested nullability conversion
+
+        >>> StructType([
+        ...     StructField("a",
+        ...         StructType([
+        ...             StructField("b", IntegerType(), nullable=False),
+        ...             StructField("c", StructType([
+        ...                 StructField("d", IntegerType(), nullable=False)
+        ...             ]))
+        ...         ]),
+        ...         nullable=False)
+        ... ]).toNullable()
+        StructType([StructField('a', StructType([StructField('b', IntegerType(), True),
+        StructField('c', StructType([StructField('d', IntegerType(), True)]), True)]), True)])
+        "#
+    };
+    (StructType . fromJson) => {
+        r#"
+        Constructs :class:`StructType` from a schema defined in JSON format.
+
+        Below is a JSON schema it must adhere to::
+
+            {
+              "title":"StructType",
+              "description":"Schema of StructType in json format",
+              "type":"object",
+              "properties":{
+                 "fields":{
+                    "description":"Array of struct fields",
+                    "type":"array",
+                    "items":{
+                        "type":"object",
+                        "properties":{
+                           "name":{
+                              "description":"Name of the field",
+                              "type":"string"
+                           },
+                           "type":{
+                              "description": "Type of the field. Can either be
+                                              another nested StructType or primitive type",
+                              "type":"object/string"
+                           },
+                           "nullable":{
+                              "description":"If nulls are allowed",
+                              "type":"boolean"
+                           },
+                           "metadata":{
+                              "description":"Additional metadata to supply",
+                              "type":"object"
+                           },
+                           "required":[
+                              "name",
+                              "type",
+                              "nullable",
+                              "metadata"
+                           ]
+                        }
+                   }
+                }
+             }
+           }
+
+        Parameters
+        ----------
+        json : dict or a dict-like object e.g. JSON object
+            This "dict" must have "fields" key that returns an array of fields
+            each of which must have specific keys (name, type, nullable, metadata).
+
+        Returns
+        -------
+        :class:`StructType`
+
+        Examples
+        --------
+        >>> json_str = '''
+        ...  {
+        ...      "fields": [
+        ...          {
+        ...              "metadata": {},
+        ...              "name": "Person",
+        ...              "nullable": true,
+        ...              "type": {
+        ...                  "fields": [
+        ...                      {
+        ...                          "metadata": {},
+        ...                          "name": "name",
+        ...                          "nullable": false,
+        ...                          "type": "string"
+        ...                      },
+        ...                      {
+        ...                          "metadata": {},
+        ...                          "name": "surname",
+        ...                          "nullable": false,
+        ...                          "type": "string"
+        ...                      }
+        ...                  ],
+        ...                  "type": "struct"
+        ...              }
+        ...          }
+        ...      ],
+        ...      "type": "struct"
+        ...  }
+        ...  '''
+        >>> import json
+        >>> scheme = StructType.fromJson(json.loads(json_str))
+        >>> scheme.simpleString()
+        'struct<Person:struct<name:string,surname:string>>'
+        "#
+    };
+    (StructType . fieldNames) => {
+        r#"
+        Returns all field names in a list.
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import StringType, StructField, StructType
+        >>> struct = StructType([StructField("f1", StringType(), True)])
+        >>> struct.fieldNames()
+        ['f1']
+        "#
+    };
+    (StructType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (VariantType) => {
+        r#"
+    Variant data type, representing semi-structured values.
+
+    .. versionadded:: 4.0.0
+    "#
+    };
+    ("VariantType") => { connect_doc!(VariantType) };
+    (VariantType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (UserDefinedType) => {
+        r#"User-defined type (UDT).
+
+    .. note:: WARN: Spark Internal Use Only
+    "#
+    };
+    ("UserDefinedType") => { connect_doc!(UserDefinedType) };
+    (UserDefinedType . sqlType) => {
+        r#"
+        Underlying SQL storage type for this UDT.
+        "#
+    };
+    (UserDefinedType . module) => {
+        r#"
+        The Python module of the UDT.
+        "#
+    };
+    (UserDefinedType . scalaUDT) => {
+        r#"
+        The class name of the paired Scala UDT (could be '', if there
+        is no corresponding one).
+        "#
+    };
+    (UserDefinedType . serialize) => {
+        r#"
+        Converts a user-type object into a SQL datum.
+        "#
+    };
+    (UserDefinedType . deserialize) => {
+        r#"
+        Converts a SQL datum into a user-type object.
+        "#
+    };
+    (UserDefinedType . fromDDL) => { connect_doc!(DataType . fromDDL) };
+    (VariantVal) => {
+        r#"
+    A class to represent a Variant value in Python.
+
+    .. versionadded:: 4.0.0
+
+    Parameters
+    ----------
+    value : bytes
+        The bytes representing the value component of the Variant.
+    metadata : bytes
+        The bytes representing the metadata component of the Variant.
+
+    Methods
+    -------
+    toPython()
+        Convert the VariantVal to a Python data structure.
+
+    Examples
+    --------
+    >>> from pyspark.sql import functions as sf
+    >>> df = spark.createDataFrame([ {'json': '''{ "a" : 1 }'''} ])
+    >>> v = df.select(sf.parse_json(df.json).alias("var")).head().var
+    >>> v.toPython()
+    {'a': 1}
+    >>> v.toJson()
+    '{"a":1}'
+    "#
+    };
+    ("VariantVal") => { connect_doc!(VariantVal) };
+    (VariantVal . toPython) => {
+        r#"
+        Convert the VariantVal to a Python data structure.
+
+        Returns
+        -------
+        Any
+            A Python object that represents the Variant.
+        "#
+    };
+    (VariantVal . toJson) => {
+        r#"
+        Convert the VariantVal to a JSON string. The zone ID represents the time zone that the
+        timestamp should be printed in. It is defaulted to UTC. The list of valid zone IDs can be
+        found by importing the `zoneinfo` module and running :code:`zoneinfo.available_timezones()`.
+
+        Returns
+        -------
+        str
+            A JSON string that represents the Variant.
+        "#
+    };
+    (VariantVal . parseJson) => {
+        r#"
+        Parse a JSON string and construct a VariantVal.
+
+        Returns
+        -------
+        VariantVal
+            A VariantVal representing the parsed Variant value.
+        "#
+    };
+    (Geography) => {
+        r#"
+    A class to represent a Geography value in Python.
+
+    .. versionadded:: 4.1.0
+
+    Parameters
+    ----------
+    wkb : bytes
+        The bytes representing the WKB of Geography.
+
+    srid : integer
+        The integer value representing SRID of Geography.
+
+    Methods
+    -------
+    getBytes()
+        Returns the WKB of Geography.
+
+    getSrid()
+        Returns the SRID of Geography.
+
+    Examples
+    --------
+    >>> g = Geography.fromWKB(bytes.fromhex('010100000000000000000031400000000000001c40'), 4326)
+    >>> g.getBytes().hex()
+    '010100000000000000000031400000000000001c40'
+    >>> g.getSrid()
+    4326
+    "#
+    };
+    ("Geography") => { connect_doc!(Geography) };
+    (Geography . getSrid) => {
+        r#"
+        Returns the SRID of Geography.
+        "#
+    };
+    (Geography . getBytes) => {
+        r#"
+        Returns the WKB of Geography.
+        "#
+    };
+    (Geography . fromWKB) => {
+        r#"
+        Construct Python Geography object from WKB.
+        :return: Python representation of the Geography type value.
+        "#
+    };
+    (Geometry) => {
+        r#"
+    A class to represent a Geometry value in Python.
+
+    .. versionadded:: 4.1.0
+
+    Parameters
+    ----------
+    wkb : bytes
+        The bytes representing the WKB of Geometry.
+
+    srid : integer
+        The integer value representing SRID of Geometry.
+
+    Methods
+    -------
+    getBytes()
+        Returns the WKB of Geometry.
+
+    getSrid()
+        Returns the SRID of Geometry.
+
+    Examples
+    --------
+    >>> g = Geometry.fromWKB(bytes.fromhex('010100000000000000000031400000000000001c40'), 0)
+    >>> g.getBytes().hex()
+    '010100000000000000000031400000000000001c40'
+    >>> g.getSrid()
+    0
+    "#
+    };
+    ("Geometry") => { connect_doc!(Geometry) };
+    (Geometry . getSrid) => {
+        r#"
+        Returns the SRID of Geometry.
+        "#
+    };
+    (Geometry . getBytes) => {
+        r#"
+        Returns the WKB of Geometry.
+        "#
+    };
+    (Geometry . fromWKB) => {
+        r#"
+        Construct Python Geometry object from WKB.
+        :return: Python representation of the Geometry type value.
+        "#
+    };
+    (Row) => {
+        r#"
+    A row in :class:`DataFrame`.
+    The fields in it can be accessed:
+
+    * like attributes (``row.key``)
+    * like dictionary values (``row[key]``)
+
+    ``key in row`` will search through row keys.
+
+    Row can be used to create a row object by using named arguments.
+    It is not allowed to omit a named argument to represent that the value is
+    None or missing. This should be explicitly set to None in this case.
+
+    .. versionchanged:: 3.0.0
+        Rows created from named arguments no longer have
+        field names sorted alphabetically and will be ordered in the position as
+        entered.
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> row = Row(name="Alice", age=11)
+    >>> row
+    Row(name='Alice', age=11)
+    >>> row['name'], row['age']
+    ('Alice', 11)
+    >>> row.name, row.age
+    ('Alice', 11)
+    >>> 'name' in row
+    True
+    >>> 'wrong_key' in row
+    False
+
+    Row also can be used to create another Row like class, then it
+    could be used to create Row objects, such as
+
+    >>> Person = Row("name", "age")
+    >>> Person
+    <Row('name', 'age')>
+    >>> 'name' in Person
+    True
+    >>> 'wrong_key' in Person
+    False
+    >>> Person("Alice", 11)
+    Row(name='Alice', age=11)
+
+    This form can also be used to create rows as tuple values, i.e. with unnamed
+    fields.
+
+    >>> row1 = Row("Alice", 11)
+    >>> row2 = Row(name="Alice", age=11)
+    >>> row1 == row2
+    True
+    "#
+    };
+    ("Row") => { connect_doc!(Row) };
+    (Row . asDict) => {
+        r#"
+        Return as a dict
+
+        Parameters
+        ----------
+        recursive : bool, optional
+            turns the nested Rows to dict (default: False).
+
+        Notes
+        -----
+        If a row contains duplicate field names, e.g., the rows of a join
+        between two :class:`DataFrame` that both have the fields of same names,
+        one of the duplicate fields will be selected by ``asDict``. ``__getitem__``
+        will also return one of the duplicate fields, however returned value might
+        be different to ``asDict``.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row
+        >>> Row(name="Alice", age=11).asDict() == {'name': 'Alice', 'age': 11}
+        True
+        >>> row = Row(key=1, value=Row(name='a', age=2))
+        >>> row.asDict() == {'key': 1, 'value': Row(name='a', age=2)}
+        True
+        >>> row.asDict(True) == {'key': 1, 'value': {'name': 'a', 'age': 2}}
+        True
         "#
     };
 }

@@ -15,12 +15,10 @@
 # limitations under the License.
 #
 
-"""
-The streaming queries of Spark Connect, as PySpark Connect's
-``pyspark.sql.connect.streaming.query``: the native StreamingQuery and StreamingQueryManager of the
-Rust core, and the Python side of the listener bus of the client, which decodes and dispatches the
-events of the listeners.
-"""
+# The streaming queries of Spark Connect, as PySpark Connect's
+# ``pyspark.sql.connect.streaming.query``: the native StreamingQuery and StreamingQueryManager of the
+# Rust core, and the Python side of the listener bus of the client, which decodes and dispatches the
+# events of the listeners.
 
 import json
 import warnings

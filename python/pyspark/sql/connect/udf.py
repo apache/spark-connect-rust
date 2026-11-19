@@ -15,12 +15,13 @@
 # limitations under the License.
 #
 
+# User-defined functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.udf``: the
+# UDF objects of ``pyspark.sql.functions.udf`` and ``pandas_udf``, and the registration of
+# ``spark.udf``. PySpark's ``pandas_udf`` (``pyspark.sql.pandas.functions``, vendored as it is)
+# makes its UDFs with ``_create_udf`` of this module on Spark Connect, as PySpark's does. PySpark's
+# classic ``pyspark.sql.udf``, vendored as it is too, has the classes of Spark Classic.
 """
-User-defined functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.udf``: the
-UDF objects of ``pyspark.sql.functions.udf`` and ``pandas_udf``, and the registration of
-``spark.udf``. PySpark's ``pandas_udf`` (``pyspark.sql.pandas.functions``, vendored as it is)
-makes its UDFs with ``_create_udf`` of this module on Spark Connect, as PySpark's does. PySpark's
-classic ``pyspark.sql.udf``, vendored as it is too, has the classes of Spark Classic.
+User-defined function related classes and functions
 """
 
 import functools

@@ -2096,14 +2096,20 @@ time, `pyspark.sql.SparkSession` and the functions of `pyspark.sql.functions`, P
 PySpark's signatures and docstrings, and so do the functions of `pyspark.sql.connect.functions`, of
 which PySpark Connect's copy them too, while the methods of the native classes, such as
 `DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
-The classes and the members whose docstrings PySpark Connect's modules copy of PySpark's classic
-classes have those docstrings, as PySpark Connect's: the registrations of UDFs, UDTFs and data
-sources, the `Catalog`, the `RuntimeConf`, the `GroupedData` and the `PandasCogroupedOps`, the
-`MergeIntoWriter` and its clauses, the `Observation`, the `TableValuedFunction`, the readers and the
-writers of DataFrames and of streams, and the `StreamingQuery` and its manager. The native classes
-are built with them, of the source of PySpark at the tracked tag
-(`scripts/gen_connect_docstrings.py`), but for the `__init__` of `RuntimeConf` and of `Observation`,
-the slot of CPython of a native class, whose docstring is CPython's.
+The docstrings of the modules of `pyspark.sql` and `pyspark.errors`, of their classes and functions
+and of the members of the classes, are PySpark's: the types of `pyspark.sql.types`, the classes and
+the members whose docstrings PySpark Connect's modules copy of PySpark's classic classes (the
+registrations of UDFs, UDTFs and data sources, the `Catalog`, the `RuntimeConf`, the `GroupedData`
+and the `PandasCogroupedOps`, the `MergeIntoWriter` and its clauses, the `Observation`, the
+`TableValuedFunction`, the readers and the writers of DataFrames and of streams, and the
+`StreamingQuery` and its manager), and the others, of the modules of `pyspark.sql.connect`. The
+native classes are built with them, of the source of PySpark at the tracked tag
+(`scripts/gen_connect_docstrings.py`), but for the `__init__` of a native class, the slot of
+CPython, whose docstring is CPython's (see `dev/parity/known-differences.md`).
+`tests/golden/runtime_docstrings.json` holds the digests of PySpark's, which a test compares with
+the drop-in's. The modules of the DataFrame, the Column, the window, the table argument, the session
+and its client, and of the functions are left out of it: not all of their docstrings are PySpark's
+yet.
 A default of an object, which the text signature of a native method cannot hold (`inspect` takes
 only literals there), shows as `Ellipsis`: the `StorageLevel(True, True, False, True, 1)` of
 `DataFrame.persist`, and the `<no value>` (`pyspark._globals._NoValue`) of the `value` of

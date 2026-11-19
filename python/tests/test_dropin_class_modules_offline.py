@@ -712,3 +712,69 @@ def test_the_connect_objects_have_the_docstrings_that_pyspark_connect_copies(
         assert ours.__doc__ == object.__init__.__doc__ != theirs.__doc__
     else:
         assert ours.__doc__ == theirs.__doc__
+
+
+# The modules of PySpark that the drop-in does not have (see dev/parity/known-differences.md).
+MODULES_OF_PYSPARK_ONLY = {
+    "pyspark.sql.connect.local_server",
+    "pyspark.sql.connect.streaming.worker.foreach_batch_worker",
+    "pyspark.sql.connect.streaming.worker.listener_worker",
+    "pyspark.sql.streaming.python_streaming_source_runner",
+    "pyspark.sql.transpile",
+}
+
+
+def test_the_docstrings_of_the_modules_are_pysparks():
+    # As official PySpark's, of tests/golden/runtime_docstrings.json: the docstrings of the modules
+    # of pyspark.sql and pyspark.errors (but those of others' work), of their classes and functions
+    # and of the members of the classes, which the native classes are built with (of
+    # scripts/gen_connect_docstrings.py) and the Python ones have. The `__init__` of a native
+    # class is CPython's slot, of CPython's docstring; a name that the drop-in does not have is not
+    # compared.
+    import importlib
+    import json
+    import types
+    from pathlib import Path
+
+    from _runtime_docstrings import digest, resolve
+
+    golden = json.loads(
+        (Path(__file__).resolve().parents[2] / "tests/golden/runtime_docstrings.json").read_text()
+    )
+    assert golden["pyspark"] == "4.3.0"
+    compared, differ = 0, []
+    for module, entries in golden["modules"].items():
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            assert module in MODULES_OF_PYSPARK_ONLY, module
+            continue
+        for rest, expected in entries.items():
+            key = f"{module}:{rest}" if rest else module
+            try:
+                found = resolve(key)
+            except KeyError:
+                continue
+            if rest.endswith(".__init__") and isinstance(found, types.WrapperDescriptorType):
+                continue
+            compared += 1
+            if digest(found.__doc__) != expected:
+                differ.append(key)
+    assert compared > 2500 and not differ, (compared, len(differ), differ[:20])
+
+
+def test_the_spatial_types_convert_of_their_own_methods_as_pysparks():
+    # As PySpark's GeographyType and GeometryType (types.py), which define their own
+    # needConversion and fromInternal, of no docstring: the Geography or the Geometry of a dict of
+    # its "srid" and "bytes", None of one without either, and the dict of toInternal back.
+    from pyspark.sql.types import Geography, GeographyType, Geometry, GeometryType
+
+    for cls, value in ((GeographyType, Geography), (GeometryType, Geometry)):
+        for member in ("needConversion", "fromInternal", "toInternal"):
+            assert member in vars(cls) and getattr(cls, member).__doc__ is None, (cls, member)
+        dt = cls(4326)
+        assert dt.needConversion() is True
+        made = dt.fromInternal({"srid": 4326, "bytes": b"\x01"})
+        assert type(made) is value and (made.srid, made.wkb) == (4326, b"\x01")
+        assert dt.fromInternal({"srid": 4326}) is None and dt.fromInternal(None) is None
+        assert dt.toInternal(made) == {"srid": 4326, "wkb": b"\x01"}
