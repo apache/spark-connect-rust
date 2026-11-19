@@ -385,6 +385,26 @@ impl UnencodableOptions {
         Ok(entries)
     }
 
+    /// Report the Python objects of the entries, the keys that are not strs and the values that
+    /// are objects, to Python's garbage collector, as PySpark's dict of its options holds them:
+    /// those that only these options hold, so that a copy of them, which a request makes of the
+    /// state, does not count one reference twice (see [`SharedObjects`]).
+    pub(crate) fn visit_objects(
+        &self,
+        visit: &pyo3::PyVisit<'_>,
+    ) -> Result<(), pyo3::PyTraverseError> {
+        for (key, value) in &self.0 {
+            for entry in std::iter::once(key).chain(value.as_ref()) {
+                if let OptionKey::Object { object, .. } = entry {
+                    if std::sync::Arc::strong_count(object) == 1 {
+                        visit.call(&**object)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The entries as Python objects, which a reduce gives back: the key, and the value, if any.
     pub(crate) fn to_objects<'py>(
         &self,
@@ -400,6 +420,74 @@ impl UnencodableOptions {
                 Ok((key.to_object(py)?, value))
             })
             .collect()
+    }
+}
+
+/// The Python objects of a state that the shallow copies of a reader, a writer or a session
+/// builder share, as PySpark's copies share the attributes of their `__dict__`, such as the dict
+/// of their options, whose keys and values may be any objects. A state that copies share has no
+/// one holder among them that could report its objects to Python's garbage collector once, so the
+/// state is held by a Python object too, a [`PySharedObjects`], which each copy holds and reports,
+/// and which reports the objects: so each is reported once, and freed with the last copy that
+/// holds the state, as in PySpark.
+pub(crate) trait SharedObjects: Send + Sync {
+    /// Report the Python objects that the state holds, unless another thread holds its lock.
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError>;
+
+    /// Drop the Python objects of the state, which the garbage collector found unreachable with
+    /// every holder of the state. They are dropped once the lock is left, as their drop may run
+    /// Python code.
+    fn clear(&self);
+}
+
+impl SharedObjects for WriterState<UnencodableOptions> {
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        match self.try_lock() {
+            Some(options) => options.visit_objects(visit),
+            None => Ok(()),
+        }
+    }
+
+    fn clear(&self) {
+        let cleared = self
+            .try_lock()
+            .map(|mut options| std::mem::take(&mut *options));
+        drop(cleared);
+    }
+}
+
+/// The Python object that holds a state that the shallow copies of an object share, for Python's
+/// garbage collector (see [`SharedObjects`]): each copy holds it and reports it in its
+/// `__traverse__`, and it reports the objects of the state.
+#[pyclass(name = "_SharedObjects", module = "pyspark._pyspark")]
+pub(crate) struct PySharedObjects(std::sync::Arc<dyn SharedObjects>);
+
+impl PySharedObjects {
+    /// The holder of `state`.
+    pub(crate) fn new(state: std::sync::Arc<dyn SharedObjects>) -> Self {
+        PySharedObjects(state)
+    }
+
+    /// The Python object of `state`, for a new holder of it, or None when it cannot be made, which
+    /// reports nothing of the state: its objects are kept alive then, rather than freed while
+    /// reachable.
+    pub(crate) fn of(state: std::sync::Arc<dyn SharedObjects>) -> Option<Py<PySharedObjects>> {
+        Python::attach(|py| Py::new(py, PySharedObjects(state)).ok())
+    }
+}
+
+#[pymethods]
+impl PySharedObjects {
+    /// The objects of the state. The object has no `__dict__`, so a collection does not meet it
+    /// before its value is written.
+    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        self.0.visit(&visit)
+    }
+
+    /// Break a reference cycle that the garbage collector found unreachable: as every holder of
+    /// the state is unreachable then, the objects of the state are dropped.
+    fn __clear__(&mut self) {
+        self.0.clear();
     }
 }
 

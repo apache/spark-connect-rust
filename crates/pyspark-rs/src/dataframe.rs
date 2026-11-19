@@ -3734,7 +3734,7 @@ impl PyDataFrame {
     fn write_to(slf: &Bound<'_, Self>, table: &Bound<'_, PyAny>) -> PyDataFrameWriterV2 {
         let (name, unsent_table) = written_table(table);
         let frame = slf.clone().unbind();
-        PyDataFrameWriterV2 {
+        let mut writer = PyDataFrameWriterV2 {
             inner: std::sync::Arc::new(WriterState::of_frame(
                 slf.borrow().dataframe.write_to(&name),
                 &frame,
@@ -3747,8 +3747,11 @@ impl PyDataFrame {
             unsent_partition: std::sync::Arc::new(std::sync::Mutex::new(None)),
             unsent_options: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             unsent_properties: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            shared: None,
             gc_ready: crate::gc::GcReady::new(),
-        }
+        };
+        writer.shared = writer.shared_of();
+        writer
     }
 
     /// The streaming writer interface (`df.writeStream`).
@@ -5125,9 +5128,125 @@ pub struct PyDataFrameWriter {
     /// The format, the partitioning columns and the save mode that PySpark keeps as they are,
     /// and whose `WriteOperation.command` converts, or resolves, at each write ([`UnsentArgs`]).
     unsent: std::sync::Arc<std::sync::Mutex<UnsentArgs>>,
+    /// The Python object of `unsent` and `refused_bucket_count`, which the copies of this writer
+    /// share too, and which reports the objects that they keep to Python's garbage collector, as
+    /// the `_write` of PySpark's copies holds them (see [`WriterKeptArgs`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
     /// Set once the value is written, as `__traverse__` reads `unsent`, which is not valid while
     /// the writer object is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
+}
+
+/// The arguments that a V1 writer keeps as they are, which the copies of the writer share, as the
+/// `_write` of PySpark's copies is one object: their Python objects are reported to Python's
+/// garbage collector by the Python object of them that each copy holds (see
+/// [`crate::options::SharedObjects`]).
+struct WriterKeptArgs {
+    unsent: std::sync::Arc<std::sync::Mutex<UnsentArgs>>,
+    refused_bucket_count: std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>,
+}
+
+impl crate::options::SharedObjects for WriterKeptArgs {
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Ok(unsent) = self.unsent.try_lock() {
+            for object in [
+                &unsent.format,
+                &unsent.partition,
+                &unsent.clustering,
+                &unsent.mode,
+                &unsent.sort,
+                &unsent.bucket,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                visit.call(object)?;
+            }
+            unsent.options.visit_objects(visit)?;
+        }
+        if let Ok(count) = self.refused_bucket_count.try_lock() {
+            if let Some(count) = &*count {
+                visit.call(count)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn clear(&self) {
+        let unsent = self
+            .unsent
+            .try_lock()
+            .map(|mut unsent| std::mem::take(&mut *unsent));
+        drop(unsent);
+        let count = self
+            .refused_bucket_count
+            .try_lock()
+            .map(|mut count| count.take());
+        drop(count);
+    }
+}
+
+/// The arguments that a V2 writer keeps as they are, which the copies of the writer share, as the
+/// `_write` of PySpark's copies is one object (see [`WriterKeptArgs`]).
+struct WriterV2KeptArgs {
+    kept: [std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>; 3],
+    options: [std::sync::Arc<std::sync::Mutex<crate::options::UnencodableOptions>>; 2],
+}
+
+impl crate::options::SharedObjects for WriterV2KeptArgs {
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        for kept in &self.kept {
+            if let Ok(kept) = kept.try_lock() {
+                if let Some(object) = &*kept {
+                    visit.call(object)?;
+                }
+            }
+        }
+        for options in &self.options {
+            if let Ok(options) = options.try_lock() {
+                options.visit_objects(visit)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn clear(&self) {
+        let kept: Vec<_> = self
+            .kept
+            .iter()
+            .filter_map(|kept| kept.try_lock().ok().and_then(|mut kept| kept.take()))
+            .collect();
+        drop(kept);
+        let options: Vec<_> = self
+            .options
+            .iter()
+            .filter_map(|options| {
+                options
+                    .try_lock()
+                    .ok()
+                    .map(|mut options| std::mem::take(&mut *options))
+            })
+            .collect();
+        drop(options);
+    }
+}
+
+impl PyDataFrameWriterV2 {
+    /// The Python object of the arguments that this writer keeps, for a new writer that holds
+    /// them (see [`WriterV2KeptArgs`]).
+    fn shared_of(&self) -> Option<Py<crate::options::PySharedObjects>> {
+        crate::options::PySharedObjects::of(std::sync::Arc::new(WriterV2KeptArgs {
+            kept: [
+                std::sync::Arc::clone(&self.unsent_provider),
+                std::sync::Arc::clone(&self.unsent_clustering),
+                std::sync::Arc::clone(&self.unsent_partition),
+            ],
+            options: [
+                std::sync::Arc::clone(&self.unsent_options),
+                std::sync::Arc::clone(&self.unsent_properties),
+            ],
+        }))
+    }
 }
 
 /// The arguments of a writer that PySpark keeps as they are, and that its `WriteOperation.command`
@@ -5161,15 +5280,21 @@ impl PyDataFrameWriter {
         writer: spark_connect::readwriter::DataFrameWriter,
         frame: Py<PyDataFrame>,
     ) -> Self {
+        let refused_bucket_count = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
         PyDataFrameWriter {
             inner: std::sync::Arc::new(WriterState::of_frame(
                 writer,
                 &frame,
                 spark_connect::readwriter::DataFrameWriter::shares_plan_with,
             )),
-            refused_bucket_count: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            refused_bucket_count: refused_bucket_count.clone(),
             refused_bucket_cols: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            unsent: std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default())),
+            shared: crate::options::PySharedObjects::of(std::sync::Arc::new(WriterKeptArgs {
+                unsent: unsent.clone(),
+                refused_bucket_count,
+            })),
+            unsent,
             frame,
             gc_ready: crate::gc::GcReady::new(),
         }
@@ -5384,6 +5509,7 @@ impl PyDataFrameWriter {
                 refused_bucket_count: std::sync::Arc::clone(&this.refused_bucket_count),
                 refused_bucket_cols: std::sync::Arc::clone(&this.refused_bucket_cols),
                 unsent: std::sync::Arc::clone(&this.unsent),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
                 frame: this.frame.clone_ref(py),
                 gc_ready: crate::gc::GcReady::new(),
             },
@@ -6075,30 +6201,15 @@ impl PyDataFrameWriter {
 
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         // The DataFrame, which reports the objects of the plan that the writer shares with it, as
-        // PySpark's writer holds the plan (see `crate::gc::Holders`). The kept arguments, which
-        // Python's garbage collector sees, as `exclusive_relation_owners` reports a DataFrame's
-        // owners: only when this writer holds them alone, so that a copy that shares them does not
-        // count one reference twice. A lock held elsewhere is skipped. Nothing of a writer object
-        // that is being created.
+        // PySpark's writer holds the plan (see `crate::gc::Holders`), and the Python object of the
+        // kept arguments, which the copies of the writer share and which reports them (see
+        // [`WriterKeptArgs`]). Nothing of a writer object that is being created.
         if !self.gc_ready.get() {
             return Ok(());
         }
         visit.call(&self.frame)?;
-        if std::sync::Arc::strong_count(&self.unsent) != 1 {
-            return Ok(());
-        }
-        if let Ok(unsent) = self.unsent.try_lock() {
-            for object in [
-                &unsent.format,
-                &unsent.partition,
-                &unsent.clustering,
-                &unsent.mode,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                visit.call(object)?;
-            }
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
         }
         Ok(())
     }
@@ -6106,6 +6217,7 @@ impl PyDataFrameWriter {
     /// Drop this writer's references to the kept arguments and to its state, of which it keeps a
     /// cleared copy; a copy's are kept.
     fn __clear__(&mut self) {
+        self.shared = None;
         self.unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
         self.inner = std::sync::Arc::new(
             self.inner
@@ -6145,9 +6257,12 @@ pub struct PyDataFrameWriterV2 {
     /// The table properties that the core writer does not take, which each write fails with after
     /// its options.
     unsent_properties: std::sync::Arc<std::sync::Mutex<crate::options::UnencodableOptions>>,
-    /// Set once the value is written, as `__traverse__` reads `unsent_provider` and
-    /// `unsent_clustering`, which are not valid while the writer object is created (see
-    /// [`crate::gc::GcReady`]).
+    /// The Python object of the kept provider, columns, options and table properties, which the
+    /// copies of this writer share too, and which reports their objects to Python's garbage
+    /// collector, as the `_write` of PySpark's copies holds them (see [`WriterV2KeptArgs`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
+    /// Set once the value is written, as `__traverse__` reads `inner`, which is not valid while
+    /// the writer object is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
 }
 
@@ -6287,6 +6402,7 @@ impl PyDataFrameWriterV2 {
                 unsent_partition: std::sync::Arc::clone(&this.unsent_partition),
                 unsent_options: std::sync::Arc::clone(&this.unsent_options),
                 unsent_properties: std::sync::Arc::clone(&this.unsent_properties),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
                 frame: this.frame.clone_ref(py),
                 gc_ready: crate::gc::GcReady::new(),
             },
@@ -6384,7 +6500,7 @@ impl PyDataFrameWriterV2 {
         if !cluster_cols.is_empty() {
             writer = writer.cluster_by(cluster_cols);
         }
-        let restored = PyDataFrameWriterV2 {
+        let mut restored = PyDataFrameWriterV2 {
             inner: std::sync::Arc::new(WriterState::of_frame(
                 writer,
                 &frame,
@@ -6396,9 +6512,11 @@ impl PyDataFrameWriterV2 {
             unsent_partition: std::sync::Arc::new(std::sync::Mutex::new(kept_partition)),
             unsent_options: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             unsent_properties: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            shared: None,
             frame,
             gc_ready: crate::gc::GcReady::new(),
         };
+        restored.shared = restored.shared_of();
         // The options and the table properties that the core writer does not take are set in
         // their order, as PySpark's dicts, which keep them.
         for (key, value) in &kept_options {
@@ -6616,18 +6734,12 @@ impl PyDataFrameWriterV2 {
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
         }
-        // The kept arguments and the state that a copy shares are reported by no owner, as the
-        // writer's are, and a lock held elsewhere is skipped: of the state, the functions of the
-        // UDFs of the partitioning columns that it alone keeps alive.
-        for kept in [&self.unsent_provider, &self.unsent_clustering] {
-            if std::sync::Arc::strong_count(kept) != 1 {
-                continue;
-            }
-            if let Ok(kept) = kept.try_lock() {
-                if let Some(object) = &*kept {
-                    visit.call(object)?;
-                }
-            }
+        // The Python object of the kept arguments, which the copies of the writer share and which
+        // reports them (see [`WriterV2KeptArgs`]). The state that a copy shares is reported by no
+        // owner, and a lock held elsewhere is skipped: of the state, the functions of the UDFs of
+        // the partitioning columns that it alone keeps alive.
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
         }
         if std::sync::Arc::strong_count(&self.inner) == 1 {
             if let Some(writer) = self.inner.try_lock() {
@@ -6644,6 +6756,7 @@ impl PyDataFrameWriterV2 {
     /// cleared copy; a copy's are kept.
     fn __clear__(&mut self) {
         self.unsent_table = None;
+        self.shared = None;
         self.unsent_provider = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.unsent_clustering = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.inner = std::sync::Arc::new(

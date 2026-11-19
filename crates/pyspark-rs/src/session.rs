@@ -42,6 +42,27 @@ pub struct PySparkSessionBuilder {
     /// builder, which a shallow copy has too, and which a `channelBuilder` sets on its builder
     /// alone.
     channel_builder: Option<Py<PyAny>>,
+    /// The Python object of `options`, which the shallow copies of this builder share too, and
+    /// which reports the keys and the values of its options that are objects to Python's garbage
+    /// collector, as PySpark's `_options` dict holds them (see
+    /// [`crate::options::SharedObjects`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
+}
+
+impl crate::options::SharedObjects for std::sync::Mutex<BuilderOptions> {
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        match self.try_lock() {
+            Ok(options) => options.unencodable.visit_objects(visit),
+            Err(_) => Ok(()),
+        }
+    }
+
+    fn clear(&self) {
+        let unencodable = self
+            .try_lock()
+            .map(|mut options| std::mem::take(&mut options.unencodable));
+        drop(unencodable);
+    }
 }
 
 /// The options of a session builder, which its shallow copies share (see
@@ -94,8 +115,10 @@ fn session_url(py: Python<'_>, remote_url: Option<Option<String>>) -> PyResult<S
 
 impl PySparkSessionBuilder {
     pub fn new(py: Python<'_>) -> Self {
+        let options: std::sync::Arc<std::sync::Mutex<BuilderOptions>> = Default::default();
         PySparkSessionBuilder {
-            options: Default::default(),
+            shared: Py::new(py, crate::options::PySharedObjects::new(options.clone())).ok(),
+            options,
             hook_factories: Some(PyList::empty(py).unbind()),
             channel_builder: None,
         }
@@ -163,6 +186,7 @@ impl PySparkSessionBuilder {
                 options: std::sync::Arc::clone(&this.options),
                 hook_factories: this.hook_factories.as_ref().map(|list| list.clone_ref(py)),
                 channel_builder: this.channel_builder.as_ref().map(|cb| cb.clone_ref(py)),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
             }
         };
         let copy = Py::new(py, copy)?;
@@ -220,8 +244,10 @@ impl PySparkSessionBuilder {
     /// reference of its own to its channel builder and to the list, which the shallow copies of
     /// the builder share and which reports the factories itself, as PySpark's list does: so no
     /// reference is counted twice, and the collector frees a factory only with the last builder
-    /// that reaches it. Only `Option<Py<_>>` fields are read, which are `None` while the object
-    /// is created, so no [`crate::gc::GcReady`] is needed.
+    /// that reaches it. So does the Python object of the options that the copies share, which
+    /// reports the keys and the values of the options that are objects. Only `Option<Py<_>>`
+    /// fields are read, which are `None` while the object is created, so no
+    /// [`crate::gc::GcReady`] is needed.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if let Some(channel_builder) = &self.channel_builder {
             visit.call(channel_builder)?;
@@ -229,15 +255,19 @@ impl PySparkSessionBuilder {
         if let Some(hook_factories) = &self.hook_factories {
             visit.call(hook_factories)?;
         }
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
+        }
         Ok(())
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the builder drops
-    /// its channel builder and its reference to the list of its hook factories, which a copy that
-    /// is reachable still holds.
+    /// its channel builder and its references to the list of its hook factories and to the
+    /// object of its options, which a copy that is reachable still holds.
     fn __clear__(&mut self) {
         self.channel_builder = None;
         self.hook_factories = None;
+        self.shared = None;
     }
 
     /// Set the remote Spark Connect server URL. Returns the builder (chainable).

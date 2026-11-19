@@ -269,6 +269,10 @@ pub struct PyDataStreamReader {
     /// The options that UTF-8 cannot encode, which the copies of this reader share, as they share
     /// `options` ([`UnencodableOptions`]).
     unencodable_options: Arc<WriterState<UnencodableOptions>>,
+    /// The Python object of `unencodable_options`, which the copies of this reader share too, and
+    /// which reports the keys of its options that are objects to Python's garbage collector, as
+    /// the `_options` dict of PySpark's copies holds them (see [`crate::options::SharedObjects`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
     /// The UTF-32LE bytes of the schema, when it is a str that UTF-8 cannot encode, which the core
     /// reader leaves unset.
     unencodable_schema: Option<Vec<u8>>,
@@ -296,11 +300,13 @@ fn stream_reader_format(
 impl PyDataStreamReader {
     pub fn new(reader: DataStreamReader) -> Self {
         let options = reader.get_options().clone();
+        let unencodable_options = Arc::new(WriterState::new(UnencodableOptions::default()));
         PyDataStreamReader {
             inner: without_options(reader, &options),
             options: Arc::new(WriterState::new(options)),
             unsent_format: None,
-            unencodable_options: Arc::new(WriterState::new(UnencodableOptions::default())),
+            shared: crate::options::PySharedObjects::of(unencodable_options.clone()),
+            unencodable_options,
             unencodable_schema: None,
             gc_ready: crate::gc::GcReady::new(),
         }
@@ -481,6 +487,7 @@ impl PyDataStreamReader {
                     .as_ref()
                     .map(|format| format.clone_ref(py)),
                 unencodable_options: Arc::clone(&this.unencodable_options),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
                 unencodable_schema: this.unencodable_schema.clone(),
                 gc_ready: crate::gc::GcReady::new(),
             },
@@ -691,11 +698,15 @@ impl PyDataStreamReader {
         if let Some(format) = &self.unsent_format {
             visit.call(&format.object)?;
         }
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
+        }
         Ok(())
     }
 
     fn __clear__(&mut self) {
         self.unsent_format = None;
+        self.shared = None;
     }
 
     /// The session of the reader, as PySpark Connect's `DataStreamReader._client`, which its

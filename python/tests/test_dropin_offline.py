@@ -13254,6 +13254,71 @@ def test_cycles_through_the_sessions_and_builders_of_their_objects_are_collected
         session.stop()
 
 
+def test_cycles_through_the_option_keys_and_kept_arguments_are_collected_as_pyspark(mock_connect):
+    # As PySpark's readers, writers and session builder, plain objects whose dicts keep the keys of
+    # their options as they are, and a table property's value, and whose writers keep a format, a
+    # mode, partitioning and clustering columns and a provider that are not strs as they are:
+    # a reference cycle through such an object is collected, also while a shallow copy shares the
+    # dict, as the copies of PySpark's do, and freed with the last of the copies.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql.connect.session import SparkSession as ConnectSession
+
+    spark, _ = mock_connect
+    df = spark.range(1)
+
+    class Key:
+        # A hashable key of an option, which keeps what it is a key of.
+        def __hash__(self):
+            return 1
+
+        def __eq__(self, other):
+            return self is other
+
+    def with_copy(make):
+        return lambda key: (lambda holder: (holder, copy.copy(holder)))(make(key))
+
+    makers = [
+        lambda key: spark.read.option(key, "v"),
+        lambda key: spark.readStream.option(key, "v"),
+        lambda key: df.write.option(key, "v"),
+        lambda key: df.write.format(key),
+        lambda key: df.write.mode(key),
+        lambda key: df.write.partitionBy(key),
+        lambda key: df.write.clusterBy(key),
+        lambda key: df.writeTo("t").option(key, "v"),
+        lambda key: df.writeTo("t").tableProperty(key, "v"),
+        lambda key: df.writeTo("t").tableProperty("p", key),
+        lambda key: df.writeTo("t").using(key),
+        lambda key: df.writeTo("t").clusterBy(key),
+        lambda key: ConnectSession.builder.config(key, "v"),
+    ]
+    for make in makers + [with_copy(make) for make in makers]:
+        key = Key()
+        key.held = make(key)
+        freed = weakref.ref(key)
+        del key
+        gc.collect()
+        assert freed() is None
+
+    # A copy that stays keeps the options, which the copy that is collected shares.
+    for make in (lambda key: spark.read.option(key, "v"), lambda key: df.write.option(key, "v"),
+                 lambda key: df.writeTo("t").option(key, "v"),
+                 lambda key: ConnectSession.builder.config(key, "v")):
+        key = Key()
+        key.held = make(key)
+        kept = copy.copy(key.held)
+        freed = weakref.ref(key)
+        del key
+        gc.collect()
+        assert freed() is not None
+        del kept
+        gc.collect()
+        assert freed() is None
+
+
 def test_stream_writers_keep_the_pickles_of_their_functions_as_pyspark(mock_connect):
     # As PySpark's DataStreamWriter, whose WriteStreamOperationStart keeps the pickle of the
     # function of foreachBatch and foreach and not the function: an object that keeps the writer
