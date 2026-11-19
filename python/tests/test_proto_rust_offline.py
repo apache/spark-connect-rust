@@ -1632,6 +1632,162 @@ def test_update_of_a_map_takes_its_arguments_as_upbs(upb):
         assert outcomes[0] == outcomes[1], label
 
 
+_MAP_METHOD_CALLS = {
+    "MergeFrom()": lambda m: m.MergeFrom(),
+    "MergeFrom(a, b)": lambda m: m.MergeFrom([], []),
+    "MergeFrom(other=a)": lambda m: m.MergeFrom(other=[]),
+    "MergeFrom(a, x=1)": lambda m: m.MergeFrom([], x=1),
+    "clear(1)": lambda m: m.clear(1),
+    "clear(x=1)": lambda m: m.clear(x=1),
+    "clear(1, x=2)": lambda m: m.clear(1, x=2),
+    "GetEntryClass(1)": lambda m: m.GetEntryClass(1),
+    "GetEntryClass(x=1)": lambda m: m.GetEntryClass(x=1),
+    "get()": lambda m: m.get(),
+    "get(k, d, x)": lambda m: m.get("k", 1, 2),
+    "get(key=k)": lambda m: m.get(key="k"),
+    "get(zz, default=1)": lambda m: m.get("zz", default=1),
+    "get(x=1)": lambda m: m.get(x=1),
+    "get(default=1)": lambda m: m.get(default=1),
+    "get(k, x=1)": lambda m: m.get("k", x=1),
+    "get(k, key=z)": lambda m: m.get("k", key="z"),
+    "get(k, 1, default=2)": lambda m: m.get("k", 1, default=2),
+    "get(key=k, default=1, x=2)": lambda m: m.get(key="k", default=1, x=2),
+    "get(k, 2, 3, x=4)": lambda m: m.get("k", 2, 3, x=4),
+    "pop()": lambda m: m.pop(),
+    "pop(k, d, x)": lambda m: m.pop("k", 1, 2),
+    "pop(key=k)": lambda m: m.pop(key="k"),
+    "pop(k, key=z)": lambda m: m.pop("k", key="z"),
+    "pop(x=1)": lambda m: m.pop(x=1),
+    "popitem(1)": lambda m: m.popitem(1),
+    "popitem(x=1)": lambda m: m.popitem(x=1),
+    "popitem() of an empty map": lambda m: (m.clear(), m.popitem()),
+    "setdefault()": lambda m: m.setdefault(),
+    "setdefault(k, d, x)": lambda m: m.setdefault("k", "d", 2),
+    "setdefault(key=k)": lambda m: m.setdefault(key="k"),
+    "setdefault(q, default=d)": lambda m: m.setdefault("q", default="d"),
+    "setdefault(q, d)": lambda m: m.setdefault("q", "d"),
+    "keys(1)": lambda m: m.keys(1),
+    "keys(x=1)": lambda m: m.keys(x=1),
+    "values(1)": lambda m: m.values(1),
+    "items(x=1)": lambda m: m.items(x=1),
+    "sorted keys(), values(), items()": lambda m: (
+        sorted(m.keys()),
+        len(m.values()),
+        [k for k, _ in m.items()],
+    ),
+    "update(a, b)": lambda m: m.update({}, {}),
+    "get_or_create()": lambda m: m.get_or_create(),
+    "get_or_create(a, b)": lambda m: m.get_or_create("a", "b"),
+    "get_or_create(key=k)": lambda m: m.get_or_create(key="k"),
+}
+
+
+_REPEATED_METHOD_CALLS = {
+    "append()": lambda c, v: c.append(),
+    "append(a, b)": lambda c, v: c.append(v, v),
+    "append(value=v)": lambda c, v: c.append(value=v),
+    "append(v, x=1)": lambda c, v: c.append(v, x=1),
+    "extend()": lambda c, v: c.extend(),
+    "extend(a, b)": lambda c, v: c.extend([], []),
+    "extend(elem_seq=[])": lambda c, v: c.extend(elem_seq=[]),
+    "insert()": lambda c, v: c.insert(),
+    "insert(0)": lambda c, v: c.insert(0),
+    "insert(0, v, 1)": lambda c, v: c.insert(0, v, 1),
+    "insert(key=0, value=v)": lambda c, v: c.insert(key=0, value=v),
+    "insert(a, v)": lambda c, v: c.insert("a", v),
+    "insert(2**70, v)": lambda c, v: c.insert(2**70, v),
+    "insert(-1, v)": lambda c, v: c.insert(-1, v),
+    "pop(0, 1)": lambda c, v: c.pop(0, 1),
+    "pop(key=0)": lambda c, v: c.pop(key=0),
+    "pop(a)": lambda c, v: c.pop("a"),
+    "pop(2**70)": lambda c, v: c.pop(2**70),
+    "pop()": lambda c, v: c.pop(),
+    "pop(0)": lambda c, v: c.pop(0),
+    "remove()": lambda c, v: c.remove(),
+    "remove(a, b)": lambda c, v: c.remove(v, v),
+    "remove(elem=v)": lambda c, v: c.remove(elem=v),
+    "MergeFrom()": lambda c, v: c.MergeFrom(),
+    "MergeFrom(a, b)": lambda c, v: c.MergeFrom([], []),
+    "MergeFrom(other=[])": lambda c, v: c.MergeFrom(other=[]),
+    "MergeFrom([v])": lambda c, v: c.MergeFrom([v]),
+    "reverse(1)": lambda c, v: c.reverse(1),
+    "clear(1)": lambda c, v: c.clear(1),
+    "sort(1)": lambda c, v: c.sort(1),
+    "__deepcopy__(1, 2)": lambda c, v: c.__deepcopy__(1, 2),
+    "__deepcopy__(memo={})": lambda c, v: c.__deepcopy__(memo={}),
+    "copy.deepcopy": lambda c, v: copy.deepcopy(c),
+}
+
+
+def test_methods_of_containers_raise_upbs_errors_of_their_arguments(upb):
+    # upb's maps are of its C types ScalarMapContainer and MessageMapContainer, whose own methods
+    # (MergeFrom, clear, GetEntryClass, setdefault, get_or_create) take positional arguments only,
+    # with CPython's errors of their C functions naming the class, and whose get parses its
+    # arguments with PyArg_ParseTupleAndKeywords; its pop, popitem, update, keys, values and items
+    # are those of collections.abc's MutableMapping and Mapping, in Python. upb's repeated
+    # containers take positional arguments only too, append, extend, remove and MergeFrom one,
+    # insert and pop of PyArg_ParseTuple's "nO" and "|n", with their errors. The runtime's methods
+    # had PyO3's arguments and errors: they took keyword arguments (MergeFrom(other=...),
+    # append(value=...), setdefault(key, default=...)), and the errors of the maps named
+    # MapContainer.
+    for kind, of in (("scalar", "Read.DataSource"), ("message", "SQL")):
+        for label, call in _MAP_METHOD_CALLS.items():
+            if kind == "scalar" and label.startswith("get_or_create"):
+                continue
+            outcomes = []
+            for new in (upb, ours):
+                if kind == "scalar":
+                    message = new(f"spark.connect.{of}")(options={"k": "v"})
+                    container = message.options
+                else:
+                    message = new(f"spark.connect.{of}")(args={"k": {"integer": 1}})
+                    container = message.args
+                outcome = _outcome(lambda: call(container))
+                outcomes.append((outcome, message.SerializeToString(deterministic=True)))
+            assert outcomes[0] == outcomes[1], (kind, label)
+    for kind in ("scalar", "composite"):
+        for label, call in _REPEATED_METHOD_CALLS.items():
+            outcomes = []
+            for new in (upb, ours):
+                if kind == "scalar":
+                    message = new("spark.connect.StatApproxQuantile")(probabilities=[1.0, 2.0])
+                    container, value = message.probabilities, 3.0
+                else:
+                    message = new("spark.connect.Expression.Literal.Array")(
+                        elements=[{"integer": 1}, {"integer": 2}]
+                    )
+                    container = message.elements
+                    value = new("spark.connect.Expression.Literal")(integer=3)
+                outcome = _outcome(lambda: call(container, value))
+                outcomes.append((outcome, message.SerializeToString()))
+            assert outcomes[0] == outcomes[1], (kind, label)
+    # A keyword argument of upb's methods of positional arguments (METH_VARARGS) is CPython's
+    # error of the method of its class when it is called of its object, and of the method only
+    # when CPython calls it as a bound method, as it calls each before Python 3.12 while a trace
+    # or a profile function is set (as coverage sets one): the runtime's errors follow.
+    calls = {
+        "setdefault": lambda new: new("spark.connect.Read.DataSource")().options.setdefault(
+            key="k"
+        ),
+        "insert": lambda new: new("spark.connect.StatApproxQuantile")().probabilities.insert(
+            key=0, value=1.0
+        ),
+        "pop": lambda new: new("spark.connect.Expression.Literal.Array")().elements.pop(key=0),
+        "__deepcopy__": lambda new: new(
+            "spark.connect.StatApproxQuantile"
+        )().probabilities.__deepcopy__(memo={}),
+    }
+    previous = sys.getprofile()
+    for profile in (None, lambda *args: None):
+        sys.setprofile(profile)
+        try:
+            for label, call in calls.items():
+                outcomes = [_outcome(lambda new=new: call(new)) for new in (upb, ours)]
+                assert outcomes[0] == outcomes[1], (label, profile)
+        finally:
+            sys.setprofile(previous)
+
+
 def _iterate_while(container, operation):
     """What a step of an iteration of `container` gives after `operation` ran between its first
     two steps: the outcome of the operation, then the keys of the rest of the iteration, or the

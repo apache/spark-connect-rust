@@ -1628,10 +1628,23 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
 `unknown_fields.UnknownFieldSet` reads their unknown fields, which `text_format` prints with
 `print_unknown_fields=True` (see below). The differences:
 
-- its types are of `pyspark.sql.connect.proto`, not `google.protobuf`: its
-  classes are of the metaclass `type`, not upb's `MessageMeta`, and can be subclassed, which upb
-  refuses, and its map of scalars is a `MapContainer`, where upb's is a `ScalarMapContainer`, of
-  which its map of messages, a `MessageMapContainer` as upb's, is a subclass;
+- its types are of `pyspark.sql.connect.proto`, not `google.protobuf`: its classes are of the
+  metaclass `type`, not upb's `MessageMeta`, and can be subclassed, which upb refuses, and its map
+  of scalars is a `MapContainer`, where upb's is a `ScalarMapContainer`, of which its map of
+  messages, a `MessageMapContainer` as upb's, is a subclass. The methods of its containers take
+  their arguments as upb's do, positionally
+  (`RepeatedScalarContainer.append() takes no keyword arguments`), with upb's errors, of the
+  names of upb's classes of the maps too
+  (`ScalarMapContainer.MergeFrom() takes exactly one argument (0 given)`). A dunder method of a
+  map called directly with the wrong arguments (`map.__eq__()`) is an exception: its error is
+  that of CPython's slot wrapper of the native type (`expected 1 argument, got 0`), where upb's
+  `__eq__` of a map is `Mapping.__eq__`, a Python function. So is a keyword argument of
+  `setdefault`, `insert`, `pop` or `__deepcopy__` (upb's `METH_VARARGS` methods) called through a
+  bound method object (`f = map.setdefault; f(key="k")`): CPython's error of upb's names the
+  method only (`setdefault() takes no keyword arguments`), as of a bound builtin method, and the
+  runtime's method, which cannot tell that call from one of the map, names the class too. Before
+  Python 3.12, while a trace or a profile function is set (`coverage`, a debugger), CPython calls
+  each such method as a bound method, and the runtime's error then names the method only too;
 - the pool of its descriptors (`DESCRIPTOR.file.pool`) is its own, of the files of the protos of
   Spark Connect and of the plugins' files that the drop-in adds to it (see below), not
   `protobuf`'s default pool: it finds their descriptors as upb's does, but has no `Add`,
@@ -1758,24 +1771,22 @@ and the rest of such a module is `protobuf`'s:
   `reflection.GeneratedProtocolMessageType` rather than with its builder, keeps `protobuf`'s
   classes, which take the package's messages only through bytes or dicts, whatever its file.
 
-The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their
-types as they are, the `MergeFrom` of their maps takes the items of `protobuf`'s maps, as upb's
-takes those of any mapping but a dict, and an `Any` of either packs and unpacks a message of
-either. A message of the
-runtime equals (`==`, on either side) a message of `protobuf`'s of its type of `protobuf`'s default
-pool of the same contents, as upb's messages of its one class of a type do: the runtime parses the
-bytes of `protobuf`'s message to compare it, as a field of the runtime takes it, so `in`, `remove`
-and `==` of the containers find such messages too. A message of a type of another pool, of
-another class for upb too, is not equal, and `CopyFrom`, `MergeFrom`, the constructors and the
-containers refuse it with upb's errors of a message of another class, as they refuse an object
+The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their types
+as they are, the `MergeFrom` of their maps takes the items of `protobuf`'s maps, as upb's takes
+those of any mapping but a dict, and an `Any` of either packs and unpacks a message of either. A
+message of the runtime equals (`==`, on either side) a message of `protobuf`'s of its type of
+`protobuf`'s default pool of the same contents, as upb's messages of its one class of a type do: the
+runtime parses the bytes of `protobuf`'s message to compare it, as a field of the runtime takes it,
+so `in`, `remove` and `==` of the containers find such messages too. A message of a type of another
+pool, of another class for upb too, is not equal, and `CopyFrom`, `MergeFrom`, the constructors and
+the containers refuse it with upb's errors of a message of another class, as they refuse an object
 that only has the `DESCRIPTOR` and the `SerializeToString` of a message. As upb's, `==` of two
-messages compares a float or a double field of its bits, so that a NaN equals a NaN of the same
-bits and -0.0 is not 0.0 (nor the default of a field without presence), and their unknown fields
-of their numbers, wire types and values, in the order of their tags, so that the order of fields
-of other tags and the encoding of a varint do not count. `==` of the containers and maps compares
-their values as Python's `==` does, as upb's `list` and `Mapping` comparisons do: a NaN value is
-not equal to itself, and a map is equal to a map of other key or value types of equal keys and
-values.
+messages compares a float or a double field of its bits, so that a NaN equals a NaN of the same bits
+and -0.0 is not 0.0 (nor the default of a field without presence), and their unknown fields of their
+numbers, wire types and values, in the order of their tags, so that the order of fields of other
+tags and the encoding of a varint do not count. `==` of the containers and maps compares their
+values as Python's `==` does, as upb's `list` and `Mapping` comparisons do: a NaN value is not equal
+to itself, and a map is equal to a map of other key or value types of equal keys and values.
 
 `google.protobuf.unknown_fields.UnknownFieldSet` is the drop-in's wrapper of `protobuf`'s class,
 once `pyspark.sql.connect.proto` is imported, which takes the messages of the package too, where
