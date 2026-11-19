@@ -42,5 +42,5 @@ def native_class(module, name, reference_module):
     if native_module() is None:
         return getattr(importlib.import_module(reference_module), name)
     native = getattr(importlib.import_module(module), name)
-    assert native.__module__.startswith("pyspark.ml.connect"), native
+    assert issubclass(native, getattr(native_module(), name)), native
     return native
