@@ -904,7 +904,7 @@ impl SparkSession {
         // server cannot parse ("Unexpected end of input. Missing schema.").
         if rows.is_empty() {
             let plan = LogicalPlan::LocalRelation {
-                schema: Some(schema),
+                schema: Some(options.map_or(schema.clone(), |o| o.sent_schema(schema))),
                 data: None,
             };
             return Ok(DataFrame::new(self.clone(), plan));
@@ -939,6 +939,7 @@ impl SparkSession {
         // compares with the cache threshold.
         let large = options.use_large_var_types() == Some("true");
         let batch = with_large_var_types(batch, &schema, large)?;
+        let schema = options.sent_schema(schema);
         let bytes = crate::arrow_input::batch_data_size(&batch);
         if bytes >= INLINE_IPC_BYTES || bytes >= options.cache_threshold() {
             return crate::arrow_input::create_relation(
@@ -986,13 +987,14 @@ impl SparkSession {
     ) -> Result<DataFrame> {
         let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema)?);
         let row_count = columns.first().map_or(0, |column| column.len());
+        let columns = with_udt_field_metadata(columns, &arrow_schema)?;
         let batch = columns_to_arrow_batch(columns, arrow_schema, row_count)?;
         // Columns of no rows are the schema alone, as `create_dataframe` sends no rows, and
         // PySpark its empty data (`LocalRelation(table=None, schema)`), before it reads any
         // setting: so no request reads them.
         let plan = if batch.num_rows() == 0 {
             LogicalPlan::LocalRelation {
-                schema: Some(schema),
+                schema: Some(options.map_or(schema.clone(), |o| o.sent_schema(schema))),
                 data: None,
             }
         } else {
@@ -1059,10 +1061,11 @@ impl SparkSession {
                 .into_iter()
                 .map(|batch| with_large_var_types(batch, &schema, large))
                 .collect::<Result<Vec<_>>>()?;
+            let schema = options.sent_schema(schema);
             crate::arrow_input::create_relation(&self.client, batches, Some(schema), Some(options))?
         } else {
             LogicalPlan::LocalRelation {
-                schema: Some(schema),
+                schema: Some(options.sent_schema(schema)),
                 data: Some(data),
             }
         };
@@ -1114,12 +1117,9 @@ impl SparkSession {
         schema: impl Into<Option<DataType>>,
         options: &crate::ArrowInputOptions,
     ) -> Result<DataFrame> {
-        let plan = crate::arrow_input::create_relation(
-            &self.client,
-            batches,
-            schema.into(),
-            Some(options),
-        )?;
+        let schema = schema.into().map(|schema| options.sent_schema(schema));
+        let plan =
+            crate::arrow_input::create_relation(&self.client, batches, schema, Some(options))?;
         Ok(DataFrame::new(self.clone(), plan))
     }
 
@@ -2173,6 +2173,31 @@ fn rows_to_arrow_ipc(rows: &[Row], schema: &DataType) -> Result<Vec<u8>> {
     batch_to_arrow_ipc(&rows_to_arrow_batch(rows, schema)?)
 }
 
+/// `columns`, of which a column of the Arrow type of its field of `arrow_schema` but the metadata
+/// of the fields of the SQL type of a user-defined type, which [`arrow_type_of`] gives the type
+/// and a caller's column need not, takes the type of its field. Another column is kept, so that a
+/// column of another type fails as it did.
+fn with_udt_field_metadata(
+    columns: Vec<arrow::array::ArrayRef>,
+    arrow_schema: &arrow::datatypes::Schema,
+) -> Result<Vec<arrow::array::ArrayRef>> {
+    columns
+        .into_iter()
+        .enumerate()
+        .map(|(i, column)| match arrow_schema.fields().get(i) {
+            Some(field)
+                if column.data_type() != field.data_type()
+                    && column.data_type().equals_datatype(field.data_type())
+                    && field.data_type().contains(column.data_type()) =>
+            {
+                crate::arrow_input::with_schema_type(column.to_data(), field.data_type())
+                    .map(arrow::array::make_array)
+            }
+            _ => Ok(column),
+        })
+        .collect()
+}
+
 fn columns_to_arrow_batch(
     columns: Vec<arrow::array::ArrayRef>,
     arrow_schema: arrow::datatypes::Schema,
@@ -2290,6 +2315,25 @@ fn datatype_to_arrow(dt: &DataType) -> Result<arrow::datatypes::DataType> {
 /// struct or the SQL type of a user-defined type, is `LargeUtf8` or `LargeBinary`, while the
 /// binaries of a variant, a geometry and a geography stay `Binary`, as PySpark keeps them.
 fn datatype_to_arrow_of(dt: &DataType, large: bool) -> Result<arrow::datatypes::DataType> {
+    arrow_type_of(dt, large, false)
+}
+
+/// The Arrow field metadata of the metadata of a field in the SQL type of a user-defined type,
+/// as PySpark's `to_arrow_type` writes it: `json.dumps` of it under `SPARK::metadata::json`, and
+/// none of no metadata. PySpark's Arrow schema of local data keeps no metadata of the other
+/// fields, as `_deduplicate_field_names` drops it, which leaves a user-defined type as it is.
+fn udt_field_metadata(
+    metadata: &crate::types::Metadata,
+) -> std::collections::HashMap<String, String> {
+    if metadata.is_empty() {
+        return std::collections::HashMap::new();
+    }
+    std::collections::HashMap::from([("SPARK::metadata::json".to_string(), metadata.json())])
+}
+
+/// [`datatype_to_arrow_of`], whose struct fields keep their metadata ([`udt_field_metadata`]) if
+/// `in_udt`, as in the SQL type of a user-defined type.
+fn arrow_type_of(dt: &DataType, large: bool, in_udt: bool) -> Result<arrow::datatypes::DataType> {
     use arrow::datatypes::{DataType as A, Field, Fields, TimeUnit};
     use std::collections::HashMap;
     Ok(match dt {
@@ -2333,7 +2377,7 @@ fn datatype_to_arrow_of(dt: &DataType, large: bool) -> Result<arrow::datatypes::
             contains_null,
         } => A::List(Arc::new(Field::new(
             "element",
-            datatype_to_arrow_of(element_type, large)?,
+            arrow_type_of(element_type, large, in_udt)?,
             *contains_null,
         ))),
         DataType::Map {
@@ -2342,10 +2386,10 @@ fn datatype_to_arrow_of(dt: &DataType, large: bool) -> Result<arrow::datatypes::
             value_contains_null,
         } => {
             let entry_fields: Fields = vec![
-                Field::new("key", datatype_to_arrow_of(key_type, large)?, false),
+                Field::new("key", arrow_type_of(key_type, large, in_udt)?, false),
                 Field::new(
                     "value",
-                    datatype_to_arrow_of(value_type, large)?,
+                    arrow_type_of(value_type, large, in_udt)?,
                     *value_contains_null,
                 ),
             ]
@@ -2357,18 +2401,30 @@ fn datatype_to_arrow_of(dt: &DataType, large: bool) -> Result<arrow::datatypes::
         }
         // The names of nested fields are deduplicated, as PySpark's `_deduplicate_field_names`
         // does for the Arrow schema it sends. The server cannot read duplicate names, while the
-        // schema of the relation keeps the names of the fields.
+        // schema of the relation keeps the names of the fields. In the SQL type of a user-defined
+        // type, which `_deduplicate_field_names` leaves as it is, the fields keep their names,
+        // also of duplicates, which the server then fails to read as PySpark's, and their
+        // metadata, as PySpark's `to_arrow_type` writes it.
         DataType::Struct { fields } => {
-            let names = dedup_field_names(fields.iter().map(|field| field.name.as_str()));
+            let names = if in_udt {
+                fields.iter().map(|field| field.name.clone()).collect()
+            } else {
+                dedup_field_names(fields.iter().map(|field| field.name.as_str()))
+            };
             let f: Fields = fields
                 .iter()
                 .zip(names)
                 .map(|(field, name)| {
-                    Ok(Field::new(
+                    let arrow_field = Field::new(
                         name,
-                        datatype_to_arrow_of(&field.data_type, large)?,
+                        arrow_type_of(&field.data_type, large, in_udt)?,
                         field.nullable,
-                    ))
+                    );
+                    Ok(if in_udt {
+                        arrow_field.with_metadata(udt_field_metadata(&field.metadata))
+                    } else {
+                        arrow_field
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?
                 .into();
@@ -2402,11 +2458,11 @@ fn datatype_to_arrow_of(dt: &DataType, large: bool) -> Result<arrow::datatypes::
                 .into(),
             )
         }
-        // As PySpark's, a user-defined type is sent as its SQL type.
+        // As PySpark's, a user-defined type is sent as its SQL type, of the metadata of its fields.
         DataType::Udt {
             sql_type: Some(sql_type),
             ..
-        } => datatype_to_arrow_of(sql_type, large)?,
+        } => arrow_type_of(sql_type, large, true)?,
         other => {
             return Err(SparkError::connect_msg(format!(
                 "Unsupported type for Arrow createDataFrame conversion: {other:?}"
@@ -2488,6 +2544,16 @@ fn has_var_types(dt: &DataType) -> bool {
 /// `DataType`, covering scalars and the nested array/map/struct types. Temporary
 /// columns borrow their values; building the Arrow output still copies payloads.
 fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::array::Array>> {
+    values_to_arrow_of(values, dt, false)
+}
+
+/// [`values_to_arrow`], of the Arrow types of [`arrow_type_of`] if `in_udt`, in the SQL type of a
+/// user-defined type.
+fn values_to_arrow_of(
+    values: &[&Value],
+    dt: &DataType,
+    in_udt: bool,
+) -> Result<Arc<dyn arrow::array::Array>> {
     use arrow::array::*;
     use arrow::buffer::{NullBuffer, OffsetBuffer};
     use arrow::datatypes::{Field, Fields};
@@ -2678,10 +2744,10 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                     _ => return Err(SparkError::connect_msg("Type mismatch: expected array")),
                 }
             }
-            let child_arr = values_to_arrow(&child, element_type)?;
+            let child_arr = values_to_arrow_of(&child, element_type, in_udt)?;
             let field = Arc::new(Field::new(
                 "element",
-                datatype_to_arrow(element_type)?,
+                arrow_type_of(element_type, false, in_udt)?,
                 *contains_null,
             ));
             // A non-nullable element that has nulls is an error, not a panic, as for a struct.
@@ -2766,7 +2832,7 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
         DataType::Udt {
             sql_type: Some(sql_type),
             ..
-        } => values_to_arrow(values, sql_type),
+        } => values_to_arrow_of(values, sql_type, true),
         DataType::Struct { fields } => {
             let mut cols: Vec<Vec<&Value>> = vec![Vec::with_capacity(values.len()); fields.len()];
             let mut valid = arrow::array::builder::BooleanBufferBuilder::new(values.len());
@@ -2813,11 +2879,12 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
             let arrays: Vec<Arc<dyn Array>> = fields
                 .iter()
                 .enumerate()
-                .map(|(i, f)| values_to_arrow(&cols[i], &f.data_type))
+                .map(|(i, f)| values_to_arrow_of(&cols[i], &f.data_type, in_udt))
                 .collect::<Result<_>>()?;
             // The Arrow fields of the struct, with the deduplicated names of `datatype_to_arrow`,
-            // which the column's type has.
-            let arrow::datatypes::DataType::Struct(afields) = datatype_to_arrow(dt)? else {
+            // and the metadata in a user-defined type, which the column's type has.
+            let arrow::datatypes::DataType::Struct(afields) = arrow_type_of(dt, false, in_udt)?
+            else {
                 unreachable!("a struct is a struct")
             };
             // A struct without fields takes its length from the values.
@@ -2859,13 +2926,13 @@ fn values_to_arrow(values: &[&Value], dt: &DataType) -> Result<Arc<dyn arrow::ar
                     _ => return Err(SparkError::connect_msg("Type mismatch: expected map")),
                 }
             }
-            let key_arr = values_to_arrow(&keys, key_type)?;
-            let val_arr = values_to_arrow(&vals, value_type)?;
+            let key_arr = values_to_arrow_of(&keys, key_type, in_udt)?;
+            let val_arr = values_to_arrow_of(&vals, value_type, in_udt)?;
             let entry_fields: Fields = vec![
-                Field::new("key", datatype_to_arrow(key_type)?, false),
+                Field::new("key", arrow_type_of(key_type, false, in_udt)?, false),
                 Field::new(
                     "value",
-                    datatype_to_arrow(value_type)?,
+                    arrow_type_of(value_type, false, in_udt)?,
                     *value_contains_null,
                 ),
             ]
@@ -4869,6 +4936,207 @@ mod tests {
             .as_any()
             .downcast_ref::<ListArray>()
             .is_some());
+    }
+
+    #[test]
+    fn input_ipc_sends_the_metadata_of_the_fields_of_the_sql_type_of_a_udt_as_pyspark() {
+        // As PySpark's Arrow schema of local rows (`LocalDataToArrowConversion.convert`): no
+        // metadata of a field of the schema or of a struct in it, which `_deduplicate_field_names`
+        // drops, while it leaves a user-defined type as it is, whose SQL type `to_arrow_type`
+        // converts with `json.dumps` of the metadata of each of its fields, at any depth, under
+        // `SPARK::metadata::json`. Of large types too.
+        use arrow::array::{Array, ListArray, StructArray};
+        use arrow::datatypes::DataType as A;
+        let field = |name: &str, data_type, json: &str| crate::types::StructField {
+            name: name.to_string(),
+            data_type,
+            nullable: true,
+            metadata: crate::types::Metadata::from_json(json).unwrap(),
+        };
+        let string = DataType::String {
+            collation: "UTF8_BINARY".into(),
+        };
+        let inner = DataType::Struct {
+            fields: vec![field("y", string, r#"{"10": "a", "9": 1e+300}"#)],
+        };
+        let sql_type = DataType::Struct {
+            fields: vec![
+                field(
+                    "x",
+                    DataType::Double,
+                    r#"{"t": 74334700308107.62, "b": [1, 18446744073709551621]}"#,
+                ),
+                field(
+                    "a",
+                    DataType::Array {
+                        element_type: Box::new(inner.clone()),
+                        contains_null: true,
+                    },
+                    "{}",
+                ),
+            ],
+        };
+        let udt = DataType::Udt {
+            type_str: "udt".to_string(),
+            jvm_class: None,
+            python_class: Some("pyspark.testing.objects.ExamplePointUDT".to_string()),
+            serialized_python_class: None,
+            sql_type: Some(Box::new(sql_type)),
+        };
+        let schema = DataType::Struct {
+            fields: vec![
+                field("u", udt, r#"{"top": 1}"#),
+                field("s", inner, r#"{"o": 2}"#),
+            ],
+        };
+        let y = |text: &str| {
+            Value::Struct(Row::new(vec!["y".to_string()], vec![Value::String(text.into())]).into())
+        };
+        let x = Row::new(
+            vec!["x".to_string(), "a".to_string()],
+            vec![Value::Double(1.0), Value::List(vec![y("v")])],
+        );
+        let rows = vec![
+            row(vec![Value::Struct(x.into()), y("w")]),
+            row(vec![Value::Null, Value::Null]),
+        ];
+        let key = "SPARK::metadata::json";
+        for large in [false, true] {
+            let batch = rows_to_arrow_batch(&rows, &schema).unwrap();
+            let batch = with_large_var_types(batch, &schema, large).unwrap();
+            let data = batch_to_arrow_ipc(&batch).unwrap();
+            let batch = StreamReader::try_new(Cursor::new(data), None)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap();
+            let arrow_schema = batch.schema();
+            assert!(arrow_schema
+                .fields()
+                .iter()
+                .all(|f| f.metadata().is_empty()));
+            let A::Struct(udt_fields) = arrow_schema.field(0).data_type() else {
+                panic!("a UDT of a struct is a struct");
+            };
+            assert_eq!(
+                udt_fields[0].metadata().get(key).map(String::as_str),
+                Some(r#"{"t": 74334700308107.62, "b": [1, 18446744073709551621]}"#)
+            );
+            assert!(udt_fields[1].metadata().is_empty());
+            let A::List(element) = udt_fields[1].data_type() else {
+                panic!("an array is a list");
+            };
+            let A::Struct(element_fields) = element.data_type() else {
+                panic!("a struct is a struct");
+            };
+            assert_eq!(
+                element_fields[0].metadata().get(key).map(String::as_str),
+                Some(r#"{"10": "a", "9": 1e+300}"#)
+            );
+            let string = if large { A::LargeUtf8 } else { A::Utf8 };
+            assert_eq!(element_fields[0].data_type(), &string);
+            let A::Struct(struct_fields) = arrow_schema.field(1).data_type() else {
+                panic!("a struct is a struct");
+            };
+            assert!(struct_fields[0].metadata().is_empty());
+            let udt_column = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            assert!(udt_column.is_null(1));
+            let list = udt_column
+                .column(1)
+                .as_any()
+                .downcast_ref::<ListArray>()
+                .unwrap();
+            assert_eq!(list.value(0).len(), 1);
+        }
+    }
+
+    #[test]
+    fn columns_of_no_metadata_of_the_sql_type_of_a_udt_take_the_types_of_the_schema() {
+        // `create_dataframe_from_columns` of a UDT column made without the metadata of the
+        // fields of its SQL type, which the Arrow types of the schema hold, sends the types of the
+        // schema; a column of another type fails as it did.
+        use arrow::array::Int64Array;
+        let sql_type = DataType::Struct {
+            fields: vec![crate::types::StructField {
+                name: "x".to_string(),
+                data_type: DataType::Double,
+                nullable: true,
+                metadata: crate::types::Metadata::from_json(r#"{"m": 1}"#).unwrap(),
+            }],
+        };
+        let udt = DataType::Udt {
+            type_str: "udt".to_string(),
+            jvm_class: None,
+            python_class: None,
+            serialized_python_class: None,
+            sql_type: Some(Box::new(sql_type.clone())),
+        };
+        let schema = schema(vec![udt]);
+        let arrow_schema = arrow::datatypes::Schema::new(schema_to_arrow_fields(&schema).unwrap());
+        let point = Value::Struct(Row::new(vec!["x".to_string()], vec![Value::Double(1.0)]).into());
+        let plain = values_to_arrow(&[&point, &Value::Null], &sql_type).unwrap();
+        assert_ne!(plain.data_type(), arrow_schema.field(0).data_type());
+        let columns = with_udt_field_metadata(vec![plain], &arrow_schema).unwrap();
+        let batch = columns_to_arrow_batch(columns, arrow_schema.clone(), 2).unwrap();
+        assert_eq!(
+            batch.schema().field(0).data_type(),
+            arrow_schema.field(0).data_type()
+        );
+        let other: arrow::array::ArrayRef = Arc::new(Int64Array::from(vec![1, 2]));
+        let columns = with_udt_field_metadata(vec![other], &arrow_schema).unwrap();
+        assert!(columns_to_arrow_batch(columns, arrow_schema, 2).is_err());
+    }
+
+    #[test]
+    fn input_ipc_keeps_the_duplicate_names_of_the_sql_type_of_a_udt_as_pyspark() {
+        // As PySpark's Arrow schema of local rows, whose `_deduplicate_field_names` stops at a
+        // user-defined type: the fields of its SQL type keep their names, also of duplicates,
+        // which the server then fails to read, as PySpark's, where they were deduplicated; a
+        // struct of the schema has deduplicated names.
+        use arrow::array::{Int64Array, StructArray};
+        use arrow::datatypes::DataType as A;
+        let pair = DataType::Struct {
+            fields: vec![
+                struct_field("d", DataType::Long),
+                struct_field("d", DataType::Long),
+            ],
+        };
+        let udt = DataType::Udt {
+            type_str: "udt".to_string(),
+            jvm_class: None,
+            python_class: None,
+            serialized_python_class: None,
+            sql_type: Some(Box::new(pair.clone())),
+        };
+        let value = || {
+            Value::Struct(
+                Row::new(
+                    vec!["d".to_string(), "d".to_string()],
+                    vec![Value::Long(1), Value::Long(2)],
+                )
+                .into(),
+            )
+        };
+        let batch = read_batch(&[row(vec![value(), value()])], &schema(vec![udt, pair]));
+        let names = |i: usize| match batch.schema().field(i).data_type() {
+            A::Struct(fields) => fields.iter().map(|f| f.name().clone()).collect::<Vec<_>>(),
+            other => panic!("not a struct: {other:?}"),
+        };
+        assert_eq!(names(0), ["d", "d"]);
+        assert_eq!(names(1), ["d_0", "d_1"]);
+        for i in 0..2 {
+            let column = batch
+                .column(i)
+                .as_any()
+                .downcast_ref::<StructArray>()
+                .unwrap();
+            let second = column.column(1).as_any().downcast_ref::<Int64Array>();
+            assert_eq!(second.unwrap().value(0), 2);
+        }
     }
 
     #[test]

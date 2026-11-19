@@ -36237,3 +36237,674 @@ def test_pivot_values_are_the_literal_columns_as_pyspark(mock_connect):
     assert [str(column) for column in grouped._pivot_values] == ["Column<'1'>", "Column<'2'>"]
     assert df.groupBy("id")._pivot_values is None
     assert df.groupBy("id").pivot("id")._pivot_values is None
+
+
+# --------------------------------------------------------------------------- the schemas of createDataFrame
+def _sent_local_relation(service):
+    # The LocalRelation of the last ExecutePlanRequest, under its ToDF: ExecutePlanRequest.plan=3
+    # -> Plan.root=1, Relation.to_df=18 -> ToDF.input=1, Relation.local_relation=11 ->
+    # LocalRelation.data=1 and schema=2.
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    while 18 in relation:
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    return parse_message(relation[11][0])
+
+
+def test_create_dataframe_sends_the_metadata_of_its_schema_as_pyspark(mock_connect):
+    # As PySpark's createDataFrame, which sends the `json()` of the schema, of the metadata dicts
+    # of its fields, also nested: an int of more than 64 bits as it is, of which the server keeps
+    # the low 64 bits, where the drop-in sent the float of the core's JSON values (the server
+    # refused an array of such an int), and a float as Python writes it. Of a pyarrow Table, the
+    # Arrow schema holds `json.dumps` of the metadata of each field, as PySpark's
+    # `to_arrow_schema` writes it; that of local rows and of a pandas DataFrame holds none. The
+    # texts are official PySpark 4.3.0's.
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    metadata = {"x": 10**30, "f": 1e-07, "b": [1, 2**70]}
+    inner = T.StructType([T.StructField("a", T.IntegerType(), True, metadata)])
+    outer = T.StructType([T.StructField("s", inner, True, {"o": 2**64 + 5})])
+    inner_json = ('{"fields":[{"metadata":{"b":[1,1180591620717411303424],"f":1e-07,'
+                  '"x":1000000000000000000000000000000},"name":"a","nullable":true,'
+                  '"type":"integer"}],"type":"struct"}')
+    outer_json = ('{"fields":[{"metadata":{"o":18446744073709551621},"name":"s","nullable":true,'
+                  f'"type":{inner_json}}}],"type":"struct"}}')
+    key = b"SPARK::metadata::json"
+    inner_arrow = {key: b'{"x": 1000000000000000000000000000000, "f": 1e-07, '
+                        b'"b": [1, 1180591620717411303424]}'}
+    table = pa.table({"s": pa.array([{"a": 1}], pa.struct([("a", pa.int32())]))})
+    for data, schema, sent, arrow_metadata in [
+        ([(1,)], inner, inner_json, [None]),
+        ([((1,),)], outer, outer_json, [None, None]),
+        ([], outer, outer_json, None),
+        (pd.DataFrame({"a": [1]}), inner, inner_json, [None]),
+        (pa.table({"a": pa.array([1], pa.int32())}), inner, inner_json, [inner_arrow]),
+        (table, outer, outer_json, [{key: b'{"o": 18446744073709551621}'}, inner_arrow]),
+    ]:
+        spark.createDataFrame(data, schema).toArrow()
+        relation = _sent_local_relation(service)
+        assert relation[2] == [sent.encode()]
+        if arrow_metadata is None:
+            assert 1 not in relation
+            continue
+        field = pa.ipc.open_stream(relation[1][0]).schema.field(0)
+        fields = [field] + ([field.type.field(0)] if pa.types.is_struct(field.type) else [])
+        assert [f.metadata for f in fields] == arrow_metadata
+
+
+def test_create_dataframe_raises_the_error_of_the_json_of_its_schema_after_the_data_as_pyspark(
+        mock_connect):
+    # As PySpark's createDataFrame, which converts the data, and then writes the `json()` of the
+    # schema: metadata that `json.dumps` refuses, or whose keys of an int and a str its sorted
+    # keys do not sort, raises its error after the errors of the data, of local rows, of no rows,
+    # of a pandas DataFrame and of a pyarrow Table, whose Arrow schema (`to_arrow_schema`) writes
+    # the metadata with `json.dumps` first. Nothing is sent. The errors are official PySpark
+    # 4.3.0's.
+    from pyspark.errors import PySparkValueError
+
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    unsorted = "'<' not supported between instances of 'str' and "
+    for metadata, error, of_arrow in [
+        ({"x": {1}}, "Object of type set is not JSON serializable", None),
+        ({(1,): 1, "b": 2}, unsorted + "'tuple'",
+         "keys must be str, int, float, bool or None, not tuple"),
+        ({1: "a", "b": 2}, unsorted + "'int'", None),
+    ]:
+        schema = T.StructType([T.StructField("a", T.LongType(), True, metadata),
+                               T.StructField("b", T.LongType())])
+        for data, raised in [
+            ([(1, 2)], error),
+            ([], error),
+            (pd.DataFrame({"a": [1], "b": [2]}), error),
+            (pa.table({"a": [1], "b": [2]}), of_arrow or error),
+        ]:
+            with pytest.raises(TypeError) as e:
+                spark.createDataFrame(data, schema)
+            assert str(e.value) == raised, (metadata, type(data))
+        with pytest.raises(PySparkValueError) as e:
+            spark.createDataFrame([(1, 2, 3)], schema)
+        assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert service.execute_requests == [] and service.analyze_requests == []
+
+
+class _OnlySqlTypeUDT(T.UserDefinedType):
+    """A UserDefinedType of a SQL type only: its `module()` and `serialize` are not implemented."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.LongType()
+
+
+class _FailingSerializeUDT(_OnlySqlTypeUDT):
+    """A UserDefinedType whose `serialize` raises, and whose `module()` is not implemented."""
+
+    def serialize(self, obj):
+        raise KeyError(f"no serialize of {obj!r}")
+
+
+class _OnlySqlTypeValue:
+    __UDT__ = _OnlySqlTypeUDT()
+
+
+class _NoSqlTypeValue:
+    __UDT__ = T.UserDefinedType()
+
+
+def test_create_dataframe_of_a_user_defined_type_of_no_json_raises_as_pyspark(mock_connect):
+    # As PySpark's createDataFrame, which converts the data with its converters before it writes
+    # the `json()` of the schema: of an array, a map, a field or a struct of a UserDefinedType whose
+    # `module()` or `sqlType()` is not implemented, the errors of the data come first, of the
+    # `sqlType()` and of the `serialize` (`toInternal()`) of the type too, and then that of its
+    # `jsonValue()`, of local rows and of a pandas DataFrame of a schema, and of local rows of
+    # values of the type, whose schema is inferred. The drop-in raised the error of the JSON of
+    # the type first. A pyarrow Table raised PySpark's errors. Nothing is sent. The errors are
+    # official PySpark 4.3.0's.
+    from pyspark.errors import PySparkNotImplementedError, PySparkValueError
+
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+
+    def frame(rows, schema):
+        return pd.DataFrame({name: [row[i] for row in rows] for i, name in enumerate(schema.names)})
+
+    def not_implemented(feature):
+        return PySparkNotImplementedError, {"feature": feature}
+
+    for udt, value, none in [
+        (T.UserDefinedType(), not_implemented("sqlType()"), not_implemented("sqlType()")),
+        (_OnlySqlTypeUDT(), not_implemented("toInternal()"), not_implemented("module()")),
+        (_FailingSerializeUDT(), (KeyError, "'no serialize of 1'"), not_implemented("module()")),
+    ]:
+        for schema, rows, expected in [
+            (T.StructType([T.StructField("a", udt)]), [(1,)], value),
+            (T.StructType([T.StructField("a", udt)]), [(None,)], none),
+            (T.StructType([T.StructField("a", udt)]), [{"a": 1}], value),
+            (T.StructType([T.StructField("a", T.ArrayType(udt))]), [([1],)], value),
+            (T.StructType([T.StructField("a", T.MapType(T.StringType(), udt))]), [({"k": 1},)],
+             value),
+            (T.StructType([T.StructField("a", T.StructType([T.StructField("b", udt)]))]),
+             [((1,),)], value),
+            (T.StructType([T.StructField("x", T.LongType()), T.StructField("a", udt)]), [(1, 1)],
+             value),
+        ]:
+            for data in [rows] + ([frame(rows, schema)] if isinstance(rows[0], tuple) else []):
+                with pytest.raises(expected[0]) as e:
+                    spark.createDataFrame(data, schema)
+                if expected[0] is PySparkNotImplementedError:
+                    assert e.value.getMessageParameters() == expected[1], (udt, schema, data)
+                else:
+                    assert str(e.value) == expected[1]
+        # A row of another width, and a null of a field that is not nullable, raise first.
+        with pytest.raises(PySparkValueError) as e:
+            spark.createDataFrame([(1, 2)], T.StructType([T.StructField("a", udt)]))
+        assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+        if udt.__class__ is not T.UserDefinedType:
+            schema = T.StructType([T.StructField("x", T.LongType(), False), T.StructField("a", udt)])
+            with pytest.raises(PySparkValueError, match="^input for LongType\\(\\) must not be None$"):
+                spark.createDataFrame([(None, 1)], schema)
+            # Of a pyarrow Table, as PySpark: the error of the JSON, after the Arrow conversion.
+            table = pa.table({"a": pa.array([1], pa.int64())})
+            with pytest.raises(PySparkNotImplementedError) as e:
+                spark.createDataFrame(table, T.StructType([T.StructField("a", udt)]))
+            assert e.value.getMessageParameters() == {"feature": "module()"}
+    for value, feature in [(_OnlySqlTypeValue(), "toInternal()"), (_NoSqlTypeValue(), "sqlType()")]:
+        for rows in ([(value,)], [(value, 1)], [{"p": value}], [T.Row(p=value)], [([value],)]):
+            with pytest.raises(PySparkNotImplementedError) as e:
+                spark.createDataFrame(rows)
+            assert e.value.getMessageParameters() == {"feature": feature}, rows
+    with pytest.raises(PySparkValueError) as e:
+        spark.createDataFrame([(_OnlySqlTypeValue(), None)])
+    assert e.value.getCondition() == "CANNOT_DETERMINE_TYPE"
+    assert service.execute_requests == [] and service.analyze_requests == []
+
+
+def _analyzed_local_relation(service):
+    # The LocalRelation of the plan of the last AnalyzePlanRequest, of isLocal:
+    # AnalyzePlanRequest.is_local=7 -> IsLocal.plan=1 -> Plan.root=1, under its ToDF
+    # (Relation.to_df=18 -> ToDF.input=1), Relation.local_relation=11.
+    request = parse_message(service.analyze_requests[-1])
+    relation = parse_message(parse_message(parse_message(request[7][0])[1][0])[1][0])
+    while 18 in relation:
+        relation = parse_message(parse_message(relation[18][0])[1][0])
+    return parse_message(relation[11][0])
+
+
+def _udt_of_metadata(metadata):
+    # A UserDefinedType of a struct SQL type, whose field has the metadata `metadata`.
+    class MetadataUDT(T.UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            return T.StructType([T.StructField("x", T.DoubleType(), False, metadata)])
+
+        @classmethod
+        def module(cls):
+            return "pyspark.sql.types"
+
+        def serialize(self, obj):
+            return (obj,)
+
+        def deserialize(self, datum):
+            return datum[0]
+
+    return MetadataUDT()
+
+
+def test_create_dataframe_sends_the_metadata_of_the_sql_type_of_a_user_defined_type_as_pyspark(
+        mock_connect):
+    # As PySpark's createDataFrame of a UserDefinedType whose `sqlType()` has a field of
+    # metadata: the `json()` of the schema has the metadata in the JSON of the type, of its keys
+    # sorted as `sort_keys` sorts ints and floats, its ints as they are and its floats as Python
+    # writes them, and the Arrow schema of local rows and of a pandas DataFrame has `json.dumps`
+    # of it, of the keys in their order, on the field of the SQL type, as no other field of the
+    # schema of local rows has. The drop-in sent the type of no metadata, also in the Arrow
+    # schema, and wrote the metadata that `json.dumps` refuses, or whose keys `sort_keys` does
+    # not sort. Of these, the error of the Arrow schema of the data comes first, then the error
+    # of the JSON, and nothing is sent. The texts and errors are official PySpark 4.3.0's.
+    from pyspark.errors import PySparkValueError
+
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    unsorted = "'<' not supported between instances of 'str' and "
+    for metadata, of_data, of_none in [
+        ({"x": {1}}, "Object of type set is not JSON serializable",
+         "Object of type set is not JSON serializable"),
+        ({(1,): 1, "b": 2}, "keys must be str, int, float, bool or None, not tuple",
+         unsorted + "'tuple'"),
+        ({1: "a", "b": 2}, unsorted + "'int'", unsorted + "'int'"),
+    ]:
+        schema = T.StructType([T.StructField("u", _udt_of_metadata(metadata))])
+        for data, error in [([(1.0,)], of_data), ([], of_none), (pd.DataFrame({"u": [1.0]}), of_data)]:
+            with pytest.raises(TypeError) as e:
+                spark.createDataFrame(data, schema)
+            assert str(e.value) == error, (metadata, type(data))
+        with pytest.raises(PySparkValueError) as e:
+            spark.createDataFrame([(1.0, 2.0)], schema)
+        assert e.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    assert service.execute_requests == [] and service.analyze_requests == []
+    key = b"SPARK::metadata::json"
+    for metadata, sent, dumped in [
+        ({10: "a", 9: "b"}, '{"9":"b","10":"a"}', b'{"10": "a", "9": "b"}'),
+        ({2.5: "a", 10: "b", -1: "c"}, '{"-1":"c","2.5":"a","10":"b"}',
+         b'{"2.5": "a", "10": "b", "-1": "c"}'),
+        ({"t": 74334700308107.625, "i": 2**70}, '{"i":1180591620717411303424,"t":74334700308107.62}',
+         b'{"t": 74334700308107.62, "i": 1180591620717411303424}'),
+    ]:
+        schema = T.StructType([T.StructField("u", _udt_of_metadata(metadata))])
+        sql_type = (f'"sqlType":{{"fields":[{{"metadata":{sent},"name":"x","nullable":false,'
+                    '"type":"double"}],"type":"struct"}')
+        for data in [[(1.0,)], [], pd.DataFrame({"u": [1.0]})]:
+            spark.createDataFrame(data, schema).isLocal()
+            relation = _analyzed_local_relation(service)
+            assert sql_type in relation[2][0].decode(), (metadata, type(data))
+            if not len(data):
+                assert 1 not in relation
+                continue
+            field = pa.ipc.open_stream(relation[1][0]).schema.field(0)
+            assert field.metadata is None
+            assert field.type.field(0).metadata == {key: dumped}, (metadata, type(data))
+    assert service.execute_requests == []
+
+
+def test_map_and_apply_of_a_return_type_that_arrow_refuses_raise_not_implemented_as_pyspark(
+        mock_connect):
+    # As PySpark's mapInPandas, mapInArrow, applyInPandas and applyInArrow, which read the
+    # columns of the DataFrame (an AnalyzePlan of its schema), and the applyInPandas and
+    # applyInArrow of a cogroup, which do not: then their UDF checks its return type, whose
+    # `to_arrow_type` writes `json.dumps` of the metadata of each field, and raises
+    # NOT_IMPLEMENTED of metadata that `json.dumps` refuses. The drop-in raised the TypeError of
+    # the JSON of the type, of no request. applyInPandasWithState raises the TypeError, of no
+    # request, as PySpark's. The messages are official PySpark 4.3.0's.
+    from pyspark.errors import PySparkNotImplementedError
+
+    spark, service = mock_connect
+    returned = "StructType([StructField('a', IntegerType(), True)])"
+    grouped = "Invalid return type with grouped map"
+    for metadata, error in [
+        ({"x": {1}}, "Object of type set is not JSON serializable"),
+        ({(1,): 1}, "keys must be str, int, float, bool or None, not tuple"),
+    ]:
+        schema = T.StructType([T.StructField("a", T.IntegerType(), True, metadata)])
+        for feature, call, analyzed in [
+            ("Invalid return type in mapInPandas",
+             lambda df: df.mapInPandas(lambda it: it, schema), 1),
+            ("Invalid return type in mapInPandas",
+             lambda df: df.mapInArrow(lambda it: it, schema), 1),
+            (f"{grouped} Pandas UDFs or at groupby.applyInPandas(WithState)",
+             lambda df: df.groupBy("id").applyInPandas(lambda pdf: pdf, schema), 1),
+            (f"{grouped} Arrow UDFs or at groupby.applyInArrow",
+             lambda df: df.groupBy("id").applyInArrow(lambda t: t, schema), 1),
+            ("Invalid return type in cogroup.applyInPandas",
+             lambda df: df.groupBy("id").cogroup(df.groupBy("id")).applyInPandas(
+                 lambda a, b: a, schema), 0),
+            ("Invalid return type in cogroup.applyInArrow",
+             lambda df: df.groupBy("id").cogroup(df.groupBy("id")).applyInArrow(
+                 lambda a, b: a, schema), 0),
+        ]:
+            df = spark.range(1)
+            before = len(service.analyze_requests)
+            with pytest.raises(PySparkNotImplementedError) as e:
+                call(df)
+            assert e.value.getMessageParameters() == {"feature": f"{feature}: {returned}"}
+            # AnalyzePlanRequest.schema=4.
+            requests = service.analyze_requests[before:]
+            assert [4 in parse_message(request) for request in requests] == [True] * analyzed
+        before = len(service.analyze_requests)
+        with pytest.raises(TypeError) as e:
+            spark.range(1).groupBy("id").applyInPandasWithState(
+                lambda key, pdfs, state: pdfs, schema, schema, "Update", "NoTimeout")
+        assert str(e.value) == error
+        assert len(service.analyze_requests) == before
+    assert service.execute_requests == []
+
+
+class _NoModuleUDT(T.UserDefinedType):
+    """A UserDefinedType of a struct SQL type, whose `module()` is not implemented."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.StructType([T.StructField("x", T.DoubleType(), False)])
+
+    def serialize(self, obj):
+        return (float(obj.x),)
+
+    def deserialize(self, datum):
+        return _NoModuleValue(datum[0])
+
+
+class _NoModuleValue:
+    __UDT__ = _NoModuleUDT()
+
+    def __init__(self, x):
+        self.x = x
+
+
+class _Uninferable:
+    __slots__ = ()
+
+
+def test_create_dataframe_of_values_of_a_user_defined_type_of_no_json_raises_the_inference_error_as_pyspark(  # noqa: E501
+        mock_connect):
+    # As PySpark's createDataFrame of rows of no schema, which infers the schema of the rows, of
+    # the UserDefinedType of the values of its class, before it writes the JSON of the type: the
+    # errors of the inference come first, of the merge of the type with the type of a value of
+    # another row, and of a value of no type that it infers, also of another row, and then of no
+    # such error, that of the JSON of the type, whose `module()` is not implemented. The drop-in
+    # raised the error of the JSON first. Nothing is sent. The errors are official PySpark
+    # 4.3.0's.
+    from pyspark.errors import PySparkNotImplementedError, PySparkTypeError
+
+    spark, service = mock_connect
+    point = _NoModuleValue(1.0)
+
+    def merge(first, second):
+        return "CANNOT_MERGE_TYPE", {"data_type1": first, "data_type2": second}
+
+    def uninferred(name):
+        return "CANNOT_INFER_TYPE_FOR_FIELD", {"field_name": name}
+
+    udt = "_NoModuleUDT"
+    for data, names, expected in [
+        ([(point,), (1,)], None, merge(udt, "LongType")),
+        ([(1,), (point,)], None, merge("LongType", udt)),
+        ([(point,), ("s",)], None, merge(udt, "StringType")),
+        ([(point,), (_Uninferable(),)], None, uninferred("_1")),
+        ([(point, _Uninferable())], None, uninferred("_2")),
+        ([(_Uninferable(), point)], None, uninferred("_1")),
+        ([{"a": point}, {"a": {"k": 1}}], None, merge(udt, "MapType")),
+        ([(point,), (datetime.date(2020, 1, 1),)], None, merge(udt, "DateType")),
+        ([([point, 1],)], None, uninferred("_1")),
+        ([(point,), (1,)], ["a"], merge(udt, "LongType")),
+    ]:
+        with pytest.raises(PySparkTypeError) as e:
+            spark.createDataFrame(data, names)
+        assert (e.value.getCondition(), e.value.getMessageParameters()) == expected, data
+    for data, names in [([(point,)], None), ([(point, 1)], ["a", "b"])]:
+        with pytest.raises(PySparkNotImplementedError) as e:
+            spark.createDataFrame(data, names)
+        assert e.value.getMessageParameters() == {"feature": "module()"}
+    assert service.execute_requests == [] and service.analyze_requests == []
+
+
+def test_create_dataframe_sends_the_metadata_of_keys_that_are_not_strings_as_pyspark(
+        mock_connect):
+    # As PySpark's createDataFrame, which writes the `json()` of the schema, of `sort_keys`: of
+    # the ints and floats that are keys of the metadata of a field sorted as Python compares
+    # them, which `json.dumps` then writes as strings, of local rows, of no rows, of a pandas
+    # DataFrame, of a pyarrow Table, whose Arrow schema has `json.dumps` of the metadata, of the
+    # keys in their order, and of numpy arrays. The drop-in sorted the strings of the keys. A bool
+    # key and a str key, which `sort_keys` does not sort, raise its TypeError. The texts are
+    # official PySpark 4.3.0's.
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    key = b"SPARK::metadata::json"
+    for metadata, sent, dumped in [
+        ({10: "a", 9: "b"}, '{"9":"b","10":"a"}', b'{"10": "a", "9": "b"}'),
+        ({2.5: "a", 10: "b", -1: "c"}, '{"-1":"c","2.5":"a","10":"b"}',
+         b'{"2.5": "a", "10": "b", "-1": "c"}'),
+    ]:
+        one = T.StructType([T.StructField("a", T.LongType(), True, metadata)])
+        two = T.StructType([T.StructField("a", T.LongType(), True, metadata),
+                            T.StructField("b", T.LongType())])
+        field = f'{{"metadata":{sent},"name":"a","nullable":true,"type":"long"}}'
+        one_json = f'{{"fields":[{field}],"type":"struct"}}'
+        two_json = (f'{{"fields":[{field},{{"metadata":{{}},"name":"b","nullable":true,'
+                    '"type":"long"}],"type":"struct"}')
+        for data, schema, text, arrow_metadata in [
+            ([(1,)], one, one_json, None),
+            ([], one, one_json, None),
+            (pd.DataFrame({"a": [1]}), one, one_json, None),
+            (pa.table({"a": [1]}), one, one_json, {key: dumped}),
+            (np.arange(3), one, one_json, None),
+            (np.arange(6).reshape(3, 2), two, two_json, None),
+            (np.zeros((0, 1), "int64"), one, one_json, None),
+        ]:
+            spark.createDataFrame(data, schema).toArrow()
+            relation = _sent_local_relation(service)
+            assert relation[2] == [text.encode()], (metadata, type(data))
+            if len(data):
+                arrow_schema = pa.ipc.open_stream(relation[1][0]).schema
+                assert arrow_schema.field(0).metadata == arrow_metadata, (metadata, type(data))
+            else:
+                assert 1 not in relation
+    schema = T.StructType([T.StructField("a", T.LongType(), True, {True: 1, False: 2, "z": 3})])
+    for data in [[(1,)], [], pd.DataFrame({"a": [1]}), pa.table({"a": [1]}), np.arange(3),
+                 np.zeros((0, 1), "int64")]:
+        before = len(service.execute_requests)
+        with pytest.raises(TypeError) as e:
+            spark.createDataFrame(data, schema)
+        assert str(e.value) == "'<' not supported between instances of 'str' and 'bool'"
+        assert len(service.execute_requests) == before
+
+
+def test_create_dataframe_of_pandas_sends_no_metadata_in_the_arrow_schema_as_pyspark(
+        mock_connect):
+    # As PySpark's createDataFrame of a pandas DataFrame, whose Arrow schema is of the fields of
+    # `_deduplicate_field_names`, which keep no metadata, of every conversion of a column: of
+    # int64 of 1000 rows or more, of a nullable Int64, of float64 of 100,000 rows, of str and of
+    # Arrow strings of 10,000 rows, of timestamps and of dates of 10,000 rows, each of a fast path
+    # of the drop-in. The relation sends the metadata in the `json()` of the schema. The drop-in's
+    # conversions of int64, Int64, Arrow strings, timestamps and dates sent `json.dumps` of the
+    # metadata in the Arrow schema too. The texts are official PySpark 4.3.0's.
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    for frame, data_type, name in [
+        (pd.DataFrame({"a": np.arange(1000, dtype="int64")}), T.LongType(), "long"),
+        (pd.DataFrame({"a": pd.array([1, None], dtype="Int64")}), T.LongType(), "long"),
+        (pd.DataFrame({"a": np.arange(100_000, dtype="float64")}), T.DoubleType(), "double"),
+        (pd.DataFrame({"a": ["x", "y"] * 5000}), T.StringType(), "string"),
+        (pd.DataFrame({"a": pd.array(["x", "y"] * 5000, dtype="string[pyarrow]")}),
+         T.StringType(), "string"),
+        (pd.DataFrame({"a": pd.to_datetime(["2020-01-01", "2020-01-02"])}), T.TimestampType(),
+         "timestamp"),
+        (pd.DataFrame({"a": [datetime.date(2020, 1, 1)] * 10_000}), T.DateType(), "date"),
+    ]:
+        schema = T.StructType([T.StructField("a", data_type, True, {"b": 1, "a": "x"})])
+        spark.createDataFrame(frame, schema).toArrow()
+        relation = _sent_local_relation(service)
+        sent = ('{"fields":[{"metadata":{"a":"x","b":1},"name":"a","nullable":true,'
+                f'"type":"{name}"}}],"type":"struct"}}')
+        assert relation[2] == [sent.encode()], frame.dtypes
+        arrow_schema = pa.ipc.open_stream(relation[1][0]).schema
+        assert arrow_schema.field(0).metadata is None, frame.dtypes
+
+
+def _sent_to_df_names(service):
+    # The column names of the ToDF of the last ExecutePlanRequest: ExecutePlanRequest.plan=3 ->
+    # Plan.root=1 -> Relation.to_df=18 -> ToDF.column_names=2.
+    request = parse_message(service.execute_requests[-1])
+    relation = parse_message(parse_message(request[3][0])[1][0])
+    return [name.decode() for name in parse_message(relation[18][0]).get(2, [])]
+
+
+class _KeysUDT(T.UserDefinedType):
+    """A UserDefinedType of a struct SQL type of a field of metadata of int and float keys."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.StructType([
+            T.StructField("x", T.LongType(), True, {10: "ten", 9: "nine", 2.5: "f"})])
+
+    @classmethod
+    def module(cls):
+        return "pyspark.sql.types"
+
+    def serialize(self, obj):
+        return (obj.x,)
+
+    def deserialize(self, datum):
+        return _KeysValue(datum[0])
+
+
+class _ExtraJsonUDT(_KeysUDT):
+    """A UserDefinedType whose `jsonValue()` adds a key of its own."""
+
+    def jsonValue(self):
+        value = super().jsonValue()
+        value["extra"] = {"k": [1, 2]}
+        return value
+
+
+class _KeysValue:
+    __UDT__ = _KeysUDT()
+
+    def __init__(self, x):
+        self.x = x
+
+
+class _ExtraJsonValue(_KeysValue):
+    __UDT__ = _ExtraJsonUDT()
+
+
+def test_create_dataframe_of_values_of_a_user_defined_type_sends_the_json_of_its_object_as_pyspark(
+        mock_connect):
+    # As PySpark's createDataFrame of rows of no schema, whose `_infer_schema` takes the `__UDT__`
+    # of each value as its type: the schema of the relation is the `json()` of the inferred struct
+    # of those objects, also in an array, a map and a struct, of the metadata of their `sqlType()`
+    # in Python's sort of its keys, and of the keys that their own `jsonValue()` adds. The
+    # drop-in sent the core's JSON of the types, of the keys sorted as strs and without the keys
+    # of `jsonValue()`. The texts are official PySpark 4.3.0's.
+    spark, service = mock_connect
+    keys = '"metadata":{"2.5":"f","9":"nine","10":"ten"}'
+    extra = '"extra":{"k":[1,2]}'
+    for value in (_KeysValue(1), _ExtraJsonValue(1)):
+        udt = type(value).__UDT__
+        for rows, names, expected in [
+            ([(value,)], None, T.StructType([T.StructField("_1", udt)])),
+            ([(value, 1)], ["v", "n"],
+             T.StructType([T.StructField("v", udt), T.StructField("n", T.LongType())])),
+            ([([value],)], None, T.StructType([T.StructField("_1", T.ArrayType(udt))])),
+            ([({"k": value},)], None,
+             T.StructType([T.StructField("_1", T.MapType(T.StringType(), udt))])),
+            ([(Row(a=value),)], None,
+             T.StructType([T.StructField("_1", T.StructType([T.StructField("a", udt)]))])),
+        ]:
+            spark.createDataFrame(rows, names).isLocal()
+            sent = _analyzed_local_relation(service)[2][0].decode()
+            assert sent == expected.json(), (rows, names)
+            assert keys in sent and (extra in sent) == (udt is _ExtraJsonValue.__UDT__), sent
+    assert service.execute_requests == []
+
+
+def test_create_dataframe_of_pandas_of_a_struct_changed_in_place_names_its_columns_as_pyspark(
+        mock_connect):
+    # As PySpark's createDataFrame of a pandas DataFrame, which names its table by the cached
+    # `names` of the struct and applies `toDF(*schema.fieldNames())`: of a `fields` list whose
+    # field was replaced in place, by the name before the change, of every conversion, of each
+    # fast path of the drop-in too, while the schema of the relation is the `json()` of the
+    # fields. The drop-in's fast paths applied the names of the fields, of the Arrow table of
+    # float64 and of str columns too. The names are official PySpark 4.3.0's.
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    for frame, data_type, name in [
+        (pd.DataFrame({"a": np.arange(1000, dtype="int64")}), T.LongType(), "long"),
+        (pd.DataFrame({"a": pd.array([1, None], dtype="Int64")}), T.LongType(), "long"),
+        (pd.DataFrame({"a": np.arange(100_000, dtype="float64")}), T.DoubleType(), "double"),
+        (pd.DataFrame({"a": ["x", "y"] * 5000}), T.StringType(), "string"),
+        (pd.DataFrame({"a": pd.array(["x", "y"] * 5000, dtype="string[pyarrow]")}),
+         T.StringType(), "string"),
+        (pd.DataFrame({"a": pd.to_datetime(["2020-01-01", "2020-01-02"])}), T.TimestampType(),
+         "timestamp"),
+        (pd.DataFrame({"a": [datetime.date(2020, 1, 1)] * 10_000}), T.DateType(), "date"),
+        (pd.DataFrame({"a": [1, 2]}), T.LongType(), "long"),
+    ]:
+        schema = T.StructType([T.StructField("a", data_type)])
+        schema.fields[0] = T.StructField("c", data_type, True, {"m": 1})
+        spark.createDataFrame(frame, schema).toArrow()
+        relation = _sent_local_relation(service)
+        sent = ('{"fields":[{"metadata":{"m":1},"name":"c","nullable":true,'
+                f'"type":"{name}"}}],"type":"struct"}}')
+        assert relation[2] == [sent.encode()], frame.dtypes
+        assert pa.ipc.open_stream(relation[1][0]).schema.names == ["a"], frame.dtypes
+        assert _sent_to_df_names(service) == ["a"], frame.dtypes
+
+
+def test_create_dataframe_sends_the_json_of_metadata_of_any_depth_as_pyspark(mock_connect):
+    # As PySpark's createDataFrame, which sends the `json()` of the schema as it is: of metadata
+    # nested deeper than the parser of the core reads, which Python writes under a raised
+    # recursion limit, of local rows and of no rows. The drop-in sent the string
+    # `unparsed(...)` of the text.
+    import sys
+
+    spark, service = mock_connect
+    limit = sys.getrecursionlimit()
+    sys.setrecursionlimit(max(limit, 10_000))
+    try:
+        value = 1
+        for _ in range(1200):
+            value = [value]
+        schema = T.StructType([T.StructField("a", T.LongType(), True, {"x": value})])
+        for rows in ([(1,)], []):
+            spark.createDataFrame(rows, schema).toArrow()
+            assert _sent_local_relation(service)[2] == [schema.json().encode()]
+    finally:
+        sys.setrecursionlimit(limit)
+
+
+class _DuplicateNamesUDT(T.UserDefinedType):
+    """A UserDefinedType of a struct SQL type of two fields of the same name."""
+
+    @classmethod
+    def sqlType(cls):
+        return T.StructType([T.StructField("d", T.LongType()), T.StructField("d", T.LongType())])
+
+    @classmethod
+    def module(cls):
+        return "pyspark.sql.types"
+
+    def serialize(self, obj):
+        return obj
+
+    def deserialize(self, datum):
+        return datum
+
+
+def test_create_dataframe_keeps_the_duplicate_names_of_the_sql_type_of_a_user_defined_type(
+        mock_connect):
+    # As PySpark's Arrow schema of local rows, whose `_deduplicate_field_names` stops at a
+    # user-defined type: the fields of its SQL type keep their names, also of duplicates, which
+    # the server then fails to read, as PySpark's, while a struct of the schema has deduplicated
+    # names. The drop-in deduplicated them too, so that the server read them.
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    pair = T.StructType([T.StructField("d", T.LongType()), T.StructField("d", T.LongType())])
+    schema = T.StructType([T.StructField("u", _DuplicateNamesUDT()), T.StructField("s", pair)])
+    spark.createDataFrame([((1, 2), (3, 4))], schema).isLocal()
+    arrow_schema = pa.ipc.open_stream(_analyzed_local_relation(service)[1][0]).schema
+    assert [field.name for field in arrow_schema.field("u").type] == ["d", "d"]
+    assert [field.name for field in arrow_schema.field("s").type] == ["d_0", "d_1"]
+
+
+def test_create_dataframe_of_pandas_names_its_arrow_table_by_deduplicated_names_as_pyspark(
+        mock_connect):
+    # As PySpark's createDataFrame of a pandas DataFrame, which names its table by the names of
+    # `_deduplicate_field_names` of the schema, of the top level too: of fields of the same name,
+    # `a_0` and `a_1`, while the schema of the relation has the names as given, which `toDF`
+    # applies. The drop-in named the table by the names as given. The names are official
+    # PySpark 4.3.0's.
+    pd = pytest.importorskip("pandas")
+    pa = pytest.importorskip("pyarrow")
+    spark, service = mock_connect
+    for values, data_type in [
+        (pd.to_datetime(["2020-01-01", "2020-01-02"]), T.TimestampType()),
+        ([datetime.date(2020, 1, 1)] * 2, T.DateType()),
+        (["x", "y"], T.StringType()),
+        (np.arange(1000, dtype="float64"), T.DoubleType()),
+        (np.arange(1000, dtype="int64"), T.LongType()),
+    ]:
+        frame = pd.DataFrame({"a": values, "b": values})
+        frame.columns = ["a", "a"]
+        schema = T.StructType([T.StructField("a", data_type, True, {"m": 1}),
+                               T.StructField("a", data_type)])
+        spark.createDataFrame(frame, schema).toArrow()
+        relation = _sent_local_relation(service)
+        assert pa.ipc.open_stream(relation[1][0]).schema.names == ["a_0", "a_1"], data_type
+        assert relation[2] == [schema.json().encode()]
+        assert _sent_to_df_names(service) == ["a", "a"]

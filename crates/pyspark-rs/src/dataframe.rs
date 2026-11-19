@@ -6936,21 +6936,21 @@ fn bind_arguments<'py, const N: usize>(
     }))
 }
 
-/// Resolve the return type of a map or group function (a `DataType` wrapper or a DDL string)
-/// into a Rust DataType: a DDL string as the server of `session` parses it, as PySpark's
-/// `_parse_ddl`. Another object raises as [`check_return_type_argument`].
+/// Resolve the return type of a map or group function (a `DataType` wrapper or a DDL string): a
+/// DDL string into the type that the server of `session` parses it to, as PySpark's `_parse_ddl`,
+/// and a type object into None, which [`map_udf_of`] lowers when it builds the function, as the
+/// `returnType` of PySpark's `UserDefinedFunction` reads it then, after the columns of the input.
+/// Another object raises as [`check_return_type_argument`].
 pub(crate) fn resolve_datatype(
     py: Python<'_>,
     session: &spark_connect::session::SparkSession,
     schema: &Bound<'_, PyAny>,
-) -> PyResult<spark_connect::types::DataType> {
-    // The live conversion, not the base snapshot: an edit in place of a StructType's fields or
-    // metadata after it was built is kept, as PySpark does.
+) -> PyResult<Option<spark_connect::types::DataType>> {
     if schema.extract::<PyRef<PyDataType>>().is_ok() {
-        return crate::types::py_to_data_type(schema);
+        return Ok(None);
     }
     if schema.is_instance_of::<pyo3::types::PyString>() {
-        return crate::types::schema_data_type(py, session, schema);
+        return crate::types::schema_data_type(py, session, schema).map(Some);
     }
     Err(not_expected_type(schema, "returnType", "DataType or str"))
 }
@@ -7101,7 +7101,7 @@ pub(crate) fn map_udf_of(
     py: Python<'_>,
     func: &Bound<'_, PyAny>,
     schema: &Bound<'_, PyAny>,
-    return_type: spark_connect::types::DataType,
+    return_type: Option<spark_connect::types::DataType>,
     eval_type_id: i32,
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
@@ -7109,15 +7109,20 @@ pub(crate) fn map_udf_of(
     // As PySpark's `MapPartitions`, `GroupMap` and the other map nodes do when they build the
     // UDF, the return type is checked for the eval type: a map or group function returns a
     // struct, so another type raises `INVALID_RETURN_TYPE_FOR_PANDAS_UDF` here, not at the action.
+    // A type object is checked as it is, whose Arrow type of metadata that `json.dumps` refuses is
+    // its `NOT_IMPLEMENTED`, and then lowered, as the live type of the object: an edit in place
+    // of a StructType's fields or metadata after it was built is kept, as PySpark does.
+    let checked = match &return_type {
+        Some(return_type) => crate::types::data_type_to_py(py, return_type)?.into_bound(py),
+        None => schema.clone(),
+    };
     py.import("pyspark.sql.udf")?
         .getattr("UserDefinedFunction")?
-        .call_method1(
-            "_check_return_type",
-            (
-                crate::types::data_type_to_py(py, &return_type)?,
-                eval_type_id,
-            ),
-        )?;
+        .call_method1("_check_return_type", (checked, eval_type_id))?;
+    let return_type = match return_type {
+        Some(return_type) => return_type,
+        None => crate::types::py_to_data_type(schema)?,
+    };
     // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
     // type it parses to, as the reference client pickles the type of `_parse_ddl`.
     let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {

@@ -15,6 +15,7 @@ import datetime
 import inspect
 import json
 import pickle
+import re
 from pathlib import Path
 
 import pytest
@@ -1916,6 +1917,261 @@ def test_copies_pickles_and_nullable_types_keep_the_metadata_dicts_as_pysparks(m
     assert nullable.fields[0].metadata is metadata and nullable.fields[0].dataType is decimal
     assert T.ArrayType(struct).toNullable().elementType.fields[0].metadata is metadata
     assert T.MapType(T.StringType(), struct).toNullable().valueType.fields[0].metadata is metadata
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"k": 10**30},
+        {"k": -(10**25), "u": 2**64 - 1},
+        {"k": [1, 2**70], "f": 1e-07, "g": 1e16, "z": -0.0},
+        {"b": 1, "a": {"d": 2, "c": [1.5, 10**20]}},
+        {"k": "\xe9\u4e2d\U0001f600\x7f"},
+        {"t": (1, 2)},
+        {1: "a", "1": "b"},
+        {"x": float("inf"), "y": float("-inf"), "n": float("nan")},
+    ],
+    ids=["big-int", "big-ints", "array-floats", "key-order", "non-ascii", "tuple", "int-keys",
+         "non-finite"],
+)
+def test_field_metadata_is_sent_as_pysparks_json_dumps_of_its_dict(metadata):
+    # PySpark's `pyspark_types_to_proto_types` sends the metadata of a field as `json.dumps` of its
+    # dict: of its keys in their order, of the escapes of `ensure_ascii`, of an int of any size and
+    # of NaN and Infinity, also in a struct of an array, a map or a struct. The core held JSON
+    # values, which sent an int of more than 64 bits as a float, and refused a float that is not
+    # finite when the field was made. The texts are official PySpark 4.3.0's.
+    field = T.StructField("a", T.LongType(), True, metadata)
+    struct = T.StructType([field])
+    for data_type, fields in [
+        (struct, lambda t: t.struct.fields),
+        (T.ArrayType(struct), lambda t: t.array.element_type.struct.fields),
+        (T.MapType(T.StringType(), struct), lambda t: t.map.value_type.struct.fields),
+        (T.StructType([T.StructField("s", struct)]),
+         lambda t: t.struct.fields[0].data_type.struct.fields),
+    ]:
+        for cast in (F.col("v").cast, F.col("v").try_cast):
+            sent = fields(cast(data_type)._expr.to_plan(None).cast.type)[0]
+            assert sent.metadata == json.dumps(metadata), repr(data_type)
+    # Its JSON is `json.dumps` of the `jsonValue()` of the type, of the sorted keys, which keys of
+    # an int and a str do not sort.
+    try:
+        text = json.dumps(struct.jsonValue(), separators=(",", ":"), sort_keys=True)
+    except TypeError as error:
+        with pytest.raises(TypeError, match=f"^{re.escape(str(error))}$"):
+            struct.json()
+        return
+    assert struct.json() == text and text.isascii()
+    assert T.ArrayType(struct).json() == (
+        f'{{"containsNull":true,"elementType":{text},"type":"array"}}')
+
+
+def test_field_metadata_of_big_ints_and_non_finite_floats_is_pysparks():
+    # The texts that official PySpark 4.3.0 sends of these, which the server reads: the low 64
+    # bits of the int, and a JSON error of a float that is not finite.
+    big = T.StructField("a", T.LongType(), True, {"x": 10**30, "b": [1, 2**70]})
+    inf = T.StructField("a", T.LongType(), True, {"x": float("inf"), "n": float("nan")})
+    for field, sent, written in [
+        (big, '{"x": 1000000000000000000000000000000, "b": [1, 1180591620717411303424]}',
+         '{"b":[1,1180591620717411303424],"x":1000000000000000000000000000000}'),
+        (inf, '{"x": Infinity, "n": NaN}', '{"n":NaN,"x":Infinity}'),
+    ]:
+        plan = F.col("v").cast(T.StructType([field]))._expr.to_plan(None)
+        assert plan.cast.type.struct.fields[0].metadata == sent
+        assert field.json() == (
+            f'{{"metadata":{written},"name":"a","nullable":true,"type":"long"}}')
+    assert inf.metadata["x"] == float("inf") and inf == inf
+
+
+def test_fields_of_metadata_that_json_dumps_refuses_are_made_as_pysparks():
+    # PySpark's StructField keeps any metadata dict, and only the uses that write its JSON raise
+    # the error of `json.dumps` of it: `json()`, of the sorted keys of `json.dumps` of the
+    # `jsonValue()` too, and the plans of the type, of `json.dumps(field.metadata)`, when a request
+    # builds them. The drop-in raised the error of `json.dumps` when the field was made. The errors
+    # are official PySpark 4.3.0's.
+    circular = {}
+    circular["self"] = circular
+    set_error = (TypeError, "Object of type set is not JSON serializable")
+    for metadata, json_error, plan_error in [
+        ({"x": {1}}, set_error, set_error),
+        ({(1,): 1, "b": 2}, (TypeError, "'<' not supported between instances of 'str' and 'tuple'"),
+         (TypeError, "keys must be str, int, float, bool or None, not tuple")),
+        ({1: "a", "b": 2}, (TypeError, "'<' not supported between instances of 'str' and 'int'"),
+         None),
+        (circular, (ValueError, "Circular reference detected"),
+         (ValueError, "Circular reference detected")),
+    ]:
+        field = T.StructField("a", T.IntegerType(), True, metadata)
+        struct = T.StructType([field, T.StructField("b", T.LongType())])
+        plain = T.StructType([T.StructField("a", T.IntegerType()), T.StructField("b", T.LongType())])
+        assert field.metadata is metadata and repr(struct) == repr(plain)
+        assert struct == T.StructType([T.StructField("a", T.IntegerType(), True, metadata),
+                                       T.StructField("b", T.LongType())])
+        assert struct != plain and hash(struct) == hash(plain)
+        assert struct.simpleString() == "struct<a:int,b:bigint>"
+        assert struct.treeString() == plain.treeString()
+        assert struct.jsonValue()["fields"][0]["metadata"] is metadata
+        assert field.jsonValue()["metadata"] is metadata
+        assert struct.toNullable().fields[0].metadata is metadata
+        assert struct.fromInternal((1, 2)) == T.Row(a=1, b=2)
+        assert copy.copy(struct).fields[0].metadata is metadata
+        if metadata is not circular:
+            assert pickle.loads(pickle.dumps(struct)).fields[0].metadata == metadata
+        added = T.StructType().add("a", T.IntegerType(), True, metadata)
+        assert added.fields[0].metadata is metadata
+        settable = T.StructField("z", T.IntegerType())
+        settable.metadata = metadata
+        assert settable.metadata is metadata
+        for typed in (struct, field, added, settable, T.ArrayType(struct),
+                      T.MapType(T.StringType(), struct), T.StructField("s", struct)):
+            with pytest.raises(json_error[0]) as error:
+                typed.json()
+            assert str(error.value) == json_error[1], repr(typed)
+        # A cast of the type is made, and shows its simpleString, as PySpark's Column.
+        column = F.col("v").cast(struct)
+        assert repr(column) == "Column<'CAST(v AS STRUCT<A:INT,B:BIGINT>)'>"
+        if plan_error is None:
+            column._expr.to_plan(None)
+            continue
+        with pytest.raises(plan_error[0]) as error:
+            column._expr.to_plan(None)
+        assert str(error.value) == plan_error[1]
+    # Each request of such a cast raises the error, before it sends anything.
+    with mock_connect_session() as (spark, service):
+        column = F.col("id").cast(T.StructType([T.StructField("a", T.LongType(), True, {"x": {1}})]))
+        df = spark.range(1).select(column)
+        for request in (lambda: df.schema, df.collect):
+            with pytest.raises(TypeError) as error:
+                request()
+            assert str(error.value) == set_error[1]
+        assert service.analyze_requests == [] and service.execute_requests == []
+
+
+def _metadata_udt(metadata):
+    """A UserDefinedType whose SQL type is a struct of a field of `metadata`."""
+
+    class MetadataUDT(T.UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            return T.StructType([T.StructField("x", T.DoubleType(), False, metadata)])
+
+        @classmethod
+        def module(cls):
+            return "pyspark.sql.types"
+
+        def serialize(self, obj):
+            return (obj,)
+
+        def deserialize(self, datum):
+            return datum[0]
+
+    return MetadataUDT()
+
+
+def test_the_metadata_of_the_sql_type_of_a_user_defined_type_is_written_as_pysparks():
+    # PySpark's `jsonValue()` of a UserDefinedType holds the `jsonValue()` of its `sqlType()`, of
+    # the metadata dicts of its fields as they are, which `json()` writes with `json.dumps`: of the
+    # keys sorted as Python sorts them, ints by their values, and of its errors. The drop-in wrote
+    # the JSON of the core type of the UDT: the keys as strs, sorted as strs, `{}` of a dict that
+    # `json.dumps` refuses, and no error of keys of an int and a str. The values are official
+    # PySpark 4.3.0's.
+    for metadata, written in [
+        ({10: "a", 9: "b"}, '{"9":"b","10":"a"}'),
+        ({"t": 74334700308107.625}, '{"t":74334700308107.62}'),
+    ]:
+        struct = T.StructType([T.StructField("u", _metadata_udt(metadata), True)])
+        sql_type = struct.jsonValue()["fields"][0]["type"]["sqlType"]
+        assert sql_type["fields"][0]["metadata"] is metadata
+        assert f'"metadata":{written}' in struct.json()
+        assert f'"metadata":{written}' in T.ArrayType(_metadata_udt(metadata)).json()
+    for metadata, error in [
+        ({1: "a", "b": 2}, "'<' not supported between instances of 'str' and 'int'"),
+        ({"x": {1}}, "Object of type set is not JSON serializable"),
+    ]:
+        struct = T.StructType([T.StructField("u", _metadata_udt(metadata), True)])
+        sql_type = struct.jsonValue()["fields"][0]["type"]["sqlType"]
+        assert sql_type["fields"][0]["metadata"] is metadata
+        with pytest.raises(TypeError, match=f"^{re.escape(error)}$"):
+            struct.json()
+
+
+def test_floats_are_written_of_the_shortest_digits_of_an_even_tie_as_pysparks():
+    # As Python's `repr`, of two shortest digits as near the value, the even last one, in the
+    # metadata that a plan sends and in the repr of a literal Column. The drop-in rounded the tie
+    # up (`74334700308107.63`). The texts are official PySpark 4.3.0's.
+    for value, text in [
+        (74334700308107.625, "74334700308107.62"),
+        (810452564081.40625, "810452564081.4062"),
+        (-2226063173806980.25, "-2226063173806980.2"),
+    ]:
+        assert repr(F.lit(value)) == f"Column<'{text}'>"
+        field = T.StructField("a", T.LongType(), True, {"t": value})
+        plan = F.col("v").cast(T.StructType([field]))._expr.to_plan(None)
+        assert plan.cast.type.struct.fields[0].metadata == f'{{"t": {text}}}'
+
+
+def test_a_lowering_lowers_the_types_of_the_code_that_it_calls_as_they_are_elsewhere():
+    # The JSON value of a type takes the metadata of its fields as they were given, but the code
+    # that it calls, such as the `sqlType()` of a UserDefinedType, lowers its own types as it does
+    # elsewhere: a cast made there to a struct of metadata that `json.dumps` refuses raises the
+    # error at each request of it, as PySpark's, and nothing is sent. The drop-in's thread-wide
+    # mode cast it to the struct of no metadata, which it sent.
+    armed, captured = [], []
+    refused = T.StructType([T.StructField("z", T.IntegerType(), True, {"bad": {1}})])
+
+    class CapturingUDT(T.UserDefinedType):
+        @classmethod
+        def sqlType(cls):
+            # The cast is made in the `sqlType()` that `jsonValue()` calls only.
+            if armed and not captured:
+                captured.append(F.lit(None).cast(refused))
+            return T.DoubleType()
+
+        @classmethod
+        def module(cls):
+            return "pyspark.sql.types"
+
+    schema = T.StructType([T.StructField("u", CapturingUDT(), True, {"m": 1})])
+    armed.append(True)
+    schema.jsonValue()
+    assert len(captured) == 1
+    with mock_connect_session() as (spark, service):
+        df = spark.range(1).select(captured[0].alias("c"))
+        for request in (lambda: df.schema, df.collect, lambda: df.select("c").schema):
+            with pytest.raises(TypeError, match="^Object of type set is not JSON serializable$"):
+                request()
+        assert service.analyze_requests == [] and service.execute_requests == []
+
+
+def test_metadata_of_many_keys_compares_in_linear_time():
+    # Each key of the metadata of a field is compared once, by a hash: a comparison of the keys of
+    # one with each of the other took a second for 20,000 keys, and would take minutes for these.
+    import time
+
+    metadata = {f"key{i}": i for i in range(100_000)}
+    reordered = dict(reversed(list(metadata.items())))
+    a, b = T.StructField("a", T.IntegerType(), True, metadata), T.StructField(
+        "a", T.IntegerType(), True, reordered)
+    started = time.perf_counter()
+    assert a == b and T.StructType([a]) == T.StructType([b])
+    assert a != T.StructField("a", T.IntegerType(), True, {**metadata, "key0": -1})
+    assert time.perf_counter() - started < 20
+
+
+def test_json_escapes_the_characters_that_are_not_printable_ascii_as_pysparks():
+    # As PySpark's `json()`, of the `ensure_ascii` of `json.dumps`: a character that is not
+    # printable ASCII, also in a name, is a `\uXXXX` escape, of a surrogate pair above U+FFFF,
+    # where the core wrote UTF-8.
+    name = "\xe9\x7f\u4e2d\U0001f600"
+    for data_type in (
+        T.StructType([T.StructField(name, T.IntegerType())]),
+        T.StructType([T.StructField("a", T.StringType(), True, {name: name})]),
+        T.ArrayType(T.StructType([T.StructField(name, T.IntegerType())])),
+    ):
+        text = data_type.json()
+        assert text.isascii() and json.loads(text) == data_type.jsonValue()
+        assert text == json.dumps(data_type.jsonValue(), separators=(",", ":"), sort_keys=True)
+    field = T.StructField(name, T.IntegerType())
+    assert field.json() == json.dumps(field.jsonValue(), separators=(",", ":"), sort_keys=True)
 
 
 def test_types_of_required_parameters_are_made_as_pysparks():

@@ -1406,18 +1406,13 @@ fn cast_column(column: &Column, data_type: &Bound<'_, PyAny>, try_: bool) -> PyR
             let parsed = match crate::types::py_to_data_type(data_type) {
                 Ok(parsed) => parsed,
                 // A type that does not lower now, such as an array of a `UserDefinedType` whose
-                // `module()` is not implemented, which PySpark's plan raises the error of at each
-                // request, as its repr shows its `simpleString()` (see
-                // `crate::types::lenient_type`).
+                // `module()` is not implemented, or a struct of metadata that `json.dumps` refuses,
+                // which PySpark's plan raises the error of at each request, as its repr shows its
+                // `simpleString()` (see `crate::types::lenient_type`).
                 Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => {
-                    match crate::errors::pyspark_class_error(py, &err)? {
-                        Some(error) => {
-                            args.record(error);
-                            let text: String = data_type.call_method0("simpleString")?.extract()?;
-                            return Ok(PyColumn::new(args.column_after(unparsed(&text))));
-                        }
-                        None => return Err(err),
-                    }
+                    args.raised(py, err)?;
+                    let text: String = data_type.call_method0("simpleString")?.extract()?;
+                    return Ok(PyColumn::new(args.column_after(unparsed(&text))));
                 }
                 Err(err) => return Err(err),
             };

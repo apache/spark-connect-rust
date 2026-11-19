@@ -3,8 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::PyList;
-use spark_connect::types::{DataType, StructField, TreeFlag, TreeStep};
-use std::collections::BTreeMap;
+use spark_connect::types::{DataType, Metadata, StructField, TreeFlag, TreeStep};
 
 /// Normalize the depth used by both Python schema-tree entry points.
 pub(crate) fn normalize_tree_depth(depth: &Bound<'_, PyAny>) -> PyResult<i32> {
@@ -756,8 +755,18 @@ impl KeptType {
 
     /// The core type of the child, as it is now: read from its object when it has one.
     fn live(&self, py: Python<'_>, snapshot: &DataType) -> PyResult<DataType> {
+        self.live_of(py, snapshot, MetadataOf::Strict)
+    }
+
+    /// [`KeptType::live`] of the metadata of the fields as `metadata` takes it.
+    fn live_of(
+        &self,
+        py: Python<'_>,
+        snapshot: &DataType,
+        metadata: MetadataOf,
+    ) -> PyResult<DataType> {
         match self.kept(py) {
-            Some(object) => py_to_data_type(object.bind(py)),
+            Some(object) => lower_type(object.bind(py), metadata),
             None => Ok(snapshot.clone()),
         }
     }
@@ -1373,7 +1382,7 @@ pub(crate) fn has_non_bool_converter_flag(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
 ) -> PyResult<bool> {
-    let data_type = py_to_data_type(obj)?;
+    let data_type = py_to_data_type_as_given(obj)?;
     converter_flag_is_other(py, &data_type, Some(obj), true)
 }
 
@@ -1649,6 +1658,12 @@ fn keep_child_json(
         json.set_item(key, nested)?;
         return Ok(true);
     }
+    // A `UserDefinedType` is its own `jsonValue()`, of the `jsonValue()` of its `sqlType()`, whose
+    // fields hold their metadata dicts as they are, which the JSON of the core type does not.
+    if is_udt(child)? {
+        json.set_item(key, child.call_method0(pyo3::intern!(py, "jsonValue"))?)?;
+        return Ok(true);
+    }
     let of_base_class = collated
         && (child.is_instance_of::<PyStringType>()
             || child.is_instance_of::<PyCharType>()
@@ -1668,7 +1683,7 @@ fn type_json_value<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
-    let json = py_json_value(py, &py_to_data_type(obj)?.json_value(), false)?;
+    let json = py_json_value(py, &py_to_data_type_as_given(obj)?.json_value(), false)?;
     let mut other = keep_flags_in_json(py, &json, obj, false)?;
     // As PySpark's `jsonValue` of an array, a map and a struct, of `self.typeName()`: of a Python
     // subclass, the name of its class, or its own `typeName`.
@@ -1734,10 +1749,40 @@ fn field_json_value<'py>(
     py: Python<'py>,
     field: &Bound<'py, PyStructField>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
-    let v = field.borrow().current_field(py)?.json_value();
+    let v = field
+        .borrow()
+        .current_field_of(py, MetadataOf::AsGiven)?
+        .json_value();
     let json = py_json_value(py, &v, true)?;
     let other = keep_flags_in_json(py, &json, field.as_any(), false)?;
     Ok((json, other))
+}
+
+/// PySpark's `_schema.json()` of the struct `schema`, if it holds metadata or a `UserDefinedType`,
+/// whose `sqlType()` may hold some, which its `createDataFrame` of data writes after it converts
+/// the data, and sends as the schema of the relation: of the error of `json.dumps` of the metadata
+/// of a field, also of the keys of the sorted JSON (`'<' not supported between instances of 'str'
+/// and 'int'`), and of the keys of a dict in the order of Python's sort of them, of an int key by
+/// its value (`{10: "a", 9: "b"}` is `{"9":"b","10":"a"}`), which the sort of the strs of the
+/// keys of the core's JSON does not keep. None of another schema, whose JSON the core writes as
+/// PySpark does.
+pub(crate) fn schema_json_text(schema: Option<&Bound<'_, PyAny>>) -> PyResult<Option<String>> {
+    let Some(schema) = schema.filter(|schema| schema.is_instance_of::<PyStructType>()) else {
+        return Ok(None);
+    };
+    let py = schema.py();
+    if !(holds_metadata(py, schema)? || holds_udt(py, schema)?) {
+        return Ok(None);
+    }
+    Ok(Some(
+        schema.call_method0(pyo3::intern!(py, "json"))?.extract()?,
+    ))
+}
+
+/// Whether the type object `obj` is, or keeps at any depth of the types that it keeps as their
+/// objects (see `keeps_object_of`), a `UserDefinedType`.
+pub(crate) fn holds_udt(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(is_udt(obj)? || keeps_object_of(py, obj, holds_udt)?)
 }
 
 /// The `fromJson` helper `name` of the shim `pyspark.sql.types`, which parses the nested JSON
@@ -1747,19 +1792,22 @@ fn shim_from_json<'py>(py: Python<'py>, name: &str) -> PyResult<Bound<'py, PyAny
     py.import("pyspark.sql.types")?.getattr(name)
 }
 
-/// Convert a Python `StructField` metadata dict to the core JSON-value map. Values may be any
-/// JSON-serializable Python object (mirrors pyspark's `Dict[str, Any]` field metadata), so we
-/// route through `json.dumps` -> serde_json.
-fn py_metadata_to_map(
-    py: Python<'_>,
-    d: &Bound<'_, pyo3::types::PyDict>,
-) -> PyResult<BTreeMap<String, serde_json::Value>> {
+/// The core metadata of a `StructField` metadata dict, of the text of its `json.dumps`, which
+/// PySpark sends in a plan, and whose values the core keeps as it writes them: an int of any size,
+/// and the `NaN` and `Infinity` of a float that is not finite. The errors are those of
+/// `json.dumps`, as PySpark's plans raise them, and that of a str that UTF-8 cannot encode.
+fn py_metadata_to_map(py: Python<'_>, d: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Metadata> {
     let s: String = py
         .import("json")?
         .getattr("dumps")?
         .call1((d,))?
         .extract()?;
-    serde_json::from_str(&s).or_else(|e| {
+    metadata_of_dumps(d, &s)
+}
+
+/// The core metadata of the text `s` of `json.dumps` of the dict `d`.
+fn metadata_of_dumps(d: &Bound<'_, pyo3::types::PyDict>, s: &str) -> PyResult<Metadata> {
+    Metadata::from_json(s).or_else(|e| {
         // The metadata of the core is JSON of UTF-8, which `json.dumps` escapes a lone surrogate
         // of: the error is that of the first str that UTF-8 cannot encode, as of a name.
         check_metadata_strs(d.as_any())?;
@@ -1767,6 +1815,50 @@ fn py_metadata_to_map(
             e.to_string(),
         ))
     })
+}
+
+/// The core metadata of the dict `d` of a field that is made, or of the field of a type that
+/// stands for its JSON (see `stand_in_field`): PySpark's field keeps any dict, and only the uses
+/// that write its JSON raise the error of `json.dumps` of it, `json()` and the plans of the type
+/// (see `PyStructField::current_field`). So metadata of a value that `json.dumps` refuses, such as
+/// a set, bytes or a key of a tuple, stands as none here. A str that UTF-8 cannot encode raises
+/// its `UnicodeEncodeError`.
+fn kept_metadata(py: Python<'_>, d: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Metadata> {
+    if d.is_empty() {
+        return Ok(Metadata::new());
+    }
+    let dumps = py.import("json")?.getattr("dumps")?.call1((d,));
+    let s: String = match dumps {
+        Ok(s) => s.extract()?,
+        Err(error) if is_exception(py, &error) => return Ok(Metadata::new()),
+        Err(error) => return Err(error),
+    };
+    match metadata_of_dumps(d, &s) {
+        // Of no str that UTF-8 cannot encode: JSON nested deeper than the core reads.
+        Err(error)
+            if error.is_instance_of::<pyo3::exceptions::PyValueError>(py)
+                && !error.is_instance_of::<pyo3::exceptions::PyUnicodeError>(py) =>
+        {
+            Ok(Metadata::new())
+        }
+        other => other,
+    }
+}
+
+/// How a lowering of type objects takes the metadata of their fields.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MetadataOf {
+    /// Of the error of `json.dumps` of a dict, as the plans of PySpark raise it.
+    Strict,
+    /// As it was given, for a use that does not write the JSON of the metadata, such as the JSON
+    /// value of a type: PySpark's `jsonValue` holds each metadata dict as it is, which only
+    /// `json.dumps` of it may refuse, so a dict that `json.dumps` refuses stands as none (see
+    /// `kept_metadata`), which the dict of the field replaces in the JSON value (see
+    /// `keep_flags_in_json`). The error of a type, as that of a `UserDefinedType` of no JSON,
+    /// stays. The mode goes down the lowering, also to the SQL type of a `UserDefinedType`, but
+    /// not to the lowerings of the code of a user that it calls, such as its `sqlType()`, which
+    /// are of their own.
+    AsGiven,
 }
 
 /// The `UnicodeEncodeError` of the first str of `value`, of metadata, that UTF-8 cannot encode:
@@ -1898,15 +1990,14 @@ fn need_conversion(py: Python<'_>, data_type: &DataType) -> PyResult<bool> {
     })
 }
 
-/// Convert the core JSON-value metadata map back to a Python dict.
+/// The Python dict of core metadata, as PySpark's `json.loads` of the metadata of a field reads it.
 fn metadata_map_to_py<'py>(
     py: Python<'py>,
-    m: &BTreeMap<String, serde_json::Value>,
+    m: &Metadata,
 ) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-    let s = serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string());
     py.import("json")?
         .getattr("loads")?
-        .call1((s,))?
+        .call1((m.json(),))?
         .cast_into::<pyo3::types::PyDict>()
         .map_err(|_| PyErr::new::<pyo3::exceptions::PyTypeError, _>("metadata is not a dict"))
 }
@@ -4276,28 +4367,51 @@ impl PyStructField {
         Ok(need)
     }
 
-    /// The core field, with the metadata of the dict as it is now.
+    /// The core field, with the metadata of the dict as it is now: of the error of `json.dumps`
+    /// of the dict, as PySpark's plans raise it.
     pub(crate) fn current_field(&self, py: Python<'_>) -> PyResult<StructField> {
-        self.field_of_type(py, self.data_type_object.live(py, &self.field.data_type)?)
+        self.current_field_of(py, MetadataOf::Strict)
+    }
+
+    /// [`PyStructField::current_field`] of the metadata as `metadata` takes it.
+    pub(crate) fn current_field_of(
+        &self,
+        py: Python<'_>,
+        metadata: MetadataOf,
+    ) -> PyResult<StructField> {
+        self.field_of_type(
+            py,
+            self.data_type_object
+                .live_of(py, &self.field.data_type, metadata)?,
+            metadata == MetadataOf::AsGiven,
+        )
     }
 
     /// The core field, as [`PyStructField::current_field`] reads it, of the type that stands for
     /// a type that does not lower now (see [`lenient_type`]), for a use that does not read its
-    /// JSON.
+    /// JSON, and of no metadata of a dict that `json.dumps` refuses (see `kept_metadata`).
     fn stand_in_field(&self, py: Python<'_>) -> PyResult<StructField> {
         let data_type = self
             .data_type_object
             .live_or_stand_in(py, &self.field.data_type)?;
-        self.field_of_type(py, data_type)
+        self.field_of_type(py, data_type, true)
     }
 
-    /// The core field of the type `data_type`, with the metadata of the dict as it is now.
-    fn field_of_type(&self, py: Python<'_>, data_type: DataType) -> PyResult<StructField> {
+    /// The core field of the type `data_type`, with the metadata of the dict as it is now, or as
+    /// it stands if `lenient` (see `kept_metadata`).
+    fn field_of_type(
+        &self,
+        py: Python<'_>,
+        data_type: DataType,
+        lenient: bool,
+    ) -> PyResult<StructField> {
         let mut field = self.field.clone();
         field.data_type = data_type;
         let metadata = self.metadata.bind(py);
         field.metadata = if metadata.is_empty() {
-            BTreeMap::new()
+            Metadata::new()
+        } else if lenient {
+            kept_metadata(py, metadata)?
         } else {
             py_metadata_to_map(py, metadata)?
         };
@@ -4342,7 +4456,7 @@ impl PyStructField {
         if other {
             return json_dumps(py, &json);
         }
-        Ok(slf.borrow().current_field(py)?.json_value().to_string())
+        Ok(slf.borrow().current_field(py)?.json())
     }
     #[pyo3(name = "jsonValue")]
     fn __sf_json_value<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
@@ -4469,7 +4583,7 @@ impl PyStructField {
             name: String::new(),
             data_type: DataType::Null,
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         };
         Ok(field_base(Self::from_field(py, field)?))
     }
@@ -4488,8 +4602,8 @@ impl PyStructField {
         let data_type = nested_data_type(dataType, "dataType")?;
         let name = field_name(name)?;
         let md = match metadata {
-            Some(d) => py_metadata_to_map(py, d)?,
-            None => BTreeMap::new(),
+            Some(d) => kept_metadata(py, d)?,
+            None => Metadata::new(),
         };
         let field = StructField {
             name,
@@ -4567,7 +4681,7 @@ impl PyStructField {
         py: Python<'_>,
         metadata: &Bound<'_, pyo3::types::PyDict>,
     ) -> PyResult<()> {
-        self.field.metadata = py_metadata_to_map(py, metadata)?;
+        self.field.metadata = kept_metadata(py, metadata)?;
         self.metadata = metadata.clone().unbind();
         Ok(())
     }
@@ -4732,10 +4846,23 @@ impl PyStructType {
     /// The core fields, as they are now: each field's metadata is read from its object, where an
     /// edit in place is kept, as in PySpark.
     pub(crate) fn current_fields(&self, py: Python<'_>) -> PyResult<Vec<StructField>> {
+        self.current_fields_of(py, MetadataOf::Strict)
+    }
+
+    /// [`PyStructType::current_fields`] of the metadata as `metadata` takes it.
+    fn current_fields_of(
+        &self,
+        py: Python<'_>,
+        metadata: MetadataOf,
+    ) -> PyResult<Vec<StructField>> {
         self.fields
             .bind(py)
             .iter()
-            .map(|item| as_struct_field(&item)?.borrow().current_field(py))
+            .map(|item| {
+                as_struct_field(&item)?
+                    .borrow()
+                    .current_field_of(py, metadata)
+            })
             .collect()
     }
 
@@ -5021,8 +5148,8 @@ impl PyStructType {
             let dt = nested_data_type(&type_object, "dataType")?;
             let name = field_name(field)?;
             let md = match metadata {
-                Some(d) => py_metadata_to_map(py, d)?,
-                None => BTreeMap::new(),
+                Some(d) => kept_metadata(py, d)?,
+                None => Metadata::new(),
             };
             let new_field = StructField {
                 name: name.clone(),
@@ -7405,6 +7532,17 @@ fn nested_data_type(obj: &Bound<'_, PyAny>, name: &str) -> PyResult<DataType> {
 }
 
 pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
+    lower_type(obj, MetadataOf::Strict)
+}
+
+/// [`py_to_data_type`] of the metadata of the fields as they were given (see
+/// [`MetadataOf::AsGiven`]).
+pub(crate) fn py_to_data_type_as_given(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
+    lower_type(obj, MetadataOf::AsGiven)
+}
+
+/// The lowering of [`py_to_data_type`], of the metadata as `metadata` takes it.
+fn lower_type(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<DataType> {
     if let Ok(g) = obj.extract::<PyRef<PyGeometryType>>() {
         return Ok(DataType::Geometry { srid: g.srid });
     }
@@ -7470,20 +7608,24 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
     }
     if let Ok(a) = obj.extract::<PyRef<PyArrayType>>() {
         return Ok(DataType::Array {
-            element_type: Box::new(a.element_object.live(obj.py(), &a.element_type)?),
+            element_type: Box::new(a.element_object.live_of(
+                obj.py(),
+                &a.element_type,
+                metadata,
+            )?),
             contains_null: a.contains_null,
         });
     }
     if let Ok(m) = obj.extract::<PyRef<PyMapType>>() {
         return Ok(DataType::Map {
-            key_type: Box::new(m.key_object.live(obj.py(), &m.key_type)?),
-            value_type: Box::new(m.value_object.live(obj.py(), &m.value_type)?),
+            key_type: Box::new(m.key_object.live_of(obj.py(), &m.key_type, metadata)?),
+            value_type: Box::new(m.value_object.live_of(obj.py(), &m.value_type, metadata)?),
             value_contains_null: m.value_contains_null,
         });
     }
     if let Ok(st) = obj.extract::<PyRef<PyStructType>>() {
         return Ok(DataType::Struct {
-            fields: st.current_fields(obj.py())?,
+            fields: st.current_fields_of(obj.py(), metadata)?,
         });
     }
     if let Ok(c) = obj.extract::<PyRef<PyCharType>>() {
@@ -7533,7 +7675,7 @@ pub(crate) fn py_to_data_type(obj: &Bound<'_, PyAny>) -> PyResult<DataType> {
                     Ok(Some(v.extract()?))
                 }
             };
-            let sql_type = py_to_data_type(&obj.call_method0("sqlType")?)?;
+            let sql_type = lower_type(&obj.call_method0("sqlType")?, metadata)?;
             let udt = DataType::Udt {
                 type_str: "udt".to_string(),
                 jvm_class: get("class")?,

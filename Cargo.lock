@@ -67,6 +67,7 @@ dependencies = [
  "polars",
  "prost",
  "prost-types",
+ "ryu",
  "serde_json",
  "stacker",
  "tokio",

@@ -2439,8 +2439,10 @@ impl UnresolvedNamedLambdaVariable {
 }
 
 /// Python's `repr` of a float, as PySpark's reprs show one: the shortest digits that
-/// round-trip, in fixed notation for a decimal exponent from -4 to 15, otherwise in
-/// scientific notation with a signed exponent of at least two digits.
+/// round-trip, the nearer of two such, and of an even last digit of a tie, as Python's `repr`
+/// (David Gay's `dtoa`) gives them (see [`shortest_float_digits`]), in fixed notation for a
+/// decimal exponent from -4 to 15, otherwise in scientific notation with a signed exponent of at
+/// least two digits.
 pub(crate) fn python_float_repr(x: f64) -> String {
     if x.is_nan() {
         return "nan".to_string();
@@ -2451,16 +2453,10 @@ pub(crate) fn python_float_repr(x: f64) -> String {
     if x == 0.0 {
         return if x.is_sign_negative() { "-0.0" } else { "0.0" }.to_string();
     }
-    let scientific = format!("{x:e}");
-    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
-    let exponent: i32 = exponent.parse().unwrap_or(0);
-    let (sign, mantissa) = match mantissa.strip_prefix('-') {
-        Some(mantissa) => ("-", mantissa),
-        None => ("", mantissa),
-    };
-    let digits = mantissa.replace('.', "");
+    let sign = if x < 0.0 { "-" } else { "" };
+    let (digits, point) = shortest_float_digits(x.abs());
+    let exponent = point - 1;
     if (-4..16).contains(&exponent) {
-        let point = exponent + 1;
         let fixed = if point <= 0 {
             format!("0.{}{digits}", "0".repeat(point.unsigned_abs() as usize))
         } else if point as usize >= digits.len() {
@@ -2482,6 +2478,27 @@ pub(crate) fn python_float_repr(x: f64) -> String {
         let exponent_sign = if exponent < 0 { '-' } else { '+' };
         format!("{sign}{mantissa}e{exponent_sign}{:02}", exponent.abs())
     }
+}
+
+/// The shortest decimal digits of the positive finite `x` that read back as `x`, without leading
+/// or trailing zeros, and the place of their decimal point: `x` is `0.<digits>` times ten to the
+/// `point`. Of two such digits, they are the nearer to `x`, and of a tie those of an even last
+/// digit, as `ryu` rounds them and as Python's `repr` does; the formatting of the standard library
+/// rounds a tie up, so `74334700308107.625` would be `74334700308107.63` of it, where Python's
+/// `repr` is `74334700308107.62`.
+pub(crate) fn shortest_float_digits(x: f64) -> (String, i32) {
+    let mut buffer = ryu::Buffer::new();
+    let text = buffer.format_finite(x);
+    let (mantissa, exponent) = match text.split_once(['e', 'E']) {
+        Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().unwrap_or(0)),
+        None => (text, 0),
+    };
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let all = format!("{whole}{fraction}");
+    let significant = all.trim_start_matches('0');
+    let leading = (all.len() - significant.len()) as i32;
+    let digits = significant.trim_end_matches('0').to_string();
+    (digits, whole.len() as i32 + exponent - leading)
 }
 
 /// The quote that Python's `repr` puts around a string or bytes: a double quote if it has
@@ -2596,6 +2613,41 @@ mod tests {
 
     fn col(name: &str) -> Expression {
         Expression::column(name)
+    }
+
+    #[test]
+    fn python_float_repr_rounds_a_tie_of_the_shortest_digits_to_even_as_python() {
+        // The reprs of official Python 3.11: of two shortest digits as near, the even last digit,
+        // where the formatting of the standard library rounds up (`74334700308107.63`). The
+        // ties are exact sums, as their literals would read as the shorter digits of the float.
+        let tie = 74_334_700_308_107.0 + 0.625;
+        for (value, repr) in [
+            (tie, "74334700308107.62"),
+            (810_452_564_081.0 + 0.40625, "810452564081.4062"),
+            (-(2_226_063_173_806_980.0 + 0.25), "-2226063173806980.2"),
+            (0.5, "0.5"),
+            (2.5e-5, "2.5e-05"),
+            (9007199254740993.0, "9007199254740992.0"),
+            (5e-324, "5e-324"),
+            (1e23, "1e+23"),
+            (8.5e-5, "8.5e-05"),
+            (1e16, "1e+16"),
+            (1e15, "1000000000000000.0"),
+            (0.0001, "0.0001"),
+            (1e-5, "1e-05"),
+            (123.0, "123.0"),
+            (f64::MAX, "1.7976931348623157e+308"),
+            (1.0 / 3.0, "0.3333333333333333"),
+            (1.2345678901234568e17, "1.2345678901234568e+17"),
+            (-0.0, "-0.0"),
+            (f64::NEG_INFINITY, "-inf"),
+        ] {
+            assert_eq!(python_float_repr(value), repr, "{value:?}");
+        }
+        assert_eq!(
+            Expression::literal(LiteralExpression::Double(tie)).render(),
+            "74334700308107.62"
+        );
     }
 
     #[test]

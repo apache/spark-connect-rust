@@ -805,8 +805,7 @@ fn dataframe_more_surface() {
 fn dataframe_extra_surface() {
     use spark_connect::plan::JoinType;
     use spark_connect::row::Value;
-    use spark_connect::types::{DataType, StructField};
-    use std::collections::BTreeMap;
+    use spark_connect::types::{DataType, Metadata, StructField};
 
     if !should_run() {
         return;
@@ -857,13 +856,13 @@ fn dataframe_extra_surface() {
                 name: "val".into(),
                 data_type: DataType::Double,
                 nullable: true,
-                metadata: BTreeMap::new(),
+                metadata: Metadata::new(),
             },
             StructField {
                 name: "id".into(),
                 data_type: DataType::Long,
                 nullable: true,
-                metadata: BTreeMap::new(),
+                metadata: Metadata::new(),
             },
         ],
     };
@@ -1387,15 +1386,14 @@ fn create_dataframe_typed_schemas() {
         return;
     }
     use spark_connect::row::{Row, Value};
-    use spark_connect::types::{DataType, StructField};
-    use std::collections::BTreeMap;
+    use spark_connect::types::{DataType, Metadata, StructField};
 
     let s = session();
     let field = |name: &str, dt: DataType| StructField {
         name: name.to_string(),
         data_type: dt,
         nullable: true,
-        metadata: BTreeMap::new(),
+        metadata: Metadata::new(),
     };
 
     // Regression: a TIMESTAMP (LTZ) column must build an Arrow array whose timezone

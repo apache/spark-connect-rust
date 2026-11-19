@@ -8214,7 +8214,7 @@ mod plan_construction_tests {
                 name: "id".to_string(),
                 data_type: DataType::Long,
                 nullable: true,
-                metadata: std::collections::BTreeMap::new(),
+                metadata: crate::types::Metadata::new(),
             }],
         }));
         ser(&df.unpivot(vec![col("id")], None::<Vec<Column>>, "var", "val"));

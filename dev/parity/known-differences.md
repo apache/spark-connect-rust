@@ -163,6 +163,16 @@ difference is intentional or tracked for a fix.
 
   Of such a metadata str, each of these DataFrames is made and has its schema, and collecting
   the rows of a batch one fails on the server so.
+- **The methods of a `UserDefinedType` that its types call when they are made** (inherent; the
+  native types hold the core type of each type that they hold). An `ArrayType`, a `MapType`, a
+  `StructField` or a `StructType` of a `UserDefinedType`, also of `add`, lowers it into the core's
+  type when it is made: of its `jsonValue()`, which calls its `scalaUDT()` and `module()` and, of a
+  Python-only type, cloudpickles its class, and of its `sqlType()`, which is called twice. PySpark's
+  makes them of the object alone and calls none of these, which its `json()` and `jsonValue()`
+  call once. Their `==` and tree string lower the types again, and so do `json()` and
+  `jsonValue()` before they call the type's own `jsonValue()`, so these methods run more often than
+  in PySpark, and with them their side effects. An error of one is kept for the uses that read the
+  JSON of the type, which raise it as PySpark's do (see `docs/compatibility.md`).
 - **The removal of the relation of a dropped checkpoint, and the deletion of a dropped model**
   (intentional; a drop does not wait). As PySpark's `CachedRemoteRelation.__del__`, the drop of
   the last DataFrame of a checkpoint sends one ExecutePlan of the removal, which is not
@@ -647,22 +657,6 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   The class's own types compare without the attributes that a user set on them, where PySpark's
   comparison of the `__dict__`s holds them (see `docs/compatibility.md`); their copies and pickles
   keep them, as PySpark's.
-- **Metadata of the fields of a type** (tracked; the core holds JSON values). A field compares its
-  metadata dict as PySpark's, of the values as they were given, writes it with `json.dumps`, and
-  copies and pickles it as it is, but a plan and `createDataFrame` of data send the core's JSON
-  values of it, of an int of more than 64 bits as a float. That float is the nearer value, as the
-  server keeps only the low 64 bits of PySpark's exact int (`10**30` becomes
-  `5076944270305263616`), but an Arrow-optimized UDF of a return type of such metadata fails with
-  `ARROW_TYPE_MISMATCH`, as the plan's type of the float is not that of the worker, of the exact
-  int, where PySpark's runs (and its `pandas_udf` fails too). A float that is not finite (`inf`,
-  `nan`) raises serde_json's `ValueError` when the field is made, where PySpark makes the field,
-  whose every request the server refuses, so only its local uses differ (intentional).
-- **The `createDataFrame` of a type of a `UserDefinedType` of no JSON** (tracked; `createDataFrame`
-  lowers its schema first). An array, a map, a field or a struct of a `UserDefinedType` whose
-  `module()` or `sqlType()` is not implemented is made and read as PySpark's, and the uses that read
-  its JSON raise its error, but `createDataFrame` of local rows or of a pandas DataFrame of one
-  raises the `NOT_IMPLEMENTED` of its `jsonValue()`, where PySpark's converters raise that of its
-  `sqlType()` or `serialize` (see `docs/compatibility.md`).
 - **Direct construction** (intentional). `SparkSession(connection=..., userId=...,
   hook_factories=...)` makes a session that is neither default nor active, as PySpark's
   constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
