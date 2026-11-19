@@ -4049,9 +4049,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "spark-connect-jni"
+version = "0.1.0"
+dependencies = [
+ "apache-spark-connect-proto",
+ "arrow",
+ "cc",
+ "futures",
+ "libc",
+ "prost",
+ "spark-connect-server",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "spark-connect-server"
 version = "0.1.0"
 dependencies = [
+ "apache-spark-connect",
  "apache-spark-connect-proto",
  "arrow",
  "futures",
