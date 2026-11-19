@@ -27525,6 +27525,59 @@ def test_datetime_literals_are_exact_micros_as_pyspark(mock_connect, monkeypatch
         time.tzset()
 
 
+def test_pre_1970_nanoseconds_round_as_each_conversion_of_pyspark(mock_connect):
+    # As PySpark 4.3.0, of times before 1970 with nanoseconds: each of its conversions drops the
+    # digits below the microsecond in its own direction, and the drop-in's send the same
+    # microseconds. Local rows of pandas Timestamps and a literal of one take the fields of the
+    # datetime, of the microsecond below (floor), and so does an object column of a pandas
+    # DataFrame; a pyarrow Table is floored by pc.floor_temporal; a datetime64[ns] column is cast
+    # by PyArrow toward 1970 when the safe cast is off, and raises when it is on.
+    import pyarrow as pa
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+
+    pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
+    stamps = [pd.Timestamp("1969-12-31 23:59:59.999999999", tz="UTC"),
+              pd.Timestamp("1960-06-15 12:34:56.123456789", tz="UTC")]
+    floor, toward_1970 = [-1, -301231503876544], [0, -301231503876543]
+    ts = T.StructType([T.StructField("ts", T.TimestampType())])
+    ntz = T.StructType([T.StructField("ts", T.TimestampNTZType())])
+
+    def micros(df):
+        # The Arrow data of the LocalRelation sent (Relation.local_relation=11, data=1), under
+        # the ToDF of names (Relation.to_df=18, input=1).
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        while 18 in relation:
+            relation = parse_message(parse_message(relation[18][0])[1][0])
+        table = pa.ipc.open_stream(parse_message(relation[11][0])[1][0]).read_all()
+        return table.column(0).cast(pa.int64()).to_pylist()
+
+    assert micros(spark.createDataFrame([(s,) for s in stamps], ts)) == floor
+    assert micros(spark.createDataFrame([(s.tz_localize(None),) for s in stamps], ntz)) == floor
+    objects = pd.DataFrame({"ts": pd.Series(stamps, dtype=object)})
+    assert micros(spark.createDataFrame(objects, ts)) == floor
+    nanos = pa.array([s.value for s in stamps], pa.int64())
+    for arrow_type in (pa.timestamp("ns", "UTC"), pa.timestamp("ns")):
+        table = pa.table({"ts": nanos.cast(arrow_type)})
+        assert micros(spark.createDataFrame(table, ts)) == floor
+    frame = pd.DataFrame({"ts": pd.Series(stamps)})
+    with pytest.raises(PySparkValueError, match="Exception thrown when converting pandas.Series"):
+        spark.createDataFrame(frame, ts)
+    service.confs = {"spark.sql.execution.pandas.convertToArrowArraySafely": "false"}
+    assert micros(spark.createDataFrame(frame, ts)) == toward_1970
+    assert micros(spark.createDataFrame(frame)) == toward_1970
+    # A literal, Literal.timestamp=17 of the Project's expression (Project.expressions=3).
+    for stamp, expected in zip(stamps, floor):
+        spark.range(1).select(F.lit(stamp)).collect()
+        plan = parse_message(parse_message(service.execute_requests[-1])[3][0])[1][0]
+        expression = parse_message(parse_message(parse_message(plan)[3][0])[3][0])
+        value = parse_message(expression[1][0])[17][0]
+        assert (value - (1 << 64) if value >= 1 << 63 else value) == expected
+
+
 def test_datetime_literals_follow_the_preferred_timestamp_type_as_pyspark(mock_connect):
     # As PySpark's LiteralExpression._infer_type, which reads spark.sql.timestampType for each
     # datetime literal: under TIMESTAMP_NTZ a datetime is a TIMESTAMP_NTZ of its wall clock (that
@@ -29252,6 +29305,30 @@ def test_connect_registry_refuses_a_schema_of_types_of_no_proto_as_pyspark(mock_
         assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
         assert str(error.value) == f"[UNSUPPORTED_OPERATION] data type {shown} is not supported."
         assert len(service.execute_requests) == sent
+
+
+def test_pipeline_events_are_logged_at_the_times_of_their_timestamps_as_pysparks(capsys):
+    # As PySpark's handle_pipeline_events, which logs each event at
+    # event.timestamp.ToDatetime() in UTC. The run stream gives the microseconds of the
+    # Timestamp, its nanoseconds truncated, which convert exactly, also before 1970 and far from
+    # it, where a float of the seconds rounded 0001-01-01 00:00:00.999999 into the next second
+    # and failed for the last microsecond of 9999. The lines are those of PySpark's
+    # ToDatetime of the same Timestamps.
+    from pyspark.pipelines.spark_connect_pipeline import handle_pipeline_events
+
+    events = [
+        ((-62135596800, 999_999_000), "first", "1-01-01 00:00:00: first"),
+        ((-29567770275, 976_787_301), "far", "1033-01-13 10:28:45: far"),
+        ((-1, 999_999_999), "before", "1969-12-31 23:59:59: before"),
+        ((0, 0), "epoch", "1970-01-01 00:00:00: epoch"),
+        ((1_763_510_400, 999_999_999), "now", "2025-11-19 00:00:00: now"),
+        ((253402300799, 999_999_999), "last", "9999-12-31 23:59:59: last"),
+    ]
+    # The (message, timestamp_micros) of each event, as pipeline_start_run's stream yields them.
+    handle_pipeline_events(
+        (message, seconds * 1_000_000 + nanos // 1_000) for (seconds, nanos), message, _ in events
+    )
+    assert capsys.readouterr().out.splitlines() == [line for _, _, line in events]
 
 
 _REQUESTS_WITHOUT_THE_GIL = {
