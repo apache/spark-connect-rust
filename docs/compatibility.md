@@ -2282,7 +2282,9 @@ their class.
 PySpark's singleton types, from `NullType` and `IntegerType` to `CalendarIntervalType` and
 `IntegralType`, are classes of the metaclass `DataTypeSingleton`, which `type(IntegerType)` shows.
 The drop-in's are native classes, whose metaclass is `type`: PyO3 has no option of a metaclass of
-a class, and CPython refuses to assign the `__class__` of a class of `type` after it is made.
+a class, and CPython refuses to assign the `__class__` of a class of `type` after it is made. So an
+error that names the type of such a class, as the `NOT_EXPECTED_TYPE` of `udf(f, IntegerType)` (of
+the class, not of an instance), names `type` where PySpark's names `DataTypeSingleton`.
 `pyspark.sql.types` has PySpark's `DataTypeSingleton`, of which a class is made as PySpark's makes
 it, such as a subclass of a singleton type of `__main__`, which PySpark's cloudpickle sends by
 value of its metaclass: it loads, of one instance, as in PySpark. The constructors of the native
@@ -2751,9 +2753,12 @@ SparkSession, its `conf`, `catalog`, `read`, `readStream`, `streams`, `udf`, `ud
 its windows, and an `Observation`. So are `SparkSession.Hook`, nested in the session class, and
 the classes that `pyspark.sql.connect.client` names, which are of `pyspark.sql.connect.client.core`:
 its channel builders, `SparkConnectClient` and `RpcDeadlines`, which PySpark's module names too, of
-the `__all__` of its `core`, and `PlanObservedMetrics`, `AnalyzeResult` and `ConfigResult`, classes
-of PySpark's `core` that only the drop-in's module names, with its own helpers and the names that
-it imports, as the drop-in's client is that module.
+the `__all__` of its `core`. `PlanObservedMetrics`, `AnalyzeResult` and `ConfigResult` are of that
+`core` only, as PySpark's. The drop-in's `pyspark.sql.connect.client` has its own helpers and the
+names that it imports too, as the drop-in's client is that module, and an `__all__`, of the names
+that PySpark's `from pyspark.sql.connect.client import *` gives of its package, which has none:
+those classes, `getLogLevel` and `core`, but for its modules `artifact` and `reattach`, which the
+transport replaces, and `retries`, which imports grpc, and is imported when it is read.
 The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` and
 `partitioning`), and so are those of `pyspark.sql.connect.avro.functions` and
 `pyspark.sql.connect.protobuf.functions`: they are not those of `pyspark.sql.functions`,

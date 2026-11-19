@@ -1567,6 +1567,23 @@ impl PySparkSession {
     /// a path is raised once the paths before it are uploaded, which the session keeps. The flags,
     /// `pyfile`, `archive` and `file`, are any objects, of which PySpark's `_parse_artifacts`
     /// tests the truth (`if pyfile and ...`), as this does once there is a path.
+    /// Upload the artifacts of `paths`, of the flags `flags`, one path after the other, as
+    /// PySpark's `SparkConnectClient.add_artifacts` reads, checks and uploads each path before the
+    /// next (see `artifact_path_of`): so a path that is not supported raises once the paths before
+    /// it are uploaded.
+    fn upload_artifact_paths(
+        &self,
+        py: Python<'_>,
+        paths: &[Bound<'_, PyAny>],
+        flags: &[Bound<'_, PyAny>; 3],
+    ) -> PyResult<()> {
+        for path in paths {
+            let path = artifact_path_of(py, path)?;
+            self.upload_artifacts(py, vec![path], flags)?;
+        }
+        Ok(())
+    }
+
     fn upload_artifacts(
         &self,
         py: Python<'_>,
@@ -3773,17 +3790,18 @@ impl PySparkSession {
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
     /// `SparkConnectClient.add_artifacts(*path, pyfile, archive, file)`: as `addArtifacts`, but of
     /// any of the flags, each path named by the first flag that it matches, as PySpark's client
-    /// does not check them: it only tests their truth.
+    /// does not check them: it only tests their truth. Its paths are read as those of
+    /// `addArtifacts`.
     #[pyo3(signature = (*path, pyfile, archive, file))]
     fn _add_artifacts_of_flags(
         &self,
         py: Python<'_>,
-        path: Vec<String>,
+        path: Vec<Bound<'_, PyAny>>,
         pyfile: Bound<'_, PyAny>,
         archive: Bound<'_, PyAny>,
         file: Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        self.upload_artifacts(py, path, &[pyfile, archive, file])
+        self.upload_artifact_paths(py, &path, &[pyfile, archive, file])
     }
 
     /// The retry policy of the RPCs of the session, as the keyword arguments of PySpark's
@@ -4311,7 +4329,9 @@ impl PySparkSession {
     /// the flags and its extension, and the errors for a path that is not supported are
     /// PySpark's (see `spark_connect_core::artifact::parse_artifact`). A class file is refused,
     /// as PySpark's ArtifactManager does not upload one. The flags are any objects, as PySpark's:
-    /// `sum([file, pyfile, archive]) > 1` refuses them first, and each path tests their truth.
+    /// `sum([file, pyfile, archive]) > 1` refuses them first, and each path tests their truth. The
+    /// paths are uploaded one after the other, and one that is not a str is read as PySpark's
+    /// ArtifactManager reads it, of the error of its `urlparse` (see `artifact_path_of`).
     #[pyo3(
         name = "addArtifacts",
         signature = (*path, pyfile=DefaultedOption::Omitted, archive=DefaultedOption::Omitted, file=DefaultedOption::Omitted),
@@ -4320,13 +4340,13 @@ impl PySparkSession {
     fn add_artifacts(
         &self,
         py: Python<'_>,
-        path: Vec<String>,
+        path: Vec<Bound<'_, PyAny>>,
         pyfile: DefaultedOption,
         archive: DefaultedOption,
         file: DefaultedOption,
     ) -> PyResult<()> {
         let flags = session_artifact_flags(py, &pyfile, &archive, &file)?;
-        self.upload_artifacts(py, path, &flags)
+        self.upload_artifact_paths(py, &path, &flags)
     }
 
     /// `addArtifact` is `addArtifacts`, as in PySpark.
@@ -4338,7 +4358,7 @@ impl PySparkSession {
     fn add_artifact(
         &self,
         py: Python<'_>,
-        path: Vec<String>,
+        path: Vec<Bound<'_, PyAny>>,
         pyfile: DefaultedOption,
         archive: DefaultedOption,
         file: DefaultedOption,
@@ -4393,6 +4413,49 @@ fn unsupported_artifact_error(py: Python<'_>, unsupported: UnsupportedArtifact) 
             &[("arg_name", "artifact path"), ("disallowed_value", "#")],
         ),
     }
+}
+
+/// The path or URI of `path`, a path of `addArtifacts` or of `client.add_artifacts`, as PySpark's
+/// ArtifactManager reads it (`_parse_artifacts`): a str as it is. Of another object, the file URI
+/// that `Path(path).resolve().as_uri()` makes of a Windows absolute path, as PySpark converts one
+/// of `PureWindowsPath`, whose `Exception` it ignores; else `urlparse` raises its error of the
+/// object, as the `AttributeError` of the `decode` that a `pathlib.Path` or an int does not have,
+/// or parses it, as bytes or a falsy object, into a scheme of bytes, which is neither empty nor
+/// `file` as PySpark compares it, so not supported.
+fn artifact_path_of(py: Python<'_>, path: &Bound<'_, PyAny>) -> PyResult<String> {
+    if path.is_instance_of::<pyo3::types::PyString>() {
+        return path.extract();
+    }
+    let pathlib = py.import("pathlib")?;
+    let windows_uri = || -> PyResult<Option<String>> {
+        let windows = pathlib.getattr("PureWindowsPath")?.call1((path,))?;
+        if !(windows.call_method0("is_absolute")?.is_truthy()?
+            && windows.getattr("drive")?.is_truthy()?)
+        {
+            return Ok(None);
+        }
+        let uri = pathlib
+            .getattr("Path")?
+            .call1((path,))?
+            .call_method0("resolve")?
+            .call_method0("as_uri")?;
+        Ok(Some(uri.extract()?))
+    };
+    match windows_uri() {
+        Ok(Some(uri)) => return Ok(uri),
+        Ok(None) => {}
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyException>(py) => {}
+        Err(error) => return Err(error),
+    }
+    let parsed = py
+        .import("urllib.parse")?
+        .getattr("urlparse")?
+        .call1((path,))?;
+    let scheme = parsed.getattr("scheme")?.str()?.to_string();
+    Err(unsupported_artifact_error(
+        py,
+        UnsupportedArtifact::Scheme(scheme),
+    ))
 }
 
 /// The flags `pyfile`, `archive` and `file` of `SparkSession.addArtifacts`, of `False` when they

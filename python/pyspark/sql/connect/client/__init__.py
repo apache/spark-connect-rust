@@ -24,7 +24,19 @@ requests of those as PySpark Connect's does, and reads their responses as it doe
 policies, the reattachable executions, the result chunking and the RPC deadlines of the client are
 those of the transport."""
 
-__all__ = ["ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
+# The names that `from pyspark.sql.connect.client import *` gives of PySpark's package, which has
+# no `__all__`: the classes of the `__all__` of its core, its `getLogLevel` and its core module.
+# PySpark's gives its modules `artifact`, `reattach` and `retries` too, which its core imports:
+# the transport replaces the first two, and `retries` is imported once it is read, as it imports
+# grpc, which the client does not need otherwise.
+__all__ = [
+    "ChannelBuilder",
+    "DefaultChannelBuilder",
+    "RpcDeadlines",
+    "SparkConnectClient",
+    "core",
+    "getLogLevel",
+]
 
 
 import copy
@@ -53,10 +65,18 @@ from pyspark.errors.exceptions.connect import SparkConnectException
 from pyspark.sql.connect.logging import logger
 # As PySpark's package, which exports the log level of Spark Connect's logger.
 from pyspark.sql.connect.logging import getLogLevel  # noqa: F401
-from pyspark.sql.metrics import ExecutionInfo, ObservedMetrics, PlanMetrics
+from pyspark.sql.metrics import ExecutionInfo, PlanMetrics
 from pyspark.sql.types import DataType, StructType
 from pyspark.util import PythonEvalType
 from pyspark.version import __version__
+
+# The results of the analyses, the configurations and the observed metrics of the client, which
+# PySpark's core defines, and its package does not have.
+from pyspark.sql.connect.client.core import (
+    AnalyzeResult as _AnalyzeResult,
+    ConfigResult as _ConfigResult,
+    PlanObservedMetrics as _PlanObservedMetrics,
+)
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -66,7 +86,6 @@ if TYPE_CHECKING:
     from pyspark.sql.connect.client.retries import RetryPolicy
     from pyspark.sql.connect.observation import Observation
     from pyspark.sql.datasource import DataSource
-    from pyspark.storagelevel import StorageLevel
 
 
 @dataclass(frozen=True)
@@ -437,174 +456,6 @@ class _UnsupportedLiteral:
 
     def __repr__(self) -> str:
         return f"_UnsupportedLiteral({self.literal})"
-
-
-class PlanObservedMetrics(ObservedMetrics):
-    """Observed metrics of one ``observe(...)`` node, as carried by
-    ``DataFrame.executionInfo.flows``, as PySpark Connect's: its ``metrics`` are the
-    ``Expression.Literal`` messages (of ``pyspark.sql.connect.proto``) that the server sent,
-    which ``pairs`` converts with ``LiteralExpression._to_value``, and so raises PySpark's
-    ``UNSUPPORTED_LITERAL`` of a literal that it does not convert."""
-
-    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
-    __module__ = "pyspark.sql.connect.client.core"
-
-    def __init__(self, name: str, metrics: list["pb2.Expression.Literal"], keys: list[str]):
-        self._name = name
-        self._metrics = metrics
-        self._keys = keys if keys else [f"observed_metric_{i}" for i in range(len(self.metrics))]
-
-    def __repr__(self) -> str:
-        return f"Plan observed({self._name}={self._metrics})"
-
-    @property
-    def name(self) -> str:
-        return self._name
-
-    @property
-    def metrics(self) -> list["pb2.Expression.Literal"]:
-        return self._metrics
-
-    @property
-    def pairs(self) -> dict[str, Any]:
-        from pyspark.sql.connect.expressions import LiteralExpression
-
-        result = {}
-        for x in range(len(self._metrics)):
-            result[self.keys[x]] = LiteralExpression._to_value(self.metrics[x])
-        return result
-
-    @property
-    def keys(self) -> list[str]:
-        return self._keys
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable dictionary representation of this observed metrics,
-        with the keys ``name``, ``keys`` and ``pairs``, as PySpark Connect's."""
-        return {
-            "name": self._name,
-            "keys": self._keys,
-            "pairs": self.pairs,
-        }
-
-
-class AnalyzeResult:
-    """The result of an analysis of SparkConnectClient's ``_analyze``, as PySpark Connect's: the
-    one field of the result of the analysis, and None for the others."""
-
-    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
-    __module__ = "pyspark.sql.connect.client.core"
-
-    def __init__(
-        self,
-        schema: Optional[DataType],
-        explain_string: Optional[str],
-        tree_string: Optional[str],
-        is_local: Optional[bool],
-        is_streaming: Optional[bool],
-        input_files: Optional[list[str]],
-        spark_version: Optional[str],
-        parsed: Optional[DataType],
-        is_same_semantics: Optional[bool],
-        semantic_hash: Optional[int],
-        storage_level: Optional["StorageLevel"],
-        ddl_string: Optional[str],
-    ):
-        self.schema = schema
-        self.explain_string = explain_string
-        self.tree_string = tree_string
-        self.is_local = is_local
-        self.is_streaming = is_streaming
-        self.input_files = input_files
-        self.spark_version = spark_version
-        self.parsed = parsed
-        self.is_same_semantics = is_same_semantics
-        self.semantic_hash = semantic_hash
-        self.storage_level = storage_level
-        self.ddl_string = ddl_string
-
-    @classmethod
-    def fromProto(cls, pb: Any) -> "AnalyzeResult":
-        from pyspark.sql.connect import types
-        from pyspark.sql.connect.conversion import proto_to_storage_level
-
-        schema: Optional[DataType] = None
-        explain_string: Optional[str] = None
-        tree_string: Optional[str] = None
-        is_local: Optional[bool] = None
-        is_streaming: Optional[bool] = None
-        input_files: Optional[list[str]] = None
-        spark_version: Optional[str] = None
-        parsed: Optional[DataType] = None
-        is_same_semantics: Optional[bool] = None
-        semantic_hash: Optional[int] = None
-        storage_level: Optional[StorageLevel] = None
-        ddl_string: Optional[str] = None
-
-        if pb.HasField("schema"):
-            schema = types.proto_schema_to_pyspark_data_type(pb.schema.schema)
-        elif pb.HasField("explain"):
-            explain_string = pb.explain.explain_string
-        elif pb.HasField("tree_string"):
-            tree_string = pb.tree_string.tree_string
-        elif pb.HasField("is_local"):
-            is_local = pb.is_local.is_local
-        elif pb.HasField("is_streaming"):
-            is_streaming = pb.is_streaming.is_streaming
-        elif pb.HasField("input_files"):
-            input_files = pb.input_files.files
-        elif pb.HasField("spark_version"):
-            spark_version = pb.spark_version.version
-        elif pb.HasField("ddl_parse"):
-            parsed = types.proto_schema_to_pyspark_data_type(pb.ddl_parse.parsed)
-        elif pb.HasField("same_semantics"):
-            is_same_semantics = pb.same_semantics.result
-        elif pb.HasField("semantic_hash"):
-            semantic_hash = pb.semantic_hash.result
-        elif pb.HasField("persist"):
-            pass
-        elif pb.HasField("unpersist"):
-            pass
-        elif pb.HasField("get_storage_level"):
-            storage_level = proto_to_storage_level(pb.get_storage_level.storage_level)
-        elif pb.HasField("json_to_ddl"):
-            ddl_string = pb.json_to_ddl.ddl_string
-        else:
-            raise SparkConnectException("No analyze result found!")
-
-        return AnalyzeResult(
-            schema,
-            explain_string,
-            tree_string,
-            is_local,
-            is_streaming,
-            input_files,
-            spark_version,
-            parsed,
-            is_same_semantics,
-            semantic_hash,
-            storage_level,
-            ddl_string,
-        )
-
-
-class ConfigResult:
-    """The result of SparkConnectClient's ``config``, as PySpark Connect's: the pairs of a key and
-    its value, None for a key without one, and the warnings of the server."""
-
-    # As PySpark Connect's, of pyspark.sql.connect.client.core, whose name this class has too.
-    __module__ = "pyspark.sql.connect.client.core"
-
-    def __init__(self, pairs: list[tuple[str, Optional[str]]], warnings: list[str]):
-        self.pairs = pairs
-        self.warnings = warnings
-
-    @classmethod
-    def fromProto(cls, pb: "pb2.ConfigResponse") -> "ConfigResult":
-        return ConfigResult(
-            pairs=[(pair.key, pair.value if pair.HasField("value") else None) for pair in pb.pairs],
-            warnings=list(pb.warnings),
-        )
 
 
 def _self_destruct_table(table: Any) -> Any:
@@ -1026,7 +877,7 @@ class SparkConnectClient:
         ``get_config_with_defaults``, of which pandas-on-Spark reads its ANSI mode."""
         return tuple(self._session.conf._get_with_defaults(list(pairs)))
 
-    def config(self, operation: "pb2.ConfigRequest.Operation") -> ConfigResult:
+    def config(self, operation: "pb2.ConfigRequest.Operation") -> _ConfigResult:
         """Send ``operation``, a ``ConfigRequest.Operation``, as SparkConnectClient's ``config``:
         the result of the configuration request of the session."""
         import pyspark.sql.connect.proto as pb2
@@ -1034,9 +885,9 @@ class SparkConnectClient:
         req = pb2.ConfigRequest()
         req.operation.CopyFrom(operation)
         response = pb2.ConfigResponse.FromString(self._session._config(req.SerializeToString()))
-        return ConfigResult.fromProto(response)
+        return _ConfigResult.fromProto(response)
 
-    def _analyze(self, method: str, **kwargs: Any) -> AnalyzeResult:
+    def _analyze(self, method: str, **kwargs: Any) -> _AnalyzeResult:
         """The result of the analysis ``method`` of the arguments ``kwargs``, as
         SparkConnectClient's ``_analyze``: an AnalyzePlanRequest of the plans or the relations it
         is given, as they are."""
@@ -1107,7 +958,7 @@ class SparkConnectClient:
                 },
             )
         data = self._session._analyze_plan(req.SerializeToString())
-        return AnalyzeResult.fromProto(pb2.AnalyzePlanResponse.FromString(data))
+        return _AnalyzeResult.fromProto(pb2.AnalyzePlanResponse.FromString(data))
 
     def schema(self, plan: "pb2.Plan") -> StructType:
         """The schema of ``plan``, a ``spark.connect.Plan``, as SparkConnectClient's ``schema``:
@@ -1240,7 +1091,7 @@ class SparkConnectClient:
         its plan metrics, its observed metrics, its properties, and its operation ID."""
         import pyarrow as pa
 
-        observed_metrics: list[PlanObservedMetrics] = []
+        observed_metrics: list[_PlanObservedMetrics] = []
         metrics: list[PlanMetrics] = []
         batches: list[pa.RecordBatch] = []
         schema: Optional[StructType] = None
@@ -1254,7 +1105,7 @@ class SparkConnectClient:
                 batches.append(response)
             elif isinstance(response, PlanMetrics):
                 metrics.append(response)
-            elif isinstance(response, PlanObservedMetrics):
+            elif isinstance(response, _PlanObservedMetrics):
                 observed_metrics.append(response)
             elif isinstance(response, dict):
                 properties.update(**response)
@@ -2437,3 +2288,12 @@ def _log_grpc_error(file: str, line: int, message: str) -> None:
     except OSError:
         # As gRPC's core, which goes on when stderr is closed.
         pass
+
+
+# The classes of the `__all__` of PySpark's core, which official code and pickles read there: the
+# core module was imported before they were defined.
+from pyspark.sql.connect.client import core as _core  # noqa: E402
+
+for _name in _core.__all__:
+    setattr(_core, _name, globals()[_name])
+del _core, _name

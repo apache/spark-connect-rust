@@ -4060,22 +4060,37 @@ def test_channel_builder_parses_the_connection_string_and_the_session_honors_it_
 
 
 def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
-    # As PySpark Connect's ChannelBuilder, DefaultChannelBuilder, PlanObservedMetrics and
-    # SparkConnectClient, of pyspark.sql.connect.client.core, which names them: their repr and a
-    # pickle by reference name them there.
+    # As PySpark Connect's ChannelBuilder, DefaultChannelBuilder, RpcDeadlines and
+    # SparkConnectClient, of pyspark.sql.connect.client.core, which names them and whose `import *`
+    # its package makes, and its PlanObservedMetrics, AnalyzeResult and ConfigResult, which only
+    # that module names: their repr and a pickle by reference name them there. The package's
+    # `import *` gives the names that PySpark's gives, those classes, its getLogLevel and its core
+    # module, but its gRPC modules.
+    import pyspark.sql.connect.logging
     from pyspark.sql.connect import client
     from pyspark.sql.connect.client import core
 
-    for name in ["ChannelBuilder", "DefaultChannelBuilder", "PlanObservedMetrics",
-                 "SparkConnectClient", "RpcDeadlines", "AnalyzeResult", "ConfigResult"]:
+    for name in ["ChannelBuilder", "DefaultChannelBuilder", "SparkConnectClient", "RpcDeadlines"]:
         cls = getattr(client, name)
         assert (cls.__module__, cls.__qualname__) == ("pyspark.sql.connect.client.core", name)
         assert getattr(core, name) is cls
+        assert pickle.loads(pickle.dumps(cls)) is cls
+    for name in ["PlanObservedMetrics", "AnalyzeResult", "ConfigResult"]:
+        cls = getattr(core, name)
+        assert (cls.__module__, cls.__qualname__) == ("pyspark.sql.connect.client.core", name)
+        assert not hasattr(client, name)
         assert pickle.loads(pickle.dumps(cls)) is cls
     assert repr(client.DefaultChannelBuilder("sc://localhost")).startswith(
         "<pyspark.sql.connect.client.core.DefaultChannelBuilder object at 0x")
     assert core.__all__ == [
         "ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
+    names = {}
+    exec("from pyspark.sql.connect.client import *", names)
+    assert sorted(name for name in names if not name.startswith("__")) == [
+        "ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient", "core",
+        "getLogLevel"]
+    assert names["core"] is core
+    assert names["getLogLevel"] is pyspark.sql.connect.logging.getLogLevel
 
 
 def test_the_session_and_its_stream_manager_have_pysparks_public_names(mock_connect):
@@ -25078,7 +25093,7 @@ def test_observed_metrics_expose_their_name_metrics_and_keys_as_pyspark():
     # does not convert when it is read.
     import pyspark.sql.connect.proto as pb2
     from pyspark.errors import PySparkTypeError
-    from pyspark.sql.connect.client import PlanObservedMetrics
+    from pyspark.sql.connect.client.core import PlanObservedMetrics
 
     one, two = pb2.Expression.Literal(long=1), pb2.Expression.Literal(integer=2)
     metrics = PlanObservedMetrics("o", [one, two], [])
@@ -25254,7 +25269,8 @@ def test_client_analysis_requests_and_results_are_those_of_pyspark():
     import pyspark.sql.connect.proto as pb2
     from pyspark.errors import PySparkValueError
     from pyspark.errors.exceptions.connect import SparkConnectException
-    from pyspark.sql.connect.client import AnalyzeResult, SparkConnectClient
+    from pyspark.sql.connect.client import SparkConnectClient
+    from pyspark.sql.connect.client.core import AnalyzeResult
     from pyspark.storagelevel import StorageLevel
 
     class Session:
@@ -28096,7 +28112,7 @@ def test_execution_info_and_operation_id():
     from pyspark.errors.exceptions.connect import (
         SparkConnectException,
     )
-    from pyspark.sql.connect.client import PlanObservedMetrics
+    from pyspark.sql.connect.client.core import PlanObservedMetrics
     from pyspark.sql.metrics import ExecutionInfo
 
     spark = _offline_session()
@@ -32279,6 +32295,48 @@ def test_column_origins_capture_their_call_site_without_importing_per_call(mock_
     assert len(imports) <= 1
     spark.range(1).select(column).collect()
     assert expected.encode() in service.execute_requests[-1]
+
+
+def test_add_artifacts_reads_a_path_that_is_not_a_str_as_pyspark(mock_connect, tmp_path):
+    # As PySpark's ArtifactManager._parse_artifacts, which parses each path with urlparse once the
+    # flags are checked and the paths before it are uploaded: a pathlib path, an int or another
+    # object that urlparse cannot decode raises its AttributeError, and bytes or a falsy object
+    # parse into a scheme of bytes, which is not supported. spark.addArtifacts, addArtifact and
+    # client.add_artifacts read their paths so.
+    import pathlib
+
+    from pyspark.errors import PySparkRuntimeError, PySparkValueError
+
+    spark, service = mock_connect
+    client = spark.client
+    module = tmp_path / "artifact_module.py"
+    module.write_text("x = 1\n")
+    adds = [
+        lambda path: spark.addArtifacts(path, pyfile=True),
+        lambda path: spark.addArtifact(path, pyfile=True),
+        lambda path: client.add_artifacts(path, pyfile=True, archive=False, file=False),
+    ]
+    for add in adds:
+        for path, kind in ((module, "PosixPath"), (pathlib.PurePosixPath(module), "PurePosixPath"),
+                           (5, "int")):
+            with pytest.raises(AttributeError) as error:
+                add(path)
+            assert str(error.value) == f"'{kind}' object has no attribute 'decode'"
+        for path, scheme in ((str(module).encode(), "b''"),
+                             (("file://" + str(module)).encode(), "b'file'"),
+                             (None, "b''"), (0, "b''")):
+            with pytest.raises(PySparkRuntimeError) as error:
+                add(path)
+            assert error.value.getCondition() == "UNSUPPORTED_OPERATION"
+            assert error.value.getMessageParameters() == {"operation": f"{scheme} scheme"}
+    assert service.add_artifacts_requests == []
+    # The flags are checked first, and the paths before one that is not supported are uploaded.
+    with pytest.raises(PySparkValueError) as error:
+        spark.addArtifacts(module, pyfile=True, archive=True)
+    assert error.value.getCondition() == "INVALID_MULTIPLE_ARGUMENT_CONDITIONS"
+    with pytest.raises(AttributeError):
+        spark.addArtifacts(str(module), module, pyfile=True)
+    assert len(service.add_artifacts_requests) == 1
 
 
 def test_add_artifacts_puts_a_pyfile_zip_on_the_client_path_before_opening_it(tmp_path, monkeypatch):
