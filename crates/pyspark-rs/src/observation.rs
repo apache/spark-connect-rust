@@ -13,12 +13,13 @@ use spark_connect_core::error::{SparkError, SparkErrorKind};
 use crate::column::{raise_pyspark, PyColumn};
 use crate::dataframe::PyDataFrame;
 
-/// Python wrapper for an Observation of metrics, as PySpark Connect's `Observation`, a plain
-/// class, which is subclassed. Its `_name`, `_result` and `_error` are attributes of its
-/// `__dict__`, as PySpark's, which a program reads, sets and deletes, and which `get`, `_on` and
-/// the actions read and set as PySpark's do (see [`PyObservationMirror`]). An Observation of a
-/// subclass is constructed of the arguments of its `__init__`, and its copies and pickles are of
-/// its class.
+// Python wrapper for an Observation of metrics, as PySpark Connect's `Observation`, a plain
+// class, which is subclassed. Its `_name`, `_result` and `_error` are attributes of its
+// `__dict__`, as PySpark's, which a program reads, sets and deletes, and which `get`, `_on` and
+// the actions read and set as PySpark's do (see [`PyObservationMirror`]). An Observation of a
+// subclass is constructed of the arguments of its `__init__`, and its copies and pickles are of
+// its class.
+#[doc = connect_doc!(Observation)]
 #[pyclass(
     name = "Observation",
     module = "pyspark.sql.connect.observation",
@@ -86,11 +87,12 @@ impl PyObservation {
         Ok(())
     }
 
-    /// The observed metrics, as PySpark's `Observation.get`: its `_error`, raised if it is not
-    /// None, else its `_result`, the dict of the metrics that the actions run so far observed, by
-    /// their names, which the actions update in place, and `NO_OBSERVE_BEFORE_GET` while it is
-    /// None, before the observation is used.
+    // The observed metrics, as PySpark's `Observation.get`: its `_error`, raised if it is not
+    // None, else its `_result`, the dict of the metrics that the actions run so far observed, by
+    // their names, which the actions update in place, and `NO_OBSERVE_BEFORE_GET` while it is
+    // None, before the observation is used.
     #[getter]
+    #[doc = connect_doc!(Observation.get)]
     fn get<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         let py = slf.py();
         let error = slf.getattr(intern!(py, "_error"))?;
@@ -115,9 +117,10 @@ impl PyObservation {
         slf.setattr(intern!(slf.py(), "_error"), exc)
     }
 
-    /// Observe the metrics of the Columns `exprs` on `df` with this observation, as PySpark's
-    /// `Observation._on`, which `DataFrame.observe` of an Observation calls.
+    // Observe the metrics of the Columns `exprs` on `df` with this observation, as PySpark's
+    // `Observation._on`, which `DataFrame.observe` of an Observation calls.
     #[pyo3(signature = (df, *exprs))]
+    #[doc = connect_doc!(Observation._on)]
     fn _on(
         slf: &Bound<'_, Self>,
         df: PyRef<'_, PyDataFrame>,

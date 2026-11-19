@@ -12,6 +12,4530 @@
 /// resolved before the imports are.
 #[rustfmt::skip]
 macro_rules! connect_doc {
+    (Catalog . currentCatalog) => {
+        r#"Returns the current catalog in this session.
+
+        .. versionadded:: 3.4.0
+
+        Returns
+        -------
+        str
+            The current catalog name.
+
+        Examples
+        --------
+        >>> spark.catalog.currentCatalog()
+        'spark_catalog'
+        "#
+    };
+    (Catalog . setCurrentCatalog) => {
+        r#"Sets the current catalog in this session.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        catalogName : str
+            Name of the catalog to set.
+
+        Examples
+        --------
+        >>> spark.catalog.setCurrentCatalog("spark_catalog")
+        "#
+    };
+    (Catalog . listCatalogs) => {
+        r#"Returns a list of catalogs available in this session.
+
+        With ``pattern``, returns only catalogs whose name matches that pattern.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        pattern : str, optional
+            Pattern that catalog names must match.
+
+            .. versionadded:: 3.5.0
+
+        Returns
+        -------
+        list
+            A list of :class:`CatalogMetadata`.
+
+        Examples
+        --------
+        >>> spark.catalog.listCatalogs()
+        [CatalogMetadata(name='spark_catalog', description=None)]
+
+        >>> spark.catalog.listCatalogs("spark*")
+        [CatalogMetadata(name='spark_catalog', description=None)]
+
+        >>> spark.catalog.listCatalogs("hive*")
+        []
+        "#
+    };
+    (Catalog . currentDatabase) => {
+        r#"
+        Returns the current database (namespace) in this session.
+
+        .. versionadded:: 2.0.0
+
+        Returns
+        -------
+        str
+            The current database (namespace) name.
+
+        Examples
+        --------
+        >>> spark.catalog.currentDatabase()
+        'default'
+        "#
+    };
+    (Catalog . setCurrentDatabase) => {
+        r#"
+        Sets the current database (namespace) in this session.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        dbName : str
+            Name of the database (namespace) to set.
+
+        Examples
+        --------
+        >>> spark.catalog.setCurrentDatabase("default")
+        "#
+    };
+    (Catalog . listDatabases) => {
+        r#"
+        Returns a list of databases (namespaces) available within the current catalog.
+
+        With ``pattern``, returns only databases whose name matches that pattern.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        pattern : str, optional
+            Pattern that database names must match.
+
+            .. versionadded:: 3.5.0
+
+        Returns
+        -------
+        list
+            A list of :class:`Database`.
+
+        Examples
+        --------
+        >>> spark.catalog.listDatabases()
+        [Database(name='default', catalog='spark_catalog', description='default database', ...
+
+        >>> spark.catalog.listDatabases("def*")
+        [Database(name='default', catalog='spark_catalog', description='default database', ...
+
+        >>> spark.catalog.listDatabases("def2*")
+        []
+        "#
+    };
+    (Catalog . getDatabase) => {
+        r#"Get the database with the specified name.
+        This throws an :class:`AnalysisException` when the database cannot be found.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        dbName : str
+             name of the database to get.
+
+        Returns
+        -------
+        :class:`Database`
+            The database found by the name.
+
+        Examples
+        --------
+        >>> spark.catalog.getDatabase("default")
+        Database(name='default', catalog='spark_catalog', description='default database', ...
+
+        Using the fully qualified name with the catalog name.
+
+        >>> spark.catalog.getDatabase("spark_catalog.default")
+        Database(name='default', catalog='spark_catalog', description='default database', ...
+        "#
+    };
+    (Catalog . databaseExists) => {
+        r#"Check if the database with the specified name exists.
+
+        .. versionadded:: 3.3.0
+
+        Parameters
+        ----------
+        dbName : str
+            name of the database to check existence
+
+            .. versionchanged:: 3.4.0
+               Allow ``dbName`` to be qualified with catalog name.
+
+        Returns
+        -------
+        bool
+            Indicating whether the database exists
+
+        Examples
+        --------
+        Check if 'test_new_database' database exists
+
+        >>> spark.catalog.databaseExists("test_new_database")
+        False
+        >>> _ = spark.sql("CREATE DATABASE test_new_database")
+        >>> spark.catalog.databaseExists("test_new_database")
+        True
+
+        Using the fully qualified name with the catalog name.
+
+        >>> spark.catalog.databaseExists("spark_catalog.test_new_database")
+        True
+        >>> _ = spark.sql("DROP DATABASE test_new_database")
+        "#
+    };
+    (Catalog . listTables) => {
+        r#"Returns a list of tables/views in the current database (namespace), or in the database
+        given by ``dbName`` when provided (the name may be qualified with catalog).
+
+        With ``pattern``, returns only tables and views whose name matches the pattern. This
+        includes all temporary views.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        dbName : str, optional
+            Database (namespace) to list tables from. If omitted, the current database is used.
+
+            .. versionchanged:: 3.4.0
+               Allow ``dbName`` to be qualified with catalog name.
+
+        pattern : str, optional
+            Pattern that table names must match.
+
+            .. versionadded:: 3.5.0
+
+        Returns
+        -------
+        list
+            A list of :class:`Table`.
+
+        Examples
+        --------
+        >>> spark.range(1).createTempView("test_view")
+        >>> spark.catalog.listTables()
+        [Table(name='test_view', catalog=None, namespace=[], description=None, ...
+
+        >>> spark.catalog.listTables(pattern="test*")
+        [Table(name='test_view', catalog=None, namespace=[], description=None, ...
+
+        >>> spark.catalog.listTables(pattern="table*")
+        []
+
+        >>> _ = spark.catalog.dropTempView("test_view")
+        >>> spark.catalog.listTables()
+        []
+        "#
+    };
+    (Catalog . getTable) => {
+        r#"Get the table or view with the specified name. This table can be a temporary view or a
+        table/view. This throws an :class:`AnalysisException` when no Table can be found.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to get.
+
+            .. versionchanged:: 3.4.0
+               Allow `tableName` to be qualified with catalog name.
+
+        Returns
+        -------
+        :class:`Table`
+            The table found by the name.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        >>> _ = spark.sql("CREATE TABLE tbl1 (name STRING, age INT) USING parquet")
+        >>> spark.catalog.getTable("tbl1")
+        Table(name='tbl1', catalog='spark_catalog', namespace=['default'], ...
+
+        Using the fully qualified name with the catalog name.
+
+        >>> spark.catalog.getTable("default.tbl1")
+        Table(name='tbl1', catalog='spark_catalog', namespace=['default'], ...
+        >>> spark.catalog.getTable("spark_catalog.default.tbl1")
+        Table(name='tbl1', catalog='spark_catalog', namespace=['default'], ...
+        >>> _ = spark.sql("DROP TABLE tbl1")
+
+        Throw an analysis exception when the table does not exist.
+
+        >>> spark.catalog.getTable("tbl1")
+        Traceback (most recent call last):
+            ...
+        AnalysisException: ...
+        "#
+    };
+    (Catalog . listFunctions) => {
+        r#"
+        Returns a list of functions registered in the current database (namespace), or in the
+        database given by ``dbName`` when provided (the name may be qualified with catalog).
+
+        With ``pattern``, returns only functions whose name matches the pattern. This includes all
+        built-in and temporary functions.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        dbName : str, optional
+            Database (namespace) to list functions from. If omitted, the current database is used.
+            May be qualified with catalog name.
+        pattern : str, optional
+            Pattern that function names must match.
+
+            .. versionadded:: 3.5.0
+
+        Returns
+        -------
+        list
+            A list of :class:`Function`.
+
+        Examples
+        --------
+        >>> spark.catalog.listFunctions()
+        [Function(name=...
+
+        >>> spark.catalog.listFunctions(pattern="to_*")
+        [Function(name=...
+
+        >>> spark.catalog.listFunctions(pattern="*not_existing_func*")
+        []
+        "#
+    };
+    (Catalog . functionExists) => {
+        r#"Check if the function with the specified name exists.
+        This can either be a temporary function or a function.
+
+        .. versionadded:: 3.3.0
+
+        Parameters
+        ----------
+        functionName : str
+            name of the function to check existence
+
+            .. versionchanged:: 3.4.0
+               Allow ``functionName`` to be qualified with catalog name
+
+        dbName : str, optional
+            name of the database to check function existence in.
+
+        Returns
+        -------
+        bool
+            Indicating whether the function exists
+
+        Notes
+        -----
+        If no database is specified, the current database and catalog
+        are used. This API includes all temporary functions.
+
+        Examples
+        --------
+        >>> spark.catalog.functionExists("count")
+        True
+
+        Using the fully qualified name for function name.
+
+        >>> spark.catalog.functionExists("default.unexisting_function")
+        False
+        >>> spark.catalog.functionExists("spark_catalog.default.unexisting_function")
+        False
+        "#
+    };
+    (Catalog . getFunction) => {
+        r#"Get the function with the specified name. This function can be a temporary function or a
+        function. This throws an :class:`AnalysisException` when the function cannot be found.
+
+        .. versionadded:: 3.4.0
+
+        Parameters
+        ----------
+        functionName : str
+            name of the function to check existence.
+
+        Returns
+        -------
+        :class:`Function`
+            The function found by the name.
+
+        Examples
+        --------
+        >>> _ = spark.sql(
+        ...     "CREATE FUNCTION my_func1 AS 'test.org.apache.spark.sql.MyDoubleAvg'")
+        >>> spark.catalog.getFunction("my_func1")
+        Function(name='my_func1', catalog='spark_catalog', namespace=['default'], ...
+
+        Using the fully qualified name for function name.
+
+        >>> spark.catalog.getFunction("default.my_func1")
+        Function(name='my_func1', catalog='spark_catalog', namespace=['default'], ...
+        >>> spark.catalog.getFunction("spark_catalog.default.my_func1")
+        Function(name='my_func1', catalog='spark_catalog', namespace=['default'], ...
+
+        Throw an analysis exception when the function does not exists.
+
+        >>> spark.catalog.getFunction("my_func2")
+        Traceback (most recent call last):
+            ...
+        AnalysisException: ...
+        "#
+    };
+    (Catalog . listColumns) => {
+        r#"Returns a list of columns for the given table/view in the specified database.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to list columns.
+
+            .. versionchanged:: 3.4.0
+               Allow ``tableName`` to be qualified with catalog name when ``dbName`` is None.
+
+        dbName : str, optional
+            name of the database to find the table to list columns.
+
+        Returns
+        -------
+        list
+            A list of :class:`Column`.
+
+        Notes
+        -----
+        The order of arguments here is different from that of its JVM counterpart
+        because Python does not support method overloading.
+
+        If no database is specified, the current database and catalog
+        are used. This API includes all temporary views.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        >>> _ = spark.sql("CREATE TABLE tblA (name STRING, age INT) USING parquet")
+        >>> spark.catalog.listColumns("tblA")
+        [Column(name='name', description=None, dataType='string', nullable=True, ...
+        >>> _ = spark.sql("DROP TABLE tblA")
+        "#
+    };
+    (Catalog . tableExists) => {
+        r#"Check if the table or view with the specified name exists.
+        This can either be a temporary view or a table/view.
+
+        .. versionadded:: 3.3.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to check existence.
+            If no database is specified, first try to treat ``tableName`` as a
+            multi-layer-namespace identifier, then try ``tableName`` as a normal table
+            name in the current database if necessary.
+
+            .. versionchanged:: 3.4.0
+               Allow ``tableName`` to be qualified with catalog name when ``dbName`` is None.
+
+        dbName : str, optional
+            name of the database to check table existence in.
+
+        Returns
+        -------
+        bool
+            Indicating whether the table/view exists
+
+        Examples
+        --------
+        This function can check if a table is defined or not:
+
+        >>> spark.catalog.tableExists("unexisting_table")
+        False
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        >>> _ = spark.sql("CREATE TABLE tbl1 (name STRING, age INT) USING parquet")
+        >>> spark.catalog.tableExists("tbl1")
+        True
+
+        Using the fully qualified names for tables.
+
+        >>> spark.catalog.tableExists("default.tbl1")
+        True
+        >>> spark.catalog.tableExists("spark_catalog.default.tbl1")
+        True
+        >>> spark.catalog.tableExists("tbl1", "default")
+        True
+        >>> _ = spark.sql("DROP TABLE tbl1")
+
+        Check if views exist:
+
+        >>> spark.catalog.tableExists("view1")
+        False
+        >>> _ = spark.sql("CREATE VIEW view1 AS SELECT 1")
+        >>> spark.catalog.tableExists("view1")
+        True
+
+        Using the fully qualified names for views.
+
+        >>> spark.catalog.tableExists("default.view1")
+        True
+        >>> spark.catalog.tableExists("spark_catalog.default.view1")
+        True
+        >>> spark.catalog.tableExists("view1", "default")
+        True
+        >>> _ = spark.sql("DROP VIEW view1")
+
+        Check if temporary views exist:
+
+        >>> _ = spark.sql("CREATE TEMPORARY VIEW view1 AS SELECT 1")
+        >>> spark.catalog.tableExists("view1")
+        True
+        >>> df = spark.sql("DROP VIEW view1")
+        >>> spark.catalog.tableExists("view1")
+        False
+        "#
+    };
+    (Catalog . createExternalTable) => {
+        r#"Creates a table based on the dataset in a data source.
+
+        It returns the DataFrame associated with the external table.
+
+        The data source is specified by the ``source`` and a set of ``options``.
+        If ``source`` is not specified, the default data source configured by
+        ``spark.sql.sources.default`` will be used.
+
+        Optionally, a schema can be provided as the schema of the returned :class:`DataFrame` and
+        created external table.
+
+        .. versionadded:: 2.0.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+        "#
+    };
+    (Catalog . createTable) => {
+        r#"Creates a table based on the dataset in a data source.
+
+        .. versionadded:: 2.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to create.
+
+            .. versionchanged:: 3.4.0
+               Allow ``tableName`` to be qualified with catalog name.
+
+        path : str, optional
+            the path in which the data for this table exists.
+            When ``path`` is specified, an external table is
+            created from the data at the given path. Otherwise a managed table is created.
+        source : str, optional
+            the source of this table such as 'parquet, 'orc', etc.
+            If ``source`` is not specified, the default data source configured by
+            ``spark.sql.sources.default`` will be used.
+        schema : class:`StructType`, optional
+            the schema for this table.
+        description : str, optional
+            the description of this table.
+
+            .. versionchanged:: 3.1.0
+                Added the ``description`` parameter.
+
+        **options : dict, optional
+            extra options to specify in the table.
+
+        Returns
+        -------
+        :class:`DataFrame`
+            The DataFrame associated with the table.
+
+        Examples
+        --------
+        Creating a managed table.
+
+        >>> _ = spark.catalog.createTable("tbl1", schema=spark.range(1).schema, source='parquet')
+        >>> _ = spark.sql("DROP TABLE tbl1")
+
+        Creating an external table
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="createTable") as d:
+        ...     _ = spark.catalog.createTable(
+        ...         "tbl2", schema=spark.range(1).schema, path=d, source='parquet')
+        >>> _ = spark.sql("DROP TABLE tbl2")
+        "#
+    };
+    (Catalog . dropTempView) => {
+        r#"Drops the local temporary view with the given view name in the catalog.
+        If the view has been cached before, then it will also be uncached.
+        Returns true if this view is dropped successfully, false otherwise.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        viewName : str
+            name of the temporary view to drop.
+
+        Returns
+        -------
+        bool
+            If the temporary view was successfully dropped or not.
+
+            .. versionadded:: 2.1.0
+                The return type of this method was ``None`` in Spark 2.0, but changed to ``bool``
+                in Spark 2.1.
+
+        Examples
+        --------
+        >>> spark.createDataFrame([(1, 1)]).createTempView("my_table")
+
+        Dropping the temporary view.
+
+        >>> spark.catalog.dropTempView("my_table")
+        True
+
+        Throw an exception if the temporary view does not exists.
+
+        >>> spark.table("my_table")
+        Traceback (most recent call last):
+            ...
+        AnalysisException: ...
+        "#
+    };
+    (Catalog . dropGlobalTempView) => {
+        r#"Drops the global temporary view with the given view name in the catalog.
+
+        .. versionadded:: 2.1.0
+
+        Parameters
+        ----------
+        viewName : str
+            name of the global view to drop.
+
+        Returns
+        -------
+        bool
+            If the global view was successfully dropped or not.
+
+        Notes
+        -----
+        If the view has been cached before, then it will also be uncached.
+
+        Examples
+        --------
+        >>> spark.createDataFrame([(1, 1)]).createGlobalTempView("my_table")
+
+        Dropping the global view.
+
+        >>> spark.catalog.dropGlobalTempView("my_table")
+        True
+
+        Throw an exception if the global view does not exists.
+
+        >>> spark.table("global_temp.my_table")
+        Traceback (most recent call last):
+            ...
+        AnalysisException: ...
+        "#
+    };
+    (Catalog . isCached) => {
+        r#"
+        Returns true if the table is currently cached in-memory.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to get.
+
+            .. versionchanged:: 3.4.0
+                Allow ``tableName`` to be qualified with catalog name.
+
+        Returns
+        -------
+        bool
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        >>> _ = spark.sql("CREATE TABLE tbl1 (name STRING, age INT) USING parquet")
+        >>> spark.catalog.cacheTable("tbl1")
+        >>> spark.catalog.isCached("tbl1")
+        True
+
+        Throw an analysis exception when the table does not exist.
+
+        >>> spark.catalog.isCached("not_existing_table")
+        Traceback (most recent call last):
+            ...
+        AnalysisException: ...
+
+        Using the fully qualified name for the table.
+
+        >>> spark.catalog.isCached("spark_catalog.default.tbl1")
+        True
+        >>> spark.catalog.uncacheTable("tbl1")
+        >>> _ = spark.sql("DROP TABLE tbl1")
+        "#
+    };
+    (Catalog . cacheTable) => {
+        r#"Caches the specified table in-memory or with given storage level.
+        Default MEMORY_AND_DISK.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to get.
+
+            .. versionchanged:: 3.4.0
+                Allow ``tableName`` to be qualified with catalog name.
+
+        storageLevel : :class:`StorageLevel`, optional
+            storage level to set for persistence.
+
+            .. versionchanged:: 3.5.0
+                Allow to specify storage level.
+
+        Notes
+        -----
+        Cached data is shared across all Spark sessions on the cluster.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        >>> _ = spark.sql("CREATE TABLE tbl1 (name STRING, age INT) USING parquet")
+        >>> spark.catalog.cacheTable("tbl1")
+
+        or
+
+        >>> spark.catalog.cacheTable("tbl1", StorageLevel.OFF_HEAP)
+
+        Throw an analysis exception when the table does not exist.
+
+        >>> spark.catalog.cacheTable("not_existing_table")
+        Traceback (most recent call last):
+            ...
+        AnalysisException: ...
+
+        Using the fully qualified name for the table.
+
+        >>> spark.catalog.cacheTable("spark_catalog.default.tbl1")
+        >>> spark.catalog.uncacheTable("tbl1")
+        >>> _ = spark.sql("DROP TABLE tbl1")
+        "#
+    };
+    (Catalog . uncacheTable) => {
+        r#"Removes the specified table from the in-memory cache.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to get.
+
+            .. versionchanged:: 3.4.0
+                Allow ``tableName`` to be qualified with catalog name.
+
+        Notes
+        -----
+        Cached data is shared across all Spark sessions on the cluster, so uncaching it
+        affects all sessions.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        >>> _ = spark.sql("CREATE TABLE tbl1 (name STRING, age INT) USING parquet")
+        >>> spark.catalog.cacheTable("tbl1")
+        >>> spark.catalog.uncacheTable("tbl1")
+        >>> spark.catalog.isCached("tbl1")
+        False
+
+        Throw an analysis exception when the table does not exist.
+
+        >>> spark.catalog.uncacheTable("not_existing_table")
+        Traceback (most recent call last):
+            ...
+        AnalysisException: ...
+
+        Using the fully qualified name for the table.
+
+        >>> spark.catalog.uncacheTable("spark_catalog.default.tbl1")
+        >>> spark.catalog.isCached("tbl1")
+        False
+        >>> _ = spark.sql("DROP TABLE tbl1")
+        "#
+    };
+    (Catalog . clearCache) => {
+        r#"Removes all cached tables from the in-memory cache.
+
+        .. versionadded:: 2.0.0
+
+        Notes
+        -----
+        Cached data is shared across all Spark sessions on the cluster, so clearing
+        the cache affects all sessions.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        >>> _ = spark.sql("CREATE TABLE tbl1 (name STRING, age INT) USING parquet")
+        >>> spark.catalog.clearCache()
+        >>> spark.catalog.isCached("tbl1")
+        False
+        >>> _ = spark.sql("DROP TABLE tbl1")
+        "#
+    };
+    (Catalog . refreshTable) => {
+        r#"Invalidates and refreshes all the cached data and metadata of the given table.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        tableName : str
+            name of the table to get.
+
+            .. versionchanged:: 3.4.0
+                Allow ``tableName`` to be qualified with catalog name.
+
+        Examples
+        --------
+        The example below caches a table, and then removes the data.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="refreshTable") as d:
+        ...     _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        ...     _ = spark.sql(
+        ...         "CREATE TABLE tbl1 (col STRING) USING TEXT LOCATION '{}'".format(d))
+        ...     _ = spark.sql("INSERT INTO tbl1 SELECT 'abc'")
+        ...     spark.catalog.cacheTable("tbl1")
+        ...     spark.table("tbl1").show()
+        +---+
+        |col|
+        +---+
+        |abc|
+        +---+
+
+        Because the table is cached, it computes from the cached data as below.
+
+        >>> spark.table("tbl1").count()
+        1
+
+        After refreshing the table, it shows 0 because the data does not exist anymore.
+
+        >>> spark.catalog.refreshTable("tbl1")
+        >>> spark.table("tbl1").count()
+        0
+
+        Using the fully qualified name for the table.
+
+        >>> spark.catalog.refreshTable("spark_catalog.default.tbl1")
+        >>> _ = spark.sql("DROP TABLE tbl1")
+        "#
+    };
+    (Catalog . recoverPartitions) => {
+        r#"Recovers all the partitions in the directory of a table and updates the catalog.
+
+        Only works with a partitioned table, and not a view.
+
+        .. versionadded:: 2.1.1
+
+        Parameters
+        ----------
+        tableName : str
+            Table name; may be qualified with catalog and database (namespace). If no database
+            identifier is provided, the name refers to a table in the current database.
+
+        Examples
+        --------
+        The example below creates a partitioned table against the existing directory of
+        the partitioned table. After that, it recovers the partitions.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="recoverPartitions") as d:
+        ...     _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        ...     p = d.replace("'", "''")
+        ...     spark.range(1).selectExpr(
+        ...         "id as key", "id as value").write.partitionBy(
+        ...             "key").mode("overwrite").format("csv").save(d)
+        ...     _ = spark.sql(
+        ...         "CREATE TABLE tbl1 (key LONG, value LONG) USING csv OPTIONS (header false, path '{}') "
+        ...         "PARTITIONED BY (key)".format(p))
+        ...     spark.table("tbl1").show()
+        ...     spark.catalog.recoverPartitions("tbl1")
+        ...     spark.table("tbl1").show()
+        +-----+---+
+        |value|key|
+        +-----+---+
+        +-----+---+
+        +-----+---+
+        |value|key|
+        +-----+---+
+        |    0|  0|
+        +-----+---+
+        >>> _ = spark.sql("DROP TABLE tbl1")
+        "#
+    };
+    (Catalog . refreshByPath) => {
+        r#"Invalidates and refreshes all the cached data (and the associated metadata) for any
+        DataFrame that contains the given data source path.
+
+        .. versionadded:: 2.2.0
+
+        Parameters
+        ----------
+        path : str
+            the path to refresh the cache.
+
+        Examples
+        --------
+        The example below caches a table, and then removes the data.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="refreshByPath") as d:
+        ...     _ = spark.sql("DROP TABLE IF EXISTS tbl1")
+        ...     _ = spark.sql(
+        ...         "CREATE TABLE tbl1 (col STRING) USING TEXT LOCATION '{}'".format(d))
+        ...     _ = spark.sql("INSERT INTO tbl1 SELECT 'abc'")
+        ...     spark.catalog.cacheTable("tbl1")
+        ...     spark.table("tbl1").show()
+        +---+
+        |col|
+        +---+
+        |abc|
+        +---+
+
+        Because the table is cached, it computes from the cached data as below.
+
+        >>> spark.table("tbl1").count()
+        1
+
+        After refreshing the table by path, it shows 0 because the data does not exist anymore.
+
+        >>> spark.catalog.refreshByPath(d)
+        >>> spark.table("tbl1").count()
+        0
+
+        >>> _ = spark.sql("DROP TABLE tbl1")
+        "#
+    };
+    (Catalog . dropTable) => {
+        r#"Drops a persistent table.
+
+        This does not remove temp views; use :meth:`Catalog.dropTempView`.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            Name of the table to drop. May be qualified with catalog and database (namespace).
+        ifExists : bool, optional
+            If ``True``, do not fail when the table does not exist.
+        purge : bool, optional
+            If ``True``, skip moving data to a trash directory when the catalog supports it.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl_drop_doc")
+        >>> _ = spark.sql("CREATE TABLE tbl_drop_doc (id INT) USING parquet")
+        >>> spark.catalog.dropTable("tbl_drop_doc")
+        >>> spark.catalog.tableExists("tbl_drop_doc")
+        False
+        "#
+    };
+    (Catalog . dropView) => {
+        r#"Drops a persistent view.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        viewName : str
+            Name of the view to drop. May be qualified with catalog and database (namespace).
+        ifExists : bool, optional
+            If ``True``, do not fail when the view does not exist.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP VIEW IF EXISTS view_drop_doc")
+        >>> _ = spark.sql("CREATE VIEW view_drop_doc AS SELECT 1 AS c")
+        >>> spark.catalog.dropView("view_drop_doc")
+        >>> spark.catalog.tableExists("view_drop_doc")
+        False
+        "#
+    };
+    (Catalog . createDatabase) => {
+        r#"Creates a namespace (database/schema).
+
+        ``dbName`` may be a multi-part identifier (for example ``catalog.schema``). Optional
+        ``properties`` follow ``CREATE NAMESPACE`` (for example comment or location keys).
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        dbName : str
+            Name of the namespace to create.
+        ifNotExists : bool, optional
+            If ``True``, do not fail when the namespace already exists.
+        properties : dict, optional
+            Map of namespace property keys to string values.
+
+        Examples
+        --------
+        >>> spark.catalog.dropDatabase("db_create_doc", ifExists=True, cascade=True)
+        >>> spark.catalog.createDatabase("db_create_doc")
+        >>> spark.catalog.databaseExists("db_create_doc")
+        True
+        >>> spark.catalog.dropDatabase("db_create_doc", cascade=True)
+        >>> spark.catalog.databaseExists("db_create_doc")
+        False
+        "#
+    };
+    (Catalog . dropDatabase) => {
+        r#"Drops a namespace.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        dbName : str
+            Name of the namespace to drop. May be qualified with catalog name.
+        ifExists : bool, optional
+            If ``True``, do not fail when the namespace does not exist.
+        cascade : bool, optional
+            If ``True``, also drop tables and functions in the namespace.
+
+        Examples
+        --------
+        >>> spark.catalog.dropDatabase("db_drop_doc", ifExists=True, cascade=True)
+        >>> spark.catalog.createDatabase("db_drop_doc")
+        >>> spark.catalog.dropDatabase("db_drop_doc", cascade=True)
+        >>> spark.catalog.databaseExists("db_drop_doc")
+        False
+        "#
+    };
+    (Catalog . listPartitions) => {
+        r#"Lists partition value strings for a table (same as ``SHOW PARTITIONS``).
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            Name of the partitioned table. May be qualified with catalog and database (namespace).
+
+        Returns
+        -------
+        list
+            A list of :class:`TablePartition` (each ``partition`` field is a spec string).
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl_part_doc")
+        >>> _ = spark.sql(
+        ...     "CREATE TABLE tbl_part_doc (id INT, p INT) USING parquet PARTITIONED BY (p)"
+        ... )
+        >>> _ = spark.sql("INSERT INTO tbl_part_doc PARTITION (p = 1) SELECT 1")
+        >>> parts = [x.partition for x in spark.catalog.listPartitions("tbl_part_doc")]
+        >>> any("p=1" in s for s in parts)
+        True
+        >>> _ = spark.sql("DROP TABLE tbl_part_doc")
+        "#
+    };
+    (Catalog . listViews) => {
+        r#"Lists views in a namespace.
+
+        With no arguments, lists views in the current namespace. With ``dbName`` only, lists
+        views in that namespace (may be catalog-qualified). With ``pattern``, filters view names
+        with a SQL ``LIKE`` string; if ``pattern`` is given without ``dbName``, the current
+        database is used as the namespace.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        dbName : str, optional
+            Namespace to list views from. May be qualified with catalog name.
+        pattern : str, optional
+            SQL ``LIKE`` pattern for view names.
+
+        Returns
+        -------
+        list
+            A list of :class:`Table` (same row shape as :meth:`Catalog.listTables`).
+
+        Notes
+        -----
+        Raises :class:`AnalysisException` if ``dbName`` names a namespace that does not exist.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP VIEW IF EXISTS view_list_doc")
+        >>> _ = spark.sql("CREATE VIEW view_list_doc AS SELECT 1 AS c")
+        >>> "view_list_doc" in [v.name for v in spark.catalog.listViews()]
+        True
+        >>> "view_list_doc" in [v.name for v in spark.catalog.listViews(pattern="view_list_*")]
+        True
+        >>> _ = spark.sql("DROP VIEW view_list_doc")
+        "#
+    };
+    (Catalog . getTableProperties) => {
+        r#"Returns all table properties as a dict (same as ``SHOW TBLPROPERTIES``).
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            Table or view name. May be qualified with catalog and database (namespace).
+
+        Returns
+        -------
+        dict
+            Map of property key to value.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl_props_doc")
+        >>> _ = spark.sql(
+        ...     "CREATE TABLE tbl_props_doc (id INT) USING parquet "
+        ...     "TBLPROPERTIES ('doc_prop_key' = 'doc_prop_val')"
+        ... )
+        >>> spark.catalog.getTableProperties("tbl_props_doc")["doc_prop_key"]
+        'doc_prop_val'
+        >>> _ = spark.sql("DROP TABLE tbl_props_doc")
+        "#
+    };
+    (Catalog . getCreateTableString) => {
+        r#"Returns the ``SHOW CREATE TABLE`` DDL string for a relation.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            Table or view name. May be qualified with catalog and database (namespace).
+        asSerde : bool, optional
+            If ``True``, request Hive serde DDL when applicable.
+
+        Returns
+        -------
+        str
+            DDL string from ``SHOW CREATE TABLE``.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl_ddl_doc")
+        >>> _ = spark.sql("CREATE TABLE tbl_ddl_doc (id INT) USING parquet")
+        >>> "CREATE" in spark.catalog.getCreateTableString("tbl_ddl_doc").upper()
+        True
+        >>> _ = spark.sql("DROP TABLE tbl_ddl_doc")
+        "#
+    };
+    (Catalog . truncateTable) => {
+        r#"Truncates a table (removes all data from the table; not supported for views).
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            Name of the table to truncate. May be qualified with catalog and database (namespace).
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl_tr_doc")
+        >>> _ = spark.sql("CREATE TABLE tbl_tr_doc (id INT) USING csv")
+        >>> _ = spark.sql("INSERT INTO tbl_tr_doc VALUES (1), (2)")
+        >>> spark.table("tbl_tr_doc").count()
+        2
+        >>> spark.catalog.truncateTable("tbl_tr_doc")
+        >>> spark.table("tbl_tr_doc").count()
+        0
+        >>> _ = spark.sql("DROP TABLE tbl_tr_doc")
+        "#
+    };
+    (Catalog . analyzeTable) => {
+        r#"Computes table statistics (same as SQL ``ANALYZE TABLE COMPUTE STATISTICS``).
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            Table or view name. May be qualified with catalog and database (namespace).
+        noScan : bool, optional
+            If ``True``, use ``NOSCAN`` mode (reuse existing column statistics where possible).
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tbl_an_doc")
+        >>> _ = spark.sql("CREATE TABLE tbl_an_doc (id INT) USING csv")
+        >>> _ = spark.sql("INSERT INTO tbl_an_doc VALUES (1)")
+        >>> spark.catalog.analyzeTable("tbl_an_doc")
+        >>> spark.catalog.analyzeTable("tbl_an_doc", noScan=True)
+        >>> _ = spark.sql("DROP TABLE tbl_an_doc")
+        "#
+    };
+    (Catalog . registerFunction) => {
+        r#"An alias for :func:`spark.udf.register`.
+        See :meth:`pyspark.sql.UDFRegistration.register`.
+
+        .. versionadded:: 2.0.0
+
+        .. deprecated:: 2.3.0
+            Use :func:`spark.udf.register` instead.
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+        "#
+    };
+    (Catalog) => {
+        r#"Spark SQL catalog interface.
+
+    Use :attr:`~pyspark.sql.SparkSession.catalog` on an active session. This class is a thin
+    wrapper around ``org.apache.spark.sql.catalog.Catalog``.
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    "#
+    };
+    (RuntimeConf . set) => {
+        r#"
+        Sets the given Spark runtime configuration property.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        key : str
+            key of the configuration to set.
+        value : str, int, or bool
+            value of the configuration to set.
+
+        Examples
+        --------
+        >>> spark.conf.set("key1", "value1")
+        "#
+    };
+    (RuntimeConf . get) => {
+        r#"
+        Returns the value of Spark runtime configuration property for the given key.
+
+        If ``default`` is not provided and the key is not explicitly set, returns the key's
+        built-in default value if one exists, otherwise raises an exception. If ``default``
+        is provided and the key is not explicitly set, returns ``default`` instead of
+        the key's built-in default value (if any).
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        key : str
+            key of the configuration to get.
+        default : str, optional
+            value to return if the key is not explicitly set. When provided, this overrides
+            the key's built-in default value.
+
+        Returns
+        -------
+        str or None
+            The value of the configuration property.
+
+        Raises
+        ------
+        pyspark.errors.SparkNoSuchElementException
+            If the key is not explicitly set, has no built-in default value, and ``default``
+            is not provided.
+
+        Examples
+        --------
+        A key with no built-in default returns the provided ``default`` when not explicitly set:
+
+        >>> spark.conf.get("non-existent-key", "my_default")
+        'my_default'
+
+        An explicitly set key returns its value:
+
+        >>> spark.conf.set("my_key", "my_value")
+        >>> spark.conf.get("my_key")
+        'my_value'
+
+        A key with a built-in default returns that default when not explicitly set:
+
+        >>> spark.conf.unset("spark.sql.sources.partitionOverwriteMode")
+        >>> spark.conf.get("spark.sql.sources.partitionOverwriteMode")
+        'STATIC'
+
+        Providing ``default`` overrides the built-in default, not just the absence of a value:
+
+        >>> spark.conf.get("spark.sql.sources.partitionOverwriteMode", "DYNAMIC")
+        'DYNAMIC'
+        "#
+    };
+    (RuntimeConf . getAll) => {
+        r#"
+        Returns all properties set in this conf.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        dict
+            A dictionary containing all properties set in this conf.
+        "#
+    };
+    (RuntimeConf . unset) => {
+        r#"
+        Resets the configuration property for the given key.
+
+        .. versionadded:: 2.0.0
+
+        Parameters
+        ----------
+        key : str
+            key of the configuration to unset.
+
+        Examples
+        --------
+        >>> spark.conf.set("my_key", "my_value")
+        >>> spark.conf.get("my_key")
+        'my_value'
+        >>> spark.conf.unset("my_key")
+        >>> spark.conf.get("my_key")
+        Traceback (most recent call last):
+           ...
+        pyspark...SparkNoSuchElementException: ... The SQL config "my_key" cannot be found...
+        "#
+    };
+    (RuntimeConf . isModifiable) => {
+        r#"Indicates whether the configuration property with the given key
+        is modifiable in the current session.
+
+        .. versionadded:: 2.4.0
+        "#
+    };
+    (RuntimeConf) => {
+        r#"User-facing configuration API, accessible through `SparkSession.conf`.
+
+    Options set here are automatically propagated to the Hadoop configuration during I/O.
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    "#
+    };
+    (DataSourceRegistration . register) => {
+        r#"Register a Python user-defined data source.
+
+        Parameters
+        ----------
+        dataSource : type
+            The data source class to be registered. It should be a subclass of DataSource.
+        "#
+    };
+    (GroupedData . agg) => {
+        r#"Compute aggregates and returns the result as a :class:`DataFrame`.
+
+        The available aggregate functions can be:
+
+        1. built-in aggregation functions, such as `avg`, `max`, `min`, `sum`, `count`
+
+        2. group aggregate pandas UDFs, created with :func:`pyspark.sql.functions.pandas_udf`
+
+           .. note:: There is no partial aggregation with group aggregate UDFs, i.e.,
+               a full shuffle is required. Also, all the data of a group will be loaded into
+               memory, so the user should be aware of the potential OOM risk if data is skewed
+               and certain groups are too large to fit in memory.
+
+           .. seealso:: :func:`pyspark.sql.functions.pandas_udf`
+
+        If ``exprs`` is a single :class:`dict` mapping from string to string, then the key
+        is the column to perform aggregation on, and the value is the aggregate function.
+
+        Alternatively, ``exprs`` can also be a list of aggregate :class:`Column` expressions.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        exprs : dict
+            a dict mapping from column name (string) to aggregate functions (string),
+            or a list of :class:`Column`.
+
+        Notes
+        -----
+        Built-in aggregation functions and group aggregate pandas UDFs cannot be mixed
+        in a single call to this function.
+
+        Examples
+        --------
+        >>> import pandas as pd
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (3, "Alice"), (5, "Bob"), (10, "Bob")], ["age", "name"])
+        >>> df.show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  3|Alice|
+        |  5|  Bob|
+        | 10|  Bob|
+        +---+-----+
+
+        Group-by name, and count each group.
+
+        >>> df.groupBy(df.name)
+        GroupedData[grouping...: [name...], value: [age: bigint, name: string], type: GroupBy]
+
+        >>> df.groupBy(df.name).agg({"*": "count"}).sort("name").show()
+        +-----+--------+
+        | name|count(1)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       2|
+        +-----+--------+
+
+        Group-by name, and calculate the minimum age.
+
+        >>> df.groupBy(df.name).agg(sf.min(df.age)).sort("name").show()
+        +-----+--------+
+        | name|min(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       5|
+        +-----+--------+
+
+        Same as above but uses pandas UDF.
+
+        >>> from pyspark.sql.functions import pandas_udf
+        >>> @pandas_udf('int')
+        ... def min_udf(v: pd.Series) -> int:
+        ...     return v.min()
+        ...
+        >>> df.groupBy(df.name).agg(min_udf(df.age)).sort("name").show()
+        +-----+------------+
+        | name|min_udf(age)|
+        +-----+------------+
+        |Alice|           2|
+        |  Bob|           5|
+        +-----+------------+
+        "#
+    };
+    (GroupedData . min) => {
+        r#"Computes the min value for each numeric column for each group.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : str
+            column names. Non-numeric columns are ignored.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice", 80), (3, "Alice", 100),
+        ...     (5, "Bob", 120), (10, "Bob", 140)], ["age", "name", "height"])
+        >>> df.show()
+        +---+-----+------+
+        |age| name|height|
+        +---+-----+------+
+        |  2|Alice|    80|
+        |  3|Alice|   100|
+        |  5|  Bob|   120|
+        | 10|  Bob|   140|
+        +---+-----+------+
+
+        Group-by name, and calculate the min of the age in each group.
+
+        >>> df.groupBy("name").min("age").sort("name").show()
+        +-----+--------+
+        | name|min(age)|
+        +-----+--------+
+        |Alice|       2|
+        |  Bob|       5|
+        +-----+--------+
+
+        Calculate the min of the age and height in all data.
+
+        >>> df.groupBy().min("age", "height").show()
+        +--------+-----------+
+        |min(age)|min(height)|
+        +--------+-----------+
+        |       2|         80|
+        +--------+-----------+
+        "#
+    };
+    (GroupedData . max) => {
+        r#"Computes the max value for each numeric columns for each group.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice", 80), (3, "Alice", 100),
+        ...     (5, "Bob", 120), (10, "Bob", 140)], ["age", "name", "height"])
+        >>> df.show()
+        +---+-----+------+
+        |age| name|height|
+        +---+-----+------+
+        |  2|Alice|    80|
+        |  3|Alice|   100|
+        |  5|  Bob|   120|
+        | 10|  Bob|   140|
+        +---+-----+------+
+
+        Group-by name, and calculate the max of the age in each group.
+
+        >>> df.groupBy("name").max("age").sort("name").show()
+        +-----+--------+
+        | name|max(age)|
+        +-----+--------+
+        |Alice|       3|
+        |  Bob|      10|
+        +-----+--------+
+
+        Calculate the max of the age and height in all data.
+
+        >>> df.groupBy().max("age", "height").show()
+        +--------+-----------+
+        |max(age)|max(height)|
+        +--------+-----------+
+        |      10|        140|
+        +--------+-----------+
+        "#
+    };
+    (GroupedData . sum) => {
+        r#"Computes the sum for each numeric columns for each group.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : str
+            column names. Non-numeric columns are ignored.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice", 80), (3, "Alice", 100),
+        ...     (5, "Bob", 120), (10, "Bob", 140)], ["age", "name", "height"])
+        >>> df.show()
+        +---+-----+------+
+        |age| name|height|
+        +---+-----+------+
+        |  2|Alice|    80|
+        |  3|Alice|   100|
+        |  5|  Bob|   120|
+        | 10|  Bob|   140|
+        +---+-----+------+
+
+        Group-by name, and calculate the sum of the age in each group.
+
+        >>> df.groupBy("name").sum("age").sort("name").show()
+        +-----+--------+
+        | name|sum(age)|
+        +-----+--------+
+        |Alice|       5|
+        |  Bob|      15|
+        +-----+--------+
+
+        Calculate the sum of the age and height in all data.
+
+        >>> df.groupBy().sum("age", "height").show()
+        +--------+-----------+
+        |sum(age)|sum(height)|
+        +--------+-----------+
+        |      20|        440|
+        +--------+-----------+
+        "#
+    };
+    (GroupedData . avg) => {
+        r#"Computes average values for each numeric columns for each group.
+
+        :func:`mean` is an alias for :func:`avg`.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : str
+            column names. Non-numeric columns are ignored.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame([
+        ...     (2, "Alice", 80), (3, "Alice", 100),
+        ...     (5, "Bob", 120), (10, "Bob", 140)], ["age", "name", "height"])
+        >>> df.show()
+        +---+-----+------+
+        |age| name|height|
+        +---+-----+------+
+        |  2|Alice|    80|
+        |  3|Alice|   100|
+        |  5|  Bob|   120|
+        | 10|  Bob|   140|
+        +---+-----+------+
+
+        Group-by name, and calculate the mean of the age in each group.
+
+        >>> df.groupBy("name").avg('age').sort("name").show()
+        +-----+--------+
+        | name|avg(age)|
+        +-----+--------+
+        |Alice|     2.5|
+        |  Bob|     7.5|
+        +-----+--------+
+
+        Calculate the mean of the age and height in all data.
+
+        >>> df.groupBy().avg('age', 'height').show()
+        +--------+-----------+
+        |avg(age)|avg(height)|
+        +--------+-----------+
+        |     5.0|      110.0|
+        +--------+-----------+
+        "#
+    };
+    (GroupedData . count) => {
+        r#"Counts the number of records for each group.
+
+        .. versionadded:: 1.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        >>> df = spark.createDataFrame(
+        ...      [(2, "Alice"), (3, "Alice"), (5, "Bob"), (10, "Bob")], ["age", "name"])
+        >>> df.show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        |  2|Alice|
+        |  3|Alice|
+        |  5|  Bob|
+        | 10|  Bob|
+        +---+-----+
+
+        Group-by name, and count each group.
+
+        >>> df.groupBy(df.name).count().sort("name").show()
+        +-----+-----+
+        | name|count|
+        +-----+-----+
+        |Alice|    2|
+        |  Bob|    2|
+        +-----+-----+
+        "#
+    };
+    (GroupedData . pivot) => {
+        r#"
+        Pivots a column of the current :class:`DataFrame` and performs the specified aggregation.
+
+        .. versionadded:: 1.6.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        pivot_col : str
+            Name of the column to pivot.
+        values : list, optional
+            List of values that will be translated to columns in the output DataFrame.
+
+            If ``values`` is not provided, Spark will eagerly compute the distinct values in
+            ``pivot_col`` so it can determine the resulting schema of the transformation. To avoid
+            any eager computations, provide an explicit list of values.
+
+        Examples
+        --------
+        >>> from pyspark.sql import Row, functions as sf
+        >>> df1 = spark.createDataFrame([
+        ...     Row(course="dotNET", year=2012, earnings=10000),
+        ...     Row(course="Java", year=2012, earnings=20000),
+        ...     Row(course="dotNET", year=2012, earnings=5000),
+        ...     Row(course="dotNET", year=2013, earnings=48000),
+        ...     Row(course="Java", year=2013, earnings=30000),
+        ... ])
+        >>> df1.show()
+        +------+----+--------+
+        |course|year|earnings|
+        +------+----+--------+
+        |dotNET|2012|   10000|
+        |  Java|2012|   20000|
+        |dotNET|2012|    5000|
+        |dotNET|2013|   48000|
+        |  Java|2013|   30000|
+        +------+----+--------+
+
+        >>> df2 = spark.createDataFrame([
+        ...     Row(training="expert", sales=Row(course="dotNET", year=2012, earnings=10000)),
+        ...     Row(training="junior", sales=Row(course="Java", year=2012, earnings=20000)),
+        ...     Row(training="expert", sales=Row(course="dotNET", year=2012, earnings=5000)),
+        ...     Row(training="junior", sales=Row(course="dotNET", year=2013, earnings=48000)),
+        ...     Row(training="expert", sales=Row(course="Java", year=2013, earnings=30000)),
+        ... ])
+        >>> df2.show(truncate=False)
+        +--------+---------------------+
+        |training|sales                |
+        +--------+---------------------+
+        |expert  |{dotNET, 2012, 10000}|
+        |junior  |{Java, 2012, 20000}  |
+        |expert  |{dotNET, 2012, 5000} |
+        |junior  |{dotNET, 2013, 48000}|
+        |expert  |{Java, 2013, 30000}  |
+        +--------+---------------------+
+
+        Compute the sum of earnings for each year by course with each course as a separate column
+
+        >>> df1.groupBy("year").pivot(
+        ...    "course", ["dotNET", "Java"]
+        ... ).sum("earnings").sort("year").show()
+        +----+------+-----+
+        |year|dotNET| Java|
+        +----+------+-----+
+        |2012| 15000|20000|
+        |2013| 48000|30000|
+        +----+------+-----+
+
+        Or without specifying column values (less efficient)
+
+        >>> df1.groupBy("year").pivot("course").sum("earnings").sort("year").show()
+        +----+-----+------+
+        |year| Java|dotNET|
+        +----+-----+------+
+        |2012|20000| 15000|
+        |2013|30000| 48000|
+        +----+-----+------+
+
+        >>> df2.groupBy("sales.year").pivot(
+        ...     "sales.course"
+        ... ).agg(sf.sum("sales.earnings")).sort("year").show()
+        +----+-----+------+
+        |year| Java|dotNET|
+        +----+-----+------+
+        |2012|20000| 15000|
+        |2013|30000| 48000|
+        +----+-----+------+
+        "#
+    };
+    (GroupedData . apply) => {
+        r#"
+        It is an alias of :meth:`pyspark.sql.GroupedData.applyInPandas`; however, it takes a
+        :meth:`pyspark.sql.functions.pandas_udf` whereas
+        :meth:`pyspark.sql.GroupedData.applyInPandas` takes a Python native function.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Support Spark Connect.
+
+        Parameters
+        ----------
+        udf : :func:`pyspark.sql.functions.pandas_udf`
+            a grouped map user-defined function returned by
+            :func:`pyspark.sql.functions.pandas_udf`.
+
+        Notes
+        -----
+        It is preferred to use :meth:`pyspark.sql.GroupedData.applyInPandas` over this
+        API. This API will be deprecated in the future releases.
+
+        Examples
+        --------
+        >>> from pyspark.sql.functions import pandas_udf, PandasUDFType
+        >>> df = spark.createDataFrame(
+        ...     [(1, 1.0), (1, 2.0), (2, 3.0), (2, 5.0), (2, 10.0)],
+        ...     ("id", "v"))
+        >>> @pandas_udf("id long, v double", PandasUDFType.GROUPED_MAP)
+        ... def normalize(pdf):
+        ...     v = pdf.v
+        ...     return pdf.assign(v=(v - v.mean()) / v.std())
+        ...
+        >>> df.groupby("id").apply(normalize).sort("id", "v").show()
+        +---+-------------------+
+        | id|                  v|
+        +---+-------------------+
+        |  1|-0.7071067811865...|
+        |  1| 0.7071067811865...|
+        |  2|-0.8320502943378...|
+        |  2|-0.2773500981126...|
+        |  2| 1.1094003924504...|
+        +---+-------------------+
+
+        See Also
+        --------
+        pyspark.sql.functions.pandas_udf
+        "#
+    };
+    (GroupedData . applyInPandas) => {
+        r#"
+        Maps each group of the current :class:`DataFrame` using a pandas udf and returns the result
+        as a `DataFrame`.
+
+        The function can take one of two forms: It can take a `pandas.DataFrame` and return a
+        `pandas.DataFrame`, or it can take an iterator of `pandas.DataFrame` and yield
+        `pandas.DataFrame`. Alternatively each form can take a tuple of grouping keys
+        as the first argument in addition to the input type above.
+        For each group, all columns are passed together as a `pandas.DataFrame` or iterator of
+        `pandas.DataFrame`, and the returned `pandas.DataFrame` or iterator of `pandas.DataFrame`
+        are combined as a :class:`DataFrame`.
+
+        The `schema` should be a :class:`StructType` describing the schema of the returned
+        `pandas.DataFrame`. The column labels of the returned `pandas.DataFrame` must either match
+        the field names in the defined schema if specified as strings, or match the
+        field data types by position if not strings, e.g. integer indices.
+        The length of the returned `pandas.DataFrame` can be arbitrary.
+
+        .. versionadded:: 3.0.0
+
+        .. versionchanged:: 3.4.0
+            Support Spark Connect.
+
+        .. versionchanged:: 4.1.0
+            Added support for an iterator of `pandas.DataFrame` API.
+
+        Parameters
+        ----------
+        func : function
+            a Python native function that either takes a `pandas.DataFrame` and outputs a
+            `pandas.DataFrame` or takes an iterator of `pandas.DataFrame` and yields
+            `pandas.DataFrame`. Additionally, each form can take a tuple of grouping keys
+            as the first argument, with the `pandas.DataFrame` or iterator of `pandas.DataFrame`
+            as the second argument.
+        schema : :class:`pyspark.sql.types.DataType` or str
+            the return type of the `func` in PySpark. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+
+        Examples
+        --------
+        >>> import pandas as pd
+        >>> from pyspark.sql import functions as sf
+        >>> df = spark.createDataFrame(
+        ...     [(1, 1.0), (1, 2.0), (2, 3.0), (2, 5.0), (2, 10.0)],
+        ...     ("id", "v"))
+        >>> def normalize(pdf):
+        ...     v = pdf.v
+        ...     return pdf.assign(v=(v - v.mean()) / v.std())
+        ...
+        >>> df.groupby("id").applyInPandas(
+        ...     normalize, schema="id long, v double"
+        ... ).sort("id", "v").show()
+        +---+-------------------+
+        | id|                  v|
+        +---+-------------------+
+        |  1|-0.7071067811865...|
+        |  1| 0.7071067811865...|
+        |  2|-0.8320502943378...|
+        |  2|-0.2773500981126...|
+        |  2| 1.1094003924504...|
+        +---+-------------------+
+
+        Alternatively, the user can pass a function that takes two arguments.
+        In this case, the grouping key(s) will be passed as the first argument and the data will
+        be passed as the second argument. The grouping key(s) will be passed as a tuple of numpy
+        data types, e.g., `numpy.int32` and `numpy.float64`. The data will still be passed in
+        as a `pandas.DataFrame` containing all columns from the original Spark DataFrame.
+        This is useful when the user does not want to hardcode grouping key(s) in the function.
+
+        >>> df = spark.createDataFrame(
+        ...     [(1, 1.0), (1, 2.0), (2, 3.0), (2, 5.0), (2, 10.0)],
+        ...     ("id", "v"))
+        >>> def mean_func(key, pdf):
+        ...     # key is a tuple of one numpy.int64, which is the value
+        ...     # of 'id' for the current group
+        ...     return pd.DataFrame([key + (pdf.v.mean(),)])
+        ...
+        >>> df.groupby("id").applyInPandas(
+        ...     mean_func, schema="id long, v double"
+        ... ).sort("id").show()
+        +---+---+
+        | id|  v|
+        +---+---+
+        |  1|1.5|
+        |  2|6.0|
+        +---+---+
+
+        >>> def sum_func(key, pdf):
+        ...     # key is a tuple of two numpy.int64s, which is the values
+        ...     # of 'id' and 'ceil(df.v / 2)' for the current group
+        ...     return pd.DataFrame([key + (pdf.v.sum(),)])
+        ...
+        >>> df.groupby(df.id, sf.ceil(df.v / 2)).applyInPandas(
+        ...     sum_func, schema="id long, `ceil(v / 2)` long, v double"
+        ... ).sort("id", "v").show()
+        +---+-----------+----+
+        | id|ceil(v / 2)|   v|
+        +---+-----------+----+
+        |  1|          1| 3.0|
+        |  2|          2| 3.0|
+        |  2|          3| 5.0|
+        |  2|          5|10.0|
+        +---+-----------+----+
+
+        The function can also take and return an iterator of `pandas.DataFrame` using type
+        hints.
+
+        >>> from typing import Iterator
+        >>> df = spark.createDataFrame(
+        ...     [(1, 1.0), (1, 2.0), (2, 3.0), (2, 5.0), (2, 10.0)],
+        ...     ("id", "v"))
+        >>> def filter_func(
+        ...     batches: Iterator[pd.DataFrame]
+        ... ) -> Iterator[pd.DataFrame]:
+        ...     for batch in batches:
+        ...         # Process and yield each batch independently
+        ...         filtered = batch[batch['v'] > 2.0]
+        ...         if not filtered.empty:
+        ...             yield filtered[['v']]
+        >>> df.groupby("id").applyInPandas(
+        ...     filter_func, schema="v double"
+        ... ).sort("v").show()
+        +----+
+        |   v|
+        +----+
+        | 3.0|
+        | 5.0|
+        |10.0|
+        +----+
+
+        Alternatively, the user can pass a function that takes two arguments.
+        In this case, the grouping key(s) will be passed as the first argument and the data will
+        be passed as the second argument. The grouping key(s) will be passed as a tuple of numpy
+        data types. The data will still be passed in as an iterator of `pandas.DataFrame`.
+
+        >>> from typing import Iterator, Tuple, Any
+        >>> def transform_func(
+        ...     key: Tuple[Any, ...], batches: Iterator[pd.DataFrame]
+        ... ) -> Iterator[pd.DataFrame]:
+        ...     for batch in batches:
+        ...         # Yield transformed results for each batch
+        ...         result = batch.assign(id=key[0], v_doubled=batch['v'] * 2)
+        ...         yield result[['id', 'v_doubled']]
+        >>> df.groupby("id").applyInPandas(
+        ...     transform_func, schema="id long, v_doubled double"
+        ... ).sort("id", "v_doubled").show()
+        +---+---------+
+        | id|v_doubled|
+        +---+---------+
+        |  1|      2.0|
+        |  1|      4.0|
+        |  2|      6.0|
+        |  2|     10.0|
+        |  2|     20.0|
+        +---+---------+
+
+        Notes
+        -----
+        This function requires a full shuffle. If using the `pandas.DataFrame` API, all data of a
+        group will be loaded into memory, so the user should be aware of the potential OOM risk if
+        data is skewed and certain groups are too large to fit in memory, and can use the
+        iterator of `pandas.DataFrame` API to mitigate this.
+
+        See Also
+        --------
+        pyspark.sql.functions.pandas_udf
+        "#
+    };
+    (GroupedData . applyInPandasWithState) => {
+        r#"
+        Applies the given function to each group of data, while maintaining a user-defined
+        per-group state. The result Dataset will represent the flattened record returned by the
+        function.
+
+        For a streaming :class:`DataFrame`, the function will be invoked first for all input groups
+        and then for all timed out states where the input data is set to be empty. Updates to each
+        group's state will be saved across invocations.
+
+        The function should take parameters (key, Iterator[`pandas.DataFrame`], state) and
+        return another Iterator[`pandas.DataFrame`]. The grouping key(s) will be passed as a tuple
+        of numpy data types, e.g., `numpy.int32` and `numpy.float64`. The state will be passed as
+        :class:`pyspark.sql.streaming.state.GroupState`.
+
+        For each group, all columns are passed together as `pandas.DataFrame` to the user-function,
+        and the returned `pandas.DataFrame` across all invocations are combined as a
+        :class:`DataFrame`. Note that the user function should not make a guess of the number of
+        elements in the iterator. To process all data, the user function needs to iterate all
+        elements and process them. On the other hand, the user function is not strictly required to
+        iterate through all elements in the iterator if it intends to read a part of data.
+
+        The `outputStructType` should be a :class:`StructType` describing the schema of all
+        elements in the returned value, `pandas.DataFrame`. The column labels of all elements in
+        returned `pandas.DataFrame` must either match the field names in the defined schema if
+        specified as strings, or match the field data types by position if not strings,
+        e.g. integer indices.
+
+        The `stateStructType` should be :class:`StructType` describing the schema of the
+        user-defined state. The value of the state will be presented as a tuple, as well as the
+        update should be performed with the tuple. The corresponding Python types for
+        :class:DataType are supported. Please refer to the page
+        https://spark.apache.org/docs/latest/sql-ref-datatypes.html (Python tab).
+
+        The size of each `pandas.DataFrame` in both the input and output can be arbitrary. The
+        number of `pandas.DataFrame` in both the input and output can also be arbitrary.
+
+        .. versionadded:: 3.4.0
+
+        .. versionchanged:: 3.5.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        func : function
+            a Python native function to be called on every group. It should take parameters
+            (key, Iterator[`pandas.DataFrame`], state) and return Iterator[`pandas.DataFrame`].
+            Note that the type of the key is tuple and the type of the state is
+            :class:`pyspark.sql.streaming.state.GroupState`.
+        outputStructType : :class:`pyspark.sql.types.DataType` or str
+            the type of the output records. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+        stateStructType : :class:`pyspark.sql.types.DataType` or str
+            the type of the user-defined state. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+        outputMode : str
+            the output mode of the function.
+        timeoutConf : str
+            timeout configuration for groups that do not receive data for a while. valid values
+            are defined in :class:`pyspark.sql.streaming.state.GroupStateTimeout`.
+
+        Examples
+        --------
+        >>> import pandas as pd  # doctest: +SKIP
+        >>> from pyspark.sql.streaming.state import GroupStateTimeout
+        >>> def count_fn(key, pdf_iter, state):
+        ...     assert isinstance(state, GroupStateImpl)
+        ...     total_len = 0
+        ...     for pdf in pdf_iter:
+        ...         total_len += len(pdf)
+        ...     state.update((total_len,))
+        ...     yield pd.DataFrame({"id": [key[0]], "countAsString": [str(total_len)]})
+        ...
+        >>> df.groupby("id").applyInPandasWithState(
+        ...     count_fn, outputStructType="id long, countAsString string",
+        ...     stateStructType="len long", outputMode="Update",
+        ...     timeoutConf=GroupStateTimeout.NoTimeout) # doctest: +SKIP
+
+        Notes
+        -----
+        This function requires a full shuffle.
+        "#
+    };
+    (GroupedData . transformWithStateInPandas) => {
+        r#"
+        Invokes methods defined in the stateful processor used in arbitrary state API v2. It
+        requires protobuf, pandas and pyarrow as dependencies to process input/state data. We
+        allow the user to act on per-group set of input rows along with keyed state and the user
+        can choose to output/return 0 or more rows.
+
+        For a streaming dataframe, we will repeatedly invoke the interface methods for new rows
+        in each trigger and the user's state/state variables will be stored persistently across
+        invocations.
+
+        The `statefulProcessor` should be a Python class that implements the interface defined in
+        :class:`StatefulProcessor`.
+
+        The `outputStructType` should be a :class:`StructType` describing the schema of all
+        elements in the returned value, `pandas.DataFrame`. The column labels of all elements in
+        returned `pandas.DataFrame` must either match the field names in the defined schema if
+        specified as strings, or match the field data types by position if not strings,
+        e.g. integer indices.
+
+        The size of each `pandas.DataFrame` in both the input and output can be arbitrary. The
+        number of `pandas.DataFrame` in both the input and output can also be arbitrary.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        statefulProcessor : :class:`pyspark.sql.streaming.stateful_processor.StatefulProcessor`
+            Instance of StatefulProcessor whose functions will be invoked by the operator.
+        outputStructType : :class:`pyspark.sql.types.DataType` or str
+            The type of the output records. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+        outputMode : str
+            The output mode of the stateful processor.
+        timeMode : str
+            The time mode semantics of the stateful processor for timers and TTL.
+        initialState : :class:`pyspark.sql.GroupedData`
+            Optional. The grouped dataframe as initial states used for initialization
+            of state variables in the first batch.
+
+        Examples
+        --------
+        >>> from typing import Iterator
+        ...
+        >>> import pandas as pd # doctest: +SKIP
+        ...
+        >>> from pyspark.sql import Row
+        >>> from pyspark.sql.functions import col, split
+        >>> from pyspark.sql.streaming import StatefulProcessor, StatefulProcessorHandle
+        >>> from pyspark.sql.types import IntegerType, LongType, StringType, StructField, StructType
+        ...
+        >>> spark.conf.set("spark.sql.streaming.stateStore.providerClass",
+        ...     "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider")
+        ... # Below is a simple example to find erroneous sensors from temperature sensor data. The
+        ... # processor returns a count of total readings, while keeping erroneous reading counts
+        ... # in streaming state. A violation is defined when the temperature is above 100.
+        ... # The input data is a DataFrame with the following schema:
+        ... #    `id: string, temperature: long`.
+        ... # The output schema and state schema are defined as below.
+        >>> output_schema = StructType([
+        ...     StructField("id", StringType(), True),
+        ...     StructField("count", IntegerType(), True)
+        ... ])
+        >>> state_schema = StructType([
+        ...     StructField("value", IntegerType(), True)
+        ... ])
+        >>> class SimpleStatefulProcessor(StatefulProcessor):
+        ...     def init(self, handle: StatefulProcessorHandle):
+        ...         self.num_violations_state = handle.getValueState("numViolations", state_schema)
+        ...
+        ...     def handleInputRows(self, key, rows):
+        ...         new_violations = 0
+        ...         count = 0
+        ...         exists = self.num_violations_state.exists()
+        ...         if exists:
+        ...             existing_violations_row = self.num_violations_state.get()
+        ...             existing_violations = existing_violations_row[0]
+        ...         else:
+        ...             existing_violations = 0
+        ...         for pdf in rows:
+        ...             pdf_count = pdf.count()
+        ...             count += pdf_count.get('temperature')
+        ...             violations_pdf = pdf.loc[pdf['temperature'] > 100]
+        ...             new_violations += violations_pdf.count().get('temperature')
+        ...         updated_violations = new_violations + existing_violations
+        ...         self.num_violations_state.update((updated_violations,))
+        ...         yield pd.DataFrame({'id': key, 'count': count})
+        ...
+        ...     def close(self) -> None:
+        ...         pass
+
+        Input DataFrame:
+        +---+-----------+
+        | id|temperature|
+        +---+-----------+
+        |  0|        123|
+        |  0|         23|
+        |  1|         33|
+        |  1|        188|
+        |  1|         88|
+        +---+-----------+
+
+        >>> df.groupBy("value").transformWithStateInPandas(statefulProcessor =
+        ...     SimpleStatefulProcessor(), outputStructType=output_schema, outputMode="Update",
+        ...     timeMode="None") # doctest: +SKIP
+
+        Output DataFrame:
+        +---+-----+
+        | id|count|
+        +---+-----+
+        |  0|    2|
+        |  1|    3|
+        +---+-----+
+
+        Notes
+        -----
+        This function requires a full shuffle.
+        "#
+    };
+    (GroupedData . transformWithState) => {
+        r#"
+        Invokes methods defined in the stateful processor used in arbitrary state API v2. It
+        requires protobuf and pyarrow as dependencies to process input/state data. We allow
+        the user to act on per-group set of input rows along with keyed state and the user
+        can choose to output/return 0 or more rows.
+
+        For a streaming dataframe, we will repeatedly invoke the interface methods for new rows
+        in each trigger and the user's state/state variables will be stored persistently across
+        invocations.
+
+        The `statefulProcessor` should be a Python class that implements the interface defined in
+        :class:`StatefulProcessor`.
+
+        The `outputStructType` should be a :class:`StructType` describing the schema of all
+        elements in the returned value, `Row`. The column labels of all elements in
+        returned `Row` must either match the field names in the defined schema.
+
+        The number of `Row`s in the iterator in both the input and output can be arbitrary.
+
+        .. versionadded:: 4.1.0
+
+        Parameters
+        ----------
+        statefulProcessor : :class:`pyspark.sql.streaming.stateful_processor.StatefulProcessor`
+            Instance of StatefulProcessor whose functions will be invoked by the operator.
+        outputStructType : :class:`pyspark.sql.types.DataType` or str
+            The type of the output records. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+        outputMode : str
+            The output mode of the stateful processor.
+        timeMode : str
+            The time mode semantics of the stateful processor for timers and TTL.
+        initialState : :class:`pyspark.sql.GroupedData`
+            Optional. The grouped dataframe as initial states used for initialization
+            of state variables in the first batch.
+
+        Examples
+        --------
+        >>> from typing import Iterator
+        ...
+        >>> from pyspark.sql import Row
+        >>> from pyspark.sql.functions import col, split
+        >>> from pyspark.sql.streaming import StatefulProcessor, StatefulProcessorHandle
+        >>> from pyspark.sql.types import IntegerType, LongType, StringType, StructField, StructType
+        ...
+        >>> spark.conf.set("spark.sql.streaming.stateStore.providerClass",
+        ...     "org.apache.spark.sql.execution.streaming.state.RocksDBStateStoreProvider")
+        ... # Below is a simple example to find erroneous sensors from temperature sensor data. The
+        ... # processor returns a count of total readings, while keeping erroneous reading counts
+        ... # in streaming state. A violation is defined when the temperature is above 100.
+        ... # The input data is a DataFrame with the following schema:
+        ... #    `id: string, temperature: long`.
+        ... # The output schema and state schema are defined as below.
+        >>> output_schema = StructType([
+        ...     StructField("id", StringType(), True),
+        ...     StructField("count", IntegerType(), True)
+        ... ])
+        >>> state_schema = StructType([
+        ...     StructField("value", IntegerType(), True)
+        ... ])
+        >>> class SimpleStatefulProcessor(StatefulProcessor):
+        ...     def init(self, handle: StatefulProcessorHandle):
+        ...         self.num_violations_state = handle.getValueState("numViolations", state_schema)
+        ...
+        ...     def handleInputRows(self, key, rows):
+        ...         new_violations = 0
+        ...         count = 0
+        ...         exists = self.num_violations_state.exists()
+        ...         if exists:
+        ...             existing_violations_row = self.num_violations_state.get()
+        ...             existing_violations = existing_violations_row[0]
+        ...         else:
+        ...             existing_violations = 0
+        ...         for row in rows:
+        ...             if row.temperature is not None:
+        ...                  count += 1
+        ...                  if row.temperature > 100:
+        ...                      new_violations += 1
+        ...         updated_violations = new_violations + existing_violations
+        ...         self.num_violations_state.update((updated_violations,))
+        ...         yield Row(id=key, count=count)
+        ...
+        ...     def close(self) -> None:
+        ...         pass
+
+        Input DataFrame:
+        +---+-----------+
+        | id|temperature|
+        +---+-----------+
+        |  0|        123|
+        |  0|         23|
+        |  1|         33|
+        |  1|        188|
+        |  1|         88|
+        +---+-----------+
+
+        >>> df.groupBy("value").transformWithState(statefulProcessor =
+        ...     SimpleStatefulProcessor(), outputStructType=output_schema, outputMode="Update",
+        ...     timeMode="None") # doctest: +SKIP
+
+        Output DataFrame:
+        +---+-----+
+        | id|count|
+        +---+-----+
+        |  0|    2|
+        |  1|    3|
+        +---+-----+
+
+        Notes
+        -----
+        This function requires a full shuffle.
+        "#
+    };
+    (GroupedData . applyInArrow) => {
+        r#"
+        Maps each group of the current :class:`DataFrame` using an Arrow udf and returns the result
+        as a `DataFrame`.
+
+        The function can take one of two forms: It can take a `pyarrow.Table` and return a
+        `pyarrow.Table`, or it can take an iterator of `pyarrow.RecordBatch` and yield
+        `pyarrow.RecordBatch`. Alternatively each form can take a tuple of `pyarrow.Scalar`
+        as the first argument in addition to the input type above. For each group, all columns
+        are passed together in the `pyarrow.Table` or `pyarrow.RecordBatch`, and the returned
+        `pyarrow.Table` or iterator of `pyarrow.RecordBatch` are combined as a :class:`DataFrame`.
+
+        The `schema` should be a :class:`StructType` describing the schema of the returned
+        `pyarrow.Table` or `pyarrow.RecordBatch`. The column labels of the returned `pyarrow.Table`
+        or `pyarrow.RecordBatch` must either match the field names in the defined schema if
+        specified as strings, or match the field data types by position if not strings, e.g.
+        integer indices. The length of the returned `pyarrow.Table` or iterator of
+        `pyarrow.RecordBatch` can be arbitrary.
+
+        .. versionadded:: 4.0.0
+
+        .. versionchanged:: 4.1.0
+           Added support for an iterator of `pyarrow.RecordBatch` API.
+
+        Parameters
+        ----------
+        func : function
+            a Python native function that either takes a `pyarrow.Table` and outputs a
+            `pyarrow.Table` or takes an iterator of `pyarrow.RecordBatch` and yields
+            `pyarrow.RecordBatch`. Additionally, each form can take a tuple of grouping keys
+            as the first argument, with the `pyarrow.Table` or iterator of `pyarrow.RecordBatch`
+            as the second argument.
+        schema : :class:`pyspark.sql.types.DataType` or str
+            the return type of the `func` in PySpark. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+
+        Examples
+        --------
+        >>> from pyspark.sql import functions as sf
+        >>> import pyarrow as pa
+        >>> import pyarrow.compute as pc
+        >>> df = spark.createDataFrame(
+        ...     [(1, 1.0), (1, 2.0), (2, 3.0), (2, 5.0), (2, 10.0)],
+        ...     ("id", "v"))
+        >>> def normalize(table):
+        ...     v = table.column("v")
+        ...     norm = pc.divide(pc.subtract(v, pc.mean(v)), pc.stddev(v, ddof=1))
+        ...     return table.set_column(1, "v", norm)
+        >>> df.groupby("id").applyInArrow(
+        ...     normalize, schema="id long, v double"
+        ... ).sort("id", "v").show()
+        +---+-------------------+
+        | id|                  v|
+        +---+-------------------+
+        |  1|-0.7071067811865...|
+        |  1| 0.7071067811865...|
+        |  2|-0.8320502943378...|
+        |  2|-0.2773500981126...|
+        |  2| 1.1094003924504...|
+        +---+-------------------+
+
+        The function can also take and return an iterator of `pyarrow.RecordBatch` using type
+        hints.
+
+        >>> from typing import Iterator, Tuple
+        >>> df = spark.createDataFrame(
+        ...     [(1, 1.0), (1, 2.0), (2, 3.0), (2, 5.0), (2, 10.0)],
+        ...     ("id", "v"))
+        >>> def sum_func(
+        ...     batches: Iterator[pa.RecordBatch]
+        ... ) -> Iterator[pa.RecordBatch]:
+        ...     total = 0
+        ...     for batch in batches:
+        ...         total += pc.sum(batch.column("v")).as_py()
+        ...     yield pa.RecordBatch.from_pydict({"v": [total]})
+        >>> df.groupby("id").applyInArrow(
+        ...     sum_func, schema="v double"
+        ... ).sort("v").show()
+        +----+
+        |   v|
+        +----+
+        | 3.0|
+        |18.0|
+        +----+
+
+        Alternatively, the user can pass a function that takes two arguments.
+        In this case, the grouping key(s) will be passed as the first argument and the data will
+        be passed as the second argument. The grouping key(s) will be passed as a tuple of Arrow
+        scalars types, e.g., `pyarrow.Int32Scalar` and `pyarrow.FloatScalar`. The data will still
+        be passed in as a `pyarrow.Table` containing all columns from the original Spark DataFrame.
+        This is useful when the user does not want to hardcode grouping key(s) in the function.
+
+        >>> df = spark.createDataFrame(
+        ...     [(1, 1.0), (1, 2.0), (2, 3.0), (2, 5.0), (2, 10.0)],
+        ...     ("id", "v"))
+        >>> def mean_func(key, table):
+        ...     # key is a tuple of one pyarrow.Int64Scalar, which is the value
+        ...     # of 'id' for the current group
+        ...     mean = pc.mean(table.column("v"))
+        ...     return pa.Table.from_pydict({"id": [key[0].as_py()], "v": [mean.as_py()]})
+        >>> df.groupby('id').applyInArrow(
+        ...     mean_func, schema="id long, v double"
+        ... ).sort("id").show()
+        +---+---+
+        | id|  v|
+        +---+---+
+        |  1|1.5|
+        |  2|6.0|
+        +---+---+
+
+        >>> def sum_func(key, table):
+        ...     # key is a tuple of two pyarrow.Int64Scalars, which is the values
+        ...     # of 'id' and 'ceil(df.v / 2)' for the current group
+        ...     sum = pc.sum(table.column("v"))
+        ...     return pa.Table.from_pydict({
+        ...         "id": [key[0].as_py()],
+        ...         "ceil(v / 2)": [key[1].as_py()],
+        ...         "v": [sum.as_py()]
+        ...     })
+        >>> df.groupby(df.id, sf.ceil(df.v / 2)).applyInArrow(
+        ...     sum_func, schema="id long, `ceil(v / 2)` long, v double"
+        ... ).sort("id", "v").show()
+        +---+-----------+----+
+        | id|ceil(v / 2)|   v|
+        +---+-----------+----+
+        |  1|          1| 3.0|
+        |  2|          2| 3.0|
+        |  2|          3| 5.0|
+        |  2|          5|10.0|
+        +---+-----------+----+
+
+        >>> def sum_func(
+        ...     key: Tuple[pa.Scalar, ...], batches: Iterator[pa.RecordBatch]
+        ... ) -> Iterator[pa.RecordBatch]:
+        ...     total = 0
+        ...     for batch in batches:
+        ...         total += pc.sum(batch.column("v")).as_py()
+        ...     yield pa.RecordBatch.from_pydict({"id": [key[0].as_py()], "v": [total]})
+        >>> df.groupby("id").applyInArrow(
+        ...     sum_func, schema="id long, v double"
+        ... ).sort("id").show()
+        +---+----+
+        | id|   v|
+        +---+----+
+        |  1| 3.0|
+        |  2|18.0|
+        +---+----+
+
+        Notes
+        -----
+        This function requires a full shuffle. If using the `pyarrow.Table` API, all data of a
+        group will be loaded into memory, so the user should be aware of the potential OOM risk
+        if data is skewed and certain groups are too large to fit in memory, and can use the
+        iterator of `pyarrow.RecordBatch` API to mitigate this.
+
+        This API is unstable, and for developers.
+
+        See Also
+        --------
+        pyspark.sql.functions.pandas_udf
+        "#
+    };
+    (GroupedData . cogroup) => {
+        r#"
+        Cogroups this group with another group so that we can run cogrouped operations.
+
+        .. versionadded:: 3.0.0
+
+        .. versionchanged:: 3.4.0
+            Support Spark Connect.
+
+        See :class:`PandasCogroupedOps` for the operations that can be run.
+        "#
+    };
+    (GroupedData) => {
+        r#"
+    A set of methods for aggregations on a :class:`DataFrame`,
+    created by :func:`DataFrame.groupBy`.
+
+    .. versionadded:: 1.3.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    "#
+    };
+    (PandasCogroupedOps . applyInPandas) => {
+        r#"
+        Applies a function to each cogroup using pandas and returns the result
+        as a `DataFrame`.
+
+        The function should take two `pandas.DataFrame`\s and return another
+        `pandas.DataFrame`. Alternatively, the user can pass a function that takes
+        a tuple of the grouping key(s) and the two `pandas.DataFrame`\s.
+        For each side of the cogroup, all columns are passed together as a
+        `pandas.DataFrame` to the user-function and the returned `pandas.DataFrame` are combined as
+        a :class:`DataFrame`.
+
+        The `schema` should be a :class:`StructType` describing the schema of the returned
+        `pandas.DataFrame`. The column labels of the returned `pandas.DataFrame` must either match
+        the field names in the defined schema if specified as strings, or match the
+        field data types by position if not strings, e.g. integer indices.
+        The length of the returned `pandas.DataFrame` can be arbitrary.
+
+        .. versionadded:: 3.0.0
+
+        .. versionchanged:: 3.4.0
+            Support Spark Connect.
+
+        Parameters
+        ----------
+        func : function
+            a Python native function that takes two `pandas.DataFrame`\s, and
+            outputs a `pandas.DataFrame`, or that takes one tuple (grouping keys) and two
+            ``pandas.DataFrame``\s, and outputs a ``pandas.DataFrame``.
+        schema : :class:`pyspark.sql.types.DataType` or str
+            the return type of the `func` in PySpark. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+
+        Examples
+        --------
+        >>> import pandas as pd
+        >>> df1 = spark.createDataFrame(
+        ...     [(20000101, 1, 1.0), (20000101, 2, 2.0), (20000102, 1, 3.0), (20000102, 2, 4.0)],
+        ...     ("time", "id", "v1"))
+        >>> df2 = spark.createDataFrame(
+        ...     [(20000101, 1, "x"), (20000101, 2, "y")],
+        ...     ("time", "id", "v2"))
+        >>> def asof_join(l, r):
+        ...     return pd.merge_asof(l, r, on="time", by="id")
+        ...
+        >>> df1.groupby("id").cogroup(df2.groupby("id")).applyInPandas(
+        ...     asof_join, schema="time int, id int, v1 double, v2 string"
+        ... ).sort("id", "time").show()
+        +--------+---+---+---+
+        |    time| id| v1| v2|
+        +--------+---+---+---+
+        |20000101|  1|1.0|  x|
+        |20000102|  1|3.0|  x|
+        |20000101|  2|2.0|  y|
+        |20000102|  2|4.0|  y|
+        +--------+---+---+---+
+
+        Alternatively, the user can define a function that takes three arguments.  In this case,
+        the grouping key(s) will be passed as the first argument and the data will be passed as the
+        second and third arguments.  The grouping key(s) will be passed as a tuple of numpy data
+        types, e.g., `numpy.int32` and `numpy.float64`. The data will still be passed in as two
+        `pandas.DataFrame` containing all columns from the original Spark DataFrames.
+
+        >>> def asof_join(k, l, r):
+        ...     if k == (1,):
+        ...         return pd.merge_asof(l, r, on="time", by="id")
+        ...     else:
+        ...         return pd.DataFrame(columns=['time', 'id', 'v1', 'v2'])
+        ...
+        >>> df1.groupby("id").cogroup(df2.groupby("id")).applyInPandas(
+        ...     asof_join, "time int, id int, v1 double, v2 string"
+        ... ).sort("time").show()
+        +--------+---+---+---+
+        |    time| id| v1| v2|
+        +--------+---+---+---+
+        |20000101|  1|1.0|  x|
+        |20000102|  1|3.0|  x|
+        +--------+---+---+---+
+
+        Notes
+        -----
+        This function requires a full shuffle. All the data of a cogroup will be loaded
+        into memory, so the user should be aware of the potential OOM risk if data is skewed
+        and certain groups are too large to fit in memory.
+
+        See Also
+        --------
+        pyspark.sql.functions.pandas_udf
+        "#
+    };
+    (PandasCogroupedOps . applyInArrow) => {
+        r#"
+        Applies a function to each cogroup using Arrow and returns the result
+        as a `DataFrame`.
+
+        The function should take two `pyarrow.Table`\s and return another
+        `pyarrow.Table`. Alternatively, the user can pass a function that takes
+        a tuple of `pyarrow.Scalar` grouping key(s) and the two `pyarrow.Table`\s.
+        For each side of the cogroup, all columns are passed together as a
+        `pyarrow.Table` to the user-function and the returned `pyarrow.Table` are combined as
+        a :class:`DataFrame`.
+
+        The `schema` should be a :class:`StructType` describing the schema of the returned
+        `pyarrow.Table`. The column labels of the returned `pyarrow.Table` must either match
+        the field names in the defined schema if specified as strings, or match the
+        field data types by position if not strings, e.g. integer indices.
+        The length of the returned `pyarrow.Table` can be arbitrary.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        func : function
+            a Python native function that takes two `pyarrow.Table`\s, and
+            outputs a `pyarrow.Table`, or that takes one tuple (grouping keys) and two
+            ``pyarrow.Table``\s, and outputs a ``pyarrow.Table``.
+        schema : :class:`pyspark.sql.types.DataType` or str
+            the return type of the `func` in PySpark. The value can be either a
+            :class:`pyspark.sql.types.DataType` object or a DDL-formatted type string.
+
+        Examples
+        --------
+        >>> import pyarrow as pa
+        >>> df1 = spark.createDataFrame([(1, 1.0), (2, 2.0), (1, 3.0), (2, 4.0)], ("id", "v1"))
+        >>> df2 = spark.createDataFrame([(1, "x"), (2, "y")], ("id", "v2"))
+        >>> def summarize(l, r):
+        ...     return pa.Table.from_pydict({
+        ...         "left": [l.num_rows],
+        ...         "right": [r.num_rows]
+        ...     })
+        >>> df1.groupby("id").cogroup(df2.groupby("id")).applyInArrow(
+        ...     summarize, schema="left long, right long"
+        ... ).show()
+        +----+-----+
+        |left|right|
+        +----+-----+
+        |   2|    1|
+        |   2|    1|
+        +----+-----+
+
+        Alternatively, the user can define a function that takes three arguments.  In this case,
+        the grouping key(s) will be passed as the first argument and the data will be passed as the
+        second and third arguments.  The grouping key(s) will be passed as a tuple of Arrow scalars
+        types, e.g., `pyarrow.Int32Scalar` and `pyarrow.FloatScalar`. The data will still be passed
+        in as two `pyarrow.Table`\s containing all columns from the original Spark DataFrames.
+
+        >>> def summarize(key, l, r):
+        ...     return pa.Table.from_pydict({
+        ...         "key": [key[0].as_py()],
+        ...         "left": [l.num_rows],
+        ...         "right": [r.num_rows]
+        ...     })
+        >>> df1.groupby("id").cogroup(df2.groupby("id")).applyInArrow(
+        ...     summarize, schema="key long, left long, right long"
+        ... ).sort("key").show()
+        +---+----+-----+
+        |key|left|right|
+        +---+----+-----+
+        |  1|   2|    1|
+        |  2|   2|    1|
+        +---+----+-----+
+
+        Notes
+        -----
+        This function requires a full shuffle. All the data of a cogroup will be loaded
+        into memory, so the user should be aware of the potential OOM risk if data is skewed
+        and certain groups are too large to fit in memory.
+
+        This API is unstable, and for developers.
+
+        See Also
+        --------
+        pyspark.sql.functions.pandas_udf
+        "#
+    };
+    (PandasCogroupedOps) => {
+        r#"
+    A logical grouping of two :class:`GroupedData`,
+    created by :func:`GroupedData.cogroup`.
+
+    .. versionadded:: 3.0.0
+
+    .. versionchanged:: 3.4.0
+        Support Spark Connect.
+    "#
+    };
+    (MergeIntoWriter . whenMatched) => {
+        r#"
+        Initialize a `WhenMatched` action with a condition.
+
+        This `WhenMatched` action will be executed when a source row matches a target table row
+        based on the merge condition and the specified `condition` is satisfied.
+
+        This `WhenMatched` can be followed by one of the following merge actions:
+          - `updateAll`: Update all the matched target table rows with source dataset rows.
+          - `update(Dict)`: Update all the matched target table rows while changing only
+            a subset of columns based on the provided assignment.
+          - `delete`: Delete all target rows that have a match in the source table.
+        "#
+    };
+    (MergeIntoWriter . whenNotMatched) => {
+        r#"
+        Initialize a `WhenNotMatched` action with a condition.
+
+        This `WhenNotMatched` action will be executed when a source row does not match any target
+        row based on the merge condition and the specified `condition` is satisfied.
+
+        This `WhenNotMatched` can be followed by one of the following merge actions:
+          - `insertAll`: Insert all rows from the source that are not already in the target table.
+          - `insert(Dict)`: Insert all rows from the source that are not already in the target
+            table, with the specified columns based on the provided assignment.
+        "#
+    };
+    (MergeIntoWriter . whenNotMatchedBySource) => {
+        r#"
+        Initialize a `WhenNotMatchedBySource` action with a condition.
+
+        This `WhenNotMatchedBySource` action will be executed when a target row does not match any
+        rows in the source table based on the merge condition and the specified `condition`
+        is satisfied.
+
+        This `WhenNotMatchedBySource` can be followed by one of the following merge actions:
+          - `updateAll`: Update all the not matched target table rows with source dataset rows.
+          - `update(Dict)`: Update all the not matched target table rows while changing only
+            the specified columns based on the provided assignment.
+          - `delete`: Delete all target rows that have no matches in the source table.
+        "#
+    };
+    (MergeIntoWriter . withSchemaEvolution) => {
+        r#"
+        Enable automatic schema evolution for this merge operation.
+        "#
+    };
+    (MergeIntoWriter . merge) => {
+        r#"
+        Execute the merge operation.
+        "#
+    };
+    (MergeIntoWriter . WhenMatched . updateAll) => {
+        r#"
+            Specifies an action to update all matched rows in the DataFrame.
+            "#
+    };
+    (MergeIntoWriter . WhenMatched . update) => {
+        r#"
+            Specifies an action to update matched rows in the DataFrame with the provided column
+            assignments.
+            "#
+    };
+    (MergeIntoWriter . WhenMatched . delete) => {
+        r#"
+            Specifies an action to delete matched rows from the DataFrame.
+            "#
+    };
+    (MergeIntoWriter . WhenMatched) => {
+        r#"
+        A class for defining actions to be taken when matching rows in a DataFrame during
+        a merge operation."#
+    };
+    (MergeIntoWriter . WhenNotMatched . insertAll) => {
+        r#"
+            Specifies an action to insert all non-matched rows into the DataFrame.
+            "#
+    };
+    (MergeIntoWriter . WhenNotMatched . insert) => {
+        r#"
+            Specifies an action to insert non-matched rows into the DataFrame with the provided
+            column assignments.
+            "#
+    };
+    (MergeIntoWriter . WhenNotMatched) => {
+        r#"
+        A class for defining actions to be taken when no matching rows are found in a DataFrame
+        during a merge operation."#
+    };
+    (MergeIntoWriter . WhenNotMatchedBySource . updateAll) => {
+        r#"
+            Specifies an action to update all non-matched rows in the target DataFrame when
+            not matched by the source.
+            "#
+    };
+    (MergeIntoWriter . WhenNotMatchedBySource . update) => {
+        r#"
+            Specifies an action to update non-matched rows in the target DataFrame with the provided
+            column assignments when not matched by the source.
+            "#
+    };
+    (MergeIntoWriter . WhenNotMatchedBySource . delete) => {
+        r#"
+            Specifies an action to delete matched rows from the DataFrame.
+            "#
+    };
+    (MergeIntoWriter . WhenNotMatchedBySource) => {
+        r#"
+        A class for defining actions to be performed when there is no match by source
+        during a merge operation in a MergeIntoWriter.
+        "#
+    };
+    (MergeIntoWriter) => {
+        r#"
+    `MergeIntoWriter` provides methods to define and execute merge actions based
+    on specified conditions.
+
+    .. versionadded:: 4.0.0
+    "#
+    };
+    (Observation . _on) => {
+        r#"Attaches this observation to the given :class:`DataFrame` to observe aggregations.
+
+        Parameters
+        ----------
+        df : :class:`DataFrame`
+            the :class:`DataFrame` to be observed
+        exprs : list of :class:`Column`
+            column expressions (:class:`Column`).
+
+        Returns
+        -------
+        :class:`DataFrame`
+            the observed :class:`DataFrame`.
+        "#
+    };
+    (Observation . get) => {
+        r#"Get the observed metrics.
+
+        Waits until the observed dataset finishes its first action. Only the result of the
+        first action is available. Subsequent actions do not modify the result.
+
+        Returns
+        -------
+        dict
+            the observed metrics
+        "#
+    };
+    (Observation) => {
+        r#"Class to observe (named) metrics on a :class:`DataFrame`.
+
+    Metrics are aggregation expressions, which are applied to the DataFrame while it is being
+    processed by an action.
+
+    The metrics have the following guarantees:
+
+    - It will compute the defined aggregates (metrics) on all the data that is flowing through
+      the Dataset during the action.
+    - It will report the value of the defined aggregate columns as soon as we reach the end of
+      the action.
+
+    The metrics columns must either contain a literal (e.g. lit(42)), or should contain one or
+    more aggregate functions (e.g. sum(a) or sum(a + b) + avg(c) - lit(1)). Expressions that
+    contain references to the input Dataset's columns must always be wrapped in an aggregate
+    function.
+
+    An Observation instance collects the metrics while the first action is executed. Subsequent
+    actions do not modify the metrics returned by `Observation.get`. Retrieval of the metric via
+    `Observation.get` blocks until the first action has finished and metrics become available.
+
+    .. versionadded:: 3.3.0
+
+    Notes
+    -----
+    This class does not support streaming datasets.
+
+    Examples
+    --------
+    >>> from pyspark.sql.functions import col, count, lit, max
+    >>> from pyspark.sql import Observation
+    >>> df = spark.createDataFrame([["Alice", 2], ["Bob", 5]], ["name", "age"])
+    >>> observation = Observation("my metrics")
+    >>> observed_df = df.observe(observation, count(lit(1)).alias("count"), max(col("age")))
+    >>> observed_df.count()
+    2
+    >>> observation.get
+    {'count': 2, 'max(age)': 5}
+    "#
+    };
+    (DataFrameReader . format) => {
+        r#"Specifies the input data source format.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        source : str
+            string, name of the data source, e.g. 'json', 'parquet'.
+
+        Examples
+        --------
+        >>> spark.read.format('json')
+        <...readwriter.DataFrameReader object ...>
+
+        Write a DataFrame into a JSON file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="format") as d:
+        ...     # Write a DataFrame into a JSON file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").format("json").save(d)
+        ...
+        ...     # Read the JSON file as a DataFrame.
+        ...     spark.read.format('json').load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameReader . schema) => {
+        r#"Specifies the input schema.
+
+        Some data sources (e.g. JSON) can infer the input schema automatically from data.
+        By specifying the schema here, the underlying data source can skip the schema
+        inference step, and thus speed up data loading.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        schema : :class:`pyspark.sql.types.StructType` or str
+            a :class:`pyspark.sql.types.StructType` object or a DDL-formatted string
+            (For example ``col0 INT, col1 DOUBLE``).
+
+        Examples
+        --------
+        >>> spark.read.schema("col0 INT, col1 DOUBLE")
+        <...readwriter.DataFrameReader object ...>
+
+        Specify the schema with reading a CSV file.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="schema") as d:
+        ...     spark.read.schema("col0 INT, col1 DOUBLE").format("csv").load(d).printSchema()
+        root
+         |-- col0: integer (nullable = true)
+         |-- col1: double (nullable = true)
+        "#
+    };
+    (DataFrameReader . option) => {
+        r#"
+        Adds an input option for the underlying data source.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        key : str
+            The key for the option to set.
+        value
+            The value for the option to set.
+
+        Examples
+        --------
+        >>> spark.read.option("key", "value")
+        <...readwriter.DataFrameReader object ...>
+
+        Specify the option 'nullValue' with reading a CSV file.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="option") as d:
+        ...     # Write a DataFrame into a CSV file
+        ...     df = spark.createDataFrame([{"age": 100, "name": "Hyukjin Kwon"}])
+        ...     df.write.mode("overwrite").format("csv").save(d)
+        ...
+        ...     # Read the CSV file as a DataFrame with 'nullValue' option set to 'Hyukjin Kwon'.
+        ...     spark.read.schema(df.schema).option(
+        ...         "nullValue", "Hyukjin Kwon").format('csv').load(d).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |100|NULL|
+        +---+----+
+        "#
+    };
+    (DataFrameReader . options) => {
+        r#"
+        Adds input options for the underlying data source.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        **options : dict
+            The dictionary of string keys and primitive-type values.
+
+        Examples
+        --------
+        >>> spark.read.options(key="value")
+        <...readwriter.DataFrameReader object ...>
+
+        Specify options in a dictionary.
+
+        >>> spark.read.options(**{"k1": "v1", "k2": "v2"})
+        <...readwriter.DataFrameReader object ...>
+
+        Specify the option 'nullValue' and 'header' with reading a CSV file.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="options") as d:
+        ...     # Write a DataFrame into a CSV file with a header.
+        ...     df = spark.createDataFrame([{"age": 100, "name": "Hyukjin Kwon"}])
+        ...     df.write.option("header", True).mode("overwrite").format("csv").save(d)
+        ...
+        ...     # Read the CSV file as a DataFrame with 'nullValue' option set to 'Hyukjin Kwon',
+        ...     # and 'header' option set to `True`.
+        ...     spark.read.options(
+        ...         nullValue="Hyukjin Kwon",
+        ...         header=True
+        ...     ).format('csv').load(d).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |100|NULL|
+        +---+----+
+        "#
+    };
+    (DataFrameReader . load) => {
+        r#"Loads data from a data source and returns it as a :class:`DataFrame`.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str or list, optional
+            optional string or a list of string for file-system backed data sources.
+        format : str, optional
+            optional string for format of the data source. Default to 'parquet'.
+        schema : :class:`pyspark.sql.types.StructType` or str, optional
+            optional :class:`pyspark.sql.types.StructType` for the input schema
+            or a DDL-formatted string (For example ``col0 INT, col1 DOUBLE``).
+        **options : dict
+            all other string options
+
+        Examples
+        --------
+        Load a CSV file with format, schema and options specified.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="load") as d:
+        ...     # Write a DataFrame into a CSV file with a header
+        ...     df = spark.createDataFrame([{"age": 100, "name": "Hyukjin Kwon"}])
+        ...     df.write.option("header", True).mode("overwrite").format("csv").save(d)
+        ...
+        ...     # Read the CSV file as a DataFrame with 'nullValue' option set to 'Hyukjin Kwon',
+        ...     # and 'header' option set to `True`.
+        ...     df = spark.read.load(
+        ...         d, schema=df.schema, format="csv", nullValue="Hyukjin Kwon", header=True)
+        ...     df.printSchema()
+        ...     df.show()
+        root
+         |-- age: long (nullable = true)
+         |-- name: string (nullable = true)
+        +---+----+
+        |age|name|
+        +---+----+
+        |100|NULL|
+        +---+----+
+        "#
+    };
+    (DataFrameReader . table) => {
+        r#"Returns the specified table as a :class:`DataFrame`.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        tableName : str
+            string, name of the table.
+
+        Examples
+        --------
+        >>> df = spark.range(10)
+        >>> df.createOrReplaceTempView('tblA')
+        >>> spark.read.table('tblA').show()
+        +---+
+        | id|
+        +---+
+        |  0|
+        |  1|
+        |  2|
+        |  3|
+        |  4|
+        |  5|
+        |  6|
+        |  7|
+        |  8|
+        |  9|
+        +---+
+        >>> _ = spark.sql("DROP TABLE tblA")
+        "#
+    };
+    (DataFrameReader . changes) => {
+        r#"Returns the row-level changes (Change Data Capture) from the specified table
+        as a :class:`DataFrame`. Currently this API is only supported for Data Source V2
+        tables whose catalog implements ``TableCatalog.loadChangelog()``.
+
+        Use :meth:`option` to specify the version/timestamp range and processing options.
+
+        .. versionadded:: 4.2.0
+
+        Parameters
+        ----------
+        tableName : str
+            string, name of the table.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> spark.read.option("startingVersion", "10").option(
+        ...     "endingVersion", "20"
+        ... ).changes("my_table")  # doctest: +SKIP
+        "#
+    };
+    (DataFrameReader . json) => {
+        r#"
+        Loads JSON files and returns the results as a :class:`DataFrame`.
+
+        `JSON Lines <http://jsonlines.org/>`_ (newline-delimited JSON) is supported by default.
+        For JSON (one record per file), set the ``multiLine`` parameter to ``true``.
+
+        If the ``schema`` parameter is not specified, this function goes
+        through the input once to determine the input schema.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        .. versionchanged:: 4.2.0
+            Supports DataFrame input.
+
+        Parameters
+        ----------
+        path : str, list, :class:`RDD`, or :class:`DataFrame`
+            string represents path to the JSON dataset, or a list of paths,
+            or RDD of Strings storing JSON objects,
+            or a DataFrame with a single string column containing JSON strings.
+        schema : :class:`pyspark.sql.types.StructType` or str, optional
+            an optional :class:`pyspark.sql.types.StructType` for the input schema or
+            a DDL-formatted string (For example ``col0 INT, col1 DOUBLE``).
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-json.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Example 1: Write a DataFrame into a JSON file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="json1") as d:
+        ...     # Write a DataFrame into a JSON file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin"}]
+        ...     ).write.mode("overwrite").format("json").save(d)
+        ...
+        ...     # Read the JSON file as a DataFrame.
+        ...     spark.read.json(d).show()
+        +---+-------+
+        |age|   name|
+        +---+-------+
+        |100|Hyukjin|
+        +---+-------+
+
+        Example 2: Read JSON from multiple files in a directory
+
+        >>> from tempfile import TemporaryDirectory
+        >>> with TemporaryDirectory(prefix="json2") as d1, TemporaryDirectory(prefix="json3") as d2:
+        ...     # Write a DataFrame into a JSON file
+        ...     spark.createDataFrame(
+        ...         [{"age": 30, "name": "Bob"}]
+        ...     ).write.mode("overwrite").format("json").save(d1)
+        ...
+        ...     # Read the JSON files as a DataFrame.
+        ...     spark.createDataFrame(
+        ...         [{"age": 25, "name": "Alice"}]
+        ...     ).write.mode("overwrite").format("json").save(d2)
+        ...     spark.read.json([d1, d2]).show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 25|Alice|
+        | 30|  Bob|
+        +---+-----+
+
+        Example 3: Read JSON with a custom schema
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="json4") as d:
+        ...     # Write a DataFrame into a JSON file
+        ...     spark.createDataFrame(
+        ...        [{"age": 30, "name": "Bob"}]
+        ...     ).write.mode("overwrite").format("json").save(d)
+        ...     custom_schema = "name STRING, age INT"
+        ...     spark.read.json(d, schema=custom_schema).show()
+        +----+---+
+        |name|age|
+        +----+---+
+        | Bob| 30|
+        +----+---+
+
+        Example 4: Parse JSON from a DataFrame with a single string column.
+
+        >>> json_df = spark.createDataFrame(
+        ...     [('{"name": "Alice", "age": 25}',), ('{"name": "Bob", "age": 30}',)],
+        ...     schema="value STRING",
+        ... )
+        >>> spark.read.json(json_df).sort("name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 25|Alice|
+        | 30|  Bob|
+        +---+-----+
+        "#
+    };
+    (DataFrameReader . parquet) => {
+        r#"
+        Loads Parquet files, returning the result as a :class:`DataFrame`.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        paths : str
+            One or more file paths to read the Parquet files from.
+
+        Other Parameters
+        ----------------
+        **options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-parquet.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Returns
+        -------
+        :class:`DataFrame`
+            A DataFrame containing the data from the Parquet files.
+
+        Examples
+        --------
+        Create sample dataframes.
+
+        >>> df = spark.createDataFrame(
+        ...     [(10, "Alice"), (15, "Bob"), (20, "Tom")], schema=["age", "name"])
+        >>> df2 = spark.createDataFrame([(70, "Alice"), (80, "Bob")], schema=["height", "name"])
+
+        Write a DataFrame into a Parquet file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="parquet1") as d:
+        ...     # Write a DataFrame into a Parquet file.
+        ...     df.write.mode("overwrite").format("parquet").save(d)
+        ...
+        ...     # Read the Parquet file as a DataFrame.
+        ...     spark.read.parquet(d).orderBy("name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 10|Alice|
+        | 15|  Bob|
+        | 20|  Tom|
+        +---+-----+
+
+        Read a Parquet file with a specific column.
+
+        >>> with tempfile.TemporaryDirectory(prefix="parquet2") as d:
+        ...     df.write.mode("overwrite").format("parquet").save(d)
+        ...
+        ...     # Read the Parquet file with only the 'name' column.
+        ...     spark.read.schema("name string").parquet(d).orderBy("name").show()
+        +-----+
+        | name|
+        +-----+
+        |Alice|
+        |  Bob|
+        |  Tom|
+        +-----+
+
+        Read multiple Parquet files and merge schema.
+
+        >>> with tempfile.TemporaryDirectory(prefix="parquet3") as d1:
+        ...     with tempfile.TemporaryDirectory(prefix="parquet4") as d2:
+        ...         df.write.mode("overwrite").format("parquet").save(d1)
+        ...         df2.write.mode("overwrite").format("parquet").save(d2)
+        ...
+        ...         spark.read.option(
+        ...             "mergeSchema", "true"
+        ...         ).parquet(d1, d2).select(
+        ...             "name", "age", "height"
+        ...         ).orderBy("name", "age").show()
+        +-----+----+------+
+        | name| age|height|
+        +-----+----+------+
+        |Alice|NULL|    70|
+        |Alice|  10|  NULL|
+        |  Bob|NULL|    80|
+        |  Bob|  15|  NULL|
+        |  Tom|  20|  NULL|
+        +-----+----+------+
+        "#
+    };
+    (DataFrameReader . text) => {
+        r#"
+        Loads text files and returns a :class:`DataFrame` whose schema starts with a
+        string column named "value", and followed by partitioned columns if there
+        are any.
+        The text files must be encoded as UTF-8.
+
+        By default, each line in the text file is a new row in the resulting DataFrame.
+
+        .. versionadded:: 1.6.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        paths : str or list
+            string, or list of strings, for input path(s).
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-text.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a text file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="text") as d:
+        ...     # Write a DataFrame into a text file
+        ...     df = spark.createDataFrame([("a",), ("b",), ("c",)], schema=["alphabets"])
+        ...     df.write.mode("overwrite").format("text").save(d)
+        ...
+        ...     # Read the text file as a DataFrame.
+        ...     spark.read.schema(df.schema).text(d).sort("alphabets").show()
+        +---------+
+        |alphabets|
+        +---------+
+        |        a|
+        |        b|
+        |        c|
+        +---------+
+        "#
+    };
+    (DataFrameReader . csv) => {
+        r#"Loads a CSV file and returns the result as a  :class:`DataFrame`.
+
+        This function will go through the input once to determine the input schema if
+        ``inferSchema`` is enabled. To avoid going through the entire data once, disable
+        ``inferSchema`` option or specify the schema explicitly using ``schema``.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        .. versionchanged:: 4.2.0
+            Supports DataFrame input.
+
+        Parameters
+        ----------
+        path : str, list, :class:`RDD`, or :class:`DataFrame`
+            string, or list of strings, for input path(s),
+            or RDD of Strings storing CSV rows,
+            or a DataFrame with a single string column containing CSV rows.
+        schema : :class:`pyspark.sql.types.StructType` or str, optional
+            an optional :class:`pyspark.sql.types.StructType` for the input schema
+            or a DDL-formatted string (For example ``col0 INT, col1 DOUBLE``).
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-csv.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a CSV file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="csv") as d:
+        ...     # Write a DataFrame into a CSV file
+        ...     df = spark.createDataFrame([{"age": 100, "name": "Hyukjin Kwon"}])
+        ...     df.write.mode("overwrite").format("csv").save(d)
+        ...
+        ...     # Read the CSV file as a DataFrame with 'nullValue' option set to 'Hyukjin Kwon'.
+        ...     spark.read.csv(d, schema=df.schema, nullValue="Hyukjin Kwon").show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |100|NULL|
+        +---+----+
+        "#
+    };
+    (DataFrameReader . xml) => {
+        r#"Loads a XML file and returns the result as a  :class:`DataFrame`.
+
+        If the ``schema`` parameter is not specified, this function goes
+        through the input once to determine the input schema.
+
+        .. versionadded:: 4.0.0
+
+        .. versionchanged:: 4.2.0
+            Supports DataFrame input.
+
+        Parameters
+        ----------
+        path : str, list, :class:`RDD`, or :class:`DataFrame`
+            string, or list of strings, for input path(s),
+            or RDD of Strings storing XML rows,
+            or a DataFrame with a single string column containing XML strings.
+        schema : :class:`pyspark.sql.types.StructType` or str, optional
+            an optional :class:`pyspark.sql.types.StructType` for the input schema
+            or a DDL-formatted string (For example ``col0 INT, col1 DOUBLE``).
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-xml.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Example 1: Write a DataFrame into a XML file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="xml") as d:
+        ...     # Write a DataFrame into a XML file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").option("rowTag", "person").format("xml").save(d)
+        ...
+        ...     # Read the XML file as a DataFrame.
+        ...     spark.read.option("rowTag", "person").xml(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+
+        Example 2: Parse XML from a DataFrame with a single string column.
+
+        >>> xml_df = spark.createDataFrame(
+        ...     [('<person><name>Alice</name><age>25</age></person>',),
+        ...      ('<person><name>Bob</name><age>30</age></person>',)],
+        ...     schema="value STRING",
+        ... )
+        >>> spark.read.option("rowTag", "person").xml(xml_df).sort("name").show()
+        +---+-----+
+        |age| name|
+        +---+-----+
+        | 25|Alice|
+        | 30|  Bob|
+        +---+-----+
+        "#
+    };
+    (DataFrameReader . orc) => {
+        r#"Loads ORC files, returning the result as a :class:`DataFrame`.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str or list
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-orc.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a ORC file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="orc") as d:
+        ...     # Write a DataFrame into a ORC file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").format("orc").save(d)
+        ...
+        ...     # Read the Parquet file as a DataFrame.
+        ...     spark.read.orc(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameReader . jdbc) => {
+        r#"
+        Construct a :class:`DataFrame` representing the database table named ``table``
+        accessible via JDBC URL ``url`` and connection ``properties``.
+
+        Partitions of the table will be retrieved in parallel if either ``column`` or
+        ``predicates`` is specified. ``lowerBound``, ``upperBound`` and ``numPartitions``
+        is needed when ``column`` is specified.
+
+        If both ``column`` and ``predicates`` are specified, ``column`` will be used.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        table : str
+            the name of the table
+        column : str, optional
+            alias of ``partitionColumn`` option. Refer to ``partitionColumn`` in
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html#data-source-option>`_
+            for the version you use.
+        predicates : list, optional
+            a list of expressions suitable for inclusion in WHERE clauses;
+            each one defines one partition of the :class:`DataFrame`
+        properties : dict, optional
+            a dictionary of JDBC database connection arguments. Normally at
+            least properties "user" and "password" with their corresponding values.
+            For example { 'user' : 'SYSTEM', 'password' : 'mypassword' }
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Notes
+        -----
+        Don't create too many partitions in parallel on a large cluster;
+        otherwise Spark might crash your external database systems.
+
+        Returns
+        -------
+        :class:`DataFrame`
+        "#
+    };
+    (DataFrameReader) => {
+        r#"
+    Interface used to load a :class:`DataFrame` from external storage systems
+    (e.g. file systems, key-value stores, etc). Use :attr:`SparkSession.read`
+    to access this.
+
+    .. versionadded:: 1.4.0
+
+    .. versionchanged:: 3.4.0
+        Supports Spark Connect.
+    "#
+    };
+    (DataFrameWriter . mode) => {
+        r#"Specifies the behavior when data or table already exists.
+
+        Options include:
+
+        * `append`: Append contents of this :class:`DataFrame` to existing data.
+        * `overwrite`: Overwrite existing data.
+        * `error` or `errorifexists`: Throw an exception if data already exists.
+        * `ignore`: Silently ignore this operation if data already exists.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Examples
+        --------
+        Raise an error when writing to an existing path.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="mode1") as d:
+        ...     spark.createDataFrame(
+        ...         [{"age": 80, "name": "Xinrong Meng"}]
+        ...     ).write.mode("error").format("parquet").save(d) # doctest: +SKIP
+        Traceback (most recent call last):
+            ...
+        ...AnalysisException: ...
+
+        Write a Parquet file back with various options, and read it back.
+
+        >>> with tempfile.TemporaryDirectory(prefix="mode2") as d:
+        ...     # Overwrite the path with a new Parquet file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").format("parquet").save(d)
+        ...
+        ...     # Append another DataFrame into the Parquet file
+        ...     spark.createDataFrame(
+        ...         [{"age": 120, "name": "Takuya Ueshin"}]
+        ...     ).write.mode("append").format("parquet").save(d)
+        ...
+        ...     # Append another DataFrame into the Parquet file
+        ...     spark.createDataFrame(
+        ...         [{"age": 140, "name": "Haejoon Lee"}]
+        ...     ).write.mode("ignore").format("parquet").save(d)
+        ...
+        ...     # Read the Parquet file as a DataFrame.
+        ...     spark.read.parquet(d).show()
+        +---+-------------+
+        |age|         name|
+        +---+-------------+
+        |120|Takuya Ueshin|
+        |100| Hyukjin Kwon|
+        +---+-------------+
+        "#
+    };
+    (DataFrameWriter . format) => {
+        r#"Specifies the underlying output data source.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        source : str
+            string, name of the data source, e.g. 'json', 'parquet'.
+
+        Examples
+        --------
+        >>> spark.range(1).write.format('parquet')
+        <...readwriter.DataFrameWriter object ...>
+
+        Write a DataFrame into a Parquet file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="format") as d:
+        ...     # Write a DataFrame into a Parquet file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").format("parquet").save(d)
+        ...
+        ...     # Read the Parquet file as a DataFrame.
+        ...     spark.read.format('parquet').load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . option) => {
+        r#"
+        Adds an output option for the underlying data source.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        key : str
+            The key for the option to set.
+        value
+            The value for the option to set.
+
+        Examples
+        --------
+        >>> spark.range(1).write.option("key", "value")
+        <...readwriter.DataFrameWriter object ...>
+
+        Specify the option 'nullValue' with writing a CSV file.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="option") as d:
+        ...     # Write a DataFrame into a CSV file with 'nullValue' option set to 'Hyukjin Kwon'.
+        ...     df = spark.createDataFrame([(100, None)], "age INT, name STRING")
+        ...     df.write.option("nullValue", "Hyukjin Kwon").mode("overwrite").format("csv").save(d)
+        ...
+        ...     # Read the CSV file as a DataFrame.
+        ...     spark.read.schema(df.schema).format('csv').load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . options) => {
+        r#"
+        Adds output options for the underlying data source.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        **options : dict
+            The dictionary of string keys and primitive-type values.
+
+        Examples
+        --------
+        >>> spark.range(1).write.options(key="value")
+        <...readwriter.DataFrameWriter object ...>
+
+        Specify options in a dictionary.
+
+        >>> spark.range(1).write.options(**{"k1": "v1", "k2": "v2"})
+        <...readwriter.DataFrameWriter object ...>
+
+        Specify the option 'nullValue' and 'header' with writing a CSV file.
+
+        >>> from pyspark.sql.types import StructType,StructField, StringType, IntegerType
+        >>> schema = StructType([
+        ...     StructField("age",IntegerType(),True),
+        ...     StructField("name",StringType(),True),
+        ... ])
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="options") as d:
+        ...     # Write a DataFrame into a CSV file with 'nullValue' option set to 'Hyukjin Kwon',
+        ...     # and 'header' option set to `True`.
+        ...     df = spark.createDataFrame([(100, None)], schema=schema)
+        ...     df.write.options(nullValue="Hyukjin Kwon", header=True).mode(
+        ...         "overwrite").format("csv").save(d)
+        ...
+        ...     # Read the CSV file as a DataFrame.
+        ...     spark.read.option("header", True).format('csv').load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . partitionBy) => {
+        r#"Partitions the output by the given columns on the file system.
+
+        If specified, the output is laid out on the file system similar
+        to Hive's partitioning scheme.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        cols : str or list
+            name of columns
+
+        Examples
+        --------
+        Write a DataFrame into a Parquet file in a partitioned manner, and read it back.
+
+        >>> import tempfile
+        >>> import os
+        >>> with tempfile.TemporaryDirectory(prefix="partitionBy") as d:
+        ...     # Write a DataFrame into a Parquet file in a partitioned manner.
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}, {"age": 120, "name": "Ruifeng Zheng"}]
+        ...     ).write.partitionBy("name").mode("overwrite").format("parquet").save(d)
+        ...
+        ...     # Read the Parquet file as a DataFrame.
+        ...     spark.read.parquet(d).sort("age").show()
+        ...
+        ...     # Read one partition as a DataFrame.
+        ...     spark.read.parquet(f"{d}{os.path.sep}name=Hyukjin Kwon").show()
+        +---+-------------+
+        |age|         name|
+        +---+-------------+
+        |100| Hyukjin Kwon|
+        |120|Ruifeng Zheng|
+        +---+-------------+
+        +---+
+        |age|
+        +---+
+        |100|
+        +---+
+        "#
+    };
+    (DataFrameWriter . bucketBy) => {
+        r#"Buckets the output by the given columns. If specified,
+        the output is laid out on the file system similar to Hive's bucketing scheme,
+        but with a different bucket hash function and is not compatible with Hive's bucketing.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        numBuckets : int
+            the number of buckets to save
+        col : str, list or tuple
+            a name of a column, or a list of names.
+        cols : str
+            additional names (optional). If `col` is a list it should be empty.
+
+        Notes
+        -----
+        Applicable for file-based data sources in combination with
+        :py:meth:`DataFrameWriter.saveAsTable`.
+
+        Examples
+        --------
+        Write a DataFrame into a Parquet file in a buckted manner, and read it back.
+
+        >>> from pyspark.sql.functions import input_file_name
+        >>> # Write a DataFrame into a Parquet file in a bucketed manner.
+        ... _ = spark.sql("DROP TABLE IF EXISTS bucketed_table")
+        >>> spark.createDataFrame([
+        ...     (100, "Hyukjin Kwon"), (120, "Hyukjin Kwon"), (140, "Haejoon Lee")],
+        ...     schema=["age", "name"]
+        ... ).write.bucketBy(2, "name").mode("overwrite").saveAsTable("bucketed_table")
+        >>> # Read the Parquet file as a DataFrame.
+        ... spark.read.table("bucketed_table").sort("age").show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        |120|Hyukjin Kwon|
+        |140| Haejoon Lee|
+        +---+------------+
+        >>> _ = spark.sql("DROP TABLE bucketed_table")
+        "#
+    };
+    (DataFrameWriter . sortBy) => {
+        r#"Sorts the output in each bucket by the given columns on the file system.
+
+        .. versionadded:: 2.3.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        col : str, tuple or list
+            a name of a column, or a list of names.
+        cols : str
+            additional names (optional). If `col` is a list it should be empty.
+
+        Examples
+        --------
+        Write a DataFrame into a Parquet file in a sorted-buckted manner, and read it back.
+
+        >>> from pyspark.sql.functions import input_file_name
+        >>> # Write a DataFrame into a Parquet file in a sorted-bucketed manner.
+        ... _ = spark.sql("DROP TABLE IF EXISTS sorted_bucketed_table")
+        >>> spark.createDataFrame([
+        ...     (100, "Hyukjin Kwon"), (120, "Hyukjin Kwon"), (140, "Haejoon Lee")],
+        ...     schema=["age", "name"]
+        ... ).write.bucketBy(1, "name").sortBy("age").mode(
+        ...     "overwrite").saveAsTable("sorted_bucketed_table")
+        >>> # Read the Parquet file as a DataFrame.
+        ... spark.read.table("sorted_bucketed_table").sort("age").show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        |120|Hyukjin Kwon|
+        |140| Haejoon Lee|
+        +---+------------+
+        >>> _ = spark.sql("DROP TABLE sorted_bucketed_table")
+        "#
+    };
+    (DataFrameWriter . clusterBy) => {
+        r#"Clusters the data by the given columns to optimize query performance.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        cols : str or list
+            name of columns
+
+        Examples
+        --------
+        Write a DataFrame into a Parquet file with clustering.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="clusterBy") as d:
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}, {"age": 120, "name": "Ruifeng Zheng"}]
+        ...     ).write.clusterBy("name").mode("overwrite").format("parquet").save(d)
+        "#
+    };
+    (DataFrameWriter . save) => {
+        r#"Saves the contents of the :class:`DataFrame` to a data source.
+
+        The data source is specified by the ``format`` and a set of ``options``.
+        If ``format`` is not specified, the default data source configured by
+        ``spark.sql.sources.default`` will be used.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str, optional
+            the path in a Hadoop supported file system
+        format : str, optional
+            the format used to save
+        mode : str, optional
+            specifies the behavior of the save operation when data already exists.
+
+            * ``append``: Append contents of this :class:`DataFrame` to existing data.
+            * ``overwrite``: Overwrite existing data.
+            * ``ignore``: Silently ignore this operation if data already exists.
+            * ``error`` or ``errorifexists`` (default case): Throw an exception if data already                 exists.
+        partitionBy : list, optional
+            names of partitioning columns
+        **options : dict
+            all other string options
+
+        Examples
+        --------
+        Write a DataFrame into a JSON file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="save") as d:
+        ...     # Write a DataFrame into a JSON file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").format("json").save(d)
+        ...
+        ...     # Read the JSON file as a DataFrame.
+        ...     spark.read.format('json').load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . insertInto) => {
+        r#"Inserts the content of the :class:`DataFrame` to the specified table.
+
+        It requires that the schema of the :class:`DataFrame` is the same as the
+        schema of the table.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        overwrite : bool, optional
+            If true, overwrites existing data. Disabled by default
+
+        Notes
+        -----
+        Unlike :meth:`DataFrameWriter.saveAsTable`, :meth:`DataFrameWriter.insertInto` ignores
+        the column names and just uses position-based resolution.
+
+        Examples
+        --------
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tblA")
+        >>> df = spark.createDataFrame([
+        ...     (100, "Hyukjin Kwon"), (120, "Hyukjin Kwon"), (140, "Haejoon Lee")],
+        ...     schema=["age", "name"]
+        ... )
+        >>> df.write.saveAsTable("tblA")
+
+        Insert the data into 'tblA' table but with different column names.
+
+        >>> df.selectExpr("age AS col1", "name AS col2").write.insertInto("tblA")
+        >>> spark.read.table("tblA").sort("age").show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        |100|Hyukjin Kwon|
+        |120|Hyukjin Kwon|
+        |120|Hyukjin Kwon|
+        |140| Haejoon Lee|
+        |140| Haejoon Lee|
+        +---+------------+
+        >>> _ = spark.sql("DROP TABLE tblA")
+        "#
+    };
+    (DataFrameWriter . saveAsTable) => {
+        r#"Saves the content of the :class:`DataFrame` as the specified table.
+
+        In the case the table already exists, behavior of this function depends on the
+        save mode, specified by the `mode` function (default to throwing an exception).
+        When `mode` is `Overwrite`, the schema of the :class:`DataFrame` does not need to be
+        the same as that of the existing table.
+
+        * `append`: Append contents of this :class:`DataFrame` to existing data.
+        * `overwrite`: Overwrite existing data.
+        * `error` or `errorifexists`: Throw an exception if data already exists.
+        * `ignore`: Silently ignore this operation if data already exists.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Notes
+        -----
+        When `mode` is `Append`, if there is an existing table, we will use the format and
+        options of the existing table. The column order in the schema of the :class:`DataFrame`
+        doesn't need to be the same as that of the existing table. Unlike
+        :meth:`DataFrameWriter.insertInto`, :meth:`DataFrameWriter.saveAsTable` will use the
+        column names to find the correct column positions.
+
+        Parameters
+        ----------
+        name : str
+            the table name
+        format : str, optional
+            the format used to save
+        mode : str, optional
+            one of `append`, `overwrite`, `error`, `errorifexists`, `ignore`             (default: error)
+        partitionBy : str or list
+            names of partitioning columns
+        **options : dict
+            all other string options
+
+        Examples
+        --------
+        Creates a table from a DataFrame, and read it back.
+
+        >>> _ = spark.sql("DROP TABLE IF EXISTS tblA")
+        >>> spark.createDataFrame([
+        ...     (100, "Hyukjin Kwon"), (120, "Hyukjin Kwon"), (140, "Haejoon Lee")],
+        ...     schema=["age", "name"]
+        ... ).write.saveAsTable("tblA")
+        >>> spark.read.table("tblA").sort("age").show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        |120|Hyukjin Kwon|
+        |140| Haejoon Lee|
+        +---+------------+
+        >>> _ = spark.sql("DROP TABLE tblA")
+        "#
+    };
+    (DataFrameWriter . json) => {
+        r#"Saves the content of the :class:`DataFrame` in JSON format
+        (`JSON Lines text format or newline-delimited JSON <http://jsonlines.org/>`_) at the
+        specified path.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str
+            the path in any Hadoop supported file system
+        mode : str, optional
+            specifies the behavior of the save operation when data already exists.
+
+            * ``append``: Append contents of this :class:`DataFrame` to existing data.
+            * ``overwrite``: Overwrite existing data.
+            * ``ignore``: Silently ignore this operation if data already exists.
+            * ``error`` or ``errorifexists`` (default case): Throw an exception if data already                 exists.
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-json.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a JSON file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="json") as d:
+        ...     # Write a DataFrame into a JSON file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.json(d, mode="overwrite")
+        ...
+        ...     # Read the JSON file as a DataFrame.
+        ...     spark.read.format("json").load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . parquet) => {
+        r#"Saves the content of the :class:`DataFrame` in Parquet format at the specified path.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str
+            the path in any Hadoop supported file system
+        mode : str, optional
+            specifies the behavior of the save operation when data already exists.
+
+            * ``append``: Append contents of this :class:`DataFrame` to existing data.
+            * ``overwrite``: Overwrite existing data.
+            * ``ignore``: Silently ignore this operation if data already exists.
+            * ``error`` or ``errorifexists`` (default case): Throw an exception if data already                 exists.
+        partitionBy : str or list, optional
+            names of partitioning columns
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-parquet.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a Parquet file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="parquet") as d:
+        ...     # Write a DataFrame into a Parquet file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.parquet(d, mode="overwrite")
+        ...
+        ...     # Read the Parquet file as a DataFrame.
+        ...     spark.read.format("parquet").load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . text) => {
+        r#"Saves the content of the DataFrame in a text file at the specified path.
+        The text files will be encoded as UTF-8.
+
+        .. versionadded:: 1.6.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str
+            the path in any Hadoop supported file system
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-text.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Notes
+        -----
+        The DataFrame must have only one column that is of string type.
+        Each row becomes a new line in the output file.
+
+        Examples
+        --------
+        Write a DataFrame into a text file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="text") as d:
+        ...     # Write a DataFrame into a text file
+        ...     df = spark.createDataFrame([("a",), ("b",), ("c",)], schema=["alphabets"])
+        ...     df.write.mode("overwrite").text(d)
+        ...
+        ...     # Read the text file as a DataFrame.
+        ...     spark.read.schema(df.schema).format("text").load(d).sort("alphabets").show()
+        +---------+
+        |alphabets|
+        +---------+
+        |        a|
+        |        b|
+        |        c|
+        +---------+
+        "#
+    };
+    (DataFrameWriter . csv) => {
+        r#"Saves the content of the :class:`DataFrame` in CSV format at the specified path.
+
+        .. versionadded:: 2.0.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str
+            the path in any Hadoop supported file system
+        mode : str, optional
+            specifies the behavior of the save operation when data already exists.
+
+            * ``append``: Append contents of this :class:`DataFrame` to existing data.
+            * ``overwrite``: Overwrite existing data.
+            * ``ignore``: Silently ignore this operation if data already exists.
+            * ``error`` or ``errorifexists`` (default case): Throw an exception if data already \
+                exists.
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-csv.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a CSV file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="csv") as d:
+        ...     # Write a DataFrame into a CSV file
+        ...     df = spark.createDataFrame([{"age": 100, "name": "Hyukjin Kwon"}])
+        ...     df.write.csv(d, mode="overwrite")
+        ...
+        ...     # Read the CSV file as a DataFrame with 'nullValue' option set to 'Hyukjin Kwon'.
+        ...     spark.read.schema(df.schema).format("csv").option(
+        ...         "nullValue", "Hyukjin Kwon").load(d).show()
+        +---+----+
+        |age|name|
+        +---+----+
+        |100|NULL|
+        +---+----+
+        "#
+    };
+    (DataFrameWriter . xml) => {
+        r#"Saves the content of the :class:`DataFrame` in XML format at the specified path.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        path : str
+            the path in any Hadoop supported file system
+        mode : str, optional
+            specifies the behavior of the save operation when data already exists.
+
+            * ``append``: Append contents of this :class:`DataFrame` to existing data.
+            * ``overwrite``: Overwrite existing data.
+            * ``ignore``: Silently ignore this operation if data already exists.
+            * ``error`` or ``errorifexists`` (default case): Throw an exception if data already \
+                exists.
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-xml.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a XML file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="xml") as d:
+        ...     # Write a DataFrame into a XML file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.mode("overwrite").option("rowTag", "person").xml(d)
+        ...
+        ...     # Read the XML file as a DataFrame.
+        ...     spark.read.option("rowTag", "person").format("xml").load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . orc) => {
+        r#"Saves the content of the :class:`DataFrame` in ORC format at the specified path.
+
+        .. versionadded:: 1.5.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        path : str
+            the path in any Hadoop supported file system
+        mode : str, optional
+            specifies the behavior of the save operation when data already exists.
+
+            * ``append``: Append contents of this :class:`DataFrame` to existing data.
+            * ``overwrite``: Overwrite existing data.
+            * ``ignore``: Silently ignore this operation if data already exists.
+            * ``error`` or ``errorifexists`` (default case): Throw an exception if data already                 exists.
+        partitionBy : str or list, optional
+            names of partitioning columns
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-orc.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Examples
+        --------
+        Write a DataFrame into a ORC file and read it back.
+
+        >>> import tempfile
+        >>> with tempfile.TemporaryDirectory(prefix="orc") as d:
+        ...     # Write a DataFrame into a ORC file
+        ...     spark.createDataFrame(
+        ...         [{"age": 100, "name": "Hyukjin Kwon"}]
+        ...     ).write.orc(d, mode="overwrite")
+        ...
+        ...     # Read the Parquet file as a DataFrame.
+        ...     spark.read.format("orc").load(d).show()
+        +---+------------+
+        |age|        name|
+        +---+------------+
+        |100|Hyukjin Kwon|
+        +---+------------+
+        "#
+    };
+    (DataFrameWriter . jdbc) => {
+        r#"Saves the content of the :class:`DataFrame` to an external database table via JDBC.
+
+        .. versionadded:: 1.4.0
+
+        .. versionchanged:: 3.4.0
+            Supports Spark Connect.
+
+        Parameters
+        ----------
+        table : str
+            Name of the table in the external database.
+        mode : str, optional
+            specifies the behavior of the save operation when data already exists.
+
+            * ``append``: Append contents of this :class:`DataFrame` to existing data.
+            * ``overwrite``: Overwrite existing data.
+            * ``ignore``: Silently ignore this operation if data already exists.
+            * ``error`` or ``errorifexists`` (default case): Throw an exception if data already                 exists.
+        properties : dict
+            a dictionary of JDBC database connection arguments. Normally at
+            least properties "user" and "password" with their corresponding values.
+            For example { 'user' : 'SYSTEM', 'password' : 'mypassword' }
+
+        Other Parameters
+        ----------------
+        Extra options
+            For the extra options, refer to
+            `Data Source Option <https://spark.apache.org/docs/latest/sql-data-sources-jdbc.html#data-source-option>`_
+            for the version you use.
+
+            .. # noqa
+
+        Notes
+        -----
+        Don't create too many partitions in parallel on a large cluster;
+        otherwise Spark might crash your external database systems.
+        "#
+    };
+    (DataFrameWriterV2 . using) => {
+        r#"
+        Specifies a provider for the underlying output data source.
+        Spark's default catalog supports "parquet", "json", etc.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . option) => {
+        r#"
+        Add a write option.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . options) => {
+        r#"
+        Add write options.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . tableProperty) => {
+        r#"
+        Add table property.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . partitionedBy) => {
+        r#"
+        Partition the output table created by `create`, `createOrReplace`, or `replace` using
+        the given columns or transforms.
+
+        When specified, the table data will be stored by these values for efficient reads.
+
+        For example, when a table is partitioned by day, it may be stored
+        in a directory layout like:
+
+        * `table/day=2019-06-01/`
+        * `table/day=2019-06-02/`
+
+        Partitioning is one of the most widely used techniques to optimize physical data layout.
+        It provides a coarse-grained index for skipping unnecessary data reads when queries have
+        predicates on the partitioned columns. In order for partitioning to work well, the number
+        of distinct values in each column should typically be less than tens of thousands.
+
+        `col` and `cols` support only the following functions:
+
+        * :py:func:`pyspark.sql.functions.years`
+        * :py:func:`pyspark.sql.functions.months`
+        * :py:func:`pyspark.sql.functions.days`
+        * :py:func:`pyspark.sql.functions.hours`
+        * :py:func:`pyspark.sql.functions.bucket`
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . clusterBy) => {
+        r#"
+        Clusters the data by the given columns to optimize query performance.
+        "#
+    };
+    (DataFrameWriterV2 . create) => {
+        r#"
+        Create a new table from the contents of the data frame.
+
+        The new table's schema, partition layout, properties, and other configuration will be
+        based on the configuration set on this writer.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . replace) => {
+        r#"
+        Replace an existing table with the contents of the data frame.
+
+        The existing table's schema, partition layout, properties, and other configuration will be
+        replaced with the contents of the data frame and the configuration set on this writer.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . createOrReplace) => {
+        r#"
+        Create a new table or replace an existing table with the contents of the data frame.
+
+        The output table's schema, partition layout, properties,
+        and other configuration will be based on the contents of the data frame
+        and the configuration set on this writer.
+        If the table exists, its configuration and data will be replaced.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . append) => {
+        r#"
+        Append the contents of the data frame to the output table.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . overwrite) => {
+        r#"
+        Overwrite rows matching the given filter condition with the contents of the data frame in
+        the output table.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
+    (DataFrameWriterV2 . overwritePartitions) => {
+        r#"
+        Overwrite all partition for which the data frame contains at least one row with the contents
+        of the data frame in the output table.
+
+        This operation is equivalent to Hive's `INSERT OVERWRITE ... PARTITION`, which replaces
+        partitions dynamically depending on the contents of the data frame.
+
+        .. versionadded:: 3.1.0
+        "#
+    };
     (StreamingQuery . id) => {
         r#"
         Returns the unique id of this query that persists across restarts from checkpoint data.
@@ -1794,6 +6318,649 @@ macro_rules! connect_doc {
         |...timestamp|value|
         +...---------+-----+
         ...
+        "#
+    };
+    (TableValuedFunction) => {
+        r#"
+    Interface for invoking table-valued functions in Spark SQL.
+    "#
+    };
+    (TableValuedFunction . range) => {
+        r#"
+        Create a :class:`DataFrame` with single :class:`pyspark.sql.types.LongType` column named
+        ``id``, containing elements in a range from ``start`` to ``end`` (exclusive) with
+        step value ``step``.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        start : int
+            the start value
+        end : int, optional
+            the end value (exclusive)
+        step : int, optional
+            the incremental step (default: 1)
+        numPartitions : int, optional
+            the number of partitions of the DataFrame
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> spark.tvf.range(1, 7, 2).show()
+        +---+
+        | id|
+        +---+
+        |  1|
+        |  3|
+        |  5|
+        +---+
+
+        If only one argument is specified, it will be used as the end value.
+
+        >>> spark.tvf.range(3).show()
+        +---+
+        | id|
+        +---+
+        |  0|
+        |  1|
+        |  2|
+        +---+
+        "#
+    };
+    (TableValuedFunction . explode) => {
+        r#"
+        Returns a :class:`DataFrame` containing a new row for each element
+        in the given array or map.
+        Uses the default column name `col` for elements in the array and
+        `key` and `value` for elements in the map unless specified otherwise.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        collection : :class:`~pyspark.sql.Column`
+            Target column to work on.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.explode`
+
+        Examples
+        --------
+        Example 1: Exploding an array column
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.explode(sf.array(sf.lit(1), sf.lit(2), sf.lit(3))).show()
+        +---+
+        |col|
+        +---+
+        |  1|
+        |  2|
+        |  3|
+        +---+
+
+        Example 2: Exploding a map column
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.explode(
+        ...     sf.create_map(sf.lit("a"), sf.lit("b"), sf.lit("c"), sf.lit("d"))
+        ... ).show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  a|    b|
+        |  c|    d|
+        +---+-----+
+
+        Example 3: Exploding an array of struct column
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.explode(sf.array(
+        ...     sf.named_struct(sf.lit("a"), sf.lit(1), sf.lit("b"), sf.lit(2)),
+        ...     sf.named_struct(sf.lit("a"), sf.lit(3), sf.lit("b"), sf.lit(4))
+        ... )).select("col.*").show()
+        +---+---+
+        |  a|  b|
+        +---+---+
+        |  1|  2|
+        |  3|  4|
+        +---+---+
+
+        Example 4: Exploding an empty array column
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.explode(sf.array()).show()
+        +---+
+        |col|
+        +---+
+        +---+
+
+        Example 5: Exploding an empty map column
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.explode(sf.create_map()).show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        +---+-----+
+        "#
+    };
+    (TableValuedFunction . explode_outer) => {
+        r#"
+        Returns a :class:`DataFrame` containing a new row for each element with position
+        in the given array or map.
+        Unlike explode, if the array/map is null or empty then null is produced.
+        Uses the default column name `col` for elements in the array and
+        `key` and `value` for elements in the map unless specified otherwise.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        collection : :class:`~pyspark.sql.Column`
+            target column to work on.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.explode_outer`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.explode_outer(sf.array(sf.lit("foo"), sf.lit("bar"))).show()
+        +---+
+        |col|
+        +---+
+        |foo|
+        |bar|
+        +---+
+        >>> spark.tvf.explode_outer(sf.array()).show()
+        +----+
+        | col|
+        +----+
+        |NULL|
+        +----+
+        >>> spark.tvf.explode_outer(sf.create_map(sf.lit("x"), sf.lit(1.0))).show()
+        +---+-----+
+        |key|value|
+        +---+-----+
+        |  x|  1.0|
+        +---+-----+
+        >>> spark.tvf.explode_outer(sf.create_map()).show()
+        +----+-----+
+        | key|value|
+        +----+-----+
+        |NULL| NULL|
+        +----+-----+
+        "#
+    };
+    (TableValuedFunction . inline) => {
+        r#"
+        Explodes an array of structs into a table.
+
+        This function takes an input column containing an array of structs and returns a
+        new column where each struct in the array is exploded into a separate row.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        input : :class:`~pyspark.sql.Column`
+            Input column of values to explode.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.inline`
+
+        Examples
+        --------
+        Example 1: Using inline with a single struct array
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.inline(sf.array(
+        ...     sf.named_struct(sf.lit("a"), sf.lit(1), sf.lit("b"), sf.lit(2)),
+        ...     sf.named_struct(sf.lit("a"), sf.lit(3), sf.lit("b"), sf.lit(4))
+        ... )).show()
+        +---+---+
+        |  a|  b|
+        +---+---+
+        |  1|  2|
+        |  3|  4|
+        +---+---+
+
+        Example 2: Using inline with an empty struct array column
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.inline(sf.array().astype("array<struct<a:int,b:int>>")).show()
+        +---+---+
+        |  a|  b|
+        +---+---+
+        +---+---+
+
+        Example 3: Using inline with a struct array column containing null values
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.inline(sf.array(
+        ...     sf.named_struct(sf.lit("a"), sf.lit(1), sf.lit("b"), sf.lit(2)),
+        ...     sf.lit(None),
+        ...     sf.named_struct(sf.lit("a"), sf.lit(3), sf.lit("b"), sf.lit(4))
+        ... )).show()
+        +----+----+
+        |   a|   b|
+        +----+----+
+        |   1|   2|
+        |NULL|NULL|
+        |   3|   4|
+        +----+----+
+        "#
+    };
+    (TableValuedFunction . inline_outer) => {
+        r#"
+        Explodes an array of structs into a table.
+        Unlike inline, if the array is null or empty then null is produced for each nested column.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        input : :class:`~pyspark.sql.Column`
+            input column of values to explode.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.inline_outer`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.inline_outer(sf.array(
+        ...     sf.named_struct(sf.lit("a"), sf.lit(1), sf.lit("b"), sf.lit(2)),
+        ...     sf.named_struct(sf.lit("a"), sf.lit(3), sf.lit("b"), sf.lit(4))
+        ... )).show()
+        +---+---+
+        |  a|  b|
+        +---+---+
+        |  1|  2|
+        |  3|  4|
+        +---+---+
+        >>> spark.tvf.inline_outer(sf.array().astype("array<struct<a:int,b:int>>")).show()
+        +----+----+
+        |   a|   b|
+        +----+----+
+        |NULL|NULL|
+        +----+----+
+        "#
+    };
+    (TableValuedFunction . json_tuple) => {
+        r#"
+        Creates a new row for a json column according to the given field names.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        input : :class:`~pyspark.sql.Column`
+            string column in json format
+        fields : :class:`~pyspark.sql.Column`
+            a field or fields to extract
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.json_tuple`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.json_tuple(
+        ...     sf.lit('{"f1": "value1", "f2": "value2"}'), sf.lit("f1"), sf.lit("f2")
+        ... ).show()
+        +------+------+
+        |    c0|    c1|
+        +------+------+
+        |value1|value2|
+        +------+------+
+        "#
+    };
+    (TableValuedFunction . posexplode) => {
+        r#"
+        Returns a :class:`DataFrame` containing a new row for each element with position
+        in the given array or map.
+        Uses the default column name `pos` for position, and `col` for elements in the
+        array and `key` and `value` for elements in the map unless specified otherwise.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        collection : :class:`~pyspark.sql.Column`
+            target column to work on.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.posexplode`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.posexplode(sf.array(sf.lit(1), sf.lit(2), sf.lit(3))).show()
+        +---+---+
+        |pos|col|
+        +---+---+
+        |  0|  1|
+        |  1|  2|
+        |  2|  3|
+        +---+---+
+        >>> spark.tvf.posexplode(sf.create_map(sf.lit("a"), sf.lit("b"))).show()
+        +---+---+-----+
+        |pos|key|value|
+        +---+---+-----+
+        |  0|  a|    b|
+        +---+---+-----+
+        "#
+    };
+    (TableValuedFunction . posexplode_outer) => {
+        r#"
+        Returns a :class:`DataFrame` containing a new row for each element with position
+        in the given array or map.
+        Unlike posexplode, if the array/map is null or empty then the row (null, null) is produced.
+        Uses the default column name `pos` for position, and `col` for elements in the
+        array and `key` and `value` for elements in the map unless specified otherwise.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        collection : :class:`~pyspark.sql.Column`
+            target column to work on.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.posexplode_outer`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.posexplode_outer(sf.array(sf.lit("foo"), sf.lit("bar"))).show()
+        +---+---+
+        |pos|col|
+        +---+---+
+        |  0|foo|
+        |  1|bar|
+        +---+---+
+        >>> spark.tvf.posexplode_outer(sf.array()).show()
+        +----+----+
+        | pos| col|
+        +----+----+
+        |NULL|NULL|
+        +----+----+
+        >>> spark.tvf.posexplode_outer(sf.create_map(sf.lit("x"), sf.lit(1.0))).show()
+        +---+---+-----+
+        |pos|key|value|
+        +---+---+-----+
+        |  0|  x|  1.0|
+        +---+---+-----+
+        >>> spark.tvf.posexplode_outer(sf.create_map()).show()
+        +----+----+-----+
+        | pos| key|value|
+        +----+----+-----+
+        |NULL|NULL| NULL|
+        +----+----+-----+
+        "#
+    };
+    (TableValuedFunction . stack) => {
+        r#"
+        Separates `col1`, ..., `colk` into `n` rows. Uses column names col0, col1, etc. by default
+        unless specified otherwise.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        n : :class:`~pyspark.sql.Column`
+            the number of rows to separate
+        fields : :class:`~pyspark.sql.Column`
+            input elements to be separated
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        See Also
+        --------
+        :meth:`pyspark.sql.functions.stack`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.stack(sf.lit(2), sf.lit(1), sf.lit(2), sf.lit(3)).show()
+        +----+----+
+        |col0|col1|
+        +----+----+
+        |   1|   2|
+        |   3|NULL|
+        +----+----+
+        "#
+    };
+    (TableValuedFunction . collations) => {
+        r#"
+        Get all of the Spark SQL string collations.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> spark.tvf.collations().show()
+        +-------+-------+-------------------+...
+        |CATALOG| SCHEMA|               NAME|...
+        +-------+-------+-------------------+...
+        ...
+        +-------+-------+-------------------+...
+        "#
+    };
+    (TableValuedFunction . sql_keywords) => {
+        r#"
+        Get Spark SQL keywords.
+
+        .. versionadded:: 4.0.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> spark.tvf.sql_keywords().columns
+        ['keyword', 'reserved']
+        "#
+    };
+    (TableValuedFunction . variant_explode) => {
+        r#"
+        Separates a variant object/array into multiple rows containing its fields/elements.
+
+        Its result schema is `struct<pos int, key string, value variant>`. `pos` is the position of
+        the field/element in its parent object/array, and `value` is the field/element value.
+        `key` is the field name when exploding a variant object, or is NULL when exploding a variant
+        array. It ignores any input that is not a variant array/object, including SQL NULL, variant
+        null, and any other variant values.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        input : :class:`~pyspark.sql.Column`
+            input column of values to explode.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        Example 1: Using variant_explode with a variant array
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.variant_explode(sf.parse_json(sf.lit('["hello", "world"]'))).show()
+        +---+----+-------+
+        |pos| key|  value|
+        +---+----+-------+
+        |  0|NULL|"hello"|
+        |  1|NULL|"world"|
+        +---+----+-------+
+
+        Example 2: Using variant_explode with a variant object
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.variant_explode(sf.parse_json(sf.lit('{"a": true, "b": 3.14}'))).show()
+        +---+---+-----+
+        |pos|key|value|
+        +---+---+-----+
+        |  0|  a| true|
+        |  1|  b| 3.14|
+        +---+---+-----+
+
+        Example 3: Using variant_explode with an empty variant array
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.variant_explode(sf.parse_json(sf.lit('[]'))).show()
+        +---+---+-----+
+        |pos|key|value|
+        +---+---+-----+
+        +---+---+-----+
+
+        Example 4: Using variant_explode with an empty variant object
+
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.variant_explode(sf.parse_json(sf.lit('{}'))).show()
+        +---+---+-----+
+        |pos|key|value|
+        +---+---+-----+
+        +---+---+-----+
+        "#
+    };
+    (TableValuedFunction . variant_explode_outer) => {
+        r#"
+        Separates a variant object/array into multiple rows containing its fields/elements.
+
+        Its result schema is `struct<pos int, key string, value variant>`. `pos` is the position of
+        the field/element in its parent object/array, and `value` is the field/element value.
+        `key` is the field name when exploding a variant object, or is NULL when exploding a variant
+        array. Unlike variant_explode, if the given variant is not a variant array/object, including
+        SQL NULL, variant null, and any other variant values, then NULL is produced.
+
+        .. versionadded:: 4.0.0
+
+        Parameters
+        ----------
+        input : :class:`~pyspark.sql.Column`
+            input column of values to explode.
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> spark.tvf.variant_explode_outer(sf.parse_json(sf.lit('["hello", "world"]'))).show()
+        +---+----+-------+
+        |pos| key|  value|
+        +---+----+-------+
+        |  0|NULL|"hello"|
+        |  1|NULL|"world"|
+        +---+----+-------+
+        >>> spark.tvf.variant_explode_outer(sf.parse_json(sf.lit('[]'))).show()
+        +----+----+-----+
+        | pos| key|value|
+        +----+----+-----+
+        |NULL|NULL| NULL|
+        +----+----+-----+
+        >>> spark.tvf.variant_explode_outer(sf.parse_json(sf.lit('{"a": true, "b": 3.14}'))).show()
+        +---+---+-----+
+        |pos|key|value|
+        +---+---+-----+
+        |  0|  a| true|
+        |  1|  b| 3.14|
+        +---+---+-----+
+        >>> spark.tvf.variant_explode_outer(sf.parse_json(sf.lit('{}'))).show()
+        +----+----+-----+
+        | pos| key|value|
+        +----+----+-----+
+        |NULL|NULL| NULL|
+        +----+----+-----+
+        "#
+    };
+    (TableValuedFunction . python_worker_logs) => {
+        r#"
+        Returns a DataFrame of logs collected from Python workers.
+
+        .. versionadded:: 4.1.0
+
+        Returns
+        -------
+        :class:`DataFrame`
+
+        Examples
+        --------
+        >>> import pyspark.sql.functions as sf
+        >>> import logging
+        >>>
+        >>> @sf.udf("string")
+        ... def my_udf(x):
+        ...     logger = logging.getLogger("my_custom_logger")
+        ...     logger.warning("This is a warning")
+        ...     return str(x)
+        ...
+        >>> spark.conf.set("spark.sql.pyspark.worker.logging.enabled", "true")
+        >>> spark.range(1).select(my_udf("id")).show()
+        +----------+
+        |my_udf(id)|
+        +----------+
+        |         0|
+        +----------+
+        >>> spark.tvf.python_worker_logs().select(
+        ...     "level", "msg", "context", "logger"
+        ... ).show(truncate=False)  # doctest: +SKIP
+        +-------+-----------------+---------------------+----------------+
+        |level  |msg              |context              |logger          |
+        +-------+-----------------+---------------------+----------------+
+        |WARNING|This is a warning|{func_name -> my_udf}|my_custom_logger|
+        +-------+-----------------+---------------------+----------------+
         "#
     };
 }

@@ -128,7 +128,8 @@ pub(crate) fn reduce_with_state<'py>(
     Ok(PyTuple::new(owner.py(), items)?.into_any())
 }
 
-/// Python wrapper for Spark GroupedData.
+// Python wrapper for Spark GroupedData.
+#[doc = connect_doc!(GroupedData)]
 #[pyclass(
     name = "GroupedData",
     module = "pyspark.sql.connect.group",
@@ -457,9 +458,10 @@ impl PyGroupedData {
         ))
     }
 
-    /// Aggregate with expressions (accepts Column objects), or the dict form
-    /// `agg({"col": "aggfunc"})` (PySpark parity), e.g. `agg({"age": "max"})`.
+    // Aggregate with expressions (accepts Column objects), or the dict form
+    // `agg({"col": "aggfunc"})` (PySpark parity), e.g. `agg({"age": "max"})`.
     #[pyo3(signature = (*exprs))]
+    #[doc = connect_doc!(GroupedData.agg)]
     fn agg(&self, _py: Python<'_>, exprs: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         // As PySpark's, which asserts that it has expressions.
         if exprs.is_empty() {
@@ -489,8 +491,9 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Count rows in each group, as PySpark's `agg(F._invoke_function("count", F.lit(1))
-    /// .alias("count"))`: the alias is of `alias`, of its origin, and the count is of none.
+    // Count rows in each group, as PySpark's `agg(F._invoke_function("count", F.lit(1))
+    // .alias("count"))`: the alias is of `alias`, of its origin, and the count is of none.
+    #[doc = connect_doc!(GroupedData.count)]
     fn count(&self) -> PyResult<PyDataFrame> {
         use spark_connect::expression::{Expression, LiteralExpression};
         let count = spark_connect::functions::count(spark_connect::Column::new(
@@ -504,10 +507,11 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(df))
     }
 
-    /// Pivot on a column; `values=None` auto-discovers the distinct pivot values. As PySpark's,
-    /// only the grouping of `groupBy` pivots, else `UNSUPPORTED_OPERATION`, and then the column
-    /// is a str and the values a list of bools, floats, ints and strs, else `NOT_EXPECTED_TYPE`.
+    // Pivot on a column; `values=None` auto-discovers the distinct pivot values. As PySpark's,
+    // only the grouping of `groupBy` pivots, else `UNSUPPORTED_OPERATION`, and then the column
+    // is a str and the values a list of bools, floats, ints and strs, else `NOT_EXPECTED_TYPE`.
     #[pyo3(signature = (pivot_col, values=None))]
+    #[doc = connect_doc!(GroupedData.pivot)]
     fn pivot(
         &self,
         py: Python<'_>,
@@ -577,26 +581,30 @@ impl PyGroupedData {
         Ok(PyGroupedData::new(grouped, self.frame.clone_ref(py)))
     }
 
-    /// Sum values in each group.
+    // Sum values in each group.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(GroupedData.sum)]
     fn sum(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         self.numeric_agg(py, "sum", cols)
     }
 
-    /// Average values in each group.
+    // Average values in each group.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(GroupedData.avg)]
     fn avg(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         self.numeric_agg(py, "avg", cols)
     }
 
-    /// Minimum values in each group.
+    // Minimum values in each group.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(GroupedData.min)]
     fn min(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         self.numeric_agg(py, "min", cols)
     }
 
-    /// Maximum values in each group.
+    // Maximum values in each group.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(GroupedData.max)]
     fn max(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         self.numeric_agg(py, "max", cols)
     }
@@ -607,8 +615,9 @@ impl PyGroupedData {
         self.numeric_agg(py, "avg", cols)
     }
 
-    /// `GroupedData.applyInPandas`.
+    // `GroupedData.applyInPandas`.
     #[pyo3(name = "applyInPandas")]
+    #[doc = connect_doc!(GroupedData.applyInPandas)]
     fn apply_in_pandas(
         &self,
         py: Python<'_>,
@@ -635,11 +644,12 @@ impl PyGroupedData {
         ))
     }
 
-    /// Deprecated grouped-map apply: `apply(udf)` where `udf` is a
-    /// `SQL_GROUPED_MAP_PANDAS_UDF` pandas UDF. Delegates to `applyInPandas` with the
-    /// UDF's wrapped function and return type, as PySpark Connect's: anything else, such as a
-    /// Column, a function or a UDF of another eval type, raises `PySparkTypeError`
-    /// `INVALID_UDF_EVAL_TYPE`, and it warns to prefer `applyInPandas`.
+    // Deprecated grouped-map apply: `apply(udf)` where `udf` is a
+    // `SQL_GROUPED_MAP_PANDAS_UDF` pandas UDF. Delegates to `applyInPandas` with the
+    // UDF's wrapped function and return type, as PySpark Connect's: anything else, such as a
+    // Column, a function or a UDF of another eval type, raises `PySparkTypeError`
+    // `INVALID_UDF_EVAL_TYPE`, and it warns to prefer `applyInPandas`.
+    #[doc = connect_doc!(GroupedData.apply)]
     fn apply(&self, py: Python<'_>, udf: Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         // A Column has any attribute, of its field of that name, so it is checked first.
         let grouped_map = !udf.is_instance_of::<crate::column::PyColumn>()
@@ -669,8 +679,9 @@ impl PyGroupedData {
         self.apply_in_pandas(py, func, schema)
     }
 
-    /// `GroupedData.applyInArrow`.
+    // `GroupedData.applyInArrow`.
     #[pyo3(name = "applyInArrow")]
+    #[doc = connect_doc!(GroupedData.applyInArrow)]
     fn apply_in_arrow(
         &self,
         py: Python<'_>,
@@ -698,11 +709,12 @@ impl PyGroupedData {
         ))
     }
 
-    /// `GroupedData.cogroup`, as PySpark's `PandasCogroupedOps`, which checks
-    /// `gd1._df._check_same_session(gd2._df)` first: an object that is not grouped data raises the
-    /// `AttributeError` of its `_df`, or `SESSION_NOT_SAME` of a `_df` that is not a DataFrame of
-    /// the session, such as the Column of a DataFrame's `_df`.
+    // `GroupedData.cogroup`, as PySpark's `PandasCogroupedOps`, which checks
+    // `gd1._df._check_same_session(gd2._df)` first: an object that is not grouped data raises the
+    // `AttributeError` of its `_df`, or `SESSION_NOT_SAME` of a `_df` that is not a DataFrame of
+    // the session, such as the Column of a DataFrame's `_df`.
     #[pyo3(name = "cogroup")]
+    #[doc = connect_doc!(GroupedData.cogroup)]
     fn cogroup(
         slf: &Bound<'_, Self>,
         py: Python<'_>,
@@ -716,15 +728,16 @@ impl PyGroupedData {
         ))
     }
 
-    /// `GroupedData.applyInPandasWithState` (stateful streaming), as PySpark's: the output
-    /// schema is the return type of the function, whose DDL string is parsed once the columns of
-    /// the input are read, and both schemas are sent as they are given, a `StructType` as its
-    /// JSON, which the server parses. The plan sets the schemas, the output mode and the timeout
-    /// in its string fields, in this order, after it pickles the function, when it is built: a
-    /// value that protobuf does not take as a str (bytes of UTF-8 it does) fails each request of
-    /// the DataFrame, as PySpark's plan fails to build, and not this call.
+    // `GroupedData.applyInPandasWithState` (stateful streaming), as PySpark's: the output
+    // schema is the return type of the function, whose DDL string is parsed once the columns of
+    // the input are read, and both schemas are sent as they are given, a `StructType` as its
+    // JSON, which the server parses. The plan sets the schemas, the output mode and the timeout
+    // in its string fields, in this order, after it pickles the function, when it is built: a
+    // value that protobuf does not take as a str (bytes of UTF-8 it does) fails each request of
+    // the DataFrame, as PySpark's plan fails to build, and not this call.
     #[pyo3(name = "applyInPandasWithState")]
     #[pyo3(signature = (func, outputStructType, stateStructType, outputMode, timeoutConf))]
+    #[doc = connect_doc!(GroupedData.applyInPandasWithState)]
     fn apply_in_pandas_with_state(
         &self,
         py: Python<'_>,
@@ -770,17 +783,18 @@ impl PyGroupedData {
         Ok(PyDataFrame::new(args.plan(df)))
     }
 
-    /// `GroupedData.transformWithStateInPandas` — arbitrary stateful processing with a
-    /// user `StatefulProcessor` (pandas output). Mirrors the Connect API: the processor is
-    /// wrapped by `TransformWithStateInPandasUdfUtils` into a UDF (cloudpickled + run on the
-    /// server), and the `GroupMap` proto carries the transform-with-state info, as
-    /// [`transform_with_state_of`] builds it.
+    // `GroupedData.transformWithStateInPandas` — arbitrary stateful processing with a
+    // user `StatefulProcessor` (pandas output). Mirrors the Connect API: the processor is
+    // wrapped by `TransformWithStateInPandasUdfUtils` into a UDF (cloudpickled + run on the
+    // server), and the `GroupMap` proto carries the transform-with-state info, as
+    // [`transform_with_state_of`] builds it.
     #[pyo3(name = "transformWithStateInPandas")]
     #[pyo3(
         signature = (statefulProcessor, outputStructType, outputMode, timeMode, initialState=None, eventTimeColumnName=DefaultedOption::Omitted),
         text_signature = "($self, statefulProcessor, outputStructType, outputMode, timeMode, initialState=None, eventTimeColumnName='')"
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(GroupedData.transformWithStateInPandas)]
     fn transform_with_state_in_pandas(
         &self,
         py: Python<'_>,
@@ -803,15 +817,16 @@ impl PyGroupedData {
         )
     }
 
-    /// `GroupedData.transformWithState` (row output). Like `transformWithStateInPandas` but
-    /// with the row-oriented eval type, of PySpark's `TransformWithStateInPySpark` plan, which
-    /// sends the output schema as the pandas one does ([`transform_with_state_of`]).
+    // `GroupedData.transformWithState` (row output). Like `transformWithStateInPandas` but
+    // with the row-oriented eval type, of PySpark's `TransformWithStateInPySpark` plan, which
+    // sends the output schema as the pandas one does ([`transform_with_state_of`]).
     #[pyo3(name = "transformWithState")]
     #[pyo3(
         signature = (statefulProcessor, outputStructType, outputMode, timeMode, initialState=None, eventTimeColumnName=DefaultedOption::Omitted),
         text_signature = "($self, statefulProcessor, outputStructType, outputMode, timeMode, initialState=None, eventTimeColumnName='')"
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(GroupedData.transformWithState)]
     fn transform_with_state(
         &self,
         py: Python<'_>,
@@ -1000,8 +1015,9 @@ fn twus_func<'py>(
     Ok((util.getattr(attr)?, et))
 }
 
-/// Python wrapper for cogrouped pandas/arrow ops, of the module of PySpark Connect's class of the
-/// objects of `cogroup`, `pyspark.sql.connect.group.PandasCogroupedOps`.
+// Python wrapper for cogrouped pandas/arrow ops, of the module of PySpark Connect's class of the
+// objects of `cogroup`, `pyspark.sql.connect.group.PandasCogroupedOps`.
+#[doc = connect_doc!(PandasCogroupedOps)]
 #[pyclass(
     name = "PandasCogroupedOps",
     module = "pyspark.sql.connect.group",
@@ -1108,8 +1124,9 @@ impl PyCoGroupedData {
         Ok(PyCoGroupedData::new(py, left, right))
     }
 
-    /// `PandasCogroupedOps.applyInPandas`.
+    // `PandasCogroupedOps.applyInPandas`.
     #[pyo3(name = "applyInPandas")]
+    #[doc = connect_doc!(PandasCogroupedOps.applyInPandas)]
     fn apply_in_pandas(
         &self,
         py: Python<'_>,
@@ -1131,8 +1148,9 @@ impl PyCoGroupedData {
         Ok(map_result_of(&schema, self.inner.apply_in_pandas(udf)))
     }
 
-    /// `PandasCogroupedOps.applyInArrow`.
+    // `PandasCogroupedOps.applyInArrow`.
     #[pyo3(name = "applyInArrow")]
+    #[doc = connect_doc!(PandasCogroupedOps.applyInArrow)]
     fn apply_in_arrow(
         &self,
         py: Python<'_>,

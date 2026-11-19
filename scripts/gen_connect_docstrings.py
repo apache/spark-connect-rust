@@ -40,8 +40,16 @@ OUTPUT = Path("crates/pyspark-rs/src/connect_docs_generated.rs")
 # The modules of PySpark Connect whose classes are native in the drop-in, and whose module copies
 # the docstrings of PySpark's classic classes onto them.
 MODULES = (
+    "pyspark.sql.connect.catalog",
+    "pyspark.sql.connect.conf",
+    "pyspark.sql.connect.datasource",
+    "pyspark.sql.connect.group",
+    "pyspark.sql.connect.merge",
+    "pyspark.sql.connect.observation",
+    "pyspark.sql.connect.readwriter",
     "pyspark.sql.connect.streaming.query",
     "pyspark.sql.connect.streaming.readwriter",
+    "pyspark.sql.connect.tvf",
 )
 
 
@@ -55,6 +63,10 @@ def docstrings(pyspark_src: str) -> dict[str, str]:
         if source is None:
             raise SystemExit(f"error: {module} not found in {pyspark_src}")
         for qualname in source.doc_assigns:
+            if qualname.endswith(".__init__"):
+                # The `__init__` of a native class is CPython's slot, whose wrapper has
+                # CPython's docstring, which the class cannot set.
+                continue
             doc = docs.raw(module, qualname)
             if doc is None:
                 raise SystemExit(f"error: {module}.{qualname} has no docstring")
