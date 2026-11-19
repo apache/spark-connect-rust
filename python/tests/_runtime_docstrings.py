@@ -3,12 +3,19 @@
 exact text, of scripts/capture_runtime_docstrings_golden.py (of official PySpark) and of the test of
 the drop-in's (test_dropin_class_modules_offline.py): of each module, of each public class and
 function that the module defines, and of each public member (and ``__init__``) of such a class,
-as Python finds it on the class, by "module", "module:Name" and "module:Class.member"."""
+as Python finds it on the class, by "module", "module:Name" and "module:Class.member".
+
+The sweep imports every module of them, some of which keep the state of the process at their
+import, such as the ``sys.stdout`` that ``pyspark.sql.connect.shell.progress`` binds as the default
+output of its progress bar: the test runs it in a child interpreter, of this file as a script
+(``python _runtime_docstrings.py <golden>``), which prints the comparison as JSON."""
 
 import hashlib
 import importlib
 import inspect
+import json
 import pkgutil
+import sys
 import types
 import warnings
 
@@ -95,3 +102,38 @@ def resolve(key):
             raise KeyError(key)
         found = getattr(found, part)
     return found
+
+
+def compare(golden):
+    """The comparison of the drop-in's docstrings with those of `golden`, the golden of
+    capture_runtime_docstrings_golden.py: the number compared, the keys that differ, and the
+    modules of the golden that do not import. The `__init__` of a native class is CPython's slot,
+    of CPython's docstring, and a name that the drop-in does not have is not compared."""
+    compared, differ, unimported = 0, [], []
+    for module, entries in golden["modules"].items():
+        try:
+            importlib.import_module(module)
+        except ImportError:
+            unimported.append(module)
+            continue
+        for rest, expected in entries.items():
+            key = f"{module}:{rest}" if rest else module
+            try:
+                found = resolve(key)
+            except KeyError:
+                continue
+            if rest.endswith(".__init__") and isinstance(found, types.WrapperDescriptorType):
+                continue
+            compared += 1
+            if digest(found.__doc__) != expected:
+                differ.append(key)
+    return {"compared": compared, "differ": differ, "unimported": unimported}
+
+
+if __name__ == "__main__":
+    warnings.simplefilter("ignore")
+    import pyspark.sql.connect.session  # noqa: F401  (as the modules of PySpark import it)
+
+    with open(sys.argv[1]) as golden_file:
+        result = compare(json.load(golden_file))
+    print(json.dumps(result))
