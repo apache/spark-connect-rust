@@ -542,92 +542,173 @@ def test_every_native_class_has_its_bare_name_as_its_c_name(objects):
     assert len(checked) > 50 and "_ExitHook" in checked
 
 
-# The methods of the classes of PySpark Connect's modules whose docstrings the module copies of
-# those of PySpark's classic class of the same name (`register.__doc__ =
-# PySparkUDFRegistration.register.__doc__`), by the modules of the two classes; None for the
-# docstring of the class.
+# The docstrings that the modules of PySpark Connect copy of those of PySpark's classic classes
+# (`format.__doc__ = PySparkDataStreamReader.format.__doc__`), of PySpark's source at the tracked
+# tag: by the module and the class of PySpark Connect and of the classic class, the names of the
+# members of the class whose docstrings the module copies, "-" for the class itself.
 COPIED_DOCSTRINGS = {
-    ("pyspark.sql.connect.udf", "pyspark.sql.udf", "UDFRegistration"): [
-        "register",
-        "registerJavaFunction",
-        "registerJavaUDAF",
-    ],
-    ("pyspark.sql.connect.udtf", "pyspark.sql.udtf", "UDTFRegistration"): ["register"],
-    ("pyspark.sql.connect.streaming.query", "pyspark.sql.streaming.query", "StreamingQuery"): [
-        "id",
-        "runId",
-        "name",
-        "isActive",
-        "awaitTermination",
-        "status",
-        "recentProgress",
-        "lastProgress",
-        "processAllAvailable",
-        "stop",
-        "explain",
-        "exception",
-    ],
+    (
+        "pyspark.sql.connect.udf",
+        "UDFRegistration",
+        "pyspark.sql.udf",
+        "UDFRegistration",
+    ): "register registerJavaFunction registerJavaUDAF",
+    (
+        "pyspark.sql.connect.udtf",
+        "UDTFRegistration",
+        "pyspark.sql.udtf",
+        "UDTFRegistration",
+    ): "register",
     (
         "pyspark.sql.connect.streaming.query",
+        "StreamingQuery",
+        "pyspark.sql.streaming.query",
+        "StreamingQuery",
+    ): (
+        "id runId name isActive awaitTermination status recentProgress lastProgress "
+        "processAllAvailable stop explain exception"
+    ),
+    (
+        "pyspark.sql.connect.streaming.query",
+        "StreamingQueryManager",
         "pyspark.sql.streaming.query",
         "StreamingQueryManager",
-    ): ["active", "get", "awaitAnyTermination", "resetTerminated", "addListener", "removeListener"],
+    ): "active get awaitAnyTermination resetTerminated addListener removeListener",
     (
         "pyspark.sql.connect.streaming.readwriter",
+        "DataStreamReader",
         "pyspark.sql.streaming.readwriter",
         "DataStreamReader",
-    ): [
-        None,
-        "format",
-        "schema",
-        "option",
-        "options",
-        "name",
-        "load",
-        "json",
-        "orc",
-        "parquet",
-        "text",
-        "csv",
-        "xml",
-        "table",
-        "changes",
-    ],
+    ): "format schema option options name load json orc parquet text csv xml table changes -",
     (
         "pyspark.sql.connect.streaming.readwriter",
+        "DataStreamWriter",
         "pyspark.sql.streaming.readwriter",
         "DataStreamWriter",
-    ): [
-        "outputMode",
-        "format",
-        "option",
-        "options",
-        "partitionBy",
-        "clusterBy",
-        "queryName",
-        "trigger",
-        "foreach",
-        "foreachBatch",
-        "start",
-        "toTable",
-    ],
+    ): (
+        "outputMode format option options partitionBy clusterBy queryName trigger foreach "
+        "foreachBatch start toTable"
+    ),
+    (
+        "pyspark.sql.connect.catalog",
+        "Catalog",
+        "pyspark.sql.catalog",
+        "Catalog",
+    ): (
+        "currentCatalog setCurrentCatalog listCatalogs currentDatabase setCurrentDatabase "
+        "listDatabases getDatabase databaseExists listTables getTable listFunctions "
+        "functionExists getFunction listColumns tableExists createExternalTable createTable "
+        "dropTempView dropGlobalTempView isCached cacheTable uncacheTable clearCache refreshTable "
+        "recoverPartitions refreshByPath dropTable dropView createDatabase dropDatabase "
+        "listPartitions listViews getTableProperties getCreateTableString truncateTable "
+        "analyzeTable registerFunction -"
+    ),
+    (
+        "pyspark.sql.connect.conf",
+        "RuntimeConf",
+        "pyspark.sql.conf",
+        "RuntimeConfig",
+    ): "__init__ set get getAll unset isModifiable -",
+    (
+        "pyspark.sql.connect.datasource",
+        "DataSourceRegistration",
+        "pyspark.sql.datasource",
+        "DataSourceRegistration",
+    ): "register",
+    (
+        "pyspark.sql.connect.group",
+        "GroupedData",
+        "pyspark.sql.group",
+        "GroupedData",
+    ): (
+        "agg min max sum avg count pivot apply applyInPandas applyInPandasWithState "
+        "transformWithStateInPandas transformWithState applyInArrow cogroup -"
+    ),
+    (
+        "pyspark.sql.connect.group",
+        "PandasCogroupedOps",
+        "pyspark.sql.pandas.group_ops",
+        "PandasCogroupedOps",
+    ): "applyInPandas applyInArrow -",
+    (
+        "pyspark.sql.connect.merge",
+        "MergeIntoWriter",
+        "pyspark.sql.merge",
+        "MergeIntoWriter",
+    ): (
+        "whenMatched whenNotMatched whenNotMatchedBySource withSchemaEvolution merge "
+        "WhenMatched.updateAll WhenMatched.update WhenMatched.delete WhenMatched "
+        "WhenNotMatched.insertAll WhenNotMatched.insert WhenNotMatched "
+        "WhenNotMatchedBySource.updateAll WhenNotMatchedBySource.update "
+        "WhenNotMatchedBySource.delete WhenNotMatchedBySource -"
+    ),
+    (
+        "pyspark.sql.connect.observation",
+        "Observation",
+        "pyspark.sql.observation",
+        "Observation",
+    ): "__init__ _on get -",
+    (
+        "pyspark.sql.connect.readwriter",
+        "DataFrameReader",
+        "pyspark.sql.readwriter",
+        "DataFrameReader",
+    ): "format schema option options load table changes json parquet text csv xml orc jdbc -",
+    (
+        "pyspark.sql.connect.readwriter",
+        "DataFrameWriter",
+        "pyspark.sql.readwriter",
+        "DataFrameWriter",
+    ): (
+        "mode format option options partitionBy bucketBy sortBy clusterBy save insertInto "
+        "saveAsTable json parquet text csv xml orc jdbc"
+    ),
+    (
+        "pyspark.sql.connect.readwriter",
+        "DataFrameWriterV2",
+        "pyspark.sql.readwriter",
+        "DataFrameWriterV2",
+    ): (
+        "using option options tableProperty partitionedBy clusterBy create replace "
+        "createOrReplace append overwrite overwritePartitions"
+    ),
+    (
+        "pyspark.sql.connect.tvf",
+        "TableValuedFunction",
+        "pyspark.sql.tvf",
+        "TableValuedFunction",
+    ): (
+        "- range explode explode_outer inline inline_outer json_tuple posexplode posexplode_outer "
+        "stack collations sql_keywords variant_explode variant_explode_outer python_worker_logs"
+    ),
 }
+# The `__init__` of a native class is the slot of CPython, whose docstring is CPython's.
+NATIVE_INITS = {("RuntimeConf", "__init__"), ("Observation", "__init__")}
+
+
+def _resolved(module, qualname):
+    import importlib
+
+    found = importlib.import_module(module)
+    for part in qualname.split("."):
+        found = getattr(found, part)
+    return found
 
 
 @pytest.mark.parametrize(
-    "connect, classic, cls, name",
-    [(*key, name) for key, names in COPIED_DOCSTRINGS.items() for name in names],
+    "connect, cls, classic, classic_cls, member",
+    [(*key, member) for key, members in COPIED_DOCSTRINGS.items() for member in members.split()],
 )
-def test_the_connect_classes_have_the_docstrings_that_pyspark_connect_copies(
-    connect, classic, cls, name
+def test_the_connect_objects_have_the_docstrings_that_pyspark_connect_copies(
+    connect, cls, classic, classic_cls, member
 ):
-    # As PySpark Connect's modules, which give these members, and the class of None, the
-    # docstrings of PySpark's classic class: the registrations, Python classes, assign them, and
-    # the streaming classes, native, are built with them (scripts/gen_connect_docstrings.py).
-    import importlib
-
-    ours = getattr(importlib.import_module(connect), cls)
-    theirs = getattr(importlib.import_module(classic), cls)
-    if name is not None:
-        ours, theirs = getattr(ours, name), getattr(theirs, name)
-    assert theirs.__doc__ and ours.__doc__ == theirs.__doc__
+    # As PySpark Connect's modules, which give these classes and their members the docstrings of
+    # PySpark's classic ones: the Python classes assign them, and the native classes are built with
+    # them (scripts/gen_connect_docstrings.py). The classic modules are Apache Spark's as they are.
+    suffix = "" if member == "-" else "." + member
+    ours = _resolved(connect, cls + suffix)
+    theirs = _resolved(classic, classic_cls + suffix)
+    if (cls, member) in NATIVE_INITS:
+        assert ours.__doc__ == object.__init__.__doc__ != theirs.__doc__
+    else:
+        assert ours.__doc__ == theirs.__doc__

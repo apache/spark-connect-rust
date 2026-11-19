@@ -7,7 +7,8 @@ use crate::dataframe::column_or_name;
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
 
-/// Python wrapper for the table-valued-function namespace (`spark.tvf`).
+// Python wrapper for the table-valued-function namespace (`spark.tvf`).
+#[doc = connect_doc!(TableValuedFunction)]
 #[pyclass(
     name = "TableValuedFunction",
     module = "pyspark.sql.connect.tvf",
@@ -50,13 +51,14 @@ impl PyTableValuedFunction {
         crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced.into_any())
     }
 
-    /// Each argument is taken by its `int()`, as PySpark's `spark.tvf.range` takes them, which
-    /// is `spark.range`.
+    // Each argument is taken by its `int()`, as PySpark's `spark.tvf.range` takes them, which
+    // is `spark.range`.
     #[pyo3(
         signature = (start, end=None, step=crate::session::RangeStep::Omitted, numPartitions=None),
         text_signature = "($self, start, end=None, step=1, numPartitions=None)"
     )]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(TableValuedFunction.range)]
     fn range(
         &self,
         py: Python<'_>,
@@ -78,6 +80,7 @@ impl PyTableValuedFunction {
         Ok(PyDataFrame::new(args.plan(df)))
     }
 
+    #[doc = connect_doc!(TableValuedFunction.explode)]
     fn explode(&self, py: Python<'_>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(collection)?;
         Ok(PyDataFrame::new(
@@ -86,6 +89,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "explode_outer")]
+    #[doc = connect_doc!(TableValuedFunction.explode_outer)]
     fn explode_outer(
         &self,
         py: Python<'_>,
@@ -97,6 +101,7 @@ impl PyTableValuedFunction {
         ))
     }
 
+    #[doc = connect_doc!(TableValuedFunction.inline)]
     fn inline(&self, py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
@@ -105,6 +110,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "inline_outer")]
+    #[doc = connect_doc!(TableValuedFunction.inline_outer)]
     fn inline_outer(&self, py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
@@ -113,6 +119,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "json_tuple", signature = (input, *fields))]
+    #[doc = connect_doc!(TableValuedFunction.json_tuple)]
     fn json_tuple(
         &self,
         py: Python<'_>,
@@ -135,6 +142,7 @@ impl PyTableValuedFunction {
         ))
     }
 
+    #[doc = connect_doc!(TableValuedFunction.posexplode)]
     fn posexplode(&self, py: Python<'_>, collection: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(collection)?;
         Ok(PyDataFrame::new(
@@ -143,6 +151,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "posexplode_outer")]
+    #[doc = connect_doc!(TableValuedFunction.posexplode_outer)]
     fn posexplode_outer(
         &self,
         py: Python<'_>,
@@ -155,6 +164,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(signature = (n, *fields))]
+    #[doc = connect_doc!(TableValuedFunction.stack)]
     fn stack(
         &self,
         py: Python<'_>,
@@ -168,6 +178,7 @@ impl PyTableValuedFunction {
         ))
     }
 
+    #[doc = connect_doc!(TableValuedFunction.collations)]
     fn collations(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.collations()).to_pyerr()?,
@@ -175,6 +186,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "sql_keywords")]
+    #[doc = connect_doc!(TableValuedFunction.sql_keywords)]
     fn sql_keywords(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.sql_keywords()).to_pyerr()?,
@@ -182,6 +194,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "variant_explode")]
+    #[doc = connect_doc!(TableValuedFunction.variant_explode)]
     fn variant_explode(&self, py: Python<'_>, input: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let c = column_or_name(input)?;
         Ok(PyDataFrame::new(
@@ -190,6 +203,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "variant_explode_outer")]
+    #[doc = connect_doc!(TableValuedFunction.variant_explode_outer)]
     fn variant_explode_outer(
         &self,
         py: Python<'_>,
@@ -203,6 +217,7 @@ impl PyTableValuedFunction {
     }
 
     #[pyo3(name = "python_worker_logs")]
+    #[doc = connect_doc!(TableValuedFunction.python_worker_logs)]
     fn python_worker_logs(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(
             py.detach(|| self.inner.python_worker_logs()).to_pyerr()?,

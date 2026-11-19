@@ -16,15 +16,16 @@ use crate::options::{
     UnencodableOptions,
 };
 
-/// Python wrapper for the batch DataFrameReader.
-///
-/// PySpark's reader is mutable: `format`/`schema`/`option`/`options` change `self`
-/// and return it, and a reader can be used again after a read. The core reader is a
-/// consuming builder, so the setters replace the wrapped value in place and return
-/// the same Python object, and the terminal reads build their DataFrame from a clone.
-/// As PySpark's plain class, it constructs of a session, `DataFrameReader(spark)`, and is
-/// subclassed: the setters return the object, of its subclass, and its copies and pickles are
-/// of its class.
+// Python wrapper for the batch DataFrameReader.
+//
+// PySpark's reader is mutable: `format`/`schema`/`option`/`options` change `self`
+// and return it, and a reader can be used again after a read. The core reader is a
+// consuming builder, so the setters replace the wrapped value in place and return
+// the same Python object, and the terminal reads build their DataFrame from a clone.
+// As PySpark's plain class, it constructs of a session, `DataFrameReader(spark)`, and is
+// subclassed: the setters return the object, of its subclass, and its copies and pickles are
+// of its class.
+#[doc = connect_doc!(DataFrameReader)]
 #[pyclass(
     name = "DataFrameReader",
     module = "pyspark.sql.connect.readwriter",
@@ -856,9 +857,10 @@ impl PyDataFrameReader {
         crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
-    /// Set the source format (e.g. "parquet", "json", "csv"). As PySpark's, None unsets it, so
-    /// that the server reads its default source, and an object that is not a str is kept until
-    /// `load` fails its assertion.
+    // Set the source format (e.g. "parquet", "json", "csv"). As PySpark's, None unsets it, so
+    // that the server reads its default source, and an object that is not a str is kept until
+    // `load` fails its assertion.
+    #[doc = connect_doc!(DataFrameReader.format)]
     fn format<'py>(
         mut slf: PyRefMut<'py, Self>,
         source: Option<&Bound<'_, PyAny>>,
@@ -869,7 +871,8 @@ impl PyDataFrameReader {
         slf
     }
 
-    /// Set the schema: a StructType or a DDL string, as in pyspark.
+    // Set the schema: a StructType or a DDL string, as in pyspark.
+    #[doc = connect_doc!(DataFrameReader.schema)]
     fn schema<'py>(
         mut slf: PyRefMut<'py, Self>,
         schema: &Bound<'_, PyAny>,
@@ -880,10 +883,11 @@ impl PyDataFrameReader {
         Ok(slf)
     }
 
-    /// Set a single read option. `None` unsets the option, as PySpark's does (not the
-    /// string "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
-    /// PySpark keeps the options in a dict, which hashes every key, and its `DataSource` plan
-    /// checks the keys of the values that are not None only.
+    // Set a single read option. `None` unsets the option, as PySpark's does (not the
+    // string "None"); booleans lowercase to "true"/"false" (reference `to_str` semantics).
+    // PySpark keeps the options in a dict, which hashes every key, and its `DataSource` plan
+    // checks the keys of the values that are not None only.
+    #[doc = connect_doc!(DataFrameReader.option)]
     fn option<'py>(
         mut slf: PyRefMut<'py, Self>,
         key: &Bound<'_, PyAny>,
@@ -904,9 +908,10 @@ impl PyDataFrameReader {
         Ok(slf)
     }
 
-    /// Set multiple read options. Mirrors reference `DataFrameReader.options(**options)`
-    /// - keyword args; a `None` value unsets the option and booleans lowercase.
+    // Set multiple read options. Mirrors reference `DataFrameReader.options(**options)`
+    // - keyword args; a `None` value unsets the option and booleans lowercase.
     #[pyo3(signature = (**options))]
+    #[doc = connect_doc!(DataFrameReader.options)]
     fn options<'py>(
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
@@ -981,11 +986,12 @@ impl PyDataFrameReader {
         ))
     }
 
-    /// Load data from the (optional) path. Mirrors the reference
-    /// `DataFrameReader.load(path=None, format=None, schema=None, **options)`: the
-    /// one-shot form applies format/schema/options here before reading, equivalent to
-    /// chaining `.format(...).schema(...).options(...).load(path)`.
+    // Load data from the (optional) path. Mirrors the reference
+    // `DataFrameReader.load(path=None, format=None, schema=None, **options)`: the
+    // one-shot form applies format/schema/options here before reading, equivalent to
+    // chaining `.format(...).schema(...).options(...).load(path)`.
     #[pyo3(signature = (path=None, format=None, schema=None, **options))]
+    #[doc = connect_doc!(DataFrameReader.load)]
     fn load(
         &mut self,
         path: Option<&Bound<'_, PyAny>>,
@@ -1028,9 +1034,10 @@ impl PyDataFrameReader {
         )))
     }
 
-    /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
-    /// [`crate::str_argument`] converts it, as `changes` and those of the stream reader do. A
-    /// name or an option that UTF-8 cannot encode fails the plan.
+    // Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
+    // [`crate::str_argument`] converts it, as `changes` and those of the stream reader do. A
+    // name or an option that UTF-8 cannot encode fails the plan.
+    #[doc = connect_doc!(DataFrameReader.table)]
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let (name, error) = table_name_of(tableName)?;
         let error = error.or_else(|| self.unencodable_options.get().error());
@@ -1038,9 +1045,10 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(with_plan_error(r.table(&name), error)))
     }
 
-    /// Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`, which raises an
-    /// `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a schema.
+    // Read the CDC changes of a named table. Mirrors `DataFrameReader.changes`, which raises an
+    // `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a schema.
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(DataFrameReader.changes)]
     fn changes(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if !self.inner.get_schema().is_empty() || self.unencodable_schema.is_some() {
             return Err(changes_of_schema_error(py));
@@ -1051,10 +1059,11 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(with_plan_error(r.changes(&name), error)))
     }
 
-    /// Read JSON file(s) - full pyspark signature; each named option is
-    /// applied as a read option when provided.
+    // Read JSON file(s) - full pyspark signature; each named option is
+    // applied as a read option when provided.
     #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, samplingRatio=None, dropFieldIfAllNull=None, encoding=None, locale=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, allowNonNumericNumbers=None, useUnsafeRow=None, **unexpected), text_signature = "($self, path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, samplingRatio=None, dropFieldIfAllNull=None, encoding=None, locale=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, allowNonNumericNumbers=None, useUnsafeRow=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameReader.json)]
     fn json(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -1128,11 +1137,12 @@ impl PyDataFrameReader {
         )
     }
 
-    /// Read Parquet file(s). As PySpark's `parquet(*paths, **options)`, only the options
-    /// `mergeSchema`, `pathGlobFilter`, `recursiveFileLookup`, `modifiedBefore`,
-    /// `modifiedAfter`, `datetimeRebaseMode` and `int96RebaseMode` of `options` are set, and
-    /// the others are ignored.
+    // Read Parquet file(s). As PySpark's `parquet(*paths, **options)`, only the options
+    // `mergeSchema`, `pathGlobFilter`, `recursiveFileLookup`, `modifiedBefore`,
+    // `modifiedAfter`, `datetimeRebaseMode` and `int96RebaseMode` of `options` are set, and
+    // the others are ignored.
     #[pyo3(signature = (*paths, **options))]
+    #[doc = connect_doc!(DataFrameReader.parquet)]
     fn parquet(
         &mut self,
         paths: Vec<Bound<'_, PyAny>>,
@@ -1160,10 +1170,11 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
-    /// Read CSV file(s) - full pyspark signature; each named option is
-    /// applied as a read option when provided.
+    // Read CSV file(s) - full pyspark signature; each named option is
+    // applied as a read option when provided.
     #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, samplingRatio=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, unescapedQuoteHandling=None, **unexpected), text_signature = "($self, path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, samplingRatio=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, unescapedQuoteHandling=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameReader.csv)]
     fn csv(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -1250,10 +1261,11 @@ impl PyDataFrameReader {
         )
     }
 
-    /// Read ORC file(s) - full pyspark signature; each named option is
-    /// applied as a read option when provided.
+    // Read ORC file(s) - full pyspark signature; each named option is
+    // applied as a read option when provided.
     #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameReader.orc)]
     fn orc(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -1284,14 +1296,15 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
-    /// Read TEXT file(s) - full pyspark signature; each named option is
-    /// applied as a read option when provided. As PySpark's `wholetext=False`, an omitted
-    /// `wholetext` sets `false`, also over an earlier `wholetext` option.
+    // Read TEXT file(s) - full pyspark signature; each named option is
+    // applied as a read option when provided. As PySpark's `wholetext=False`, an omitted
+    // `wholetext` sets `false`, also over an earlier `wholetext` option.
     #[pyo3(
         signature = (paths, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None, **unexpected),
         text_signature = "($self, paths, wholetext=False, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, modifiedBefore=None, modifiedAfter=None)"
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameReader.text)]
     fn text(
         &mut self,
         py: Python<'_>,
@@ -1326,10 +1339,11 @@ impl PyDataFrameReader {
         Ok(PyDataFrame::new(with_plan_error(df, error)))
     }
 
-    /// Read XML file(s) - full pyspark signature; each named option is
-    /// applied as a read option when provided.
+    // Read XML file(s) - full pyspark signature; each named option is
+    // applied as a read option when provided.
     #[pyo3(signature = (path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None, **unexpected), text_signature = "($self, path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameReader.xml)]
     fn xml(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -1383,17 +1397,18 @@ impl PyDataFrameReader {
         self.read_or_parse(r, None, "xml", spark_connect::plan::ParseFormat::Xml, path)
     }
 
-    /// Read from a JDBC source. Mirrors `DataFrameReader.jdbc(url, table, column=None,
-    /// lowerBound=None, upperBound=None, numPartitions=None, predicates=None, properties=None)`,
-    /// which keeps the format, then the options, on the reader:
-    /// - of a `column`, it asserts the bounds and `numPartitions`, and reads the partitions of
-    ///   the column, ignoring `predicates`;
-    /// - else, it reads the partitions of `predicates`, ignoring the bounds and `numPartitions`.
-    ///
-    /// The column, the bounds, `numPartitions` and the values of `properties` are options, of any
-    /// type (None skipped, bools lowercased).
+    // Read from a JDBC source. Mirrors `DataFrameReader.jdbc(url, table, column=None,
+    // lowerBound=None, upperBound=None, numPartitions=None, predicates=None, properties=None)`,
+    // which keeps the format, then the options, on the reader:
+    // - of a `column`, it asserts the bounds and `numPartitions`, and reads the partitions of
+    //   the column, ignoring `predicates`;
+    // - else, it reads the partitions of `predicates`, ignoring the bounds and `numPartitions`.
+    //
+    // The column, the bounds, `numPartitions` and the values of `properties` are options, of any
+    // type (None skipped, bools lowercased).
     #[pyo3(signature = (url, table, column=None, lowerBound=None, upperBound=None, numPartitions=None, predicates=None, properties=None))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameReader.jdbc)]
     fn jdbc(
         &mut self,
         url: &Bound<'_, PyAny>,

@@ -141,11 +141,12 @@ impl PyDataSourceRegistration {
         self.session = None;
     }
 
-    /// Register a custom data source class.
-    ///
-    /// Mirrors `pyspark.sql.SparkSession.dataSource.register(dataSource)`, of PySpark's parameter.
-    /// The data source class is cloudpickled and sent to the server.
+    // Register a custom data source class.
+    //
+    // Mirrors `pyspark.sql.SparkSession.dataSource.register(dataSource)`, of PySpark's parameter.
+    // The data source class is cloudpickled and sent to the server.
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(DataSourceRegistration.register)]
     fn register(slf: &Bound<'_, Self>, dataSource: &Bound<'_, PyAny>) -> PyResult<()> {
         let py = slf.py();
         // As PySpark's `self.sparkSession._client.register_data_source(dataSource)`, which reads

@@ -744,6 +744,13 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   ones, which pyright does not see in `pyspark-client`'s source: a hover over
   `pyspark.sql.connect.functions.col` or Spark Connect's `SparkSession.builder` shows PySpark's
   documentation with the drop-in, and none with `pyspark-client`.
+- **The docstrings of `RuntimeConf.__init__` and `Observation.__init__`** (inherent; the classes
+  are native). PySpark Connect's modules give them the docstrings of the `__init__` of the classic
+  `RuntimeConfig` and `Observation` (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`).
+  The `__init__` of a native class is a slot of CPython, whose wrapper has CPython's docstring
+  (`Initialize self.  See help(type(self)) for accurate signature.`), which the class cannot set.
+  The other docstrings that PySpark Connect's modules copy are PySpark's (see
+  `docs/compatibility.md`).
 - **Modules of messages** (intentional). pyright warns that `pyspark.sql.connect.proto.base_pb2`
   and the other modules of messages, which the drop-in's protobuf runtime makes at run time, have
   a stub and no source (`reportMissingModuleSource`), as it does of
