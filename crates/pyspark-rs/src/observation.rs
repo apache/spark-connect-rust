@@ -2,8 +2,9 @@
 
 use std::sync::Arc;
 
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString, PyTuple};
+use pyo3::types::{PyDict, PyString, PyTuple, PyWeakrefReference};
 use spark_connect::expression::Expression;
 use spark_connect::observation::{MetricsMirror, Observation};
 use spark_connect::SparkSession;
@@ -11,11 +12,13 @@ use spark_connect_core::error::{SparkError, SparkErrorKind};
 
 use crate::column::{raise_pyspark, PyColumn};
 use crate::dataframe::PyDataFrame;
-use crate::errors::ResultExt;
 
 /// Python wrapper for an Observation of metrics, as PySpark Connect's `Observation`, a plain
-/// class, which is subclassed: an Observation of a subclass is constructed of the arguments of
-/// its `__init__`, and its copies and pickles are of its class.
+/// class, which is subclassed. Its `_name`, `_result` and `_error` are attributes of its
+/// `__dict__`, as PySpark's, which a program reads, sets and deletes, and which `get`, `_on` and
+/// the actions read and set as PySpark's do (see [`PyObservationMirror`]). An Observation of a
+/// subclass is constructed of the arguments of its `__init__`, and its copies and pickles are of
+/// its class.
 #[pyclass(
     name = "Observation",
     module = "pyspark.sql.connect.observation",
@@ -24,50 +27,10 @@ use crate::errors::ResultExt;
     dict
 )]
 pub struct PyObservation {
+    /// The state of the observation in the core, of its last `_on`, which the plans of the
+    /// DataFrames that it observed hold, and whose metrics and errors the actions set in the
+    /// attributes of this object.
     pub(crate) inner: Observation,
-    /// The `_result` and `_error` of an Observation unpickled from the state of PySpark's (see
-    /// `__setstate__`), which no action sets, and which `get` gives back as PySpark's does.
-    restored: Restored,
-    /// A name that UTF-8 cannot encode, as it was given, which `_name` gives back: PySpark keeps
-    /// it, and its `CollectMetrics` plan sets it when it builds the plan, which fails the requests
-    /// of each DataFrame that it observes (see [`observe`]). `inner` is of its rendering.
-    unencodable_name: Option<Py<PyString>>,
-}
-
-/// The state of an Observation of the name `name`, None or a str, and the name itself if UTF-8
-/// cannot encode it (see `PyObservation::unencodable_name`).
-fn named(name: Option<&Bound<'_, PyAny>>) -> PyResult<(Observation, Option<Py<PyString>>)> {
-    let Some(name) = name.filter(|name| !name.is_none()) else {
-        return Ok((Observation::unnamed(), None));
-    };
-    let name = name.cast::<PyString>()?;
-    Ok(match name.to_cow() {
-        Ok(text) => (Observation::new(&text), None),
-        Err(_) => (
-            Observation::new(&crate::plan_args::rendered(name.as_any())?),
-            Some(name.clone().unbind()),
-        ),
-    })
-}
-
-/// The `_result` and `_error` of the state of a pickled Observation, which its Rust state does
-/// not hold: none for an Observation that was not unpickled.
-#[derive(Default)]
-struct Restored {
-    /// The metrics of an Observation unpickled from a used one, a dict as PySpark's.
-    result: Option<Py<PyAny>>,
-    /// The exception that `get` raises.
-    error: Option<Py<PyAny>>,
-}
-
-impl Restored {
-    /// The same objects, as a shallow copy of PySpark's Observation keeps them.
-    fn clone_ref(&self, py: Python<'_>) -> Restored {
-        Restored {
-            result: self.result.as_ref().map(|result| result.clone_ref(py)),
-            error: self.error.as_ref().map(|error| error.clone_ref(py)),
-        }
-    }
 }
 
 #[pymethods]
@@ -84,14 +47,12 @@ impl PyObservation {
     fn new(_args: &Bound<'_, PyTuple>, _kwargs: Option<&Bound<'_, PyDict>>) -> Self {
         PyObservation {
             inner: Observation::unnamed(),
-            restored: Restored::default(),
-            unencodable_name: None,
         }
     }
 
     /// `Observation(name=None)`, as PySpark's `__init__`: the name is a non-empty string, and an
-    /// observation without one is of a random UUID once it is used. As PySpark's, it makes the
-    /// observation anew, unused.
+    /// observation without one is of a random UUID once it is used. As PySpark's, it sets the
+    /// attributes `_name`, `_result` and `_error` of the observation, which is unused.
     #[pyo3(signature = (name=None))]
     fn __init__(slf: &Bound<'_, Self>, name: Option<&Bound<'_, PyAny>>) -> PyResult<()> {
         let py = slf.py();
@@ -118,73 +79,40 @@ impl PyObservation {
                 ));
             }
         }
-        let (inner, unencodable_name) = named(name)?;
-        let mut this = slf.borrow_mut();
-        this.inner = inner;
-        this.restored = Restored::default();
-        this.unencodable_name = unencodable_name;
+        slf.setattr(intern!(py, "_name"), name)?;
+        slf.setattr(intern!(py, "_result"), py.None())?;
+        slf.setattr(intern!(py, "_error"), py.None())?;
+        slf.borrow_mut().inner = Observation::unnamed();
         Ok(())
     }
 
-    /// The name of the observation, as PySpark's `_name`: None for an unnamed observation
-    /// before it is used, and a name that UTF-8 cannot encode as it was given.
-    #[getter(_name)]
-    fn name(&self, py: Python<'_>) -> Option<Py<PyAny>> {
-        if let Some(name) = &self.unencodable_name {
-            return Some(name.clone_ref(py).into_any());
-        }
-        self.inner
-            .name()
-            .map(|name| PyString::new(py, &name).into_any().unbind())
-    }
-
-    /// The observed metrics, as PySpark's `Observation.get`: its `_result`, the dict of the metrics
-    /// that the actions run so far observed, by their names, and empty before an action runs,
-    /// which is one dict, that the actions update in place, as PySpark's client updates it. The
-    /// metrics of an execution that PySpark's client does not convert (see
-    /// [`check_observed_metrics`]) are never set, so these are those of the executions before it,
-    /// as PySpark's. An unpickled Observation gives back its `_error` and its `_result`, as
-    /// PySpark's.
+    /// The observed metrics, as PySpark's `Observation.get`: its `_error`, raised if it is not
+    /// None, else its `_result`, the dict of the metrics that the actions run so far observed, by
+    /// their names, which the actions update in place, and `NO_OBSERVE_BEFORE_GET` while it is
+    /// None, before the observation is used.
     #[getter]
-    fn get<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        if let Some(error) = &self.restored.error {
-            return Err(PyErr::from_value(error.bind(py).clone()));
+    fn get<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        let py = slf.py();
+        let error = slf.getattr(intern!(py, "_error"))?;
+        if !error.is_none() {
+            return Err(PyErr::from_value(error));
         }
-        if let Some(result) = &self.restored.result {
-            return Ok(result.bind(py).clone());
+        let result = slf.getattr(intern!(py, "_result"))?;
+        if result.is_none() {
+            return Err(raise_pyspark(
+                py,
+                "PySparkAssertionError",
+                "NO_OBSERVE_BEFORE_GET",
+                &[],
+            ));
         }
-        // The error of collecting the metrics, or NO_OBSERVE_BEFORE_GET of an unused observation.
-        self.inner.get().to_pyerr()?;
-        match result_dict(py, &self.inner)? {
-            Some(result) => Ok(result.into_any()),
-            None => Ok(PyDict::new(py).into_any()),
-        }
+        Ok(result)
     }
 
-    /// The result of the observation, as PySpark's `_result`: None before it is used, and then
-    /// the dict that `get` gives, which the actions that set its metrics update in place.
-    #[getter(_result)]
-    fn result<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        if let Some(result) = &self.restored.result {
-            return Ok(Some(result.bind(py).clone()));
-        }
-        Ok(result_dict(py, &self.inner)?.map(Bound::into_any))
-    }
-
-    /// The error of collecting the metrics, which the server reported, as PySpark's `_error`, or
-    /// None: the exception that `get` raises.
-    #[getter(_error)]
-    fn error<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
-        if let Some(error) = &self.restored.error {
-            return Some(error.bind(py).clone());
-        }
-        let (_, error) = self.inner.state();
-        error.map(|error| {
-            crate::errors::spark_error_to_py_exception(error)
-                .value(py)
-                .clone()
-                .into_any()
-        })
+    /// Set the error of collecting the metrics, as PySpark's `_set_error`, which its client calls
+    /// when the server reports one: the `_error` that `get` raises.
+    fn _set_error(slf: &Bound<'_, Self>, exc: &Bound<'_, PyAny>) -> PyResult<()> {
+        slf.setattr(intern!(slf.py(), "_error"), exc)
     }
 
     /// Observe the metrics of the Columns `exprs` on `df` with this observation, as PySpark's
@@ -199,85 +127,43 @@ impl PyObservation {
             .iter()
             .map(|c| c.column.expression().clone())
             .collect();
-        observe(slf.py(), &df, slf, exprs)
+        let observed = observe(slf.py(), &df, slf, exprs)?;
+        // The cached schema of the DataFrame, which observing does not change.
+        Ok(df.of_same_schema(observed))
     }
 
-    /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the class, the
-    /// name, the state and the attributes of this one, which shares the metrics of a used one, as
-    /// the copy of PySpark's shares its result dict (see `Observation::shallow_copy`).
+    /// `copy.copy`, as of PySpark's Observation, a plain object: an Observation of the class and
+    /// of the attributes of this one, the same objects, so the copy of a used one shares its
+    /// result dict, which the actions of this one update.
     fn __copy__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyObservation>> {
-        let py = slf.py();
-        let this = slf.borrow();
-        let copy = PyObservation {
-            inner: this.inner.shallow_copy(),
-            restored: this.restored.clone_ref(py),
-            unencodable_name: this
-                .unencodable_name
-                .as_ref()
-                .map(|name| name.clone_ref(py)),
-        };
-        let copy = crate::reduce::new_of_class(&slf.get_type(), copy)?;
+        let copy = crate::reduce::new_of_class(
+            &slf.get_type(),
+            PyObservation {
+                inner: Observation::unnamed(),
+            },
+        )?;
         copy_attributes(slf, &copy, None)?;
         Ok(copy)
     }
 
-    /// `copy.deepcopy`, as of PySpark's Observation: an Observation of the class, the name and
-    /// the state of this one as they are now, which the actions of this one do not set, with deep
-    /// copies of its attributes.
+    /// `copy.deepcopy`, as of PySpark's Observation: an Observation of the class and of deep
+    /// copies of the attributes of this one, which the actions of this one do not set. The copy
+    /// is the Observation of the state that the deep copy of a DataFrame of the call holds, which
+    /// the actions of that copy set.
     fn __deepcopy__<'py>(
         slf: &Bound<'py, Self>,
         memo: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyObservation>> {
-        let py = slf.py();
         let inner = slf.borrow().inner.detached();
-        let unencodable_name = slf
-            .borrow()
-            .unencodable_name
-            .as_ref()
-            .map(|name| name.clone_ref(py));
-        let copy = crate::reduce::new_of_class(
-            &slf.get_type(),
-            PyObservation {
-                inner,
-                restored: Restored::default(),
-                unencodable_name,
-            },
-        )?;
+        let copy = crate::reduce::new_of_class(&slf.get_type(), PyObservation { inner })?;
         // The copy is the Observation of the state that the deep copy of a DataFrame of the call
         // holds, which a deep copy of that DataFrame copies with the copy.
         keep_handle(&copy)?;
         // As copy.deepcopy of a plain object, which records the copy in `memo` before it copies
         // the attributes, so that an attribute that refers to this observation refers to the copy.
         memo.set_item(slf.as_ptr() as usize, &copy)?;
-        let deepcopy = py.import("copy")?.getattr("deepcopy")?;
-        let copied = |object: &Option<Py<PyAny>>| -> PyResult<Option<Py<PyAny>>> {
-            object
-                .as_ref()
-                .map(|object| Ok(deepcopy.call1((object, memo))?.unbind()))
-                .transpose()
-        };
-        let restored = {
-            let this = slf.borrow();
-            Restored {
-                result: copied(&this.restored.result)?,
-                error: copied(&this.restored.error)?,
-            }
-        };
-        copy.borrow_mut().restored = restored;
-        // As the deep copy of PySpark's `_result`, of the memo: a copy of the dict that `get` gave,
-        // with what was set on it, which the actions of this observation do not update. One that
-        // `get` did not give yet is made of the copied metrics when the copy's is read.
-        let result = slf.borrow().inner.metrics_mirror();
-        if let Some(result) = result.as_deref().and_then(mirrored_dict) {
-            let copied = deepcopy.call1((result.bind(py), memo))?;
-            if let Ok(copied) = copied.cast_into::<PyDict>() {
-                let mirror: Arc<dyn MetricsMirror> = Arc::new(PyMetricsMirror {
-                    dict: copied.unbind(),
-                });
-                let _ = copy.borrow().inner.set_metrics_mirror(mirror);
-            }
-        }
         copy_attributes(slf, &copy, Some(memo))?;
+        mirror_into(&copy)?;
         Ok(copy)
     }
 
@@ -295,96 +181,93 @@ impl PyObservation {
     }
 
     /// The state that a pickled Observation keeps, that of PySpark's, its `__dict__`: `_name`,
-    /// `_result`, a dict of the metrics or None before it is used, `_error`, the exception that
-    /// `get` raises or None, and the attributes of this one. So on a Python worker of the server,
-    /// whose PySpark has no Rust client, it unpickles as PySpark's Observation, and here as this
-    /// one (see `__setstate__`).
+    /// `_result`, `_error` and the other attributes. So on a Python worker of the server, whose
+    /// PySpark has no Rust client, it unpickles as PySpark's Observation, and here as this one.
     fn __getstate__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyDict>> {
-        let py = slf.py();
-        let this = slf.borrow();
-        let (_, error) = this.inner.state();
-        let result = match &this.restored.result {
-            Some(result) => Some(result.bind(py).clone()),
-            None => result_dict(py, &this.inner)?.map(Bound::into_any),
-        };
-        let error = match &this.restored.error {
-            Some(error) => Some(error.bind(py).clone()),
-            None => error.map(|error| {
-                crate::errors::spark_error_to_py_exception(error)
-                    .value(py)
-                    .clone()
-                    .into_any()
-            }),
-        };
-        let state = PyDict::new(py);
-        state.set_item("_name", this.name(py))?;
-        state.set_item("_result", result)?;
-        state.set_item("_error", error)?;
-        state.call_method1("update", (slf.getattr(pyo3::intern!(py, "__dict__"))?,))?;
-        Ok(state)
+        let attributes = slf.getattr(intern!(slf.py(), "__dict__"))?;
+        attributes.cast_into::<PyDict>()?.copy()
     }
 
     /// The Observation of the state of `__getstate__`, as pickle sets the `__dict__` of
-    /// PySpark's: of the name `_name`, whose `get` gives back `_error` and `_result`, which no
-    /// action sets, and so used if `_result` is not None, and of the other attributes.
+    /// PySpark's: of its attributes, so used if `_result` is not None, which no action sets.
     fn __setstate__<'py>(slf: &Bound<'py, Self>, state: &Bound<'py, PyDict>) -> PyResult<()> {
         let py = slf.py();
-        let state = state.copy()?;
-        let take = |key: &str| -> PyResult<Option<Bound<'py, PyAny>>> {
-            let value = state.get_item(key)?;
-            if value.is_some() {
-                state.del_item(key)?;
-            }
-            Ok(value.filter(|value| !value.is_none()))
-        };
-        let (inner, unencodable_name) = named(take("_name")?.as_ref())?;
-        let result = take("_result")?.map(Bound::unbind);
-        let error = take("_error")?.map(Bound::unbind);
-        {
-            let mut this = slf.borrow_mut();
-            this.inner = inner;
-            this.unencodable_name = unencodable_name;
-            this.restored = Restored { result, error };
-        }
-        slf.getattr(pyo3::intern!(py, "__dict__"))?
-            .call_method1(pyo3::intern!(py, "update"), (state,))?;
+        slf.borrow_mut().inner = Observation::unnamed();
+        slf.getattr(intern!(py, "__dict__"))?
+            .call_method1(intern!(py, "update"), (state,))?;
         Ok(())
     }
 
-    /// The `_result` and `_error` of an unpickled Observation, Python objects, which Python's
-    /// garbage collector sees, as those of PySpark's: so a reference cycle through them is freed.
-    /// Only `Option<Py<_>>` fields are read, which are `None` while the object is created, so no
-    /// [`crate::gc::GcReady`] is needed.
-    fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if let Some(result) = &self.restored.result {
-            visit.call(result)?;
-        }
-        if let Some(error) = &self.restored.error {
-            visit.call(error)?;
-        }
+    /// The attributes of an Observation are those of its `__dict__`, which Python's garbage
+    /// collector sees, as those of PySpark's: so a reference cycle through them, as through its
+    /// result dict, is freed. The state of the core holds no Python object of it.
+    fn __traverse__(&self, _visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         Ok(())
     }
+}
 
-    /// Break a reference cycle that the garbage collector found unreachable.
-    fn __clear__(&mut self) {
-        self.restored = Restored::default();
+/// The mirror of the state of an Observation of the core of a used Python Observation, which the
+/// actions set as PySpark's client sets the attributes of the Observation of their plans: they
+/// read its `_result`, which must not be None, update it in place with the metrics, and give the
+/// error of collecting them to its `_set_error`. Their errors are those of the actions. The mirror
+/// holds the Python Observation weakly, as the plans of its DataFrames hold it.
+struct PyObservationMirror {
+    observation: Py<PyWeakrefReference>,
+}
+
+impl PyObservationMirror {
+    /// The Python Observation of this mirror, while it is alive.
+    fn observation<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
+        self.observation.bind(py).upgrade()
     }
 }
 
-/// The result dict of a used Observation, as PySpark's `_result`: the dict that `get` gives,
-/// which the actions that set the metrics of the Observation update in place, as PySpark's client
-/// does, the shallow copies of the Observation sharing it.
-struct PyMetricsMirror {
-    dict: Py<PyDict>,
-}
-
-impl MetricsMirror for PyMetricsMirror {
-    fn update(&self, keys: &[String], values: &[spark_connect_proto::expression::Literal]) {
+impl MetricsMirror for PyObservationMirror {
+    fn is_used(&self) -> Result<bool, SparkError> {
         Python::attach(|py| {
-            // Of metrics that the check of the session found PySpark converts, before they were
-            // set (see `check_observed_metrics`).
-            let _ = set_metrics(py, self.dict.bind(py), keys.iter().zip(values));
-        });
+            let Some(observation) = self.observation(py) else {
+                return Ok(true);
+            };
+            match observation.getattr(intern!(py, "_result")) {
+                Ok(result) => Ok(!result.is_none()),
+                Err(error) => Err(crate::errors::callback_error(error)),
+            }
+        })
+    }
+
+    fn update(
+        &self,
+        keys: &[String],
+        values: &[spark_connect_proto::expression::Literal],
+    ) -> Result<(), SparkError> {
+        Python::attach(|py| {
+            let Some(observation) = self.observation(py) else {
+                return Ok(());
+            };
+            let updated = || -> PyResult<()> {
+                let result = observation.getattr(intern!(py, "_result"))?;
+                // Of metrics that the check of the session found PySpark converts, before they
+                // were set (see `check_observed_metrics`).
+                let metrics = PyDict::new(py);
+                set_metrics(py, &metrics, keys.iter().zip(values))?;
+                result.call_method1(intern!(py, "update"), (metrics,))?;
+                Ok(())
+            };
+            updated().map_err(crate::errors::callback_error)
+        })
+    }
+
+    fn error(&self, error: &SparkError) -> Result<(), SparkError> {
+        Python::attach(|py| {
+            let Some(observation) = self.observation(py) else {
+                return Ok(());
+            };
+            let exception = crate::errors::spark_error_to_py_exception(error.clone());
+            observation
+                .call_method1(intern!(py, "_set_error"), (exception.value(py),))
+                .map(drop)
+                .map_err(crate::errors::callback_error)
+        })
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -392,12 +275,31 @@ impl MetricsMirror for PyMetricsMirror {
     }
 }
 
-/// The dict of `mirror`, of an Observation of this binding.
-fn mirrored_dict(mirror: &dyn MetricsMirror) -> Option<&Py<PyDict>> {
-    mirror
-        .as_any()
-        .downcast_ref::<PyMetricsMirror>()
-        .map(|mirror| &mirror.dict)
+/// The state of the core of `observation`, an Observation that `SparkConnectClient` was given for
+/// an execution, as PySpark's client sets the Observations of its `observations` by their
+/// attributes: that of its last `_on`, else a used one, whose mirror reads its `_result`, so that
+/// the execution updates the `_result` of an Observation that no `_on` used, such as one that a
+/// pickle restored, and raises PySpark's `AssertionError` of one that is None.
+pub(crate) fn state_of_execution(observation: &Bound<'_, PyObservation>) -> PyResult<Observation> {
+    let inner = observation.borrow().inner.clone();
+    if inner.metrics_mirror().is_some() {
+        return Ok(inner);
+    }
+    let used = Observation::used(&inner.name().unwrap_or_default());
+    let weak = PyWeakrefReference::new(observation.as_any())?.unbind();
+    let mirror: Arc<dyn MetricsMirror> = Arc::new(PyObservationMirror { observation: weak });
+    let _ = used.set_metrics_mirror(mirror);
+    Ok(used)
+}
+
+/// Make the attributes of `observation` those that the actions set of the state of its core,
+/// if that state is used: the metrics that the actions set before the mirror, which a deep copy
+/// keeps in its copied `_result`, are not set again.
+fn mirror_into(observation: &Bound<'_, PyObservation>) -> PyResult<()> {
+    let weak = PyWeakrefReference::new(observation.as_any())?.unbind();
+    let mirror: Arc<dyn MetricsMirror> = Arc::new(PyObservationMirror { observation: weak });
+    let _ = observation.borrow().inner.set_metrics_mirror(mirror);
+    Ok(())
 }
 
 /// Set the metrics `metrics` in `dict` by their names, as PySpark's client updates the result of
@@ -411,33 +313,6 @@ fn set_metrics<'a>(
         dict.set_item(name, crate::dataframe::literal_to_py(py, value, None)?)?;
     }
     Ok(())
-}
-
-/// The result dict of `observation`, PySpark's `_result`, or None before it is used: the one that
-/// was made of it, else a new one of its metrics so far, which the actions update from now on.
-fn result_dict<'py>(
-    py: Python<'py>,
-    observation: &Observation,
-) -> PyResult<Option<Bound<'py, PyDict>>> {
-    if let Some(mirror) = observation.metrics_mirror() {
-        if let Some(dict) = mirrored_dict(mirror.as_ref()) {
-            return Ok(Some(dict.bind(py).clone()));
-        }
-    }
-    let dict = PyDict::new(py);
-    let made = Arc::new(PyMetricsMirror {
-        dict: dict.clone().unbind(),
-    });
-    let Some((mirror, metrics)) = observation.set_metrics_mirror(made) else {
-        return Ok(None);
-    };
-    if let Some(metrics) = metrics {
-        set_metrics(py, &dict, metrics.iter().map(|(name, value)| (name, value)))?;
-    }
-    Ok(Some(match mirrored_dict(mirror.as_ref()) {
-        Some(kept) => kept.bind(py).clone(),
-        None => dict,
-    }))
 }
 
 /// Keep a weak reference to `observation` on its state, by which the deep copy of a DataFrame
@@ -489,8 +364,9 @@ fn held_by_the_plan(observation: &Bound<'_, PyObservation>) -> Observation {
 
 /// The Python Observation of `observation`, a state that the plan of a DataFrame holds, as the
 /// Observation that PySpark's plan holds itself: the one that the plan keeps alive, or that of
-/// [`keep_handle`] while it is alive, else a new Observation of the state, whose `get` the actions
-/// of the plan set as they set the state, and which later reads give back while it is alive.
+/// [`keep_handle`] while it is alive, else a new Observation of the state, of its name, of a
+/// result of its metrics once it is used and of its error, which the actions of the plan set from
+/// now on, and which later reads give back while it is alive.
 pub(crate) fn python_observation_of<'py>(
     py: Python<'py>,
     observation: &Observation,
@@ -505,10 +381,29 @@ pub(crate) fn python_observation_of<'py>(
         py,
         PyObservation {
             inner: observation.clone(),
-            restored: Restored::default(),
-            unencodable_name: None,
         },
     )?;
+    let (_, error) = observation.state();
+    python.setattr(intern!(py, "_name"), observation.name())?;
+    python.setattr(intern!(py, "_result"), py.None())?;
+    let error = error.map(|error| {
+        crate::errors::spark_error_to_py_exception(error)
+            .value(py)
+            .clone()
+    });
+    python.setattr(intern!(py, "_error"), error)?;
+    // The metrics so far, and the mirror of those that the actions set from now on.
+    let weak = PyWeakrefReference::new(python.as_any())?.unbind();
+    let mirror: Arc<dyn MetricsMirror> = Arc::new(PyObservationMirror { observation: weak });
+    if let Some(metrics) = observation.set_metrics_mirror(mirror) {
+        let result = PyDict::new(py);
+        set_metrics(
+            py,
+            &result,
+            metrics.iter().map(|(name, value)| (name, value)),
+        )?;
+        python.setattr(intern!(py, "_result"), result)?;
+    }
     keep_handle(&python)?;
     Ok(python)
 }
@@ -557,8 +452,10 @@ fn copy_attributes(
 }
 
 /// `df` observing the metrics `exprs` with `observation`, as PySpark's `Observation._on`, which
-/// `DataFrame.observe` calls. The actions of the DataFrames of it set the metrics, as those of
-/// an Observation of their plans.
+/// `DataFrame.observe` calls: `REUSE_OBSERVATION` of an observation whose `_result` is not None,
+/// a random UUID as the `_name` of an unnamed one, the check that `df` is not streaming, and then
+/// an empty `_result`, of the observation of a new state of the core. The actions of the
+/// DataFrames of it set the metrics, as those of an Observation of their plans.
 pub(crate) fn observe(
     py: Python<'_>,
     frame: &PyDataFrame,
@@ -566,8 +463,7 @@ pub(crate) fn observe(
     mut exprs: Vec<Expression>,
 ) -> PyResult<PyDataFrame> {
     let df = &frame.dataframe;
-    // An Observation unpickled from a used one is used, as PySpark's of a `_result`.
-    if observation.borrow().restored.result.is_some() {
+    if !observation.getattr(intern!(py, "_result"))?.is_none() {
         return Err(raise_pyspark(
             py,
             "PySparkAssertionError",
@@ -575,18 +471,25 @@ pub(crate) fn observe(
             &[],
         ));
     }
-    // A name that UTF-8 cannot encode fails the requests of the DataFrame, as PySpark's
-    // `CollectMetrics` sets it when it builds the plan, before the metrics.
-    let mut args = crate::plan_args::PlanArgs::new();
-    if let Some(name) = &observation.borrow().unencodable_name {
-        args.str(name.bind(py).as_any())?;
+    let mut name = observation.getattr(intern!(py, "_name"))?;
+    if name.is_none() {
+        name = py.import("uuid")?.call_method0("uuid4")?.str()?.into_any();
+        observation.setattr(intern!(py, "_name"), &name)?;
     }
+    // A name that protobuf does not take, as one that UTF-8 cannot encode, fails the requests of
+    // the DataFrame, as PySpark's `CollectMetrics` sets it when it builds the plan, before the
+    // metrics.
+    let mut args = crate::plan_args::PlanArgs::new();
+    let name = args.str(&name)?;
     let args = args.before(&mut exprs);
+    observation.borrow_mut().inner = Observation::new(&name);
     let inner = held_by_the_plan(observation);
     // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once.
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
         df.observe_with_streaming(&inner, exprs, || frame.streaming_once())
     })?;
+    observation.setattr(intern!(py, "_result"), PyDict::new(py))?;
+    mirror_into(observation)?;
     // The plan holds the Observation itself, as PySpark's does (see `held_by_the_plan`), which a
     // deep copy of the plan copies with the memo of the call. The clones of its state that do not
     // keep it alive find it by its weak reference.

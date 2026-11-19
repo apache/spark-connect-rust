@@ -80,9 +80,20 @@ _CHILD = textwrap.dedent("""
         spark.stop()
         print("ready", flush=True)
         sys.stdin.readline()
-    if mode == "live_wait":
+    if mode in ("live_wait", "live_handler_wait"):
         import atexit
 
+        if mode == "live_handler_wait":
+            import signal
+
+            class HandlerError(Exception):
+                pass
+
+            def handler(signum, frame):
+                print("signal", flush=True)
+                raise HandlerError("of the handler")
+
+            signal.signal(signal.SIGINT, handler)
         print("ready", flush=True)
         sys.stdin.readline()
         # Registered after the session, so it runs before the session's exit hook.
@@ -374,3 +385,43 @@ def test_f_a_signal_ends_the_wait_of_the_exit_hook_when_the_server_is_gone(varia
     assert elapsed < 30, elapsed
     assert "Exception ignored in atexit callback" in stderr, stderr
     assert "KeyboardInterrupt" in stderr, stderr
+
+
+def test_f_the_plan_compression_lookup_of_the_exit_hook_catches_the_exception_of_a_handler(
+        exit_service):
+    # (f) The clean_cache of the exit hook of a session that ran no plan looks the plan compression
+    # up first, as PySpark's `_set_command_in_plan` does, whose `except Exception` catches the
+    # exception that a signal handler raises while the lookup waits: the lookup ends, and the exit
+    # hook goes on to send its clean_cache, as PySpark's keeps waiting, and the child exits with
+    # status 0, of no exception reported by atexit.
+    exit_service.plan_compression_lookup_delay = 10.0
+    child = subprocess.Popen(
+        [sys.executable, "-c", _CHILD, exit_service.remote, "live_handler_wait"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_child_env(None),
+    )
+    try:
+        (session_id,) = child.stdout.readline().split()
+        assert child.stdout.readline().strip() == "ready"
+        child.stdin.write("\n")
+        child.stdin.close()
+        assert child.stdout.readline().strip() == "exiting"
+        # The exit hook of the session waits on its lookup by now.
+        time.sleep(1)
+        child.send_signal(signal.SIGINT)
+        started = time.monotonic()
+        status = child.wait(timeout=60)
+        elapsed = time.monotonic() - started
+        stdout, stderr = child.stdout.read(), child.stderr.read()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    assert status == 0, stderr
+    assert stdout.split() == ["signal"]
+    assert elapsed < 8, elapsed
+    assert "Exception ignored" not in stderr, stderr
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]

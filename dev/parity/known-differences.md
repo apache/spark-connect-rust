@@ -563,7 +563,15 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   readers, writers, builders and the other objects of a session or a DataFrame hold their
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
   which their copies and pickles keep as PySpark's do, but not their state, which PySpark's
-  holds there (`vars(spark.streams)` is empty, where PySpark's has `_session` and `_sqlb`).
+  holds there (`vars(spark.streams)` is empty, where PySpark's has `_session` and `_sqlb`). An
+  `Observation` is not one of them: its `_name`, `_result` and `_error` are of its `__dict__`, as
+  PySpark's.
+- **The name of an Observation renamed after `observe`** (intentional; the plan is native). The
+  `CollectMetrics` of a DataFrame that an Observation observes is of the name that the
+  Observation had then, which the Rust core keeps in the plan, where PySpark's plan reads the
+  Observation's `_name` each time it is built: after `o._name = "other"`, the plan that the
+  server explains names the first name, where PySpark's names `other`. The metrics that its
+  actions observe set that Observation all the same, as in PySpark.
 - **Subclasses** (intentional; the state is native). PySpark's classes are plain classes that a
   user subclasses. The drop-in's DataFrame, `Observation`, `SparkSession`, `Catalog`,
   `DataSourceRegistration`, `DataFrameReader`, `DataStreamReader`, `SparkSession.Hook`,

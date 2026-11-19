@@ -1929,12 +1929,19 @@ them, as PySpark's DataFrame gives them to its client. An Observation that is no
 the name of metrics that the plan observes (`client.to_table(plan, {"x": Observation("x")})`),
 fails the execution with PySpark's `AssertionError` when those metrics arrive.
 
-As PySpark's, the `get` of an Observation is its `_result`, one dict, which the executions that set
-its metrics update in place: a dict read before an action has the metrics once the action ran, what
-is set on it stays, and a `copy.copy` of the Observation shares it. `_result` is None before the
-Observation is used, and `_error` is the error that `get` raises, a new exception of it at each read
-where PySpark's is the one that its client set. The three are attributes of the class, not of the
-instance, so `vars()` of an Observation does not show them, and they cannot be set.
+As PySpark's, `_name`, `_result` and `_error` are the attributes of an Observation, which `vars()`
+shows and a program sets and deletes, and `DataFrame.observe` of an Observation gives what its `_on`
+gives, of a subclass too. The `get` of an Observation raises its `_error` if it is not
+None, and is its `_result` otherwise: one dict, which the executions that set its metrics update in
+place, as it is then, so a dict read before an action has the metrics once the action ran, what is
+set on it stays, and a `copy.copy` of the Observation shares it. `_result` is None before the
+Observation is used, which `observe` checks, so an Observation whose `_result` a program sets to
+None is used again, and an execution of its metrics then raises PySpark's `AssertionError`. The
+executions convert the metrics when they set them, so a metric that does not convert, such as a
+timestamp of the year 1 that `datetime` cannot make local, raises the error of its conversion from
+the action, and none is set. The error of collecting them that the server reports is given to the
+`_set_error` of the Observation, which sets `_error`, the one exception that `get` raises. A
+reference cycle through the attributes, as through the result dict, is freed.
 
 The errors of the RPCs that PySpark's client leaves to grpc, those of `clone` (and
 `SparkSession.cloneSession`) and of `copy_from_local_to_fs` (and `SparkSession.copyFromLocalToFs`),
@@ -2435,13 +2442,25 @@ implementation that is the server's order too, and with upb, protobuf's default,
 hash table, which changes from one process to the next. For its own errors, PySpark keeps the
 order of each call site.
 
+A signal ends the wait of a call for the server as it ends PySpark's. The `KeyboardInterrupt` of a
+handler, as of Ctrl-C, interrupts the execution in flight on the server, as the `except
+KeyboardInterrupt` of PySpark's execution does, and a second signal ends the wait without waiting
+for the interrupt; the exception of another handler ends the wait at once and is raised, without
+an interrupt. The lookup of the plan compression settings of the first plan of a session, and the
+read of the stack-trace settings of an error, catch the exception of a handler that is an
+`Exception`, as the `except Exception` of PySpark's do: the lookup is then of no settings, as a
+failed one, and the call goes on and waits again.
+
 At interpreter exit, a session that is not stopped has its ML cache cleaned by one
 `clean_cache` request, as PySpark's client does. Its errors are ignored, but when the server
 is gone the exit waits on that request's retries, as PySpark's does, so the exit can take as
 long as those retries. A signal ends that wait, as it ends PySpark's, whose cleanup catches
 `Exception` only: the `KeyboardInterrupt` of Ctrl-C is raised out of the exit hook, which
 `atexit` reports before it runs the next one, and the session is then neither released nor
-closed. A stopped session sends nothing at exit. PySpark 4.3.0 does not exit at all while a
+closed. The exception of a handler that is an `Exception` ends the request that waits, which the
+exit hook goes on from, unless it arrives while the session looks the plan compression settings
+up for the `clean_cache`, as for its first plan: the lookup catches it, as PySpark's, and the
+`clean_cache` is sent, which waits again. A stopped session sends nothing at exit. PySpark 4.3.0 does not exit at all while a
 session other than its default one is left open to the end, such as one of `newSession()` or of
 `SparkSession(connection=...)`: its `SparkSession.__del__` closes the client in the teardown of the
 interpreter, whose grpcio `Channel.close()` waits forever. The drop-in exits.

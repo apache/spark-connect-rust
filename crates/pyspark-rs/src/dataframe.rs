@@ -324,7 +324,7 @@ impl PyDataFrame {
     /// this one keeps apart from the core, as PySpark's `alias`, `filter`, `limit`, `sort`, the
     /// repartitions and the other methods that copy the `_cached_schema` of their input copy it
     /// whatever it is. The core keeps a cached struct itself.
-    fn of_same_schema(&self, mut result: PyDataFrame) -> PyDataFrame {
+    pub(crate) fn of_same_schema(&self, mut result: PyDataFrame) -> PyDataFrame {
         if let Some(schema) = &self.schema_object {
             result.schema_object = Some(Python::attach(|py| schema.clone_ref(py)));
         }
@@ -2503,14 +2503,15 @@ impl PyDataFrame {
     }
 
     /// Observe metrics, as PySpark's `DataFrame.observe(observation, *exprs)`: the Columns
-    /// `exprs`, which an Observation receives, or which are observed by a name.
+    /// `exprs`, which an Observation receives by its `_on`, of a subclass too, or which are
+    /// observed by a name.
     #[pyo3(signature = (observation, *exprs))]
-    fn observe(
-        &self,
-        py: Python<'_>,
-        observation: &Bound<'_, PyAny>,
-        exprs: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    fn observe<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        observation: &Bound<'py, PyAny>,
+        exprs: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         if exprs.is_empty() {
             return Err(crate::column::raise_pyspark(
                 py,
@@ -2537,18 +2538,26 @@ impl PyDataFrame {
                 }
             }
         }
-        if let Ok(observation) = observation.cast::<crate::observation::PyObservation>() {
-            let observed = crate::observation::observe(py, self, observation, columns)?;
-            return Ok(self.of_same_schema(observed));
+        if observation.is_instance_of::<crate::observation::PyObservation>() {
+            // As PySpark's, which gives the DataFrame of the `_on` of the Observation, of a
+            // subclass too.
+            let mut arguments = vec![slf.clone().into_any()];
+            arguments.extend(exprs);
+            return observation.call_method1(
+                pyo3::intern!(py, "_on"),
+                pyo3::types::PyTuple::new(py, arguments)?,
+            );
         }
+        let this = slf.borrow();
         if observation.is_instance_of::<pyo3::types::PyString>() {
             // Its `CollectMetrics` plan sets the name when it builds the plan, before the metrics.
             let mut args = crate::plan_args::PlanArgs::new();
             let name = args.str(observation)?;
             let args = args.before(&mut columns);
-            return Ok(self.of_same_schema(PyDataFrame::new(
-                args.plan(self.dataframe.observe(&name, columns)),
-            )));
+            let observed = this.of_same_schema(PyDataFrame::new(
+                args.plan(this.dataframe.observe(&name, columns)),
+            ));
+            return Ok(Bound::new(py, observed)?.into_any());
         }
         let type_name = observation.get_type().name()?.to_string();
         Err(crate::column::raise_pyspark(
