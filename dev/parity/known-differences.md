@@ -753,13 +753,17 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   ones, which pyright does not see in `pyspark-client`'s source: a hover over
   `pyspark.sql.connect.functions.col` or Spark Connect's `SparkSession.builder` shows PySpark's
   documentation with the drop-in, and none with `pyspark-client`.
-- **The docstrings of `RuntimeConf.__init__` and `Observation.__init__`** (inherent; the classes
-  are native). PySpark Connect's modules give them the docstrings of the `__init__` of the classic
-  `RuntimeConfig` and `Observation` (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`).
-  The `__init__` of a native class is a slot of CPython, whose wrapper has CPython's docstring
+- **The docstrings of the `__init__` of the native classes** (inherent; the classes are native).
+  The `__init__` of a native class, as of the types of `pyspark.sql.types` (`StringType`,
+  `ArrayType`, `StructField`, ...) and of the classes of `pyspark.sql.connect` (`Catalog`,
+  `RuntimeConf`, `Observation`, ...), is a slot of CPython, whose wrapper has CPython's docstring
   (`Initialize self.  See help(type(self)) for accurate signature.`), which the class cannot set.
-  The other docstrings that PySpark Connect's modules copy are PySpark's (see
-  `docs/compatibility.md`).
+  PySpark's is that of its Python function: None, or of a docstring that PySpark Connect's modules
+  copy (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
+  modules of `pyspark.sql` and `pyspark.errors` are PySpark's (see `docs/compatibility.md`).
+- **The docstrings of `fromInternal` and `needConversion` of `GeographyType` and `GeometryType`**
+  (intentional; the types are native). PySpark's spatial types define their own methods, of no
+  docstring; the drop-in's inherit those of `DataType`, of its docstrings.
 - **Modules of messages** (intentional). pyright warns that `pyspark.sql.connect.proto.base_pb2`
   and the other modules of messages, which the drop-in's protobuf runtime makes at run time, have
   a stub and no source (`reportMissingModuleSource`). The modules of `pyspark.sql.functions`,

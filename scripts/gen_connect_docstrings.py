@@ -10,8 +10,12 @@ docstrings are those of the ``#[doc]`` attributes of their Rust definitions, whi
 is built with. This script generates crates/pyspark-rs/src/connect_docs_generated.rs, whose
 ``connect_doc!`` gives the docstring of each object of ``MODULES`` that PySpark's module assigns,
 as PySpark has it at run time, which the Rust definitions take
-(``#[doc = connect_doc!(DataStreamReader.format)]``). The docstrings are worked out of PySpark's
-source as scripts/gen_type_stubs.py works them out for the stubs (its ``Docs``).
+(``#[doc = connect_doc!(DataStreamReader.format)]``). It also gives the docstring of each class of
+``CLASS_MODULES``, whose classes are native here too (``pyspark.sql.types``), and of each public
+member of it, its own or of a base of it in PySpark, as Python finds it on the class
+(``connect_doc!(IntegerType.fromInternal)`` is that of ``DataType.fromInternal``); an object of no
+docstring has none, of which the Rust definitions take no ``#[doc]``. The docstrings are worked out
+of PySpark's source as scripts/gen_type_stubs.py works them out for the stubs (its ``Docs``).
 
 Usage, from anywhere:
 
@@ -27,6 +31,7 @@ regenerates in memory and fails with a diff when the checked-in file differs; CI
 from __future__ import annotations
 
 import argparse
+import ast
 import difflib
 import sys
 from pathlib import Path
@@ -52,6 +57,10 @@ MODULES = (
     "pyspark.sql.connect.tvf",
 )
 
+# The modules of PySpark whose classes are native in the drop-in, of the docstrings of all their
+# classes and public members, as Python finds them on each class.
+CLASS_MODULES = ("pyspark.sql.types",)
+
 
 def docstrings(pyspark_src: str) -> dict[str, str]:
     """The docstring of each object that a module of ``MODULES`` assigns one, by its qualified
@@ -73,6 +82,68 @@ def docstrings(pyspark_src: str) -> dict[str, str]:
             if qualname in found:
                 raise SystemExit(f"error: {qualname} of two modules")
             found[qualname] = doc
+        for name, node in source.defs.items():
+            if "." in name or not isinstance(node, ast.ClassDef) or name in found:
+                continue
+            # The docstring of a class of the module of its own, that the module does not assign.
+            doc = docs.raw(module, name)
+            if doc is not None:
+                found[name] = doc
+        for name, node in source.defs.items():
+            if (
+                name.count(".") != 1
+                or name in found
+                or not isinstance(node, ast.Assign)
+                or not isinstance(node.value, ast.Name)
+            ):
+                continue
+            # An alias of a member of a class (`mean = avg` of GroupedData), whose docstring is
+            # that of the member.
+            target = f"{name.split('.')[0]}.{node.value.id}"
+            if target in found:
+                found[name] = "@" + target
+    return found
+
+
+def class_docstrings(pyspark_src: str) -> dict[str, str]:
+    """The docstring of each class of a module of ``CLASS_MODULES`` and of each public member of
+    the class, as Python finds it on the class: the member of the first class of its MRO in PySpark
+    that defines it, of the module. A member of no docstring, as a class of none, is left out. The
+    value of a member that the class does not define is the qualified name of the one it finds."""
+    docs = Docs(Path(pyspark_src))
+    found: dict[str, str] = {}
+    for module in CLASS_MODULES:
+        source = docs.source(module)
+        if source is None:
+            raise SystemExit(f"error: {module} not found in {pyspark_src}")
+        classes = [
+            name
+            for name, node in source.defs.items()
+            if "." not in name and isinstance(node, ast.ClassDef) and not name.startswith("_")
+        ]
+        for cls in classes:
+            doc = docs.raw(module, cls)
+            if doc is not None:
+                found[cls] = doc
+            seen: set[str] = set()
+            for base_module, base in docs.mro(module, cls):
+                if base_module != module:
+                    continue
+                for qualname in docs.source(base_module).defs:
+                    member = qualname[len(base) + 1 :]
+                    if (
+                        not qualname.startswith(base + ".")
+                        or "." in member
+                        or member.startswith("_")
+                        or member in seen
+                    ):
+                        continue
+                    seen.add(member)
+                    if docs.raw(base_module, qualname) is None:
+                        continue
+                    found[f"{cls}.{member}"] = (
+                        docs.raw(base_module, qualname) if base == cls else f"@{base}.{member}"
+                    )
     return found
 
 
@@ -86,6 +157,8 @@ def _raw_string(text: str) -> str:
 
 def generate(pyspark_src: str) -> str:
     tag = tracked_tag(REPO_ROOT)
+    of_classes = class_docstrings(pyspark_src)
+    classes_of_class_modules = {name for name in of_classes if "." not in name}
     lines = [
         f"// Generated by scripts/gen_connect_docstrings.py of Apache Spark {tag}. Do not edit:",
         "// regenerate it with the script.",
@@ -102,11 +175,21 @@ def generate(pyspark_src: str) -> str:
         "#[rustfmt::skip]",
         "macro_rules! connect_doc {",
     ]
-    for qualname, doc in docstrings(pyspark_src).items():
+    for qualname, doc in [*docstrings(pyspark_src).items(), *of_classes.items()]:
         pattern = " . ".join(qualname.split("."))
+        if doc.startswith("@"):
+            # A member that the class inherits, or an alias, of the docstring of the member that
+            # it is.
+            lines.append(
+                f"    ({pattern}) => {{ connect_doc!({' . '.join(doc[1:].split('.'))}) }};"
+            )
+            continue
         lines.append(f"    ({pattern}) => {{")
         lines.append(f"        {_raw_string(doc)}")
         lines.append("    };")
+        if "." not in qualname and qualname in classes_of_class_modules:
+            # Of the name of the class as a string, which a macro of classes forwards (`tt`).
+            lines.append(f'    ("{qualname}") => {{ connect_doc!({qualname}) }};')
     lines += ["}", ""]
     return "\n".join(lines)
 

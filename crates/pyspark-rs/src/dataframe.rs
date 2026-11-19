@@ -5149,7 +5149,7 @@ impl PyWhenNotMatchedBySource {
     }
 }
 
-/// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
+// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
 #[pyclass(
     name = "DataFrameWriter",
     module = "pyspark.sql.connect.readwriter",
@@ -6288,7 +6288,7 @@ impl PyDataFrameWriter {
     }
 }
 
-/// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
+// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
 #[pyclass(
     name = "DataFrameWriterV2",
     module = "pyspark.sql.connect.readwriter",

@@ -609,8 +609,9 @@ impl PyGroupedData {
         self.numeric_agg(py, "max", cols)
     }
 
-    /// Mean (alias for avg).
+    // Mean (alias for avg).
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(GroupedData.mean)]
     fn mean(&self, py: Python<'_>, cols: Vec<Bound<'_, PyAny>>) -> PyResult<PyDataFrame> {
         self.numeric_agg(py, "avg", cols)
     }

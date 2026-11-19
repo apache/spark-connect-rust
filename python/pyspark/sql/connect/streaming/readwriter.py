@@ -15,13 +15,11 @@
 # limitations under the License.
 #
 
-"""
-The streaming readers and writers of Spark Connect, as PySpark Connect's
-``pyspark.sql.connect.streaming.readwriter``: the native classes of the Rust core, and its native
-``Trigger``. ``DataStreamWriter.foreachBatch`` and ``.foreach`` take a Python callable and
-cloudpickle it inside the extension (with ``pyspark.serializers.CloudPickleSerializer``);
-``.foreach`` sends the function of ``_construct_foreach_function``, as PySpark does.
-"""
+# The streaming readers and writers of Spark Connect, as PySpark Connect's
+# ``pyspark.sql.connect.streaming.readwriter``: the native classes of the Rust core, and its native
+# ``Trigger``. ``DataStreamWriter.foreachBatch`` and ``.foreach`` take a Python callable and
+# cloudpickle it inside the extension (with ``pyspark.serializers.CloudPickleSerializer``);
+# ``.foreach`` sends the function of ``_construct_foreach_function``, as PySpark does.
 
 from collections.abc import Iterator
 from typing import Any, Callable, Union, cast

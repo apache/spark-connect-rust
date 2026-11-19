@@ -15,8 +15,8 @@
 # limitations under the License.
 #
 
-"""GroupedData / PandasCogroupedOps of Spark Connect, as PySpark Connect's
-``pyspark.sql.connect.group``: the native classes of the Rust core."""
+# GroupedData / PandasCogroupedOps of Spark Connect, as PySpark Connect's
+# ``pyspark.sql.connect.group``: the native classes of the Rust core.
 from pyspark._pyspark import GroupedData, PandasCogroupedOps
 
 __all__ = ["GroupedData", "PandasCogroupedOps"]

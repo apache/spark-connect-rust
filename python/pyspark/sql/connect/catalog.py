@@ -15,10 +15,10 @@
 # limitations under the License.
 #
 
-"""The Catalog of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.catalog``: the native
-Catalog of the Rust core, whose methods return the NamedTuples of PySpark's classic
-``pyspark.sql.catalog`` (Database, Table, Column, Function, CatalogMetadata and TablePartition),
-which PySpark Connect's module imports too."""
+# The Catalog of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.catalog``: the native
+# Catalog of the Rust core, whose methods return the NamedTuples of PySpark's classic
+# ``pyspark.sql.catalog`` (Database, Table, Column, Function, CatalogMetadata and TablePartition),
+# which PySpark Connect's module imports too.
 from pyspark._pyspark import Catalog
 from pyspark.sql.catalog import (
     CatalogMetadata,

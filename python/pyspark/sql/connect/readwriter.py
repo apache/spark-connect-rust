@@ -15,8 +15,8 @@
 # limitations under the License.
 #
 
-"""DataFrameReader / DataFrameWriter(V2) of Spark Connect, as PySpark Connect's
-``pyspark.sql.connect.readwriter``: the native readers and writers of the Rust core."""
+# DataFrameReader / DataFrameWriter(V2) of Spark Connect, as PySpark Connect's
+# ``pyspark.sql.connect.readwriter``: the native readers and writers of the Rust core.
 from pyspark._pyspark import DataFrameReader, DataFrameWriter, DataFrameWriterV2
 
 # PathOrPaths and TupleOrListOfString: PySpark Connect's aliases of the types of the paths and

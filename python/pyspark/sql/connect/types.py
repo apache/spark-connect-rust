@@ -14,13 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The types of ``pyspark.sql.connect.types`` that are not those of ``pyspark.sql.types``, as
-PySpark Connect's: ``UnparsedDataType``, a DDL string of a type that the server parses. The
-conversions between the types and their ``spark.connect.DataType`` messages,
-``pyspark_types_to_proto_types`` and ``proto_schema_to_pyspark_data_type``, are those of the Rust
-transport, of the messages of ``pyspark.sql.connect.proto``. ``parse_attr_name``,
-``verify_col_name`` and ``verify_numeric_col_name`` are PySpark Connect's, from Apache Spark
-v4.3.0."""
+# The types of ``pyspark.sql.connect.types`` that are not those of ``pyspark.sql.types``, as
+# PySpark Connect's: ``UnparsedDataType``, a DDL string of a type that the server parses. The
+# conversions between the types and their ``spark.connect.DataType`` messages,
+# ``pyspark_types_to_proto_types`` and ``proto_schema_to_pyspark_data_type``, are those of the Rust
+# transport, of the messages of ``pyspark.sql.connect.proto``. ``parse_attr_name``,
+# ``verify_col_name`` and ``verify_numeric_col_name`` are PySpark Connect's, from Apache Spark
+# v4.3.0.
 
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -105,10 +105,10 @@ class UnparsedDataType(DataType):
 
 
 def pyspark_types_to_proto_types(data_type: DataType) -> "pb2.DataType":
-    """The ``spark.connect.DataType`` of ``data_type``, as the client sends the type. As PySpark's,
-    a value that is not a DataType, such as an int or a DDL string, raises
-    ``UNSUPPORTED_OPERATION`` of ``f"data type {data_type}"``, and so does a type that has no
-    proto, such as ``AtomicType()``."""
+    # The ``spark.connect.DataType`` of ``data_type``, as the client sends the type. As PySpark's,
+    # a value that is not a DataType, such as an int or a DDL string, raises
+    # ``UNSUPPORTED_OPERATION`` of ``f"data type {data_type}"``, and so does a type that has no
+    # proto, such as ``AtomicType()``.
     import pyspark.sql.connect.proto as pb2
     from pyspark._pyspark import _data_type_proto
 
@@ -121,8 +121,8 @@ def pyspark_types_to_proto_types(data_type: DataType) -> "pb2.DataType":
 
 
 def proto_schema_to_pyspark_data_type(schema: "pb2.DataType") -> DataType:
-    """The type of ``schema``, a ``spark.connect.DataType``, as the client reads the types of the
-    server."""
+    # The type of ``schema``, a ``spark.connect.DataType``, as the client reads the types of the
+    # server.
     from pyspark._pyspark import _data_type_of_proto
 
     return _data_type_of_proto(schema.SerializeToString())

@@ -14,17 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Exceptions raised from Spark Connect.
-
-The classes are those of upstream pyspark, and so are ``convert_exception``, which converts the
-gRPC ``ErrorInfo`` and ``FetchErrorDetailsResponse`` of an error that the server raised into one
-of them, and ``convert_observation_errors``, of the errors of the metrics of an Observation, for
-the code that has those messages. In this Rust-backed drop-in, the Rust transport fetches and
-reads them of the errors of its RPCs, and ``_convert_server_error`` picks and builds the
-exception from what it read, as the rest of upstream ``_convert_exception`` does. ``grpc`` is
-optional: without it, ``StatusCode`` is an enum with the members and values of
-``grpc.StatusCode``.
-"""
+# Exceptions raised from Spark Connect.
+#
+# The classes are those of upstream pyspark, and so are ``convert_exception``, which converts the
+# gRPC ``ErrorInfo`` and ``FetchErrorDetailsResponse`` of an error that the server raised into one
+# of them, and ``convert_observation_errors``, of the errors of the metrics of an Observation, for
+# the code that has those messages. In this Rust-backed drop-in, the Rust transport fetches and
+# reads them of the errors of its RPCs, and ``_convert_server_error`` picks and builds the
+# exception from what it read, as the rest of upstream ``_convert_exception`` does. ``grpc`` is
+# optional: without it, ``StatusCode`` is an enum with the members and values of
+# ``grpc.StatusCode``.
 import enum
 import json
 from types import SimpleNamespace

@@ -1,7 +1,5 @@
-"""
-Minimal pyspark.sql.types module for the Spark Connect client.
-Provides DataType classes and conversion functions.
-"""
+# The pyspark.sql.types module of the Spark Connect client: the DataType classes of the Rust
+# extension, and the conversion functions. As PySpark's module, it has no docstring.
 import re
 from typing import cast  # noqa: F401  (upstream leaks typing.cast from this module)
 
@@ -103,17 +101,14 @@ except ImportError:  # pragma: no cover - defensive fallback when the extension 
         pass
 
 
+# A UDT is inherently a Python-level construct: ``jsonValue`` serializes the concrete Python class
+# with cloudpickle and ``fromJson`` re-imports it by module path, so (like the pickling
+# serializers) it cannot be lowered into Rust. It subclasses the Rust-backed :class:`DataType` so
+# ``isinstance`` and schema conversion treat it like any other type. Its docstrings are PySpark's.
 class UserDefinedType(DataType):
     """User-defined type (UDT).
 
     .. note:: WARN: Spark Internal Use Only
-
-    A UDT is inherently a Python-level construct: ``jsonValue`` serializes the
-    concrete Python class with cloudpickle and ``fromJson`` re-imports it by
-    module path, so (like the pickling serializers) it cannot be lowered into
-    Rust. It subclasses the Rust-backed :class:`DataType` so ``isinstance`` and
-    schema conversion treat it like any other type. Mirrors
-    ``pyspark.sql.types.UserDefinedType``.
     """
 
     @classmethod
@@ -131,7 +126,9 @@ class UserDefinedType(DataType):
 
     @classmethod
     def sqlType(cls) -> "DataType":
-        """Underlying SQL storage type for this UDT."""
+        """
+        Underlying SQL storage type for this UDT.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
@@ -141,7 +138,9 @@ class UserDefinedType(DataType):
 
     @classmethod
     def module(cls) -> str:
-        """The Python module of the UDT."""
+        """
+        The Python module of the UDT.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
@@ -151,8 +150,10 @@ class UserDefinedType(DataType):
 
     @classmethod
     def scalaUDT(cls) -> str:
-        """The class name of the paired Scala UDT (could be '', if there
-        is no corresponding one)."""
+        """
+        The class name of the paired Scala UDT (could be '', if there
+        is no corresponding one).
+        """
         return ""
 
     def needConversion(self) -> bool:
@@ -175,7 +176,9 @@ class UserDefinedType(DataType):
             return self.deserialize(v)
 
     def serialize(self, obj):
-        """Converts a user-type object into a SQL datum."""
+        """
+        Converts a user-type object into a SQL datum.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
@@ -184,7 +187,9 @@ class UserDefinedType(DataType):
         )
 
     def deserialize(self, datum):
-        """Converts a SQL datum into a user-type object."""
+        """
+        Converts a SQL datum into a user-type object.
+        """
         from pyspark.errors import PySparkNotImplementedError
 
         raise PySparkNotImplementedError(
