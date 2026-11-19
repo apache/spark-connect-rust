@@ -629,9 +629,14 @@ impl PyFieldDescriptor {
         self.index
     }
 
+    /// As upb's: `TYPE_GROUP` of a group, also of a delimited message field of editions.
     #[getter(r#type)]
     fn type_(&self) -> i32 {
-        self.message.fields[self.index].kind.proto_type()
+        let field = &self.message.fields[self.index];
+        if field.delimited {
+            return Self::TYPE_GROUP;
+        }
+        field.kind.proto_type()
     }
 
     #[getter]
@@ -699,12 +704,20 @@ impl PyFieldDescriptor {
         if field.kind == Kind::Message {
             return Ok(py.None());
         }
-        Scalar::default_of(field.kind).to_py(py)
+        match &field.default {
+            Some(default) => default.to_py(py),
+            None => Scalar::default_of(field.kind).to_py(py),
+        }
     }
 
+    /// Whether the field declares a default (`[default = ...]`, of proto2 and editions).
     #[getter]
-    fn has_default_value(&self) -> bool {
-        false
+    fn has_default_value(&self) -> PyResult<bool> {
+        let field = &self.message.fields[self.index];
+        let proto = pool()
+            .message_proto(&self.message)
+            .and_then(|p| p.field.into_iter().nth(self.index));
+        Ok(!field.repeated && proto.is_some_and(|p| p.default_value.is_some()))
     }
 
     #[getter]
@@ -732,7 +745,7 @@ impl PyFieldDescriptor {
 
     #[getter]
     fn is_required(&self) -> bool {
-        false
+        self.message.fields[self.index].is_required()
     }
 
     #[getter]

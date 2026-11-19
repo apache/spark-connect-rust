@@ -1693,11 +1693,13 @@ impl MapContainer {
         }
     }
 
-    /// The Python object of `map`: a `MessageMapContainer` of a map of messages, which has
-    /// `get_or_create` as upb's of the same name has, else a `MapContainer`.
+    /// The map as an object of its class, as upb's: a `ScalarMapContainer` of a map of scalars,
+    /// a `MessageMapContainer` of a map of messages (which has `get_or_create`, as upb's), neither
+    /// a subclass of the other.
     pub(crate) fn into_object(self, py: Python<'_>) -> PyResult<Py<MapContainer>> {
         if self.map.value != Kind::Message {
-            return Py::new(py, self);
+            let init = PyClassInitializer::from(self).add_subclass(ScalarMapContainer);
+            return Ok(Bound::new(py, init)?.into_super().unbind());
         }
         let init = PyClassInitializer::from(self).add_subclass(MessageMapContainer);
         Ok(Bound::new(py, init)?.into_super().unbind())
@@ -2354,6 +2356,16 @@ impl MapIterator {
         key.to_py(py).map(Some)
     }
 }
+
+/// The map of a map field of scalars, as upb's `ScalarMapContainer`, of the methods of
+/// `MapContainer`, the base of the maps of the runtime.
+#[pyclass(
+    extends = MapContainer,
+    mapping,
+    module = "pyspark.sql.connect.proto",
+    name = "ScalarMapContainer"
+)]
+pub struct ScalarMapContainer;
 
 /// The map of a map field of messages, as upb's `MessageMapContainer`: a `MapContainer` with
 /// `get_or_create`.

@@ -138,12 +138,25 @@ vendored `pyspark.ml` (and any module that builds its own `spark.connect` messag
 RPCs, and the retry policies, which the transport retries with - with the
 `pyspark.sql.connect.proto`: always the Rust protobuf runtime (`crates/pyspark-rs/src/pbmsg`,
 exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are not vendored, only
-their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where
-`protobuf` is installed, the runtime also adds the files of the protos to protobuf's default pool,
-so that a plugin's generated modules that import them build, and wraps protobuf's builder, so that
-those modules (of protoc 3.20 and later, which build their classes with it) get the runtime's
-classes, whose fields take ours as they are: their files are added to the runtime's pool at run
-time (`pbmsg::pool::register`; see `docs/compatibility.md`).
+their `.pyi` stubs, next to which a docstring-only `*_pb2.py` is the source that type checkers
+find, which the runtime's finder shadows), which `python/tests/test_proto_rust_offline.py`
+compares with upb. Where `protobuf` imports, the runtime's classes are of the shape of upb's
+(metaclass `MessageMeta`, subclasses of protobuf's `Message` and `WKTBASES`, of protobuf's
+descriptors of its default pool, to which the runtime adds the files of the protos), and the
+runtime wraps protobuf's metaclass (`reflection.GeneratedProtocolMessageType`) and
+`message_factory.GetMessageClass`, so that a plugin's generated modules (of any protoc) of files
+of proto2, proto3 or editions that import the protos get the runtime's classes, whose fields take
+ours as they are: their files are added to the runtime's pool at run time
+(`pbmsg::pool::register`; see `docs/compatibility.md`). So do the modules of the files of their
+package (of a package) that they import, and the modules of the files of any package (but
+Google's) that import a file that the runtime holds so, before or after it does. Any other file
+keeps protobuf's classes (the runtime has classes of its types of its own, which pickle as
+protobuf's): a file of another package or of no package that such a file imports, unless it imports
+a held file itself, Google's, and a file that the runtime cannot hold (of extensions, extension
+ranges or message sets), which also gives protobuf's classes back to the held files that it
+imports (but a proto of Spark Connect and a file that imports one), so that upb's classes of it
+take their messages. Never take over a module of a file that imports no file that the runtime
+holds, but a file of a plugin's own package that the plugin's file imports.
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
 that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the
 placeholder that `DataFrame._plan.plan(session)` gives, of one level, which holds the relation of

@@ -8056,7 +8056,8 @@ pub(crate) fn execution_metrics<'py>(
     // The metrics as PySpark's client keeps them, the `Expression.Literal` messages that the
     // server sent, of `pyspark.sql.connect.proto`, which `PlanObservedMetrics.pairs` converts
     // when it is read, and so raises the `UNSUPPORTED_LITERAL` of a literal that PySpark does not
-    // convert there.
+    // convert there. They are parsed of any depth, as the transport reads the responses, so a
+    // struct nested past upb's limit reads as `collect()` reads it.
     let literal_cls = py
         .import("pyspark.sql.connect.proto")?
         .getattr("Expression")?
@@ -8068,8 +8069,7 @@ pub(crate) fn execution_metrics<'py>(
             .iter()
             .map(|literal| {
                 use prost::Message;
-                let encoded = pyo3::types::PyBytes::new(py, &literal.encode_to_vec());
-                literal_cls.call_method1("FromString", (encoded,))
+                crate::pbmsg::parse_deep(&literal_cls, &literal.encode_to_vec())
             })
             .collect::<PyResult<Vec<_>>>()?;
         observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
@@ -8298,13 +8298,11 @@ pub(crate) fn literal_text(
 ) -> String {
     use prost::Message;
     let text = || -> PyResult<String> {
-        py.import("pyspark.sql.connect.proto")?
+        let literal_cls = py
+            .import("pyspark.sql.connect.proto")?
             .getattr("Expression")?
-            .getattr("Literal")?
-            .call_method1(
-                "FromString",
-                (pyo3::types::PyBytes::new(py, &literal.encode_to_vec()),),
-            )?
+            .getattr("Literal")?;
+        crate::pbmsg::parse_deep(&literal_cls, &literal.encode_to_vec())?
             .str()?
             .extract()
     };

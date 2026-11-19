@@ -393,6 +393,36 @@ def test_the_plans_of_dataframes_give_the_client_their_observations_as_pyspark(s
     assert len(frame) == 5 and aliased.get == {"n": 5}
 
 
+def test_observed_metrics_of_any_depth_are_read_by_every_action(session):
+    # The observed metrics of a struct nested past upb's limit of 100 levels of messages are read
+    # by toPandas(), its executionInfo and the client's to_table as collect() reads them, of the
+    # Rust transport, which reads the responses of any depth (see docs/compatibility.md).
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import Observation
+
+    def depth(value):
+        levels = 0
+        while hasattr(value, "asDict"):
+            value, levels = value["a"], levels + 1
+        return levels
+
+    nested = "count(1)"
+    for _ in range(40):
+        nested = f"named_struct('a', {nested})"
+    for action in ("collect", "toPandas", "to_table"):
+        observation = Observation(f"deep_{action}")
+        df = session.range(3).observe(observation, F.expr(nested).alias("s"))
+        if action == "to_table":
+            plan = pb2.Plan()
+            plan.root.CopyFrom(df._plan.plan(session.client))
+            assert session.client.to_table(plan, df._plan.observations)[0].num_rows == 3
+        else:
+            assert len(getattr(df, action)()) == 3
+            flows = dict(df.executionInfo.flows)
+            assert list(flows) == [f"deep_{action}"] and depth(flows[f"deep_{action}"]["s"]) == 40
+        assert depth(observation.get["s"]) == 40, action
+
+
 def test_observations_are_pysparks_objects_of_a_live_result(session):
     # As PySpark Connect's Observation: `get` is its `_result`, one dict, which the executions
     # update in place, also through a shallow copy; the plan of observe holds the Observation

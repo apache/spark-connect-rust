@@ -34,9 +34,11 @@ def parse_deep(message_class: Any, data: bytes) -> Any:
     on its own, and one that the parser refuses is filled in turn, so that the parser never
     nests past its limit. Where ``FromString`` succeeds, this gives the same message."""
     if _is_of_the_rust_runtime(message_class):
-        # The Rust protobuf runtime of the drop-in parses a message of any depth, and needs no
-        # protobuf.
-        return message_class.FromString(data)
+        # The Rust protobuf runtime of the drop-in parses a message of any depth of its own parse,
+        # and needs no protobuf.
+        from pyspark import _pyspark
+
+        return _pyspark._proto_parse_deep(message_class, data)
     from google.protobuf.descriptor import FieldDescriptor
     from google.protobuf.message import DecodeError
 

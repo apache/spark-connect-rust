@@ -692,48 +692,63 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 
 ## `pyspark.sql.connect.proto` and plugins
 
-- **Pickles of `Any` and `Timestamp`** (intentional). The drop-in's protobuf runtime has classes
-  of its own of the well-known types, of its modules `pyspark.sql.connect.proto._rust.any_pb2` and
-  `timestamp_pb2`, as `protobuf`'s modules of them (`google.protobuf.any_pb2`) are `protobuf`'s,
-  which the drop-in leaves as they are. So the pickle of its `Any` or `Timestamp` names that module,
-  and loads where the drop-in is installed, with or without `protobuf`, but not in PySpark, such as
-  in the Python worker of the server that runs a UDF that holds one, where upb's names
-  `google.protobuf.any_pb2.Any`, which loads in the drop-in as a message of `protobuf`'s class,
-  which the runtime's fields take as they are.
 - **Generated modules of a plugin's protos** (intentional; DESIGN). A module that protoc
-  generates of a proto3 file that imports the protos of Spark Connect, directly or through the
-  files it imports (Delta Lake's `delta/connect/relations.proto` and `commands.proto`), gets the
-  classes of the drop-in's Rust protobuf runtime when `protobuf`'s builder builds it, as it builds
-  the modules of protoc 3.20 and later, so its message fields take the messages of
-  `pyspark.sql.connect.proto` as they are, as PySpark's plugins take PySpark's, and the server
-  receives the plans of Delta Lake 4.0's `delete`, `update` and `merge` as PySpark sends them: the
-  core replaces the placeholder that holds the relation of a DataFrame, which
-  `DataFrame._plan.plan(session)` gives, in the message of an extension too. What stays different
-  (see `docs/compatibility.md`):
+  generates of a file that imports the protos of Spark Connect, directly or through the files it
+  imports (Delta Lake's `delta/connect/relations.proto` and `commands.proto`), of proto2, proto3 or
+  editions, the module of each file of its package (of a package) that it imports (Delta Lake's
+  `delta/connect/base.proto`, also once built), and the module of each file that imports such a
+  file (also once built), get the classes of the drop-in's Rust protobuf
+  runtime when `protobuf`'s metaclass builds them, as the modules of protoc 3.20 and later (through
+  its builder) and those of an older protoc do, which `protobuf`'s lookups of their types give too,
+  so their message fields take the messages of `pyspark.sql.connect.proto` as they are, as
+  PySpark's plugins take PySpark's, and the server receives the plans of Delta Lake 4.0's
+  `delete`, `update` and `merge` as PySpark sends them: the core replaces the placeholder that
+  holds the relation of a DataFrame, which `DataFrame._plan.plan(session)` gives, in the message of
+  an extension too. The files of other packages that such a file imports (a company's shared
+  proto), of no package, and Google's (`google/protobuf/duration.proto`, `google/rpc/status.proto`),
+  keep `protobuf`'s classes, in their modules and of `protobuf`'s lookups, so that the modules of
+  other libraries that import them take their messages as they do without the drop-in, as does a
+  file whose module the runtime does not find. What stays
+  different (see `docs/compatibility.md`):
   - the core replaces that placeholder where it replaces the plan of a DataFrame (see "Plans of a
     DataFrame's relation" above), also one whose `common` the plugin changes, with the change;
-  - its classes are the runtime's, not subclasses of `google.protobuf.message.Message`, while its
-    `DESCRIPTOR`, its `_*` descriptors, its extensions and services stay `protobuf`'s, and
-    `protobuf`'s `message_factory` and `symbol_database` give `protobuf`'s classes of its types,
-    whose messages equal (`==`) the runtime's of the same contents, as upb's of its one class of a
-    type do;
-  - a file that it imports that does not import the protos of Spark Connect (Delta Lake's
-    `delta/connect/base.proto`) keeps `protobuf`'s classes, as the drop-in cannot know, when
-    `protobuf`'s builder builds it, that a plugin's file will import it later, and giving the
-    runtime's classes to every proto3 module would change unrelated libraries. A field of the
-    runtime of one of its types takes `protobuf`'s messages of the type, and gives a message of the
-    runtime's class of the type, not of the module's class, which upb gives, so `isinstance` with
-    the module's class is false, the message pickles only within the message that holds it, and the
-    module's class takes it only through bytes or dicts (`CopyFrom` raises `TypeError`), though the
-    two are equal of the same contents;
-  - a file that is not proto3, or that imports one or a well-known type other than `Any` and
-    `Timestamp`, keeps `protobuf`'s classes, which take the package's messages, and those of a
-    module of a file that it imports that has the runtime's classes (a proto3 file of the plugin
-    that imports the protos of Spark Connect), only through bytes or dicts, where upb's take them
-    as they are. So does a module of protoc before 3.20, which makes its classes with
-    `reflection.GeneratedProtocolMessageType` rather than with `protobuf`'s builder, and a module
-    that builds before `pyspark.sql.connect.proto` is imported, as only one that imports another
-    copy of Spark's generated modules can.
+  - a message field of such a module of a type of a file that keeps `protobuf`'s classes (of
+    another package, or of Google's, such as a well-known type other than `Any` and `Timestamp`)
+    gives a message of the runtime's own class of the type, of the module and qualified names of
+    `protobuf`'s, where upb has one class of each type: `isinstance` with `protobuf`'s class tells
+    them apart, and `protobuf`'s messages of other files take it only through its bytes or a dict
+    (their `CopyFrom`, constructors and containers raise upb's `TypeError` of a message of another
+    class, as `struct_pb2.Struct(fields=message.options.fields)` does), though the two are equal
+    of the same contents, the runtime's fields take `protobuf`'s messages of the type as they are,
+    and it pickles as upb's, of `protobuf`'s class, where `copy.copy` keeps the runtime's;
+  - the runtime's class of such a type pickles as `protobuf`'s class of the type, as its messages
+    do; `cloudpickle` pickles it by value, which fails, so a function that refers to one does not
+    pickle;
+  - the `_concrete_class` of `protobuf`'s descriptor of a type of the runtime's classes is, of
+    upb, upb's `SystemError` (as upb's of a type that it made no class of, since upb gives only the
+    classes that it made), and, of `protobuf`'s pure-Python implementation, the runtime's class,
+    which the runtime sets of a descriptor of no class, as `protobuf`'s metaclass does, never in
+    place of `protobuf`'s class of a descriptor (of a well-known type, of a module built before);
+    `message_factory.GetMessageClass` gives the runtime's class of either;
+  - a file that declares extensions or extension ranges, or a message set, keeps `protobuf`'s
+    classes, as the runtime has no extensions, and so do the files that import it (a file of custom
+    options, which imports `google/protobuf/descriptor.proto`): their classes take the package's
+    messages, and those of a plugin's module of the runtime's classes, only through bytes or dicts,
+    where upb's take them as they are. A file that the runtime took over that such a file imports
+    gets `protobuf`'s classes back (but a proto of Spark Connect and a file that imports one),
+    whether the file builds before the plugin's or after, in its module, the names of the modules
+    of the plugin's top-level package and `protobuf`'s lookups, so upb's classes of the file take
+    its messages. What the give-back does not reach keeps the runtime's class, which upb's classes
+    of the file refuse (`TypeError`; a dict or the bytes are taken): a name bound outside that
+    top-level package before (`from gb.common_pb2 import Common` in `__main__`), a message of the
+    runtime's class made before the give-back, and the values of the plugin's message fields of
+    the type, which are the runtime's messages;
+  - a name that the runtime binds to its class in place of `protobuf`'s is a global of a module of
+    the top-level package of the module that it takes over (as Delta Lake's
+    `delta/connect/proto/__init__.py` star-imports `base_pb2`), bound to `protobuf`'s class of the
+    type, so `protobuf`'s class that a module of another package or another object holds (an
+    attribute, a closure) stays, as do the messages that it made, which the runtime's fields take
+    as they are, and equal the runtime's of the same contents.
 
 ## Type checking (the stubs of `scripts/gen_type_stubs.py`)
 
@@ -774,7 +789,3 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   PySpark's is that of its Python function: None, or of a docstring that PySpark Connect's modules
   copy (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
   modules of `pyspark.sql` and `pyspark.errors` are PySpark's (see `docs/compatibility.md`).
-- **Modules of messages** (intentional). pyright warns that `pyspark.sql.connect.proto.base_pb2`
-  and the other modules of messages, which the drop-in's protobuf runtime makes at run time, have
-  a stub and no source (`reportMissingModuleSource`). The modules of `pyspark.sql.functions`,
-  PySpark's source, have no warning, as with `pyspark-client`.

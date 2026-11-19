@@ -1,0 +1,67 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// A file of the edition 2023 of a plugin of python/tests/test_proto_rust_offline.py that imports
+// the protos of Spark Connect: its generated module gets the classes of the drop-in's Rust
+// protobuf runtime, which reads the features of its fields and enums (presence, packing, closed
+// enums, delimited messages and UTF-8 validation). See plugin.proto for how the modules are
+// generated.
+
+edition = "2023";
+
+package thirdparty.editions;
+
+import "spark/connect/relations.proto";
+
+option features.field_presence = IMPLICIT;
+
+enum Open {
+  OPEN_ZERO = 0;
+  OPEN_ONE = 1;
+}
+
+enum Closed {
+  option features.enum_type = CLOSED;
+  CLOSED_ONE = 1;
+  CLOSED_TWO = 2;
+}
+
+message Featured {
+  int32 implicit = 1;
+  int32 explicit = 2 [features.field_presence = EXPLICIT, default = 3];
+  string required = 3 [features.field_presence = LEGACY_REQUIRED];
+  repeated int32 packed = 4;
+  repeated int32 expanded = 5 [features.repeated_field_encoding = EXPANDED];
+  Closed closed = 6 [features.field_presence = EXPLICIT];
+  repeated Closed closed_values = 7;
+  Open open = 8;
+  Inner delimited = 9 [features.message_encoding = DELIMITED];
+  repeated Inner delimited_values = 10 [features.message_encoding = DELIMITED];
+  spark.connect.Relation input = 11;
+  string unchecked = 12 [features.utf8_validation = NONE];
+  message Inner {
+    int32 value = 1;
+  }
+}
+
+// A message of a required message field (of LEGACY_REQUIRED) and of a map of strings that a parse
+// does not check the UTF-8 of.
+message Strict {
+  Featured.Inner inner = 1 [features.field_presence = LEGACY_REQUIRED];
+  map<string, string> names = 2 [features.utf8_validation = NONE];
+  map<string, string> checked_names = 3;
+}

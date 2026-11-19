@@ -110,14 +110,15 @@ def pyspark_types_to_proto_types(data_type: DataType) -> "pb2.DataType":
     # ``UNSUPPORTED_OPERATION`` of ``f"data type {data_type}"``, and so does a type that has no
     # proto, such as ``AtomicType()``.
     import pyspark.sql.connect.proto as pb2
-    from pyspark._pyspark import _data_type_proto
+    from pyspark._pyspark import _data_type_proto, _proto_parse_deep
 
     if not isinstance(data_type, DataType):
         raise PySparkValueError(
             errorClass="UNSUPPORTED_OPERATION",
             messageParameters={"operation": f"data type {data_type}"},
         )
-    return pb2.DataType.FromString(_data_type_proto(data_type))
+    # Of any depth, as PySpark builds the message in Python, where upb's parse stops at 100 levels.
+    return _proto_parse_deep(pb2.DataType, _data_type_proto(data_type))
 
 
 def proto_schema_to_pyspark_data_type(schema: "pb2.DataType") -> DataType:

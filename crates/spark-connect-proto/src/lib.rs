@@ -2,7 +2,8 @@
 //!
 //! All messages live in the `spark.connect` protobuf package and are re-exported
 //! here at the crate root. The generated gRPC client is
-//! [`spark_connect_service_client::SparkConnectServiceClient`].
+//! [`spark_connect_service_client::SparkConnectServiceClient`], of the codec [`ClientCodec`],
+//! which tags the status of a response that the client fails to decode.
 //!
 //! Baseline protocol version: see `proto/PROTO_VERSION.txt` / `proto/SPARK_SHA.txt`.
 
@@ -25,3 +26,7 @@ pub const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(
     env!("OUT_DIR"),
     "/spark_connect_descriptor_set.bin"
 ));
+
+mod codec;
+
+pub use codec::{is_client_decode_error, ClientCodec, ClientDecodeError, ClientDecoder};

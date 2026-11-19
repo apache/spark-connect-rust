@@ -1643,126 +1643,201 @@ client:
 
 ## pyspark.ml
 
-The DataFrame-based `pyspark.ml` API (`pyspark.ml.classification`, `feature`,
-`regression`, `clustering`, `evaluation`, `tuning`, `stat`, `Pipeline`, ...) is
-Apache Spark's own, vendored from v4.3.0: estimators fit, models transform, and
-pipelines save and load on the server as with PySpark Connect, over the Rust
-transport. These modules build their own `spark.connect` messages with
+The DataFrame-based `pyspark.ml` API (`pyspark.ml.classification`, `feature`, `regression`,
+`clustering`, `evaluation`, `tuning`, `stat`, `Pipeline`, ...) is Apache Spark's own, vendored from
+v4.3.0: estimators fit, models transform, and pipelines save and load on the server as with PySpark
+Connect, over the Rust transport. These modules build their own `spark.connect` messages with
 `pyspark.sql.connect.proto`, which is the drop-in's own protobuf runtime in Rust
 (`pyspark.sql.connect.proto._rust`) in place of the generated modules of Apache Spark, whether or
-not `protobuf` is installed, so `protobuf` is not a dependency of `pyspark-client-rust`. The
-runtime has the classes, containers, descriptors and descriptor pool of upb, the implementation
-of a `protobuf` install, with their bytes, text, errors and presence (of protobuf 7, where
-protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timestamp field takes a
-`datetime`), and the modules of the protos with the names of the generated modules
-(`pyspark.sql.connect.proto.base_pb2`, ..., and `example_plugins_pb2`, of Spark's example plugin).
-`protobuf`'s `json_format` and `text_format` print and parse its messages, and
+not `protobuf` is installed, so `protobuf` is not a dependency of `pyspark-client-rust`. The runtime
+has the classes, containers, descriptors and descriptor pool of upb, the implementation of a
+`protobuf` install, with their bytes, text, errors and presence (of protobuf 7, where protobuf 6's
+differ), the methods of protobuf's `Any` and `Timestamp` (a Timestamp field takes a `datetime`), and
+the modules of the protos with the names of the generated modules
+(`pyspark.sql.connect.proto.base_pb2`, ..., and `example_plugins_pb2`, of Spark's example plugin),
+whose files in the package are the source that type checkers find next to their stubs. Where
+`protobuf` imports, the classes are of the shape of upb's: of a metaclass `MessageMeta` (which
+refuses a subclass of a message class, gives the one class of a descriptor and gives the attributes
+of the nested enums, their values and the numbers of the fields), subclasses of protobuf's
+`google.protobuf.message.Message` (and of protobuf's methods of a well-known type,
+`well_known_types.WKTBASES`), of protobuf's descriptors of its default pool, to which the files of
+the protos are added, and of protobuf's `EnumTypeWrapper`; they pickle as protobuf's
+`Message.__reduce__` pickles upb's (a message of a nested type of protobuf's
+`_InternalConstructMessage`, so that such a pickle loads where `protobuf` imports), and a parse that
+fails raises protobuf's `DecodeError` itself, of upb's message (`Error parsing message with type
+'spark.connect.Plan': Wire format was corrupt`), as a serialization of a message that lacks a
+required field raises its `EncodeError`. As upb's, a message of more than 100 levels of messages
+below it fails where upb parses its bytes, of upb's `Exceeded upb_DecodeOptions_MaxDepth` and of
+what the parse keeps: in a parse, the load of a pickle, `Any.Unpack`, `MergeFrom`, `copy.copy`, a
+constructor given a message for a field or a repeated field (`Plan(root=relation)`), and `append`,
+`extend` and `insert`, while `CopyFrom` (of a message of `protobuf`'s of the type too), `==`,
+`copy.deepcopy`, the value of a map and the mappings of a constructor copy any depth, and the
+drop-in's own parses of the messages that PySpark builds in Python (`Column._expr`, a type of
+`pyspark_types_to_proto_types`, the requests that session hooks see) and of the responses of the
+server (see "SparkSession.client") take any depth. Once upb's `SetAllowOversizeProtos(True)`
+(`api_implementation._c_module`) is called, before the package imports or after (also of a reference
+to the function taken before, which a parse that reaches the limit of 100 levels asks upb of again,
+as upb tells of no other way), the limit is 65535 levels, as upb's; upb's parser, which recurses on
+the stack, ends the process past about 50,000 levels, where the runtime's grows its stack. A call of
+a reference taken before that sets it back to False is not seen once a parse found it set. Of
+protobuf's pure-Python implementation, the limit is that of its `decoder.SetRecursionLimit` (100 of
+none), as of its parsers, of upb's message (where its own parser's is `Error parsing message: too
+many levels of nesting.`), as of the runtime's other errors. A parse that fails keeps what upb's
+decoder keeps of its input stream: a value cut short by the end of its message is read of the bytes
+that follow it, and of zeros past the end of the data, and set before the parse fails, but an
+undeclared value of a closed enum of a field that is not packed read past the end of its message,
+which is not kept; an undeclared value of a closed enum is kept in the unknown fields of the bytes
+of its field as they are (of a packed field, of a tag of its own and the 64 bits of the value), a
+length of more than five bytes is corrupt, a field (of a group too) of the number 0 is an unknown
+field of a message type of no fields (`google.protobuf.Empty`), and an unknown group past the limit
+is corrupt (`Wire format was corrupt`), as upb's. A string or bytes member of a oneof whose bytes
+fail to parse after a member that holds a message is empty, where upb reads the memory of that
+message as the string, of the length of a string that the oneof held before, which no program can
+rely on. `protobuf`'s `json_format` and `text_format` print and parse its messages, and
 `unknown_fields.UnknownFieldSet` reads their unknown fields, which `text_format` prints with
-`print_unknown_fields=True` (see below). The differences:
+`print_unknown_fields=True` (see below). Without `protobuf` (which PySpark does not run without),
+the classes are of the runtime's own descriptors and pool, which Python code adds no file to, of the
+runtime's base of protobuf's methods of `Message` (`_rust._MessageBase`), a message of a nested type
+pickles of its class's qualified name, `GetOptions()` of a descriptor needs `protobuf`, and the
+errors are the runtime's `DecodeError` and `EncodeError`. The differences:
 
-- its types are of `pyspark.sql.connect.proto`, not `google.protobuf`: its classes are of the
-  metaclass `type`, not upb's `MessageMeta`, and can be subclassed, which upb refuses, and its map
-  of scalars is a `MapContainer`, where upb's is a `ScalarMapContainer`, of which its map of
-  messages, a `MessageMapContainer` as upb's, is a subclass. The methods of its containers take
-  their arguments as upb's do, positionally
-  (`RepeatedScalarContainer.append() takes no keyword arguments`), with upb's errors, of the
-  names of upb's classes of the maps too
-  (`ScalarMapContainer.MergeFrom() takes exactly one argument (0 given)`). A dunder method of a
-  map called directly with the wrong arguments (`map.__eq__()`) is an exception: its error is
-  that of CPython's slot wrapper of the native type (`expected 1 argument, got 0`), where upb's
-  `__eq__` of a map is `Mapping.__eq__`, a Python function. So is a keyword argument of
-  `setdefault`, `insert`, `pop` or `__deepcopy__` (upb's `METH_VARARGS` methods) called through a
-  bound method object (`f = map.setdefault; f(key="k")`): CPython's error of upb's names the
-  method only (`setdefault() takes no keyword arguments`), as of a bound builtin method, and the
-  runtime's method, which cannot tell that call from one of the map, names the class too. Before
-  Python 3.12, while a trace or a profile function is set (`coverage`, a debugger), CPython calls
-  each such method as a bound method, and the runtime's error then names the method only too;
-- the pool of its descriptors (`DESCRIPTOR.file.pool`) is its own, of the files of the protos of
-  Spark Connect and of the plugins' files that the drop-in adds to it (see below), not
-  `protobuf`'s default pool: it finds their descriptors as upb's does, but has no `Add`,
-  `AddSerializedFile` or `SetFeatureSetDefaults`, so Python code adds no file to it;
-- it parses, copies, prints and builds messages of any depth, where upb refuses a message of more
-  than 100 nested messages wherever it reads one of its bytes: in the parse, the load of a pickle
-  and `Any.Unpack`, and where it copies a message by its bytes, in `MergeFrom`, `copy.copy`, the
-  `append`, `extend` and `insert` of a repeated field, and a constructor given the message of a
-  field or of a repeated field (`Plan(root=relation)`), though `CopyFrom`, `copy.deepcopy` and a
-  value of a map field of a constructor copy any depth. upb's constructor also overflows the stack
-  of a thread from thousands of nested dicts, and `text_format` exceeds Python's recursion limit;
+- its types are of `pyspark.sql.connect.proto`, not of upb's `google._upb._message`: its metaclass
+  is `pyspark.sql.connect.proto._rust.MessageMeta`, its classes subclass the runtime's `Message`
+  (`pyspark.sql.connect.proto.Message`), its maps of scalars and of messages are its
+  `ScalarMapContainer` and `MessageMapContainer`, of a base `MapContainer`, and its messages take
+  weak references, which upb's refuse, as the runtime's unset messages and containers hold the
+  message that they set weakly. The runtime's `Message` has the `__reduce__`, `__getstate__` and
+  `__setstate__` of the results of protobuf's (of upb's pickles), which take less time than
+  protobuf's Python ones, and a `__copy__`, which copies a message of its fields (of upb's bytes
+  past the limit of a parse), where upb's `copy.copy` is protobuf's `__reduce__`, a parse of the
+  bytes: so `dir()` of a class and of a message list `__copy__`, which upb's do not. The metaclass
+  gives the attributes of a class (the wrappers of the nested enums, the numbers of their values
+  and of the fields) when it makes the class, where upb's binds each when it is read, so that a
+  read of an attribute of a class takes no more time than of a Python class: `dir()` and `vars()`
+  of a class list them before they are read, and the `AttributeError` of a name that a class
+  lacks is Python's (`type object 'Join' has no attribute 'nope'`), where upb's is of the name
+  only (`nope`); as upb's, a name of the suffix `_FIELD_NUMBER` is only the number of a field,
+  not a nested enum or a value of one of the name. The methods of its containers take their
+  arguments as upb's do, positionally
+  (`RepeatedScalarContainer.append() takes no keyword arguments`), with upb's errors, of the names
+  of upb's classes of the maps too (`ScalarMapContainer.MergeFrom() takes exactly one argument (0
+  given)`). A dunder method of a map called directly with the wrong arguments
+  (`map.__eq__()`) is an exception: its error is that of CPython's slot wrapper of the native type
+  (`expected 1 argument, got 0`), where upb's `__eq__` of a map is `Mapping.__eq__`, a Python
+  function. So is a keyword argument of `setdefault`, `insert`, `pop` or `__deepcopy__` (upb's
+  `METH_VARARGS` methods) called through a bound method object (`f = map.setdefault; f(key="k")`):
+  CPython's error of upb's names the method only (`setdefault() takes no keyword arguments`), as of
+  a bound builtin method, and the runtime's method, which cannot tell that call from one of the map,
+  names the class too. Before Python 3.12, while a trace or a profile function is set (`coverage`, a
+  debugger), CPython calls each such method as a bound method, and the runtime's error then names
+  the method only too;
 - where Python code that a method of a container runs (an `__index__`, an `__eq__`, an iterable)
   shortens the container, a read past its end raises `IndexError` and an insertion or a deletion
   takes the container as it is, where upb reads or writes past the end of its array, which can
   end the process;
 - the iteration order of a map is the order of insertion, where upb's is that of its hash table,
-  which changes from one process to another. The serialization of a map writes its entries in
+  which changes from one process to another (two processes of upb serialize the same `Struct` of
+  other orders), so no program can rely on upb's. The serialization of a map writes its entries in
   the order of their keys of upb's deterministic serialization
   (`SerializeToString(deterministic=True)`), with `deterministic` or without it, where upb's
   serialization without it writes them in the order of its hash table; `str()` and `repr()` write
   them in upb's order of the keys of its text, and `text_format` in its own, as of upb's messages.
   upb's orders take the keys of a signed integer type as unsigned numbers, so that a negative key
   comes after the others;
-- a varint that the end of the data, or of its packed field, cuts short fails the parse with a
-  `DecodeError`, as upb's parse fails, but the message keeps less of it: upb keeps a value of the
-  bytes that it read past the varint (of the next field, or zeros past the end of the data), and the
-  values of the packed field before it, where the runtime keeps neither;
 - it makes a Python object of each message that it parses or copies, where upb makes one when the
   message is read, so the parse, the copy and the release of a message of many messages take
-  several times as long as upb's (0.3 s for the parse of a million messages, upb's 0.05 s, with
-  no other thread running). The parse, the constructor (of lists and mappings too), the copies
-  (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the merges
-  (`MergeFrom`), the `extend` of a repeated field of messages and the `update` and `MergeFrom` of
-  a map let another thread take the GIL, and a signal interrupt them with the exception of its
-  handler, every 1,024 steps of the operation (a message that it reads, makes or copies, an entry
-  of a map, or a value of a repeated field that the constructor takes), where upb holds the GIL
-  until they end (but in the `update` and `MergeFrom` of a map and the constructor of a map of
-  scalars, which run `MutableMapping.update` in Python, as the runtime's constructor runs it of a
-  value that is not a dict), so another thread can use a message that
-  one of them reads meanwhile. `SerializeToString`, `==` of two messages of the runtime and the
-  release of a message hold the GIL until they end, as upb's do: 0.07 s, 0.05 s and 0.07 s for a
-  million messages, where upb's take 0.04 s, 0.14 s and 2 ms. The messages that a parse or a copy
-  makes within the message that it parses or copies into, those of `copy.deepcopy`, and that of a
-  read of an unset field are not tracked by the garbage collector (`gc.is_tracked`), as they make
-  no reference cycles, so that a collection does not go through the messages of a large message;
-  the message of a constructor, of `FromString`, and that `ParseFromString` or `CopyFrom` fills, are
-  tracked;
-- the pickle of a message of a nested type names its class, which loads without `protobuf`,
-  where upb's names protobuf's `_InternalConstructMessage` of the full name of its type, which
-  loads where `protobuf` is installed once `pyspark.sql.connect.proto` is imported, as in PySpark,
-  where its generated modules add the files to protobuf's default pool (as a message of the
-  runtime, whose classes of the protos of Spark Connect are those of protobuf's default symbol
-  database; those of a plugin's files stay `protobuf`'s there, as below). As PySpark's,
-  `pyspark.sql.connect.client.core` imports the package, so a pickle of PySpark's
-  `PlanObservedMetrics`, such as one in the `attrs` of a pandas DataFrame of `toPandas`, which
-  imports that module before it makes its messages, loads in a new process;
-- the pickle of an `Any` or a `Timestamp` names its class of the runtime, of the module
-  `pyspark.sql.connect.proto._rust.any_pb2` or `timestamp_pb2`, which loads where the drop-in is
-  installed, with or without `protobuf`, where upb's names `protobuf`'s class
-  (`google.protobuf.any_pb2.Any`): so a pickle of the drop-in's does not load in PySpark, such as
-  in the Python worker of the server that runs a UDF that holds one, and one of PySpark's loads,
-  where `protobuf` is installed, as a message of `protobuf`'s class, which the runtime's fields
-  take as they are;
-- a parse that fails raises upb's message (`Error parsing message with type 'spark.connect.Plan':
-  Wire format was corrupt`) of the runtime's class, `pyspark.sql.connect.proto._rust.DecodeError`,
-  where upb raises `google.protobuf.message.DecodeError` itself. Where `protobuf` is installed (of
-  either implementation), the runtime's class is a subclass of `protobuf`'s, so `except
-  google.protobuf.message.DecodeError` catches it, as it catches upb's, but `type(error)` is not
-  `protobuf`'s class, and a traceback names the runtime's; without `protobuf`, it is a subclass of
-  `pyspark._pyspark.ProtoDecodeError` only. Its pickle names the runtime's class, so it loads
-  where the drop-in is installed, with or without `protobuf`;
-- `GetOptions()` of a descriptor gives `protobuf`'s `descriptor_pb2` options, as upb's does, so
-  it needs `protobuf`.
+  several times as long as upb's (of CPU time, of a message of a million messages: 0.3 s for the
+  parse, upb's 0.04 s, 0.3 s for `CopyFrom` and `copy.deepcopy`, upb's 0.1 s, and 0.3 s for
+  `MergeFrom`, upb's 0.07 s). The parse, the constructor (of lists and mappings too),
+  the copies (`CopyFrom`, and `copy.deepcopy` of a message or of a repeated field of messages), the
+  merges (`MergeFrom`), the `extend` of a repeated field of messages and the `update` and
+  `MergeFrom` of a map let another thread take the GIL, and a signal interrupt them with the
+  exception of its handler, every 1,024 steps of the operation (a message that it reads, makes or
+  copies, an entry of a map, or a value of a repeated field that the constructor takes), where upb
+  holds the GIL until they end (but in the `update` and `MergeFrom` of a map and the constructor of
+  a map of scalars, which run `MutableMapping.update` in Python, as the runtime's constructor runs
+  it of a value that is not a dict), so another thread can use a message that one of them reads
+  meanwhile. `SerializeToString`, `==` of two messages of the runtime and the release of a message
+  hold the GIL until they end, as upb's do: 0.09 s, 0.07 s and 0.08 s for a million messages, where
+  upb's take 0.03 s, 0.13 s and 3 ms. The messages that a parse or a copy makes within the
+  message that it parses or copies into, those of `copy.deepcopy`, and that of a read of an unset
+  field are not tracked by the garbage collector (`gc.is_tracked`), as they make no reference
+  cycles, so that a collection does not go through the messages of a large message; the message of
+  a constructor, of `FromString` and of `copy.copy`, and that `ParseFromString` or `CopyFrom`
+  fills, are tracked, as upb's;
+- the classes of `Any` and `Timestamp` are the runtime's own, of its modules
+  (`pyspark.sql.connect.proto._rust.any_pb2` and `timestamp_pb2`), where `protobuf`'s modules
+  (`google.protobuf.any_pb2`) keep `protobuf`'s classes. Where `protobuf` imports, a message of
+  one pickles as upb's, of `protobuf`'s class (`google.protobuf.any_pb2.Any`), of the same bytes,
+  so the pickle loads wherever `protobuf` does, as in the Python worker of the server that runs a
+  UDF that holds one, and in the drop-in as a message of `protobuf`'s class, which the runtime's
+  fields take as they are, as one of PySpark's does; `copy.copy` keeps the runtime's class.
+  Without `protobuf`, a pickle of protocol 4 or later names the class by the name that the module
+  of the first proto of Spark Connect that imports its file binds it to, which is the class's own
+  (`pyspark.sql.connect.proto.base_pb2` and `google_dot_protobuf_dot_any__pb2.Any`, whose `repr`
+  the class has), of no other global: it loads in PySpark as a message of `protobuf`'s class (whose
+  generated module binds `protobuf`'s module there), where `pyspark.sql.connect` imports (which
+  needs `grpcio` and the other dependencies of PySpark's Spark Connect, as PySpark's pickles of the
+  package's messages do), and in the drop-in of the runtime's, with or without `protobuf`. One of
+  an earlier protocol, which has no such dotted names, names the runtime's function
+  `pyspark.sql.connect.proto._rust._new_message`, and loads only in the drop-in, as the class
+  itself does of such a protocol, which `pickle` names as the attribute of the runtime's module of
+  its file, which pickles by its name.
+  A message of a nested type pickles of `protobuf`'s `_InternalConstructMessage` where `protobuf`
+  imports, as upb's, so a drop-in without `protobuf` does not load it (as it does not load
+  PySpark's), and of its class's qualified name without `protobuf`
+  (`pyspark.sql.connect.proto.expressions_pb2` and `Expression.Literal`), which loads in PySpark
+  and in the drop-in, with or without `protobuf`.
 
 Where `protobuf` is installed, the files of the protos of Spark Connect are added to its default
 descriptor pool, as the generated modules add them. The modules that protoc generates of other
 protos that import them (those of a plugin, such as Delta Lake's Connect client) then build, and
-`json_format` finds the types of an `Any`. Such a module, of a proto3 file that imports the protos
-of Spark Connect directly or through the files it imports, gets the classes of the runtime when
-`protobuf`'s builder builds it (the drop-in wraps `builder.BuildTopDescriptorsAndMessages`, which
-the modules of protoc 3.20 and later call, but not those of an older protoc, as below), and its
-files are added to the runtime's pool. So their message fields take the messages of
-`pyspark.sql.connect.proto` as they are, as `protobuf`'s messages of PySpark's plugins take
-PySpark's: Delta Lake 4.0's `DeltaTable.delete`, `update` and `merge` build their plans with
-`CopyFrom` of the package's messages, of the bytes, text and JSON of PySpark's, with either
-implementation of `protobuf`. The relation of a DataFrame that such a message takes
+`json_format` finds the types of an `Any`. Such a module, of a file of proto2, proto3 or editions
+that imports the protos of Spark Connect directly or through the files it imports, gets the classes
+of the runtime when `protobuf`'s metaclass builds them: the drop-in wraps
+`reflection.GeneratedProtocolMessageType` (and the one of `message_factory`), which the builder of
+the modules of protoc 3.20 and later calls, as do the modules of an older protoc themselves, and
+`message_factory.GetMessageClass`, and the files are added to the runtime's pool. So their message
+fields take the messages of `pyspark.sql.connect.proto` as they are, as `protobuf`'s messages of
+PySpark's plugins take PySpark's: Delta Lake 4.0's `DeltaTable.delete`, `update` and `merge` build
+their plans with `CopyFrom` of the package's messages, of the bytes, text and JSON of PySpark's,
+with either implementation of `protobuf`. The runtime reads the presence, defaults, packing,
+required fields, closed enums, groups and the strings that a parse does not check of proto2 and of
+the features of editions (of maps too), of upb's behaviors and errors of them. The module of a file
+of the package of such a file that it imports (of a package: files of no package are not of one)
+gets the runtime's classes too, also one that `protobuf`'s builder built first (Delta Lake's
+`delta/connect/proto/__init__.py` imports `base_pb2`, of `delta/connect/base.proto`, of the package
+`delta.connect`, which does not import the protos, before the modules that do): the runtime takes
+over the module, found as the module of `protobuf`'s class of a message of the file, else as a
+module of the top-level package of that module's name or of the plugin's module whose `DESCRIPTOR`
+is the file and that has the descriptors of its builder (`_DELTATABLE`, which a package that
+star-imports it has not), as a module of the name of protoc's path of the file
+(`delta.connect.base_pb2`) is imported of another (`delta.connect.proto.base_pb2`), and each name
+of a global of a module of its top-level package (`delta`) that is bound to one of `protobuf`'s
+classes that they replace (the package's, of its star import), but a name bound to another object:
+the runtime reads the names of `sys.modules` once of a top-level package, and rebinds the globals of
+its modules once, of all the modules that it takes over at once. The classes are of the module that
+`protobuf`'s builder named, as upb's. A file whose module the
+runtime does not find keeps `protobuf`'s classes. Each file that imports a file that the runtime
+holds so, but no proto of Spark Connect, gets the runtime's classes too, as Delta Lake's
+`commands.proto` would of `base.proto` alone, of its module built before (of `protobuf`'s symbol
+database) or after, so that its messages and those of the file take each other's as upb's of one
+class of each type. The files of other packages that such a file imports (a company's shared
+proto), and Google's (`google/protobuf/duration.proto`, `google/rpc/status.proto`), keep
+`protobuf`'s classes, in their modules and of `protobuf`'s lookups, as do the files that no such
+file imports, so that the modules of other libraries that import them (`grpcio-status`,
+`google/longrunning/operations.proto`) take their messages as they do without the drop-in. A module
+that protobuf's builder built before `pyspark.sql.connect.proto` is imported, as only a copy of
+Apache Spark's generated modules of the same protos can, gets the classes of the package (of a
+proto of Spark Connect) or the runtime's (of a file that imports them) once the package is
+imported, of the modules of the classes of `protobuf`'s symbol database. Whether a file imports the
+protos is known of each file once, and `message_factory.GetMessageClass` of a type of the default
+pool that keeps `protobuf`'s class looks it up once, so neither reads `sys.modules` nor costs more
+than a lookup of a dict afterwards; of a type of another pool, it costs the lookups of its file and
+pool too. The `DESCRIPTOR` of such a class is `protobuf`'s descriptor of its type, the
+module's (`_DELETEFROMTABLE`), and `protobuf`'s lookups of its type
+(`message_factory.GetMessageClass`, `symbol_database`, and the load of a pickle of a nested type)
+give the class. The relation of a DataFrame that such a message takes
 (`df._plan.plan(session)`, as `merge` takes the plan of its source DataFrame) is a placeholder that
 holds the relation of the DataFrame (see "SparkSession.client" below), as in the plans of
 `pyspark.ml`: the core replaces it when the plan or the command reaches it, so the server receives
@@ -1770,37 +1845,58 @@ the relation, as PySpark's plugins send it: also anywhere in the message of the 
 relation or of a command, of a type that it does not know, as long as the message holds the
 placeholder as `plan(session)` gives it, or with the `common` that the plugin sets on it.
 "SparkSession.client" below lists the places where the core replaces it: under any relation, in
-any command that holds one, and in the extension of an expression.
-Its classes are the runtime's, as those of the package (not `google.protobuf.message.Message`'s),
-and the rest of such a module is `protobuf`'s:
+any command that holds one, and in the extension of an expression. What differs of such a module:
 
-- its `DESCRIPTOR` and the descriptors of its messages and enums (`_DELETEFROMTABLE`), whose
-  options and serialized ranges the generated code sets with `protobuf`'s pure-Python
-  implementation, and its extensions and services. `protobuf`'s own lookups of its types
-  (`message_factory.GetMessageClass`, `symbol_database`) give `protobuf`'s classes of them, which
-  the builder makes too, as without the drop-in; a class of those takes a message of the package
-  only through its bytes (`plugin.input.ParseFromString(relation.SerializeToString())`) or a dict;
-- a file that it imports that does not import the protos of Spark Connect (Delta Lake's
-  `delta/connect/base.proto`) keeps `protobuf`'s classes in its own module: when `protobuf`'s
-  builder builds such a file, the drop-in cannot know that a plugin's file will import it later
-  (Delta Lake's `delta/connect/proto/__init__.py` imports `base_pb2` first), and giving the
-  runtime's classes to every proto3 module would change the classes of unrelated libraries. A
-  message field of the runtime of one of its types takes `protobuf`'s messages of the type, by their
-  full name and bytes, and gives a message of the runtime's class of the type, which is not the
-  module's class: `isinstance(relation.scan.table, base_pb2.DeltaTable)` is false, such a message
-  pickles only within the message that holds it, and the module's class takes it only through its
-  bytes or a dict (`base_pb2.DeltaTable().CopyFrom(relation.scan.table)` raises `TypeError`), though
-  the two are equal (`==`) of the same contents, as below;
-- a file that is not proto3 (of proto2 or of editions, whose presence, defaults and packing the
-  runtime does not read), or that imports one, or a well-known type other than `Any` and
-  `Timestamp` (`protobuf`'s classes of `Duration`, `Struct` and the others have methods that the
-  runtime's classes would lack), keeps `protobuf`'s classes, which take the package's messages,
-  and those of a module of a file that it imports that has the runtime's classes (a proto3 file
-  of the plugin that imports the protos of Spark Connect), only through bytes or dicts, where
-  upb's take them as they are;
-- a module of protoc before 3.20, which makes its classes with `protobuf`'s
-  `reflection.GeneratedProtocolMessageType` rather than with its builder, keeps `protobuf`'s
-  classes, which take the package's messages only through bytes or dicts, whatever its file.
+- a message field of such a module of a type of a file that keeps `protobuf`'s classes (of a
+  well-known type other than `Any` and `Timestamp`, such as `Duration` or `Struct`, or of a file of
+  another package) gives a message of the runtime's own class of the type, of the module and
+  qualified names of `protobuf`'s (`google.protobuf.duration_pb2.Duration`), of protobuf's methods
+  of a well-known type (`ToTimedelta`, the mapping of a `Struct`) and of upb's assignments,
+  comparisons and membership of a `Struct` and a `ListValue`, where upb has one class of each type:
+  `isinstance(message.timeout, duration_pb2.Duration)` is false, and `protobuf`'s messages of other
+  files take the runtime's message only through its bytes or a dict (their `CopyFrom`,
+  constructors and containers raise upb's `TypeError` of a message of another class, as
+  `struct_pb2.Struct(fields=message.options.fields)` does, where
+  `struct_pb2.Struct.FromString(message.options.SerializeToString())` reads it), and errors name
+  the runtime's class, though the two are equal (`==`) of the same contents and the runtime's
+  fields take `protobuf`'s messages as they are. A message of one pickles as upb's, of
+  `protobuf`'s class, so it loads as a message of `protobuf`'s class, where `copy.copy` gives one
+  of the runtime's;
+- the class of the runtime of such a type pickles as `protobuf`'s class of the type (`pickle`
+  gives `protobuf`'s class), as its messages do; `cloudpickle` pickles a class that is not of its
+  module's name by value, which it cannot of such a class, so a function that refers to one does
+  not pickle;
+- the `_concrete_class` of `protobuf`'s descriptor of a type of the runtime's classes is, of upb,
+  upb's `SystemError: error return without exception set`, as of a type that upb made no class of
+  (upb gives only the classes that it made), and, of `protobuf`'s pure-Python implementation, the
+  runtime's class, which the runtime sets of a descriptor of no class, as `protobuf`'s metaclass
+  does, but never in place of `protobuf`'s class of a descriptor (of a well-known type, or of a
+  module built before), so `protobuf`'s messages of other files make and take theirs;
+  `message_factory.GetMessageClass` gives the runtime's class of either;
+- a file that declares extensions or extension ranges, or a message set, keeps `protobuf`'s
+  classes, as the runtime has no extensions, and so do the files that import it (as a file of
+  custom options imports `google/protobuf/descriptor.proto`): their classes take the package's
+  messages, and those of a plugin's module of the runtime's classes, only through bytes or dicts,
+  where upb's take them as they are. Since upb's classes of such a file take only upb's messages
+  of the files that it imports, a file that the runtime took over (of a plugin's package, or that
+  imports one that it holds) that it imports gets `protobuf`'s classes back, in its module, the
+  names of the modules of the plugin's top-level package and `protobuf`'s lookups, with the files
+  that it imports (but a proto of Spark Connect and a file that imports one), whether the file
+  builds before the plugin's or after (also of a module built after the runtime held its file of a
+  lookup, as `message_factory.GetMessageClass` of a plugin's type of the default pool holds its
+  files before their modules build): its messages are then of `protobuf`'s classes, as without
+  the drop-in, and the runtime's classes of its types are of the shadows of a file of another
+  package (above). What the give-back does not reach keeps the runtime's class, which upb's
+  classes of such a file refuse (`TypeError`, where a dict or the bytes are taken): a name bound
+  outside the modules of that top-level package before (`from gb.common_pb2 import Common` in
+  `__main__`), a message of the runtime's class made before the give-back, and the values of the
+  plugin's message fields of the types, which are the runtime's messages;
+- the names that the runtime binds to its classes in place of `protobuf`'s are the globals of the
+  modules of the top-level package of the module that it takes over, so `protobuf`'s class of a
+  type that a module of another package or another object holds (an attribute, a closure) stays,
+  as do the messages that it made before, which the runtime's fields take as they are. The
+  globals of a module are read of its `__dict__`, so that a lazy module
+  (`importlib.util.LazyLoader`) is not loaded.
 
 The other way, the messages of `pyspark.sql.connect.proto` take `protobuf`'s messages of their types
 as they are, the `MergeFrom` of their maps takes the items of `protobuf`'s maps, as upb's takes
@@ -1808,7 +1904,10 @@ those of any mapping but a dict, and an `Any` of either packs and unpacks a mess
 message of the runtime equals (`==`, on either side) a message of `protobuf`'s of its type of
 `protobuf`'s default pool of the same contents, as upb's messages of its one class of a type do: the
 runtime parses the bytes of `protobuf`'s message to compare it, as a field of the runtime takes it,
-so `in`, `remove` and `==` of the containers find such messages too. A message of a type of another
+so `in`, `remove` and `==` of the containers find such messages too. Of `protobuf`'s pure-Python
+implementation, whose `==` of its message reads the unknown fields of the other
+(`_unknown_fields`), a message of the runtime has them, of the bytes of the tag and of the value of
+each. A message of a type of another
 pool, of another class for upb too, is not equal, and `CopyFrom`, `MergeFrom`, the constructors and
 the containers refuse it with upb's errors of a message of another class, as they refuse an object
 that only has the `DESCRIPTOR` and the `SerializeToString` of a message. As upb's, `==` of two
@@ -2204,18 +2303,29 @@ no `__wrapped__` (the drop-in captures the call site of a Column in the Rust cor
 has none of the classes of PySpark Connect's expressions that its module imports (`CaseWhen`,
 `ColumnReference`, ...), nor `np`, and the private helpers of the Rust core are its own; and the
 annotations name the class of `pyspark.sql.column.Column`, which is PySpark Connect's class (see
-below), where those of `pyspark-client` name its classic class. pyright warns that an import of a
-module of messages, such as `from pyspark.sql.connect.proto import base_pb2`, could not be
-resolved from source (`reportMissingModuleSource`): its stub is PySpark's (`base_pb2.pyi`), and the
-drop-in's protobuf runtime makes the module at run time.
+below), where those of `pyspark-client` name its classic class. An import of a module of
+messages, such as `from pyspark.sql.connect.proto import base_pb2`, has no warning of pyright: its
+stub is PySpark's (`base_pb2.pyi`), and the module, which the drop-in's protobuf runtime makes at
+run time, has a file of the package as its source.
 
 The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests
 that session hooks see, at any depth that PySpark's serializer reaches, where the parsers of
 protobuf and prost stop at 100 nested messages. Its Rust client enables prost's
 `no-recursion-limit` feature, which applies to every message the drop-in decodes. So it also
 decodes server responses deeper than 100 nested messages, such as the schema of a struct nested
-34 levels deep, which PySpark's client rejects with "Exception deserializing response!". The
-server is trusted, as SECURITY.md sets out, so this is not a bound on the responses.
+34 levels deep, which PySpark's client rejects with "Exception deserializing response!", and so do
+the actions of a DataFrame of the observed metrics of a struct nested as deep (`collect()`,
+`toPandas()`, its `executionInfo` and the `Observation`'s `get`) and the messages of the responses
+that `SparkSession.client` parses (of `schema`, `config`, `to_table`, the results of commands and
+the statuses of operations), of the runtime's parse of any depth. A response that does not parse,
+of the drop-in's Rust client or of `SparkSession.client`, raises PySpark's error of a response that
+gRPC's deserializer refuses: the `SparkConnectGrpcException` of the status `INTERNAL`, of the text
+of grpc's error of the call (`_InactiveRpcError`, or `_MultiThreadedRendezvous` of an execution)
+whose details are "Exception deserializing response!" (and whose `debug_error_string` is `None`),
+where the error of the Rust API is prost's (`[Internal] failed to decode Protobuf message: ...`):
+the codec of the client tags its own failure, so a status of the server of the same text (of a
+server of tonic that fails to decode a request) is the server's error. The server is trusted, as
+SECURITY.md sets out, so this is not a bound on the responses.
 
 The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested
 expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it

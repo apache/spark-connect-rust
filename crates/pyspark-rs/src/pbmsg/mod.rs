@@ -8,8 +8,9 @@
 //! ([`message`]), read the descriptors of the protos that the proto crate compiles ([`pool`]),
 //! and encode and decode the wire format here ([`codec`]), with the Python API of protobuf's
 //! messages, containers, descriptors and descriptor pool. The messages of a plugin's protos that
-//! import those of Spark Connect run on it too: the files of the modules that protoc generates of
-//! them are added to its pool when protobuf's builder builds them ([`pool::register`]).
+//! import those of Spark Connect (of proto2, proto3 or editions) run on it too: the files of the
+//! modules that protoc generates of them are added to its pool when protobuf's metaclass builds
+//! their classes ([`pool::register`]).
 
 mod codec;
 mod containers;
@@ -32,19 +33,61 @@ pyo3::create_exception!(
     "The error of parsing a protocol message, as protobuf's `google.protobuf.message.DecodeError`."
 );
 
+pyo3::create_exception!(
+    pyspark.sql.connect.proto,
+    EncodeError,
+    pyo3::exceptions::PyException,
+    "The error of serializing a protocol message, as protobuf's `google.protobuf.message.EncodeError`."
+);
+
+/// The class of the error of a serialization of a message that lacks a required field, which
+/// `_proto_set_encode_error` set: `protobuf`'s `google.protobuf.message.EncodeError`, which upb
+/// raises, where `protobuf` imports, else [`EncodeError`].
+static ENCODE_ERROR_CLASS: Mutex<Option<Py<PyType>>> = Mutex::new(None);
+
+/// Set the class of the error of a serialization that fails, an exception class.
+#[pyfunction]
+fn _proto_set_encode_error(class: &Bound<'_, PyType>) -> PyResult<()> {
+    if !class.is_subclass_of::<pyo3::exceptions::PyException>()? {
+        return Err(PyTypeError::new_err(format!(
+            "{} is not an exception class",
+            class.str()?
+        )));
+    }
+    let previous = ENCODE_ERROR_CLASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .replace(class.clone().unbind());
+    drop(previous);
+    Ok(())
+}
+
+/// The error of a serialization that fails, of upb's `message`, of the class that
+/// `_proto_set_encode_error` set, else of [`EncodeError`].
+pub(crate) fn encode_error_of(py: Python<'_>, message: String) -> PyErr {
+    let class = ENCODE_ERROR_CLASS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|class| class.clone_ref(py));
+    match class {
+        Some(class) => PyErr::from_type(class.into_bound(py), (message,)),
+        None => EncodeError::new_err(message),
+    }
+}
+
 /// The class of the error of a parse that fails, which `_proto_set_decode_error` set:
-/// `pyspark.sql.connect.proto._rust.DecodeError`, a subclass of [`DecodeError`] and, where
-/// protobuf imports, of protobuf's `google.protobuf.message.DecodeError`, which upb raises, so
-/// that `except google.protobuf.message.DecodeError` catches it.
+/// `protobuf`'s `google.protobuf.message.DecodeError`, which upb raises, where `protobuf`
+/// imports, else `pyspark.sql.connect.proto._rust.DecodeError`, a subclass of [`DecodeError`].
 static DECODE_ERROR_CLASS: Mutex<Option<Py<PyType>>> = Mutex::new(None);
 
-/// Set the class of the error of a parse that fails, a subclass of `ProtoDecodeError` (see
+/// Set the class of the error of a parse that fails, an exception class (see
 /// [`decode_error_of`]), in place of the one set before.
 #[pyfunction]
 fn _proto_set_decode_error(class: &Bound<'_, PyType>) -> PyResult<()> {
-    if !class.is_subclass_of::<DecodeError>()? {
+    if !class.is_subclass_of::<pyo3::exceptions::PyException>()? {
         return Err(PyTypeError::new_err(format!(
-            "{} is not a subclass of ProtoDecodeError",
+            "{} is not an exception class",
             class.str()?
         )));
     }
@@ -70,6 +113,48 @@ pub(crate) fn decode_error_of(py: Python<'_>, message: String) -> PyErr {
         Some(class) => PyErr::from_type(class.into_bound(py), (message,)),
         None => DecodeError::new_err(message),
     }
+}
+
+/// protobuf's `google.protobuf.message._InternalConstructMessage`, which the pickle of a message
+/// of a nested type names where `protobuf` imports, as protobuf's `Message.__reduce__` names it,
+/// which `_proto_set_internal_construct` set; none without `protobuf`, so that such a pickle names
+/// the class of the message by its qualified name.
+static INTERNAL_CONSTRUCT: Mutex<Option<Py<PyAny>>> = Mutex::new(None);
+
+/// Set the function of the pickles of the messages of nested types (see [`INTERNAL_CONSTRUCT`]),
+/// or none.
+#[pyfunction]
+fn _proto_set_internal_construct(function: Option<Py<PyAny>>) {
+    let previous = std::mem::replace(
+        &mut *INTERNAL_CONSTRUCT.lock().unwrap_or_else(|e| e.into_inner()),
+        function,
+    );
+    // Released once the function is no longer locked.
+    drop(previous);
+}
+
+/// The function of the pickles of the messages of nested types, if any (see
+/// [`INTERNAL_CONSTRUCT`]).
+pub(crate) fn internal_construct(py: Python<'_>) -> Option<Bound<'_, PyAny>> {
+    INTERNAL_CONSTRUCT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .map(|function| function.bind(py).clone())
+}
+
+/// Set the limit of the levels of messages that a parse reads below the message that it parses, as
+/// the parsers of the `protobuf` of the process have it (see `codec::LIMIT`).
+#[pyfunction]
+fn _proto_set_depth_limit(levels: u32) {
+    codec::set_depth_limit(levels);
+}
+
+/// Set the function of Python that gives the limit of the parsers of `protobuf`, which a parse
+/// that reaches its limit calls (see `codec::DEPTH_PROBE`), or none.
+#[pyfunction]
+fn _proto_set_depth_probe(probe: Option<Py<PyAny>>) {
+    codec::set_depth_probe(probe);
 }
 
 /// Run `f`, one level of a recursion over a message, on a stack with room for it: deeply nested
@@ -150,6 +235,28 @@ fn _proto_file_descriptor(
     descriptors::file_descriptor_object(py, name)
 }
 
+/// A message of `class`, a class of the runtime, of the bytes `data`, as its `FromString` gives
+/// it, but of any depth, where upb's parse stops at 100 levels: the drop-in's own parse of the
+/// bytes of a message that PySpark builds in Python of any depth (the expression of a Column, a
+/// schema, the deep plans of `parse_deep`), whose bytes the core encodes.
+pub(crate) fn parse_deep<'py>(
+    class: &Bound<'py, PyAny>,
+    data: &[u8],
+) -> PyResult<Bound<'py, PyAny>> {
+    let message = class.call0()?;
+    codec::merge_unlimited(class.py(), message.cast::<message::PyMessage>()?, data)?;
+    Ok(message)
+}
+
+/// [`parse_deep`] of Python: a message of `class` of the bytes `data`, of any depth.
+#[pyfunction]
+fn _proto_parse_deep<'py>(
+    class: &Bound<'py, PyAny>,
+    data: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyAny>> {
+    parse_deep(class, &message::bytes_of(data)?)
+}
+
 /// The text format of `message`, as protobuf's `text_format.MessageToString` writes it.
 #[pyfunction]
 #[pyo3(signature = (message, as_one_line=false))]
@@ -170,6 +277,26 @@ fn _proto_unknown_fields<'py>(
     pyo3::types::PyBytes::new(message.py(), &message.borrow().unknown)
 }
 
+/// The unknown fields of `message` as protobuf's pure-Python messages hold them
+/// (`_unknown_fields`): a list of the bytes of the tag and the bytes of the value of each, in the
+/// order in which the message read them (see [`codec::unknown_field_pairs`]).
+#[pyfunction]
+fn _proto_unknown_field_pairs<'py>(
+    message: &Bound<'py, message::PyMessage>,
+) -> PyResult<Bound<'py, pyo3::types::PyList>> {
+    let py = message.py();
+    let m = message.borrow();
+    let pairs = codec::unknown_field_pairs(&m.unknown)?;
+    let list = pyo3::types::PyList::empty(py);
+    for (tag, value) in pairs {
+        list.append((
+            pyo3::types::PyBytes::new(py, tag),
+            pyo3::types::PyBytes::new(py, value),
+        ))?;
+    }
+    Ok(list)
+}
+
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
     m.add("ProtoMessage", py.get_type::<message::PyMessage>())?;
@@ -184,6 +311,10 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "ProtoMapContainer",
         py.get_type::<containers::MapContainer>(),
+    )?;
+    m.add(
+        "ProtoScalarMapContainer",
+        py.get_type::<containers::ScalarMapContainer>(),
     )?;
     m.add(
         "ProtoMessageMapContainer",
@@ -227,7 +358,13 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py.get_type::<descriptors::PyDescriptorPool>(),
     )?;
     m.add("ProtoDecodeError", py.get_type::<DecodeError>())?;
+    m.add("ProtoEncodeError", py.get_type::<EncodeError>())?;
     m.add_function(wrap_pyfunction!(_proto_set_decode_error, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_set_encode_error, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_set_internal_construct, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_set_depth_limit, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_set_depth_probe, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_unknown_field_pairs, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_files, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_register_files, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_descriptor, m)?)?;
@@ -235,6 +372,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_proto_file_descriptor, m)?)?;
     m.add_function(wrap_pyfunction!(message::_proto_register_classes, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_to_string, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_parse_deep, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_unknown_fields, m)?)?;
     Ok(())
 }
