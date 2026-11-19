@@ -39,7 +39,8 @@ _VARIABLE = "SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"
 # modes "stop_wait" and "new_session_dropped_wait" stop the session, then print "ready" and hold
 # the child until a line on its stdin, for a test that stops the server before the child exits.
 # The mode "live_wait" does so with its session live, and prints "exiting" when it exits, just
-# before the exit hook of its session runs.
+# before the exit hook of its session runs. The modes "client_*" print the ID of the session of
+# the client that they drop.
 _CHILD = textwrap.dedent("""
     import os
     import sys
@@ -65,11 +66,11 @@ _CHILD = textwrap.dedent("""
         from pyspark.sql.connect.client import SparkConnectClient
 
         # A client of a session of its own, which the child drops at once.
-        SparkConnectClient(remote)
+        print(SparkConnectClient(remote)._session_id, flush=True)
     if mode == "client_new_session_dropped":
-        spark.client.newSession()
+        print(spark.client.newSession()._session_id, flush=True)
     if mode == "client_clone_dropped":
-        spark.client.clone()
+        print(spark.client.clone()._session_id, flush=True)
     if mode == "stop":
         spark.stop()
     if mode == "set_after_creation":
@@ -180,17 +181,6 @@ def _exit_requests(service, session_id):
     return requests
 
 
-def _session_ids_of_requests(service):
-    # The IDs of the sessions of the requests that the server received, in the order of their
-    # first request.
-    session_ids = []
-    for _, data in service.recorded_order:
-        session_id = parse_message(data).get(1, [b""])[0].decode()
-        if session_id not in session_ids:
-            session_ids.append(session_id)
-    return session_ids
-
-
 def test_a_live_session_cleans_its_ml_cache_at_exit(exit_service):
     # (a) A session that is not stopped sends one clean_cache at exit, and nothing else.
     _, (session_id,) = _run_child(exit_service.remote, "plain")
@@ -278,12 +268,15 @@ def test_i_a_dropped_client_of_a_session_of_its_own_cleans_its_ml_cache_at_exit(
     # (i) The atexit registration of PySpark's SparkConnectClient keeps the client until the exit,
     # and no session object owns a client of SparkConnectClient(connection), or of the newSession
     # or the clone of a client, which none closes: its exit hook sends its clean_cache, even
-    # though the child dropped the client.
-    _, (session_id,) = _run_child(exit_service.remote, mode)
-    session_ids = _session_ids_of_requests(exit_service)
-    assert len(session_ids) == 2 and session_id in session_ids
-    (client_session_id,) = [other for other in session_ids if other != session_id]
+    # though the child dropped the client, as the session that the child keeps does. The requests
+    # are told apart by the sessions that the child printed, as each other test's are: a request
+    # of another session can reach the server too, such as a request of another process that is
+    # retried after its server stopped (the release of an execution, or the execution), once this
+    # server has the port of that one.
+    (session_id,), (client_session_id,) = _run_child_lines(exit_service.remote, mode)
+    assert client_session_id != session_id
     assert _exit_requests(exit_service, client_session_id) == ["clean_cache"]
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]
 
 
 def test_h_an_execution_once_the_interpreter_shuts_down_raises_pysparks_runtime_error(
