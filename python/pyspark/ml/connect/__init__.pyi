@@ -23,6 +23,7 @@
 from typing import Optional
 from pyspark.ml._typing import ParamMap
 from pyspark.sql.dataframe import DataFrame
+from pyspark.sql.connect.utils import check_dependencies as check_dependencies
 from pyspark.ml.connect.feature import ArrayAssembler as ArrayAssembler
 from pyspark.ml.connect.feature import StandardScaler as StandardScaler
 from pyspark.ml.connect.feature import MaxAbsScaler as MaxAbsScaler

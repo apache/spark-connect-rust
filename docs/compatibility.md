@@ -2826,6 +2826,17 @@ The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` a
 as `column`, `negate`, `power` or `random`, is the function `col`, `negative`, `pow` or `rand`, of
 that name, as PySpark binds it.
 
+`pyspark.sql.utils` is PySpark's module, of Apache Spark as it is, of its names and its helpers:
+`is_remote()` and `is_remote_only()` are True, and its decorators, such as `try_remote_functions`
+and `dispatch_df_method`, run the functions of PySpark Connect's modules of their names, and the
+methods of the classes of Spark Connect, which an object of another class does not have
+(`NOT_IMPLEMENTED`). The package `pyspark.sql.connect` has the names of PySpark's,
+`check_dependencies` and `utils`, which its `__init__` imports, and importing `pyspark` imports no
+module of it, as in PySpark: `udf`, `udtf` and `arrow_udtf` of `pyspark.sql.functions` are read of
+`pyspark.sql.connect.udf` and `pyspark.sql.connect.udtf` when they are first asked for. Its import
+does not run `check_dependencies`, which PySpark's does, nor does the import of `pyspark.ml.connect`,
+which has the name too, as PySpark's (see `dev/parity/known-differences.md`).
+
 `pyspark.sql.SparkSession` is PySpark's classic class, the module `pyspark.sql.session` of Apache
 Spark as it is, as in PySpark. Its builder reads `spark.remote` or `SPARK_REMOTE`, raises
 `CONNECT_URL_NOT_SET` without either, also while a session is active, and makes the session with
