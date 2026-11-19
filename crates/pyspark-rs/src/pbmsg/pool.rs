@@ -12,6 +12,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock, RwLock, RwLockReadGuard};
 
 use prost::Message as _;
+
+use super::scalar::Scalar;
 use prost_types::{
     DescriptorProto, EnumDescriptorProto, FileDescriptorProto, FileDescriptorSet,
     ServiceDescriptorProto,
@@ -140,6 +142,28 @@ pub(crate) struct MapDesc {
     pub(crate) value: Kind,
     /// The full name of the message or enum of the value, if it is one.
     pub(crate) value_type: String,
+    /// Whether a parse checks the UTF-8 of a string key and of a string value, of the fields of
+    /// the entry message (see [`FieldDesc::validate_utf8`]): an entry of proto2 takes any bytes.
+    pub(crate) key_validate_utf8: bool,
+    pub(crate) value_validate_utf8: bool,
+    /// The values of a closed enum of the values (see [`FieldDesc::closed_values`]).
+    pub(crate) value_closed: Option<Arc<[i32]>>,
+    /// Whether the key and the value fields of the entry message have presence (of proto2, or of
+    /// the `EXPLICIT` presence of editions), so that an entry encoded again writes one of the
+    /// default that it read.
+    pub(crate) key_presence: bool,
+    pub(crate) value_presence: bool,
+}
+
+/// Whether a field tells being set apart from holding its default, as protobuf's presence of a
+/// field: of a proto3 scalar (implicit), of a singular field of proto2, a message field, a member
+/// of a oneof or a proto3 `optional` (explicit), or of a `required` field of proto2 (or of the
+/// `LEGACY_REQUIRED` presence of editions), which a message must set to be initialized.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Presence {
+    Implicit,
+    Explicit,
+    Required,
 }
 
 /// A field of a message.
@@ -162,13 +186,44 @@ pub(crate) struct FieldDesc {
     pub(crate) map: Option<Arc<MapDesc>>,
     /// Whether the field has options, such as `deprecated`, as protobuf's `has_options` tells.
     pub(crate) has_options: bool,
+    /// The presence of a singular field.
+    pub(crate) presence: Presence,
+    /// The value of an unset scalar field, of its `[default = ...]` (of proto2 and editions), else
+    /// of the first value of the enum of an enum field of explicit presence, else none (the zero
+    /// of its type).
+    pub(crate) default: Option<Scalar>,
+    /// Whether a message field is encoded as a group (a group of proto2, or a message field of the
+    /// `DELIMITED` encoding of editions), between a start and an end tag.
+    pub(crate) delimited: bool,
+    /// Whether a parse checks the UTF-8 of a string field, as proto3 and editions do (of the
+    /// `VERIFY` validation); one of proto2 (or of `NONE`) takes any bytes.
+    pub(crate) validate_utf8: bool,
+    /// The values that a closed enum of an enum field declares, in order (of an enum of proto2, or
+    /// of the `CLOSED` enum type of editions), which a parse looks a value up in: another value
+    /// goes to the unknown fields. None of an open enum, which takes any value, and of a field of
+    /// another kind.
+    pub(crate) closed_values: Option<Arc<[i32]>>,
 }
 
 impl FieldDesc {
-    /// Whether the field tells being set apart from holding the default: a singular message, a
-    /// member of a oneof, or a proto3 `optional` (a member of a synthetic oneof).
+    /// Whether the field tells being set apart from holding the default: a singular field of
+    /// explicit or required presence (see [`Presence`]).
     pub(crate) fn has_presence(&self) -> bool {
-        !self.repeated && (self.kind == Kind::Message || self.oneof.is_some())
+        !self.repeated && self.presence != Presence::Implicit
+    }
+
+    /// Whether the field is required, of proto2's `required` (or editions' `LEGACY_REQUIRED`).
+    pub(crate) fn is_required(&self) -> bool {
+        !self.repeated && self.presence == Presence::Required
+    }
+
+    /// The wire type of a value of the field: 3 of a group, else that of its kind.
+    pub(crate) fn wire_type(&self) -> u8 {
+        if self.delimited {
+            3
+        } else {
+            self.kind.wire_type()
+        }
     }
 }
 
@@ -206,6 +261,12 @@ pub(crate) struct MessageDesc {
     /// The full names of the messages and enums that this message declares.
     pub(crate) nested_messages: Vec<String>,
     pub(crate) nested_enums: Vec<String>,
+    /// The indices of the required fields, in the order of their declaration.
+    pub(crate) required: Vec<usize>,
+    /// Whether a message of the type can lack a required field, of the types that it can hold
+    /// too, which the first check of a message of the type finds (see `may_lack_required` of
+    /// `message.rs`).
+    pub(crate) may_lack_required: OnceLock<bool>,
 }
 
 /// An enum type.
@@ -303,6 +364,10 @@ pub(crate) fn pool() -> &'static Pool {
     })
 }
 
+/// The values of an enum of the pool that a file that [`register`] adds may use, by its full name,
+/// and whether it is closed.
+type KnownEnum<'a> = dyn Fn(&str) -> Option<(Vec<(String, i32)>, bool)> + 'a;
+
 /// The descriptors of the files of a set, as [`Pool::build_files`] reads them.
 struct Built {
     messages: Vec<MessageDesc>,
@@ -314,12 +379,13 @@ struct Built {
 impl Pool {
     fn build(bytes: &[u8]) -> Result<Pool, String> {
         let set = FileDescriptorSet::decode(bytes).map_err(|e| e.to_string())?;
+        let serialized: Vec<Vec<u8>> = set.file.iter().map(|f| f.encode_to_vec()).collect();
         let Built {
             messages,
             enums,
             services,
             files,
-        } = Self::build_files(&set.file)?;
+        } = Self::build_files(&set.file, &serialized, &|_| None)?;
         Ok(Pool {
             messages: messages
                 .into_iter()
@@ -337,15 +403,20 @@ impl Pool {
         })
     }
 
-    /// The descriptors of the messages, enums and services of `protos`, and of the files, with the
-    /// map fields of the messages: a map entry message is nested in the message of its map field, in
-    /// the same file.
-    fn build_files(protos: &[FileDescriptorProto]) -> Result<Built, String> {
+    /// The descriptors of the messages, enums and services of `protos`, each of the bytes of its
+    /// file in `serialized`, and of the files, with the map fields of the messages (a map entry
+    /// message is nested in the message of its map field, in the same file) and the defaults of
+    /// their enum fields, of the features of their files (see [`FileView`]).
+    fn build_files(
+        protos: &[FileDescriptorProto],
+        serialized: &[Vec<u8>],
+        known_enum: &KnownEnum<'_>,
+    ) -> Result<Built, String> {
         let mut messages: Vec<MessageDesc> = Vec::new();
         let mut enums: Vec<EnumDesc> = Vec::new();
         let mut services: Vec<ServiceDesc> = Vec::new();
         let mut files = Vec::new();
-        for file in protos {
+        for (file, bytes) in protos.iter().zip(serialized) {
             let name = file.name().to_string();
             let package = file.package().to_string();
             let prefix = if package.is_empty() {
@@ -353,22 +424,43 @@ impl Pool {
             } else {
                 format!("{package}.")
             };
-            // The enums of a proto2 file (whose syntax protoc leaves unset) are closed; those of
-            // proto3 and of editions (of their default features) are open.
+            let view = FileView::decode(bytes.as_slice())
+                .map_err(|e| format!("{name} is not a FileDescriptorProto: {e}"))?;
+            let syntax = Syntax::of(file.syntax(), view.edition).ok_or_else(|| {
+                format!("{name} is of a syntax or edition that the runtime does not read")
+            })?;
+            let features = syntax
+                .defaults()
+                .with(view.options.as_ref().and_then(|o| o.features.as_ref()));
             let scope = FileScope {
                 name: &name,
                 package: &package,
-                closed_enums: matches!(file.syntax(), "" | "proto2"),
+                syntax,
             };
             let mut top_messages = Vec::new();
             let mut top_enums = Vec::new();
-            for message in &file.message_type {
+            for (index, message) in file.message_type.iter().enumerate() {
                 top_messages.push(format!("{prefix}{}", message.name()));
-                add_message(&mut messages, &mut enums, &scope, &prefix, None, message)?;
+                let view = view.message_type.get(index).cloned().unwrap_or_default();
+                add_message(
+                    &mut messages,
+                    &mut enums,
+                    &scope,
+                    (&prefix, None, features),
+                    message,
+                    &view,
+                )?;
             }
-            for enumeration in &file.enum_type {
+            for (index, enumeration) in file.enum_type.iter().enumerate() {
                 top_enums.push(format!("{prefix}{}", enumeration.name()));
-                add_enum(&mut enums, &scope, &prefix, None, enumeration);
+                let view = view.enum_type.get(index).cloned().unwrap_or_default();
+                add_enum(
+                    &mut enums,
+                    &scope,
+                    (&prefix, None, features),
+                    enumeration,
+                    &view,
+                );
             }
             let mut top_services = Vec::new();
             for (index, service) in file.service.iter().enumerate() {
@@ -394,9 +486,33 @@ impl Pool {
                 services: top_services,
                 dependencies: file.dependency.clone(),
                 public_dependencies,
-                serialized: file.encode_to_vec(),
+                serialized: bytes.clone(),
                 has_options: file.options.is_some(),
             });
+        }
+
+        // The values of the enums of these files or of the pool, and whether each is closed.
+        let declared_enums: HashMap<&str, &EnumDesc> =
+            enums.iter().map(|e| (e.full_name.as_str(), e)).collect();
+        let enum_of = |name: &str| -> Option<(Vec<(String, i32)>, bool)> {
+            declared_enums
+                .get(name)
+                .map(|e| (e.values.clone(), e.closed))
+                .or_else(|| known_enum(name))
+        };
+        // The values of the closed enum of each enum field, which a parse looks its values up in.
+        for message in &mut messages {
+            for field in &mut message.fields {
+                if field.kind != Kind::Enum {
+                    continue;
+                }
+                if let Some((values, true)) = enum_of(&field.type_name) {
+                    let mut numbers: Vec<i32> = values.iter().map(|(_, n)| *n).collect();
+                    numbers.sort_unstable();
+                    numbers.dedup();
+                    field.closed_values = Some(numbers.into());
+                }
+            }
         }
 
         // The map fields: repeated fields of a map entry message.
@@ -413,6 +529,11 @@ impl Pool {
                     key: key.map_or(Kind::String, |f| f.kind),
                     value: value.map_or(Kind::String, |f| f.kind),
                     value_type: value.map_or(String::new(), |f| f.type_name.clone()),
+                    key_validate_utf8: key.is_none_or(|f| f.validate_utf8),
+                    value_validate_utf8: value.is_none_or(|f| f.validate_utf8),
+                    value_closed: value.and_then(|f| f.closed_values.clone()),
+                    key_presence: key.is_some_and(FieldDesc::has_presence),
+                    value_presence: value.is_some_and(FieldDesc::has_presence),
                 };
                 (m.full_name.clone(), Arc::new(map))
             })
@@ -422,6 +543,36 @@ impl Pool {
                 if field.repeated && field.kind == Kind::Message {
                     field.map = entries.get(&field.type_name).cloned();
                 }
+            }
+        }
+
+        // The defaults of the enum fields, of the enums of these files or of the pool: of the name
+        // of a value of `[default = ...]`, else, of a field of presence, the first value.
+        for message in &mut messages {
+            for field in &mut message.fields {
+                if field.kind != Kind::Enum || field.repeated {
+                    continue;
+                }
+                let Some((values, _)) = enum_of(&field.type_name) else {
+                    continue;
+                };
+                field.default = match field.default.take() {
+                    Some(Scalar::Str(name)) => {
+                        let number = values
+                            .iter()
+                            .find(|(n, _)| *n == name)
+                            .map(|(_, number)| *number)
+                            .ok_or_else(|| {
+                                format!("the default {name} of {} is no value", field.full_name)
+                            })?;
+                        Some(Scalar::Enum(number))
+                    }
+                    Some(other) => Some(other),
+                    None if field.presence != Presence::Implicit => {
+                        values.first().map(|(_, number)| Scalar::Enum(*number))
+                    }
+                    None => None,
+                };
             }
         }
 
@@ -547,12 +698,14 @@ fn registered() -> RwLockReadGuard<'static, Registry> {
 /// protobuf's default pool, which holds one file of a name: so a file of a name that the pool has
 /// is left as it is, and adding the files of a module again adds nothing.
 ///
-/// The files are added together or not at all: each file that the pool does not have must be a
-/// proto3 file (the runtime reads the fields of proto3, whose presence, defaults and packing are
-/// not those of proto2 or of editions, and which have no groups), import files that the pool has
-/// or that `serialized` adds, declare no name that another file declares, and declare fields of
-/// messages and enums that those files declare. Gives each file of `serialized`, as the pool has
-/// it, in their order.
+/// The files are added together or not at all: each file that the pool does not have must be of
+/// proto2, proto3 or the editions 2023 and 2024 (whose presence, defaults, packing, closed enums,
+/// groups and UTF-8 validation the runtime reads of their syntax and features), declare no
+/// extensions, extension ranges or message sets, import files that the pool has or that
+/// `serialized` adds, declare no name that another file declares, and declare fields of messages
+/// and enums that those files declare. The pool keeps the bytes of each file as they are given
+/// (which prost-types, of no features of editions, would not encode again). Gives each file of
+/// `serialized`, as the pool has it, in their order.
 pub(crate) fn register(serialized: &[Vec<u8>]) -> Result<Vec<&'static FileDesc>, String> {
     let protos = serialized
         .iter()
@@ -573,8 +726,11 @@ pub(crate) fn register(serialized: &[Vec<u8>]) -> Result<Vec<&'static FileDesc>,
         .filter(|p| !has_file(&registry, p.name()) && names.insert(p.name()))
         .collect();
     for file in &added {
-        if file.syntax() != "proto3" {
-            return Err(format!("{} is not a proto3 file", file.name()));
+        if let Some(what) = unheld_declaration(file) {
+            return Err(format!(
+                "{} declares {what}, which the runtime does not hold",
+                file.name()
+            ));
         }
         if let Some(missing) = file
             .dependency
@@ -587,7 +743,27 @@ pub(crate) fn register(serialized: &[Vec<u8>]) -> Result<Vec<&'static FileDesc>,
             ));
         }
     }
-    let built = Pool::build_files(&added.into_iter().cloned().collect::<Vec<_>>())?;
+    let added_bytes: Vec<Vec<u8>> = added
+        .iter()
+        .map(|file| {
+            let at = protos
+                .iter()
+                .position(|p| std::ptr::eq(p, *file))
+                .expect("a file of the protos");
+            serialized[at].clone()
+        })
+        .collect();
+    let known_enum = |name: &str| {
+        pool.enums
+            .get(name)
+            .or_else(|| registry.enums.get(name).copied())
+            .map(|e| (e.values.clone(), e.closed))
+    };
+    let built = Pool::build_files(
+        &added.into_iter().cloned().collect::<Vec<_>>(),
+        &added_bytes,
+        &known_enum,
+    )?;
 
     let taken = |name: &str| {
         pool.messages.contains_key(name)
@@ -710,7 +886,310 @@ fn json_name_of(name: &str) -> String {
 struct FileScope<'a> {
     name: &'a str,
     package: &'a str,
+    syntax: Syntax,
+}
+
+/// The syntax of a file, as its semantics differ: proto2, proto3, or an edition of the features
+/// of its descriptors.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Syntax {
+    Proto2,
+    Proto3,
+    Editions,
+}
+
+/// The editions that the runtime reads, as `google.protobuf.Edition` numbers them: 2023 and 2024.
+const EDITIONS: [i32; 2] = [1000, 1001];
+
+impl Syntax {
+    /// The syntax of a file of the `syntax` and `edition` of its descriptor, as protoc writes them
+    /// (no syntax of proto2), if the runtime reads it.
+    fn of(syntax: &str, edition: Option<i32>) -> Option<Syntax> {
+        match syntax {
+            "" | "proto2" => Some(Syntax::Proto2),
+            "proto3" => Some(Syntax::Proto3),
+            "editions" if edition.is_some_and(|e| EDITIONS.contains(&e)) => Some(Syntax::Editions),
+            _ => None,
+        }
+    }
+
+    /// The features of the files of the syntax, as protobuf resolves those of proto2 and proto3,
+    /// and the defaults of editions 2023 and 2024.
+    fn defaults(self) -> Resolved {
+        match self {
+            Syntax::Proto2 => Resolved {
+                presence: features::EXPLICIT,
+                closed_enums: true,
+                packed: false,
+                validate_utf8: false,
+                delimited: false,
+            },
+            Syntax::Proto3 => Resolved {
+                presence: features::IMPLICIT,
+                closed_enums: false,
+                packed: true,
+                validate_utf8: true,
+                delimited: false,
+            },
+            Syntax::Editions => Resolved {
+                presence: features::EXPLICIT,
+                closed_enums: false,
+                packed: true,
+                validate_utf8: true,
+                delimited: false,
+            },
+        }
+    }
+}
+
+/// The numbers of the values of the features of `google.protobuf.FeatureSet` that the runtime
+/// reads.
+mod features {
+    pub(super) const EXPLICIT: i32 = 1;
+    pub(super) const IMPLICIT: i32 = 2;
+    pub(super) const LEGACY_REQUIRED: i32 = 3;
+    pub(super) const OPEN: i32 = 1;
+    pub(super) const CLOSED: i32 = 2;
+    pub(super) const PACKED: i32 = 1;
+    pub(super) const EXPANDED: i32 = 2;
+    pub(super) const VERIFY: i32 = 2;
+    pub(super) const NONE: i32 = 3;
+    pub(super) const LENGTH_PREFIXED: i32 = 1;
+    pub(super) const DELIMITED: i32 = 2;
+}
+
+/// The features of a scope of a file (the file, a message, a field or an enum), as its own
+/// features over those of the scope that holds it resolve them. Only editions declare features;
+/// proto2 and proto3 have those of their syntax.
+#[derive(Clone, Copy, Debug)]
+struct Resolved {
+    presence: i32,
     closed_enums: bool,
+    packed: bool,
+    validate_utf8: bool,
+    delimited: bool,
+}
+
+impl Resolved {
+    /// These features, of those that `declared` declares over them.
+    fn with(self, declared: Option<&FeaturesView>) -> Resolved {
+        let Some(declared) = declared else {
+            return self;
+        };
+        let mut resolved = self;
+        if let Some(presence) = declared.field_presence.filter(|&p| p != 0) {
+            resolved.presence = presence;
+        }
+        match declared.enum_type {
+            Some(features::CLOSED) => resolved.closed_enums = true,
+            Some(features::OPEN) => resolved.closed_enums = false,
+            _ => {}
+        }
+        match declared.repeated_field_encoding {
+            Some(features::PACKED) => resolved.packed = true,
+            Some(features::EXPANDED) => resolved.packed = false,
+            _ => {}
+        }
+        match declared.utf8_validation {
+            Some(features::VERIFY) => resolved.validate_utf8 = true,
+            Some(features::NONE) => resolved.validate_utf8 = false,
+            _ => {}
+        }
+        match declared.message_encoding {
+            Some(features::DELIMITED) => resolved.delimited = true,
+            Some(features::LENGTH_PREFIXED) => resolved.delimited = false,
+            _ => {}
+        }
+        resolved
+    }
+}
+
+/// The features of editions of a descriptor, which prost-types 0.14 does not read: those of
+/// `google.protobuf.FeatureSet` that the runtime reads, of their numbers.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FeaturesView {
+    #[prost(int32, optional, tag = "1")]
+    field_presence: Option<i32>,
+    #[prost(int32, optional, tag = "2")]
+    enum_type: Option<i32>,
+    #[prost(int32, optional, tag = "3")]
+    repeated_field_encoding: Option<i32>,
+    #[prost(int32, optional, tag = "4")]
+    utf8_validation: Option<i32>,
+    #[prost(int32, optional, tag = "5")]
+    message_encoding: Option<i32>,
+}
+
+/// The `features` of the options of a descriptor, which each type of options numbers: those of a
+/// file 50, of a message 12, of a field 21 and of an enum 7.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FileOptionsView {
+    #[prost(message, optional, tag = "50")]
+    features: Option<FeaturesView>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct MessageOptionsView {
+    #[prost(message, optional, tag = "12")]
+    features: Option<FeaturesView>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct FieldOptionsView {
+    #[prost(message, optional, tag = "21")]
+    features: Option<FeaturesView>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct EnumOptionsView {
+    #[prost(message, optional, tag = "7")]
+    features: Option<FeaturesView>,
+}
+
+/// The options of a field, as [`FileView`] reads them.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FieldView {
+    #[prost(message, optional, tag = "8")]
+    options: Option<FieldOptionsView>,
+}
+
+/// The options of an enum, as [`FileView`] reads them.
+#[derive(Clone, PartialEq, prost::Message)]
+struct EnumView {
+    #[prost(message, optional, tag = "3")]
+    options: Option<EnumOptionsView>,
+}
+
+/// The options of a message and of its members, as [`FileView`] reads them.
+#[derive(Clone, PartialEq, prost::Message)]
+struct MessageView {
+    #[prost(message, repeated, tag = "2")]
+    field: Vec<FieldView>,
+    #[prost(message, repeated, tag = "3")]
+    nested_type: Vec<MessageView>,
+    #[prost(message, repeated, tag = "4")]
+    enum_type: Vec<EnumView>,
+    #[prost(message, optional, tag = "7")]
+    options: Option<MessageOptionsView>,
+}
+
+/// The edition of a file and the features of the options of its descriptors, of the bytes of its
+/// `FileDescriptorProto`, in the order of the descriptors of prost-types' decoding of them.
+#[derive(Clone, PartialEq, prost::Message)]
+struct FileView {
+    #[prost(message, repeated, tag = "4")]
+    message_type: Vec<MessageView>,
+    #[prost(message, repeated, tag = "5")]
+    enum_type: Vec<EnumView>,
+    #[prost(message, optional, tag = "8")]
+    options: Option<FileOptionsView>,
+    #[prost(int32, optional, tag = "14")]
+    edition: Option<i32>,
+}
+
+/// What `file` declares that the runtime does not hold, if anything: extensions (of the file or of
+/// a message), extension ranges, or the message-set wire format of a message. Its messages then
+/// keep `protobuf`'s classes.
+fn unheld_declaration(file: &FileDescriptorProto) -> Option<String> {
+    fn of_message(message: &DescriptorProto) -> Option<String> {
+        if !message.extension.is_empty() || !message.extension_range.is_empty() {
+            return Some(format!("the extensions of {}", message.name()));
+        }
+        if message
+            .options
+            .as_ref()
+            .and_then(|o| o.message_set_wire_format)
+            .unwrap_or(false)
+        {
+            return Some(format!("the message set {}", message.name()));
+        }
+        message.nested_type.iter().find_map(of_message)
+    }
+    if !file.extension.is_empty() {
+        return Some("extensions".to_string());
+    }
+    file.message_type.iter().find_map(of_message)
+}
+
+/// The value of the default `text` of a field of `kind`, as protoc writes it in a descriptor: of
+/// an enum field, the name of its value, as a string to resolve once the enums are built.
+fn default_of(kind: Kind, text: &str) -> Option<Scalar> {
+    let float = |text: &str| -> Option<f64> {
+        match text {
+            "inf" => Some(f64::INFINITY),
+            "-inf" => Some(f64::NEG_INFINITY),
+            "nan" | "-nan" => Some(f64::NAN),
+            _ => text.parse().ok(),
+        }
+    };
+    Some(match kind {
+        Kind::Double => Scalar::F64(float(text)?),
+        Kind::Float => Scalar::F32(float(text)? as f32),
+        Kind::Int64 | Kind::SInt64 | Kind::SFixed64 => Scalar::I64(text.parse().ok()?),
+        Kind::UInt64 | Kind::Fixed64 => Scalar::U64(text.parse().ok()?),
+        Kind::Int32 | Kind::SInt32 | Kind::SFixed32 => Scalar::I32(text.parse().ok()?),
+        Kind::UInt32 | Kind::Fixed32 => Scalar::U32(text.parse().ok()?),
+        Kind::Bool => Scalar::Bool(text == "true"),
+        Kind::String | Kind::Enum => Scalar::Str(text.to_string()),
+        Kind::Bytes => Scalar::Bytes(c_unescape(text)),
+        Kind::Message => return None,
+    })
+}
+
+/// The bytes of `text`, of the C escapes that protoc writes of the default of a bytes field
+/// (`\001\377x`): an octal escape of up to three digits, `\x` of up to two hexadecimal ones, and
+/// the escapes of single characters.
+fn c_unescape(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        at += 1;
+        if byte != b'\\' || at >= bytes.len() {
+            out.push(byte);
+            continue;
+        }
+        let escape = bytes[at];
+        at += 1;
+        match escape {
+            b'0'..=b'7' => {
+                let mut value = u32::from(escape - b'0');
+                for _ in 0..2 {
+                    match bytes.get(at) {
+                        Some(&d @ b'0'..=b'7') => {
+                            value = value * 8 + u32::from(d - b'0');
+                            at += 1;
+                        }
+                        _ => break,
+                    }
+                }
+                out.push(value as u8);
+            }
+            b'x' | b'X' => {
+                let mut value = 0u32;
+                for _ in 0..2 {
+                    match bytes.get(at).and_then(|&d| (d as char).to_digit(16)) {
+                        Some(d) => {
+                            value = value * 16 + d;
+                            at += 1;
+                        }
+                        None => break,
+                    }
+                }
+                out.push(value as u8);
+            }
+            b'a' => out.push(0x07),
+            b'b' => out.push(0x08),
+            b'f' => out.push(0x0c),
+            b'n' => out.push(b'\n'),
+            b'r' => out.push(b'\r'),
+            b't' => out.push(b'\t'),
+            b'v' => out.push(0x0b),
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 fn service_desc(
@@ -742,16 +1221,21 @@ fn service_desc(
     }
 }
 
+/// The scope that a message or an enum is declared in: the prefix of its full name, the full name
+/// of the message that declares it, if any, and the features of that scope.
+type Within<'a> = (&'a str, Option<&'a str>, Resolved);
+
 fn add_message(
     messages: &mut Vec<MessageDesc>,
     enums: &mut Vec<EnumDesc>,
     scope: &FileScope<'_>,
-    prefix: &str,
-    containing: Option<&str>,
+    (prefix, containing, outer): Within<'_>,
     proto: &DescriptorProto,
+    view: &MessageView,
 ) -> Result<(), String> {
     let full_name = format!("{prefix}{}", proto.name());
     let nested_prefix = format!("{full_name}.");
+    let features = outer.with(view.options.as_ref().and_then(|o| o.features.as_ref()));
 
     let mut oneofs: Vec<OneofDesc> = proto
         .oneof_decl
@@ -767,11 +1251,17 @@ fn add_message(
 
     let mut fields = Vec::with_capacity(proto.field.len());
     for (index, field) in proto.field.iter().enumerate() {
-        let kind = Kind::of_proto(field.r#type.unwrap_or_default()).ok_or_else(|| {
+        let proto_type = field.r#type.unwrap_or_default();
+        // A group of proto2 is a message field encoded between a start and an end tag.
+        let kind = if proto_type == GROUP {
+            Some(Kind::Message)
+        } else {
+            Kind::of_proto(proto_type)
+        }
+        .ok_or_else(|| {
             format!(
-                "the field {full_name}.{} has the unsupported type {}",
-                field.name(),
-                field.r#type.unwrap_or_default()
+                "the field {full_name}.{} has the unsupported type {proto_type}",
+                field.name()
             )
         })?;
         let repeated = field.label == Some(3);
@@ -784,13 +1274,42 @@ fn add_message(
                 .push(index);
         }
         let proto3_optional = field.proto3_optional.unwrap_or(false);
-        let packed = repeated
-            && kind.packable()
-            && field
+        let field_view = view.field.get(index).cloned().unwrap_or_default();
+        let resolved = features.with(
+            field_view
                 .options
                 .as_ref()
-                .and_then(|o| o.packed)
-                .unwrap_or(true);
+                .and_then(|o| o.features.as_ref()),
+        );
+        // A field of `LEGACY_REQUIRED` of editions is required, a message field too, as upb's.
+        let presence = match scope.syntax {
+            Syntax::Proto2 if field.label == Some(2) => Presence::Required,
+            Syntax::Proto2 => Presence::Explicit,
+            Syntax::Editions if !repeated && resolved.presence == features::LEGACY_REQUIRED => {
+                Presence::Required
+            }
+            _ if kind == Kind::Message || oneof.is_some() || proto3_optional => Presence::Explicit,
+            Syntax::Proto3 => Presence::Implicit,
+            Syntax::Editions => match resolved.presence {
+                features::IMPLICIT => Presence::Implicit,
+                _ => Presence::Explicit,
+            },
+        };
+        let declared_packed = field.options.as_ref().and_then(|o| o.packed);
+        let packed = repeated
+            && kind.packable()
+            && match scope.syntax {
+                Syntax::Proto2 => declared_packed.unwrap_or(false),
+                Syntax::Proto3 => declared_packed.unwrap_or(true),
+                Syntax::Editions => resolved.packed,
+            };
+        let delimited = proto_type == GROUP
+            || (scope.syntax == Syntax::Editions && kind == Kind::Message && resolved.delimited);
+        let default = field
+            .default_value
+            .as_deref()
+            .filter(|_| !repeated)
+            .and_then(|text| default_of(kind, text));
         fields.push(FieldDesc {
             name: field.name().to_string(),
             full_name: format!("{full_name}.{}", field.name()),
@@ -808,6 +1327,11 @@ fn add_message(
             packed,
             map: None,
             has_options: field.options.is_some(),
+            presence,
+            default,
+            delimited,
+            validate_utf8: resolved.validate_utf8,
+            closed_values: None,
         });
     }
     for oneof in &mut oneofs {
@@ -826,6 +1350,9 @@ fn add_message(
         .enum_type
         .iter()
         .map(|e| format!("{nested_prefix}{}", e.name()))
+        .collect();
+    let required = (0..fields.len())
+        .filter(|&i| fields[i].is_required())
         .collect();
 
     messages.push(MessageDesc {
@@ -860,20 +1387,30 @@ fn add_message(
             .unwrap_or(false),
         nested_messages,
         nested_enums,
+        required,
+        may_lack_required: OnceLock::new(),
     });
 
-    for nested in &proto.nested_type {
+    for (index, nested) in proto.nested_type.iter().enumerate() {
+        let view = view.nested_type.get(index).cloned().unwrap_or_default();
         add_message(
             messages,
             enums,
             scope,
-            &nested_prefix,
-            Some(&full_name),
+            (&nested_prefix, Some(&full_name), features),
             nested,
+            &view,
         )?;
     }
-    for enumeration in &proto.enum_type {
-        add_enum(enums, scope, &nested_prefix, Some(&full_name), enumeration);
+    for (index, enumeration) in proto.enum_type.iter().enumerate() {
+        let view = view.enum_type.get(index).cloned().unwrap_or_default();
+        add_enum(
+            enums,
+            scope,
+            (&nested_prefix, Some(&full_name), features),
+            enumeration,
+            &view,
+        );
     }
     Ok(())
 }
@@ -881,10 +1418,19 @@ fn add_message(
 fn add_enum(
     enums: &mut Vec<EnumDesc>,
     scope: &FileScope<'_>,
-    prefix: &str,
-    containing: Option<&str>,
+    (prefix, containing, outer): Within<'_>,
     proto: &EnumDescriptorProto,
+    view: &EnumView,
 ) {
+    let closed = match scope.syntax {
+        Syntax::Proto2 => true,
+        Syntax::Proto3 => false,
+        Syntax::Editions => {
+            outer
+                .with(view.options.as_ref().and_then(|o| o.features.as_ref()))
+                .closed_enums
+        }
+    };
     enums.push(EnumDesc {
         name: proto.name().to_string(),
         full_name: format!("{prefix}{}", proto.name()),
@@ -897,9 +1443,12 @@ fn add_enum(
             .collect(),
         value_has_options: proto.value.iter().map(|v| v.options.is_some()).collect(),
         has_options: proto.options.is_some(),
-        closed: scope.closed_enums,
+        closed,
     });
 }
+
+/// The number of the type of a group, as `google.protobuf.FieldDescriptorProto.Type` numbers it.
+const GROUP: i32 = 10;
 
 #[cfg(test)]
 mod tests {
@@ -1023,14 +1572,23 @@ mod tests {
             &[],
             vec![message("Good", vec![field("name", 1, Type::String, "")])],
         );
+        let mut extendable = message("X", vec![]);
+        extendable
+            .extension_range
+            .push(prost_types::descriptor_proto::ExtensionRange {
+                start: Some(100),
+                end: Some(200),
+                options: None,
+            });
         let cases = [
             (
-                file("tests/pool/proto2.proto", "proto2", &[], vec![]),
-                "tests/pool/proto2.proto is not a proto3 file",
+                file("tests/pool/editions.proto", "editions", &[], vec![]),
+                "tests/pool/editions.proto is of a syntax or edition that the runtime does not read",
             ),
             (
-                file("tests/pool/editions.proto", "editions", &[], vec![]),
-                "tests/pool/editions.proto is not a proto3 file",
+                file("tests/pool/extendable.proto", "proto2", &[], vec![extendable]),
+                "tests/pool/extendable.proto declares the extensions of X, which the runtime does \
+                 not hold",
             ),
             (
                 file(
@@ -1081,7 +1639,7 @@ mod tests {
                     &[],
                     vec![message("G", vec![field("g", 1, Type::Group, "")])],
                 ),
-                "the field tests.pool.G.g has the unsupported type 10",
+                "the field tests.pool.G.g is of the type , which no file declares",
             ),
             (vec![0xff], "a file that is not a FileDescriptorProto"),
         ];
@@ -1107,6 +1665,185 @@ mod tests {
         assert_eq!(
             refused,
             "spark.connect.Relation is declared by another file"
+        );
+    }
+
+    #[test]
+    fn reads_the_presence_defaults_packing_and_groups_of_proto2_and_editions() {
+        // proto2: optional fields of presence, of their defaults (the first value of a closed
+        // enum of none), a required field, packing of [packed = true] only, and groups.
+        let mut defaults = message(
+            "D",
+            vec![
+                field("count", 1, Type::Int32, ""),
+                field("data", 2, Type::Bytes, ""),
+                field("color", 3, Type::Enum, ".tests.pool2.Color"),
+                field("first", 4, Type::Enum, ".tests.pool2.Color"),
+                field("id", 5, Type::String, ""),
+                field("unpacked", 6, Type::Int32, ""),
+                field("packed", 7, Type::Int32, ""),
+                field("item", 8, Type::Group, ".tests.pool2.D.Item"),
+            ],
+        );
+        defaults.field[0].default_value = Some("-5".to_string());
+        defaults.field[1].default_value = Some("\\001\\377x".to_string());
+        defaults.field[2].default_value = Some("GREEN".to_string());
+        defaults.field[4].label = Some(Label::Required as i32);
+        defaults.field[5].label = Some(Label::Repeated as i32);
+        defaults.field[6].label = Some(Label::Repeated as i32);
+        defaults.field[6].options = Some(prost_types::FieldOptions {
+            packed: Some(true),
+            ..Default::default()
+        });
+        defaults
+            .nested_type
+            .push(message("Item", vec![field("x", 9, Type::Int32, "")]));
+        let mut proto2 = FileDescriptorProto::decode(
+            file("tests/pool2/d.proto", "proto2", &[], vec![defaults]).as_slice(),
+        )
+        .unwrap();
+        proto2.package = Some("tests.pool2".to_string());
+        proto2.enum_type.push(EnumDescriptorProto {
+            name: Some("Color".to_string()),
+            value: ["RED", "GREEN"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| EnumValueDescriptorProto {
+                    name: Some(name.to_string()),
+                    number: Some(i as i32 + 1),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        });
+        register(&[proto2.encode_to_vec()]).expect("a proto2 file is held");
+        let pool = pool();
+        let desc = pool.message("tests.pool2.D").expect("D");
+        let field_of = |name: &str| &desc.fields[desc.by_name[name]];
+        assert_eq!(field_of("count").presence, Presence::Explicit);
+        assert_eq!(field_of("count").default, Some(Scalar::I32(-5)));
+        assert_eq!(
+            field_of("data").default,
+            Some(Scalar::Bytes(vec![0o001, 0o377, b'x']))
+        );
+        assert_eq!(field_of("color").default, Some(Scalar::Enum(2)));
+        assert_eq!(field_of("first").default, Some(Scalar::Enum(1)));
+        assert!(field_of("id").is_required() && desc.required == vec![4]);
+        assert!(!field_of("unpacked").packed && field_of("packed").packed);
+        let item = field_of("item");
+        assert!(item.delimited && item.kind == Kind::Message && item.wire_type() == 3);
+        assert!(!field_of("id").validate_utf8);
+        assert!(pool.enumeration("tests.pool2.Color").unwrap().closed);
+        // The values of the closed enum of each enum field, which a parse looks a value up in.
+        assert_eq!(
+            field_of("color").closed_values.as_deref(),
+            Some(&[1, 2][..])
+        );
+        assert_eq!(field_of("count").closed_values, None);
+
+        // Editions: the features of the file and of the fields over the defaults of the edition
+        // 2023 (explicit presence, packed, checked UTF-8, length-prefixed), of the bytes of the
+        // file as protoc writes them, which prost-types does not read.
+        let held = register(&[editions_file_with_fields("tests/ed/f.proto")]);
+        assert!(held.is_ok(), "{held:?}");
+        let desc = pool.message("tests.ed.F").expect("F");
+        let field_of = |name: &str| &desc.fields[desc.by_name[name]];
+        assert_eq!(field_of("implicit").presence, Presence::Implicit);
+        assert_eq!(field_of("explicit").presence, Presence::Explicit);
+        assert!(!field_of("expanded").packed);
+        assert!(field_of("inner").delimited);
+        assert!(!field_of("unchecked").validate_utf8);
+    }
+
+    /// The bytes of a file of the edition 2023 of a message `F` of fields of features, as protoc
+    /// writes it: of the file's feature of implicit presence, and of the fields' features.
+    fn editions_file_with_fields(name: &str) -> Vec<u8> {
+        fn varint(mut value: u64, out: &mut Vec<u8>) {
+            while value >= 0x80 {
+                out.push((value as u8) | 0x80);
+                value >>= 7;
+            }
+            out.push(value as u8);
+        }
+        fn len_field(number: u32, payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::new();
+            varint(u64::from((number << 3) | 2), &mut out);
+            varint(payload.len() as u64, &mut out);
+            out.extend_from_slice(payload);
+            out
+        }
+        fn field_proto(
+            name: &str,
+            number: u8,
+            kind: u8,
+            label: u8,
+            features: &[u8],
+            type_name: &str,
+        ) -> Vec<u8> {
+            let mut out = len_field(1, name.as_bytes());
+            out.extend_from_slice(&[0x18, number, 0x20, label, 0x28, kind]);
+            if !type_name.is_empty() {
+                out.extend(len_field(6, type_name.as_bytes()));
+            }
+            if !features.is_empty() {
+                // FieldOptions.features is field 21: a tag of two bytes.
+                let mut options = vec![0xaa, 0x01, features.len() as u8];
+                options.extend_from_slice(features);
+                out.extend(len_field(8, &options));
+            }
+            out
+        }
+        let mut message = len_field(1, b"F");
+        message.extend(len_field(2, &field_proto("implicit", 1, 5, 1, &[], "")));
+        message.extend(len_field(
+            2,
+            &field_proto("explicit", 2, 5, 1, &[0x08, 0x01], ""),
+        ));
+        message.extend(len_field(
+            2,
+            &field_proto("expanded", 3, 5, 3, &[0x18, 0x02], ""),
+        ));
+        message.extend(len_field(
+            2,
+            &field_proto("inner", 4, 11, 1, &[0x28, 0x02], ".tests.ed.F"),
+        ));
+        message.extend(len_field(
+            2,
+            &field_proto("unchecked", 5, 9, 1, &[0x20, 0x03], ""),
+        ));
+        let mut file = len_field(1, name.as_bytes());
+        file.extend(len_field(2, b"tests.ed"));
+        file.extend(len_field(4, &message));
+        // FileOptions.features (50) of field_presence IMPLICIT.
+        file.extend(len_field(8, &[0x92, 0x03, 0x02, 0x08, 0x02]));
+        file.extend(len_field(12, b"editions"));
+        file.extend_from_slice(&[0x70, 0xe8, 0x07]);
+        file
+    }
+
+    #[test]
+    fn reads_the_defaults_that_protoc_writes() {
+        assert_eq!(
+            default_of(Kind::Double, "inf"),
+            Some(Scalar::F64(f64::INFINITY))
+        );
+        assert_eq!(
+            default_of(Kind::Float, "-inf"),
+            Some(Scalar::F32(f32::NEG_INFINITY))
+        );
+        assert!(matches!(default_of(Kind::Double, "nan"), Some(Scalar::F64(v)) if v.is_nan()));
+        assert_eq!(
+            default_of(Kind::UInt64, "18446744073709551615"),
+            Some(Scalar::U64(u64::MAX))
+        );
+        assert_eq!(default_of(Kind::Bool, "true"), Some(Scalar::Bool(true)));
+        assert_eq!(
+            default_of(Kind::String, "a\"b"),
+            Some(Scalar::Str("a\"b".to_string()))
+        );
+        assert_eq!(
+            c_unescape("\\001\\377x\\n\\\\\\x41\\'"),
+            b"\x01\xffx\n\\A'".to_vec()
         );
     }
 

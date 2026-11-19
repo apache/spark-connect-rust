@@ -34,9 +34,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
     let full_set = out_dir.join("spark_connect_descriptor_set_full.bin");
+    // The client's codec is prost's, of its errors of a response tagged (see src/codec.rs).
     tonic_prost_build::configure()
         .build_server(false)
         .build_client(true)
+        .codec_path("crate::ClientCodec")
         .bytes(".")
         .file_descriptor_set_path(&full_set)
         .compile_protos(&protos, &[proto_root])?;

@@ -267,17 +267,16 @@ pub(crate) fn install_getattr(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 /// The `spark.connect.Expression` of `column`, a message of `pyspark.sql.connect.proto`, as
-/// PySpark Connect's `to_plan` of its expression builds it. One too deep to be sent is the
-/// `RecursionError` that PySpark's `to_plan`, which recurses, raises.
+/// PySpark Connect's `to_plan` of its expression builds it, of any depth (where upb's parse stops
+/// at 100 levels). One too deep to be sent is the `RecursionError` that PySpark's `to_plan`, which
+/// recurses, raises.
 pub(crate) fn expression_message(py: Python<'_>, column: &Column) -> PyResult<Py<PyAny>> {
     use prost::Message;
     let expression = column.try_to_proto().to_pyerr()?;
-    let bytes = pyo3::types::PyBytes::new(py, &expression.encode_to_vec());
-    Ok(py
+    let class = py
         .import("pyspark.sql.connect.proto")?
-        .getattr("Expression")?
-        .call_method1("FromString", (bytes,))?
-        .unbind())
+        .getattr("Expression")?;
+    Ok(crate::pbmsg::parse_deep(&class, &expression.encode_to_vec())?.unbind())
 }
 
 #[pymethods]

@@ -784,7 +784,8 @@ class SparkConnectClient:
             req.operation_status.extensions.extend(operation_extensions)
         if request_extensions:
             req.extensions.extend(request_extensions)
-        return pb2.GetStatusResponse.FromString(self._session._get_status(req.SerializeToString()))
+        data = self._session._get_status(req.SerializeToString())
+        return _parse_response(pb2.GetStatusResponse, data)
 
     @property
     def is_closed(self) -> bool:
@@ -884,8 +885,8 @@ class SparkConnectClient:
 
         req = pb2.ConfigRequest()
         req.operation.CopyFrom(operation)
-        response = pb2.ConfigResponse.FromString(self._session._config(req.SerializeToString()))
-        return _ConfigResult.fromProto(response)
+        data = self._session._config(req.SerializeToString())
+        return _ConfigResult.fromProto(_parse_response(pb2.ConfigResponse, data))
 
     def _analyze(self, method: str, **kwargs: Any) -> _AnalyzeResult:
         """The result of the analysis ``method`` of the arguments ``kwargs``, as
@@ -958,7 +959,7 @@ class SparkConnectClient:
                 },
             )
         data = self._session._analyze_plan(req.SerializeToString())
-        return _AnalyzeResult.fromProto(pb2.AnalyzePlanResponse.FromString(data))
+        return _AnalyzeResult.fromProto(_parse_response(pb2.AnalyzePlanResponse, data))
 
     def schema(self, plan: "pb2.Plan") -> StructType:
         """The schema of ``plan``, a ``spark.connect.Plan``, as SparkConnectClient's ``schema``:
@@ -1029,7 +1030,7 @@ class SparkConnectClient:
                     if observed.name != "__python_accumulator__":
                         _ = observed.name in observations
                     yield observed
-                b = pb2.ExecutePlanResponse.FromString(data)
+                b = _parse_response(pb2.ExecutePlanResponse, data, streaming=True)
                 if b.HasField("schema"):
                     dt = types.proto_schema_to_pyspark_data_type(b.schema)
                     assert isinstance(dt, StructType)
@@ -1953,6 +1954,29 @@ for _name in (
 ):
     setattr(_ThreadTags, _name, _synced(set, _name))
 del _list, _name
+
+
+def _parse_response(message_class: Any, data: bytes, streaming: bool = False) -> Any:
+    """The response of the server of the bytes ``data``, a message of ``message_class``, as
+    PySpark's client has the response of gRPC, of any depth, as the Rust transport reads the
+    responses (where PySpark's deserializer stops at 100 levels, see docs/compatibility.md). Bytes
+    that do not parse raise PySpark's error of a response that gRPC's deserializer refuses: the
+    ``SparkConnectGrpcException`` of the status ``INTERNAL`` of grpc's error of the call
+    (``_MultiThreadedRendezvous`` of a call of a stream of responses, ``streaming``, else
+    ``_InactiveRpcError``), whose details are "Exception deserializing response!"."""
+    from pyspark.sql.connect.proto._rust import DecodeError
+
+    try:
+        return _pyspark._proto_parse_deep(message_class, data)
+    except DecodeError:
+        from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
+
+        call = "_MultiThreadedRendezvous" if streaming else "_InactiveRpcError"
+        raise SparkConnectGrpcException(
+            f"<{call} of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+            '\tdetails = "Exception deserializing response!"\n\tdebug_error_string = "None"\n>',
+            grpc_status_code=StatusCode.INTERNAL,
+        ) from None
 
 
 def _extensions_of(extensions: Any) -> list[Any]:

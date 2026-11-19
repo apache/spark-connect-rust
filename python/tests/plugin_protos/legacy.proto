@@ -1,0 +1,80 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+// A proto2 file of a plugin of python/tests/test_proto_rust_offline.py that imports the protos of
+// Spark Connect: its generated module gets the classes of the drop-in's Rust protobuf runtime,
+// which reads the presence, defaults, packing, required fields, closed enums and groups of proto2.
+// See plugin.proto for how the modules are generated.
+
+syntax = "proto2";
+
+package thirdparty.legacy;
+
+import "spark/connect/relations.proto";
+
+enum Color {
+  RED = 1;
+  GREEN = 2;
+  BLUE = 3;
+}
+
+message Defaults {
+  optional int32 count = 1 [default = 5];
+  optional string name = 2 [default = "a\"b\\c\x01d"];
+  optional bytes data = 3 [default = "\001\377x"];
+  optional double ratio = 4 [default = inf];
+  optional float scale = 5 [default = -nan];
+  optional bool flag = 6 [default = true];
+  optional Color color = 7 [default = GREEN];
+  optional Color first_color = 8;
+  optional uint64 big = 9 [default = 18446744073709551615];
+  optional sint32 negative = 10 [default = -7];
+  optional int64 plain = 11;
+  optional string plain_name = 12;
+}
+
+message Legacy {
+  required string id = 1;
+  optional spark.connect.Relation input = 2;
+  repeated int32 unpacked = 3;
+  repeated int32 packed = 4 [packed = true];
+  optional Color color = 5;
+  repeated Color colors = 6;
+  repeated Color packed_colors = 7 [packed = true];
+  optional group Item = 8 {
+    optional int32 x = 9;
+    required string label = 10;
+  }
+  repeated group Entry = 11 {
+    optional int32 key = 12;
+    optional spark.connect.Relation value = 13;
+  }
+  optional Defaults defaults = 14;
+  map<string, Defaults> by_name = 15;
+  optional Required required = 16;
+  repeated Required many_required = 17;
+  oneof choice {
+    string text = 18;
+    Color tint = 19;
+  }
+  optional string raw = 20;
+}
+
+message Required {
+  required int32 a = 1;
+  optional Required next = 2;
+}

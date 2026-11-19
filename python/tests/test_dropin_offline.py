@@ -2971,21 +2971,28 @@ def test_deep_messages_parse_as_from_string_and_fill_past_protobufs_limit():
     # gives, and a message past protobuf's limit of 100 nested messages is filled in full, so that
     # it serializes to the bytes it was parsed from, with a map, a repeated message and a oneof.
     # The messages are protobuf's, as a Python worker of the server parses them: of the files of
-    # the protos that pyspark.sql.connect.proto adds to protobuf's default pool.
+    # the protos that pyspark.sql.connect.proto adds to protobuf's default pool, of protobuf's own
+    # metaclass (whose wrapper, as protobuf's lookups, gives the runtime's classes).
     import types
 
     pytest.importorskip("google.protobuf")
-    from google.protobuf import descriptor_pool, message_factory
+    from google.protobuf import descriptor_pool, reflection
+    from google.protobuf import message as protobuf_message
     from google.protobuf.message import DecodeError
     from pyspark.sql.connect import proto as _proto  # noqa: F401
     from pyspark.sql.connect._column_reduce import parse_deep
 
     pool = descriptor_pool.Default()
+    metaclass = reflection.GeneratedProtocolMessageType._protobuf_class
+
+    def protobufs(name):
+        descriptor = pool.FindMessageTypeByName(f"spark.connect.{name}")
+        return metaclass(
+            name, (protobuf_message.Message,), {"DESCRIPTOR": descriptor, "__module__": None}
+        )
+
     proto = types.SimpleNamespace(
-        **{
-            name: message_factory.GetMessageClass(pool.FindMessageTypeByName(f"spark.connect.{name}"))
-            for name in ("Expression", "Relation", "ExecutePlanRequest")
-        }
+        **{name: protobufs(name) for name in ("Expression", "Relation", "ExecutePlanRequest")}
     )
 
     def deep_expression(levels):
@@ -25913,6 +25920,109 @@ def test_client_analysis_requests_and_results_are_those_of_pyspark():
     Session.response = pb2.AnalyzePlanResponse()
     with pytest.raises(SparkConnectException, match="No analyze result found!"):
         client._analyze("spark_version")
+
+
+def _deep_struct_type(levels):
+    """A ``spark.connect.DataType`` of a struct of one field of a struct, ``levels`` structs deep
+    (three messages a level: DataType, DataType.Struct and StructField)."""
+    import pyspark.sql.connect.proto as pb2
+
+    data_type = pb2.DataType(long=pb2.DataType.Long())
+    for _ in range(levels):
+        outer = pb2.DataType()
+        outer.struct.fields.add(name="a", nullable=True).data_type.CopyFrom(data_type)
+        data_type = outer
+    return data_type
+
+
+def test_client_reads_responses_of_any_depth_and_raises_pysparks_error_of_bad_ones():
+    # The responses that the client API parses (SparkConnectClient._analyze, _results, config and
+    # the status of operations) are read of any depth, as the Rust transport reads the responses
+    # of DataFrame.schema and collect(), where PySpark's deserializer stops at 100 levels (see
+    # docs/compatibility.md). Bytes that do not parse raise PySpark's error of a response that
+    # gRPC's deserializer refuses: SparkConnectGrpcException of the status INTERNAL, of grpc's
+    # error of the call ("Exception deserializing response!").
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
+    from pyspark.sql.connect.client import SparkConnectClient
+
+    deep = pb2.AnalyzePlanResponse()
+    deep.schema.schema.CopyFrom(_deep_struct_type(40))
+
+    class Session:
+        session_id = "s"
+        response = deep.SerializeToString()
+
+        def _user_context_extensions(self, is_global):
+            return []
+
+        def _set_user_context_refresh(self, refresh):
+            pass
+
+        def _analyze_plan(self, data):
+            return Session.response
+
+        def _config(self, data):
+            return Session.response
+
+        def _get_status(self, data):
+            return Session.response
+
+    client = SparkConnectClient._of_session(Session())
+    plan = pb2.Plan()
+    plan.root.range.end = 1
+    schema = client.schema(plan)
+    depth = 0
+    while isinstance(schema, T.StructType):
+        schema, depth = schema.fields[0].dataType, depth + 1
+    assert depth == 40
+    response = pb2.ExecutePlanResponse()
+    response.schema.CopyFrom(_deep_struct_type(40))
+
+    def responses(data):
+        # The responses of the transport, which the results close.
+        yield data, [], []
+
+    assert [type(item).__name__ for item in client._results(
+        responses(response.SerializeToString()), {})] == ["StructType"]
+
+    unary = (
+        "<_InactiveRpcError of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+        '\tdetails = "Exception deserializing response!"\n\tdebug_error_string = "None"\n>'
+    )
+    Session.response = b"\xff"
+    operation = pb2.ConfigRequest.Operation()
+    operation.get.keys.append("k")
+    for call in (lambda: client.schema(plan), lambda: client.config(operation),
+                 lambda: client._get_operation_statuses()):
+        with pytest.raises(SparkConnectGrpcException) as error:
+            call()
+        assert error.value.getMessage() == unary
+        assert error.value.getGrpcStatusCode() == StatusCode.INTERNAL
+    with pytest.raises(SparkConnectGrpcException) as error:
+        list(client._results(responses(b"\xff"), {}))
+    assert error.value.getMessage() == unary.replace("_InactiveRpcError", "_MultiThreadedRendezvous")
+
+
+def test_client_tables_of_responses_of_any_depth(mock_connect):
+    # SparkConnectClient.to_table reads a schema of a response nested past 100 levels, as
+    # DataFrame.collect() does, of the Rust transport.
+    import pyarrow as pa
+    import pyspark.sql.connect.proto as pb2
+
+    spark, service = mock_connect
+    client = spark.client
+    table = pa.table({"id": pa.array([1, 2], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, _deep_struct_type(40).SerializeToString()) + (
+        message_field(2, varint_field(1, 2) + message_field(2, sink.getvalue().to_pybytes())))
+    plan = pb2.Plan()
+    plan.root.CopyFrom(spark.range(2)._plan.plan(client))
+    result, schema, _ = client.to_table(plan, {})
+    assert result.to_pydict() == {"id": [1, 2]} and schema.fieldNames() == ["a"]
 
 
 def test_client_executes_the_plans_and_commands_it_is_given_as_pyspark(mock_connect):
