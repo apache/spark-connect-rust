@@ -28,6 +28,24 @@ pub(crate) fn raise_pyspark(
     build().unwrap_or_else(|e| e)
 }
 
+/// Raise a `pyspark.errors` exception (`class_name`) of the `error_class` condition alone, as
+/// PySpark raises some of them without `messageParameters`, such as `MALFORMED_VARIANT` of the
+/// conversion of local rows: its `getMessageParameters()` is None, where that of
+/// [`raise_pyspark`] of no parameters is `{}`.
+pub(crate) fn raise_pyspark_condition(
+    py: Python<'_>,
+    class_name: &str,
+    error_class: &str,
+) -> PyErr {
+    let build = || -> PyResult<PyErr> {
+        let cls = py.import("pyspark.errors")?.getattr(class_name)?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("errorClass", error_class)?;
+        Ok(PyErr::from_value(cls.call((), Some(&kwargs))?))
+    };
+    build().unwrap_or_else(|e| e)
+}
+
 /// As [`raise_pyspark`], of parameters that are Python objects, as PySpark formats them into its
 /// message: a str that UTF-8 cannot encode, such as one of a lone surrogate, shows as it is.
 pub(crate) fn raise_pyspark_of(

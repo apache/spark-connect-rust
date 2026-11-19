@@ -2206,6 +2206,17 @@ PySpark's shares the list of its fields. The class's own types compare without t
 a user set, where PySpark's comparison of the `__dict__`s holds them: a `DecimalType(7, 3)` of an
 attribute equals `DecimalType(7, 3)`, where a type of a Python subclass compares them (see below).
 
+A `StructType` caches its `names` as it is made and as `add` adds a field, as PySpark's, so an
+in-place change of its `fields` list, such as a `StructField` appended, leaves `names` and
+`fieldNames()` as they were. `createDataFrame` takes local rows, and the struct values below the
+top level, apart by those names, as PySpark's conversion reads `fieldNames()`, and converts their
+values by position with the fields as they are: a row of another number of values than the names
+raises `AXIS_LENGTH_MISMATCH`, a dict is read by them, and a field past them has no value
+(`IndexError`); below the top level, a value past the fields and fewer names than fields raise
+`IndexError` too. A pandas DataFrame is named with `toDF(*schema.fieldNames())`, of which the server
+raises for another number of names than columns. An element that is not a `StructField` is not
+taken (see `dev/parity/known-differences.md`).
+
 The parameters of a type are its attributes, as PySpark's: `t.scale = 3` makes a
 `DecimalType(10, 2)` a `DecimalType(10, 3)`, as its repr, JSON, `==` and hash show, also in the
 struct, array or map that holds it. A drop-in type holds only the values that its constructor

@@ -670,6 +670,65 @@ def test_pyspark_types_to_proto_types_refuses_values_that_are_not_types_as_pyspa
         pyspark_types_to_proto_types(UnparsedDataType(5))
 
 
+def test_proto_schema_conversion_raises_pysparks_errors_of_types_that_it_does_not_convert():
+    # As official PySpark 4.3.0's `proto_schema_to_pyspark_data_type`, whose last branch raises
+    # UNSUPPORTED_OPERATION of `f"data type {schema}"`, of the proto text of the type, for a type
+    # of no kind, such as `pb2.DataType()` or an element type that an array does not set, and of
+    # a kind that it has no branch of, an unparsed type or a nanosecond-precision timestamp: in the
+    # order of its conversion, of which a spatial type of an SRID that it does not take raises
+    # ST_INVALID_SRID_VALUE first. A user-defined type is of its Python class, of no conversion of
+    # its SQL type. The drop-in raised a PySparkRuntimeError of its own for a type of no kind,
+    # and gave an UnparsedDataType.
+    from pyspark.errors import IllegalArgumentException
+    from pyspark.sql.connect import proto as pb2
+    from pyspark.sql.connect.types import proto_schema_to_pyspark_data_type
+
+    def struct(*builds):
+        dt = pb2.DataType()
+        dt.struct.SetInParent()
+        for i, build in enumerate(builds):
+            field = dt.struct.fields.add()
+            field.name, field.nullable = f"f{i}", True
+            if build is not None:
+                build(field.data_type)
+        return dt
+
+    def unparsed(dt):
+        dt.unparsed.data_type_string = 'a "b"'
+
+    def nanos(dt):
+        dt.timestamp_ntz_nanos.precision = 9
+
+    def srid(dt):
+        dt.geometry.srid = 2154
+
+    array, map_ = pb2.DataType(), pb2.DataType()
+    array.array.SetInParent()
+    map_.map.key_type.string.SetInParent()
+    for dt, text in [
+        (pb2.DataType(), ""),
+        (struct(None), ""),
+        (struct(lambda dt: dt.long.SetInParent(), lambda dt: None), ""),
+        (array, ""),
+        (map_, ""),
+        (struct(unparsed), 'unparsed {\n  data_type_string: "a \\"b\\""\n}\n'),
+        (struct(nanos, None), "timestamp_ntz_nanos {\n  precision: 9\n}\n"),
+        (struct(None, nanos), ""),
+    ]:
+        with pytest.raises(PySparkValueError) as e:
+            proto_schema_to_pyspark_data_type(dt)
+        assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
+        assert e.value.getMessageParameters() == {"operation": f"data type {text}"}
+    with pytest.raises(IllegalArgumentException) as e:
+        proto_schema_to_pyspark_data_type(struct(srid, None))
+    assert e.value.getCondition() == "ST_INVALID_SRID_VALUE"
+    for sql_type in (nanos, unparsed, lambda dt: dt.SetInParent()):
+        udt = pb2.DataType()
+        udt.udt.type, udt.udt.python_class = "udt", "pyspark.ml.linalg.VectorUDT"
+        sql_type(udt.udt.sql_type)
+        assert type(proto_schema_to_pyspark_data_type(udt)).__name__ == "VectorUDT"
+
+
 def test_the_abstract_types_have_no_proto_nor_arrow_type_as_pysparks():
     # PySpark's `pyspark_types_to_proto_types` has no proto of a type of its class only, of which
     # it raises UNSUPPORTED_OPERATION, also in a struct, an array or a map. `cast` and `try_cast`

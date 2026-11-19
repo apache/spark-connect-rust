@@ -1513,7 +1513,9 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
         )
     if len(schema.fields) == 0:
         return table
-    return table.rename_columns(schema.names).cast(arrow_schema)
+    # The names of the fields, of a `fields` list changed in place the cached `names` of as many,
+    # as PySpark's names of `_deduplicate_field_names`, which raises of fewer.
+    return table.rename_columns(schema.names[: len(schema.fields)]).cast(arrow_schema)
 
 
 def arrow_decimal_column(values, dtype, name):
