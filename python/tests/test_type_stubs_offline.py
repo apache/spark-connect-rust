@@ -259,6 +259,26 @@ def user_mypy(tmp_path_factory):
         attribute_uses[len(probe)] = f"{module}.{cls}.{name}"
     (app / "probe_attributes.py").write_text("\n".join(probe) + "\n")
 
+    ml_aliases = [
+        "import pyspark.ml.classification as standard",
+        "import pyspark.ml.connect.classification as native",
+        "from pyspark.sql import DataFrame",
+        "def fit_logistic(df: DataFrame) -> standard.LogisticRegressionModel:",
+        "    return standard.LogisticRegression(maxIter=3).setRegParam(0.1).fit(df)",
+    ]
+    for name in (
+        "LogisticRegression", "LogisticRegressionModel", "LogisticRegressionSummary",
+        "LogisticRegressionTrainingSummary", "BinaryLogisticRegressionSummary",
+        "BinaryLogisticRegressionTrainingSummary",
+    ):
+        ml_aliases += [
+            f"def to_native_{name}(value: standard.{name}) -> native.{name}:",
+            "    return value",
+            f"def to_standard_{name}(value: native.{name}) -> standard.{name}:",
+            "    return value",
+        ]
+    (app / "probe_ml_aliases.py").write_text("\n".join(ml_aliases) + "\n")
+
     diagnostics = _run_mypy(
         "--cache-dir",
         str(app / ".mypy_cache"),
@@ -267,6 +287,7 @@ def user_mypy(tmp_path_factory):
         "probe_modules.py",
         "probe_attributes.py",
         "probe_members.py",
+        "probe_ml_aliases.py",
         CLASSIC_PROBE.name,
         cwd=app,
     )
@@ -299,6 +320,7 @@ def user_pyright(user_mypy):
         "probe_modules.py",
         "probe_attributes.py",
         "probe_members.py",
+        "probe_ml_aliases.py",
         CLASSIC_PROBE.name,
     ]
     result = subprocess.run(
@@ -346,6 +368,14 @@ def test_user_application_has_only_its_deliberate_error(user_mypy):
     assert revealed[2].endswith(') -> pyspark.sql.dataframe.DataFrame"'), revealed[2]
     assert revealed[3] == 'Revealed type is "pyspark.sql.connect.proto.base_pb2.Plan"'
     assert len(revealed) == 4
+
+
+def test_standard_logistic_aliases_are_typed(user_mypy):
+    assert _of(user_mypy, "probe_ml_aliases.py") == []
+
+
+def test_pyright_types_standard_logistic_aliases(user_pyright):
+    assert _of(user_pyright, "probe_ml_aliases.py") == []
 
 
 def test_every_function_of_functions_all_is_typed(user_mypy):
@@ -724,8 +754,8 @@ def test_the_stubs_have_the_docstrings_of_pysparks_objects():
                     samples[key] = doc
         digests[module] = capture.digest(pairs)
     assert samples == golden["samples"]
-    assert samples["pyspark.ml.connect.classification:LogisticRegression"].startswith(
-        "Logistic regression."
+    assert samples["pyspark.ml.connect.classification:LinearSVC"].startswith(
+        "This binary classifier optimizes the Hinge Loss"
     )
     # A stub of other docstrings than PySpark's, or of other declarations: regenerate the golden
     # with pyspark-client (see the capture script) once its docstrings are checked.

@@ -19,8 +19,14 @@
 # do not edit. Type checkers read this stub instead of the module of the drop-in.
 
 import pyspark.ml.classification as _pysparks
+from pyspark.ml.classification import BinaryLogisticRegressionSummary as BinaryLogisticRegressionSummary
+from pyspark.ml.classification import BinaryLogisticRegressionTrainingSummary as BinaryLogisticRegressionTrainingSummary
 from pyspark.ml.classification import ClassificationModel as ClassificationModel
 from pyspark.ml.classification import Classifier as Classifier
+from pyspark.ml.classification import LogisticRegression as LogisticRegression
+from pyspark.ml.classification import LogisticRegressionModel as LogisticRegressionModel
+from pyspark.ml.classification import LogisticRegressionSummary as LogisticRegressionSummary
+from pyspark.ml.classification import LogisticRegressionTrainingSummary as LogisticRegressionTrainingSummary
 from pyspark.ml.classification import ProbabilisticClassificationModel as ProbabilisticClassificationModel
 from pyspark.ml.classification import ProbabilisticClassifier as ProbabilisticClassifier
 from pyspark.ml.classification import OneVsRestReader as OneVsRestReader
@@ -30,26 +36,6 @@ from pyspark.ml.classification import OneVsRestModelWriter as OneVsRestModelWrit
 
 __all__ = ['LinearSVC', 'LinearSVCModel', 'LinearSVCSummary', 'LinearSVCTrainingSummary', 'LogisticRegression', 'LogisticRegressionModel', 'LogisticRegressionSummary', 'LogisticRegressionTrainingSummary', 'BinaryLogisticRegressionSummary', 'BinaryLogisticRegressionTrainingSummary', 'DecisionTreeClassifier', 'DecisionTreeClassificationModel', 'GBTClassifier', 'GBTClassificationModel', 'RandomForestClassifier', 'RandomForestClassificationModel', 'RandomForestClassificationSummary', 'RandomForestClassificationTrainingSummary', 'BinaryRandomForestClassificationSummary', 'BinaryRandomForestClassificationTrainingSummary', 'NaiveBayes', 'NaiveBayesModel', 'MultilayerPerceptronClassifier', 'MultilayerPerceptronClassificationModel', 'MultilayerPerceptronClassificationSummary', 'MultilayerPerceptronClassificationTrainingSummary', 'OneVsRest', 'OneVsRestModel', 'FMClassifier', 'FMClassificationModel', 'FMClassificationSummary', 'FMClassificationTrainingSummary']
 
-class LogisticRegressionSummary(_pysparks.LogisticRegressionSummary):
-    """Abstraction for Logistic Regression Results for a given model.
-
-    .. versionadded:: 2.0.0
-    """
-class BinaryLogisticRegressionSummary(LogisticRegressionSummary, _pysparks.BinaryLogisticRegressionSummary):
-    """Binary Logistic regression results for a given model.
-
-    .. versionadded:: 2.0.0
-    """
-class LogisticRegressionTrainingSummary(LogisticRegressionSummary, _pysparks.LogisticRegressionTrainingSummary):
-    """Abstraction for multinomial Logistic Regression Training results.
-
-    .. versionadded:: 2.0.0
-    """
-class BinaryLogisticRegressionTrainingSummary(BinaryLogisticRegressionSummary, LogisticRegressionTrainingSummary, _pysparks.BinaryLogisticRegressionTrainingSummary):
-    """Binary Logistic regression training results for a given model.
-
-    .. versionadded:: 2.0.0
-    """
 class RandomForestClassificationSummary(_pysparks.RandomForestClassificationSummary):
     """Abstraction for RandomForestClassification Results for a given model.
 
@@ -425,103 +411,6 @@ class LinearSVCTrainingSummary(LinearSVCSummary, _pysparks.LinearSVCTrainingSumm
     """Abstraction for LinearSVC Training results.
 
     .. versionadded:: 3.1.0
-    """
-class LogisticRegression(_pysparks.LogisticRegression):
-    """Logistic regression.
-    This class supports multinomial logistic (softmax) and binomial logistic regression.
-
-    .. versionadded:: 1.3.0
-
-    Examples
-    --------
-    >>> from pyspark.sql import Row
-    >>> from pyspark.ml.linalg import Vectors
-    >>> bdf = sc.parallelize([
-    ...     Row(label=1.0, weight=1.0, features=Vectors.dense(0.0, 5.0)),
-    ...     Row(label=0.0, weight=2.0, features=Vectors.dense(1.0, 2.0)),
-    ...     Row(label=1.0, weight=3.0, features=Vectors.dense(2.0, 1.0)),
-    ...     Row(label=0.0, weight=4.0, features=Vectors.dense(3.0, 3.0))]).toDF()
-    >>> blor = LogisticRegression(weightCol="weight")
-    >>> blor.getRegParam()
-    0.0
-    >>> blor.setRegParam(0.01)
-    LogisticRegression...
-    >>> blor.getRegParam()
-    0.01
-    >>> blor.setMaxIter(10)
-    LogisticRegression...
-    >>> blor.getMaxIter()
-    10
-    >>> blor.clear(blor.maxIter)
-    >>> blorModel = blor.fit(bdf)
-    >>> blorModel.setFeaturesCol("features")
-    LogisticRegressionModel...
-    >>> blorModel.setProbabilityCol("newProbability")
-    LogisticRegressionModel...
-    >>> blorModel.getProbabilityCol()
-    'newProbability'
-    >>> blorModel.getMaxBlockSizeInMB()
-    0.0
-    >>> blorModel.setThreshold(0.1)
-    LogisticRegressionModel...
-    >>> blorModel.getThreshold()
-    0.1
-    >>> blorModel.coefficients
-    DenseVector([-1.080..., -0.646...])
-    >>> blorModel.intercept
-    3.112...
-    >>> blorModel.evaluate(bdf).accuracy == blorModel.summary.accuracy
-    True
-    >>> data_path = "data/mllib/sample_multiclass_classification_data.txt"
-    >>> mdf = spark.read.format("libsvm").load(data_path)
-    >>> mlor = LogisticRegression(regParam=0.1, elasticNetParam=1.0, family="multinomial")
-    >>> mlorModel = mlor.fit(mdf)
-    >>> mlorModel.coefficientMatrix
-    SparseMatrix(3, 4, [0, 1, 2, 3], [3, 2, 1], [1.87..., -2.75..., -0.50...], 1)
-    >>> mlorModel.interceptVector
-    DenseVector([0.04..., -0.42..., 0.37...])
-    >>> test0 = sc.parallelize([Row(features=Vectors.dense(-1.0, 1.0))]).toDF()
-    >>> blorModel.predict(test0.head().features)
-    1.0
-    >>> blorModel.predictRaw(test0.head().features)
-    DenseVector([-3.54..., 3.54...])
-    >>> blorModel.predictProbability(test0.head().features)
-    DenseVector([0.028, 0.972])
-    >>> result = blorModel.transform(test0).head()
-    >>> result.prediction
-    1.0
-    >>> result.newProbability
-    DenseVector([0.02..., 0.97...])
-    >>> result.rawPrediction
-    DenseVector([-3.54..., 3.54...])
-    >>> test1 = sc.parallelize([Row(features=Vectors.sparse(2, [0], [1.0]))]).toDF()
-    >>> blorModel.transform(test1).head().prediction
-    1.0
-    >>> blor.setParams("vector")
-    Traceback (most recent call last):
-        ...
-    TypeError: Method setParams forces keyword arguments.
-    >>> lr_path = temp_path + "/lr"
-    >>> blor.save(lr_path)
-    >>> lr2 = LogisticRegression.load(lr_path)
-    >>> lr2.getRegParam()
-    0.01
-    >>> model_path = temp_path + "/lr_model"
-    >>> blorModel.save(model_path)
-    >>> model2 = LogisticRegressionModel.load(model_path)
-    >>> bool(blorModel.coefficients[0] == model2.coefficients[0])
-    True
-    >>> blorModel.intercept == model2.intercept
-    True
-    >>> model2
-    LogisticRegressionModel: uid=..., numClasses=2, numFeatures=2
-    >>> blorModel.transform(test0).take(1) == model2.transform(test0).take(1)
-    True
-    """
-class LogisticRegressionModel(_pysparks.LogisticRegressionModel):
-    """Model fitted by LogisticRegression.
-
-    .. versionadded:: 1.3.0
     """
 class MultilayerPerceptronClassificationModel(_pysparks.MultilayerPerceptronClassificationModel):
     """Model fitted by MultilayerPerceptronClassifier.

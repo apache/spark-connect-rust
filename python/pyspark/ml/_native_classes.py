@@ -337,6 +337,21 @@ def _native_member(native, name):
     return _NativeMember(getattr(_native, native), name)
 
 
+def _ensure_readwrite_classes():
+    """Initialize the shared native reader/writer adapters before a standard-import operation.
+
+    Their registration currently lives in the native package initializer. Import it lazily,
+    after the standard ML modules have loaded, to avoid a classification import cycle.
+    """
+    importlib.import_module("pyspark.ml.connect.readwrite")
+
+
+def _restore_readwrite(factory):
+    """Rebuild a pickled native reader/writer after registering its public Python class."""
+    _ensure_readwrite_classes()
+    return factory()
+
+
 def _synced(member, name, official, sync=True):
     """The member `name` of the public class of PySpark's class `official`, which runs the native
     method `member` of the native object's params synced first: a function of the parameters of
@@ -370,7 +385,13 @@ def _synced(member, name, official, sync=True):
     if sync:
         body = f"_sync({parameters[0].name})\n    {body}"
     qualname = getattr(pysparks, "__qualname__", None) or f"{official.__name__}.{name}"
-    scope = {"_sync": _sync, "__member": member}
+    if name in ("write", "read"):
+        body = f"_ensure_readwrite_classes()\n    {body}"
+    scope = {
+        "_sync": _sync,
+        "__member": member,
+        "_ensure_readwrite_classes": _ensure_readwrite_classes,
+    }
     return _function(pysparks, name, qualname, body, scope, binding=binding)
 
 
@@ -635,7 +656,7 @@ def _has_training_summary(official):
     return issubclass(official, HasTrainingSummary)
 
 
-def _public_class(native, official, parents):
+def _public_class(native, official, parents, public_module=None):
     """The public class of `native`, of PySpark's class `official` and of the public classes
     `parents` of its bases of the module (see `publish`)."""
     bases = (native,) + parents + (official,)
@@ -648,7 +669,7 @@ def _public_class(native, official, parents):
     holder = [None]
     __new__, __init__ = _constructors(native, official, holder)
     namespace = {
-        "__module__": native.__module__,
+        "__module__": public_module or native.__module__,
         "__qualname__": native.__qualname__,
         "__doc__": official.__doc__ or native.__doc__,
         "__new__": __new__,
@@ -767,6 +788,15 @@ def _readwrite_api(native, official):
     for name in ("save", "load"):
         if hasattr(native, name):
             namespace[name] = _synced(_NativeMember(native, name), name, official, sync=False)
+
+    def __reduce__(self):
+        reduced = native.__reduce__(self)
+        if reduced[0] in (_native._new_remote_ml_writer, _native._new_remote_ml_reader):
+            # A fresh interpreter may not have imported any native ML namespace yet.
+            return (_restore_readwrite, (reduced[0],), *reduced[2:])
+        return reduced
+
+    namespace["__reduce__"] = __reduce__
     return namespace
 
 
@@ -827,10 +857,16 @@ def _newargs_of(official):
     return __getnewargs__
 
 
-def publish(namespace, official_module):
+def publish(namespace, official_module, *, public_module=None):
     """Replace each native class of the module of the globals `namespace` by its public class, of
-    PySpark's class of the same name of `official_module`."""
-    official = importlib.import_module(official_module)
+    PySpark's class of the same name of `official_module`. A reference namespace also works,
+    so a public adapter can retain upstream definitions before publishing native classes under
+    `public_module` without importing itself recursively."""
+    official = (
+        importlib.import_module(official_module)
+        if isinstance(official_module, str)
+        else official_module
+    )
     natives = [
         (name, value)
         for name, value in list(namespace.items())
@@ -861,7 +897,7 @@ def publish(namespace, official_module):
                 ours = published[base.__name__][1]
                 if not any(issubclass(parent, ours) for parent in parents):
                     parents.append(ours)
-        public = _public_class(native, official_class, tuple(parents))
+        public = _public_class(native, official_class, tuple(parents), public_module)
         published[name] = (official_class, public)
         namespace[name] = public
     return {name: public for name, (_, public) in published.items()}
