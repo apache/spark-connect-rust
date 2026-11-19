@@ -224,8 +224,9 @@ Rigorously classify before touching anything (diff our dir vs the version tag):
   shims can hold vendored files too, such as most of `errors/*`, `sql/session.py` and the
   classic modules of the objects of a session (`sql/{catalog,conf,readwriter,udf,udtf,group}.py`,
   `sql/streaming/{query,readwriter}.py`, `sql/pandas/group_ops.py` and others), whose objects on
-  Spark Connect are of the classes of `sql/connect/*`, as in PySpark: `VENDORED_FILES` of
-  `scripts/check_vendored_upstream.sh` lists every vendored file.
+  Spark Connect are of the classes of `sql/connect/*`, as in PySpark, and `sql/utils.py`, whose
+  decorators run those of Spark Connect: `VENDORED_FILES` of `scripts/check_vendored_upstream.sh`
+  lists every vendored file.
 
 Subtree conversion (serial, needs a **clean working tree**, one dir at a time):
 ```

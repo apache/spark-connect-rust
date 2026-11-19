@@ -314,9 +314,9 @@ def _dict_to_options_column(options_dict):
     # since create_map is auto-generated
     return _call_function("create_map", *[_pyfunc_lit(arg) for arg in args])
 
-# Import UDF / UDTF functions
-from pyspark.sql.connect.udf import udf
-from pyspark.sql.connect.udtf import arrow_udtf, udtf
+# Import UDF / UDTF functions. udf, udtf and arrow_udtf are those of pyspark.sql.connect.udf and
+# pyspark.sql.connect.udtf, which this module reads when they are first asked for (see
+# ``__getattr__`` below).
 from pyspark.sql.pandas.functions import arrow_udf, pandas_udf
 from pyspark.sql.udtf import (
     OrderingColumn,
@@ -1319,19 +1319,53 @@ for _bname, _bobj in list(globals().items()):
         setattr(builtin, _bname, _bobj)
 _sys.modules["pyspark.sql.functions.builtin"] = builtin
 
+# The functions of the UDFs and the UDTFs of Spark Connect, of the modules of pyspark.sql.connect
+# that define them, which this module and ``builtin`` read the first time that one of them is asked
+# for (PEP 562), as an attribute or by an import: as PySpark's, whose functions run those of Spark
+# Connect only when they are called, importing pyspark imports no module of pyspark.sql.connect,
+# so that package has the names of PySpark's.
+_CONNECT_FUNCTIONS = {
+    "udf": "pyspark.sql.connect.udf",
+    "udtf": "pyspark.sql.connect.udtf",
+    "arrow_udtf": "pyspark.sql.connect.udtf",
+}
+
+
+def _connect_function(name, module_name):
+    if name not in _CONNECT_FUNCTIONS:
+        raise AttributeError(f"module {module_name!r} has no attribute {name!r}")
+    import importlib
+
+    function = getattr(importlib.import_module(_CONNECT_FUNCTIONS[name]), name)
+    # As the other functions (see below): pickled by reference to PySpark's module.
+    function.__module__ = builtin.__name__
+    globals()[name] = function
+    setattr(builtin, name, function)
+    return function
+
+
+def __getattr__(name):
+    return _connect_function(name, __name__)
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_CONNECT_FUNCTIONS))
+
+
+builtin.__getattr__ = lambda name: _connect_function(name, builtin.__name__)
+builtin.__dir__ = lambda: sorted(set(vars(builtin)) | set(_CONNECT_FUNCTIONS))
+
 # As PySpark's, the functions are of the module ``pyspark.sql.functions.builtin``, where
 # PySpark defines all of them but pandas_udf and arrow_udf (of pyspark.sql.pandas.functions).
 # So pickle, and cloudpickle, pickle them by reference, by that name: a UDF or a foreachBatch
 # function that captures one, such as ``array_sort``, pickles, and the Python worker of the
 # server imports PySpark's. Of the module of the generated functions, which is not importable,
 # cloudpickle would pickle them by value, and fail on the Rust functions that they call.
-for _bname in dir(builtin):
-    _bobj = getattr(builtin, _bname)
+for _bname, _bobj in list(vars(builtin).items()):
     if (
         not _bname.startswith("_")
         and _inspect.isfunction(_bobj)
-        and _bobj.__module__
-        in ("functions_generated", __name__, "pyspark.sql.connect.udf", "pyspark.sql.connect.udtf")
+        and _bobj.__module__ in ("functions_generated", __name__)
         and getattr(builtin, _bobj.__qualname__, None) is _bobj
     ):
         _bobj.__module__ = builtin.__name__

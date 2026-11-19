@@ -327,10 +327,6 @@ _CONNECT = (
 UNRESOLVED_IMPORTS = {
     "pyspark.core.context.SparkContext": _CLASSIC,
     "pyspark.core.rdd.RDD": _CLASSIC,
-    "pyspark.sql.utils.StringConcat": (
-        "the helper of the private tree strings of PySpark's classic types, which the drop-in's "
-        "native types build in Rust"
-    ),
     "pyspark.sql.connect.expressions.CommonInlineUserDefinedFunction": _CONNECT,
     "pyspark.sql.connect.expressions.SortOrder": _CONNECT,
     "pyspark.sql.connect.expressions.SubqueryExpression": _CONNECT,

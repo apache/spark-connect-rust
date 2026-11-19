@@ -404,6 +404,19 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 
 ## Session and client (Connect)
 
+- **The check of the dependencies at `import pyspark.sql.connect`** (intentional; the transport
+  is native). PySpark's package runs `check_dependencies()` when it is imported. That raises
+  `PACKAGE_NOT_INSTALLED` without pandas 2.2.0, PyArrow 18.0.0, grpcio 1.48.1, grpcio-status
+  1.48.1, googleapis-common-protos 1.56.4 or zstandard 0.25.0, and `UNSUPPORTED_PACKAGE_VERSION`
+  of an older one. Of a main module without a file, as of `python -c`, it takes the import for a
+  run of the doctests and imports `pyspark.testing.connectutils`, which exits the process: with
+  255 when no `SPARK_HOME` is found, or with 0 ("Skipping doctests") without the dependencies of
+  the Connect tests. The drop-in's package imports `check_dependencies`, as PySpark's, so it has
+  the same names (`check_dependencies` and `utils`), but it does not run it. Its transport needs
+  none of the gRPC packages, and it runs without PyArrow and pandas (see "pandas DataFrames
+  without PyArrow" above), so the import works without them, also of `python -c`. A program's call
+  of `check_dependencies()` checks pandas and PyArrow, and the doctest run, as PySpark's, but not
+  the gRPC packages.
 - **Custom gRPC channels** (intentional; the transport is native). `ChannelBuilder` and
   `DefaultChannelBuilder` parse the connection string and hold its parameters, `host`,
   `endpoint`, `get`, `set`, `userId`, `token`, `session_id`, `use_ssl`, `secure` and

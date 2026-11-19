@@ -163,6 +163,10 @@ VENDORED_FILES=(
   "sql/pandas/group_ops.py"
   "sql/streaming/readwriter.py"
   "sql/streaming/query.py"
+  # PySpark's pyspark.sql.utils, of the helpers and the decorators that its modules import: its
+  # is_remote() is True of the remote-only pyspark.util, and its decorators run the functions and
+  # the methods of the classes of pyspark.sql.connect, the drop-in's.
+  "sql/utils.py"
 
   # PEP 561: the package is typed, and the type aliases of PySpark's stubs.
   "py.typed"

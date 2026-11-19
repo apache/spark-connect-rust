@@ -242,6 +242,172 @@ def test_the_udfs_and_udtfs_are_of_pyspark_connects_classes():
         assert pickle.loads(pickle.dumps(cls)) is cls
 
 
+# The names of pyspark-client 4.3.0's pyspark.sql.utils, but those of the dunder methods.
+SQL_UTILS_NAMES = (
+    "AnalysisException Any Callable CapturedException Dict Enum ForeachBatchFunction FuncT "
+    "IllegalArgumentException JVM_INT_MAX List NumpyHelper Optional ParseException "
+    "PySparkImportError PySparkNotImplementedError PySparkRuntimeError PythonException "
+    "QueryExecutionException Sequence SparkUpgradeException StreamingQueryException StringConcat "
+    "TYPE_CHECKING TypeVar Union UnknownException _find_spark_home cast dispatch_col_method "
+    "dispatch_df_method dispatch_table_arg_method dispatch_window_method enum_to_value "
+    "escape_meta_characters functools get_active_spark_context get_lit_sql_str inspect is_remote "
+    "is_remote_only is_timestamp_ntz_preferred os overload pyspark_column_op remote_only "
+    "require_minimum_plotly_version require_test_compiled to_java_array to_scala_map to_str "
+    "try_partitioning_remote_functions try_remote_avro_functions try_remote_functions "
+    "try_remote_protobuf_functions try_remote_session_classmethod"
+).split()
+
+
+def test_sql_utils_is_pysparks_module(tmp_path, monkeypatch):
+    # As pyspark-client's pyspark.sql.utils, of its names and its helpers: a remote-only client,
+    # whose is_remote() is True, and whose require_test_compiled raises of a SPARK_HOME without
+    # the test classes of Spark SQL.
+    import pyspark.sql.utils as utils
+    from pyspark.errors import PySparkRuntimeError
+
+    assert sorted(n for n in vars(utils) if not n.startswith("__")) == sorted(SQL_UTILS_NAMES)
+    assert utils.is_remote_only() is True and utils.is_remote() is True
+    assert utils.JVM_INT_MAX == (1 << 31) - 1
+    assert utils.escape_meta_characters("a\nb\tc") == "a\\nb\\tc"
+    concat = utils.StringConcat()
+    concat.append("a")
+    concat.append("b")
+    assert concat.toString() == "ab"
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    assert utils._find_spark_home() == str(tmp_path)
+    with pytest.raises(PySparkRuntimeError) as raised:
+        utils.require_test_compiled()
+    assert raised.value.getCondition() == "TEST_CLASS_NOT_COMPILED"
+    # A Connect-only client has no SparkContext, of which PySpark's classic helper imports.
+    with pytest.raises(ImportError, match="SparkContext"):
+        utils.get_active_spark_context()
+
+
+def test_the_decorators_of_sql_utils_run_spark_connects(objects):
+    # As PySpark's decorators of a remote client: the functions run those of PySpark Connect's
+    # modules of their names, and the methods those of the classes of Spark Connect, which an
+    # object of another class does not have.
+    from pyspark.errors import PySparkNotImplementedError
+    from pyspark.sql.connect.column import Column
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.table_arg import TableArg
+    from pyspark.sql.connect.window import WindowSpec
+    from pyspark.sql.utils import (
+        dispatch_col_method,
+        dispatch_df_method,
+        dispatch_table_arg_method,
+        dispatch_window_method,
+        try_partitioning_remote_functions,
+        try_remote_avro_functions,
+        try_remote_functions,
+        try_remote_protobuf_functions,
+    )
+
+    def named(name, decorator):
+        def classic(*args, **kwargs):
+            raise AssertionError("of Spark Classic")
+
+        classic.__name__ = classic.__qualname__ = name
+        return decorator(classic)
+
+    assert type(named("lit", try_remote_functions)(5)) is Column
+    assert type(named("years", try_partitioning_remote_functions)(F.col("d"))) is Column
+    assert type(named("to_avro", try_remote_avro_functions)(F.col("d"))) is Column
+    protobuf = named("to_protobuf", try_remote_protobuf_functions)
+    assert type(protobuf(F.col("d"), "M", binaryDescriptorSet=b"")) is Column
+    limit = named("limit", dispatch_df_method)
+    assert type(limit(objects["df"], 1)) is DataFrame
+    alias = named("alias", dispatch_col_method)
+    assert type(alias(objects["column"], "x")) is Column
+    for method, feature in ((limit, "DataFrame.limit"), (alias, "Column.alias")):
+        with pytest.raises(PySparkNotImplementedError) as raised:
+            method(object(), 1)
+        assert raised.value.getMessageParameters() == {"feature": feature}
+    assert type(named("partitionBy", dispatch_window_method)("id")) is WindowSpec
+    table_arg = named("partitionBy", dispatch_table_arg_method)(objects["asTable"], "id")
+    assert type(table_arg) is TableArg
+
+
+def test_the_connect_package_has_pysparks_names_and_imports_without_its_checks(tmp_path):
+    # As pyspark-client's pyspark.sql.connect, whose __init__ imports the check_dependencies of
+    # pyspark.sql.connect.utils: the package has those names, and importing pyspark imports no
+    # module of it, nor do the functions of UDFs and UDTFs until they are asked for. Its import
+    # does not run the check, which requires pandas, PyArrow and the packages of gRPC, so it
+    # imports without them, and of a main module without a file, which `python -c` runs and
+    # which PySpark's check takes for its doctests.
+    import subprocess
+    import sys
+
+    script = tmp_path / "connect_names.py"
+    script.write_text(
+        """
+import importlib.abc, pickle, sys
+
+blocked = sys.argv[1:]
+
+
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if any(name == b or name.startswith(b + ".") for b in blocked):
+            raise ImportError("blocked: " + name)
+
+
+sys.meta_path.insert(0, Block())
+
+
+def connect_modules():
+    return sorted(m for m in sys.modules if m.startswith("pyspark.sql.connect"))
+
+
+import pyspark
+from pyspark.sql import SparkSession, functions as F
+
+assert connect_modules() == [], connect_modules()
+assert {"udf", "udtf", "arrow_udtf"} <= set(dir(F))
+assert connect_modules() == [], connect_modules()
+import pyspark.sql.connect as connect
+
+assert sorted(n for n in vars(connect) if not n.startswith("__")) == ["check_dependencies", "utils"]
+assert connect_modules() == ["pyspark.sql.connect", "pyspark.sql.connect.utils"], connect_modules()
+assert connect.__doc__ == "Spark Connect client"
+assert connect.check_dependencies is connect.utils.check_dependencies
+from pyspark.sql.functions import udf
+import pyspark.sql.functions.builtin as builtin
+
+assert udf is F.udf is builtin.udf and F.udtf is builtin.udtf and F.arrow_udtf is builtin.arrow_udtf
+assert udf.__module__ == "pyspark.sql.functions.builtin" and pickle.loads(pickle.dumps(udf)) is udf
+print("ok")
+"""
+    )
+    packages = ["pandas", "pyarrow", "numpy", "grpc", "grpc_status", "google.rpc", "zstandard"]
+    for blocked in ([], packages):
+        result = subprocess.run(
+            [sys.executable, str(script), *blocked], capture_output=True, text=True, timeout=300
+        )
+        assert result.returncode == 0 and result.stdout.strip() == "ok", result.stderr
+    result = subprocess.run(
+        [sys.executable, "-c", "import pyspark.sql.connect as c; print(sorted(vars(c))[-1])"],
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0 and result.stdout.strip() == "utils", result.stderr
+
+
+def test_the_udf_functions_are_names_of_the_functions_modules_as_pysparks():
+    # The functions of UDFs and UDTFs that pyspark.sql.functions reads when they are asked for are
+    # names of it and of its builtin module, which dir() lists, and a name that neither has raises
+    # the AttributeError of a module, as PySpark's.
+    import pyspark.sql.functions.builtin as builtin
+
+    for module in (F, builtin):
+        assert {"udf", "udtf", "arrow_udtf"} <= set(dir(module))
+        assert module.udf is F.udf and module.arrow_udtf is F.arrow_udtf
+        with pytest.raises(AttributeError) as raised:
+            module.no_such_function
+        assert str(raised.value) == f"module {module.__name__!r} has no attribute 'no_such_function'"
+
+
 def test_the_native_trigger_and_listener_bus_are_of_the_connect_modules(objects):
     # The drop-in's Trigger of a stream writer, of its module of PySpark Connect, where it pickles
     # by reference, and the listener bus of a session's streams, of PySpark Connect's module and
