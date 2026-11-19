@@ -14,9 +14,441 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""UserDefinedFunction / UDFRegistration under the connect import path, and the
-``_create_udf`` with which ``pyspark.sql.pandas.functions`` creates pandas and Arrow UDFs, as
-in PySpark Connect."""
-from pyspark.sql.udf import UDFRegistration, UserDefinedFunction, _create_udf  # noqa: F401
+
+"""
+User-defined functions of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.udf``: the
+UDF objects of ``pyspark.sql.functions.udf`` and ``pandas_udf``, and the registration of
+``spark.udf``. PySpark's ``pandas_udf`` (``pyspark.sql.pandas.functions``, vendored as it is)
+makes its UDFs with ``_create_udf`` of this module on Spark Connect, as PySpark's does. PySpark's
+classic ``pyspark.sql.udf``, vendored as it is too, has the classes of Spark Classic.
+"""
+
+import functools
+import sys
+import warnings
+from typing import Callable, Optional, Any
+
+from pyspark.errors import PySparkRuntimeError, PySparkTypeError
+from pyspark.sql.types import DataType, StringType
+# As PySpark Connect's, which checks the return type of a UDF for its eval type with the
+# static method of PySpark's classic class (its PySparkUserDefinedFunction).
+from pyspark.sql.udf import UserDefinedFunction as _PySparkUserDefinedFunction
+# As PySpark's module, of whose namespace it is (see the stubs).
+from pyspark.serializers import CloudPickleSerializer  # noqa: F401
+from pyspark.util import PythonEvalType
 
 __all__ = ["UDFRegistration", "UserDefinedFunction"]
+
+
+def _as_concrete_datatype(returnType: Any) -> DataType:
+    """Return a concrete, picklable pyspark ``DataType``.
+
+    A DDL string (e.g. ``"double"``, ``"a int, b string"``) is parsed into its
+    concrete type with ``DataType.fromDDL``. This matters because the cloudpickled UDF
+    command must carry a real ``DataType`` (not a DDL string): the pandas/Arrow
+    worker pairs each result column with its spark type to build the Arrow batch,
+    so a bare string breaks it ("not enough values to unpack"). Mirrors how the
+    reference Connect client pickles the *parsed* output type.
+    """
+    if isinstance(returnType, str):
+        return DataType.fromDDL(returnType)
+    return returnType
+
+
+class UserDefinedFunction:
+    """
+    User defined function in Python
+
+    Notes
+    -----
+    The constructor of this class is not supposed to be directly called.
+    Use :meth:`pyspark.sql.functions.udf` or :meth:`pyspark.sql.functions.pandas_udf`
+    to create this instance.
+    """
+
+    # The class of PySpark Connect, of pyspark.sql.connect.udf: a UDF that a function captures is
+    # pickled by reference to that name, which the Python worker of the server has as the Connect
+    # class. PySpark's classic pyspark.sql.udf.UserDefinedFunction is another class, as in PySpark.
+
+    def __init__(
+        self,
+        func: Callable[..., Any],
+        returnType: Any = StringType(),
+        name: Optional[str] = None,
+        evalType: int = PythonEvalType.SQL_BATCHED_UDF,
+        deterministic: bool = True,
+    ):
+        # cloudpickle pickles this class by reference only when its module is imported.
+        import pyspark.sql.connect.udf  # noqa: F401
+
+        # The checks of PySpark Connect's UserDefinedFunction.
+        if not callable(func):
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "callable",
+                    "arg_name": "func",
+                    "arg_type": type(func).__name__,
+                },
+            )
+
+        if not isinstance(returnType, (DataType, str)):
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "DataType or str",
+                    "arg_name": "returnType",
+                    "arg_type": type(returnType).__name__,
+                },
+            )
+
+        if not isinstance(evalType, int):
+            raise PySparkTypeError(
+                errorClass="NOT_EXPECTED_TYPE",
+                messageParameters={
+                    "expected_type": "int",
+                    "arg_name": "evalType",
+                    "arg_type": type(evalType).__name__,
+                },
+            )
+
+        self.func = func
+        self._returnType = returnType
+        self._returnType_placeholder: Optional[DataType] = None
+        self._name = name or (
+            func.__name__ if hasattr(func, "__name__") else func.__class__.__name__
+        )
+        self.evalType = evalType
+        self.deterministic = deterministic
+
+    @property
+    def returnType(self) -> DataType:
+        # As PySpark's, the return type is parsed once, and checked for the eval type each
+        # time. It is a concrete DataType, which the pickled command carries for the pandas
+        # and Arrow workers; a DDL string is parsed on the client.
+        if self._returnType_placeholder is None:
+            self._returnType_placeholder = _as_concrete_datatype(self._returnType)
+
+        _PySparkUserDefinedFunction._check_return_type(self._returnType_placeholder, self.evalType)
+        return self._returnType_placeholder
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """
+        Call the UDF with Column arguments.
+        Returns a Column representing the UDF call.
+        """
+        from pyspark import _pyspark
+
+        # A UDF argument is ColumnOrName: as PySpark's, a bare string is a column name, of
+        # which pyfunc_make_udf makes a ColumnReference, and each keyword argument is a
+        # NamedArgumentExpression, after the positional ones.
+        cols = list(args)
+        named = list(kwargs.items())
+
+        # As PySpark's PythonUDF, which keeps the function and the return type object: each
+        # request that builds the plan converts the output type of that object and pickles
+        # (func, returnType) for the server-side Python worker with CloudPickleSerializer, as
+        # PySpark's `PythonUDF.to_plan` does. So the function is pickled as it is then, with
+        # the globals that it reads, and a StructType changed in place after the call is the
+        # type that is sent, and pickled, as it is then; a function that does not pickle raises
+        # the PicklingError of `CloudPickleSerializer.dumps` from the request.
+        return _pyspark.functions.pyfunc_make_udf(
+            self._name,
+            self.returnType,
+            self.evalType,
+            self.func,
+            "%d.%d" % sys.version_info[:2],
+            *cols,
+            deterministic=self.deterministic,
+            named_args=named,
+        )
+
+    # Verbatim from PySpark Connect (pyspark.sql.connect.udf.UserDefinedFunction).
+    # This function is for improving the online help system in the interactive interpreter.
+    # For example, the built-in help / pydoc.help. It wraps the UDF with the docstring and
+    # argument annotation. (See: SPARK-19161)
+    def _wrapped(self) -> Any:
+        """
+        Wrap this udf with a function and attach docstring from func
+        """
+
+        # It is possible for a callable instance without __name__ attribute or/and
+        # __module__ attribute to be wrapped here. For example, functools.partial. In this case,
+        # we should avoid wrapping the attributes from the wrapped function to the wrapper
+        # function. So, we take out these attribute names from the default names to set and
+        # then manually assign it after being wrapped.
+        assignments = tuple(
+            a for a in functools.WRAPPER_ASSIGNMENTS if a != "__name__" and a != "__module__"
+        )
+
+        @functools.wraps(self.func, assigned=assignments)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            return self(*args, **kwargs)
+
+        wrapper.__name__ = self._name
+        wrapper.__module__ = (
+            self.func.__module__
+            if hasattr(self.func, "__module__")
+            else self.func.__class__.__module__
+        )
+
+        wrapper.func = self.func  # type: ignore[attr-defined]
+        wrapper.returnType = self.returnType  # type: ignore[attr-defined]
+        wrapper.evalType = self.evalType  # type: ignore[attr-defined]
+        wrapper.deterministic = self.deterministic  # type: ignore[attr-defined]
+        wrapper.asNondeterministic = functools.wraps(  # type: ignore[attr-defined]
+            self.asNondeterministic
+        )(lambda: self.asNondeterministic()._wrapped())
+        wrapper._unwrapped = self  # type: ignore[attr-defined]
+        return wrapper  # type: ignore[return-value]
+
+    def asNondeterministic(self) -> "UserDefinedFunction":
+        """
+        Updates UserDefinedFunction to nondeterministic.
+
+        .. versionadded:: 3.4.0
+        """
+        self.deterministic = False
+        return self
+
+
+def udf(
+    f: Optional[Any] = None,
+    returnType: Any = StringType(),
+    *,
+    useArrow: Optional[bool] = None,
+) -> Any:
+    """
+    Create a user-defined function (UDF).
+
+    Parameters
+    ----------
+    f : callable, optional
+        The Python function to wrap as a UDF.
+    returnType : DataType, optional
+        The return type of the UDF. Defaults to StringType().
+    useArrow : bool, optional
+        Whether to use Arrow optimization. Defaults to None (auto-detect).
+
+    Returns
+    -------
+    function or callable
+        If f is provided, returns the function wrapper of the UDF, as PySpark does. If f is
+        None or a return type, returns a decorator.
+
+    Examples
+    --------
+    >>> from pyspark.sql import functions as F
+    >>> from pyspark.sql.types import IntegerType
+    >>> u = F.udf(lambda x: x + 1, IntegerType())
+    >>> result = spark.range(3).select(u(F.col('id')).alias('inc_id'))
+    """
+    # Verbatim from PySpark Connect (pyspark.sql.connect.functions.builtin.udf).
+    if f is None or isinstance(f, (str, DataType)):
+        # If DataType has been passed as a positional argument
+        # for decorator use it as a returnType
+        return_type = f or returnType
+        return functools.partial(
+            _create_py_udf,
+            returnType=return_type,
+            useArrow=useArrow,
+        )
+    else:
+        return _create_py_udf(f=f, returnType=returnType, useArrow=useArrow)
+
+
+# Verbatim from PySpark Connect (pyspark.sql.connect.udf).
+def _create_py_udf(
+    f: Callable[..., Any],
+    returnType: Any,
+    useArrow: Optional[bool] = None,
+) -> Any:
+    from pyspark.sql.pandas.utils import (
+        require_minimum_pandas_version,
+        require_minimum_pyarrow_version,
+    )
+
+    is_arrow_enabled = False
+    if useArrow is None:
+        is_arrow_enabled = False
+        try:
+            from pyspark.sql import SparkSession
+
+            session = SparkSession.active()
+            is_arrow_enabled = (
+                str(session.conf.get("spark.sql.execution.pythonUDF.arrow.enabled")).lower()
+                == "true"
+            )
+        except PySparkRuntimeError as e:
+            if e.getCondition() == "NO_ACTIVE_OR_DEFAULT_SESSION":
+                pass  # Just uses the default if no session found.
+            else:
+                raise e
+    else:
+        is_arrow_enabled = useArrow
+
+    if is_arrow_enabled:
+        try:
+            require_minimum_pandas_version()
+            require_minimum_pyarrow_version()
+        except ImportError:
+            is_arrow_enabled = False
+            warnings.warn(
+                "Arrow optimization failed to enable because PyArrow or Pandas is not installed. "
+                "Falling back to a non-Arrow-optimized UDF.",
+                RuntimeWarning,
+            )
+
+    eval_type: Optional[int] = None
+    if useArrow is None:
+        # If the user doesn't explicitly set useArrow
+        from pyspark.sql.pandas.typehints import infer_eval_type_for_udf
+
+        try:
+            # Try to infer the eval type from type hints
+            eval_type = infer_eval_type_for_udf(f)
+        except Exception:
+            warnings.warn("Cannot infer the eval type from type hints. ", UserWarning)
+
+    if eval_type is None:
+        if is_arrow_enabled:
+            # Arrow optimized Python UDF
+            eval_type = PythonEvalType.SQL_ARROW_BATCHED_UDF
+        else:
+            # Fallback to Regular Python UDF
+            eval_type = PythonEvalType.SQL_BATCHED_UDF
+
+    return _create_udf(f, returnType, eval_type)
+
+
+# Verbatim from PySpark Connect (pyspark.sql.connect.udf); pyspark.sql.pandas.functions
+# creates pandas and Arrow UDFs with it.
+def _create_udf(
+    f: Callable[..., Any],
+    returnType: Any,
+    evalType: int,
+    name: Optional[str] = None,
+    deterministic: bool = True,
+) -> Any:
+    # Set the name of the UserDefinedFunction object to be the name of function f
+    udf_obj = UserDefinedFunction(
+        f, returnType=returnType, name=name, evalType=evalType, deterministic=deterministic
+    )
+    return udf_obj._wrapped()
+
+
+class UDFRegistration:
+    """
+    Wrapper for user-defined function registration.
+    """
+
+    # The class of `spark.udf`, as PySpark Connect's.
+
+    def __init__(self, sparkSession: Any):
+        self.sparkSession = sparkSession
+
+    def register(
+        self,
+        name: str,
+        f: Callable[..., Any],
+        returnType: Optional[DataType] = None,
+    ) -> Any:
+        """
+        Register a Python UDF with the given name.
+
+        Parameters
+        ----------
+        name : str
+            Name to register the UDF with.
+        f : callable
+            The Python function to register.
+        returnType : DataType, optional
+            The return type of the UDF. Defaults to StringType().
+
+        Returns
+        -------
+        function
+            The registered UDF that can be called with columns: ``f`` if it is a UDF,
+            or the function wrapper of the UDF of ``f``, as PySpark returns.
+
+        Examples
+        --------
+        >>> from pyspark.sql.types import IntegerType
+        >>> spark.udf.register("inc_id", lambda x: x + 1, IntegerType())
+        >>> result = spark.sql("SELECT inc_id(id) AS incremented FROM range(3)")
+        """
+        # As PySpark Connect's: a UDF (from udf() or pandas_udf()) is registered with its
+        # eval type, and a plain Python function as a SQL_BATCHED_UDF of `name`. The
+        # registration is a RegisterFunction command carrying the cloudpickled PythonUDF
+        # with no bound arguments, as the reference client.register_udf sends, so `name`
+        # resolves in SQL.
+        if hasattr(f, "asNondeterministic"):
+            if returnType is not None:
+                raise PySparkTypeError(
+                    errorClass="CANNOT_SPECIFY_RETURN_TYPE_FOR_UDF",
+                    messageParameters={"arg_name": "f", "return_type": str(returnType)},
+                )
+            if f.evalType not in [
+                PythonEvalType.SQL_BATCHED_UDF,
+                PythonEvalType.SQL_ARROW_BATCHED_UDF,
+                PythonEvalType.SQL_SCALAR_PANDAS_UDF,
+                PythonEvalType.SQL_SCALAR_ARROW_UDF,
+                PythonEvalType.SQL_SCALAR_PANDAS_ITER_UDF,
+                PythonEvalType.SQL_SCALAR_ARROW_ITER_UDF,
+                PythonEvalType.SQL_GROUPED_AGG_PANDAS_UDF,
+                PythonEvalType.SQL_GROUPED_AGG_ARROW_UDF,
+                PythonEvalType.SQL_GROUPED_AGG_PANDAS_ITER_UDF,
+                PythonEvalType.SQL_GROUPED_AGG_ARROW_ITER_UDF,
+            ]:
+                raise PySparkTypeError(
+                    errorClass="INVALID_UDF_EVAL_TYPE",
+                    messageParameters={
+                        "eval_type": "SQL_BATCHED_UDF, SQL_ARROW_BATCHED_UDF, "
+                        "SQL_SCALAR_PANDAS_UDF, SQL_SCALAR_ARROW_UDF, "
+                        "SQL_SCALAR_PANDAS_ITER_UDF, SQL_SCALAR_ARROW_ITER_UDF, "
+                        "SQL_GROUPED_AGG_PANDAS_UDF, SQL_GROUPED_AGG_ARROW_UDF, "
+                        "SQL_GROUPED_AGG_PANDAS_ITER_UDF or SQL_GROUPED_AGG_ARROW_ITER_UDF"
+                    },
+                )
+            self.sparkSession._client.register_udf(
+                f.func, f.returnType, name, f.evalType, f.deterministic
+            )
+            return f
+        else:
+            if returnType is None:
+                returnType = StringType()
+            py_udf = _create_udf(
+                f, returnType=returnType, evalType=PythonEvalType.SQL_BATCHED_UDF, name=name
+            )
+
+            # As PySpark's: the registration takes the return type as given, not the one that
+            # the wrapper parsed, so a DDL string is parsed again for the command.
+            self.sparkSession._client.register_udf(py_udf.func, returnType, name)
+            return py_udf
+
+    def registerJavaFunction(
+        self,
+        name: str,
+        javaClassName: str,
+        returnType: Optional[DataType] = None,
+    ) -> None:
+        """Register a Java UDF by fully-qualified class name so it is callable by
+        ``name`` in SQL. Mirrors ``UDFRegistration.registerJavaFunction``.
+
+        Parameters
+        ----------
+        name : str
+            Name to register the function with.
+        javaClassName : str
+            Fully-qualified name of the Java class implementing the UDF.
+        returnType : DataType or str, optional
+            Return type: a DataType, or a DDL string, which the server parses, as PySpark
+            sends it. Defaults to the class's own type.
+        """
+        self.sparkSession._client.register_java(name, javaClassName, returnType)
+
+    def registerJavaUDAF(self, name: str, javaClassName: str) -> None:
+        """Register a Java user-defined aggregate function (UDAF) by class name.
+        Mirrors ``UDFRegistration.registerJavaUDAF``.
+        """
+        self.sparkSession._client.register_java(name, javaClassName, aggregate=True)

@@ -14,15 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""DataFrameReader / DataFrameWriter(V2) under the connect import path."""
+
+"""DataFrameReader / DataFrameWriter(V2) of Spark Connect, as PySpark Connect's
+``pyspark.sql.connect.readwriter``: the native readers and writers of the Rust core."""
+from pyspark._pyspark import DataFrameReader, DataFrameWriter, DataFrameWriterV2
+
 # PathOrPaths and TupleOrListOfString: PySpark Connect's aliases of the types of the paths and
-# of the lists of column names, which are those of pyspark.sql.readwriter.
-from pyspark.sql.readwriter import (  # noqa: F401
-    DataFrameReader,
-    DataFrameWriter,
-    DataFrameWriterV2,
-    PathOrPaths,
-    TupleOrListOfString,
-)
+# of the lists of column names, which are those of PySpark's classic pyspark.sql.readwriter.
+from pyspark.sql.readwriter import PathOrPaths, TupleOrListOfString  # noqa: F401
 
 __all__ = ["DataFrameReader", "DataFrameWriter", "DataFrameWriterV2"]

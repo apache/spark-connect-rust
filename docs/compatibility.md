@@ -2094,16 +2094,16 @@ differences:
   re-exported when the drop-in's module has it too, so that `F.partitioning`, which pyright
   reports as a private import with `pyspark-client`, and `F.PandasUDFType`, which mypy with
   `--no-implicit-reexport` reports, are not reported. One that the drop-in's module does not
-  have, such as `pyspark.sql.catalog.DataFrame`, is an error, where mypy takes it with
+  have, such as `pyspark.sql.connect.catalog.DataFrame`, is an error, where mypy takes it with
   `pyspark-client` by default, as it fails at run time. So is the plumbing of PySpark's modules
   that the drop-in does not have, such as the py4j converters of `pyspark.sql.types`.
 - A few names that PySpark's annotations need are declared, which the drop-in does not have at run
   time: `DataFrame.rdd`, which PySpark defines when not `is_remote_only()`, so that type checkers
-  of `pyspark-client` see it too, and neither client has it; and the bases and the decorators of
-  PySpark's classes that the drop-in implements natively, such as `OptionUtils` of the readers and
-  writers, `PandasGroupedOpsMixin` of `GroupedData` and `dfapi` (`TYPE_ONLY` of the test lists
-  them with their reasons). `pyspark.sql.types` has `DataTypeSingleton`, the metaclass of the
-  singleton types of the stubs, at run time too, of which the native classes are not. The
+  of `pyspark-client` see it too, and neither client has it; and the classes of PySpark Connect
+  that the drop-in implements natively in another way, `OptionUtils`, the base of its readers and
+  writers, and the `StreamingQueryListenerBus` of its `StreamingQueryManager` (`TYPE_ONLY` of the
+  test lists them with their reasons). `pyspark.sql.types` has `DataTypeSingleton`, the metaclass
+  of the singleton types of the stubs, at run time too, of which the native classes are not. The
   `SparkContext`, `RDD` and the other names of classic PySpark that PySpark's `pyspark` module
   imports of `pyspark.core` when not `is_remote_only()`, which `pyspark-client` does not ship,
   the drop-in's module imports so too, in a block that does not run either: mypy takes them as
@@ -2122,9 +2122,9 @@ differences:
   pyright does not see in PySpark's source, as its modules copy them there at run time: a hover
   over `col` of `pyspark.sql.connect.functions` or the `builder` of its `SparkSession` shows its
   documentation with the drop-in, and none with `pyspark-client`.
-- The names that only the drop-in has, such as `Trigger` of `pyspark.sql.streaming.readwriter` and
-  `FrameBound` of `pyspark.sql.window`, are typed with the drop-in and are errors with
-  `pyspark-client`, as at run time.
+- The names that only the drop-in has, such as `Trigger` of
+  `pyspark.sql.connect.streaming.readwriter` and `FrameBound` of `pyspark.sql.window`, are typed
+  with the drop-in and are errors with `pyspark-client`, as at run time.
 
 PySpark's `pyspark.sql.functions` is a package of the modules `builtin` and `partitioning`, where
 the drop-in's is a module, with the stubs of the three in the directory `pyspark/sql/functions/`,
@@ -2798,11 +2798,12 @@ built then, as PySpark's sends the protos that `_build_merge_action` built for t
 value that a function reads, changed after the clause, is not that of the merge, also of a copy of
 the builder, and a window of no partitions of a clause warns once, at the clause.
 
-The drop-in has one class for each UDF and UDTF, the Connect class of `pyspark.sql.connect.udf`
-and `pyspark.sql.connect.udtf`, which the classic names `pyspark.sql.udf.UserDefinedFunction` and
-`pyspark.sql.udtf.UserDefinedTableFunction` also name. So `isinstance` of a UDTF that `udtf` builds
-is True against either name, where PySpark 4.3.0 gives False for the classic name, whose class
-needs a SparkContext. `udf` gives a function in both clients, which is of neither class.
+A UDF and a UDTF are of PySpark Connect's classes, `UserDefinedFunction` of
+`pyspark.sql.connect.udf` and `UserDefinedTableFunction` of `pyspark.sql.connect.udtf`, as in
+PySpark. The classic `pyspark.sql.udf` and `pyspark.sql.udtf` are PySpark's modules, of Apache
+Spark as they are, whose classes, which `pyspark.sql.functions` names too, need a SparkContext: so
+`isinstance` of a UDTF that `udtf` builds against the classic `UserDefinedTableFunction` is False,
+as in PySpark. `udf` gives a function in both clients, which is of neither class.
 
 So it is for the objects of a session: each is of PySpark Connect's class, of its module of
 `pyspark.sql.connect`, as `repr`, `type(x).__module__` and pickle show it. These are the
@@ -2838,26 +2839,36 @@ without a URL or a channel builder, returns the active session from `getOrCreate
 `spark.sql.catalogImplementation`.
 
 The classic classes of `pyspark.sql.conf`, `pyspark.sql.tvf`, `pyspark.sql.datasource`,
-`pyspark.sql.merge` and `pyspark.sql.observation` are PySpark's, of those modules of Apache Spark
-as they are, so `isinstance` of a session's `conf`, `tvf`, `dataSource` and `mergeInto` against
-them is False, as in PySpark. `Observation(...)` makes an Observation of
-`pyspark.sql.connect.observation`, which is not an instance of `pyspark.sql.Observation`, as
-PySpark's `__new__` makes one. `pyspark.sql.connect.window.Window` is a subclass of
-`pyspark.sql.window.Window`, as in PySpark. For the other objects of a session, the classic name
-names PySpark Connect's class, so `isinstance` against it is True, where PySpark gives False:
-`Catalog`, `DataFrameReader`, `DataFrameWriter`, `DataFrameWriterV2`, `DataStreamReader`,
-`DataStreamWriter`, `StreamingQueryManager`, `StreamingQuery`, `UDFRegistration`,
-`UDTFRegistration`, `GroupedData` and `PandasCogroupedOps`, and the UDTFs above. The classic
-`DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg` name PySpark
-Connect's classes too, which in PySpark are their subclasses: `isinstance` is True in both, and
+`pyspark.sql.merge`, `pyspark.sql.observation`, `pyspark.sql.catalog`, `pyspark.sql.readwriter`,
+`pyspark.sql.udf`, `pyspark.sql.udtf`, `pyspark.sql.group`, `pyspark.sql.pandas.group_ops`,
+`pyspark.sql.streaming.readwriter` and `pyspark.sql.streaming.query` are PySpark's, of those
+modules of Apache Spark as they are, which `pyspark.sql` and `pyspark.sql.streaming` name as
+PySpark's do. So `isinstance` against them is False, as in PySpark, of a session's `conf`, `tvf`,
+`dataSource`, `catalog`, `read`, `readStream`, `streams`, `udf` and `udtf`, of a DataFrame's
+`mergeInto`, `write`, `writeTo`, `writeStream`, `groupBy` and `cogroup`, of a StreamingQuery and of
+the UDTFs above. Their constructors and methods are those of Spark Classic, as PySpark's:
+`pyspark.sql.DataFrameReader(spark)` and `pyspark.sql.Catalog(spark)` raise the
+`JVM_ATTRIBUTE_NOT_SUPPORTED` of `_jsparkSession`, and so does the `register` of a
+`pyspark.sql.udf.UDFRegistration(spark)`, as in PySpark, where the reader of `spark.read` and
+`pyspark.sql.connect.readwriter.DataFrameReader(spark)` are PySpark Connect's.
+`Observation(...)` makes an Observation of `pyspark.sql.connect.observation`, which is not an
+instance of `pyspark.sql.Observation`, as PySpark's `__new__` makes one.
+`pyspark.sql.connect.window.Window` is a subclass of `pyspark.sql.window.Window`, as in PySpark.
+The classic `DataFrameNaFunctions`, `DataFrameStatFunctions`, `WindowSpec` and `TableArg` name
+PySpark Connect's classes, which in PySpark are their subclasses: `isinstance` is True in both, and
 the MRO of such an object is its native class and `object`. The concrete DataFrame and Column are
 not subclasses of the public `pyspark.sql.DataFrame` and `pyspark.sql.Column`: `isinstance` holds
 by registration, so the MRO of a DataFrame is its native class and `object`, and
-`pyspark.sql.Column` names the concrete class.
+`pyspark.sql.Column` names the concrete class, where PySpark's is the abstract class of the
+concrete one of `pyspark.sql.connect.column`. The readers and writers of PySpark Connect are
+subclasses of the `OptionUtils` of `pyspark.sql.connect.readwriter`, a class of private methods
+only, of which the drop-in's native readers and writers are not: their MRO is their class and
+`object`, and `pyspark.sql.connect.readwriter` has no `OptionUtils`.
 
 PySpark's classes are plain Python classes, which a user subclasses. So are these of the drop-in:
-the DataFrame, `Observation`, `SparkSession`, `Catalog`, `DataSourceRegistration`,
-`DataFrameReader` and `DataStreamReader`, which construct of their PySpark arguments
+the DataFrame, `Observation`, and the `SparkSession`, `Catalog`, `DataSourceRegistration`,
+`DataFrameReader` and `DataStreamReader` of `pyspark.sql.connect`, which construct of their PySpark
+arguments
 (`SparkSession(connection=...)`, `Catalog(spark)`, `DataFrameReader(spark)`), also a subclass of an
 `__init__` of its own, and whose setters, copies and pickles are of the subclass (but those of a
 session, which are the active session of its ID, as PySpark's);

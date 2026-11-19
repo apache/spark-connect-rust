@@ -315,14 +315,13 @@ def _dict_to_options_column(options_dict):
     return _call_function("create_map", *[_pyfunc_lit(arg) for arg in args])
 
 # Import UDF / UDTF functions
+from pyspark.sql.connect.udf import udf
+from pyspark.sql.connect.udtf import arrow_udtf, udtf
 from pyspark.sql.pandas.functions import arrow_udf, pandas_udf
-from pyspark.sql.udf import udf
 from pyspark.sql.udtf import (
     OrderingColumn,
     PartitioningColumn,
     SelectedColumn,
-    arrow_udtf,
-    udtf,
 )
 
 
@@ -1332,7 +1331,7 @@ for _bname in dir(builtin):
         not _bname.startswith("_")
         and _inspect.isfunction(_bobj)
         and _bobj.__module__
-        in ("functions_generated", __name__, "pyspark.sql.udf", "pyspark.sql.udtf")
+        in ("functions_generated", __name__, "pyspark.sql.connect.udf", "pyspark.sql.connect.udtf")
         and getattr(builtin, _bobj.__qualname__, None) is _bobj
     ):
         _bobj.__module__ = builtin.__name__

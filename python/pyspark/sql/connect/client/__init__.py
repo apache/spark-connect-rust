@@ -1446,7 +1446,7 @@ class SparkConnectClient:
         valid arguments."""
         import pyspark.sql.connect.proto as pb2
         from pyspark.sql.connect.utils import get_python_ver
-        from pyspark.sql.udtf import _pickled_handler
+        from pyspark.sql.connect.udtf import _pickled_handler
 
         # As PySpark's PythonUDTF, which reads the name of the handler class when it is made.
         _ = function.__name__

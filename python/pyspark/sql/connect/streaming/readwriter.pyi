@@ -1682,3 +1682,16 @@ class DataStreamWriter:
         +...---------+-----+
         ...
         """
+
+# Names of the drop-in's module that PySpark's does not have.
+from pyspark.errors import PySparkAttributeError as PySparkAttributeError
+from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError
+class Trigger:
+    @staticmethod
+    def processingTime(interval: str) -> Trigger: ...
+    @staticmethod
+    def once() -> Trigger: ...
+    @staticmethod
+    def availableNow() -> Trigger: ...
+    @staticmethod
+    def continuous(interval: str) -> Trigger: ...

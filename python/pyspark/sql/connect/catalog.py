@@ -14,9 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Catalog under the connect import path (mirrors pyspark.sql.connect.catalog)."""
+
+"""The Catalog of Spark Connect, as PySpark Connect's ``pyspark.sql.connect.catalog``: the native
+Catalog of the Rust core, whose methods return the NamedTuples of PySpark's classic
+``pyspark.sql.catalog`` (Database, Table, Column, Function, CatalogMetadata and TablePartition),
+which PySpark Connect's module imports too."""
+from pyspark._pyspark import Catalog
 from pyspark.sql.catalog import (
-    Catalog,
     CatalogMetadata,
     Column,
     Database,

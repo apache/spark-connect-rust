@@ -6224,6 +6224,102 @@ def test_create_dataframe_converts_numpy_scalars_as_pyspark(session):
     assert [tuple(r) for r in df.collect()] == [(1, 0.5, True, 1)]
 
 
+def test_the_objects_of_a_session_are_not_of_the_classic_classes_as_pysparks(session):
+    # As official PySpark 4.3.0: the classic modules are PySpark's, of the JVM of Spark Classic,
+    # whose classes the objects of a session of Spark Connect are not instances of; they are of
+    # PySpark Connect's classes. Of the na and stat functions, a WindowSpec, a table argument, a
+    # DataFrame and a Column, the classic names are True in both clients.
+    import pyspark.sql.catalog
+    import pyspark.sql.connect.catalog
+    import pyspark.sql.connect.group
+    import pyspark.sql.connect.readwriter
+    import pyspark.sql.connect.streaming.query
+    import pyspark.sql.connect.streaming.readwriter
+    import pyspark.sql.connect.udf
+    import pyspark.sql.connect.udtf
+    import pyspark.sql.group
+    import pyspark.sql.pandas.group_ops
+    import pyspark.sql.readwriter
+    import pyspark.sql.streaming.query
+    import pyspark.sql.streaming.readwriter
+    import pyspark.sql.udf
+    import pyspark.sql.udtf
+    from pyspark.sql import (
+        Column,
+        DataFrame,
+        DataFrameNaFunctions,
+        DataFrameStatFunctions,
+        Window,
+        WindowSpec,
+    )
+    from pyspark.sql import functions as F
+    from pyspark.sql.table_arg import TableArg
+
+    @F.udtf(returnType="a int")
+    class Echo:
+        def eval(self, a: int):
+            yield (a,)
+
+    df = session.range(3)
+    query = session.readStream.format("rate").load().writeStream.format("noop").start()
+    try:
+        connect, classic = pyspark.sql.connect, pyspark.sql
+        for obj, connect_class, classic_class in [
+            (session.catalog, connect.catalog.Catalog, classic.catalog.Catalog),
+            (session.read, connect.readwriter.DataFrameReader, classic.readwriter.DataFrameReader),
+            (df.write, connect.readwriter.DataFrameWriter, classic.readwriter.DataFrameWriter),
+            (
+                df.writeTo("t"),
+                connect.readwriter.DataFrameWriterV2,
+                classic.readwriter.DataFrameWriterV2,
+            ),
+            (
+                session.readStream,
+                connect.streaming.readwriter.DataStreamReader,
+                classic.streaming.readwriter.DataStreamReader,
+            ),
+            (
+                session.readStream.format("rate").load().writeStream,
+                connect.streaming.readwriter.DataStreamWriter,
+                classic.streaming.readwriter.DataStreamWriter,
+            ),
+            (
+                session.streams,
+                connect.streaming.query.StreamingQueryManager,
+                classic.streaming.query.StreamingQueryManager,
+            ),
+            (query, connect.streaming.query.StreamingQuery, classic.streaming.query.StreamingQuery),
+            (session.udf, connect.udf.UDFRegistration, classic.udf.UDFRegistration),
+            (session.udtf, connect.udtf.UDTFRegistration, classic.udtf.UDTFRegistration),
+            (df.groupBy("id"), connect.group.GroupedData, classic.group.GroupedData),
+            (
+                df.groupBy("id").cogroup(df.groupBy("id")),
+                connect.group.PandasCogroupedOps,
+                classic.pandas.group_ops.PandasCogroupedOps,
+            ),
+            (Echo, connect.udtf.UserDefinedTableFunction, classic.udtf.UserDefinedTableFunction),
+            (
+                F.udf(lambda x: x)._unwrapped,
+                connect.udf.UserDefinedFunction,
+                classic.udf.UserDefinedFunction,
+            ),
+        ]:
+            assert isinstance(obj, connect_class), type(obj)
+            assert not isinstance(obj, classic_class), type(obj)
+    finally:
+        query.stop()
+    for obj, classic_class in [
+        (df.na, DataFrameNaFunctions),
+        (df.stat, DataFrameStatFunctions),
+        (Window.partitionBy("id"), WindowSpec),
+        (df.asTable(), TableArg),
+        (df, DataFrame),
+        (F.col("id"), Column),
+    ]:
+        assert isinstance(obj, classic_class), type(obj)
+    assert [r.a for r in Echo(F.lit(7)).collect()] == [7]
+
+
 def test_catalogs_return_the_named_tuples_of_pyspark(session):
     # As PySpark's: the methods of the catalog return the NamedTuples of pyspark.sql.catalog,
     # and registerFunction registers a UDF with spark.udf.register, with its FutureWarning.

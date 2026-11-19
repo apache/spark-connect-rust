@@ -575,10 +575,11 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   `Observation` is not one of them: its `_name`, `_result` and `_error` are of its `__dict__`, as
   PySpark's.
 - **Subclasses** (intentional; the state is native). PySpark's classes are plain classes that a
-  user subclasses. The drop-in's DataFrame, `Observation`, `SparkSession`, `Catalog`,
-  `DataSourceRegistration`, `DataFrameReader`, `DataStreamReader`, `SparkSession.Hook`,
-  `StorageLevel`, `PythonEvalType` and the data types are subclassed as PySpark's: a subclass
-  constructs of the arguments of its `__init__`, and its copies and pickles are of the subclass
+  user subclasses. The drop-in's DataFrame, `Observation`, the `SparkSession`, `Catalog`,
+  `DataSourceRegistration`, `DataFrameReader` and `DataStreamReader` of `pyspark.sql.connect`,
+  `SparkSession.Hook`, `StorageLevel`, `PythonEvalType` and the data types are subclassed as
+  PySpark's: a subclass constructs of the arguments of its `__init__`, and its copies and pickles
+  are of the subclass
   (but those of a session, which are the active session of its ID, as PySpark's), and PySpark's
   pickle of a reader, a catalog or a registration, which makes it of its class without
   arguments, loads in the drop-in. The `Window` of `pyspark.sql.window` and of
@@ -704,15 +705,17 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
 mypy and pyright type an application as with `pyspark-client` (see `docs/compatibility.md`), but:
 
 - **Imports of PySpark's modules** (intentional). A name that a module of PySpark imports, such as
-  `DataFrame` of `pyspark.sql.catalog`, is an attribute of the module, which mypy takes by default
-  with `pyspark-client`. The stubs declare it only when the drop-in's module has it at run time, so
-  that it is an error, as `from pyspark.sql.catalog import DataFrame` fails with the drop-in.
+  `DataFrame` of `pyspark.sql.connect.catalog`, is an attribute of the module, which mypy takes by
+  default with `pyspark-client`. The stubs declare it only when the drop-in's module has it at run
+  time, so that it is an error, as `from pyspark.sql.connect.catalog import DataFrame` fails with
+  the drop-in.
   pyright reports it as a private import with `pyspark-client` too.
 - **Names that only PySpark's annotations need** (intentional). `TYPE_ONLY` of
   `python/tests/test_type_stubs_offline.py` lists the names that the stubs declare and the drop-in
   does not have, with their reasons: the classic-only `DataFrame.rdd`, as type checkers of
-  `pyspark-client` see it, and the bases, metaclass, decorators and internal classes of PySpark's
-  classes that the drop-in implements natively.
+  `pyspark-client` see it, the type variables of the annotations of `pyspark.sql.types`, and the
+  base and the internal class of PySpark Connect's classes that the drop-in implements natively,
+  the `OptionUtils` of its readers and writers and its `StreamingQueryListenerBus`.
 - **`SparkSession.client`** (intentional; the drop-in's own class). The client has PySpark
   Connect's public API, of the class `pyspark.sql.connect.client.SparkConnectClient` rather than
   `pyspark.sql.connect.client.core`'s.

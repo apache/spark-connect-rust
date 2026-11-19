@@ -51,7 +51,6 @@ mod transport;
 mod tvf;
 mod types;
 mod udf_command;
-mod udtf_analyze;
 mod values;
 mod window;
 
@@ -245,11 +244,6 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register TVF + Observation
     m.add_class::<tvf::PyTableValuedFunction>()?;
     m.add_class::<tablearg::PyTableArg>()?;
-    m.add(
-        "SkipRestOfInputTableException",
-        m.py()
-            .get_type::<udtf_analyze::SkipRestOfInputTableException>(),
-    )?;
 
     m.add_class::<observation::PyObservation>()?;
 

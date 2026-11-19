@@ -57,7 +57,7 @@ fn post_listener_event<'a>(
     event: &StreamingQueryListenerEvent,
     started: bool,
 ) -> std::result::Result<(), ListenerDispatchError> {
-    let module = py.import("pyspark.sql.streaming.query")?;
+    let module = py.import("pyspark.sql.connect.streaming.query")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("started", started)?;
     let decoded = module.call_method(
@@ -1153,7 +1153,7 @@ impl PyDataStreamReader {
 /// Python wrapper for Trigger.
 #[pyclass(
     name = "Trigger",
-    module = "pyspark.sql.streaming.readwriter",
+    module = "pyspark.sql.connect.streaming.readwriter",
     from_py_object
 )]
 #[derive(Clone)]
@@ -1740,7 +1740,7 @@ impl PyDataStreamWriter {
         f: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         let func = py
-            .import("pyspark.sql.streaming.readwriter")?
+            .import("pyspark.sql.connect.streaming.readwriter")?
             .getattr("_construct_foreach_function")?
             .call1((f,))?;
         let serializers = py.import("pyspark.serializers")?;
@@ -2125,7 +2125,7 @@ fn warn(py: Python<'_>, line: u32, message: String) -> PyResult<()> {
 /// which Apache Spark's tests read to remove them.
 #[pyclass(
     name = "StreamingQueryListenerBus",
-    module = "pyspark.sql.streaming.query",
+    module = "pyspark.sql.connect.streaming.query",
     frozen
 )]
 pub struct PyStreamingQueryListenerBus {
@@ -2381,7 +2381,10 @@ impl PyStreamingQueryManager {
 
 /// Python wrapper for ListenerEventStream.
 /// Implements `__iter__` and `__next__` to yield (event_type: i32, event_json: String) tuples.
-#[pyclass(name = "ListenerEventStream", module = "pyspark.sql.streaming.query")]
+#[pyclass(
+    name = "ListenerEventStream",
+    module = "pyspark.sql.connect.streaming.query"
+)]
 pub struct PyListenerEventStream {
     inner: Option<ListenerEventStream>,
     /// The session of the stream, whose waits a signal of the process ends.
