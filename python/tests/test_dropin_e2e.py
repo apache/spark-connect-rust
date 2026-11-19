@@ -5609,6 +5609,31 @@ def test_create_dataframe_schema_keeps_metadata_edited_in_place(session):
     assert df.collect() == [Row(a=1, b="x")]
 
 
+def test_field_metadata_is_sent_as_pyspark_sends_it(session):
+    # As PySpark, which sends `json.dumps` of the metadata dict in a plan and the `json()` of the
+    # schema of createDataFrame: the server keeps the low 64 bits of an int beyond a long, also in
+    # an array, where the drop-in sent the float of the core's JSON values, which the server took
+    # as a double, refused in an array (a ClassCastException) and failed an Arrow-optimized UDF of
+    # it with ARROW_TYPE_MISMATCH. A float that is not finite is made, and the server refuses it.
+    # The values are those of official PySpark 4.3.0.
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+    from pyspark.sql import types as T
+
+    metadata = {"x": 10**30, "f": 1e-07, "b": [1, 2**70]}
+    struct = T.StructType([T.StructField("a", T.IntegerType(), True, metadata)])
+    kept = {"b": [1, 0], "f": 1e-07, "x": 5076944270305263616}
+    assert session.createDataFrame([(1,)], struct).schema.fields[0].metadata == kept
+    base = session.range(1).select(F.struct(F.lit(1).alias("a")).alias("v"))
+    cast = base.select(F.col("v").cast(struct)).schema.fields[0].dataType
+    assert cast.fields[0].metadata == kept
+    for use_arrow in (True, False):
+        udf = F.udf(lambda v: (v,), returnType=struct, useArrow=use_arrow)
+        assert session.range(1).select(udf(F.lit(1)).alias("r")).collect() == [Row(r=Row(a=1))]
+    infinite = T.StructType([T.StructField("a", T.IntegerType(), True, {"x": float("inf")})])
+    with pytest.raises(SparkConnectGrpcException, match="Non-standard token 'Infinity'"):
+        base.select(F.col("v").cast(infinite)).schema
+
+
 def test_collected_values_of_user_defined_types_are_deserialized_as_pyspark(session):
     # As official PySpark 4.3.0: a collected value of a UDT is its deserialized object, and
     # dtypes names the UDT by its simpleString(), in every way that rows are collected.

@@ -515,6 +515,38 @@ PySpark's class of a type, `type(dt).__name__`, such as `LongType`, by which PyS
 it, and `DataType::simple_string` of the `VectorUDT` and `MatrixUDT` of `pyspark.mllib.linalg` is
 `vector` and `matrix`, as of those of `pyspark.ml.linalg`, where it was `udt`.
 
+`StructField::metadata` is a `types::Metadata`, where it was a `BTreeMap<String,
+serde_json::Value>`: a JSON object, of its keys in their order and of its values as they are
+written, an int beyond 64 bits and the `NaN` and `Infinity` of Python's JSON too, which a plan sends
+as PySpark's `json.dumps(metadata)` writes it, where an int beyond 64 bits was sent as a float.
+`Metadata::new()`, or `Default::default()`, is no metadata, and `Metadata::from` a `BTreeMap` or a
+`serde_json::Map` of `serde_json` values, or `collect` of key and value pairs, makes metadata of
+them, so a struct expression of `metadata: BTreeMap::new()` takes `Metadata::new()`, and one of a
+map takes its `.into()`; `Metadata::from_json` reads the text of a JSON object, and `Metadata::json`
+writes it. `get` returns the value of a key as an owned `serde_json::Value`, where it returned a
+reference: an int beyond 64 bits as its nearest float and a float that is not finite as null, of
+which `get_json` gives the exact text. `insert` sets the value of a key at its place, or after the
+others, and returns the value it had, `remove`, `contains_key`, `len` and `is_empty` are as those
+of the map, and `keys` gives each key once in its order, where the map's were sorted. It has no
+`iter`, `values`, `entry`, `get_mut`, indexing (`metadata["comment"]`) or `IntoIterator`: `to_map`
+gives the map of its keys and `serde_json` values, to iterate in the order of the keys, or `keys`
+and `get` in their order, and its `Debug` shows its JSON. It is `Clone`, `Default` and `PartialEq`,
+as Python compares the dicts of its JSON, but not `Eq`, `Hash`, `Serialize` or `Deserialize`, which
+the map was. `DataType::add` takes a map of `serde_json` values, as before. The Arrow schema of
+`SparkSession::create_dataframe` and `create_dataframe_from_columns` of a `DataType::Udt` holds the
+metadata of each field of its `sql_type`, at any depth (`json.dumps` of it, under
+`SPARK::metadata::json`), as PySpark's `to_arrow_type` writes it, and that of no other field, as
+before, and the names of the fields of its `sql_type` as they are, also of duplicates, which the
+server then fails to read, as PySpark's, where they were deduplicated. The name of a float literal, and
+the JSON of a float of an ML param, are Python's `repr` of it, of an even last digit of a tie of
+its shortest digits, where a tie was rounded up (`74334700308107.625` is `74334700308107.62`).
+`DataType::json`, and the new `StructField::json`, write the metadata as it is, of its keys sorted,
+and each character of a string that is not printable ASCII as a `\u` escape, as PySpark's `json()`
+writes them, where they wrote UTF-8; `json_value` holds the values of the metadata as `serde_json`
+values. `DataType::from_json_str` and `StructField::from_json_str` read the JSON of Python's
+`json.dumps`, of `NaN` and `Infinity` too, of the metadata as it is written, and the detail of their
+`INVALID_JSON` is the message of their own parser.
+
 `functions` adds a form of each optional argument of a PySpark function that had none, which sends
 PySpark's request, such as `to_date_with_format`, `first_with_ignore_nulls`,
 `from_json_with_options` (of name and value pairs) and `make_interval_with_parts` (of an `Option`
@@ -2277,8 +2309,12 @@ setters, are kept as they are, as PySpark's keep them, so a `UserDefinedType` wh
 `DataFrame.to`, `from_json`, a table, a Java UDF and a UDTF, a reader's schema and the relation of
 data of no rows. `toInternal` and `fromInternal` raise the errors of the type's own methods. A cast
 to one is made and shows its `simpleString()`, as PySpark's Column, and raises its error at each
-request. `createDataFrame` of local rows or of a pandas DataFrame of one raises the error of its
-`jsonValue()`, where PySpark's converters raise that of its `sqlType()` or `serialize`.
+request. `createDataFrame` of local rows or of a pandas DataFrame of one, also of local rows of
+values of such a type (its `__UDT__`), whose schema it infers first, of the errors of PySpark's
+inference, such as the `CANNOT_MERGE_TYPE` of the type and the type of a value of another row and
+the `CANNOT_INFER_TYPE_FOR_FIELD` of a value of no type, then converts the data, as PySpark's
+converters do, of the errors of the `sqlType()` and the `serialize` of the type, and then raises the
+error of its `jsonValue()`, of the `json()` of the schema.
 
 The abstract classes of the types, `DataType`, `AtomicType`, `NumericType`, `IntegralType`,
 `FractionalType`, `DatetimeType`, `AnyTimeType`, `SpatialType` and `AnsiIntervalType`, make types
@@ -2416,20 +2452,36 @@ What differs:
   PySpark. The readers, `from_json`, `from_xml`, `applyInPandasWithState` and `toDDL` send the
   `json()` of the object, as PySpark's.
 
-The metadata of a field is the dict that it was given, which `==` compares as Python compares
-dicts, as PySpark compares the `__dict__`s of its fields, also in a struct and in the types that
-hold it: `(1, 2)` is not `[1, 2]`, nor `{1: "a"}` `{"1": "a"}`, nor `10**30` `10**30 + 1`. Its
-`jsonValue()` holds that dict, which `json()` writes with `json.dumps`, as PySpark's: an int of more
-than 64 bits as it is and a float as Python writes it (`1e-07`), which the readers and
-`createDataFrame` of no rows send. The core holds the values of JSON of the metadata, which a plan
-and `createDataFrame` of data send, of an int of more than 64 bits as a float: the server keeps
-only the low 64 bits of PySpark's exact int (`10**30` becomes `5076944270305263616`), so the float
-is the nearer value, but an Arrow-optimized UDF of a return type of such metadata fails with
-`ARROW_TYPE_MISMATCH`, as the type of its plan is not that of the Python worker, of the exact int,
-where PySpark's runs (its `pandas_udf` fails so too). A float that is not finite (`inf`, `nan`),
-which JSON has no value of, raises the `ValueError` of serde_json when the field is made
-(`expected value at line 1 column 7`), where PySpark's makes the field: the server refuses such
-metadata in every request, so only the local uses of the field differ.
+The metadata of a field is the dict that it was given, which `==` compares as Python compares dicts,
+as PySpark compares the `__dict__`s of its fields, also in a struct and in the types that hold it:
+`(1, 2)` is not `[1, 2]`, nor `{1: "a"}` `{"1": "a"}`, nor `10**30` `10**30 + 1`. Its `jsonValue()`
+holds that dict, which `json()` writes with `json.dumps`, as PySpark's: an int of more than 64 bits
+as it is, a float as Python's `repr` writes it, of the shortest digits that read back as it and of
+an even last digit of a tie (`1e-07`, and `74334700308107.62` of `74334700308107.625`), `NaN` and
+`Infinity`, and the keys sorted as `sort_keys` sorts them, of the ints and floats by their values
+(`{10: "a", 9: "b"}` is `{"9":"b","10":"a"}`). The core holds the metadata of the JSON of
+`json.dumps` of the dict, of its values as they are written, so a plan sends that text, as
+PySpark's `pyspark_types_to_proto_types` sends the metadata of a field, and the readers and
+`createDataFrame` the `json()` of the schema, as it is, of any depth, also of the metadata of the
+fields of the `sqlType()` of a `UserDefinedType`, as PySpark's: of a schema that was given, or of
+one inferred of local rows, of the `__UDT__` objects of their values, of their own `jsonValue()`.
+The server keeps the low 64 bits of such an int (`10**30` becomes `5076944270305263616`), and
+refuses a float that is not finite. The Arrow schema of `createDataFrame` of a pyarrow Table holds
+`json.dumps` of the metadata of each field, as PySpark's `to_arrow_schema` writes it; that of local
+rows, of a pandas DataFrame, of each of its conversions of a column, and of a numpy array holds it
+on the fields of the `sqlType()` of a `UserDefinedType` only, as PySpark's `_deduplicate_field_names`
+drops the metadata of the others, which names the fields of each struct of the schema (`a_0`,
+`a_1`), of the top level too for a pandas DataFrame, but not those of the `sqlType()`. A dict that
+`json.dumps` refuses, such as one of a set or of a key of a tuple, is kept, and only the uses that
+write its JSON raise the error of `json.dumps`, as PySpark's: `json()`, of its sorted keys too (`'<'
+not supported between instances of 'str' and 'int'`), each request of a plan of the type, such as
+of a cast, also of one made in the `sqlType()` that `jsonValue()` calls, and `createDataFrame`,
+after it converts the data, of the error of its Arrow schema first where that holds the metadata
+(`keys must be str, int, float, bool or None, not tuple`). `mapInPandas`, `mapInArrow`,
+`applyInPandas` and `applyInArrow`, after they read the columns of the DataFrame, and those of a
+cogroup raise PySpark's `NOT_IMPLEMENTED` of the return type of such a schema, of their UDF's check
+of its Arrow type. The JSON of a type writes each character of its names and strings that is not
+printable ASCII as the `\u` escape of `json.dumps`, as PySpark's `json()`.
 
 A `TableArg`, of `DataFrame.asTable()`, pickles at every protocol, plainly and by cloudpickle, as
 PySpark's, of its user-set attributes, and `copy.copy` and `copy.deepcopy` copy it as PySpark's. Its

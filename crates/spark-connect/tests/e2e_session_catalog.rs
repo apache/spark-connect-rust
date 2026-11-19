@@ -453,7 +453,7 @@ fn parse_ddl_parses_on_the_server() {
     assert!(!fields[0].nullable);
     assert_eq!(
         fields[0].metadata.get("comment"),
-        Some(&serde_json::Value::String("c".to_string()))
+        Some(serde_json::Value::String("c".to_string()))
     );
     assert_eq!(spark.parse_ddl("bigint").expect("parse"), DataType::Long);
     let error = spark.parse_ddl("a INT,").expect_err("a syntax error");

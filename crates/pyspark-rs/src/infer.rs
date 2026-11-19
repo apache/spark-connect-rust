@@ -399,6 +399,20 @@ fn inferred<'py>(data_type: DataType) -> Inferred<'py> {
     (data_type, TypeObjects::default())
 }
 
+thread_local! {
+    /// Set when the inference of a value fails at the lowering of its `__UDT__`, such as a
+    /// `UserDefinedType` whose `module()` is not implemented, which PySpark's inference keeps as
+    /// it is (see `take_unlowered_udt`).
+    static UNLOWERED_UDT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether an inference failed at the lowering of the `__UDT__` of a value since the last call,
+/// which this resets: PySpark's inference takes the type object as it is, and its conversion and
+/// the `json()` of the schema raise its errors then.
+pub(crate) fn take_unlowered_udt() -> bool {
+    UNLOWERED_UDT.with(|flag| flag.replace(false))
+}
+
 /// The type of `obj`, as PySpark's `_infer_type`, with the `__UDT__` of a value of a user-defined
 /// type, which PySpark's inferred schema holds.
 pub(crate) fn infer_type<'py>(obj: &Bound<'py, PyAny>, o: Options<'_>) -> PyResult<Inferred<'py>> {
@@ -469,7 +483,8 @@ pub(crate) fn infer_type<'py>(obj: &Bound<'py, PyAny>, o: Options<'_>) -> PyResu
     }
     if obj.hasattr(intern!(py, "__UDT__"))? {
         let udt = obj.getattr(intern!(py, "__UDT__"))?;
-        let data_type = crate::types::py_to_data_type(&udt)?;
+        let data_type = crate::types::py_to_data_type(&udt)
+            .inspect_err(|_| UNLOWERED_UDT.with(|flag| flag.set(true)))?;
         return Ok((data_type, TypeObjects::of_udt(udt)));
     }
     if let Ok(dict) = obj.cast::<PyDict>() {
@@ -1710,6 +1725,58 @@ impl<'py> TypeObjects<'py> {
             .get_mut(index)
             .map(std::mem::take)
             .unwrap_or_default()
+    }
+}
+
+/// The type object of the type `dt` that inference gave local rows, of its objects `objects`, as
+/// PySpark's `_infer_schema` makes it: the `__UDT__` of the first value of each user-defined type
+/// (see [`TypeObjects`]), of its own `jsonValue()`, which the JSON of the core type does not keep,
+/// in the arrays, maps and structs of PySpark's classes that hold one, and PySpark's class of
+/// each other type.
+pub(crate) fn inferred_type_object<'py>(
+    py: Python<'py>,
+    dt: &DataType,
+    objects: Option<&TypeObjects<'py>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let Some(objects) = objects.filter(|objects| !objects.is_empty()) else {
+        return Ok(crate::types::data_type_to_py(py, dt)?.into_bound(py));
+    };
+    if let (DataType::Udt { .. }, Some(udt)) = (dt, objects.object()) {
+        return Ok(udt.clone());
+    }
+    let types = py.import(intern!(py, "pyspark.sql.types"))?;
+    match dt {
+        DataType::Struct { fields } => {
+            let field_class = types.getattr(intern!(py, "StructField"))?;
+            let mut items = Vec::with_capacity(fields.len());
+            for (i, field) in fields.iter().enumerate() {
+                let data_type = inferred_type_object(py, &field.data_type, objects.field(i))?;
+                items.push(field_class.call1((field.name.as_str(), data_type, field.nullable))?);
+            }
+            types
+                .getattr(intern!(py, "StructType"))?
+                .call1((PyList::new(py, items)?,))
+        }
+        DataType::Array {
+            element_type,
+            contains_null,
+        } => types.getattr(intern!(py, "ArrayType"))?.call1((
+            inferred_type_object(py, element_type, objects.element())?,
+            *contains_null,
+        )),
+        DataType::Map {
+            key_type,
+            value_type,
+            value_contains_null,
+        } => {
+            let (key, value) = objects.key_and_value();
+            types.getattr(intern!(py, "MapType"))?.call1((
+                inferred_type_object(py, key_type, key)?,
+                inferred_type_object(py, value_type, value)?,
+                *value_contains_null,
+            ))
+        }
+        _ => Ok(crate::types::data_type_to_py(py, dt)?.into_bound(py)),
     }
 }
 
