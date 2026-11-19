@@ -119,6 +119,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 See the [WASM UDF guide](https://apache.github.io/spark-connect-rust/udfs/) for
 the full setup, SQL registration, supported types, and more.
 
+## Experimental server frontend
+
+The unpublished [`spark-connect-server`](crates/spark-connect-server/README.md)
+library provides a Rust Spark Connect protocol frontend. It manages protocol sessions,
+operations and Arrow IPC responses, delegating planning and execution to an
+application-provided `Engine`. The library includes no execution backend or standalone
+server executable; its protocol tests use injected engine fixtures.
+
+The frontend is intended for local, trusted experiments. Read its
+[security model](SECURITY.md#experimental-server-frontend) before embedding it.
+
 ## Contributing
 
 Issues are tracked in ASF JIRA under

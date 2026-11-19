@@ -3,6 +3,8 @@
 //! All messages live in the `spark.connect` protobuf package and are re-exported
 //! here at the crate root. The generated gRPC client is
 //! [`spark_connect_service_client::SparkConnectServiceClient`].
+//! Enable the optional `server` feature for `spark_connect_service_server`
+//! bindings. Embeddings configure tonic's transport server features separately.
 //!
 //! Baseline protocol version: see `proto/PROTO_VERSION.txt` / `proto/SPARK_SHA.txt`.
 

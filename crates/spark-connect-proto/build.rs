@@ -35,8 +35,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
     let full_set = out_dir.join("spark_connect_descriptor_set_full.bin");
     tonic_prost_build::configure()
-        .build_server(false)
+        .build_server(cfg!(feature = "server"))
         .build_client(true)
+        // async_trait repeats Future's must_use on generated server methods.
+        .trait_attribute("SparkConnectService", "#[allow(clippy::double_must_use)]")
         .bytes(".")
         .file_descriptor_set_path(&full_set)
         .compile_protos(&protos, &[proto_root])?;
