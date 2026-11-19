@@ -269,13 +269,216 @@ fn not_in_container() -> PyErr {
     PyValueError::new_err("remove(x): x not in container")
 }
 
-/// A container of `value`'s items, by `collections.abc` `name` (such as `KeysView`) of `value`.
-fn view<'py>(value: &Bound<'py, PyAny>, name: &str) -> PyResult<Bound<'py, PyAny>> {
-    value
-        .py()
-        .import("collections.abc")?
-        .getattr(name)?
-        .call1((value,))
+/// upb's errors of the arguments of a method `method` of a container of upb's class `class`
+/// (`ScalarMapContainer`, `MessageMapContainer`, `RepeatedScalarContainer`, ...) that takes none
+/// (`METH_NOARGS`), as CPython checks them: a keyword argument first.
+fn no_arguments(
+    class: &str,
+    method: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    no_keywords(class, method, kwargs)?;
+    if !args.is_empty() {
+        return Err(PyTypeError::new_err(format!(
+            "{class}.{method}() takes no arguments ({} given)",
+            args.len()
+        )));
+    }
+    Ok(())
+}
+
+/// upb's errors of the arguments of a method of a container that takes exactly one (`METH_O`), as
+/// [`no_arguments`] gives them: the argument.
+fn one_argument<'py>(
+    class: &str,
+    method: &str,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    no_keywords(class, method, kwargs)?;
+    if args.len() != 1 {
+        return Err(PyTypeError::new_err(format!(
+            "{class}.{method}() takes exactly one argument ({} given)",
+            args.len()
+        )));
+    }
+    args.get_item(0)
+}
+
+/// upb's error of a keyword argument of a method of a container that takes one or none
+/// (`METH_O`, `METH_NOARGS`), which names the method of its class however it is called.
+fn no_keywords(class: &str, method: &str, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<()> {
+    if kwargs.is_some_and(|k| !k.is_empty()) {
+        return Err(PyTypeError::new_err(format!(
+            "{class}.{method}() takes no keyword arguments"
+        )));
+    }
+    Ok(())
+}
+
+/// upb's error of a keyword argument of a method of a container that takes positional arguments
+/// (`METH_VARARGS`: `setdefault`, `insert`, `pop`, `__deepcopy__`), which CPython words by the
+/// way that the method is called: called of its object (`map.setdefault(key="k")`), it names the
+/// method of its class (`ScalarMapContainer.setdefault() takes no keyword arguments`), and called
+/// as a bound method, it names the method only (`setdefault() takes no keyword arguments`). The
+/// runtime's methods cannot tell the two apart, so the error names the method of its class, but
+/// where CPython binds the method of every call: before 3.12, while a trace or a profile function
+/// is set on the thread (as `coverage` and debuggers set one), CPython's `trace_call_function`
+/// calls a method of a native type as a bound method, so that a profiler sees it.
+fn no_keywords_of_positional(
+    py: Python<'_>,
+    class: &str,
+    method: &str,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<()> {
+    if kwargs.is_none_or(|k| k.is_empty()) {
+        return Ok(());
+    }
+    let bound = py.version_info() < (3, 12) && {
+        let sys = py.import("sys")?;
+        !sys.call_method0("gettrace")?.is_none() || !sys.call_method0("getprofile")?.is_none()
+    };
+    Err(PyTypeError::new_err(if bound {
+        format!("{method}() takes no keyword arguments")
+    } else {
+        format!("{class}.{method}() takes no keyword arguments")
+    }))
+}
+
+/// The `key` and `default` of upb's `get` of a map, which parses them as CPython's
+/// `PyArg_ParseTupleAndKeywords(args, kwargs, "O|O", {"key", "default"})` does, with its errors
+/// (of a "function", as the format names none): too many arguments, a missing `key`, an argument
+/// given by name and position, then a keyword of no argument.
+fn get_arguments<'py>(
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<(Bound<'py, PyAny>, Option<Bound<'py, PyAny>>)> {
+    const NAMES: [&str; 2] = ["key", "default"];
+    let nargs = args.len();
+    let nkwargs = kwargs.map_or(0, |k| k.len());
+    if nargs + nkwargs > NAMES.len() {
+        return Err(PyTypeError::new_err(format!(
+            "function takes at most {} {}arguments ({} given)",
+            NAMES.len(),
+            if nargs == 0 { "keyword " } else { "" },
+            nargs + nkwargs
+        )));
+    }
+    let keyword = |name: &str| -> PyResult<Option<Bound<'py, PyAny>>> {
+        match kwargs {
+            Some(kwargs) => kwargs.get_item(name),
+            None => Ok(None),
+        }
+    };
+    let mut values: [Option<Bound<'py, PyAny>>; 2] = [None, None];
+    for (i, name) in NAMES.iter().enumerate() {
+        values[i] = if i < nargs {
+            Some(args.get_item(i)?)
+        } else {
+            keyword(name)?
+        };
+        if values[i].is_none() && i == 0 {
+            return Err(PyTypeError::new_err(
+                "function missing required argument 'key' (pos 1)",
+            ));
+        }
+    }
+    for (i, name) in NAMES.iter().enumerate().take(nargs) {
+        if keyword(name)?.is_some() {
+            return Err(PyTypeError::new_err(format!(
+                "argument for function given by name ('{name}') and position ({})",
+                i + 1
+            )));
+        }
+    }
+    for key in kwargs.iter().flat_map(|k| k.keys()) {
+        if !key
+            .extract::<String>()
+            .is_ok_and(|k| NAMES.contains(&k.as_str()))
+        {
+            return Err(PyTypeError::new_err(format!(
+                "'{}' is an invalid keyword argument for this function",
+                key.str()?
+            )));
+        }
+    }
+    let [key, default] = values;
+    Ok((key.expect("the key, which is required"), default))
+}
+
+/// `arg` as an index of upb's `PyArg_ParseTuple` "n" format: of its `__index__`, with CPython's
+/// errors ("'str' object cannot be interpreted as an integer", "Python int too large to convert to
+/// C ssize_t").
+fn ssize_t_of(arg: &Bound<'_, PyAny>) -> PyResult<isize> {
+    let py = arg.py();
+    // SAFETY: the pointers are of live objects; `PyNumber_Index` gives a new reference, owned by
+    // the `Bound` that wraps it, or null with an exception set.
+    unsafe {
+        let index = ffi::PyNumber_Index(arg.as_ptr());
+        if index.is_null() {
+            return Err(PyErr::fetch(py));
+        }
+        let index = Bound::from_owned_ptr(py, index);
+        let value = ffi::PyLong_AsSsize_t(index.as_ptr());
+        match PyErr::take(py) {
+            Some(error) if value == -1 => Err(error),
+            _ => Ok(value),
+        }
+    }
+}
+
+/// The index and the value of upb's `insert` of a repeated field of `class`, as it takes them of
+/// `PyArg_ParseTuple(args, "nO")`: of no keyword argument (`METH_VARARGS`), exactly two, the index
+/// of [`ssize_t_of`].
+fn insert_arguments<'py>(
+    class: &str,
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<(isize, Bound<'py, PyAny>)> {
+    no_keywords_of_positional(args.py(), class, "insert", kwargs)?;
+    if args.len() != 2 {
+        return Err(PyTypeError::new_err(format!(
+            "function takes exactly 2 arguments ({} given)",
+            args.len()
+        )));
+    }
+    Ok((ssize_t_of(&args.get_item(0)?)?, args.get_item(1)?))
+}
+
+/// The index of upb's `pop` of a repeated field of `class`, as it takes it of
+/// `PyArg_ParseTuple(args, "|n")`: of no keyword argument, at most one, -1 of none.
+fn pop_argument(
+    class: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<isize> {
+    no_keywords_of_positional(args.py(), class, "pop", kwargs)?;
+    match args.len() {
+        0 => Ok(-1),
+        1 => ssize_t_of(&args.get_item(0)?),
+        given => Err(PyTypeError::new_err(format!(
+            "function takes at most 1 argument ({given} given)"
+        ))),
+    }
+}
+
+/// The method `name` of `collections.abc`'s class `abc` (`Mapping`, `MutableMapping`) called of
+/// `map` and of `args` and `kwargs`, as upb's maps have it: so its result, and the errors of its
+/// arguments, are Python's (`MutableMapping.pop() missing 1 required positional argument: 'key'`).
+fn abc_method(
+    map: &Bound<'_, MapContainer>,
+    abc: &str,
+    name: &str,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let py = map.py();
+    let method = py.import("collections.abc")?.getattr(abc)?.getattr(name)?;
+    let mut all = Vec::with_capacity(args.len() + 1);
+    all.push(map.as_any().clone());
+    all.extend(args.iter());
+    Ok(method.call(PyTuple::new(py, all)?, kwargs)?.unbind())
 }
 
 /// The key and value of `pair`, as `for key, value in pairs` unpacks it.
@@ -590,20 +793,15 @@ impl RepeatedScalar {
     }
 }
 
-#[pymethods]
 impl RepeatedScalar {
-    fn append(slf: &Bound<'_, Self>, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        Self::reify(slf)?;
-        let v = Self::field_of(slf).convert(value)?;
-        slf.borrow_mut().items.push(v);
-        Ok(())
-    }
+    /// The name of upb's class of the container, which its errors of arguments name.
+    const UPB_CLASS: &'static str = "RepeatedScalarContainer";
 
     /// As upb's: the values of `elem_seq` (of `PySequence_Fast`, so those of an iterator to its
     /// end first), each converted and appended in turn. A failure, of the iteration too, leaves
     /// the container of the length that it had: upb resizes it, so a position that Python code
     /// removed meanwhile holds the default.
-    fn extend(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
+    fn extend_values(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
         Self::reify(slf)?;
         let field = Self::field_of(slf);
         let start = slf.borrow().items.len();
@@ -615,11 +813,46 @@ impl RepeatedScalar {
         }
         extended
     }
+}
+
+/// The methods take their arguments as upb's do, positional only, with upb's errors.
+#[pymethods]
+impl RepeatedScalar {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn append(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let value = &one_argument(Self::UPB_CLASS, "append", args, kwargs)?;
+        Self::reify(slf)?;
+        let v = Self::field_of(slf).convert(value)?;
+        slf.borrow_mut().items.push(v);
+        Ok(())
+    }
+
+    /// See [`RepeatedScalar::extend_values`].
+    #[pyo3(signature = (*args, **kwargs))]
+    fn extend(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let elem_seq = one_argument(Self::UPB_CLASS, "extend", args, kwargs)?;
+        Self::extend_values(slf, &elem_seq)
+    }
 
     /// As upb's: the position of `key` in the container as it is, then the value converted. A
     /// conversion that shortened the container leaves the position past its end (where upb's
     /// insert writes out of its bounds), so the value goes at its end.
-    fn insert(slf: &Bound<'_, Self>, key: isize, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn insert(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let (key, value) = insert_arguments(Self::UPB_CLASS, args, kwargs)?;
+        let value = &value;
         Self::reify(slf)?;
         let at = insert_position(key, slf.borrow().items.len());
         let v = Self::field_of(slf).convert(value)?;
@@ -629,8 +862,13 @@ impl RepeatedScalar {
         Ok(())
     }
 
-    #[pyo3(signature = (key=-1))]
-    fn pop(slf: &Bound<'_, Self>, key: isize) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn pop(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let key = pop_argument(Self::UPB_CLASS, args, kwargs)?;
         let py = slf.py();
         Self::reify(slf)?;
         let len = slf.borrow().items.len();
@@ -642,7 +880,13 @@ impl RepeatedScalar {
     /// As upb's: the first item that equals `elem`, as Python compares them, among as many items
     /// as the container had, each of the container as it is when it is compared (an `__eq__` may
     /// change it).
-    fn remove(slf: &Bound<'_, Self>, elem: &Bound<'_, PyAny>) -> PyResult<()> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn remove(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let elem = &one_argument(Self::UPB_CLASS, "remove", args, kwargs)?;
         let py = slf.py();
         Self::reify(slf)?;
         let len = slf.borrow().items.len();
@@ -692,16 +936,27 @@ impl RepeatedScalar {
         Ok(())
     }
 
-    #[pyo3(name = "MergeFrom")]
-    fn merge_from(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<()> {
-        Self::extend(slf, other)
+    #[pyo3(name = "MergeFrom", signature = (*args, **kwargs))]
+    fn merge_from(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let other = one_argument(Self::UPB_CLASS, "MergeFrom", args, kwargs)?;
+        Self::extend_values(slf, &other)
     }
 
-    /// A copy of the container, held by no message, as upb's `copy.deepcopy` gives one.
-    #[pyo3(signature = (memo=None))]
-    fn __deepcopy__(&self, memo: Option<&Bound<'_, PyAny>>) -> Self {
-        let _ = memo;
-        self.copy()
+    /// A copy of the container, held by no message, as upb's `copy.deepcopy` gives one: of any
+    /// positional arguments (the memo) and of no keyword argument, as upb's `METH_VARARGS`.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __deepcopy__(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let _ = args;
+        no_keywords_of_positional(slf.py(), Self::UPB_CLASS, "__deepcopy__", kwargs)?;
+        Ok(slf.borrow().copy())
     }
 
     fn __reduce__(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -884,8 +1139,26 @@ impl RepeatedComposite {
         PyMessage::merge_from_with(&child, value, budget)?;
         Ok(child)
     }
+
+    /// The name of upb's class of the container, which its errors of arguments name.
+    const UPB_CLASS: &'static str = "RepeatedCompositeContainer";
+
+    /// As upb's: each value of the iterator of `elem_seq` appended as it comes, so a failure
+    /// leaves the values before it appended. One interrupt budget counts a step for each message
+    /// that the appends merge or copy, so that the extend of many messages lets another thread
+    /// take the GIL, and a signal interrupt it, as a copy does.
+    fn extend_values(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
+        Self::reify(slf)?;
+        let budget = ConversionBudget::full();
+        for value in elem_seq.try_iter()? {
+            Self::append_with(slf, &value?, &budget)?;
+        }
+        Ok(())
+    }
 }
 
+/// The methods take their arguments as upb's do, positional only (but `add`'s keywords), with
+/// upb's errors.
 #[pymethods]
 impl RepeatedComposite {
     /// As upb's: a new message of the fields of `kwargs`, appended; a positional argument is the
@@ -912,29 +1185,37 @@ impl RepeatedComposite {
 
     /// As upb's: a new message, appended, then merged with `value` and returned, so that a message
     /// of another type leaves the new message (empty) in the container.
+    #[pyo3(signature = (*args, **kwargs))]
     fn append<'py>(
         slf: &Bound<'py, Self>,
-        value: &Bound<'py, PyAny>,
+        args: &Bound<'py, PyTuple>,
+        kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyMessage>> {
-        Self::append_with(slf, value, &ConversionBudget::full())
+        let value = one_argument(Self::UPB_CLASS, "append", args, kwargs)?;
+        Self::append_with(slf, &value, &ConversionBudget::full())
     }
 
-    /// As upb's: each value of the iterator of `elem_seq` appended as it comes, so a failure
-    /// leaves the values before it appended. One interrupt budget counts a step for each message
-    /// that the appends merge or copy, so that the extend of many messages lets another thread
-    /// take the GIL, and a signal interrupt it, as a copy does.
-    fn extend(slf: &Bound<'_, Self>, elem_seq: &Bound<'_, PyAny>) -> PyResult<()> {
-        Self::reify(slf)?;
-        let budget = ConversionBudget::full();
-        for value in elem_seq.try_iter()? {
-            Self::append_with(slf, &value?, &budget)?;
-        }
-        Ok(())
+    /// See [`RepeatedComposite::extend_values`].
+    #[pyo3(signature = (*args, **kwargs))]
+    fn extend(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let elem_seq = one_argument(Self::UPB_CLASS, "extend", args, kwargs)?;
+        Self::extend_values(slf, &elem_seq)
     }
 
     /// As upb's: the position of `key` in the container as it is, then the copy of `value`,
     /// which goes at the end of a container that is shorter by then.
-    fn insert(slf: &Bound<'_, Self>, key: isize, value: &Bound<'_, PyAny>) -> PyResult<()> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn insert(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let (key, value) = insert_arguments(Self::UPB_CLASS, args, kwargs)?;
+        let value = &value;
         let py = slf.py();
         Self::reify(slf)?;
         let (class, at) = {
@@ -948,8 +1229,13 @@ impl RepeatedComposite {
         Ok(())
     }
 
-    #[pyo3(signature = (key=-1))]
-    fn pop(slf: &Bound<'_, Self>, key: isize) -> PyResult<Py<PyMessage>> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn pop(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyMessage>> {
+        let key = pop_argument(Self::UPB_CLASS, args, kwargs)?;
         let py = slf.py();
         Self::reify(slf)?;
         let len = slf.borrow().items.len();
@@ -959,7 +1245,13 @@ impl RepeatedComposite {
 
     /// As upb's: the first message that equals `elem`, among as many as the container had, each
     /// of the container as it is when it is compared.
-    fn remove(slf: &Bound<'_, Self>, elem: &Bound<'_, PyAny>) -> PyResult<()> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn remove(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let elem = &one_argument(Self::UPB_CLASS, "remove", args, kwargs)?;
         let py = slf.py();
         Self::reify(slf)?;
         let len = slf.borrow().items.len();
@@ -1013,17 +1305,27 @@ impl RepeatedComposite {
         Ok(())
     }
 
-    #[pyo3(name = "MergeFrom")]
-    fn merge_from(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<()> {
-        Self::extend(slf, other)
+    #[pyo3(name = "MergeFrom", signature = (*args, **kwargs))]
+    fn merge_from(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        let other = one_argument(Self::UPB_CLASS, "MergeFrom", args, kwargs)?;
+        Self::extend_values(slf, &other)
     }
 
     /// A copy of the container, of copies of its messages, held by no message. The messages are
     /// read under a short borrow and copied after it, of one interrupt budget, as a copy of a
     /// message copies them.
-    #[pyo3(signature = (memo=None))]
-    fn __deepcopy__(slf: &Bound<'_, Self>, memo: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
-        let _ = memo;
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __deepcopy__(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
+        let _ = args;
+        no_keywords_of_positional(slf.py(), Self::UPB_CLASS, "__deepcopy__", kwargs)?;
         let py = slf.py();
         let (class, items) = {
             let me = slf.borrow();
@@ -1369,6 +1671,16 @@ impl MapContainer {
     fn keep_version(&mut self, before: u64) {
         if self.version == before.wrapping_add(1) {
             self.version = before;
+        }
+    }
+
+    /// The name of upb's class of the map, which its errors of the arguments of its methods name:
+    /// `ScalarMapContainer` (the runtime's `MapContainer`) or `MessageMapContainer`.
+    fn upb_class_name(slf: &Bound<'_, Self>) -> &'static str {
+        if slf.borrow().map.value == Kind::Message {
+            "MessageMapContainer"
+        } else {
+            "ScalarMapContainer"
         }
     }
 
@@ -1787,69 +2099,103 @@ impl MapContainer {
         }
     }
 
-    /// The keys, values and items, as the views of `collections.abc.Mapping` give them, as
-    /// upb's maps do.
-    fn keys<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        view(slf.as_any(), "KeysView")
+    /// The keys, values and items, as upb's maps give them: `Mapping`'s methods, of its views and
+    /// of the errors of their arguments.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn keys(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        abc_method(slf, "Mapping", "keys", args, kwargs)
     }
 
-    fn values<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        view(slf.as_any(), "ValuesView")
+    #[pyo3(signature = (*args, **kwargs))]
+    fn values(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        abc_method(slf, "Mapping", "values", args, kwargs)
     }
 
-    fn items<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        view(slf.as_any(), "ItemsView")
+    #[pyo3(signature = (*args, **kwargs))]
+    fn items(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        abc_method(slf, "Mapping", "items", args, kwargs)
     }
 
-    #[pyo3(signature = (key, default=None))]
+    /// The value of `key`, or `default`, of upb's arguments and errors (see [`get_arguments`]).
+    #[pyo3(signature = (*args, **kwargs))]
     fn get(
         slf: &Bound<'_, Self>,
-        key: &Bound<'_, PyAny>,
-        default: Option<Py<PyAny>>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let key = key_of(&Self::map_of(slf), key)?;
-        Ok(Self::lookup(slf, &key)?.unwrap_or_else(|| default.unwrap_or_else(|| slf.py().None())))
+        let (key, default) = get_arguments(args, kwargs)?;
+        let key = key_of(&Self::map_of(slf), &key)?;
+        Ok(match Self::lookup(slf, &key)? {
+            Some(value) => value,
+            None => default.map_or_else(|| slf.py().None(), Bound::unbind),
+        })
     }
 
-    /// The value of `key`, removed, as `MutableMapping.pop` of upb's maps gives it: `map[key]`
-    /// gives the default of the value type for a missing key, so `default` is never returned.
-    #[pyo3(signature = (key, default=None))]
+    /// As upb's, which is `MutableMapping.pop`: `map[key]` gives the default of the value type for
+    /// a missing key, so `default` is never returned.
+    #[pyo3(signature = (*args, **kwargs))]
     fn pop(
         slf: &Bound<'_, Self>,
-        key: &Bound<'_, PyAny>,
-        default: Option<&Bound<'_, PyAny>>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        let _ = default;
-        let value = Self::get_or_insert(slf, key)?;
-        Self::__delitem__(slf, key)?;
-        Ok(value)
+        abc_method(slf, "MutableMapping", "pop", args, kwargs)
     }
 
-    fn popitem<'py>(slf: &Bound<'py, Self>) -> PyResult<(Bound<'py, PyAny>, Py<PyAny>)> {
-        let py = slf.py();
-        let key = match slf.borrow().entries.iter().next() {
-            Some((key, _)) => key.clone(),
-            None => return Err(PyKeyError::new_err(())),
-        };
-        let key = key.to_py(py)?.into_bound(py);
-        let value = Self::get_or_insert(slf, &key)?;
-        Self::__delitem__(slf, &key)?;
-        Ok((key, value))
+    /// As upb's, which is `MutableMapping.popitem`: the first key of an iteration of the map.
+    #[pyo3(signature = (*args, **kwargs))]
+    fn popitem(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        abc_method(slf, "MutableMapping", "popitem", args, kwargs)
     }
 
-    #[pyo3(signature = (key, default=None))]
+    /// As upb's: of no keyword arguments, refused of a map of messages, and of a key and a value
+    /// that is not None, of the errors of `PyArg_UnpackTuple` of a map of scalars.
+    #[pyo3(signature = (*args, **kwargs))]
     fn setdefault(
         slf: &Bound<'_, Self>,
-        key: &Bound<'_, PyAny>,
-        default: Option<&Bound<'_, PyAny>>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
+        no_keywords_of_positional(slf.py(), Self::upb_class_name(slf), "setdefault", kwargs)?;
         let map = Self::map_of(slf);
         if map.value == Kind::Message {
             return Err(PyNotImplementedError::new_err(
                 "Set message map value directly is not supported.",
             ));
         }
-        let Some(default) = default.filter(|d| !d.is_none()) else {
+        match args.len() {
+            0 => {
+                return Err(PyTypeError::new_err(
+                    "setdefault expected at least 1 argument, got 0",
+                ))
+            }
+            1 | 2 => {}
+            given => {
+                return Err(PyTypeError::new_err(format!(
+                    "setdefault expected at most 2 arguments, got {given}"
+                )))
+            }
+        }
+        let key = args.get_item(0)?;
+        let key = &key;
+        let default = args.get_item(1).ok();
+        let Some(default) = default.as_ref().filter(|d| !d.is_none()) else {
             return Err(PyValueError::new_err(
                 "The value for scalar map setdefault must be set.",
             ));
@@ -1864,7 +2210,13 @@ impl MapContainer {
         Ok(default.clone().unbind())
     }
 
-    fn clear(slf: &Bound<'_, Self>) -> PyResult<()> {
+    #[pyo3(signature = (*args, **kwargs))]
+    fn clear(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
+        no_arguments(Self::upb_class_name(slf), "clear", args, kwargs)?;
         Self::reify(slf)?;
         slf.borrow_mut().new_version();
         // The entries are dropped once the map is no longer borrowed.
@@ -1899,9 +2251,16 @@ impl MapContainer {
     /// copied into the message of the key. The entries of a map of other types are converted, with
     /// upb's errors. upb's map takes a new version first, so an iteration of the map in progress
     /// fails, even of an argument that it refuses. Each entry is a step of an interrupt budget.
-    #[pyo3(name = "MergeFrom")]
-    fn merge_from(slf: &Bound<'_, Self>, other: &Bound<'_, PyAny>) -> PyResult<()> {
+    /// The argument is upb's one positional argument, of the errors of `METH_O`, which come before
+    /// the new version.
+    #[pyo3(name = "MergeFrom", signature = (*args, **kwargs))]
+    fn merge_from(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<()> {
         let py = slf.py();
+        let other = &one_argument(Self::upb_class_name(slf), "MergeFrom", args, kwargs)?;
         Self::reify(slf)?;
         slf.borrow_mut().new_version();
         if other.cast::<PyDict>().is_ok() {
@@ -1911,11 +2270,18 @@ impl MapContainer {
         Self::update_from(py, slf, other, &field, &ConversionBudget::full())
     }
 
-    /// The class of the entry messages of the map, as upb's `GetEntryClass`.
-    #[pyo3(name = "GetEntryClass")]
-    fn get_entry_class(&self, py: Python<'_>) -> PyResult<Py<PyType>> {
-        registered_class(py, &self.map.entry)
-            .ok_or_else(|| PyTypeError::new_err(format!("no class for {}", self.map.entry)))
+    /// The class of the entry messages of the map, as upb's `GetEntryClass`, of its errors of
+    /// arguments.
+    #[pyo3(name = "GetEntryClass", signature = (*args, **kwargs))]
+    fn get_entry_class(
+        slf: &Bound<'_, Self>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyType>> {
+        no_arguments(Self::upb_class_name(slf), "GetEntryClass", args, kwargs)?;
+        let entry = slf.borrow().map.entry.clone();
+        registered_class(slf.py(), &entry)
+            .ok_or_else(|| PyTypeError::new_err(format!("no class for {entry}")))
     }
 
     fn __richcmp__(
@@ -2009,18 +2375,8 @@ impl MessageMapContainer {
         args: &Bound<'_, PyTuple>,
         kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
-        if kwargs.is_some_and(|k| !k.is_empty()) {
-            return Err(PyTypeError::new_err(
-                "MessageMapContainer.get_or_create() takes no keyword arguments",
-            ));
-        }
-        if args.len() != 1 {
-            return Err(PyTypeError::new_err(format!(
-                "MessageMapContainer.get_or_create() takes exactly one argument ({} given)",
-                args.len()
-            )));
-        }
-        MapContainer::get_or_insert(slf.as_super(), &args.get_item(0)?)
+        let key = one_argument("MessageMapContainer", "get_or_create", args, kwargs)?;
+        MapContainer::get_or_insert(slf.as_super(), &key)
     }
 }
 
