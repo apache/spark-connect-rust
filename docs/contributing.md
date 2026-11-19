@@ -262,6 +262,17 @@ The stubs keep the docstring of each of PySpark's objects as it has it at run ti
 decorators too: one that the generator does not know is an error, which `DOC_KEEPING_DECORATORS`
 takes when the decorator keeps the docstring.
 
+The classic classes whose Connect classes are native (`pyspark.sql.Column` and the others of
+`_BINDINGS` of `python/pyspark/sql/_classic_bases.py`) forward a patch to the native class unless
+PySpark's Connect class has the name itself or its `__init__` sets it on each object, of the names
+that `_BINDINGS` keeps of PySpark's classes. CI checks those names against the source of PySpark at
+the tracked tag, of which the script works them out, and prints the difference and the names to
+keep when they differ, as after a change of the tracked version:
+
+```bash
+python scripts/check_classic_bindings.py --pyspark-src "$SPARK_HOME/python"
+```
+
 For local collection measurements and their interpretation, see
 [Row conversion throughput and responsiveness](row-conversion-benchmark.md).
 

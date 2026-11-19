@@ -42,15 +42,17 @@ __all__: list[str] = []
 class _Binding(NamedTuple):
     # The name of the native class in pyspark._pyspark.
     native_name: str
-    # The names that PySpark 4.3.0's Connect class defines itself (its vars()), which its objects
-    # find before those of the classic class. Re-derive these on every PySpark version bump.
+    # The names that PySpark's Connect class defines itself (of its own __dict__), which its
+    # objects find before those of the classic class.
     connect_names: frozenset[str]
     # The attributes that the __init__ of PySpark's Connect class sets on each object, which hide
     # a patch of the class unless the patch is a data descriptor.
     instance_names: frozenset[str]
 
 
-# The classic classes of PySpark whose Connect classes are native, by their module and name.
+# The classic classes of PySpark whose Connect classes are native, by their module and name. The
+# generated-drift workflow checks their names against the source of the PySpark of the tracked tag
+# (scripts/check_classic_bindings.py, which works them out of it).
 _BINDINGS: dict[str, _Binding] = {
     "pyspark.sql.column.Column": _Binding(
         "Column",
