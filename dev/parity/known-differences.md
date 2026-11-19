@@ -120,6 +120,20 @@ difference is intentional or tracked for a fix.
   `timestamp_seconds(-62135596800)`, 0001-01-01 00:00:00 UTC, with the session time zone
   `America/Los_Angeles` on a host in UTC, this client returns `datetime(1, 1, 1, 0, 0)`. Both
   raise the `OverflowError` of a wall clock out of the range in the local time zone.
+- **A `StructType` whose `fields` hold an element that is not a `StructField`** (inherent; the
+  uses of the native type lower its fields into the core's struct type, which holds fields only).
+  PySpark's `StructType` methods read the attributes of each element of `fields` as they go, so of
+  a list that a str or another object was appended to in place, each use raises the
+  `AttributeError` of the first attribute that it reads (`simpleString`, `jsonValue`, `name`,
+  `dataType`, `needConversion`), or uses an object that has them, and its pickles and copies keep
+  the element; `createDataFrame` of local rows takes them apart by the cached names first, so a
+  row of another number of values raises `AXIS_LENGTH_MISMATCH` before that. This client lowers the
+  list into the core's struct type at each use that needs the type (its JSON, simple string and
+  tree string, a lookup by name, `add`, its pickles and copies, the plans of `to`, `cast`,
+  `from_json` and a reader's schema, and `createDataFrame`), and raises
+  `TypeError: StructType fields must be StructField objects` there, and an assignment of `fields`
+  of such an element raises it at once. Of a list of `StructField`s changed in place, the cached
+  `names` and their uses are PySpark's (see `docs/compatibility.md`).
 - **The `__repr__` of a Column of a str that UTF-8 cannot encode** (intentional; the expressions
   of the core hold UTF-8). Such a str, of a name, a SQL string or a literal, fails the plans of the
   Column when they are built, as in PySpark, and its lone surrogates show escaped in the `__repr__`

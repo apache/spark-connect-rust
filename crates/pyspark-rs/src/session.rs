@@ -1700,6 +1700,7 @@ impl PySparkSession {
         use crate::infer;
 
         let atomic = matches!(spec, Spec::Atomic(_));
+        let given_struct = matches!(spec, Spec::Struct(_));
         let (given, mut cols) = match spec {
             Spec::None => (None, None),
             Spec::Names(names) => (None, Some(names)),
@@ -1803,17 +1804,24 @@ impl PySparkSession {
             }
         };
 
-        // As PySpark: every row is taken apart first, then each column is converted.
+        // As PySpark: every row is taken apart first, then each column is converted. The rows are
+        // taken apart by `schema.fieldNames()` of the given `StructType`, which of a `fields` list
+        // changed in place are the names before the change (`infer::cached_names`).
+        let names = match (schema, given_struct) {
+            (Some(schema), true) => infer::cached_names(schema, &fields)?,
+            _ => None,
+        };
         let mut parts: Vec<Vec<Bound<'_, PyAny>>> = Vec::with_capacity(items.len());
         for item in &items {
             budget.step(py)?;
             parts.push(if single {
-                if fields.len() != 1 {
-                    return Err(infer::axis_length_mismatch(py, fields.len(), 1));
+                let len = names.as_ref().map_or(fields.len(), Vec::len);
+                if len != 1 {
+                    return Err(infer::axis_length_mismatch(py, len, 1));
                 }
                 vec![item.clone()]
             } else {
-                infer::row_values(item, &fields)?
+                infer::row_values(item, &fields, names.as_deref())?
             });
         }
         // As PySpark's converters, which assert the nullable flags of the schema when they are
@@ -1881,6 +1889,11 @@ impl PySparkSession {
         }
         // The rows of a struct of no fields have no values.
         values.resize_with(row_count, Vec::new);
+        // As PySpark's Arrow schema of the fields, whose names of the structs below the top level
+        // are their cached names, of which fewer than the fields raise (`infer::dedup_names_error`).
+        if let Some(err) = infer::dedup_names_error(objects.as_ref(), &fields) {
+            return Err(err);
+        }
         // Then, as PySpark, the schema converts to Arrow, a field at a time and depth first,
         // which rejects a null type that is not nullable, and has no char, varchar, year-month
         // or calendar interval type, nor a type of its class only such as `AtomicType()` or a
@@ -2005,16 +2018,21 @@ impl PySparkSession {
                 .create_dataframe_from_arrow_with_options(batches, Some(spark_schema), &options)
                 .map_err(Box::new)
         })?;
-        // As the other pandas paths, the explicit names are applied with toDF, when there are any.
-        Ok(Some(PyDataFrame::new(if fields.is_empty() {
+        // As the other pandas paths, the explicit names are applied with toDF, when there are any:
+        // PySpark's `toDF(*schema.fieldNames())`, which of a `fields` list changed in place are the
+        // names before the change, of which the server raises for another number of columns
+        // (`infer::cached_names`).
+        let names = match crate::infer::cached_names(schema, fields)? {
+            Some(names) => names
+                .iter()
+                .map(|name| Ok(name.str()?.to_cow()?.into_owned()))
+                .collect::<PyResult<Vec<String>>>()?,
+            None => fields.iter().map(|field| field.name.clone()).collect(),
+        };
+        Ok(Some(PyDataFrame::new(if names.is_empty() {
             df
         } else {
-            df.to_df(
-                fields
-                    .iter()
-                    .map(|field| field.name.as_str())
-                    .collect::<Vec<_>>(),
-            )
+            df.to_df(names.iter().map(String::as_str).collect::<Vec<_>>())
         })))
     }
 
@@ -3138,10 +3156,16 @@ impl PySparkSession {
         // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
         // Only a native StructType opts into this explicit integer optimization;
         // DDL, inferred schemas and unsupported values keep schema-driven conversion.
-        if schema.is_some_and(|s| s.extract::<PyRef<crate::types::PyStructType>>().is_ok()) {
+        if let Some(struct_type) =
+            schema.filter(|s| s.extract::<PyRef<crate::types::PyStructType>>().is_ok())
+        {
             if let Spec::Struct(fields) = &spec {
                 if let Ok(data) = data.cast::<PyList>() {
-                    if let Some(columns) = exact_long_tuple_columns(data, fields)? {
+                    // Not of a `fields` list changed in place, whose rows are taken apart by the
+                    // names before the change (`infer::cached_names`).
+                    if let Some(columns) = exact_long_tuple_columns(data, fields)?.filter(|_| {
+                        matches!(crate::infer::cached_names(struct_type, fields), Ok(None))
+                    }) {
                         let schema = DataType::Struct {
                             fields: fields.clone(),
                         };

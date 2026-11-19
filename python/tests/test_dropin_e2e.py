@@ -5427,6 +5427,39 @@ class _ScaleUDT(UserDefinedType):
         return datum // self.scale
 
 
+def test_create_dataframe_of_a_struct_changed_in_place_reads_its_cached_names_as_pyspark(session):
+    # As official PySpark 4.3.0, whose StructType caches its `names` as it is made, which an
+    # in-place change of its `fields` list leaves as they were: createDataFrame takes local rows,
+    # and the struct values below the top level, apart by those names (`fieldNames()`), and
+    # converts their values by position with the fields as they are; a pandas DataFrame is
+    # named with `toDF(*schema.fieldNames())`.
+    pd = pytest.importorskip("pandas")
+    appended = StructType([StructField("a", LongType())])
+    appended.fields.append(StructField("b", StringType()))
+    popped = StructType([StructField("a", LongType()), StructField("b", StringType())])
+    popped.fields.pop()
+    replaced = StructType([StructField("a", LongType())])
+    replaced.fields[0] = StructField("z", StringType())
+    for data, schema in (([(1, "q")], appended), ([(1,)], popped),
+                         ([((1, "q"),)], StructType([StructField("s", appended)]))):
+        with pytest.raises(PySparkValueError, match="AXIS_LENGTH_MISMATCH"):
+            session.createDataFrame(data, schema)
+    with pytest.raises(IndexError, match="tuple index out of range"):
+        session.createDataFrame([(1,)], appended)
+    for data, inner in (([((1,),)], appended), ([(None,)], appended), ([({"a": 1},)], popped)):
+        with pytest.raises(IndexError, match="list index out of range"):
+            session.createDataFrame(data, StructType([StructField("s", inner)]))
+    assert session.createDataFrame([(1, "q")], popped).collect() == [Row(a=1)]
+    assert session.createDataFrame([{"a": 1}], replaced).collect() == [Row(z="1")]
+    nested = StructType([StructField("s", replaced)])
+    assert session.createDataFrame([({"a": 1},)], nested).collect() == [Row(s=Row(z="1"))]
+    string = StructType([StructField("a", StringType())])
+    string.fields[0] = StructField("z", StringType())
+    assert session.createDataFrame(pd.DataFrame({"a": ["x"]}), string).collect() == [Row(a="x")]
+    with pytest.raises(AnalysisException, match="ASSIGNMENT_ARITY_MISMATCH"):
+        session.createDataFrame(pd.DataFrame({"a": [1]}), popped).collect()
+
+
 def test_local_rows_are_serialized_by_the_udt_objects_of_the_schema_as_pyspark(session):
     # As official PySpark 4.3.0, which serializes each value of local rows with the UDT object
     # that the schema holds: two UDTs of one class and other parameters keep their own, in a

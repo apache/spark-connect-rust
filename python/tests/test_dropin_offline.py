@@ -6848,7 +6848,9 @@ def test_variant_spatial_and_user_defined_values_are_sent_as_pyspark(mock_connec
     # As PySpark's LocalDataToArrowConversion: a VariantVal is the struct of its value and
     # metadata, a Geometry or a Geography that of its srid and WKB, whose metadata tags the
     # struct as of its type, and a value of a user-defined type is serialized by the UDT and
-    # sent as its SQL type; a value of another type for these is malformed.
+    # sent as its SQL type; a value of another type for these is malformed, of the condition
+    # alone, whose message parameters are None, as PySpark's `PySparkValueError(errorClass=...)`
+    # of its converters, also nested.
     import pyarrow as pa
     from pyspark.errors import PySparkValueError
     from pyspark.testing.objects import ExamplePoint
@@ -6889,12 +6891,15 @@ def test_variant_spatial_and_user_defined_values_are_sent_as_pyspark(mock_connec
          "_2": {"srid": 4326, "wkb": wkb}, "_3": {"srid": 4326, "wkb": wkb}, "_4": [1.0, 2.0]},
         {"_1": None, "_2": None, "_3": None, "_4": None},
     ]
-    for ddl, condition in (("v variant", "MALFORMED_VARIANT"),
-                           ("g geometry(4326)", "MALFORMED_GEOMETRY"),
-                           ("g geography(4326)", "MALFORMED_GEOGRAPHY")):
+    for ddl, value, condition in (("v variant", "x", "MALFORMED_VARIANT"),
+                                  ("g geometry(4326)", "x", "MALFORMED_GEOMETRY"),
+                                  ("g geography(4326)", 1, "MALFORMED_GEOGRAPHY"),
+                                  ("v array<variant>", ["x"], "MALFORMED_VARIANT"),
+                                  ("s struct<g: geometry(4326)>", ("x",), "MALFORMED_GEOMETRY")):
         with pytest.raises(PySparkValueError) as error:
-            spark.createDataFrame([("x",)], ddl)
+            spark.createDataFrame([(value,)], ddl)
         assert error.value.getCondition() == condition
+        assert error.value.getMessageParameters() is None
     # The attributes of PySpark's spatial values.
     geometry = T.Geometry.fromWKB(wkb, 4326)
     assert (geometry.srid, geometry.wkb) == (4326, wkb)
@@ -23249,6 +23254,98 @@ def test_local_rows_are_serialized_by_the_udt_objects_of_the_schema_as_pysparks(
     table, _ = _local_rows_relation_of(service, spark.createDataFrame(
         pd.DataFrame({"a": [3], "b": [4]}), T.StructType([schema["a"], schema["b"]])))
     assert table.to_pylist() == [{"a": 6, "b": 40}]
+
+
+def _struct_changed_in_place(change):
+    # A StructType whose `fields` list was changed in place, whose cached `names` stay as they
+    # were made: a field appended, the last one popped, or the first one replaced by another.
+    if change == "appended":
+        st = T.StructType([T.StructField("a", T.LongType())])
+        st.fields.append(T.StructField("b", T.StringType()))
+    elif change == "popped":
+        st = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.StringType())])
+        st.fields.pop()
+    else:
+        st = T.StructType([T.StructField("a", T.LongType())])
+        st.fields[0] = T.StructField("z", T.StringType())
+    return st
+
+
+def test_local_rows_of_a_struct_changed_in_place_are_taken_apart_by_its_cached_names(mock_connect):
+    # As PySpark's LocalDataToArrowConversion, whose `to_row`, and the converter of a struct
+    # below the top level, take each value apart by `fieldNames()` of the StructType, its cached
+    # `names`, which an in-place change of its `fields` leaves as they were, and convert the
+    # values by position with the fields as they are: the arity of a row is the number of the
+    # names, a dict is read by them, and a field past them has no value (`IndexError` of
+    # `row[i]`). Below the top level, a value past the fields has no converter, and the Arrow
+    # schema of fewer names than fields fails (`_deduplicate_field_names`), both `IndexError`.
+    # The integer fast path takes them so too. As official PySpark 4.3.0 (see
+    # test_dropin_e2e.py); the drop-in took them apart by the names of the fields as they are.
+    from pyspark.errors import PySparkValueError
+
+    spark, service = mock_connect
+    appended, popped, replaced = (
+        _struct_changed_in_place(change) for change in ("appended", "popped", "replaced"))
+    for data, schema in (
+        ([(1, "q")], appended), ([Row(a=1, b="q")], appended), ([[1, "q"]], appended),
+        ([(1,)], popped), ([(1,), (2,)], popped), ([[1]], popped), ([None], popped),
+        ([1], popped),
+    ):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(data, schema)
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    for data in ([(1,)], [{"a": 1, "b": "q"}], [None], [1]):
+        with pytest.raises(IndexError, match="tuple index out of range"):
+            spark.createDataFrame(data, appended)
+    table, _ = _local_rows_relation_of(service, spark.createDataFrame([(1, "q")], popped))
+    assert table.to_pylist() == [{"a": 1}]
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([{"a": 1, "z": 2}, {"z": 3}], replaced))
+    assert table.to_pylist() == [{"z": "1"}, {"z": None}]
+
+    def nested(inner):
+        return T.StructType([T.StructField("s", inner)])
+
+    for data, schema in (([((1, "q"),)], appended), ([((1,),)], popped)):
+        with pytest.raises(PySparkValueError) as error:
+            spark.createDataFrame(data, nested(schema))
+        assert error.value.getCondition() == "AXIS_LENGTH_MISMATCH"
+    for data, schema in (
+        ([((1,),)], appended), ([({"a": 1},)], appended), ([(None,)], appended),
+        ([((1, "q"),)], popped), ([({"a": 1},)], popped), ([(Row(a=1, b="q"),)], popped),
+    ):
+        with pytest.raises(IndexError, match="list index out of range"):
+            spark.createDataFrame(data, nested(schema))
+    table, _ = _local_rows_relation_of(
+        service, spark.createDataFrame([({"a": 1, "z": 2},), ((3,),)], nested(replaced)))
+    assert table.to_pylist() == [{"s": {"z": "1"}}, {"s": {"z": "3"}}]
+
+
+def test_pandas_frames_of_a_struct_changed_in_place_are_named_by_its_cached_names(mock_connect):
+    # As PySpark's createDataFrame of a pandas DataFrame, which names its columns with
+    # `toDF(*schema.fieldNames())`, of the cached `names` of a StructType whose `fields` list
+    # was changed in place, after the table of its fields as they are is renamed by as many of
+    # them, as official PySpark 4.3.0 (see test_dropin_e2e.py); the server raises of another
+    # number of names than columns. The drop-in named them by the fields as they are, and
+    # failed the rename of more names than columns.
+    pd = pytest.importorskip("pandas")
+    spark, service = mock_connect
+
+    def column_names(df):
+        df.toArrow()
+        request = parse_message(service.execute_requests[-1])
+        relation = parse_message(parse_message(request[3][0])[1][0])
+        # Relation.to_df=18 -> ToDF.column_names=2.
+        return [name.decode() for name in parse_message(relation[18][0])[2]]
+
+    replaced = T.StructType([T.StructField("a", T.StringType())])
+    replaced.fields[0] = T.StructField("z", T.StringType())
+    df = spark.createDataFrame(pd.DataFrame({"a": ["x"]}), replaced)
+    assert column_names(df) == ["a"]
+    table, schema = _local_rows_relation_of(service, df)
+    assert table.to_pylist() == [{"a": "x"}] and schema["fields"][0]["name"] == "z"
+    popped = _struct_changed_in_place("popped")
+    assert column_names(spark.createDataFrame(pd.DataFrame({"a": [1]}), popped)) == ["a", "b"]
 
 
 class _ScaledValueUDT(T.UserDefinedType):
