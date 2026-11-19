@@ -2727,11 +2727,17 @@ collects it. A stream writer holds its DataFrame, where PySpark's holds the plan
 that keeps its stream writer is freed by the collector, where PySpark frees it with its last
 reference. The functions of `foreachBatch` and `foreach` are kept as their pickles, as PySpark's
 stream writer keeps them, so a function that keeps its writer is freed with its last reference, and
-a copy or a pickle of the writer carries the pickle of the call. The registration of `dataSource` reports its session, and the builder of
-`pyspark.sql.connect.session.SparkSession` its channel builder and the list of its hook factories,
-which its shallow copies share, as PySpark's plain objects hold them, so a session that keeps its
-`dataSource`, or a channel builder or a hook factory that keeps its builder or a copy of it, is
-collected.
+a copy or a pickle of the writer carries the pickle of the call. The registration of `dataSource`
+reports its session, and the builder of `pyspark.sql.connect.session.SparkSession` its channel
+builder and the list of its hook factories, which its shallow copies share, as PySpark's plain
+objects hold them, so a session that keeps its `dataSource`, or a channel builder or a hook factory
+that keeps its builder or a copy of it, is collected. The readers, the writers and the builder
+report the keys and the values of their options that are objects, which PySpark's dicts of options
+keep as they are, such as a key that is not a str, and the format, the save mode, the partitioning
+and clustering columns and the provider that the writers keep as they are, through one object of
+them that their shallow copies share, as PySpark's copies share the dict of their options and the
+`_write` of a writer: so a cycle through one, such as a key of an option that keeps its reader, is
+collected, also with a copy of the reader, and freed with the last of the copies.
 
 The condition and the assignments of a clause of `mergeInto` are built, and the functions of their
 UDFs pickled, when the clause is added, which raises there, and the merge sends them as they were

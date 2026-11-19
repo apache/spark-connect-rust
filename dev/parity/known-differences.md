@@ -366,7 +366,9 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   rows of `toLocalIterator`, and the expression of a Column and of a table argument (`_expr`,
   `_subquery_expr`) and its copies, of the Columns and the plans that they hold, and an `ArrayType`,
   a `MapType`, a `StructField` and a `StructType`, of the types, flags, metadata and fields that
-  they hold, as PySpark's `__dict__` holds them. Those that hold their DataFrame report it, which
+  they hold, as PySpark's `__dict__` holds them, and the readers, the writers and the session
+  builder, of the objects of their options and of the arguments that the writers keep, through one
+  object of them that their shallow copies share. Those that hold their DataFrame report it, which
   reports the functions of the plan that they share (`crate::gc::Holders`). A function that a Column
   and a DataFrame of it share, or two DataFrames, or a DataFrame and a table argument of it, which
   holds the plan and not the DataFrame, is reported by none: the holders share one reference to it,

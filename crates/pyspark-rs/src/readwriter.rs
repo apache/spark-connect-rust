@@ -43,6 +43,11 @@ pub struct PyDataFrameReader {
     /// The options that UTF-8 cannot encode, which the copies of this reader share, as they share
     /// `options` ([`UnencodableOptions`]).
     unencodable_options: std::sync::Arc<crate::dataframe::WriterState<UnencodableOptions>>,
+    /// The Python object of `unencodable_options`, which the copies of this reader share too, and
+    /// which reports the keys and the values of its options that are objects to Python's garbage
+    /// collector, as the `_options` dict of PySpark's copies holds them (see
+    /// [`crate::options::SharedObjects`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
     /// The UTF-32LE bytes of the schema, when it is a str that UTF-8 cannot encode, which the core
     /// reader leaves unset.
     unencodable_schema: Option<Vec<u8>>,
@@ -54,13 +59,15 @@ pub struct PyDataFrameReader {
 impl PyDataFrameReader {
     pub fn new(reader: DataFrameReader) -> Self {
         let options = reader.get_options().clone();
+        let unencodable_options = std::sync::Arc::new(crate::dataframe::WriterState::new(
+            UnencodableOptions::default(),
+        ));
         PyDataFrameReader {
             inner: without_options(reader, &options),
             options: std::sync::Arc::new(crate::dataframe::WriterState::new(options)),
             unsent_format: None,
-            unencodable_options: std::sync::Arc::new(crate::dataframe::WriterState::new(
-                UnencodableOptions::default(),
-            )),
+            shared: crate::options::PySharedObjects::of(unencodable_options.clone()),
+            unencodable_options,
             unencodable_schema: None,
             gc_ready: crate::gc::GcReady::new(),
         }
@@ -716,6 +723,7 @@ impl PyDataFrameReader {
                     .as_ref()
                     .map(|format| format.clone_ref(py)),
                 unencodable_options: std::sync::Arc::clone(&this.unencodable_options),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
                 unencodable_schema: this.unencodable_schema.clone(),
                 gc_ready: crate::gc::GcReady::new(),
             },
@@ -908,8 +916,9 @@ impl PyDataFrameReader {
         Ok(slf)
     }
 
-    /// The format that the reader keeps, a Python object, which Python's garbage collector sees;
-    /// nothing of a reader object that is being created.
+    /// The format that the reader keeps, a Python object, which Python's garbage collector sees,
+    /// and the Python object of the options that it shares with its copies, which reports their
+    /// keys and values that are objects; nothing of a reader object that is being created.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
@@ -917,11 +926,15 @@ impl PyDataFrameReader {
         if let Some(format) = &self.unsent_format {
             visit.call(&format.object)?;
         }
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
+        }
         Ok(())
     }
 
     fn __clear__(&mut self) {
         self.unsent_format = None;
+        self.shared = None;
     }
 
     /// The session of the reader, as PySpark Connect's `DataFrameReader._client`, which its

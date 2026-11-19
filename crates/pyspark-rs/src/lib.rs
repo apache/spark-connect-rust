@@ -333,8 +333,10 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// The native classes that are not attributes of the module, of objects that it makes: the
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
 /// hook and the active session of the sessions (`SparkSession._active_session`), the tags and the
-/// user context extensions that threads share, and the listener bus of a stream manager.
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7] {
+/// user context extensions that threads share, the listener bus of a stream manager, and the
+/// objects of the options and the kept arguments that the copies of a reader, a writer or a
+/// builder share.
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 8] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
@@ -343,5 +345,6 @@ fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7]
         py.get_type::<session::PySharedTags>(),
         py.get_type::<session::PySharedUserContextExtensions>(),
         py.get_type::<streaming::PyStreamingQueryListenerBus>(),
+        py.get_type::<options::PySharedObjects>(),
     ]
 }
