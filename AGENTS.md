@@ -224,9 +224,12 @@ Rigorously classify before touching anything (diff our dir vs the version tag):
   shims can hold vendored files too, such as most of `errors/*`, `sql/session.py` and the
   classic modules of the objects of a session (`sql/{catalog,conf,readwriter,udf,udtf,group}.py`,
   `sql/streaming/{query,readwriter}.py`, `sql/pandas/group_ops.py` and others), whose objects on
-  Spark Connect are of the classes of `sql/connect/*`, as in PySpark, and `sql/utils.py`, whose
-  decorators run those of Spark Connect: `VENDORED_FILES` of `scripts/check_vendored_upstream.sh`
-  lists every vendored file.
+  Spark Connect are of the classes of `sql/connect/*`, as in PySpark, `sql/utils.py`, whose
+  decorators run those of Spark Connect, and the package `sql/functions/` (with
+  `sql/connect/functions/partitioning.py`), whose functions run those of
+  `sql/connect/functions/builtin.py`, the drop-in's, which `_generated.py` there and the Rust
+  core implement: `VENDORED_DIRS` and `VENDORED_FILES` of `scripts/check_vendored_upstream.sh`
+  list every vendored file.
 
 Subtree conversion (serial, needs a **clean working tree**, one dir at a time):
 ```
@@ -550,7 +553,7 @@ For every method matching a pyspark name:
   - **Internal pandas functions dispatch by NAME, not by client reimplementation.**
     `pyspark.sql.internal.InternalFunction` (`distributed_sequence_id`, `pandas_product`,
     `pandas_stddev`, ...) routes through `connect.functions.builtin._invoke_function_over_columns`,
-    which must build a plain `UnresolvedFunction(name, cols)` (via `functions._invoke_function` →
+    which must build a plain `UnresolvedFunction(name, cols)` (via its `_invoke_function` →
     Rust `pyfunc_invoke_function`). The Connect *server* resolves these internal names. Do NOT
     special-case them client-side (e.g. faking `distributed_sequence_id` with a `row_number`
     window — it is wrong and non-distributed).

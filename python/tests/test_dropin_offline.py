@@ -2616,10 +2616,12 @@ def test_functions_exports_fresh_process():
             assert all(builtin_namespace[name] is getattr(F, name) for name in F.__all__)
             part = importlib.import_module("pyspark.sql.functions.partitioning")
             assert part is F.partitioning is sys.modules[part.__name__]
-            assert part.__all__ == ["years", "months", "days", "hours", "bucket"]
+            # As PySpark's, of no __all__ either.
+            assert not hasattr(part, "__all__")
             # As in PySpark, distinct from those of pyspark.sql.functions, which are deprecated
             # and call them.
-            assert all(getattr(part, name) is not getattr(F, name) for name in part.__all__)
+            transforms = ("years", "months", "days", "hours", "bucket")
+            assert all(getattr(part, name) is not getattr(F, name) for name in transforms)
             # The aliases are their functions, as PySpark binds them.
             assert F.random is F.rand and F.column is F.col
             assert F.negate is F.negative and F.power is F.pow
@@ -2633,7 +2635,9 @@ def test_functions_exports_fresh_process():
         F.builtin.builtin_only_name = None
         importlib.reload(F)
         assert F.__all__ is not old_all
-        assert not hasattr(F.builtin, "builtin_only_name")
+        # As PySpark's package, which binds the names of its module builtin, which a reload of
+        # the package does not reload.
+        assert F.builtin.builtin_only_name is None
         assert check_exports() == expected
     ''').replace("__OFFICIAL_FUNCTIONS_ALL__", repr(OFFICIAL_FUNCTIONS_ALL))], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
@@ -3131,10 +3135,13 @@ def test_functions_keyword_and_dispatch_paths():
     # lag/lead literal-arg overrides
     assert is_col(F.lag(c, offset=2, default=0))
     assert is_col(F.lead(c, offset=2, default=0))
-    # the *args fallback wrapper (used for Rust-only extras) still dispatches positionally
-    assert is_col(F._create_wrapper("upper")(c))
+    # the *args fallback wrapper (used for Rust-only extras) still dispatches positionally, of
+    # the module of the functions of Spark Connect, which those of pyspark.sql.functions run
+    from pyspark.sql.connect.functions import builtin as CB
+
+    assert is_col(CB._create_wrapper("upper")(c))
     # the _UNSET sentinel (default for optional generated args) has a stable repr
-    assert repr(F._UNSET) == "<unset>"
+    assert repr(CB._UNSET) == "<unset>"
 
 
 def _sent_function_arguments(service):
@@ -16632,8 +16639,9 @@ def test_keyword_param_names_match_pyspark(cls, method, param):
 
 # --- SPARK-XXXXX: string function args are column names (ColumnOrName parity) ---
 def test_fn_col_args_spec_classification():
-    from pyspark.sql import functions as F
-    spec = F._FN_COL_ARGS
+    # Of the module of the functions of Spark Connect, which those of pyspark.sql.functions run.
+    from pyspark.sql.connect.functions import builtin as CB
+    spec = CB._FN_COL_ARGS
     # literal-param functions: only the listed positions are columns
     assert spec["date_format"] == ((0,), None)
     assert spec["regexp_replace"] == ((0,), None)
@@ -16647,13 +16655,17 @@ def test_fn_col_args_spec_classification():
 
 
 def test_to_col_coerces_str_to_column():
+    # PySpark Connect's _to_col, of the module of the functions of Spark Connect, and the helper of
+    # the arguments of its functions that dispatch to the Rust core.
     from pyspark.sql import functions as F
+    from pyspark.sql.connect.functions import builtin as CB
     col_cls = type(F.col("x"))
-    # a bare str resolves to a Column via col()
-    assert isinstance(F._to_col("x"), col_cls)
-    # an existing Column passes through unchanged
-    c = F.col("y")
-    assert F._to_col(c) is c
+    for to_col in (CB._to_col, CB._name_to_col):
+        # a bare str resolves to a Column via col()
+        assert isinstance(to_col("x"), col_cls)
+        # an existing Column passes through unchanged
+        c = F.col("y")
+        assert to_col(c) is c
 
 
 def test_generated_fn_accepts_str_column_name():

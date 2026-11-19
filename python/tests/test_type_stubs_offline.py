@@ -317,7 +317,7 @@ def user_pyright(user_mypy):
         if d["severity"] == "information" and revealed:
             message = f'Revealed type is "{revealed.group(1)}"'
         elif d["severity"] != "error":
-            continue  # such as reportMissingModuleSource of pyspark.sql.functions.builtin
+            continue  # such as reportMissingModuleSource of a module of pyspark.sql.connect.proto
         line = d["range"]["start"]["line"] + 1
         diagnostics.append((Path(d["file"]).resolve(), line, d["severity"], message))
     return {**user_mypy, "diagnostics": diagnostics}
@@ -372,7 +372,9 @@ def test_stubs_declare_every_public_name_of_their_modules(user_mypy):
         if severity == "error"
     ]
     assert missing == []
-    assert len(user_mypy["module_uses"]) > 2000
+    # Of the names of the stubbed modules: pyspark.sql.functions, PySpark's package as it is,
+    # has none, and its 562 functions are those of probe_functions.py.
+    assert len(user_mypy["module_uses"]) > 1500
 
 
 def test_stubs_type_the_instance_attributes(user_mypy):
@@ -678,26 +680,91 @@ def test_vendored_pandas_udf_stub_has_distinct_overloads():
     assert [d for d in diagnostics if d[0] == PYTHON_ROOT / stub and d[2] == "error"] == []
 
 
-def test_python_imports_the_module_not_the_stubs():
-    # pyspark/sql/functions/ holds only the stubs of PySpark's package pyspark.sql.functions,
-    # with no __init__.py: Python imports functions.py, as a module of a directory goes before a
-    # namespace package of the same name (PEP 420), and no loader reads a .pyi.
+def test_the_functions_are_pysparks_package_which_type_checkers_read_as_they_run():
+    # pyspark.sql.functions is PySpark's package, vendored as it is, of no stub: type checkers
+    # read the source that Python imports, as with pyspark-client. The drop-in's was the module
+    # functions.py next to the stubs of PySpark's package, the directory pyspark/sql/functions/
+    # of no __init__.py, which Python did not import.
     import pyspark.sql
     import pyspark.sql.functions as F
     import pyspark.sql.functions.builtin as builtin
     import pyspark.sql.functions.partitioning as partitioning
 
-    stubs = PYTHON_ROOT / "pyspark" / "sql" / "functions"
-    assert sorted(p.name for p in stubs.iterdir()) == [
-        "__init__.pyi",
-        "builtin.pyi",
-        "partitioning.pyi",
+    package = PYTHON_ROOT / "pyspark" / "sql" / "functions"
+    assert sorted(p.name for p in package.iterdir() if p.name != "__pycache__") == [
+        "__init__.py",
+        "builtin.py",
+        "partitioning.py",
     ]
-    assert Path(F.__file__) == PYTHON_ROOT / "pyspark" / "sql" / "functions.py"
+    assert not (PYTHON_ROOT / "pyspark" / "sql" / "functions.py").exists()
+    assert Path(F.__file__) == package / "__init__.py"
     assert importlib.util.find_spec("pyspark.sql.functions").origin == F.__file__
     assert builtin is F.builtin and partitioning is F.partitioning
-    assert ("functions", False) in [
+    assert ("functions", True) in [
         (m.name, m.ispkg) for m in pkgutil.iter_modules(pyspark.sql.__path__)
+    ]
+    assert "pyspark.sql.functions" not in _stubs()
+
+
+def test_mypy_finds_one_module_of_the_functions_by_path():
+    # mypy run on the files of the source tree by path: of the module functions.py and of the
+    # stubs of the package functions/, it reported `Duplicate module named
+    # "pyspark.sql.functions"` and checked nothing. Of PySpark's package, it checks it, as of
+    # pyspark-client's source.
+    sql = PYTHON_ROOT / "pyspark" / "sql"
+    paths = [str(p.relative_to(PYTHON_ROOT)) for p in sorted(sql.glob("functions*"))]
+    diagnostics = _run_mypy("--cache-dir", os.devnull, *paths, cwd=PYTHON_ROOT)
+    assert [d for d in diagnostics if "Duplicate module" in d[3]] == []
+    assert paths == ["pyspark/sql/functions"]
+    # What it reports is of PySpark's source, such as its imports of pyspark.sql.classic, which
+    # neither client has.
+    assert all(d[0].parent == sql / "functions" for d in diagnostics)
+
+
+def test_pyright_resolves_the_modules_of_the_functions_from_source(tmp_path):
+    # pyright typed the modules of the functions of their stubs, and warned that each import of
+    # one "could not be resolved from source" (reportMissingModuleSource). As with
+    # pyspark-client, it reads them of their source; `F.partitioning` is the error of PySpark's
+    # package, whose __all__ does not list it (reportPrivateImportUsage), as with pyspark-client.
+    if PYRIGHT is None:
+        pytest.skip("pyright is not installed")
+    probe = tmp_path / "probe_functions_modules.py"
+    probe.write_text(
+        "import pyspark.sql.functions.builtin\n"
+        "from pyspark.sql.functions import builtin, partitioning\n"
+        "from pyspark.sql.functions.builtin import col\n"
+        "from pyspark.sql.functions.partitioning import bucket\n"
+        "import pyspark.sql.functions as F\n"
+        "reveal_type(builtin.col)\n"
+        "reveal_type(partitioning.bucket)\n"
+        "reveal_type(F.partitioning.bucket)\n"
+    )
+    path = os.pathsep.join(p for p in (str(PYTHON_ROOT), os.environ.get("PYTHONPATH")) if p)
+    result = subprocess.run(
+        [PYRIGHT, "--pythonpath", sys.executable, "--outputjson", probe.name],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": path},
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode in (0, 1), result.stdout + result.stderr
+    found = [
+        (d["range"]["start"]["line"] + 1, d["severity"], d.get("rule"), d["message"].split("\n")[0])
+        for d in json.loads(result.stdout)["generalDiagnostics"]
+    ]
+    assert [f for f in found if f[1] != "information"] == [
+        (
+            8,
+            "error",
+            "reportPrivateImportUsage",
+            '"partitioning" is not exported from module "pyspark.sql.functions"',
+        ),
+    ]
+    assert [m for _, severity, _, m in found if severity == "information"] == [
+        'Type of "builtin.col" is "(col: str) -> Column"',
+        'Type of "partitioning.bucket" is "(numBuckets: Column | int, col: Column | str) -> Column"',
+        'Type of "F.partitioning.bucket" is "(numBuckets: Column | int, col: Column | str) -> Column"',
     ]
 
 

@@ -327,13 +327,14 @@ pub fn to_column(obj: &Bound<'_, PyAny>) -> PyResult<Column> {
     }
 
     // A list, or a one-dimensional NumPy array, is an array, as PySpark's functions take a
-    // value with `lit`: `pyspark.sql.functions.lit` builds it. Another NumPy array is not a
-    // literal value; NumPy would convert one of a single element to a scalar below.
+    // value with `lit`: the `lit` of `pyspark.sql.connect.functions.builtin` builds it, as
+    // PySpark Connect's functions call their module's. Another NumPy array is not a literal
+    // value; NumPy would convert one of a single element to a scalar below.
     let ndarray = numpy_ndarray_ndim(obj)?;
     if obj.is_instance_of::<pyo3::types::PyList>() || ndarray == Some(1) {
         let column = obj
             .py()
-            .import("pyspark.sql.functions")?
+            .import("pyspark.sql.connect.functions.builtin")?
             .getattr("lit")?
             .call1((obj,))?;
         return Ok(column.extract::<PyRef<'_, PyColumn>>()?.column.clone());

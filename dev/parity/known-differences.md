@@ -661,6 +661,21 @@ each UDF, UDTF and map or group-map function of its plan when it builds the plan
   hook_factories=...)` makes a session that is neither default nor active, as PySpark's
   constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
   takes precedence, as PySpark's does.
+- **The functions of `pyspark.sql.connect.functions`** (intentional; the drop-in's, of the Rust
+  core). `pyspark.sql.functions` is PySpark's package, as it is, whose functions run those of
+  `pyspark.sql.connect.functions` of their names, as with `pyspark-client`. Those are the
+  drop-in's, of the docstrings, the annotations and the module of PySpark Connect's, which call
+  the `lit`, `column` and `_to_col` of their module as PySpark Connect's do (see
+  `docs/compatibility.md`), but: a traceback of a generated one has the frames of
+  `pyspark/sql/connect/functions/_generated.py`, where PySpark Connect's are of its `builtin.py`;
+  `col` has no `__wrapped__` of PySpark's `_with_origin` (the Rust core captures the call site);
+  `pyspark.sql.connect.functions.builtin` has none of the expression classes of PySpark Connect
+  that its module imports (`CaseWhen`, `ColumnReference`, ...), nor `np`, and its private helpers
+  are its own; and the annotations of `schema_of_csv`, `schema_of_json` and `schema_of_xml` are
+  those of PySpark's classic functions, `Union[Column, str]`, where PySpark Connect's write
+  `Union[str, Column]`. The annotations, of `pyspark.sql.functions` too, name the class of
+  `pyspark.sql.column.Column`, which is PySpark Connect's class in the drop-in (see
+  `docs/compatibility.md`), where `pyspark-client`'s name its classic class.
 
 ## `pyspark.sql.connect.proto` and plugins
 
@@ -747,5 +762,5 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   `docs/compatibility.md`).
 - **Modules of messages** (intentional). pyright warns that `pyspark.sql.connect.proto.base_pb2`
   and the other modules of messages, which the drop-in's protobuf runtime makes at run time, have
-  a stub and no source (`reportMissingModuleSource`), as it does of
-  `pyspark.sql.functions.builtin`.
+  a stub and no source (`reportMissingModuleSource`). The modules of `pyspark.sql.functions`,
+  PySpark's source, have no warning, as with `pyspark-client`.

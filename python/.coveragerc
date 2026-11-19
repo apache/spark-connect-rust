@@ -40,7 +40,7 @@ omit =
     */pyspark/sql/worker/*
     */pyspark/sql/plot/*
     */pyspark/sql/pandas/*
-    */pyspark/sql/functions_generated.py
+    */pyspark/sql/connect/functions/_generated.py
     */pyspark/sql/datasource.py
     */pyspark/sql/conversion.py
     */pyspark/sql/internal.py
@@ -91,6 +91,8 @@ omit =
     */pyspark/sql/connect/profiler.py
     */pyspark/sql/connect/shell/progress.py
     */pyspark/sql/connect/resource/*
+    */pyspark/sql/functions/*
+    */pyspark/sql/connect/functions/partitioning.py
     */pyspark/sql/connect/avro/__init__.py
     */pyspark/sql/connect/protobuf/__init__.py
     */pyspark/sql/connect/streaming/__init__.py

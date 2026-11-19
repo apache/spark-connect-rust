@@ -204,7 +204,7 @@ Fix a behavior in the Rust core (`crates/spark-connect`), in the bindings
 (`crates/pyspark-rs`) or in a hand-written shim instead, and not by monkey-patching a
 Rust class from Python.
 
-`python/pyspark/sql/functions_generated.py` and
+`python/pyspark/sql/connect/functions/_generated.py` and
 `crates/pyspark-rs/src/dispatch_generated.rs` are generated from
 `crates/spark-connect/src/functions.rs`. Regenerate them after changing a function there;
 CI runs the same command with `--check`:

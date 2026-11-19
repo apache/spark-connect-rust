@@ -7428,3 +7428,29 @@ def test_a_table_of_a_nested_abstract_type_is_not_created_as_pyspark(session):
     assert e.value.getCondition() == "UNSUPPORTED_OPERATION"
     assert e.value.getMessageParameters() == {"operation": "data type DataType()"}
     assert not session.catalog.tableExists(table)
+
+
+def test_the_functions_run_those_of_spark_connect_of_their_names_as_pysparks(
+    session, monkeypatch
+):
+    # As official PySpark 4.3.0, whose pyspark.sql.functions runs the functions of
+    # pyspark.sql.connect.functions of their names at each call (try_remote_functions): a patch
+    # of one is what a query of the functions of pyspark.sql.functions selects, also of a
+    # partition transform, which a function of the session gets too. The drop-in's
+    # pyspark.sql.functions were its own functions, which the patch did not change.
+    import pyspark.sql.connect.functions as CF
+    from pyspark.sql import functions as F
+
+    monkeypatch.setattr(CF, "upper", CF.lower)
+    df = session.createDataFrame([("aB",)], ["s"])
+    assert df.select(F.upper("s"), F.builtin.upper(df.s)).first() == ("ab", "ab")
+    assert df.select(F.expr("upper(s)").alias("u")).first().u == "AB"
+    monkeypatch.undo()
+    assert df.select(F.upper("s")).first()[0] == "AB"
+    # PYSPARK_NO_NAMESPACE_SHARE makes them run their own bodies, of Spark Classic, which a
+    # client of Spark Connect cannot.
+    monkeypatch.setenv("PYSPARK_NO_NAMESPACE_SHARE", "1")
+    with pytest.raises(ImportError, match="cannot import name 'SparkContext' from 'pyspark'"):
+        F.col("s")
+    monkeypatch.delenv("PYSPARK_NO_NAMESPACE_SHARE")
+    assert df.select(F.col("s")).first().s == "aB"

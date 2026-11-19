@@ -22,7 +22,8 @@ worker, so they are Python, as PySpark's ``pyspark.sql.connect.dataframe`` build
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, Callable
 
-from pyspark.sql import functions as F
+# The functions of Spark Connect, as PySpark Connect's DataFrame builds these of them.
+from pyspark.sql.connect.functions import builtin as F
 from pyspark.sql.conversion import ArrowTableToRowsConversion
 from pyspark.sql.types import Row, StructType, _create_row
 

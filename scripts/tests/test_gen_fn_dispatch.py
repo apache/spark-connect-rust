@@ -17,7 +17,7 @@
 """The Rust half of gen_fn_dispatch.py: parsing, the override tables and --check.
 
 None of this needs a reference PySpark; the generated-drift workflow checks
-functions_generated.py against one.
+pyspark/sql/connect/functions/_generated.py against one.
 """
 
 import importlib.util
