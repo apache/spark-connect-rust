@@ -15521,6 +15521,210 @@ def _count_batch_and_observed_metrics(service, df):
     return batch, observed
 
 
+def test_the_attributes_of_an_observation_are_those_of_its_dict_as_pyspark(mock_connect):
+    # As PySpark Connect's Observation, a plain class: its _name, _result and _error are the
+    # entries of vars(o), which observe and the actions set, and which a program sets and deletes,
+    # of their effects on get, on a new observe and on the metrics of the actions, which update the
+    # _result of the observation as it is then. Its _error is the one object that each read and
+    # get give, of the error that the server reports, which the action gives to its _set_error.
+    from pyspark.errors import PySparkAssertionError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation
+
+    spark, service = mock_connect
+    observation = Observation("o")
+    assert vars(observation) == {"_name": "o", "_result": None, "_error": None}
+    assert list(vars(observation)) == ["_name", "_result", "_error"]
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    assert vars(observation) == {"_name": "o", "_result": {}, "_error": None}
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    service.execute_payload = batch + metrics("o", varint_field(7, 3), "c")
+    df.collect()
+    assert vars(observation) == {"_name": "o", "_result": {"c": 3}, "_error": None}
+
+    # A result that is set is the one that get gives and that the actions update.
+    replaced = {"kept": True}
+    observation._result = replaced
+    df.collect()
+    assert observation.get is replaced and replaced == {"kept": True, "c": 3}
+    # Of None, get raises, an action raises PySpark's AssertionError, and observe uses it again.
+    observation._result = None
+    with pytest.raises(PySparkAssertionError) as error:
+        observation.get
+    assert error.value.getCondition() == "NO_OBSERVE_BEFORE_GET"
+    with pytest.raises(AssertionError):
+        df.collect()
+    observation._name = "again"
+    again = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    assert vars(observation) == {"_name": "again", "_result": {}, "_error": None}
+    batch, metrics = _count_batch_and_observed_metrics(service, again)
+    service.execute_payload = batch + metrics("again", varint_field(7, 5), "c")
+    again.collect()
+    assert observation.get == {"c": 5}
+
+    # An error that is set is raised by get, the same object each time.
+    raised = ValueError("set")
+    observation._error = raised
+    with pytest.raises(ValueError) as error:
+        observation.get
+    assert error.value is raised and observation._error is raised
+    del observation._error
+    with pytest.raises(AttributeError):
+        observation.get
+    observation._error = None
+    observation.other = 1
+    assert list(vars(observation).items()) == [
+        ("_name", "again"), ("_result", {"c": 5}), ("_error", None), ("other", 1)]
+
+    # The error that the server reports is given to _set_error by the action, and is the one
+    # object of each read. ExecutePlanResponse.observed_metrics=6: ObservedMetrics.name=1,
+    # root_error_idx=5, errors=6; Error.error_type_hierarchy=1, message=2.
+    class Recording(Observation):
+        def _set_error(self, exc):
+            self.recorded = exc
+            super()._set_error(exc)
+
+    failed = Recording("f")
+    failing = spark.range(3).observe(failed, F.count(F.lit(1)).alias("c"))
+    error = (message_field(1, "org.apache.spark.SparkArithmeticException")
+             + message_field(2, "[DIVIDE_BY_ZERO] Division by zero. SQLSTATE: 22012"))
+    service.execute_payload = batch + message_field(
+        6, message_field(1, "f") + varint_field(5, 0) + message_field(6, error))
+    failing.count()
+    assert failed._error is failed._error is failed.recorded
+    with pytest.raises(Exception, match="DIVIDE_BY_ZERO") as raised:
+        failed.get
+    assert raised.value is failed._error
+    assert list(vars(failed)) == ["_name", "_result", "_error", "recorded"]
+
+
+def test_observe_gives_the_dataframe_of_the_on_of_an_observation_as_pyspark(mock_connect):
+    # As PySpark's DataFrame.observe, which checks its Columns and then gives what the _on of the
+    # Observation gives, of a subclass too.
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation
+
+    spark, _ = mock_connect
+    calls = []
+
+    class Mine(Observation):
+        def _on(self, df, *exprs):
+            calls.append((df, exprs))
+            return "of _on"
+
+    observation = Mine("m")
+    df = spark.range(3)
+    column = F.count(F.lit(1)).alias("c")
+    assert df.observe(observation, column) == "of _on"
+    ((seen, exprs),) = calls
+    assert seen is df and len(exprs) == 1 and exprs[0] is column
+    with pytest.raises(PySparkValueError) as error:
+        df.observe(observation)
+    assert error.value.getCondition() == "CANNOT_BE_EMPTY" and len(calls) == 1
+    assert vars(observation) == {"_name": "m", "_result": None, "_error": None}
+
+
+def test_the_plan_of_an_observation_is_built_of_its_name_as_it_is_then_as_pyspark(mock_connect):
+    # As PySpark's CollectMetrics, which sets the str() of the _name of its Observation each time
+    # it builds the plan, after its input, and whose observations name it so: a request of an
+    # Observation renamed after observe carries its new name, of any object, by which its metrics
+    # are set, and a name whose __str__ raises, or a str that UTF-8 cannot encode, fails each
+    # request with that error, until it is renamed again. Observation._on does not read the name.
+    # A deep copy of the DataFrame holds a copy of the Observation, of its name then, whose metrics
+    # its actions set, as PySpark's deep copy of the plan.
+    import copy
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation
+
+    class Unnamed:
+        def __str__(self):
+            raise ValueError("no name")
+
+    def sent_name():
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        return request.plan.root.collect_metrics.name
+
+    spark, service = mock_connect
+    observation = Observation("before")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    observation._name = "after"
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    assert sent_name() == "after"
+    service.execute_payload = batch + metrics("after", varint_field(7, 3), "c")
+    df.collect()
+    assert observation.get == {"c": 3}
+    for name, text in ((5, "5"), (None, "None"), (b"n", "b'n'")):
+        observation._name = name
+        df.collect()
+        assert sent_name() == text
+    sent = len(service.execute_requests)
+    for name, error in (("lone \ud800", UnicodeEncodeError), (Unnamed(), ValueError)):
+        observation._name = name
+        with pytest.raises(error):
+            df.collect()
+    assert len(service.execute_requests) == sent
+    observation._name = "again"
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    assert sent_name() == "again"
+    service.execute_payload = batch + metrics("again", varint_field(7, 4), "c")
+    df.collect()
+    assert observation.get == {"c": 4}
+    copied = copy.deepcopy(df)
+    (held,) = copied._plan.observations.values()
+    assert held is not observation and list(copied._plan.observations) == ["again"]
+    service.execute_payload = batch + metrics("again", varint_field(7, 5), "c")
+    copied.collect()
+    assert held.get == {"c": 5} and observation.get == {"c": 4}
+    unnamed = Observation("unnamed")
+    unnamed._name = Unnamed()
+    observed = spark.range(3).observe(unnamed, F.count(F.lit(1)).alias("c"))
+    sent = len(service.execute_requests)
+    with pytest.raises(ValueError, match="no name"):
+        observed.collect()
+    assert len(service.execute_requests) == sent
+
+
+def test_an_observation_in_a_cycle_through_its_result_is_collected_as_pyspark(mock_connect):
+    # As PySpark's Observation, whose result dict is an attribute of its __dict__, which Python's
+    # garbage collector sees: an observation that its result refers to is freed with it.
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation
+
+    spark, _ = mock_connect
+    observation = Observation("cycle")
+    df = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    observation.get["self"] = observation
+    gone = weakref.ref(observation)
+    del observation, df
+    gc.collect()
+    assert gone() is None
+
+
+def test_an_action_converts_the_metrics_of_its_observations_as_pyspark(mock_connect):
+    # As PySpark's client, which converts the metrics of an Observation when the action sets them
+    # (LiteralExpression._to_value): a timestamp of the year 1, whose conversion to a local
+    # datetime fails, raises the ValueError of the conversion from the action, which sets none of
+    # its metrics.
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.observation import Observation
+
+    spark, service = mock_connect
+    observation = Observation("t")
+    df = spark.range(3).observe(observation, F.min(F.current_timestamp()).alias("m"))
+    batch, metrics = _count_batch_and_observed_metrics(service, df)
+    # Expression.Literal.timestamp=17, the microseconds of 0001-01-01 00:00:00 UTC.
+    service.execute_payload = batch + metrics("t", varint_field(17, -62135596800000000), "m")
+    with pytest.raises(ValueError, match="year 0 is out of range"):
+        df.collect()
+    assert observation.get == {}
+
+
 def test_only_the_observations_of_the_plan_of_an_action_receive_its_metrics_as_pyspark(
         mock_connect):
     # As PySpark's client, which converts and sets the metrics of the Observations of the plan of
@@ -30467,13 +30671,15 @@ def test_sigint_during_a_native_kmeans_fit_raises_keyboard_interrupt(mock_connec
     assert len(service.interrupt_requests) == 1
 
 
-def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_connect):
+@pytest.mark.parametrize("raised", [Exception, KeyboardInterrupt])
+def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_connect, raised):
     # As PySpark's: an exception that the handler of the signal raises is the one that the
-    # waiting call raises, and the operation is interrupted.
+    # waiting call raises, at once, and the operation is interrupted for a KeyboardInterrupt only,
+    # as the `except KeyboardInterrupt` of PySpark's execution interrupts it.
     import signal
     import threading
 
-    class Stop(Exception):
+    class Stop(raised):
         pass
 
     def stop(signum, frame):
@@ -30483,6 +30689,7 @@ def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_conn
     service.block_execute = True
     previous = signal.signal(signal.SIGINT, stop)
     timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
     timer.start()
     try:
         with pytest.raises(Stop):
@@ -30490,7 +30697,9 @@ def test_exception_of_a_signal_handler_is_raised_by_collect_as_pyspark(mock_conn
     finally:
         timer.cancel()
         signal.signal(signal.SIGINT, previous)
-    assert len(service.interrupt_requests) == 1
+        service.release_response()
+    assert time.monotonic() - started < 3
+    assert len(service.interrupt_requests) == (1 if raised is KeyboardInterrupt else 0)
 
 
 def _two_row_range_results(service):
@@ -30836,6 +31045,89 @@ def test_sigint_during_the_plan_compression_lookup_raises_keyboard_interrupt_at_
     assert time.monotonic() - started < 1.5
     assert service.execute_requests == []
     assert service.interrupt_requests == []
+
+
+@pytest.mark.parametrize("action", [
+    pytest.param(lambda df: df.collect(), id="collect"),
+    pytest.param(lambda df: list(df.toLocalIterator()), id="toLocalIterator"),
+])
+def test_the_plan_compression_lookup_catches_the_exception_of_a_signal_handler_as_pyspark(
+        mock_connect, action):
+    # As PySpark's `_get_plan_compression_threshold_and_algorithm`, whose `except Exception`
+    # catches the exception that a signal handler raises while the lookup of the first plan waits,
+    # unless it is a KeyboardInterrupt (see above): the lookup ends, the compression is disabled
+    # for the session, which looks nothing up again, and the action goes on.
+    import signal
+    import threading
+
+    class HandlerError(Exception):
+        pass
+
+    calls = []
+
+    def handler(signum, frame):
+        calls.append(signum)
+        raise HandlerError("of the handler")
+
+    spark, service = mock_connect
+    service.plan_compression_lookup_delay = 5.0
+    previous = signal.signal(signal.SIGINT, handler)
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        action(spark.range(3))
+        action(spark.range(3))
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGINT, previous)
+    assert calls == [signal.SIGINT]
+    assert time.monotonic() - started < 4
+    assert service.plan_compression_lookups == 1
+    assert len(service.execute_requests) == 2
+
+
+def test_the_stack_trace_settings_of_an_error_catch_the_exception_of_a_handler_as_pyspark(
+        mock_connect):
+    # As PySpark's `_display_server_stack_trace`, whose `except Exception` catches the exception
+    # that a signal handler raises while it reads the stack-trace settings of an error: the error
+    # of the execution is raised, with its stack trace, and not the exception of the handler.
+    import signal
+    import threading
+
+    from pyspark.errors import AnalysisException
+
+    class HandlerError(Exception):
+        pass
+
+    calls = []
+
+    def handler(signum, frame):
+        calls.append(signum)
+        raise HandlerError("of the handler")
+
+    spark, service = mock_connect
+    spark.range(1).collect()
+    classes = ["org.apache.spark.sql.AnalysisException", "java.lang.Exception"]
+    service.execute_error = ("[TABLE_OR_VIEW_NOT_FOUND] t", classes[0],
+                             _error_info(classes, errorClass="TABLE_OR_VIEW_NOT_FOUND"))
+    service.block_config = True
+    previous = signal.signal(signal.SIGINT, handler)
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    started = time.monotonic()
+    timer.start()
+    try:
+        with pytest.raises(AnalysisException) as error:
+            spark.range(1).collect()
+    finally:
+        timer.cancel()
+        signal.signal(signal.SIGINT, previous)
+        service.block_config = False
+        service.release_response()
+        service.execute_error = None
+    assert calls == [signal.SIGINT]
+    assert error.value.getCondition() == "TABLE_OR_VIEW_NOT_FOUND"
+    assert time.monotonic() - started < 4
 
 
 def test_sigint_ends_the_backoff_before_the_reattach_of_a_dropped_stream(mock_connect):

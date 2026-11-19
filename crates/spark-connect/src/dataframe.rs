@@ -3722,7 +3722,10 @@ fn capture_execution(
 /// set, as PySpark's client raises when it converts them. Before that, the metrics of an
 /// Observation that is not used, which `observations` may hold when the caller gives them, as
 /// the `observations` of `SparkConnectClient.to_table`, are the `AssertionError` of PySpark's
-/// client, which asserts that the result of the Observation is not None.
+/// client, which asserts that the result of the Observation is not None. The error of the mirror
+/// of a binding of an Observation, which is told of its metrics and of its error (see
+/// [`crate::observation::MetricsMirror`]), is returned, as PySpark's client raises the error of
+/// the update of the result of an Observation, or of its `_set_error`.
 fn set_observations(
     session: &SparkSession,
     observations: &[(String, crate::observation::Observation)],
@@ -3740,7 +3743,7 @@ fn set_observations(
                     observation.set_error(SparkError::from_observation_errors(
                         root_error_idx,
                         observed.errors.clone(),
-                    ));
+                    ))?;
                 }
             }
             None if observed.name == crate::profiler::PYTHON_ACCUMULATOR_METRICS => session
@@ -3748,13 +3751,13 @@ fn set_observations(
                 .accumulate(std::slice::from_ref(observed)),
             None => {
                 if let Some(observation) = observation {
-                    if !observation.is_used() {
+                    if !observation.is_used()? {
                         return Err(SparkError::builtin_assertion());
                     }
                     if let Some(check) = &check {
                         check(observed)?;
                     }
-                    observation.update(&observed.keys, &observed.values);
+                    observation.update(&observed.keys, &observed.values)?;
                 }
             }
         }
@@ -7279,7 +7282,7 @@ mod plan_construction_tests {
         );
         assert_eq!(err.operation_id.as_deref(), Some("op-1"));
         assert!(used.get().unwrap().is_empty());
-        assert!(!unused.is_used());
+        assert!(!unused.is_used().unwrap());
 
         let mut failed = observed("u");
         failed.root_error_idx = Some(0);

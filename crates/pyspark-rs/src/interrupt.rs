@@ -3,9 +3,13 @@
 //!
 //! The wait runs on the calling thread, as PySpark's does, so the progress handlers and the
 //! other callbacks of the execution run there too. The wait polls the signals of the process,
-//! which only the main thread of Python runs the handlers of. A handler that raises interrupts the
-//! execution in flight of the calling thread on the server; the wait then ends with the server's
-//! cancellation, and the exception of the handler is raised.
+//! which only the main thread of Python runs the handlers of. A handler that raises a
+//! KeyboardInterrupt, as the default handler of SIGINT does, interrupts the execution in flight of
+//! the calling thread on the server; the wait then ends with the server's cancellation, and the
+//! exception of the handler is raised. The exception of another handler ends the wait at once, as
+//! PySpark's execution interrupts the operation of a KeyboardInterrupt only, unless the part of
+//! the call that waits catches it, as PySpark's lookup of the plan compression settings catches an
+//! `Exception` (see `spark_connect_core::runtime::catching`).
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -122,10 +126,35 @@ impl SignalWatch {
         {
             let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
             if error.is_none() {
-                // Takes the GIL for the check only, as the wait runs without it.
-                match Python::attach(|py| py.check_signals()) {
-                    Ok(()) => return Watch::Continue,
-                    Err(signal) => *error = Some(signal),
+                // Takes the GIL for the check only, as the wait runs without it. The exception of a
+                // handler that is an `Exception` ends the part of the call that PySpark's `except
+                // Exception` covers, if one runs, such as the lookup of the plan compression
+                // settings, and the call goes on, as PySpark's does (see `runtime::catching`).
+                let raised = Python::attach(|py| match py.check_signals() {
+                    Ok(()) => None,
+                    Err(signal)
+                        if signal.is_instance_of::<pyo3::exceptions::PyException>(py)
+                            && spark_connect_core::runtime::catch_signal() =>
+                    {
+                        None
+                    }
+                    Err(signal) => {
+                        let keyboard_interrupt =
+                            signal.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py);
+                        Some((signal, keyboard_interrupt))
+                    }
+                });
+                match raised {
+                    None => return Watch::Continue,
+                    Some((signal, keyboard_interrupt)) => {
+                        *error = Some(signal);
+                        // As PySpark's execution, whose `except KeyboardInterrupt` interrupts the
+                        // operation on the server: the exception of another handler ends the
+                        // wait at once, as it goes out of the execution as it is.
+                        if !keyboard_interrupt {
+                            return Watch::Abort;
+                        }
+                    }
                 }
             } else if self.interrupted.load(Ordering::SeqCst) {
                 // A failed interrupt ends the wait at once, as PySpark raises the error of the
@@ -159,9 +188,10 @@ impl SignalWatch {
 }
 
 /// Run `f` without the GIL, on the calling thread, as the signals of the process are polled while
-/// it waits for the server. When a handler raises, the execution that the calling thread waits for
-/// is interrupted, and the exception of the handler is raised once `f` has ended. Otherwise the
-/// result of `f` is returned.
+/// it waits for the server. When a handler raises a KeyboardInterrupt, the execution that the
+/// calling thread waits for is interrupted, and the exception of the handler is raised once `f`
+/// has ended; the exception of another handler ends the waits of `f` at once, and is raised.
+/// Otherwise the result of `f` is returned.
 ///
 /// The execution is interrupted only when a wait of the calling thread is for one. The waits
 /// that a signal ends at once, as PySpark's do (a retry sleep, or a call that the server does not

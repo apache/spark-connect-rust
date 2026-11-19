@@ -84,7 +84,7 @@ pub(crate) fn execute_plan(
         .into_iter()
         .map(|(name, observation)| {
             let observation = observation.cast::<crate::observation::PyObservation>()?;
-            Ok((name, observation.borrow().inner.clone()))
+            Ok((name, crate::observation::state_of_execution(observation)?))
         })
         .collect::<PyResult<Vec<_>>>()?;
     let execution = interruptible(py, session, || {

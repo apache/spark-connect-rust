@@ -1777,6 +1777,20 @@ pub(crate) fn too_deep_a_plan(depth: usize) -> SparkError {
     ))
 }
 
+/// The name that the `CollectMetrics` of an `Observe` of `name` and `observation` is built of, as
+/// PySpark's sets the `str` of the `_name` of its Observation each time it builds the plan: that
+/// which the binding of the Observation gives now (see
+/// [`crate::observation::MetricsMirror::name`]), or its error, else `name`.
+fn observed_name(
+    name: &str,
+    observation: Option<&crate::observation::Observation>,
+) -> Result<String> {
+    match observation.and_then(crate::observation::Observation::name_of_plan) {
+        Some(current) => current,
+        None => Ok(name.to_string()),
+    }
+}
+
 /// Serialize a shared plan node for a request: the node and every node below it carry
 /// their stable plan IDs. A plan deeper than [`MAX_PLAN_DEPTH`], with the plans of its
 /// subqueries, or with an expression deeper than [`crate::expression::MAX_EXPRESSION_DEPTH`], is
@@ -2558,7 +2572,13 @@ impl LogicalPlan {
                     name,
                     observation: Some(observation),
                     ..
-                } => keep(name, observation),
+                } => {
+                    // By the name of the plan as it is built now, as PySpark's `observations`
+                    // names the Observation by the `str` of its `_name`.
+                    let name =
+                        observed_name(name, Some(observation)).unwrap_or_else(|_| name.clone());
+                    keep(&name, observation)
+                }
                 LogicalPlan::Raw {
                     observations: held, ..
                 } => {
@@ -3517,11 +3537,23 @@ impl LogicalPlan {
             }
 
             LogicalPlan::Observe {
-                input, name, exprs, ..
+                input,
+                name,
+                exprs,
+                observation,
             } => {
                 let mut collect_metrics = proto::CollectMetrics::default();
                 collect_metrics.input = Some(Box::new(relation_of(input, plan_ids)));
-                collect_metrics.name = name.clone();
+                // As PySpark's `CollectMetrics`, which sets the `str` of the `_name` of its
+                // Observation when it builds the plan, after its input: its error fails the
+                // request.
+                collect_metrics.name = match observed_name(name, observation.as_ref()) {
+                    Ok(name) => name,
+                    Err(error) => {
+                        crate::expression::record_unbuildable(&error);
+                        name.clone()
+                    }
+                };
                 for expr in exprs {
                     collect_metrics.metrics.push(expr.to_proto());
                 }

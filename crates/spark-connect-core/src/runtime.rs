@@ -138,6 +138,60 @@ pub async fn until_abort<F: std::future::Future>(level: u8, f: F) -> Option<F::O
     }
 }
 
+thread_local! {
+    /// The scopes of [`catching`] that a wait of this thread runs, innermost last: the sender
+    /// that ends each.
+    static CATCHING: RefCell<Vec<tokio::sync::watch::Sender<bool>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Pops the scope of [`catching`] that it was made for, when the scope ends or is dropped.
+struct CatchingScope;
+
+impl Drop for CatchingScope {
+    fn drop(&mut self) {
+        CATCHING.with(|scopes| {
+            scopes.borrow_mut().pop();
+        });
+    }
+}
+
+/// `f`, a part of a wait whose caller catches the exception of a signal handler that is not a
+/// `BaseException` only, as the `except Exception` of PySpark's lookup of the plan compression
+/// settings catches the exception that a handler raises while the lookup waits: `f` ends at
+/// once, unfinished, with None, when the watch of the wait ends the scope with [`catch_signal`]
+/// while `f` runs. The wait goes on after it, and the later signals are those of the wait. Outside
+/// a wait that a watch polls, `f` is awaited as it is. Not a stable API.
+#[doc(hidden)]
+pub async fn catching<F: std::future::Future>(f: F) -> Option<F::Output> {
+    if WAIT_WATCH.with(|watch| watch.borrow().is_none()) {
+        return Some(f.await);
+    }
+    let (sender, mut receiver) = tokio::sync::watch::channel(false);
+    CATCHING.with(|scopes| scopes.borrow_mut().push(sender));
+    let _scope = CatchingScope;
+    tokio::pin!(f);
+    tokio::select! {
+        biased;
+        _ = receiver.wait_for(|caught| *caught) => None,
+        output = &mut f => Some(output),
+    }
+}
+
+/// End the innermost scope of [`catching`] that a wait of the calling thread runs, for the
+/// exception of a signal handler that the caller of the scope catches: true then, and the watch
+/// that calls it lets the wait go on; false when no such scope runs. Not a stable API.
+#[doc(hidden)]
+pub fn catch_signal() -> bool {
+    CATCHING.with(|scopes| match scopes.borrow().last() {
+        Some(scope) => {
+            scope.send_replace(true);
+            true
+        }
+        None => false,
+    })
+}
+
 /// Run `f` on this thread, with `watch` called by the waits for the server that `f` makes on this
 /// thread, as [`block_on`] makes them: the waits poll `watch` every [`POLL_INTERVAL`] while the
 /// future of each waits. A wait on another thread (see [`block_on`]) does not poll it. The watch of
@@ -785,6 +839,41 @@ mod tests {
         assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
         // Outside a watch, a future is awaited as it is.
         assert_eq!(block_on(until_abort(ABORT_ALL, async { 8 })), Some(8));
+    }
+
+    #[test]
+    fn test_a_catching_scope_ends_for_a_caught_signal_and_the_wait_goes_on() {
+        // A watch whose signal the scope of the wait catches ends that scope, unfinished, and the
+        // wait goes on to its end; a watch that catches nothing finds no scope outside one.
+        let caught = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = Arc::clone(&caught);
+        let watch: Arc<WaitWatch> = Arc::new(move || {
+            if !flag.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                assert!(catch_signal());
+            }
+            Watch::Continue
+        });
+        let (scoped, after) = with_wait_watch(watch, || {
+            block_on(async {
+                let scoped = catching(std::future::pending::<u8>()).await;
+                tokio::time::sleep(POLL_INTERVAL * 2).await;
+                (scoped, 7)
+            })
+        });
+        assert_eq!((scoped, after), (None, 7));
+        assert!(caught.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!catch_signal());
+        // A scope that the watch does not end gives the output of its future, and outside a watch
+        // the future is awaited as it is.
+        let ended = with_wait_watch(Arc::new(|| Watch::Continue), || {
+            block_on(catching(async {
+                tokio::time::sleep(POLL_INTERVAL * 2).await;
+                8
+            }))
+        });
+        assert_eq!(ended, Some(8));
+        assert_eq!(block_on(catching(async { 9 })), Some(9));
+        assert!(CATCHING.with(|scopes| scopes.borrow().is_empty()));
     }
 
     #[test]

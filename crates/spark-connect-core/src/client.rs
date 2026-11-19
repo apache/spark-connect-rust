@@ -1722,20 +1722,24 @@ impl SparkConnectClient {
         if known != PlanCompression::Unknown {
             return known;
         }
-        let looked_up = match self
-            .get_configs(&[
-                PLAN_COMPRESSION_THRESHOLD_CONF,
-                PLAN_COMPRESSION_ALGORITHM_CONF,
-            ])
-            .await
+        // As PySpark's `except Exception` of the lookup, which catches the exception that a signal
+        // handler raises while the lookup waits, unless it is a `BaseException` only, such as the
+        // KeyboardInterrupt of Ctrl-C: then the settings are those of a failed lookup, kept for the
+        // later plans, and the call goes on (see `runtime::catching`).
+        let looked_up = match crate::runtime::catching(self.get_configs(&[
+            PLAN_COMPRESSION_THRESHOLD_CONF,
+            PLAN_COMPRESSION_ALGORITHM_CONF,
+        ]))
+        .await
         {
-            Ok(values) => match values.as_slice() {
+            None => PlanCompression::Disabled,
+            Some(Ok(values)) => match values.as_slice() {
                 [threshold, algorithm] => {
                     plan_compression_of(threshold.as_deref(), algorithm.as_deref())
                 }
                 _ => PlanCompression::Disabled,
             },
-            Err(error) => {
+            Some(Err(error)) => {
                 let aborted = is_wait_aborted(&error);
                 // As PySpark's `except Exception` of the lookup, which catches its failure, and the
                 // exception of the warning of its retries once they are spent.
@@ -2451,19 +2455,21 @@ impl SparkConnectClient {
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = &request;
         let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
-        let attempts = self
-            .retried(&mut retries, || {
-                let deadline = self.rpc_deadlines.config;
-                let mut req = with_deadline(Request::new(request.clone()), deadline);
-                self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
-                async move {
-                    within_deadline(deadline, stub.config(req))
-                        .await
-                        .map(Response::into_inner)
-                }
-            })
-            .await;
+        // As the `except Exception` of `_display_server_stack_trace`, which catches the exception
+        // that a signal handler raises while the config is read, unless it is a `BaseException`
+        // only: the config is then not read (see `runtime::catching`).
+        let attempts = crate::runtime::catching(self.retried(&mut retries, || {
+            let deadline = self.rpc_deadlines.config;
+            let mut req = with_deadline(Request::new(request.clone()), deadline);
+            self._attach_metadata(&mut req);
+            let mut stub = self.stub.clone();
+            async move {
+                within_deadline(deadline, stub.config(req))
+                    .await
+                    .map(Response::into_inner)
+            }
+        }))
+        .await?;
         let response = match attempts {
             Ok(response) => response,
             Err(RetryError::Exceeded(_)) => {
