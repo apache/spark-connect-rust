@@ -17,6 +17,10 @@ mod client;
 mod column;
 mod conf;
 mod connect_bridge;
+// Before the modules that take its `connect_doc!` in their attributes, as a macro of the
+// textual scope of the modules after it.
+#[macro_use]
+mod connect_docs_generated;
 mod dataframe;
 mod datasource;
 mod errors;

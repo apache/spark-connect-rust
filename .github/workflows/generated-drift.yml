@@ -24,7 +24,9 @@ name: Generated files drift
 # tag, and fails with a diff when a checked-in file differs. Catches hand edits to the
 # generated files, and generator or functions.rs changes that were not regenerated.
 # It guards the same way the type stubs that scripts/gen_type_stubs.py generates from that
-# PySpark (python/pyspark/**/*.pyi, and their block of ruff excludes in pyproject.toml).
+# PySpark (python/pyspark/**/*.pyi, and their block of ruff excludes in pyproject.toml), and the
+# docstrings that scripts/gen_connect_docstrings.py generates for the native classes of the modules
+# of PySpark Connect (crates/pyspark-rs/src/connect_docs_generated.rs).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -67,3 +69,6 @@ jobs:
       - name: Check the type stubs
         # The generator parses the reference PySpark, and imports none of it.
         run: python scripts/gen_type_stubs.py --pyspark-src "${RUNNER_TEMP}/spark/python" --check
+      - name: Check the docstrings of the native classes of PySpark Connect's modules
+        # As the stubs, of the reference PySpark parsed, not imported.
+        run: python scripts/gen_connect_docstrings.py --pyspark-src "${RUNNER_TEMP}/spark/python" --check

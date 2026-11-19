@@ -2062,8 +2062,12 @@ server raises has the frames of the user's code only, without those of PySpark's
 (`collect`, `_to_table`, `_execute_and_fetch`, ...), which the native core does not have. At run
 time, `pyspark.sql.SparkSession`, PySpark's own class, has PySpark's signatures and docstrings,
 while the functions of `pyspark.sql.functions` and the methods of the native classes, such as
-`DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings. A
-default of an object, which the text signature of a native method cannot hold (`inspect` takes only
+`DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
+The methods whose docstrings PySpark Connect's modules copy of PySpark's classic classes, those of
+the UDF and UDTF registrations and of `DataStreamReader`, `DataStreamWriter`, `StreamingQuery` and
+`StreamingQueryManager` (and the `DataStreamReader` class), have those docstrings, as PySpark
+Connect's: the native streaming classes are built with them, of the source of PySpark at the
+tracked tag (`scripts/gen_connect_docstrings.py`). A default of an object, which the text signature of a native method cannot hold (`inspect` takes only
 literals there), shows as `Ellipsis`: the `StorageLevel(True, True, False, True, 1)` of
 `DataFrame.persist`, and the `<no value>` (`pyspark._globals._NoValue`) of the `value` of
 `DataFrame.replace` and `DataFrameNaFunctions.replace` and of the `default` of `RuntimeConf.get`.
