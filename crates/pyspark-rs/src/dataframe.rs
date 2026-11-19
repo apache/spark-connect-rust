@@ -99,7 +99,8 @@ impl PyDataFrame {
 
     /// The schema of this DataFrame, as PySpark's `_cached_schema` is: the object of `to` that is
     /// not a DataType, which it keeps (see `schema_object`), or else the schema of the server, as
-    /// PySpark's client converts it. The schema is cached, so it is asked of the server once.
+    /// PySpark's client converts it, of the errors of that conversion (see `check_python_schema`).
+    /// The schema is cached, so it is asked of the server once.
     fn own_schema<'py>(&self, py: Python<'py>) -> PyResult<PropertySchema<'py>> {
         if let Some(schema) = &self.schema_object {
             return Ok(PropertySchema::Object(schema.bind(py).clone()));
@@ -107,8 +108,19 @@ impl PyDataFrame {
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
-        check_schema_conversion(py, Some(&schema))?;
+        check_python_schema(py, &schema)?;
         Ok(PropertySchema::Core(schema))
+    }
+
+    /// Raises as PySpark's `schema` of this DataFrame does, which its grouped data reads, of the
+    /// conversion of the schema that it caches (see `own_schema`): of a copy or an unpickle,
+    /// whose `schema` is the schema that it requested and converted then (see `copy_schema`),
+    /// nothing.
+    pub(crate) fn check_schema_read(&self, py: Python<'_>) -> PyResult<()> {
+        if self.copy_schema.is_none() {
+            self.own_schema(py)?;
+        }
+        Ok(())
     }
 
     /// The schema that the properties `schema`, `columns` and `dtypes` read, as PySpark's read
@@ -358,7 +370,10 @@ impl PyDataFrame {
             .to_pyerr()
             .map_err(|err| columns_read_error(py, err))?;
         let fresh = DataFrame::from_sent_relation(session.clone(), relation);
-        interruptible(py, &session, || fresh.schema())
+        let schema = interruptible(py, &session, || fresh.schema())?;
+        // As the read of the columns, which converts the schema (see `check_python_schema`).
+        check_python_schema(py, &schema)?;
+        Ok(schema)
     }
 
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
@@ -1009,8 +1024,9 @@ impl PyDataFrame {
             },
         };
         // The schema that this DataFrame cached, of the types of PySpark, when they hold it: the
-        // `StructType` that it keeps as an object, of `to` or of a map function, as it is now, as
-        // PySpark's state carries the object.
+        // `StructType` that it keeps as an object, of `to`, of a map function or of an unpickle,
+        // as it is now, as PySpark's state carries the object; else that of the server, of new
+        // objects of its user-defined types, as PySpark's `_schema` made them.
         let cached_schema = match &this.schema_object {
             Some(schema)
                 if schema
@@ -1019,12 +1035,7 @@ impl PyDataFrame {
             {
                 Some(schema.clone_ref(py))
             }
-            _ => this
-                .dataframe
-                .known_schema()
-                .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
-                .map(|schema| crate::types::data_type_to_py(py, &schema))
-                .transpose()?,
+            _ => known_schema_object(py, &this.dataframe)?,
         };
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
@@ -1179,9 +1190,10 @@ impl PyDataFrame {
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
     /// pickled DataFrame unpickles, with the `_support_repr_html` and the `_cached_schema` of its
     /// state. As PySpark's unpickle, whose lookup of the `__setstate__` of the new DataFrame reads
-    /// its columns, it requests the schema of the relation, whose error it raises, and keeps it
-    /// (see `copy_schema`), and then the DataFrame has the cached schema of the pickled one,
-    /// none when it had none, so that its `schema` requests it again then. Without
+    /// its columns, it requests the schema of the relation, whose error it raises, also that of
+    /// its conversion (see `check_python_schema`), and keeps it (see `copy_schema`), and then the
+    /// DataFrame has the cached schema of the pickled one, the objects that it is of, or none
+    /// when it had none, so that its `schema` requests it again then. Without
     /// `request_schema`, of an object that PySpark pickles of the plan of the DataFrame, as a
     /// DataStreamWriter, the schema is not requested.
     #[staticmethod]
@@ -1214,12 +1226,18 @@ impl PyDataFrame {
         .to_pyerr()?;
         let requested = if request_schema {
             let schema = interruptible(py, &dataframe.spark_session(), || dataframe.schema())?;
-            check_schema_conversion(py, Some(&schema))?;
+            check_python_schema(py, &schema)?;
             Some(schema)
         } else {
             None
         };
         let mut dataframe = PyDataFrame::new(dataframe.with_known_schema(known_schema));
+        // The `StructType` of the state as the object that it is, as PySpark's `_cached_schema`,
+        // which `columns`, `dtypes` and the methods that copy the cached schema read: of the
+        // objects of `to`, of a map function or of the server that the pickled DataFrame held.
+        dataframe.schema_object = cached_schema
+            .filter(|schema| schema.is_instance_of::<crate::types::PyStructType>())
+            .map(|schema| schema.clone().unbind());
         if let Some(requested) = requested {
             dataframe.keep_copy_schema(requested);
         }
@@ -7298,13 +7316,51 @@ pub(crate) fn check_schema_conversion(
     }
 }
 
+/// Raises as PySpark's conversion of `schema`, a schema of the server, raises where its
+/// `_schema` makes the type objects of it: the errors of [`check_schema_conversion`], and those of
+/// its user-defined types, of which `UserDefinedType.fromJson` makes `UDT()` of the class that
+/// the `pyClass` names (see `types::schema_to_py`), so that a class whose `__init__` takes
+/// arguments raises its `TypeError`. The properties that read the schema, the column lookups,
+/// the copies and the unpickles raise it so.
+pub(crate) fn check_python_schema(
+    py: Python<'_>,
+    schema: &spark_connect::types::DataType,
+) -> PyResult<()> {
+    check_schema_conversion(py, Some(schema))?;
+    if crate::types::has_udt(schema) {
+        crate::types::schema_to_py(py, schema)?;
+    }
+    Ok(())
+}
+
+/// The `_cached_schema` of PySpark's DataFrame of `dataframe`, of the schema that the core caches,
+/// which is of the server: its type objects, as PySpark converts the schema of the server, of a
+/// new object of each user-defined type (see `types::schema_to_py`), and not of the objects that
+/// the client was given. None when it has none, or when PySpark would not have one, as its
+/// conversion of the schema raised (see [`check_python_schema`]).
+fn known_schema_object(py: Python<'_>, dataframe: &DataFrame) -> PyResult<Option<Py<PyAny>>> {
+    let Some(schema) = dataframe.known_schema() else {
+        return Ok(None);
+    };
+    if check_schema_conversion(py, Some(&schema)).is_err() {
+        return Ok(None);
+    }
+    match crate::types::schema_to_py(py, &schema) {
+        Ok(schema) => Ok(Some(schema)),
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 /// The result of a set operation of `this` and `other`, `dataframe`, which keeps the schema that
 /// PySpark's `_merge_cached_schema` keeps: `this.schema` when the cached schemas of both are
 /// equal, else none. The core keeps that of two cached structs; of a schema that a DataFrame
 /// keeps as a Python object, the schema of `to` that is not a DataType or the `StructType` of a
 /// map function, the objects are compared as they are now, as PySpark compares them with `==`,
-/// and the result keeps a deep copy of that of `this`, as `this.schema` gives. Of a copy or an
-/// unpickle, `this.schema` is the schema that it requested (see `copy_schema`).
+/// with the type objects of the cached schema of the other, which of the server holds new objects
+/// of its user-defined types (see `known_schema_object`), and the result keeps a deep copy of
+/// that of `this`, as `this.schema` gives. Of a copy or an unpickle, `this.schema` is the schema
+/// that it requested (see `copy_schema`).
 fn set_operation_result(
     py: Python<'_>,
     this: &PyDataFrame,
@@ -7322,12 +7378,7 @@ fn set_operation_result(
     let cached = |df: &PyDataFrame| -> PyResult<Option<Py<PyAny>>> {
         match &df.schema_object {
             Some(schema) => Ok(Some(schema.clone_ref(py))),
-            None => df
-                .dataframe
-                .known_schema()
-                .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
-                .map(|schema| crate::types::data_type_to_py(py, &schema))
-                .transpose(),
+            None => known_schema_object(py, &df.dataframe),
         }
     };
     if let (Some(left), Some(right)) = (cached(this)?, cached(other)?) {

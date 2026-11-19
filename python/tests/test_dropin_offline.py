@@ -5618,15 +5618,63 @@ def test_structtype_add_reflected_in_json():
 
 def test_structtype_add_reflected_in_the_base_data_type():
     # Regression: add() must update the base DataType too, which the schemas of
-    # mapInArrow/mapInPandas/applyInPandas/... read (via resolve_datatype). The base
-    # implementation of simpleString reads it.
+    # mapInArrow/mapInPandas/applyInPandas/... read (via resolve_datatype), and so its JSON.
     built = T.StructType([T.StructField("a", T.LongType()), T.StructField("b", T.LongType())])
     chained = T.StructType().add("a", T.LongType()).add("b", T.LongType())
     st = T.StructType([T.StructField("a", T.LongType())])
     st.add("b", T.LongType())
     for added in (chained, st):
-        assert T.DataType.simpleString(added) == "struct<a:bigint,b:bigint>"
+        assert added.simpleString() == "struct<a:bigint,b:bigint>"
+        assert added.json() == built.json()
         assert str(added) == str(built) == repr(built)
+
+
+@pytest.mark.parametrize("data_type,type_name", [
+    (T.ByteType(), "byte"),
+    (T.IntegerType(), "integer"),
+    (T.LongType(), "long"),
+    (T.DecimalType(10, 2), "decimal"),
+    (T.StringType("UTF8_LCASE"), "string"),
+    (T.CharType(3), "char"),
+    (T.VarcharType(3), "varchar"),
+    (T.TimeType(6), "time"),
+    (T.YearMonthIntervalType(), "yearmonthinterval"),
+    (T.DayTimeIntervalType(0, 3), "daytimeinterval"),
+    (T.GeometryType(4326), "geometry"),
+    (T.ArrayType(T.IntegerType()), "array"),
+    (T.MapType(T.StringType(), T.LongType()), "map"),
+    (T.StructType([T.StructField("a", T.LongType())]), "struct"),
+    (T.StructType([T.StructField("a", _DayPointUDT())]), "struct"),
+    (T.CalendarIntervalType(), "interval"),
+    (T.TimestampNTZType(), "timestamp_ntz"),
+    (T.NullType(), "void"),
+    (T.AtomicType(), "atomic"),
+])
+def test_the_base_simple_string_of_a_type_is_its_type_name_as_pysparks(data_type, type_name):
+    # As PySpark's DataType.simpleString, `self.typeName()`, which the types of a string of
+    # their own override: the base method called on one of them directly is its typeName(), as
+    # official PySpark 4.3.0's. The drop-in's gave the simple string of the type, of the
+    # user-defined type objects of its JSON that it had lowered last.
+    assert T.DataType.simpleString(data_type) == type_name == data_type.typeName()
+
+
+@pytest.mark.parametrize("base,simple", [
+    (T.DoubleType, "renamed"),
+    (T.LongType, "bigint"),
+    (T.DecimalType, "decimal(10,0)"),
+    (T.YearMonthIntervalType, "interval year to month"),
+    (T.DayTimeIntervalType, "interval day to second"),
+])
+def test_the_simple_strings_of_subclasses_of_their_own_type_name_are_pysparks(base, simple):
+    # As official PySpark 4.3.0: of a Python subclass of another typeName(), the base
+    # simpleString is that name, and the simpleString of its class is that of PySpark's class,
+    # which reads the typeName() of the type of its class only, as DoubleType's, and not of the
+    # interval types, whose own simpleString is of their fields.
+    subclass = type("Renamed" + base.__name__, (base,), {
+        "typeName": classmethod(lambda cls: "renamed")})
+    data_type = subclass()
+    assert T.DataType.simpleString(data_type) == "renamed"
+    assert data_type.simpleString() == simple
 
 
 @pytest.mark.parametrize("data_type,expected", [
@@ -23552,6 +23600,91 @@ def test_pandas_frames_of_a_struct_changed_in_place_are_named_by_its_cached_name
     assert column_names(spark.createDataFrame(pd.DataFrame({"a": [1]}), popped)) == ["a", "b"]
 
 
+def _server_schema_of(*fields):
+    # The schema that the server sends of the fields (name, type), of LongType or of a
+    # user-defined type of a LongType SQL type: DataType.struct=21, Struct.fields=1,
+    # StructField: name=1, data_type=2, nullable=3; DataType.long=7, and DataType.udt=23 ->
+    # UDT: type=1, python_class=3, sql_type=5.
+    def proto(data_type):
+        if isinstance(data_type, T.UserDefinedType):
+            python_class = f"{data_type.module()}.{type(data_type).__name__}"
+            return message_field(23, message_field(1, "udt") + message_field(3, python_class)
+                                 + message_field(5, message_field(7, b"")))
+        return message_field(7, b"")
+
+    return message_field(21, b"".join(
+        message_field(1, message_field(1, name) + message_field(2, proto(data_type))
+                      + varint_field(3, 1))
+        for name, data_type in fields))
+
+
+def test_reads_of_a_schema_of_a_udt_of_constructor_arguments_raise_as_pysparks(mock_connect):
+    # As PySpark's reads of the schema of a DataFrame, which convert the schema of the server
+    # (`_schema`) with UserDefinedType.fromJson, which calls the class of no arguments: of a
+    # class whose __init__ needs one, `columns` and what reads them (printSchema, the index of a
+    # column, `dir`, the lookups of names of two underscores, and the copies and an unpickle,
+    # which look `__setstate__` up so), and the numeric aggregations of grouped data, which read
+    # `self._df.schema`, raise its TypeError, as official PySpark 4.3.0 does (see
+    # test_dropin_e2e.py). The drop-in read the names of the columns of its core type.
+    import copy
+
+    from pyspark import cloudpickle
+
+    spark, service = mock_connect
+    service.data_type = _server_schema_of(("p", _OffsetUDT(1)), ("i", T.LongType()))
+    df = spark.range(1)
+    for use in (
+        lambda: df.columns,
+        df.printSchema,
+        lambda: df[0],
+        lambda: dir(df),
+        lambda: hasattr(df, "__array__"),
+        lambda: df._ipython_key_completions_(),
+        lambda: copy.copy(df),
+        lambda: copy.deepcopy(df),
+        lambda: cloudpickle.loads(cloudpickle.dumps(df)),
+        lambda: df.groupBy("i").sum(),
+        lambda: df.groupBy("i").max("i"),
+    ):
+        with pytest.raises(TypeError, match="missing 1 required positional argument"):
+            use()
+    # Of a class of a default, a new object of it.
+    service.data_type = _server_schema_of(("p", _ScaleUDT(3)), ("i", T.LongType()))
+    df = spark.range(1)
+    assert df.columns == ["p", "i"] and df.schema["p"].dataType.scale == 1
+    assert hasattr(copy.copy(df), "columns") and df.groupBy("i").sum() is not None
+
+
+def test_cached_schemas_of_set_operations_and_pickles_are_pysparks_objects(mock_connect):
+    # As PySpark's `_cached_schema`, the object of `to`, or the type objects of its conversion of
+    # the schema of the server, of new user-defined type objects: a set operation keeps the cached
+    # schema of `this` when both are equal by `==` (`_merge_cached_schema`), which compares the
+    # `__dict__` of user-defined types, so that of `to` of another scale and the server's differ,
+    # and their union has none, whose schema is the server's. A pickle carries the cached schema
+    # as its objects, which `filter` of the unpickled DataFrame keeps, while its own `schema` is
+    # the one that its unpickle requested; that of a DataFrame of the server's schema is of new
+    # objects. As official PySpark 4.3.0 (see test_dropin_e2e.py); the drop-in gave the objects
+    # of their JSON that it lowered last.
+    from pyspark import cloudpickle
+
+    spark, service = mock_connect
+    service.data_type = _server_schema_of(("p", _ScaleUDT()))
+    server = spark.range(1)
+    assert server.columns == ["p"]
+    cast = server.to(T.StructType([T.StructField("p", _ScaleUDT(2))]))
+    for union in (cast.union(server), server.union(cast), cast.exceptAll(server)):
+        assert union.schema["p"].dataType.scale == 1
+    assert cast.union(cast).schema["p"].dataType.scale == 2
+    unpickled = cloudpickle.loads(cloudpickle.dumps(cast))
+    assert unpickled.schema["p"].dataType.scale == 1
+    assert unpickled.filter("true").schema["p"].dataType.scale == 2
+    assert unpickled.union(cast).schema["p"].dataType.scale == 1
+    unpickled = cloudpickle.loads(cloudpickle.dumps(server))
+    service.data_type = _server_schema_of(("q", T.LongType()))
+    assert unpickled.columns == ["p"]
+    assert unpickled.filter("true").schema["p"].dataType.scale == 1
+
+
 class _ScaledValueUDT(T.UserDefinedType):
     """A UserDefinedType of a scale, of the values of `_ScaledValue`."""
 
@@ -34631,10 +34764,13 @@ def test_schema_tree_type_names_and_escaped_field_names():
     "python_class, expected",
     [
         ("pyspark.ml.linalg.VectorUDT", "vectorudt"),
-        (None, "udt"),
+        (None, None),
     ],
 )
 def test_print_schema_udt_class_name(mock_connect, capsys, python_class, expected):
+    # As PySpark's printSchema, of the schema that its `_schema` converts, whose
+    # UserDefinedType.fromJson makes the user-defined type of its Python class: of a type of no
+    # Python class, it raises the KeyError of `pyClass`, as `columns` does.
     spark, service = mock_connect
     udt = message_field(1, "udt")
     if python_class is not None:
@@ -34642,9 +34778,16 @@ def test_print_schema_udt_class_name(mock_connect, capsys, python_class, expecte
     service.data_type = message_field(
         21, message_field(1, _print_schema_field("features", message_field(23, udt)))
     )
-    assert spark.range(10).printSchema() is None
-    assert capsys.readouterr().out == f"root\n |-- features: {expected} (nullable = true)\n\n"
-    assert service.calls == 1
+    if expected is None:
+        df = spark.range(10)
+        for read in (df.printSchema, lambda: df.columns):
+            with pytest.raises(KeyError, match="pyClass"):
+                read()
+        assert capsys.readouterr().out == ""
+    else:
+        assert spark.range(10).printSchema() is None
+        assert capsys.readouterr().out == f"root\n |-- features: {expected} (nullable = true)\n\n"
+        assert service.calls == 1
     assert service.execute_calls == 0
 
 

@@ -2058,46 +2058,12 @@ impl PyDataType {
         class_repr(slf.as_any())
     }
 
-    /// As pyspark's `simpleString()`, the `typeName()` of a type of its class only. An array, map
-    /// or struct of a user-defined type names it by the `simpleString()` of its Python class,
-    /// such as `array<vector>`.
-    fn simpleString(slf: &Bound<'_, Self>) -> PyResult<String> {
-        let py = slf.py();
-        // A struct, array or map reads its live type, as its own `simpleString` does: the base
-        // method is also called on them directly, as `DataType.simpleString(st)`.
-        if slf.is_instance_of::<PyStructType>()
-            || slf.is_instance_of::<PyArrayType>()
-            || slf.is_instance_of::<PyMapType>()
-        {
-            return match py_to_data_type(slf.as_any()) {
-                Ok(data_type) => simple_string_with_udts(py, &data_type),
-                // Of a type that holds one that does not lower now, of the type objects that it
-                // holds, as PySpark's reads them (see `lenient_type`).
-                Err(error) if is_exception(py, &error) => {
-                    if let Ok(array) = slf.cast::<PyArrayType>() {
-                        return array.borrow().simple_string(py);
-                    }
-                    if let Ok(map) = slf.cast::<PyMapType>() {
-                        return map.borrow().simple_string(py);
-                    }
-                    slf.cast::<PyStructType>()?.borrow().simple_string(py)
-                }
-                Err(error) => Err(error),
-            };
-        }
-        let this = slf.borrow();
-        let Some(inner) = &this.inner else {
-            drop(this);
-            return slf.call_method0(pyo3::intern!(py, "typeName"))?.extract();
-        };
-        match inner {
-            DataType::Array { .. } | DataType::Map { .. } | DataType::Struct { .. }
-                if has_udt(inner) =>
-            {
-                simple_string_with_udts(py, inner)
-            }
-            _ => Ok(inner.simple_string()),
-        }
+    /// As PySpark's `DataType.simpleString`, `self.typeName()`. The types of a string of their
+    /// own, such as `bigint`, `decimal(10,2)` or `struct<a:bigint>`, override it, as PySpark's
+    /// do, so the base method called on one of them directly, as `DataType.simpleString(st)`, is
+    /// its `typeName()`, `struct`, as in PySpark.
+    fn simpleString<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
+        type_name_of(slf.as_any())
     }
 
     // Equality/hashing are defined once here and inherited by every concrete type class
@@ -5945,6 +5911,16 @@ impl PyYearMonthIntervalType {
     const YEAR: i32 = 0;
     #[classattr]
     const MONTH: i32 = 1;
+    /// As PySpark's `simpleString`, its `_str_repr` of the fields: `interval year to month`, or
+    /// `interval year` of one field, also of a Python subclass, as it reads no `typeName()`.
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        DataType::YearMonthInterval {
+            start_field: self.start_field,
+            end_field: self.end_field,
+        }
+        .simple_string()
+    }
     // --- DataType object-model methods (v4.2.0 parity) ---
     /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]
@@ -6113,6 +6089,16 @@ impl PyDayTimeIntervalType {
     const MINUTE: i32 = 2;
     #[classattr]
     const SECOND: i32 = 3;
+    /// As PySpark's `simpleString`, its `_str_repr` of the fields: `interval day to second`, or
+    /// `interval day` of one field, also of a Python subclass, as it reads no `typeName()`.
+    #[pyo3(name = "simpleString")]
+    fn simple_string(&self) -> String {
+        DataType::DayTimeInterval {
+            start_field: self.start_field,
+            end_field: self.end_field,
+        }
+        .simple_string()
+    }
     // --- DataType object-model methods (v4.2.0 parity) ---
     /// As PySpark's `DataType.json`, of the `jsonValue` of the type, of a Python subclass its own.
     #[pyo3(name = "json")]

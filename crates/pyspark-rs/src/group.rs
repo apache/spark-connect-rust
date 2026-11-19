@@ -226,6 +226,10 @@ impl PyGroupedData {
             };
             names.push(name.to_cow().ok().map(|name| name.into_owned()));
         }
+        // As PySpark's `self._df.schema`, which raises the errors of its conversion of the schema
+        // of the server, such as the `TypeError` of a user-defined type whose `__init__` takes
+        // arguments.
+        self.frame.bind(py).borrow().check_schema_read(py)?;
         let requested = self.frame.bind(py).borrow().copy_schema();
         let of_requested;
         let grouped = match requested {

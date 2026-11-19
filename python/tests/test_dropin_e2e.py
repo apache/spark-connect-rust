@@ -936,8 +936,10 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
     # As PySpark's conversion of the schema from its proto: a TIMESTAMP_NTZ(p) or TIMESTAMP_LTZ(p)
     # with p > 6, also nested, raises UNSUPPORTED_OPERATION from every collecting API, toPandas
     # and toArrow, and from every schema surface (the schema, columns, dtypes, printSchema, repr
-    # and json, and the DDL strings of the types), while count, show and the microsecond
-    # timestamps keep working.
+    # and json, the copies, whose lookups read the columns of the copy, the numeric aggregations
+    # of grouped data, which read `self._df.schema`, and the DDL strings of the types), while
+    # count, show and the microsecond timestamps keep working.
+    import copy
     import datetime
     import re
 
@@ -988,6 +990,9 @@ def test_nanosecond_timestamps_are_not_collected_as_pyspark(session):
                 lambda d: d.printSchema(),
                 lambda d: repr(d),
                 lambda d: d.schema.json(),
+                copy.copy,
+                copy.deepcopy,
+                lambda d: d.groupBy().sum(),
             ):
                 with pytest.raises(PySparkValueError, match=message(proto_text)):
                     surface(df)
@@ -4920,6 +4925,75 @@ def test_schemas_of_the_server_make_new_user_defined_type_objects_as_pyspark(ses
             request()
     own = StructType([StructField("p", marked)])
     assert own["p"].dataType is marked and ArrayType(marked).elementType is marked
+
+
+def test_cached_schemas_of_set_operations_and_pickles_hold_the_objects_of_pyspark(session):
+    # As official PySpark 4.3.0, whose cached schema of a DataFrame (`_cached_schema`) is the
+    # object of `to`, or the type objects of its conversion of the schema of the server, of new
+    # user-defined type objects. A set operation keeps the cached schema of equal ones
+    # (`_merge_cached_schema`), which `==` compares by the `__dict__` of their user-defined types:
+    # that of `to` of a marked object differs from the server's, so their union caches none, and
+    # its schema is the server's. A pickle carries the cached schema as its objects, which the
+    # methods that copy the cached schema of the unpickled DataFrame keep, such as `filter`, while
+    # its own `schema` is the one that its unpickle requested. The client gave instead the objects
+    # of their JSON that it lowered last.
+    from pyspark import cloudpickle
+
+    marked = _MarkedPointUDT()
+    marked.marker = "made"
+    server = session.createDataFrame(
+        [((1.0, 2.0),)], StructType([StructField("p", _MarkedPointUDT())])
+    )
+    assert server.columns == ["p"]
+    cast = server.to(StructType([StructField("p", marked)]))
+    for union in (cast.union(server), server.union(cast), cast.intersect(server)):
+        assert not hasattr(union.schema["p"].dataType, "marker")
+    assert cast.union(cast).schema["p"].dataType.marker == "made"
+    unpickled = cloudpickle.loads(cloudpickle.dumps(cast))
+    assert not hasattr(unpickled.schema["p"].dataType, "marker")
+    assert unpickled.filter("true").schema["p"].dataType.marker == "made"
+    assert unpickled.columns == ["p"] and unpickled.dtypes == [("p", "udt")]
+    unpickled = cloudpickle.loads(cloudpickle.dumps(server))
+    assert not hasattr(unpickled.filter("true").schema["p"].dataType, "marker")
+    assert unpickled.collect() == [Row(p=(1.0, 2.0))]
+
+
+def test_reads_of_a_schema_of_a_user_defined_type_of_arguments_raise_as_pyspark(session):
+    # As official PySpark 4.3.0, whose reads of the schema of a DataFrame convert the schema of the
+    # server (`_schema`) with `UserDefinedType.fromJson`, which calls the class of no arguments:
+    # of a class whose __init__ takes arguments, `columns` and what reads them (printSchema, the
+    # index of a column, `dir`, the lookups of names of two underscores, the copies, of which
+    # pickle and copy look `__setstate__` up so, and the map functions), and the numeric
+    # aggregations of grouped data, which read `self._df.schema`, raise its TypeError. The uses
+    # of the plan that do not read the schema work.
+    import copy
+
+    from pyspark import cloudpickle
+
+    df = session.createDataFrame(
+        [((1.0, 2.0), 1)],
+        StructType([StructField("p", _ArgPointUDT(2)), StructField("i", LongType())]),
+    )
+    for use in (
+        lambda: df.columns,
+        df.printSchema,
+        lambda: df[0],
+        lambda: dir(df),
+        lambda: hasattr(df, "__array__"),
+        lambda: df.select("*").columns,
+        lambda: copy.copy(df),
+        lambda: copy.deepcopy(df),
+        lambda: cloudpickle.loads(cloudpickle.dumps(df)),
+        lambda: df.groupBy("i").sum(),
+        lambda: df.groupBy("i").avg("i"),
+        lambda: df.groupBy("i").applyInPandas(lambda pdf: pdf, "i long"),
+        lambda: df.mapInPandas(lambda batches: batches, "i long"),
+    ):
+        with pytest.raises(TypeError, match="missing 1 required positional argument"):
+            use()
+    assert df.count() == 1
+    assert df.select("i").columns == ["i"]
+    assert df.groupBy("i").count().collect() == [Row(i=1, count=1)]
 
 
 def test_uses_of_the_json_of_a_type_of_a_user_defined_type_of_no_json_raise_its_error(session):

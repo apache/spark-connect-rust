@@ -2286,9 +2286,16 @@ that hold them, as `UserDefinedType`s of other parameters do, and `toNullable()`
 are. The schema of a DataFrame and of its rows, as the server gives it, holds a new object of each
 user-defined type, as PySpark's `UserDefinedType.fromJson` makes it of its class, and so does
 `fromJson`: not the object that the client was given, nor of its attributes, and a class whose
-`__init__` takes arguments raises its `TypeError` there, as in PySpark. A struct, array or map that
-the client makes of core types, without the objects of a user, holds the user-defined type of its
-JSON that a type was last made of, if one was. `IntegralType()` is one instance, as PySpark's
+`__init__` takes arguments raises its `TypeError` wherever PySpark converts that schema, as in
+PySpark: the schema, `columns`, `dtypes`, `printSchema`, the rows, the lookups that read the
+columns (`df[0]`, `dir(df)`, names of two underscores), the copies and the unpickles, the map
+functions and the numeric aggregations of grouped data. The cached schema of a DataFrame holds the
+objects that PySpark's `_cached_schema` holds, those of `to` or of a map function, else the new
+objects of the schema of the server: a set operation compares them as PySpark's does, by the
+`__dict__` of their user-defined types, and a pickle carries them, which the unpickled DataFrame
+keeps as its cached schema. `DataType.simpleString(t)`, the method of the base class, is
+`t.typeName()`, as PySpark's, which the types of a string of their own, such as `bigint` or
+`struct<a:bigint>`, override. `IntegralType()` is one instance, as PySpark's
 `DataTypeSingleton` makes it, and so is each Python subclass of it, of an instance of its own, and a
 Python subclass of the other classes, such as a `UserDefinedType` of parameters, takes the arguments
 of its `__init__`.
@@ -2905,13 +2912,13 @@ session fails the copy with `SparkConnectException`, as PySpark's does. One diff
 PySpark's `DataFrame.__getattr__` answers `getattr(df, "__deepcopy__")` and
 `getattr(df, "__copy__")` by requesting the schema, to read the columns, and raises
 `ATTRIBUTE_NOT_SUPPORTED`, so `hasattr(df, "__copy__")` is false; the drop-in defines both
-itself, which it finds without a request. An unpickled DataFrame requests its
-schema once, at the unpickle, which raises the error of the request, as PySpark's pickle looks the
+itself, which it finds without a request. An unpickled DataFrame requests its schema once, at the
+unpickle, which raises the error of the request or of its conversion, as PySpark's pickle looks the
 `__setstate__` of the new DataFrame up through its `__getattr__`. Its cached schema is then that of
-the pickled DataFrame, as the state of PySpark's pickle sets it: of none, its `schema` requests it
-again. So does the unpickle of an object that PySpark pickles with its DataFrame: a writer, of its
-callback, grouped data, `na` and `stat`; a stream writer, which PySpark's pickles of the plan of
-the DataFrame, requests nothing.
+the pickled DataFrame, as the state of PySpark's pickle sets it, of the objects that it carries: of
+none, its `schema` requests it again. So does the unpickle of an object that PySpark pickles with
+its DataFrame: a writer, of its callback, grouped data, `na` and `stat`; a stream writer, which
+PySpark's pickles of the plan of the DataFrame, requests nothing.
 
 A copy, a deep copy or an unpickle of a DataFrame keeps the schema that it requests apart from the
 cached schema of the state, as PySpark's keeps it as the `_cached_schema_serialized` that its
