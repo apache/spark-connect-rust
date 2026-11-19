@@ -134,6 +134,14 @@ difference is intentional or tracked for a fix.
   `TypeError: StructType fields must be StructField objects` there, and an assignment of `fields`
   of such an element raises it at once. Of a list of `StructField`s changed in place, the cached
   `names` and their uses are PySpark's (see `docs/compatibility.md`).
+- **A schema that PySpark does not convert is requested once** (intentional; the errors are the
+  same). PySpark's `_schema` keeps the schema that it requested only once its conversion of it
+  succeeded, so of a schema that it does not convert, such as of a user-defined type whose
+  `__init__` takes arguments or of no Python class, of a nanosecond-precision timestamp, or of a
+  spatial type of an SRID that it does not take, each read of the schema (`schema`, `columns`,
+  `dtypes`, `printSchema` and the lookups that read the columns) requests it again, and raises.
+  This client keeps the schema of the server once it requested it, as of any other schema, and
+  raises the same error of its conversion at each read, of no other request.
 - **The `__repr__` of a Column of a str that UTF-8 cannot encode** (intentional; the expressions
   of the core hold UTF-8). Such a str, of a name, a SQL string or a literal, fails the plans of the
   Column when they are built, as in PySpark, and its lone surrogates show escaped in the `__repr__`
