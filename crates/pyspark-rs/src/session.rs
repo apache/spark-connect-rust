@@ -1591,7 +1591,7 @@ impl PySparkSession {
                 return Err(unsupported_artifact_error(py, format));
             }
             check_local_artifact(py, &name, &local, pyfile)?;
-            interruptible(py, &self.session, || {
+            crate::interrupt::interruptible_without_user_context(py, &self.session, || {
                 self.session
                     .add_artifacts_of_flags(&[p.as_str()], pyfile, archive, file)
                     .map_err(Box::new)
@@ -3198,7 +3198,7 @@ impl PySparkSession {
         local_path: String,
         dest_path: String,
     ) -> PyResult<()> {
-        interruptible(py, &self.session, || {
+        crate::interrupt::interruptible_without_user_context(py, &self.session, || {
             self.session
                 .copy_from_local_to_fs(&local_path, &dest_path)
                 .map_err(Box::new)
@@ -3304,9 +3304,11 @@ impl PySparkSession {
                 // session open, so nothing below runs. The core runs its stops of all sessions
                 // one at a time too, for the stops that do not hold `SparkSession._lock`; the
                 // resets below are idempotent, and run with the GIL, after the core's stop.
-                crate::interrupt::interruptible_outcome(py, &self.session, || {
-                    self.session.stop().map_err(Box::new)
-                })?
+                crate::interrupt::interruptible_outcome_without_user_context(
+                    py,
+                    &self.session,
+                    || self.session.stop().map_err(Box::new),
+                )?
             } else {
                 // As PySpark's stop, which closes the client under its lock all the same.
                 let _stopping = crate::interrupt::abortable_without_session(
@@ -3598,7 +3600,9 @@ impl PySparkSession {
     /// Release the session on the server, without stopping it, for `client.release_session`.
     fn _release_session(&self, py: Python<'_>) -> PyResult<()> {
         let session = self.session.clone();
-        interruptible(py, &session, || session.release_session().map_err(Box::new))
+        crate::interrupt::interruptible_without_user_context(py, &session, || {
+            session.release_session().map_err(Box::new)
+        })
     }
 
     /// Close the session without releasing it on the server, for `client.close`.
@@ -3967,9 +3971,10 @@ impl PySparkSession {
         use prost::Message;
         let request = spark_connect_proto::GetStatusRequest::decode(request)
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        let response = interruptible(py, &self.session, || {
-            self.session.get_status_proto(request).map_err(Box::new)
-        })?;
+        let response =
+            crate::interrupt::interruptible_without_user_context(py, &self.session, || {
+                self.session.get_status_proto(request).map_err(Box::new)
+            })?;
         Ok(pyo3::types::PyBytes::new(py, &response.encode_to_vec()))
     }
 
@@ -4356,11 +4361,12 @@ impl PySparkSession {
         py: Python<'_>,
         new_session_id: Option<String>,
     ) -> PyResult<Py<PySparkSession>> {
-        let session = interruptible(py, &self.session, || {
-            self.session
-                .clone_session_with_id(new_session_id.as_deref())
-                .map_err(Box::new)
-        })?;
+        let session =
+            crate::interrupt::interruptible_without_user_context(py, &self.session, || {
+                self.session
+                    .clone_session_with_id(new_session_id.as_deref())
+                    .map_err(Box::new)
+            })?;
         session_object(py, &session)
     }
 }

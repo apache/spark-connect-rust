@@ -2455,6 +2455,10 @@ def test_messages_work_without_protobuf():
             "str": [str(relation), str(context)],
             "pickle": pickle.loads(pickle.dumps(relation)) == relation,
             "pickle nested": pickle.loads(pickle.dumps(nested)) == nested,
+            "pickle well-known": [
+                type(pickle.loads(pickle.dumps(m))) is type(m) and pickle.loads(pickle.dumps(m)) == m
+                for m in (context.extensions[0], event.timestamp)
+            ],
             "deepcopy": copy.deepcopy(context) == context,
             "numpy": np.array(values).tolist(),
             "sequence": isinstance(values, collections.abc.MutableSequence),
@@ -2474,6 +2478,7 @@ def test_messages_work_without_protobuf():
     assert result.returncode == 0, result.stderr
     out = json.loads(result.stdout)
     assert out["pickle"] and out["pickle nested"] and out["deepcopy"]
+    assert out["pickle well-known"] == [True, True]
     assert out["numpy"] == [1.5, 2.5] and out["sequence"] and out["mapping"]
     assert out["enum"] == 4
     assert out["decode error"] == (
@@ -3060,6 +3065,60 @@ def test_pickles_of_nested_messages_load_as_upbs(upb):
         mine = ours(full_name)(**fields)
         loaded = pickle.loads(pickle.dumps(mine))
         assert type(loaded) is ours(full_name) and loaded == mine, full_name
+
+
+def test_pickles_of_the_well_known_types_load_of_the_classes_of_the_runtime():
+    # The classes of the runtime of the well-known types, Any and Timestamp, are of its modules
+    # pyspark.sql.connect.proto._rust.any_pb2 and timestamp_pb2, which are in sys.modules, so
+    # their messages pickle of their classes, as the others do, cloudpickle pickles them by
+    # reference, and their pickles load in another process of the drop-in, with or without
+    # protobuf. protobuf's are of its modules (google.protobuf.any_pb2), so, where it is
+    # installed, their pickles load as protobuf's classes, which the fields of the runtime take as
+    # they are.
+    from pyspark import cloudpickle
+
+    packed = _rust.Any()
+    packed.Pack(proto.Relation(range=proto.Range(end=3)))
+    stamp = _rust.Timestamp(seconds=7, nanos=8)
+    assert sys.modules["pyspark.sql.connect.proto._rust.any_pb2"].Any is _rust.Any
+    assert sys.modules["pyspark.sql.connect.proto._rust.timestamp_pb2"].Timestamp is _rust.Timestamp
+    for message in (packed, stamp, proto.Relation(extension=packed).extension):
+        for dumps in (pickle.dumps, cloudpickle.dumps):
+            loaded = pickle.loads(dumps(message))
+            assert type(loaded) is type(message) and loaded == message
+    assert pickle.loads(cloudpickle.dumps(lambda: packed))() == packed
+    try:
+        from google.protobuf import any_pb2
+    except ImportError:  # the drop-in runs without protobuf
+        any_pb2 = None
+    if any_pb2 is not None:
+        theirs = pickle.loads(pickle.dumps(any_pb2.Any.FromString(packed.SerializeToString())))
+        assert type(theirs) is any_pb2.Any
+        assert proto.Relation(extension=theirs).extension == packed
+    script = textwrap.dedent(
+        """
+        import json, pickle, sys
+
+        packed, stamp = pickle.loads(sys.stdin.buffer.read())
+        from pyspark.sql.connect import proto
+        from pyspark.sql.connect.proto import _rust
+
+        relation = proto.Relation()
+        out = [type(packed) is _rust.Any, packed.Unpack(relation), relation.range.end]
+        out += [type(stamp) is _rust.Timestamp, stamp.ToJsonString()]
+        print(json.dumps(out))
+        """
+    )
+    root = str(pathlib.Path(__file__).resolve().parent.parent)
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        input=pickle.dumps([packed, stamp]),
+        capture_output=True,
+        timeout=120,
+        cwd=root,
+    )
+    assert result.returncode == 0, result.stderr.decode()[-3000:]
+    assert json.loads(result.stdout) == [True, True, 3, True, "1970-01-01T00:00:07.000000008Z"]
 
 
 # Unknown fields of each wire type: a varint, a fixed64, bytes, a group of a varint and bytes, a

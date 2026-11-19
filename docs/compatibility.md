@@ -1688,6 +1688,13 @@ protobuf 6's differ), the methods of protobuf's `Any` and `Timestamp` (a Timesta
   `pyspark.sql.connect.client.core` imports the package, so a pickle of PySpark's
   `PlanObservedMetrics`, such as one in the `attrs` of a pandas DataFrame of `toPandas`, which
   imports that module before it makes its messages, loads in a new process;
+- the pickle of an `Any` or a `Timestamp` names its class of the runtime, of the module
+  `pyspark.sql.connect.proto._rust.any_pb2` or `timestamp_pb2`, which loads where the drop-in is
+  installed, with or without `protobuf`, where upb's names `protobuf`'s class
+  (`google.protobuf.any_pb2.Any`): so a pickle of the drop-in's does not load in PySpark, such as
+  in the Python worker of the server that runs a UDF that holds one, and one of PySpark's loads,
+  where `protobuf` is installed, as a message of `protobuf`'s class, which the runtime's fields
+  take as they are;
 - a parse that fails raises upb's message (`Error parsing message with type 'spark.connect.Plan':
   Wire format was corrupt`) of the runtime's class, `pyspark.sql.connect.proto._rust.DecodeError`,
   where upb raises `google.protobuf.message.DecodeError` itself. Where `protobuf` is installed (of
@@ -1940,6 +1947,14 @@ PySpark serializes them when it builds each request. The classes of these differ
 extensions and the global list are subclasses of `set` and `list`, of a plain `repr`, whose copies
 and pickles are a plain set and plain lists; a set of tags refuses an object that is neither a str
 nor bytes when it is added, of the `TypeError` that PySpark raises when it builds a request of it.
+The lists of the extensions take any object, as PySpark's: an extension that is not an `Any`
+(another message, or not a message), or an item that is not a pair, fails each call whose requests
+carry the extensions, those of executions, analyses, configurations and interrupts, with upb's
+`TypeError` (or the error of the unpacking of the item) before the request is sent, of the global
+extensions first, as PySpark's requests raise it when they are built, until it is removed, while
+the calls of the artifacts, `cloneSession` and `stop`, whose requests carry none, are made. The
+error names the runtime's class of `Any` (`pyspark.sql.connect.proto._rust.any_pb2.Any`), where
+upb's names `google.protobuf.any_pb2.Any`.
 A `copy.copy` of the client has the attributes of its session, but a list that the copy's
 attribute is set to is not one that the requests carry. The official tests of the client
 (`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable iterator of

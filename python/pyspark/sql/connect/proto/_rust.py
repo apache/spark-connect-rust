@@ -813,14 +813,16 @@ def install(package: dict[str, _Any]) -> None:
     """Export the messages of Spark Connect into ``package``, the globals of
     ``pyspark.sql.connect.proto``, as its ``from ..._pb2 import *`` of the generated modules does
     (so its ``DESCRIPTOR`` is that of the last, ``pipelines_pb2``), make each generated module
-    (``pyspark.sql.connect.proto.base_pb2``, ...) the one of this runtime, and, when protobuf is
-    installed, add the files of the protos to its pool, give the modules that protoc generates of
-    other protos that import them the classes of the runtime, and make its ``UnknownFieldSet``
-    take the messages of the runtime."""
+    (``pyspark.sql.connect.proto.base_pb2``, ...) the one of this runtime, put the modules of the
+    well-known types of the runtime (``pyspark.sql.connect.proto._rust.any_pb2`` and
+    ``timestamp_pb2``) in ``sys.modules``, so that their messages pickle, of their classes, as the
+    others do, and, when protobuf is installed, add the files of the protos to its pool, give the
+    modules that protoc generates of other protos that import them the classes of the runtime,
+    and make its ``UnknownFieldSet`` take the messages of the runtime."""
     prefix = "pyspark.sql.connect.proto."
     for module_name, module in _MODULES.items():
+        sys.modules[module_name] = module
         if _is_exported(module_name):
-            sys.modules[module_name] = module
             package[module_name[len(prefix) :]] = module
     for stem in _EXPORTED:
         for name, value in vars(_MODULES[f"{prefix}{stem}_pb2"]).items():

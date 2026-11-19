@@ -1881,7 +1881,10 @@ impl PyMessage {
 
     /// Pickle as protobuf's messages pickle: the class, and the state of the bytes of the
     /// message, which `__setstate__` parses. A nested class pickles by its qualified name, which
-    /// the generated modules of protobuf have too, so either runtime loads the pickle of the other.
+    /// the generated modules of protobuf have too, so either runtime loads the pickle of the
+    /// other, but for the well-known types (`Any`, `Timestamp`): their classes are of the modules
+    /// of the runtime (`pyspark.sql.connect.proto._rust.any_pb2`), which `install` puts in
+    /// `sys.modules`, where upb's are of protobuf's (`google.protobuf.any_pb2`).
     fn __reduce__<'py>(
         slf: &Bound<'py, Self>,
     ) -> PyResult<(Bound<'py, PyType>, Bound<'py, PyTuple>, Bound<'py, PyDict>)> {
