@@ -1,7 +1,7 @@
 {
   "inputs": {
     "Cargo.lock": "4e72bf09e4de3cfaf0b7c996d35b9d788bc134b2c93e522579a322d8d6500d5c",
-    "Cargo.toml": "7643b23addd58bdbeecd687297526c3ddc8c3b85f0e019d9ef334bf8c0e3dbb6",
+    "Cargo.toml": "c6633f9ffab4f49000d4e4ca9b7496b6b3025ca711170970c7c74df16980a996",
     "LICENSE": "0d1dda3ddbb607c0ce754eddb23aa9b25b96f4f937b79b32605614c9ff1bfb96",
     "NOTICE": "f34ebcb547d17c3d7aab2d024c4685d4b17d49182480727b70cad2eccfc35274",
     "crates/spark-connect-proto/Cargo.toml": "5b43301089f8496478820fa2b063e544c2255da7cf8f1a33240ea915f2fe28ec",
