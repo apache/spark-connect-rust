@@ -2527,8 +2527,9 @@ the members whose docstrings PySpark Connect's modules copy of PySpark's classic
 the `GroupedData` and the `PandasCogroupedOps`, the `MergeIntoWriter` and its clauses, the
 `Observation`, the `TableValuedFunction`, the readers and the writers of DataFrames and of streams,
 and the `StreamingQuery` and its manager), and the others, of the modules of `pyspark.sql.connect`,
-such as the `Builder` and the `Hook` of the `SparkSession`. The
-native classes are built with them, of the source of PySpark at the tracked tag
+such as the `Builder` and the `Hook` of the `SparkSession`, and the `SparkConnectClient` and the
+other classes of `pyspark.sql.connect.client.core`, as PySpark's source writes them. The native
+classes are built with them, of the source of PySpark at the tracked tag
 (`scripts/gen_connect_docstrings.py`), but for the `__init__` of a native class, the slot of
 CPython, whose docstring is CPython's (see `dev/parity/known-differences.md`).
 The DataFrame, the Column, the WindowSpec, the TableArg, the `DataFrameNaFunctions` and the
@@ -2540,10 +2541,10 @@ where the two differ (`python/pyspark/sql/_classic_docs_generated.py`): of the a
 `groupby`, whose docstring that `help()` shows of PySpark Connect's is that of the member that it
 names, and of the members that PySpark Connect's DataFrame wraps in a cache of functools, such as
 `isEmpty`, of which `help()` shows none. `tests/golden/runtime_docstrings.json` holds the digests of
-PySpark's, which a test compares with the drop-in's: of the `__doc__` of each object, or of the
-`inspect.getdoc` of one of no docstring of its own that inherits one, also of the members of the
-classes of class bodies, such as `SparkSession.Builder`. The modules of the client of the session
-(`pyspark.sql.connect.client`) are left out of it: not all of their docstrings are PySpark's yet.
+PySpark's docstrings of every module of `pyspark.sql` and `pyspark.errors`, which a test compares
+with the drop-in's: of the `__doc__` of each object, or of the `inspect.getdoc` of one of no
+docstring of its own that inherits one, also of the members of the classes of class bodies, such as
+`SparkSession.Builder`.
 A default of an object, which the text signature of a native method cannot hold (`inspect` takes
 only literals there), shows as `Ellipsis`: the `StorageLevel(True, True, False, True, 1)` of
 `DataFrame.persist`, and the `<no value>` (`pyspark._globals._NoValue`) of the `value` of

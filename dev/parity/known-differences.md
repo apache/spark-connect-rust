@@ -998,8 +998,9 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   the class cannot set. PySpark's is that of its Python function: None, its own (that of the
   `SparkSession` of Spark Connect, and `Creates a new data frame` of its DataFrame), or of a
   docstring that PySpark Connect's modules copy
-  (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
-  modules of `pyspark.sql` and `pyspark.errors` are PySpark's (see `docs/compatibility.md`).
+  (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of every
+  module of `pyspark.sql` and `pyspark.errors` are PySpark's, which a golden of them guards (see
+  `docs/compatibility.md`).
 - **The docstrings of the native DataFrame, Column, WindowSpec, TableArg, `DataFrameNaFunctions`
   and `DataFrameStatFunctions` of Spark Connect** (inherent; a virtual subclass inherits no
   docstring). PySpark Connect's classes are subclasses of the classic ones, and neither they nor

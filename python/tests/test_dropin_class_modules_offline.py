@@ -1307,6 +1307,8 @@ def test_the_connect_objects_have_the_docstrings_that_pyspark_connect_copies(
 
 # The modules of PySpark that the drop-in does not have (see dev/parity/known-differences.md).
 MODULES_OF_PYSPARK_ONLY = {
+    "pyspark.sql.connect.client.artifact",
+    "pyspark.sql.connect.client.reattach",
     "pyspark.sql.connect.local_server",
     "pyspark.sql.connect.streaming.worker.foreach_batch_worker",
     "pyspark.sql.connect.streaming.worker.listener_worker",
@@ -1316,18 +1318,17 @@ MODULES_OF_PYSPARK_ONLY = {
 
 
 def test_the_docstrings_of_the_modules_are_pysparks():
-    # As official PySpark's, of tests/golden/runtime_docstrings.json: the docstrings of the modules
-    # of pyspark.sql and pyspark.errors (but those of the client of the session, of `EXCLUDED` of
-    # the helper), of their classes and functions and of the members of the classes and of the
-    # classes of their bodies (`SparkSession.Builder`), which the native classes are built with (of
-    # scripts/gen_connect_docstrings.py) and the Python ones have: their `__doc__`, or the
-    # `inspect.getdoc` that `help()` shows of one of no docstring of its own that inherits one,
-    # such as a member of PySpark Connect's Column, of the classic Column's. The `__init__` of a
-    # native class is CPython's slot, of CPython's docstring; a name that the drop-in does not have
-    # is not compared. The sweep imports every module, so it runs in a child interpreter: this
-    # process imports none of them, as a module that keeps the state of its import (the
-    # `sys.stdout` of the progress bar of pyspark.sql.connect.shell.progress) would keep that of
-    # this test.
+    # As official PySpark's, of tests/golden/runtime_docstrings.json: the docstrings of every module
+    # of pyspark.sql and pyspark.errors, of their classes and functions and of the members of the
+    # classes and of the classes of their bodies (`SparkSession.Builder`), which the native classes
+    # are built with (of scripts/gen_connect_docstrings.py) and the Python ones have: their
+    # `__doc__`, or the `inspect.getdoc` that `help()` shows of one of no docstring of its own that
+    # inherits one, such as a member of PySpark Connect's Column, of the classic Column's. The
+    # `__init__` of a native class is CPython's slot, of CPython's docstring; a name that the
+    # drop-in does not have is not compared. The sweep imports every module, so it runs in a child
+    # interpreter: this process imports none of them, as a module that keeps the state of its
+    # import (the `sys.stdout` of the progress bar of pyspark.sql.connect.shell.progress) would
+    # keep that of this test.
     import json
     import subprocess
     import sys
@@ -1346,7 +1347,7 @@ def test_the_docstrings_of_the_modules_are_pysparks():
     result = json.loads(run.stdout.strip().splitlines()[-1])
     assert set(result["unimported"]) <= MODULES_OF_PYSPARK_ONLY, result["unimported"]
     differ = result["differ"]
-    assert result["compared"] > 4300 and not differ, (result["compared"], len(differ), differ[:20])
+    assert result["compared"] > 4450 and not differ, (result["compared"], len(differ), differ[:20])
 
 
 def test_the_spatial_types_convert_of_their_own_methods_as_pysparks():
