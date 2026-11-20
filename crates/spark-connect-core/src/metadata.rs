@@ -27,10 +27,11 @@
 //! (`grpc.max_metadata_size`, 8 KiB by default) the call fails at random, the more often the
 //! larger the metadata is up to the hard limit, of `received metadata size exceeds soft limit
 //! (...)`, of all the entries, which the call still has, as the details of an error that grpcio
-//! gives the application. A binary value that is not base64 fails the call `INTERNAL`, of `Error
-//! parsing '<name>' metadata: illegal base64 encoding`, as gRPC's core decodes it as it reads it,
-//! but the `grpc-status-details-bin` of an error, which it gives the call empty (see
-//! [`UndecodedDetails`]). The entries of these texts are those of gRPC's core's metadata, as its
+//! gives the application. A binary value that gRPC's core does not decode as base64 (see
+//! [`unbase64`]) fails the call `INTERNAL`, of `Error parsing '<name>' metadata: illegal base64
+//! encoding`, as it decodes it as it reads it; of the `grpc-status-details-bin` of an error, the
+//! call still has it, empty, as an empty one of base64 (see [`EmptyDetails`]). The entries of these
+//! texts are those of gRPC's core's metadata, as its
 //! encoder gives them: the headers that it knows first, in the order of its table, of their values
 //! as it encodes them again, then the others, in the order that they came in, of their values as
 //! they came but of the decoded bytes of a binary one (of a name ending in `-bin`).
@@ -104,39 +105,55 @@ impl std::fmt::Display for MetadataRefused {
 
 impl std::error::Error for MetadataRefused {}
 
-/// The source of the status of an error whose `grpc-status-details-bin` is not base64, which
-/// gRPC's core gives the call empty, where tonic would panic of it: the details of the status are
-/// empty, but present, so that grpcio's error of the call has them, as PySpark's
+/// The source of a status whose `grpc-status-details-bin` the call has, but empty, of which tonic
+/// gives no details: an empty value of base64, or, of the client's own status of details that
+/// gRPC's core does not decode ([`MetadataRefused`], its source then), the value that it gives the
+/// call of them. grpcio's error of such a call has the details, empty, as PySpark's
 /// `rpc_status.from_call` reads them (see [`crate::error::GrpcioError`]).
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct UndecodedDetails;
+pub(crate) struct EmptyDetails {
+    /// The refusal of the details, of a status of the client's own.
+    pub(crate) refused: Option<MetadataRefused>,
+}
 
-impl std::fmt::Display for UndecodedDetails {
+impl std::fmt::Display for EmptyDetails {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("the details of the status are not base64")
+        f.write_str("the details of the status are empty")
     }
 }
 
-impl std::error::Error for UndecodedDetails {}
-
-/// Whether `status` is of an error whose `grpc-status-details-bin` was not base64, of empty
-/// details that it has (see [`UndecodedDetails`]).
-pub(crate) fn has_undecoded_details(status: &tonic::Status) -> bool {
-    std::iter::successors(std::error::Error::source(status), |error| error.source())
-        .any(|error| error.is::<UndecodedDetails>())
+impl std::error::Error for EmptyDetails {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.refused
+            .as_ref()
+            .map(|refused| refused as &(dyn std::error::Error + 'static))
+    }
 }
 
-/// The name of the details of the status of an error, which gRPC's core decodes leniently.
+/// Whether the call of `status` has its `grpc-status-details-bin`, empty (see [`EmptyDetails`]).
+pub(crate) fn has_empty_details(status: &tonic::Status) -> bool {
+    std::iter::successors(std::error::Error::source(status), |error| error.source())
+        .any(|error| error.is::<EmptyDetails>())
+}
+
+/// The name of the details of the status of an error.
 const STATUS_DETAILS: &str = "grpc-status-details-bin";
 
 /// Of the metadata `headers` of a response, its headers or its trailers, whose
-/// `grpc-status-details-bin` is not base64, that value made empty, as gRPC's core gives it the
-/// call, so that tonic, which would panic of it, reads it; and the status of an error of them,
-/// tonic's, of its details empty but present (see [`UndecodedDetails`]). None of metadata of no
-/// such details, or of no error.
-fn undecoded_details(headers: &mut http::HeaderMap) -> Option<tonic::Status> {
-    let details = headers.get(STATUS_DETAILS)?;
-    if base64_decoded(details.as_bytes()).is_some() {
+/// `grpc-status-details-bin` gRPC's core decodes (see [`checked`] for one that it does not), the
+/// value that tonic reads of the bytes that gRPC's core decodes, where tonic's own decoding would
+/// differ, or panic, and of empty bytes, the status of an error of them, tonic's, of its details
+/// empty but present (see [`EmptyDetails`]). None of metadata of no details, or of no error.
+fn read_details(headers: &mut http::HeaderMap) -> Option<tonic::Status> {
+    let details = unbase64(headers.get(STATUS_DETAILS)?.as_bytes())?;
+    if !details.is_empty() {
+        use base64::Engine;
+        let canonical = base64::engine::general_purpose::STANDARD.encode(&details);
+        if headers.get(STATUS_DETAILS).map(|value| value.as_bytes()) != Some(canonical.as_bytes()) {
+            let canonical = http::HeaderValue::from_str(&canonical)
+                .unwrap_or_else(|_| http::HeaderValue::from_static(""));
+            headers.insert(STATUS_DETAILS, canonical);
+        }
         return None;
     }
     headers.insert(STATUS_DETAILS, http::HeaderValue::from_static(""));
@@ -144,7 +161,7 @@ fn undecoded_details(headers: &mut http::HeaderMap) -> Option<tonic::Status> {
     if status.code() == tonic::Code::Ok {
         return None;
     }
-    status.set_source(std::sync::Arc::new(UndecodedDetails));
+    status.set_source(std::sync::Arc::new(EmptyDetails { refused: None }));
     Some(status)
 }
 
@@ -186,13 +203,20 @@ fn checked(
                 value.len()
             )));
         }
-        // As gRPC's core decodes a binary value as it reads it, but the details of an error,
-        // which it decodes leniently (see `undecoded_details`).
-        if name.ends_with("-bin") && name != STATUS_DETAILS && base64_decoded(value).is_none() {
-            return Some(refused(
-                tonic::Code::Internal,
-                format!("Error parsing '{name}' metadata: illegal base64 encoding"),
+        // As gRPC's core decodes a binary value as it reads it; of the details of an error, the
+        // call still has them, empty (see `EmptyDetails`).
+        if name.ends_with("-bin") && unbase64(value).is_none() {
+            let mut status = tonic::Status::internal(format!(
+                "Error parsing '{name}' metadata: illegal base64 encoding"
             ));
+            status.set_source(if name == STATUS_DETAILS {
+                std::sync::Arc::new(EmptyDetails {
+                    refused: Some(MetadataRefused),
+                })
+            } else {
+                std::sync::Arc::new(MetadataRefused)
+            });
+            return Some(status);
         }
         total += name.len() + value.len() + ENTRY_OVERHEAD;
         listed.push((name, value));
@@ -263,9 +287,7 @@ fn encoded_length(name: &str, value: &[u8]) -> usize {
             "application/grpc+unknown".len()
         }),
         "grpc-accept-encoding" => Some(accepted_encodings(value).len()),
-        // Of empty details where they are not base64, as gRPC's core gives them the call.
-        STATUS_DETAILS => Some(decoded_length(value).unwrap_or(0)),
-        _ if name.ends_with("-bin") => decoded_length(value),
+        _ if name.ends_with("-bin") => unbase64(value).map(|decoded| decoded.len()),
         _ => None,
     };
     length.unwrap_or(value.len())
@@ -285,22 +307,48 @@ fn accepted_encodings(value: &[u8]) -> String {
         .join(", ")
 }
 
-/// The length of the bytes of a binary value, of base64 with or without its padding, as gRPC's
-/// core decodes it; None of a value that is not base64.
-fn decoded_length(value: &[u8]) -> Option<usize> {
-    base64_decoded(value).map(|decoded| decoded.len())
-}
-
-/// The bytes of a binary value, of base64 with or without its padding, as gRPC's core and tonic
-/// decode them.
-fn base64_decoded(value: &[u8]) -> Option<Vec<u8>> {
-    use base64::Engine;
-    let engine = base64::engine::GeneralPurpose::new(
-        &base64::alphabet::STANDARD,
-        base64::engine::GeneralPurposeConfig::new()
-            .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent),
-    );
-    engine.decode(value).ok()
+/// The bytes of a binary value of base64, as gRPC's core decodes the metadata that it reads: of
+/// the standard alphabet, of any `=` at its end dropped, of whole groups of four characters, and
+/// of a last group of two or three characters whose unused bits are zero; None of any other
+/// value, of a character out of the alphabet, an `=` within it, or a last group of one.
+fn unbase64(value: &[u8]) -> Option<Vec<u8>> {
+    let sextet = |byte: u8| -> Option<u32> {
+        Some(u32::from(match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        }))
+    };
+    let end = value.len() - value.iter().rev().take_while(|byte| **byte == b'=').count();
+    let value = &value[..end];
+    let mut decoded = Vec::with_capacity(value.len() / 4 * 3 + 2);
+    let (groups, rest) = value.as_chunks::<4>();
+    for group in groups {
+        let bits = group
+            .iter()
+            .try_fold(0u32, |bits, byte| Some(bits << 6 | sextet(*byte)?))?;
+        decoded.extend_from_slice(&bits.to_be_bytes()[1..]);
+    }
+    match rest.len() {
+        0 => {}
+        1 => return None,
+        length => {
+            let bits = rest
+                .iter()
+                .try_fold(0u32, |bits, byte| Some(bits << 6 | sextet(*byte)?))?
+                << (6 * (4 - length));
+            // The bits past the bytes of the group are zero, as gRPC's core asks.
+            let bytes = length - 1;
+            if bits & (0xff_ffff >> (8 * bytes)) != 0 {
+                return None;
+            }
+            decoded.extend_from_slice(&bits.to_be_bytes()[1..1 + bytes]);
+        }
+    }
+    Some(decoded)
 }
 
 /// The status of metadata `headers` past the soft limit, of `message`: of the details of the
@@ -308,10 +356,11 @@ fn base64_decoded(value: &[u8]) -> Option<Vec<u8>> {
 /// grpcio's error of it has them in its trailing metadata, as PySpark's `rpc_status.from_call`
 /// reads them (see [`crate::error::from_call_error`]).
 fn soft_rejected(message: String, headers: &http::HeaderMap) -> tonic::Status {
-    let details = headers
-        .get(STATUS_DETAILS)
-        .and_then(|details| base64_decoded(details.as_bytes()))
+    let present = headers.get(STATUS_DETAILS);
+    let details = present
+        .and_then(|details| unbase64(details.as_bytes()))
         .unwrap_or_default();
+    let empty = present.is_some() && details.is_empty();
     let mut metadata = headers.clone();
     for name in ["grpc-status", "grpc-message", STATUS_DETAILS] {
         metadata.remove(name);
@@ -322,7 +371,13 @@ fn soft_rejected(message: String, headers: &http::HeaderMap) -> tonic::Status {
         details.into(),
         tonic::metadata::MetadataMap::from_headers(metadata),
     );
-    status.set_source(std::sync::Arc::new(MetadataRefused));
+    if empty {
+        status.set_source(std::sync::Arc::new(EmptyDetails {
+            refused: Some(MetadataRefused),
+        }));
+    } else {
+        status.set_source(std::sync::Arc::new(MetadataRefused));
+    }
     status
 }
 
@@ -370,7 +425,7 @@ impl Service<http::Request<tonic::body::Body>> for Checked {
             if let Some(status) = refusal(Some(response.status().as_str()), response.headers()) {
                 return Err(Box::new(status) as StdError);
             }
-            if let Some(status) = undecoded_details(response.headers_mut()) {
+            if let Some(status) = read_details(response.headers_mut()) {
                 return Err(Box::new(status) as StdError);
             }
             Ok(response.map(CheckedBody))
@@ -397,7 +452,7 @@ impl Body for CheckedBody {
                 {
                     return Poll::Ready(Some(Err(Box::new(status))));
                 }
-                if let Some(status) = frame.trailers_mut().and_then(undecoded_details) {
+                if let Some(status) = frame.trailers_mut().and_then(read_details) {
                     return Poll::Ready(Some(Err(Box::new(status))));
                 }
                 Poll::Ready(Some(Ok(frame)))
@@ -682,58 +737,102 @@ mod tests {
     }
 
     #[test]
-    fn a_binary_value_that_is_not_base64_is_refused_as_grpc_s_core_refuses_it() {
-        // Of grpcio 1.85's text, but of the details of the status of an error, which gRPC's core
-        // decodes leniently.
+    fn binary_values_are_decoded_as_grpc_s_core_decodes_them() {
+        // As the base64 of gRPC core's reads of the metadata, which grpcio 1.85 reads so: of the
+        // standard alphabet, of any `=` at its end dropped, and of a last group of two or three
+        // characters whose unused bits are zero.
+        let decoded = |value: &str| unbase64(value.as_bytes());
+        for (value, bytes) in [
+            ("", &b""[..]),
+            ("=", b""),
+            ("==", b""),
+            ("YWJj", b"abc"),
+            ("YWJj=", b"abc"),
+            ("YWJj===", b"abc"),
+            ("YWI=", b"ab"),
+            ("YWI", b"ab"),
+            ("abc", b"i\xb7"),
+            ("YQ", b"a"),
+            ("YQ=", b"a"),
+            ("YQ==", b"a"),
+            ("YWJjZA", b"abcd"),
+            ("YWJjZGU", b"abcde"),
+            ("CA0SBGJvb20", b"\x08\x0d\x12\x04boom"),
+        ] {
+            assert_eq!(decoded(value).as_deref(), Some(bytes), "{value:?}");
+        }
+        for value in [
+            "a",
+            "Y",
+            "YW",
+            "YW==",
+            "YWJjZB",
+            "YWJjZGV",
+            "Y=WJj",
+            "YW Jj",
+            "-_-_",
+            "YWJj\t",
+            "!!!*",
+            "@@@@",
+            "not base64!",
+        ] {
+            assert_eq!(decoded(value), None, "{value:?}");
+        }
+    }
+
+    #[test]
+    fn a_binary_value_that_grpc_s_core_does_not_decode_fails_the_call_as_it_fails_it() {
+        // Of grpcio 1.85's text, `INTERNAL`; of the details of the status of an error, which the
+        // call still has, empty, as gRPC's core gives them.
         let bad = |name: &str| {
             checked(
                 None,
-                &headers(&[
-                    ("grpc-status", "13".to_string()),
-                    (name, "not base64!".to_string()),
-                ]),
+                &headers(&[("grpc-status", "8".to_string()), (name, "YW==".to_string())]),
                 false,
                 || 0.9,
             )
+            .unwrap()
         };
-        let status = bad("x-d-bin").unwrap();
-        assert_eq!(status.code(), tonic::Code::Internal);
-        assert!(is_refused(&status));
-        assert_eq!(
-            status.message(),
-            "Error parsing 'x-d-bin' metadata: illegal base64 encoding"
-        );
-        assert!(bad(STATUS_DETAILS).is_none());
+        for name in ["x-d-bin", STATUS_DETAILS] {
+            let status = bad(name);
+            assert_eq!(status.code(), tonic::Code::Internal);
+            assert!(is_refused(&status));
+            assert_eq!(
+                status.message(),
+                format!("Error parsing '{name}' metadata: illegal base64 encoding")
+            );
+            assert_eq!(has_empty_details(&status), name == STATUS_DETAILS);
+        }
         assert!(checked(
             None,
-            &headers(&[("x-d-bin", "AQID".to_string())]),
+            &headers(&[("x-d-bin", "YWJj=".to_string())]),
             false,
             || 0.9
         )
         .is_none());
-        // Listed of empty details.
-        assert_eq!(encoded_length(STATUS_DETAILS, b"!!!*"), 0);
-        assert_eq!(encoded_length(STATUS_DETAILS, b"YWJj"), 3);
+        // Listed of the bytes that gRPC's core decodes.
+        assert_eq!(encoded_length(STATUS_DETAILS, b"YWJj="), 3);
+        assert_eq!(encoded_length("x-d-bin", b"YQ"), 1);
     }
 
     #[test]
-    fn details_of_an_error_that_are_not_base64_are_empty_as_grpc_s_core_gives_them() {
-        // As gRPC's core, which gives the call the details of an error that are not base64 empty,
-        // and tonic, which would panic of them, reads them so: an error of its code and message,
-        // of empty details that it has, and the metadata of a success of them, empty.
-        for value in ["!!!*", "not base64!", "@@@@", "a"] {
+    fn the_details_of_an_error_are_read_of_the_bytes_that_grpc_s_core_decodes() {
+        // tonic, which would panic of a value that its base64 refuses, reads the bytes that gRPC's
+        // core decodes, and of empty details, which the call has, an error of its code and message
+        // of the details empty but present; the metadata of a success of them is emptied.
+        for value in ["", "=", "=="] {
             let mut trailers = headers(&[
-                ("grpc-status", "13".to_string()),
+                ("grpc-status", "8".to_string()),
                 ("grpc-message", "boom".to_string()),
                 (STATUS_DETAILS, value.to_string()),
                 ("x-custom", "c".to_string()),
             ]);
-            let status = undecoded_details(&mut trailers).unwrap();
+            let status = read_details(&mut trailers).unwrap();
             assert_eq!(
                 (status.code(), status.message()),
-                (tonic::Code::Internal, "boom")
+                (tonic::Code::ResourceExhausted, "boom")
             );
-            assert!(status.details().is_empty() && has_undecoded_details(&status));
+            assert!(status.details().is_empty() && has_empty_details(&status));
             assert!(!is_refused(&status));
             assert_eq!(status.metadata().get("x-custom").unwrap(), "c");
             assert!(status.metadata().get(STATUS_DETAILS).is_none());
@@ -741,21 +840,29 @@ mod tests {
         }
         let mut success = headers(&[
             ("grpc-status", "0".to_string()),
-            (STATUS_DETAILS, "!!!*".to_string()),
+            (STATUS_DETAILS, "=".to_string()),
         ]);
-        assert!(undecoded_details(&mut success).is_none());
+        assert!(read_details(&mut success).is_none());
         assert_eq!(success.get(STATUS_DETAILS).unwrap(), "");
-        // Details of base64, even if they are not a `google.rpc.Status`, and no details, are as
-        // they are.
-        for value in ["YWJj", "abc", "CA0SBGJvb20"] {
+        // Of bytes, of the value that tonic decodes to them.
+        for (value, read) in [
+            ("YWJj=", "YWJj"),
+            ("YWJj===", "YWJj"),
+            ("YQ", "YQ=="),
+            ("abc", "abc="),
+            ("CA0SBGJvb20", "CA0SBGJvb20="),
+            ("CA0SBGJvb20=", "CA0SBGJvb20="),
+        ] {
             let mut trailers = headers(&[
                 ("grpc-status", "13".to_string()),
                 (STATUS_DETAILS, value.to_string()),
             ]);
-            assert!(undecoded_details(&mut trailers).is_none());
-            assert_eq!(trailers.get(STATUS_DETAILS).unwrap(), value);
+            assert!(read_details(&mut trailers).is_none());
+            assert_eq!(trailers.get(STATUS_DETAILS).unwrap(), read, "{value:?}");
+            let status = tonic::Status::from_header_map(&trailers).unwrap();
+            assert_eq!(status.details(), &unbase64(value.as_bytes()).unwrap()[..]);
         }
-        assert!(undecoded_details(&mut headers(&[("grpc-status", "13".to_string())])).is_none());
+        assert!(read_details(&mut headers(&[("grpc-status", "13".to_string())])).is_none());
     }
 
     #[test]
