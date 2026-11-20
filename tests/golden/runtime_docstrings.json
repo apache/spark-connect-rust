@@ -1494,6 +1494,268 @@
    "Catalog.truncateTable": "6e092f5fc6a54065",
    "Catalog.uncacheTable": "2b48252a8a8cb038"
   },
+  "pyspark.sql.connect.client": {
+   "": null
+  },
+  "pyspark.sql.connect.client.artifact": {
+   "": null,
+   "Artifact": null,
+   "Artifact.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "Artifact.size": null,
+   "ArtifactManager": "7a10a204e8622b44",
+   "ArtifactManager.CHUNK_SIZE": "4072aed12b3287d8",
+   "ArtifactManager.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "ArtifactManager.add_artifacts": "7b20cfa58f5d1320",
+   "ArtifactManager.cache_artifact": "5983795448a5077a",
+   "ArtifactManager.cache_artifacts": "39a0969eaf6b490c",
+   "ArtifactManager.get_cached_artifacts": "167d174f69d8764c",
+   "ArtifactManager.is_cached_artifact": "a312aa3a47e20b8d",
+   "InMemory": "fed70315dae8a6f1",
+   "InMemory.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "InMemory.size": null,
+   "InMemory.stream": null,
+   "LocalData": "b2ad908923e5ef38",
+   "LocalData.__init__": "15432c8b93cc48ea",
+   "LocalData.size": null,
+   "LocalData.stream": null,
+   "LocalFile": "845df9be279cc44f",
+   "LocalFile.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "LocalFile.size": null,
+   "LocalFile.stream": null,
+   "new_archive_artifact": null,
+   "new_cache_artifact": null,
+   "new_file_artifact": null,
+   "new_jar_artifact": null,
+   "new_pyfile_artifact": null
+  },
+  "pyspark.sql.connect.client.core": {
+   "": null,
+   "AnalyzeResult": null,
+   "AnalyzeResult.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "AnalyzeResult.fromProto": null,
+   "ChannelBuilder": "300029a0783b09df",
+   "ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_ENABLED": "89d61a0f6c4b7b36",
+   "ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS": "4072aed12b3287d8",
+   "ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIME_MS": "4072aed12b3287d8",
+   "ChannelBuilder.GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS": "89d61a0f6c4b7b36",
+   "ChannelBuilder.GRPC_DEFAULT_OPTIONS": "e4b7fc2f852bd7bf",
+   "ChannelBuilder.GRPC_MAX_MESSAGE_LENGTH_DEFAULT": "4072aed12b3287d8",
+   "ChannelBuilder.PARAM_GRPC_KEEPALIVE_ENABLED": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIMEOUT_MS": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_GRPC_KEEPALIVE_TIME_MS": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_SESSION_ID": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_TOKEN": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_USER_AGENT": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_USER_ID": "fdf09be211280cf3",
+   "ChannelBuilder.PARAM_USE_SSL": "fdf09be211280cf3",
+   "ChannelBuilder.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "ChannelBuilder.add_interceptor": null,
+   "ChannelBuilder.get": "2b9177ccf22c9827",
+   "ChannelBuilder.getDefault": null,
+   "ChannelBuilder.host": "c8e9071be8885ed4",
+   "ChannelBuilder.keepalive_enabled": "4b6275fc56f7a758",
+   "ChannelBuilder.keepalive_time_ms": "935fbe13124002e0",
+   "ChannelBuilder.keepalive_timeout_ms": "a9502e046997ce91",
+   "ChannelBuilder.keepalive_without_calls": "983a580adb74e4b6",
+   "ChannelBuilder.metadata": "d35f1ac66ac9620d",
+   "ChannelBuilder.session_id": "c456411064606f17",
+   "ChannelBuilder.set": null,
+   "ChannelBuilder.setChannelOption": null,
+   "ChannelBuilder.toChannel": "ad929ea1ae192f08",
+   "ChannelBuilder.token": null,
+   "ChannelBuilder.userAgent": "4970128728f84ddc",
+   "ChannelBuilder.userId": "911bc230cab7b9e2",
+   "ConfigResult": null,
+   "ConfigResult.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "ConfigResult.fromProto": null,
+   "DefaultChannelBuilder": "263adc4371234437",
+   "DefaultChannelBuilder.GRPC_DEFAULT_KEEPALIVE_ENABLED": "89d61a0f6c4b7b36",
+   "DefaultChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIMEOUT_MS": "4072aed12b3287d8",
+   "DefaultChannelBuilder.GRPC_DEFAULT_KEEPALIVE_TIME_MS": "4072aed12b3287d8",
+   "DefaultChannelBuilder.GRPC_DEFAULT_KEEPALIVE_WITHOUT_CALLS": "89d61a0f6c4b7b36",
+   "DefaultChannelBuilder.GRPC_DEFAULT_OPTIONS": "e4b7fc2f852bd7bf",
+   "DefaultChannelBuilder.GRPC_MAX_MESSAGE_LENGTH_DEFAULT": "4072aed12b3287d8",
+   "DefaultChannelBuilder.PARAM_GRPC_KEEPALIVE_ENABLED": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_GRPC_KEEPALIVE_TIMEOUT_MS": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_GRPC_KEEPALIVE_TIME_MS": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_GRPC_KEEPALIVE_WITHOUT_CALLS": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_SESSION_ID": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_TOKEN": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_USER_AGENT": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_USER_ID": "fdf09be211280cf3",
+   "DefaultChannelBuilder.PARAM_USE_SSL": "fdf09be211280cf3",
+   "DefaultChannelBuilder.__init__": "fe21fec6288ed90a",
+   "DefaultChannelBuilder.add_interceptor": null,
+   "DefaultChannelBuilder.default_port": null,
+   "DefaultChannelBuilder.endpoint": null,
+   "DefaultChannelBuilder.get": "2b9177ccf22c9827",
+   "DefaultChannelBuilder.getDefault": null,
+   "DefaultChannelBuilder.host": "191462512d1767b8",
+   "DefaultChannelBuilder.keepalive_enabled": "4b6275fc56f7a758",
+   "DefaultChannelBuilder.keepalive_time_ms": "935fbe13124002e0",
+   "DefaultChannelBuilder.keepalive_timeout_ms": "a9502e046997ce91",
+   "DefaultChannelBuilder.keepalive_without_calls": "983a580adb74e4b6",
+   "DefaultChannelBuilder.metadata": "d35f1ac66ac9620d",
+   "DefaultChannelBuilder.secure": null,
+   "DefaultChannelBuilder.session_id": "c456411064606f17",
+   "DefaultChannelBuilder.set": null,
+   "DefaultChannelBuilder.setChannelOption": null,
+   "DefaultChannelBuilder.toChannel": "7c89a113e5b84f98",
+   "DefaultChannelBuilder.token": null,
+   "DefaultChannelBuilder.use_ssl": null,
+   "DefaultChannelBuilder.userAgent": "4970128728f84ddc",
+   "DefaultChannelBuilder.userId": "911bc230cab7b9e2",
+   "PlanObservedMetrics": {
+    "getdoc": "6d2e78bc68039f22"
+   },
+   "PlanObservedMetrics.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "PlanObservedMetrics.keys": null,
+   "PlanObservedMetrics.metrics": null,
+   "PlanObservedMetrics.name": null,
+   "PlanObservedMetrics.pairs": null,
+   "PlanObservedMetrics.to_dict": "9375b27af15ec03e",
+   "RpcDeadlines": "f7080334b691f752",
+   "RpcDeadlines.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "RpcDeadlines.add_artifacts": "4072aed12b3287d8",
+   "RpcDeadlines.analyze_plan": "4072aed12b3287d8",
+   "RpcDeadlines.artifact_status": "4072aed12b3287d8",
+   "RpcDeadlines.clone_session": "4072aed12b3287d8",
+   "RpcDeadlines.config": "4072aed12b3287d8",
+   "RpcDeadlines.disabled": "09ecd05b090a83cd",
+   "RpcDeadlines.fetch_error_details": "4072aed12b3287d8",
+   "RpcDeadlines.get_status": "4072aed12b3287d8",
+   "RpcDeadlines.interrupt": "4072aed12b3287d8",
+   "RpcDeadlines.reattach_execute": "4072aed12b3287d8",
+   "RpcDeadlines.reattachable_execute_plan": "4072aed12b3287d8",
+   "RpcDeadlines.release_session": "4072aed12b3287d8",
+   "SparkConnectClient": "e7faecd27d4e9c91",
+   "SparkConnectClient.__init__": "6bcebbb42c8db03c",
+   "SparkConnectClient.add_artifacts": null,
+   "SparkConnectClient.add_global_user_context_extension": null,
+   "SparkConnectClient.add_tag": null,
+   "SparkConnectClient.add_threadlocal_user_context_extension": null,
+   "SparkConnectClient.cache_artifact": null,
+   "SparkConnectClient.cache_artifacts": null,
+   "SparkConnectClient.clear_progress_handlers": null,
+   "SparkConnectClient.clear_tags": null,
+   "SparkConnectClient.clear_user_context_extensions": null,
+   "SparkConnectClient.clone": "2a388d63edad29c6",
+   "SparkConnectClient.close": "817fcd7844c6b43f",
+   "SparkConnectClient.config": "e2a54779510213ab",
+   "SparkConnectClient.copy_from_local_to_fs": null,
+   "SparkConnectClient.disable_reattachable_execute": null,
+   "SparkConnectClient.enable_reattachable_execute": null,
+   "SparkConnectClient.execute_command": "ccb532f3b2f5cdf2",
+   "SparkConnectClient.execute_command_as_iterator": "453999065f00ae14",
+   "SparkConnectClient.explain_string": "16e7d7bc38b0ad2f",
+   "SparkConnectClient.get_config_dict": null,
+   "SparkConnectClient.get_config_with_defaults": null,
+   "SparkConnectClient.get_configs": null,
+   "SparkConnectClient.get_retry_policies": "b45a0c561e7484c1",
+   "SparkConnectClient.get_tags": null,
+   "SparkConnectClient.host": "191462512d1767b8",
+   "SparkConnectClient.interrupt_all": null,
+   "SparkConnectClient.interrupt_operation": null,
+   "SparkConnectClient.interrupt_tag": null,
+   "SparkConnectClient.is_closed": "8157ae421bc58558",
+   "SparkConnectClient.newSession": "e1ef90497dd2e7b7",
+   "SparkConnectClient.register_data_source": "9888cf0c46db977a",
+   "SparkConnectClient.register_java": null,
+   "SparkConnectClient.register_progress_handler": "d1469652f3ee172d",
+   "SparkConnectClient.register_udf": "62118580a1fc5e99",
+   "SparkConnectClient.register_udtf": "3fe099c17f59633a",
+   "SparkConnectClient.release_session": null,
+   "SparkConnectClient.remove_progress_handler": "c49e541b15a12acd",
+   "SparkConnectClient.remove_tag": null,
+   "SparkConnectClient.remove_user_context_extension": null,
+   "SparkConnectClient.same_semantics": "670f82553cb3ae35",
+   "SparkConnectClient.schema": "1dcb91262464aa29",
+   "SparkConnectClient.semantic_hash": "8500efa214605b35",
+   "SparkConnectClient.set_retry_policies": "3e6328dd47643c92",
+   "SparkConnectClient.to_pandas": "6ad6a6b10926b9a1",
+   "SparkConnectClient.to_table": "bebbd147f07ebfbf",
+   "SparkConnectClient.to_table_as_iterator": "2a70795a3d7762b8",
+   "SparkConnectClient.token": "27c884d4211a3277"
+  },
+  "pyspark.sql.connect.client.reattach": {
+   "": null,
+   "ExecutePlanResponseReattachableIterator": "e4ba25e3451beabd",
+   "ExecutePlanResponseReattachableIterator.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "ExecutePlanResponseReattachableIterator.close": {
+    "getdoc": "5bc8bd4708039d44"
+   },
+   "ExecutePlanResponseReattachableIterator.release_futures": null,
+   "ExecutePlanResponseReattachableIterator.send": {
+    "getdoc": "b46ae0574dc43f90"
+   },
+   "ExecutePlanResponseReattachableIterator.shutdown_threadpool_if_idle": null,
+   "ExecutePlanResponseReattachableIterator.throw": {
+    "getdoc": "8ab97bee201e71e3"
+   }
+  },
+  "pyspark.sql.connect.client.retries": {
+   "": null,
+   "AttemptManager": "41b992bb7c70089d",
+   "AttemptManager.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "DefaultPolicy": {
+    "getdoc": "3785122890cf0e78"
+   },
+   "DefaultPolicy.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "DefaultPolicy.can_retry": "c5e262cb0668e20f",
+   "DefaultPolicy.name": null,
+   "DefaultPolicy.to_state": null,
+   "RetryException": "071cc4d92e46bfbb",
+   "RetryException.__init__": "15432c8b93cc48ea",
+   "RetryPolicy": "9f8d357d0750507b",
+   "RetryPolicy.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "RetryPolicy.can_retry": null,
+   "RetryPolicy.name": null,
+   "RetryPolicy.to_state": null,
+   "RetryPolicyState": "718bd5ce2297876b",
+   "RetryPolicyState.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "RetryPolicyState.can_retry": null,
+   "RetryPolicyState.name": null,
+   "RetryPolicyState.next_attempt": "7f077b1bdf89fb91",
+   "RetryPolicyState.policy": null,
+   "Retrying": "b94fc60446ba5e4e",
+   "Retrying.__init__": {
+    "getdoc": "15432c8b93cc48ea"
+   },
+   "Retrying.accept_exception": null,
+   "Retrying.accept_succeeded": null,
+   "Retrying.can_retry": null,
+   "extract_retry_delay": "75f872a90c2195f5",
+   "extract_retry_info": "2a86c61adfeec2ec"
+  },
   "pyspark.sql.connect.column": {
    "": null,
    "Column": {

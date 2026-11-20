@@ -15,17 +15,17 @@
 # limitations under the License.
 #
 
-"""The module of PySpark's ``pyspark.sql.connect.client.core``, which defines the client of a
-Spark Connect session, ``SparkConnectClient``, the class of ``SparkSession.client``, and its
-classes, as PySpark's: its channel builders, its RPC deadlines, and the results of its analyses,
-its configurations and its observed metrics. Its package exports the classes of ``__all__``, as
-PySpark's does. Official PySpark code and tests import them here, and a pickle names them here.
-
-The client runs over the Rust transport of its session, which sends the messages that it is
-given, such as the plans of ``to_table`` and ``schema``, as they are: the client builds the
-requests of those as PySpark Connect's does, and reads their responses as it does. The retry
-policies, the reattachable executions, the result chunking and the RPC deadlines of the client are
-those of the transport, which replaces the gRPC stub of PySpark's client."""
+# The module of PySpark's ``pyspark.sql.connect.client.core``, which defines the client of a
+# Spark Connect session, ``SparkConnectClient``, the class of ``SparkSession.client``, and its
+# classes, as PySpark's: its channel builders, its RPC deadlines, and the results of its analyses,
+# its configurations and its observed metrics. Its package exports the classes of ``__all__``, as
+# PySpark's does. Official PySpark code and tests import them here, and a pickle names them here.
+#
+# The client runs over the Rust transport of its session, which sends the messages that it is
+# given, such as the plans of ``to_table`` and ``schema``, as they are: the client builds the
+# requests of those as PySpark Connect's does, and reads their responses as it does. The retry
+# policies, the reattachable executions, the result chunking and the RPC deadlines of the client are
+# those of the transport, which replaces the gRPC stub of PySpark's client.
 
 __all__ = [
     "ChannelBuilder",
@@ -116,7 +116,7 @@ PYSPARK_ROOT = os.path.dirname(pyspark.__file__)
 
 @dataclass(frozen=True)
 class RpcDeadlines:
-    """Per-RPC timeout configuration for :class:`SparkConnectClient`, as PySpark Connect's.
+    """Per-RPC timeout configuration for :class:`SparkConnectClient`.
 
     Each field controls the timeout (in seconds as a float) for one gRPC call type. Set a field to
     ``None`` to disable the per-RPC timeout for that call. Use :meth:`RpcDeadlines.disabled` to
@@ -127,10 +127,10 @@ class RpcDeadlines:
     fires, the server-side operation continues running; the client opens a new ReattachExecute
     stream to resume receiving results. Non-reattachable ExecutePlan has no deadline because a
     timeout there would kill the execution with no recovery path.
-
-    The Rust transport applies the deadline of each of its RPCs, ``get_status`` that of the
-    GetStatus RPC of ``SparkConnectClient._get_operation_statuses``.
     """
+
+    # As PySpark Connect's. The Rust transport applies the deadline of each of its RPCs,
+    # ``get_status`` that of the GetStatus RPC of ``SparkConnectClient._get_operation_statuses``.
 
     reattachable_execute_plan: Optional[float] = 10 * 60  # 10 min
     reattach_execute: Optional[float] = 10 * 60  # 10 min
@@ -190,12 +190,18 @@ def _import_zstandard_if_available() -> Optional[Any]:
 
 
 class ChannelBuilder:
-    """The parameters of a Spark Connect connection, as PySpark Connect's ``ChannelBuilder``:
-    what ``SparkSession.builder.channelBuilder`` and ``SparkSession(connection=...)`` take. The
-    Rust transport opens the channel of the session from the ``host``, the ``port`` and the
-    ``_params`` of the builder, as a ``sc://`` connection string, so the endpoint and the
-    parameters apply. A custom gRPC channel (``toChannel``), its interceptors and its channel
-    options do not: the transport has no gRPC channel to give them to."""
+    """
+    This is a helper class that is used to create a GRPC channel based on the given
+    connection string per the documentation of Spark Connect.
+
+    The standard implementation is in :class:`DefaultChannelBuilder`.
+    """
+    # The parameters of a Spark Connect connection, as PySpark Connect's ``ChannelBuilder``:
+    # what ``SparkSession.builder.channelBuilder`` and ``SparkSession(connection=...)`` take. The
+    # Rust transport opens the channel of the session from the ``host``, the ``port`` and the
+    # ``_params`` of the builder, as a ``sc://`` connection string, so the endpoint and the
+    # parameters apply. A custom gRPC channel (``toChannel``), its interceptors and its channel
+    # options do not: the transport has no gRPC channel to give them to.
 
     PARAM_USE_SSL = "use_ssl"
     PARAM_TOKEN = "token"
@@ -231,40 +237,63 @@ class ChannelBuilder:
         self._params: dict[str, str] = params or dict()
 
     def get(self, key: str) -> Any:
-        """The value of the parameter ``key``; raises ``KeyError`` if it is not set."""
+        """
+        Parameters
+        ----------
+        key : str
+            Parameter key name.
+        Returns
+        -------
+        The parameter value if present, raises exception otherwise.
+        """
+        # The value of the parameter ``key``; raises ``KeyError`` if it is not set.
         return self._params[key]
 
     def getDefault(self, key: str, default: Any) -> Any:
-        """The value of the parameter ``key``, or ``default`` if it is not set."""
+        # The value of the parameter ``key``, or ``default`` if it is not set.
         return self._params.get(key, default)
 
     def set(self, key: str, value: Any) -> None:
-        """Set the parameter ``key`` to ``value``."""
+        # Set the parameter ``key`` to ``value``.
         self._params[key] = value
 
     @property
     def host(self) -> str:
-        """The hostname where this client intends to connect, which a channel builder of its own
-        gives: PySpark's raises without one (``PySparkNotImplementedError``)."""
+        """
+        The hostname where this client intends to connect.
+        This is used for end-user display purpose in REPL
+        """
+        # The hostname where this client intends to connect, which a channel builder of its own
+        # gives: PySpark's raises without one (``PySparkNotImplementedError``).
         raise PySparkNotImplementedError
 
     @property
     def userId(self) -> Optional[str]:
-        """The user_id, extracted from the connection string or configured by other means."""
+        """
+        Returns
+        -------
+        The user_id (extracted from connection string or configured by other means).
+        """
         return self._params.get(ChannelBuilder.PARAM_USER_ID, None)
 
     @property
     def token(self) -> Optional[str]:
-        """The authentication token: of the parameters, else of the environment variable
-        ``SPARK_CONNECT_AUTHENTICATE_TOKEN``."""
+        # The authentication token: of the parameters, else of the environment variable
+        # ``SPARK_CONNECT_AUTHENTICATE_TOKEN``.
         return self._params.get(
             ChannelBuilder.PARAM_TOKEN, os.environ.get("SPARK_CONNECT_AUTHENTICATE_TOKEN")
         )
 
     @property
     def keepalive_enabled(self) -> bool:
-        """Whether the client sends gRPC/HTTP2 keepalive PINGs to detect a silently-dead
-        connection. Enabled by default."""
+        """
+        Whether the client sends gRPC/HTTP2 keepalive PINGs to detect a silently-dead
+        connection. Enabled by default; can be turned off as an escape hatch, e.g. if it
+        interacts badly with a particular network path, or a client environment is prone to
+        stalls long enough to trip false-positive disconnects.
+        """
+        # Whether the client sends gRPC/HTTP2 keepalive PINGs to detect a silently-dead
+        # connection. Enabled by default.
         return (
             self.getDefault(
                 ChannelBuilder.PARAM_GRPC_KEEPALIVE_ENABLED,
@@ -320,7 +349,13 @@ class ChannelBuilder:
 
     @property
     def session_id(self) -> Optional[str]:
-        """The session_id of the parameters, or None if it is not set."""
+        """
+        Returns
+        -------
+        The session_id extracted from the parameters of the connection string or `None` if not
+        specified.
+        """
+        # The session_id of the parameters, or None if it is not set.
         session_id = self._params.get(ChannelBuilder.PARAM_SESSION_ID, None)
         if session_id is not None:
             try:
@@ -335,9 +370,17 @@ class ChannelBuilder:
 
     @property
     def userAgent(self) -> str:
-        """The user agent: the ``user_agent`` parameter, else the environment variable
-        ``SPARK_CONNECT_USER_AGENT``, else ``_SPARK_CONNECT_PYTHON``, with the versions of
-        Spark, the operating system and Python. Its URL-escaped form is at most 2048 characters."""
+        """
+        Returns
+        -------
+        user_agent : str
+            The user_agent parameter specified in the connection string,
+            or "_SPARK_CONNECT_PYTHON" when not specified.
+            The returned value will be percent encoded.
+        """
+        # The user agent: the ``user_agent`` parameter, else the environment variable
+        # ``SPARK_CONNECT_USER_AGENT``, else ``_SPARK_CONNECT_PYTHON``, with the versions of
+        # Spark, the operating system and Python. Its URL-escaped form is at most 2048 characters.
         user_agent = self._params.get(
             ChannelBuilder.PARAM_USER_AGENT,
             os.getenv("SPARK_CONNECT_USER_AGENT", "_SPARK_CONNECT_PYTHON"),
@@ -358,7 +401,15 @@ class ChannelBuilder:
         )
 
     def metadata(self) -> Iterable[tuple[str, str]]:
-        """The parameters that are not used by the channel, as gRPC metadata of each request."""
+        """
+        Builds the GRPC specific metadata list to be injected into the request. All
+        parameters will be converted to metadata except ones that are explicitly used
+        by the channel.
+        Returns
+        -------
+        A list of tuples (key, value)
+        """
+        # The parameters that are not used by the channel, as gRPC metadata of each request.
         reserved = [
             ChannelBuilder.PARAM_TOKEN,
             ChannelBuilder.PARAM_USE_SSL,
@@ -374,18 +425,37 @@ class ChannelBuilder:
 
 
 class DefaultChannelBuilder(ChannelBuilder):
-    """The channel builder of a ``sc://`` connection string, as PySpark Connect's
-    ``DefaultChannelBuilder``.
+    """
+    This is a helper class that is used to create a GRPC channel based on the given
+    connection string per the documentation of Spark Connect.
+
+    .. versionadded:: 3.4.0
 
     Examples
     --------
-    >>> cb = DefaultChannelBuilder("sc://localhost")
-    >>> cb.endpoint
-    'localhost:15002'
+    >>> cb =  DefaultChannelBuilder("sc://localhost")
+    ... cb.endpoint
+    "localhost:15002"
+
     >>> cb = DefaultChannelBuilder("sc://localhost/;use_ssl=true;token=aaa")
-    >>> cb.secure
+    ... cb.secure
     True
+
+    >>> cb = DefaultChannelBuilder("sc://localhost/;grpc_keepalive_time_ms=30000")
+    ... cb.keepalive_time_ms
+    30000
     """
+    # The channel builder of a ``sc://`` connection string, as PySpark Connect's
+    # ``DefaultChannelBuilder``.
+    #
+    # Examples
+    # --------
+    # >>> cb = DefaultChannelBuilder("sc://localhost")
+    # >>> cb.endpoint
+    # 'localhost:15002'
+    # >>> cb = DefaultChannelBuilder("sc://localhost/;use_ssl=true;token=aaa")
+    # >>> cb.secure
+    # True
 
     @staticmethod
     def default_port() -> int:
@@ -394,8 +464,19 @@ class DefaultChannelBuilder(ChannelBuilder):
         return 15002
 
     def __init__(self, url: str, channelOptions: Optional[list[tuple[str, Any]]] = None) -> None:
-        """Construct a channel builder of the connection string ``url``, such as
-        ``sc://hostname:port/;key=value``."""
+        """
+        Constructs a new channel builder. This is used to create the proper GRPC channel from
+        the connection string.
+
+        Parameters
+        ----------
+        url : str
+            Spark Connect connection string
+        channelOptions: list of tuple, optional
+            Additional options that can be passed to the GRPC channel construction.
+        """
+        # Construct a channel builder of the connection string ``url``, such as
+        # ``sc://hostname:port/;key=value``.
         super().__init__(channelOptions=channelOptions)
 
         # Explicitly check the scheme of the URL.
@@ -450,7 +531,7 @@ class DefaultChannelBuilder(ChannelBuilder):
 
     @property
     def secure(self) -> bool:
-        """Whether the connection is secured: by TLS, or by a token."""
+        # Whether the connection is secured: by TLS, or by a token.
         return self.use_ssl or self.token is not None
 
     @property
@@ -459,7 +540,10 @@ class DefaultChannelBuilder(ChannelBuilder):
 
     @property
     def host(self) -> str:
-        """The hostname where this client intends to connect."""
+        """
+        The hostname where this client intends to connect.
+        """
+        # The hostname where this client intends to connect.
         return self._host
 
     @property
@@ -469,16 +553,16 @@ class DefaultChannelBuilder(ChannelBuilder):
 
     @property
     def endpoint(self) -> str:
-        """The ``host:port`` of the connection."""
+        # The ``host:port`` of the connection.
         return f"{self._host}:{self._port}"
 
 
 class PlanObservedMetrics(ObservedMetrics):
-    """Observed metrics of one ``observe(...)`` node, as carried by
-    ``DataFrame.executionInfo.flows``, as PySpark Connect's: its ``metrics`` are the
-    ``Expression.Literal`` messages (of ``pyspark.sql.connect.proto``) that the server sent,
-    which ``pairs`` converts with ``LiteralExpression._to_value``, and so raises PySpark's
-    ``UNSUPPORTED_LITERAL`` of a literal that it does not convert."""
+    # Observed metrics of one ``observe(...)`` node, as carried by
+    # ``DataFrame.executionInfo.flows``, as PySpark Connect's: its ``metrics`` are the
+    # ``Expression.Literal`` messages (of ``pyspark.sql.connect.proto``) that the server sent,
+    # which ``pairs`` converts with ``LiteralExpression._to_value``, and so raises PySpark's
+    # ``UNSUPPORTED_LITERAL`` of a literal that it does not convert.
 
     def __init__(self, name: str, metrics: list["pb2.Expression.Literal"], keys: list[str]):
         self._name = name
@@ -510,8 +594,13 @@ class PlanObservedMetrics(ObservedMetrics):
         return self._keys
 
     def to_dict(self) -> dict[str, Any]:
-        """Return a JSON-serializable dictionary representation of this observed metrics,
-        with the keys ``name``, ``keys`` and ``pairs``, as PySpark Connect's."""
+        """Return a JSON-serializable dictionary representation of this observed metrics.
+
+        Returns
+        -------
+        dict
+            A dictionary with keys 'name', 'keys', and 'pairs'.
+        """
         return {
             "name": self._name,
             "keys": self._keys,
@@ -520,8 +609,8 @@ class PlanObservedMetrics(ObservedMetrics):
 
 
 class AnalyzeResult:
-    """The result of an analysis of SparkConnectClient's ``_analyze``, as PySpark Connect's: the
-    one field of the result of the analysis, and None for the others."""
+    # The result of an analysis of SparkConnectClient's ``_analyze``, as PySpark Connect's: the
+    # one field of the result of the analysis, and None for the others.
 
     def __init__(
         self,
@@ -617,8 +706,8 @@ class AnalyzeResult:
 
 
 class ConfigResult:
-    """The result of SparkConnectClient's ``config``, as PySpark Connect's: the pairs of a key and
-    its value, None for a key without one, and the warnings of the server."""
+    # The result of SparkConnectClient's ``config``, as PySpark Connect's: the pairs of a key and
+    # its value, None for a key without one, and the warnings of the server.
 
     def __init__(self, pairs: list[tuple[str, Optional[str]]], warnings: list[str]):
         self.pairs = pairs
@@ -749,13 +838,16 @@ def _is_pyspark_source(filename: str) -> bool:
 
 
 class SparkConnectClient:
-    """The client of a Spark Connect session, as PySpark Connect's ``SparkConnectClient``: the
-    client of ``SparkSession.client``, and one that ``SparkConnectClient(connection, ...)`` makes
-    of a session of its own. It sends the messages that it is given, of
-    ``pyspark.sql.connect.proto``, over the Rust transport of its session, as the modules of
-    PySpark that build their own messages, such as ``pyspark.ml``, send them: commands, plans and
-    their analyses, configurations, and the artifacts, the tags, the interrupts and the progress
-    handlers of the session."""
+    """
+    Conceptually the remote spark session that communicates with the server
+    """
+    # The client of a Spark Connect session, as PySpark Connect's ``SparkConnectClient``: the
+    # client of ``SparkSession.client``, and one that ``SparkConnectClient(connection, ...)`` makes
+    # of a session of its own. It sends the messages that it is given, of
+    # ``pyspark.sql.connect.proto``, over the Rust transport of its session, as the modules of
+    # PySpark that build their own messages, such as ``pyspark.ml``, send them: commands, plans and
+    # their analyses, configurations, and the artifacts, the tags, the interrupts and the progress
+    # handlers of the session.
 
     # The session of the client is kept apart from its attributes, which are those of its session:
     # the clients of a session share them (see `_client_state`), as PySpark's session has one
@@ -792,19 +884,77 @@ class SparkConnectClient:
         rpc_deadlines: Optional[RpcDeadlines] = None,
         max_retry_exception_elapsed_time: Optional[float] = None,
     ):
-        """A client of a new session of the connection string or the channel builder
-        ``connection``, as PySpark Connect's ``SparkConnectClient``: of the user ``user_id``
-        unless the connection names one, else of ``SPARK_USER`` or ``USER``; of the retries of a
-        ``DefaultPolicy`` of the keyword arguments ``retry_policy``, and of a
-        ``RetryException`` for up to ``max_retry_exception_elapsed_time`` seconds; of reattachable
-        executions unless ``use_reattachable_execute`` is False; whose executions call the
-        ``on_execute_plan`` of ``session_hooks``; of the result chunking of
-        ``allow_arrow_batch_chunking`` and ``preferred_arrow_chunk_size``; and of the deadlines
-        of ``rpc_deadlines``. The session is neither the default session nor the active one.
+        """
+        Creates a new SparkSession for the Spark Connect interface.
 
-        The Rust transport opens the channel of the connection, so a ``channel_options`` of a
-        connection string raises ``NOT_IMPLEMENTED``, as its ``DefaultChannelBuilder`` does; as
-        PySpark's, the client of a channel builder does not read it."""
+        Parameters
+        ----------
+        connection : str or :class:`ChannelBuilder`
+            Connection string that is used to extract the connection parameters and configure
+            the GRPC connection. Or instance of ChannelBuilder that creates GRPC connection.
+            Defaults to `sc://localhost`.
+        user_id : str, optional
+            Optional unique user ID that is used to differentiate multiple users and
+            isolate their Spark Sessions. If the `user_id` is not set, will default to
+            the $USER environment. Defining the user ID as part of the connection string
+            takes precedence.
+        channel_options: list of tuple, optional
+            Additional options that can be passed to the GRPC channel construction.
+        retry_policy: dict of str and any, optional
+            Additional configuration for retrying. There are four configurations as below
+                * ``max_retries``
+                    Maximum number of tries default 15
+                * ``backoff_multiplier``
+                    Backoff multiplier for the policy. Default: 4(ms)
+                * ``initial_backoff``
+                    Backoff to wait before the first retry. Default: 50(ms)
+                * ``max_backoff``
+                    Maximum backoff controls the maximum amount of time to wait before retrying
+                    a failed request. Default: 60000(ms).
+        use_reattachable_execute: bool
+            Enable reattachable execution.
+        session_hooks: list[SparkSession.Hook], optional
+            List of session hooks to call.
+        allow_arrow_batch_chunking: bool
+            Whether to allow the server to split large Arrow batches into smaller chunks.
+            Although Arrow results are split into batches with a size limit according to estimation,
+            the size of the batches is not guaranteed to be less than the limit, especially when a
+            single row is larger than the limit, in which case the server will fail to split it
+            further into smaller batches. As a result, the client may encounter a gRPC error stating
+            "Received message larger than max" when a batch is too large.
+            If true, the server will split large Arrow batches into smaller chunks, and the client
+            is expected to handle the chunked Arrow batches.
+            If false, the server will not chunk large Arrow batches.
+        preferred_arrow_chunk_size: Optional[int]
+            Optional preferred Arrow batch size in bytes for the server to use when sending Arrow
+            results.
+            The server will attempt to use this size if it is set and within the valid range
+            ([1KB, max batch size on server]). Otherwise, the server's maximum batch size is used.
+        rpc_deadlines : RpcDeadlines, optional
+            Per-RPC gRPC call timeouts in seconds (10 min for most RPCs,
+            1 hour for analyze/addArtifacts, none for non-reattachable execute).
+            Use :meth:`RpcDeadlines.disabled` to turn off all deadlines.
+        max_retry_exception_elapsed_time : float, optional
+            Maximum cumulative elapsed time in seconds the client will keep retrying a
+            RetryException (raised internally when a reattach attempt keeps hitting
+            DEADLINE_EXCEEDED, or when the initial ExecutePlan never reached the server) before
+            giving up and raising the underlying error. Defaults to
+            :data:`~pyspark.sql.connect.client.retries.DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME`
+            (1 hour).
+        """
+        # A client of a new session of the connection string or the channel builder
+        # ``connection``, as PySpark Connect's ``SparkConnectClient``: of the user ``user_id``
+        # unless the connection names one, else of ``SPARK_USER`` or ``USER``; of the retries of a
+        # ``DefaultPolicy`` of the keyword arguments ``retry_policy``, and of a
+        # ``RetryException`` for up to ``max_retry_exception_elapsed_time`` seconds; of reattachable
+        # executions unless ``use_reattachable_execute`` is False; whose executions call the
+        # ``on_execute_plan`` of ``session_hooks``; of the result chunking of
+        # ``allow_arrow_batch_chunking`` and ``preferred_arrow_chunk_size``; and of the deadlines
+        # of ``rpc_deadlines``. The session is neither the default session nor the active one.
+        #
+        # The Rust transport opens the channel of the connection, so a ``channel_options`` of a
+        # connection string raises ``NOT_IMPLEMENTED``, as its ``DefaultChannelBuilder`` does; as
+        # PySpark's, the client of a channel builder does not read it.
         # As PySpark's, the channel builder of a connection string, which checks it, and then the
         # retry policy and the session ID that the client reads of them.
         builder = (
@@ -919,17 +1069,24 @@ class SparkConnectClient:
 
     @property
     def host(self) -> str:
-        """The hostname where this client intends to connect, as SparkConnectClient's ``host``:
-        of its channel builder."""
+        """
+        The hostname where this client intends to connect.
+        """
+        # The hostname where this client intends to connect, as SparkConnectClient's ``host``:
+        # of its channel builder.
         if self._builder is not None:
             return self._builder.host
         return self._session._endpoint_host()
 
     @property
     def token(self) -> Optional[str]:
-        """The authentication bearer token during connection, as SparkConnectClient's ``token``:
-        that of its channel builder, the ``token`` parameter of the connection string, else the
-        environment variable ``SPARK_CONNECT_AUTHENTICATE_TOKEN``, or None."""
+        """
+        The authentication bearer token during connection.
+        If authentication is not using a bearer token, None will be returned.
+        """
+        # The authentication bearer token during connection, as SparkConnectClient's ``token``:
+        # that of its channel builder, the ``token`` parameter of the connection string, else the
+        # environment variable ``SPARK_CONNECT_AUTHENTICATE_TOKEN``, or None.
         if self._builder is not None:
             return self._builder.token
         token = self._session._token_parameter()
@@ -999,8 +1156,11 @@ class SparkConnectClient:
 
     @property
     def is_closed(self) -> bool:
-        """Whether the session of the client is stopped, as SparkConnectClient's ``is_closed``,
-        whether its channel is closed."""
+        """
+        Returns if the channel was closed previously using close() method
+        """
+        # Whether the session of the client is stopped, as SparkConnectClient's ``is_closed``,
+        # whether its channel is closed.
         return self._session.is_stopped
 
     def _proto_to_string(self, p: Any, truncate: bool = False) -> str:
@@ -1071,26 +1231,38 @@ class SparkConnectClient:
         return p2
 
     def get_configs(self, *keys: str) -> tuple[Optional[str], ...]:
-        """The values of the configurations ``keys``, in one request, as SparkConnectClient's
-        ``get_configs``."""
+        # The values of the configurations ``keys``, in one request, as SparkConnectClient's
+        # ``get_configs``.
         return tuple(self._session.conf._get_many(list(keys)))
 
     def get_config_dict(self, *keys: str) -> Mapping[str, Optional[str]]:
-        """The values of the configurations ``keys`` by their keys, in one request, as
-        SparkConnectClient's ``get_config_dict``."""
+        # The values of the configurations ``keys`` by their keys, in one request, as
+        # SparkConnectClient's ``get_config_dict``.
         return dict(zip(keys, self.get_configs(*keys)))
 
     def get_config_with_defaults(
         self, *pairs: tuple[str, Optional[str]]
     ) -> tuple[Optional[str], ...]:
-        """The values of the configurations of ``pairs`` of a key and its default, the default of
-        a key that is not set, in one request, as SparkConnectClient's
-        ``get_config_with_defaults``, of which pandas-on-Spark reads its ANSI mode."""
+        # The values of the configurations of ``pairs`` of a key and its default, the default of
+        # a key that is not set, in one request, as SparkConnectClient's
+        # ``get_config_with_defaults``, of which pandas-on-Spark reads its ANSI mode.
         return tuple(self._session.conf._get_with_defaults(list(pairs)))
 
     def config(self, operation: "pb2.ConfigRequest.Operation") -> ConfigResult:
-        """Send ``operation``, a ``ConfigRequest.Operation``, as SparkConnectClient's ``config``:
-        the result of the configuration request of the session."""
+        """
+        Call the config RPC of Spark Connect.
+
+        Parameters
+        ----------
+        operation : str
+           Operation kind
+
+        Returns
+        -------
+        The result of the config call.
+        """
+        # Send ``operation``, a ``ConfigRequest.Operation``, as SparkConnectClient's ``config``:
+        # the result of the configuration request of the session.
         import pyspark.sql.connect.proto as pb2
 
         req = pb2.ConfigRequest()
@@ -1172,8 +1344,11 @@ class SparkConnectClient:
         return AnalyzeResult.fromProto(_parse_response(pb2.AnalyzePlanResponse, data))
 
     def schema(self, plan: "pb2.Plan") -> StructType:
-        """The schema of ``plan``, a ``spark.connect.Plan``, as SparkConnectClient's ``schema``:
-        of its analysis by the server."""
+        """
+        Return schema for given plan.
+        """
+        # The schema of ``plan``, a ``spark.connect.Plan``, as SparkConnectClient's ``schema``:
+        # of its analysis by the server.
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Schema for plan: {self._proto_to_string(plan, True)}")
         schema = self._analyze(method="schema", plan=plan).schema
@@ -1183,9 +1358,12 @@ class SparkConnectClient:
         return schema
 
     def explain_string(self, plan: "pb2.Plan", explain_mode: str = "extended") -> str:
-        """The explain string of ``plan`` in ``explain_mode``, as SparkConnectClient's
-        ``explain_string``: ``VALUE_NOT_ALLOWED`` for a mode other than ``simple``,
-        ``extended``, ``codegen``, ``cost`` and ``formatted``."""
+        """
+        Return explain string for given plan.
+        """
+        # The explain string of ``plan`` in ``explain_mode``, as SparkConnectClient's
+        # ``explain_string``: ``VALUE_NOT_ALLOWED`` for a mode other than ``simple``,
+        # ``extended``, ``codegen``, ``cost`` and ``formatted``.
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 f"Explain (mode={explain_mode}) for plan {self._proto_to_string(plan, True)}"
@@ -1197,15 +1375,21 @@ class SparkConnectClient:
         return result
 
     def same_semantics(self, plan: "pb2.Plan", other: "pb2.Plan") -> bool:
-        """Whether ``plan`` and ``other`` have the same semantics, as SparkConnectClient's
-        ``same_semantics``."""
+        """
+        return if two plans have the same semantics.
+        """
+        # Whether ``plan`` and ``other`` have the same semantics, as SparkConnectClient's
+        # ``same_semantics``.
         result = self._analyze(method="same_semantics", plan=plan, other=other).is_same_semantics
         assert result is not None
         return result
 
     def semantic_hash(self, plan: "pb2.Plan") -> int:
-        """The ``hashCode`` of the logical plan of ``plan``, as SparkConnectClient's
-        ``semantic_hash``."""
+        """
+        returns a `hashCode` of the logical query plan.
+        """
+        # The ``hashCode`` of the logical plan of ``plan``, as SparkConnectClient's
+        # ``semantic_hash``.
         result = self._analyze(method="semantic_hash", plan=plan).semantic_hash
         assert result is not None
         return result
@@ -1358,10 +1542,13 @@ class SparkConnectClient:
     def to_table_as_iterator(
         self, plan: "pb2.Plan", observations: dict[str, "Observation"]
     ) -> Iterator[Union[StructType, "pa.Table"]]:
-        """The result of ``plan`` as it arrives, as SparkConnectClient's
-        ``to_table_as_iterator``: its schema, once the server sends it, and a PyArrow Table of
-        each record batch. The execution sets the Observations of ``observations`` by their
-        names, and starts with the first item."""
+        """
+        Return given plan as a PyArrow Table iterator.
+        """
+        # The result of ``plan`` as it arrives, as SparkConnectClient's
+        # ``to_table_as_iterator``: its schema, once the server sends it, and a PyArrow Table of
+        # each record batch. The execution sets the Observations of ``observations`` by their
+        # names, and starts with the first item.
         import pyarrow as pa
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -1376,9 +1563,12 @@ class SparkConnectClient:
     def to_table(
         self, plan: "pb2.Plan", observations: dict[str, "Observation"]
     ) -> tuple["pa.Table", Optional[StructType], ExecutionInfo]:
-        """The result of ``plan`` as a PyArrow Table, as SparkConnectClient's ``to_table``: the
-        table of the record batches of the server, the schema that it sent, or None, and the
-        ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``."""
+        """
+        Return given plan as a PyArrow Table.
+        """
+        # The result of ``plan`` as a PyArrow Table, as SparkConnectClient's ``to_table``: the
+        # table of the record batches of the server, the schema that it sent, or None, and the
+        # ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``.
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
         sent = _plan_of(plan)
@@ -1393,10 +1583,13 @@ class SparkConnectClient:
     def to_pandas(
         self, plan: "pb2.Plan", observations: dict[str, "Observation"], **kwargs: Any
     ) -> tuple["pd.DataFrame", ExecutionInfo]:
-        """The result of ``plan`` as a pandas DataFrame, as SparkConnectClient's ``to_pandas``:
-        each column converted by its Spark type, in the session time zone, of the
-        ``spark.sql.execution.pandas.structHandlingMode``, or of a ``pandasStructHandlingMode``
-        keyword argument, and the ``ExecutionInfo`` of the execution."""
+        """
+        Return given plan as a pandas DataFrame.
+        """
+        # The result of ``plan`` as a pandas DataFrame, as SparkConnectClient's ``to_pandas``:
+        # each column converted by its Spark type, in the session time zone, of the
+        # ``spark.sql.execution.pandas.structHandlingMode``, or of a ``pandasStructHandlingMode``
+        # keyword argument, and the ``ExecutionInfo`` of the execution.
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Executing plan {self._proto_to_string(plan, True)}")
         sent = _plan_of(plan)
@@ -1435,12 +1628,15 @@ class SparkConnectClient:
     def execute_command(
         self, command: "pb2.Command", observations: Optional[dict[str, "Observation"]] = None
     ) -> tuple[Optional["pd.DataFrame"], dict[str, Any], ExecutionInfo]:
-        """Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's
-        ``execute_command``: the pandas DataFrame of the record batches of the responses, or
-        None without any, the properties of the results of the responses, of their field names,
-        as SparkConnectClient converts them (the resources of a GetResourcesCommand, the
-        profile ID of a resource profile, and the DataFrame of a checkpoint), and the
-        ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``."""
+        """
+        Execute given command.
+        """
+        # Execute ``command``, a ``spark.connect.Command``, as SparkConnectClient's
+        # ``execute_command``: the pandas DataFrame of the record batches of the responses, or
+        # None without any, the properties of the results of the responses, of their field names,
+        # as SparkConnectClient converts them (the resources of a GetResourcesCommand, the
+        # profile ID of a resource profile, and the DataFrame of a checkpoint), and the
+        # ``ExecutionInfo`` of the execution, which sets the Observations of ``observations``.
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Execute command for command {self._proto_to_string(command, True)}")
         data, _, metrics, observed_metrics, properties, operation_id = self._execute_and_fetch(
@@ -1456,10 +1652,13 @@ class SparkConnectClient:
     def execute_command_as_iterator(
         self, command: "pb2.Command", observations: Optional[dict[str, "Observation"]] = None
     ) -> Iterator[dict[str, Any]]:
-        """Execute ``command``, as ``execute_command``, and yield the properties of the result of
-        each response as it arrives, as SparkConnectClient's ``execute_command_as_iterator``:
-        ``UNKNOWN_RESPONSE`` for a result that is not one, such as metrics or a record batch. Its
-        progress does not reach the progress handlers, as PySpark's does not."""
+        """
+        Execute given command. Similar to execute_command, but the value is returned using yield.
+        """
+        # Execute ``command``, as ``execute_command``, and yield the properties of the result of
+        # each response as it arrives, as SparkConnectClient's ``execute_command_as_iterator``:
+        # ``UNKNOWN_RESPONSE`` for a result that is not one, such as metrics or a record batch. Its
+        # progress does not reach the progress handlers, as PySpark's does not.
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 f"Execute command as iterator for command {self._proto_to_string(command, True)}"
@@ -1478,9 +1677,9 @@ class SparkConnectClient:
                 )
 
     def add_threadlocal_user_context_extension(self, extension: Any) -> str:
-        """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests that
-        the current thread sends, as SparkConnectClient's: to the list of
-        ``thread_local.user_context_extensions``, of its ID."""
+        # Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests that
+        # the current thread sends, as SparkConnectClient's: to the list of
+        # ``thread_local.user_context_extensions``, of its ID.
         if not hasattr(self.thread_local, "user_context_extensions"):
             self.thread_local.user_context_extensions = list()
         extension_id = "threadlocal_" + str(uuid.uuid4())
@@ -1488,18 +1687,18 @@ class SparkConnectClient:
         return extension_id
 
     def add_global_user_context_extension(self, extension: Any) -> str:
-        """Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests of
-        all the threads, as SparkConnectClient's: its ID, of the extension that its
-        ``global_user_context_extensions`` list holds."""
+        # Add ``extension``, a ``google.protobuf.Any``, to the user context of the requests of
+        # all the threads, as SparkConnectClient's: its ID, of the extension that its
+        # ``global_user_context_extensions`` list holds.
         extension_id = "global_" + str(uuid.uuid4())
         with self.global_user_context_extensions_lock:
             self.global_user_context_extensions.append((extension_id, extension))
         return extension_id
 
     def remove_user_context_extension(self, extension_id: str) -> None:
-        """Remove the user context extension of ``extension_id``, as SparkConnectClient's: of the
-        current thread, which rebinds ``thread_local.user_context_extensions`` to a list without
-        it, or a global one, which rebinds ``global_user_context_extensions``."""
+        # Remove the user context extension of ``extension_id``, as SparkConnectClient's: of the
+        # current thread, which rebinds ``thread_local.user_context_extensions`` to a list without
+        # it, or a global one, which rebinds ``global_user_context_extensions``.
         if extension_id.find("threadlocal_") == 0:
             if not hasattr(self.thread_local, "user_context_extensions"):
                 return
@@ -1513,25 +1712,25 @@ class SparkConnectClient:
                 )
 
     def clear_user_context_extensions(self) -> None:
-        """Remove the user context extensions of the current thread and the global ones, as
-        SparkConnectClient's: each is a new, empty list, that of the thread if it has one."""
+        # Remove the user context extensions of the current thread and the global ones, as
+        # SparkConnectClient's: each is a new, empty list, that of the thread if it has one.
         if hasattr(self.thread_local, "user_context_extensions"):
             self.thread_local.user_context_extensions = list()
         with self.global_user_context_extensions_lock:
             self.global_user_context_extensions = list()
 
     def add_tag(self, tag: str) -> None:
-        """Add ``tag`` to the tags of the current thread, which the executions that it starts
-        carry, as SparkConnectClient's: to the set of ``thread_local.tags``, of the errors of
-        ``_throw_if_invalid_tag``."""
+        # Add ``tag`` to the tags of the current thread, which the executions that it starts
+        # carry, as SparkConnectClient's: to the set of ``thread_local.tags``, of the errors of
+        # ``_throw_if_invalid_tag``.
         self._throw_if_invalid_tag(tag)
         if not hasattr(self.thread_local, "tags"):
             self.thread_local.tags = set()
         self.thread_local.tags.add(tag)
 
     def remove_tag(self, tag: str) -> None:
-        """Remove ``tag`` from the tags of the current thread, as SparkConnectClient's: of the
-        errors of ``add_tag``, and nothing for a tag that the thread does not have."""
+        # Remove ``tag`` from the tags of the current thread, as SparkConnectClient's: of the
+        # errors of ``add_tag``, and nothing for a tag that the thread does not have.
         self._throw_if_invalid_tag(tag)
         if not hasattr(self.thread_local, "tags"):
             self.thread_local.tags = set()
@@ -1540,15 +1739,15 @@ class SparkConnectClient:
         self.thread_local.tags.discard(tag)
 
     def get_tags(self) -> set[str]:
-        """The tags of the current thread, as SparkConnectClient's: the set of
-        ``thread_local.tags``, which the later changes of the tags change too."""
+        # The tags of the current thread, as SparkConnectClient's: the set of
+        # ``thread_local.tags``, which the later changes of the tags change too.
         if not hasattr(self.thread_local, "tags"):
             self.thread_local.tags = set()
         return self.thread_local.tags
 
     def clear_tags(self) -> None:
-        """Remove the tags of the current thread, as SparkConnectClient's: ``thread_local.tags``
-        is a new, empty set."""
+        # Remove the tags of the current thread, as SparkConnectClient's: ``thread_local.tags``
+        # is a new, empty set.
         self.thread_local.tags = set()
 
     def _throw_if_invalid_tag(self, tag: str) -> None:
@@ -1576,20 +1775,20 @@ class SparkConnectClient:
             )
 
     def interrupt_all(self) -> Optional[list[str]]:
-        """Interrupt the executions of the session, as SparkConnectClient's: the IDs of the
-        operations interrupted."""
+        # Interrupt the executions of the session, as SparkConnectClient's: the IDs of the
+        # operations interrupted.
         return self._session.interruptAll()
 
     def interrupt_tag(self, tag: str) -> Optional[list[str]]:
-        """Interrupt the executions of the session of the tag ``tag``, as SparkConnectClient's:
-        the IDs of the operations interrupted."""
+        # Interrupt the executions of the session of the tag ``tag``, as SparkConnectClient's:
+        # the IDs of the operations interrupted.
         # As PySpark's request of an interrupt of a tag, which asserts that there is one.
         assert tag is not None
         return self._session.interruptTag(tag)
 
     def interrupt_operation(self, op_id: str) -> Optional[list[str]]:
-        """Interrupt the execution of the operation ``op_id``, as SparkConnectClient's: the IDs
-        of the operations interrupted."""
+        # Interrupt the execution of the operation ``op_id``, as SparkConnectClient's: the IDs
+        # of the operations interrupted.
         # As PySpark's request of an interrupt of an operation, which asserts that there is one.
         assert op_id is not None
         return self._session.interruptOperation(op_id)
@@ -1602,14 +1801,18 @@ class SparkConnectClient:
         eval_type: int = PythonEvalType.SQL_BATCHED_UDF,
         deterministic: bool = True,
     ) -> str:
-        """Register the Python function ``function`` as a temporary function of the session of
-        the name ``name``, else of a name that the client generates, as SparkConnectClient's
-        ``register_udf``: the name. A DDL ``return_type`` is parsed by the server, and the
-        function is pickled with the type, as PySpark's ``PythonUDF`` does. As PySpark's, the
-        name and ``deterministic`` are set in the fields of the command first, then the return
-        type is parsed and converted, then ``eval_type`` is set, and the function is pickled
-        last, so each raises the error of its protobuf field or of its conversion in that
-        order."""
+        """
+        Create a temporary UDF in the session catalog on the other side. We generate a
+        temporary name for it.
+        """
+        # Register the Python function ``function`` as a temporary function of the session of
+        # the name ``name``, else of a name that the client generates, as SparkConnectClient's
+        # ``register_udf``: the name. A DDL ``return_type`` is parsed by the server, and the
+        # function is pickled with the type, as PySpark's ``PythonUDF`` does. As PySpark's, the
+        # name and ``deterministic`` are set in the fields of the command first, then the return
+        # type is parsed and converted, then ``eval_type`` is set, and the function is pickled
+        # last, so each raises the error of its protobuf field or of its conversion in that
+        # order.
         import pyspark.sql.connect.proto as pb2
         from pyspark.serializers import CloudPickleSerializer
 
@@ -1648,13 +1851,19 @@ class SparkConnectClient:
         eval_type: int = PythonEvalType.SQL_TABLE_UDF,
         deterministic: bool = True,
     ) -> str:
-        """Register the user-defined table function class ``function`` as the temporary
-        function ``name`` of the session, as SparkConnectClient's ``register_udtf``: the name. A
-        DDL ``return_type`` is left to the server to parse. As PySpark's, the ``__name__`` of the
-        handler class is read, the name and ``deterministic`` are set in the fields of the
-        command, the return type is converted and ``eval_type`` set before the handler is
-        pickled, so a handler that does not pickle raises ``UDTF_SERIALIZATION_ERROR`` only of
-        valid arguments."""
+        """
+        Register a user-defined table function (UDTF) in the session catalog
+        as a temporary function. The return type, if specified, must be a
+        struct type and it's validated when building the proto message
+        for the PythonUDTF.
+        """
+        # Register the user-defined table function class ``function`` as the temporary
+        # function ``name`` of the session, as SparkConnectClient's ``register_udtf``: the name. A
+        # DDL ``return_type`` is left to the server to parse. As PySpark's, the ``__name__`` of the
+        # handler class is read, the name and ``deterministic`` are set in the fields of the
+        # command, the return type is converted and ``eval_type`` set before the handler is
+        # pickled, so a handler that does not pickle raises ``UDTF_SERIALIZATION_ERROR`` only of
+        # valid arguments.
         import pyspark.sql.connect.proto as pb2
         from pyspark.sql.connect.udtf import _pickled_handler
         from pyspark.sql.connect.utils import get_python_ver
@@ -1678,8 +1887,11 @@ class SparkConnectClient:
         return name
 
     def register_data_source(self, dataSource: type["DataSource"]) -> None:
-        """Register the Python data source class ``dataSource`` with the session, of its
-        ``name()``, as SparkConnectClient's ``register_data_source``."""
+        """
+        Register a data source in the session catalog.
+        """
+        # Register the Python data source class ``dataSource`` with the session, of its
+        # ``name()``, as SparkConnectClient's ``register_data_source``.
         self._session.dataSource.register(dataSource)
 
     def register_java(
@@ -1689,13 +1901,13 @@ class SparkConnectClient:
         return_type: "Optional[Union[DataType, str]]" = None,
         aggregate: bool = False,
     ) -> None:
-        """Register the Java function of the class ``javaClassName`` as the temporary function
-        ``name`` of the session, as SparkConnectClient's ``register_java``: an aggregate one for
-        ``aggregate``, of the class's own type, and of a ``return_type``, a DataType or a DDL
-        string that the server parses, a function that is not an aggregate one, as PySpark's
-        ``JavaUDF`` of an output type is. As PySpark's, the name, the class name, the return
-        type and then ``aggregate``, unless there is a return type, are set in the fields of the
-        command in that order, so each raises the error of its protobuf field in that order."""
+        # Register the Java function of the class ``javaClassName`` as the temporary function
+        # ``name`` of the session, as SparkConnectClient's ``register_java``: an aggregate one for
+        # ``aggregate``, of the class's own type, and of a ``return_type``, a DataType or a DDL
+        # string that the server parses, a function that is not an aggregate one, as PySpark's
+        # ``JavaUDF`` of an output type is. As PySpark's, the name, the class name, the return
+        # type and then ``aggregate``, unless there is a return type, are set in the fields of the
+        # command in that order, so each raises the error of its protobuf field in that order.
         import pyspark.sql.connect.proto as pb2
 
         # As PySpark's CommonInlineUserDefinedFunction.to_plan_judf and JavaUDF.to_plan.
@@ -1711,17 +1923,17 @@ class SparkConnectClient:
         )
 
     def add_artifacts(self, *paths: str, pyfile: bool, archive: bool, file: bool) -> None:
-        """Add the local files, or ``file:`` URIs, ``paths`` as artifacts of the session, as
-        SparkConnectClient's ``add_artifacts``: each named by the first of ``pyfile``,
-        ``archive`` and ``file`` that it matches, which the client, unlike
-        ``SparkSession.addArtifacts``, does not check against each other, else a jar."""
+        # Add the local files, or ``file:`` URIs, ``paths`` as artifacts of the session, as
+        # SparkConnectClient's ``add_artifacts``: each named by the first of ``pyfile``,
+        # ``archive`` and ``file`` that it matches, which the client, unlike
+        # ``SparkSession.addArtifacts``, does not check against each other, else a jar.
         self._session._add_artifacts_of_flags(*paths, pyfile=pyfile, archive=archive, file=file)
 
     def copy_from_local_to_fs(self, local_path: str, dest_path: str) -> None:
-        """Copy the local file ``local_path`` to the absolute path ``dest_path`` of the file
-        system of the server, as SparkConnectClient's ``copy_from_local_to_fs``: of the
-        assertions and the errors of its ArtifactManager, without the check of a scheme of
-        ``SparkSession.copyFromLocalToFs``."""
+        # Copy the local file ``local_path`` to the absolute path ``dest_path`` of the file
+        # system of the server, as SparkConnectClient's ``copy_from_local_to_fs``: of the
+        # assertions and the errors of its ArtifactManager, without the check of a scheme of
+        # ``SparkSession.copyFromLocalToFs``.
         abs_path = Path(local_path).absolute()
         assert abs_path.is_file(), "local path must be a file path."
         assert Path(dest_path).is_absolute(), "destination FS path must be an absolute path."
@@ -1731,17 +1943,17 @@ class SparkConnectClient:
         self._session._copy_from_local_to_fs(str(abs_path), dest_path)
 
     def cache_artifact(self, blob: bytes) -> str:
-        """Cache ``blob``, a bytes-like object, as an artifact of the session, as
-        SparkConnectClient's ``cache_artifact``: its SHA-256 hash, of which it is uploaded unless
-        the server has it."""
+        # Cache ``blob``, a bytes-like object, as an artifact of the session, as
+        # SparkConnectClient's ``cache_artifact``: its SHA-256 hash, of which it is uploaded unless
+        # the server has it.
         return self.cache_artifacts([blob])[0]
 
     def cache_artifacts(self, blobs: list[bytes]) -> list[str]:
-        """Cache ``blobs``, bytes-like objects, as artifacts of the session, as
-        SparkConnectClient's ``cache_artifacts``: their SHA-256 hashes, in order, of which those
-        that the server does not have are uploaded, once each, in one request. As PySpark's
-        ``ArtifactManager``, the hashes of ``hashlib`` come first, so a blob that is not
-        bytes-like raises its ``TypeError`` before anything is sent."""
+        # Cache ``blobs``, bytes-like objects, as artifacts of the session, as
+        # SparkConnectClient's ``cache_artifacts``: their SHA-256 hashes, in order, of which those
+        # that the server does not have are uploaded, once each, in one request. As PySpark's
+        # ``ArtifactManager``, the hashes of ``hashlib`` come first, so a blob that is not
+        # bytes-like raises its ``TypeError`` before anything is sent.
         import hashlib
 
         blobs = list(blobs)
@@ -1755,10 +1967,24 @@ class SparkConnectClient:
         )
 
     def newSession(self) -> "SparkConnectClient":
-        """A client of a new session of the same connection string, over the connection of the
-        process to its server, as SparkConnectClient's ``newSession``: of none of the state of this
-        session, of its hooks, its deadlines and whether its executions are reattachable, of the
-        user of ``_user_id`` unless the connection has one, and of the default retry policy."""
+        """
+        Create a new client against the same endpoint with a fresh, independent server-side
+        session that does NOT inherit any state from this client's session. Unlike
+        :meth:`clone`, no state (SQL configurations, temporary views, registered functions,
+        catalog state) is copied over, and no server round-trip is made: the new client is
+        built from a copy of this client's connection configuration with the session ID
+        cleared, so a fresh session ID is generated and the server lazily creates an empty
+        isolated session for it.
+
+        Returns
+        -------
+        SparkConnectClient
+            A new SparkConnectClient instance bound to a fresh, empty session.
+        """
+        # A client of a new session of the same connection string, over the connection of the
+        # process to its server, as SparkConnectClient's ``newSession``: of none of the state of this
+        # session, of its hooks, its deadlines and whether its executions are reattachable, of the
+        # user of ``_user_id`` unless the connection has one, and of the default retry policy.
         session = _new_session_of(self._session, client_state=self.__dict__)
         # A client that no session object owns, as PySpark's, lives until the exit.
         client = SparkConnectClient._of_session(session)
@@ -1766,11 +1992,37 @@ class SparkConnectClient:
         return client
 
     def clone(self, new_session_id: Optional[str] = None) -> "SparkConnectClient":
-        """A client of a clone of this session on the server, of the ID ``new_session_id``, a
-        UUID, if one is given, as SparkConnectClient's ``clone``: of a copy of its SQL
-        configurations, temporary views, registered functions and catalog state, of the hooks,
-        the deadlines and the reattachable executions of this client, of the user of its
-        ``_user_id`` unless the connection has one, and of the default retry policy."""
+        """
+        Clone this client session on the server side. The server-side session is cloned with
+        all its current state (SQL configurations, temporary views, registered functions,
+        catalog state) copied over to a new independent session. The returned client with the
+        cloned session is isolated from this client's session - any subsequent changes to
+        either session's server-side state will not be reflected in the other.
+
+        Parameters
+        ----------
+        new_session_id : str, optional
+            Custom session ID to use for the cloned session (must be a valid UUID).
+            If not provided, a new UUID will be generated.
+
+        Returns
+        -------
+        SparkConnectClient
+            A new SparkConnectClient instance with the cloned session.
+
+        Notes
+        -----
+        This creates a new server-side session with the specified or generated session ID
+        while preserving the current session's configuration and state.
+
+        .. note::
+            This is a developer API.
+        """
+        # A client of a clone of this session on the server, of the ID ``new_session_id``, a
+        # UUID, if one is given, as SparkConnectClient's ``clone``: of a copy of its SQL
+        # configurations, temporary views, registered functions and catalog state, of the hooks,
+        # the deadlines and the reattachable executions of this client, of the user of its
+        # ``_user_id`` unless the connection has one, and of the default retry policy.
         session = _new_session_of(
             self._session, True, new_session_id, client_state=self.__dict__
         )
@@ -1780,45 +2032,71 @@ class SparkConnectClient:
         return client
 
     def register_progress_handler(self, handler: "ProgressHandler") -> None:
-        """Register ``handler`` to be called with the progress of the executions of the session,
-        once, as SparkConnectClient's ``register_progress_handler``."""
+        """
+        Register a progress handler to be called when a progress message is received.
+
+        Parameters
+        ----------
+        handler : ProgressHandler
+          The callable that will be called with the progress information.
+
+        """
+        # Register ``handler`` to be called with the progress of the executions of the session,
+        # once, as SparkConnectClient's ``register_progress_handler``.
         self._session.registerProgressHandler(handler)
 
     def remove_progress_handler(self, handler: "ProgressHandler") -> None:
-        """Remove the progress handler ``handler``, as SparkConnectClient's
-        ``remove_progress_handler``: a ``ValueError`` for one that is not registered."""
+        """
+        Remove a progress handler from the list of registered handlers.
+
+        Parameters
+        ----------
+        handler : ProgressHandler
+          The callable to remove from the list of progress handlers.
+
+        """
+        # Remove the progress handler ``handler``, as SparkConnectClient's
+        # ``remove_progress_handler``: a ``ValueError`` for one that is not registered.
         self._session.removeProgressHandler(handler)
 
     def clear_progress_handlers(self) -> None:
-        """Remove the progress handlers, as SparkConnectClient's ``clear_progress_handlers``."""
+        # Remove the progress handlers, as SparkConnectClient's ``clear_progress_handlers``.
         self._session.clearProgressHandlers()
 
     def disable_reattachable_execute(self) -> "SparkConnectClient":
-        """Make the executions of the session not reattachable from the next one on, as
-        SparkConnectClient's ``disable_reattachable_execute``: the client."""
+        # Make the executions of the session not reattachable from the next one on, as
+        # SparkConnectClient's ``disable_reattachable_execute``: the client.
         self._session._set_reattachable_execute(False)
         return self
 
     def enable_reattachable_execute(self) -> "SparkConnectClient":
-        """Make the executions of the session reattachable from the next one on, as
-        SparkConnectClient's ``enable_reattachable_execute``: the client."""
+        # Make the executions of the session reattachable from the next one on, as
+        # SparkConnectClient's ``enable_reattachable_execute``: the client.
         self._session._set_reattachable_execute(True)
         return self
 
     def set_retry_policies(self, policies: Iterable["RetryPolicy"]) -> None:
-        """Set the retry policies of the RPCs of the session, as SparkConnectClient's
-        ``set_retry_policies``: a failure is retried by the first of ``policies`` that can retry
-        it, with its backoff, until its retries are spent. The Rust transport retries with the
-        parameters of PySpark's own ``DefaultPolicy`` and ``RetryPolicy`` as they are now, of
-        whole milliseconds, without Python; any other policy, as a subclass of its own
-        ``can_retry`` or ``to_state``, is asked by PySpark's ``Retrying`` of each call, as
-        PySpark's client asks it, of the ``grpc.RpcError`` of each failed RPC."""
+        """
+        Sets list of policies to be used for retries.
+        I.e. set_retry_policies([DefaultPolicy(), CustomPolicy()]).
+
+        """
+        # Set the retry policies of the RPCs of the session, as SparkConnectClient's
+        # ``set_retry_policies``: a failure is retried by the first of ``policies`` that can retry
+        # it, with its backoff, until its retries are spent. The Rust transport retries with the
+        # parameters of PySpark's own ``DefaultPolicy`` and ``RetryPolicy`` as they are now, of
+        # whole milliseconds, without Python; any other policy, as a subclass of its own
+        # ``can_retry`` or ``to_state``, is asked by PySpark's ``Retrying`` of each call, as
+        # PySpark's client asks it, of the ``grpc.RpcError`` of each failed RPC.
         self._set_retry_policies(list(policies), None)
 
     def get_retry_policies(self) -> list["RetryPolicy"]:
-        """The retry policies of the RPCs of the session, as SparkConnectClient's
-        ``get_retry_policies``: those that ``set_retry_policies`` set, else a ``DefaultPolicy``
-        of the parameters that the transport retries with."""
+        """
+        Return list of currently used policies
+        """
+        # The retry policies of the RPCs of the session, as SparkConnectClient's
+        # ``get_retry_policies``: those that ``set_retry_policies`` set, else a ``DefaultPolicy``
+        # of the parameters that the transport retries with.
         policies = _RETRY_POLICIES.get(self._context)
         if policies is None:
             from pyspark.sql.connect.client.retries import DefaultPolicy
@@ -1854,13 +2132,16 @@ class SparkConnectClient:
             _RETRY_POLICIES[self._context] = policies
 
     def release_session(self) -> None:
-        """Release the session on the server, as SparkConnectClient's: its state there."""
+        # Release the session on the server, as SparkConnectClient's: its state there.
         self._session._release_session()
 
     def close(self) -> None:
-        """Close the client, as SparkConnectClient's: of a session that ``is_closed``, and is
-        not released on the server, whose channel is closed, so that its requests raise the
-        ``ValueError`` of a closed channel once ``_closed`` is set to False."""
+        """
+        Close the channel.
+        """
+        # Close the client, as SparkConnectClient's: of a session that ``is_closed``, and is
+        # not released on the server, whose channel is closed, so that its requests raise the
+        # ``ValueError`` of a closed channel once ``_closed`` is set to False.
         self._session._close()
 
     def _resources(self) -> dict[str, Any]:

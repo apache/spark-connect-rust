@@ -24,10 +24,6 @@ import sys
 import types
 import warnings
 
-# The golden leaves out the modules whose docstrings are not all PySpark's yet: those of the client
-# of the session (pyspark.sql.connect.client).
-EXCLUDED = ("pyspark.sql.connect.client",)
-
 # The kinds of the digests of the golden, which its note gives.
 KINDS = {
     "doc": "a digest, or null: of the __doc__ of the object",
@@ -60,7 +56,7 @@ def entry(obj):
 
 
 def module_names():
-    """The modules of pyspark.sql and pyspark.errors, but the excluded and the test modules."""
+    """The modules of pyspark.sql and pyspark.errors, but the test modules and those of messages."""
     found = {"pyspark.sql", "pyspark.errors"}
     for root in ("pyspark.sql", "pyspark.errors"):
         package = importlib.import_module(root)
@@ -69,8 +65,7 @@ def module_names():
     return sorted(
         name
         for name in found
-        if not any(name == e or name.startswith(e + ".") for e in EXCLUDED)
-        and ".tests" not in name
+        if ".tests" not in name
         and not name.endswith("_pb2")
         and ".proto." not in name + "."
     )
