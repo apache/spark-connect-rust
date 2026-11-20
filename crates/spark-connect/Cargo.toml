@@ -48,7 +48,8 @@ futures.workspace = true
 # The gRPC servers of the tests.
 tonic = { workspace = true, features = ["server", "router"] }
 # The tests decode the relations of the placeholders of deep DataFrames, as the drop-in does,
-# whose `pyspark-rs` lifts prost's limit of 100 nested messages: so do the tests.
+# whose `pyspark-rs` lifts prost's limit of 100 nested messages: so do the tests. The responses of
+# the client keep the limit, which the codec of the client checks itself.
 prost = { workspace = true, features = ["no-recursion-limit"] }
 
 [features]

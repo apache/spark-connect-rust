@@ -380,8 +380,11 @@ pub(crate) fn depth_limit() -> u32 {
 
 /// Set the limit of the parses (see [`LIMIT`]). upb's parser recurses on the stack, so a message of
 /// tens of thousands of levels can crash it; this runtime's parser grows its stack, and does not.
+/// The responses of the server that the core decodes take it too, as grpc's deserializer of
+/// PySpark's client parses them with upb (see `spark_connect_proto::ClientCodec`).
 pub(crate) fn set_depth_limit(levels: u32) {
     LIMIT.store(levels, Ordering::Relaxed);
+    spark_connect_proto::set_depth_limit(levels);
 }
 
 /// Set the function of Python that gives the limit of the parsers of `protobuf` (see
@@ -409,6 +412,29 @@ fn probed_depth_limit() -> u32 {
         }
     });
     depth_limit()
+}
+
+/// The limit of the parsers of `protobuf` for a response of the server that would nest past the
+/// limit of the core (see `spark_connect_proto::set_depth_probe`), as [`probed_depth_limit`] tells
+/// it, once the runtime has installed, which a deep response installs: the runtime takes the limit
+/// of upb when it installs. Only on a thread of Python, as that of a call of the client is: a
+/// thread of the runtime has no thread state of Python, and does not wait for the GIL.
+pub(crate) fn response_depth_probe() -> Option<u32> {
+    // SAFETY: reads the thread state that the interpreter keeps for this thread, without the
+    // GIL, which it does not need.
+    if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
+        return None;
+    }
+    let installed = DEPTH_PROBE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some();
+    if !installed {
+        // The runtime sets the limit and the probe when it installs; of an import that fails, the
+        // limit stays.
+        Python::attach(|py| py.import("pyspark.sql.connect.proto").map(drop).ok());
+    }
+    Some(probed_depth_limit())
 }
 
 /// The levels of messages that a parse may still read below the message that it reads, of the

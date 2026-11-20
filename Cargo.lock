@@ -126,8 +126,10 @@ dependencies = [
 name = "apache-spark-connect-proto"
 version = "4.4.0"
 dependencies = [
+ "heck",
  "prost",
  "prost-types",
+ "stacker",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

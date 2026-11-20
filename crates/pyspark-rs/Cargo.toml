@@ -27,7 +27,9 @@ arrow = { workspace = true, features = ["pyarrow"] }
 tokio.workspace = true
 # The drop-in decodes the protobufs that a pickled Column or DataFrame, and a session hook's
 # request, carry, which PySpark's protobuf decodes at any depth: lift prost's limit of 100
-# nested messages for this crate (the decode stacks are grown, see `on_grown_stack`).
+# nested messages for this crate (the decode stacks are grown, see `on_grown_stack`). The responses
+# of the server keep the limit of upb's decoder, which the codec of the client checks itself
+# (`spark_connect_proto::ClientCodec`).
 prost = { workspace = true, features = ["no-recursion-limit"] }
 prost-types.workspace = true
 tonic.workspace = true

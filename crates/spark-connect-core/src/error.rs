@@ -601,6 +601,11 @@ impl SparkError {
     /// if it has one, else the text of grpcio's error of the call, `str()` of its `RpcError`, of
     /// the class of `call`.
     pub fn from_grpc_status_of(status: Status, call: GrpcCall) -> Self {
+        // A response that the client refused, whose kept messages nest past the bound of what it
+        // holds (`spark_connect_proto::MAX_KEPT_DEPTH`): its `RecursionError`.
+        if let Some(too_deep) = spark_connect_proto::kept_too_deep(&status) {
+            return Self::recursion_msg(too_deep.to_string());
+        }
         let message = crate::client::status_details(&status);
         let code = crate::retries::grpc_python_code(&status);
         let details = status.details().to_vec();
@@ -1276,17 +1281,18 @@ fn text_format_escape(value: &str) -> String {
 }
 
 /// The `google.rpc.ErrorInfo` of a gRPC status, from its `grpc-status-details-bin`: the
-/// protobuf-encoded `google.rpc.Status` whose details hold Any-packed messages.
+/// protobuf-encoded `google.rpc.Status` whose details hold Any-packed messages, each decoded
+/// within the limit of the nesting of the responses (see `spark_connect_proto::ClientCodec`).
 fn parse_error_info(details: &[u8]) -> Option<RpcErrorInfo> {
+    use spark_connect_proto::decode_status_detail;
     if details.is_empty() {
         return None;
     }
-    RpcStatus::decode(details)
-        .ok()?
+    decode_status_detail::<RpcStatus>("google.rpc.Status", details)?
         .details
         .into_iter()
         .filter(|detail| detail.type_url == "type.googleapis.com/google.rpc.ErrorInfo")
-        .find_map(|detail| RpcErrorInfo::decode(&detail.value[..]).ok())
+        .find_map(|detail| decode_status_detail("google.rpc.ErrorInfo", &detail.value))
 }
 
 /// The names in a JSON object of message parameters, in their order. A JSON object that does

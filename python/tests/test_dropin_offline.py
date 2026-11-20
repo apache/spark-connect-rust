@@ -32,6 +32,7 @@ from _mock_connect_server import (
     mock_connect_session,
     parse_message,
     struct_schema,
+    varint,
     varint_field,
 )
 
@@ -27609,7 +27610,8 @@ def test_client_analysis_requests_and_results_are_those_of_pyspark():
 
 def _deep_struct_type(levels):
     """A ``spark.connect.DataType`` of a struct of one field of a struct, ``levels`` structs deep
-    (three messages a level: DataType, DataType.Struct and StructField)."""
+    (three messages a level: DataType, DataType.Struct and StructField), of a long: its DataType.Long
+    is ``3 * levels + 1`` levels below it."""
     import pyspark.sql.connect.proto as pb2
 
     data_type = pb2.DataType(long=pb2.DataType.Long())
@@ -27620,23 +27622,45 @@ def _deep_struct_type(levels):
     return data_type
 
 
-def test_client_reads_responses_of_any_depth_and_raises_pysparks_error_of_bad_ones():
+def _unknown_groups(levels, number=1000):
+    """Groups of the field ``number``, which no type of the protos has, nested ``levels`` deep
+    below the message that holds them: each group is a level of upb's decoder, as a message is."""
+    return varint(number << 3 | 3) * levels + varint(number << 3 | 4) * levels
+
+
+# PySpark's error of a response that gRPC's deserializer refuses (upb's FromString), of a call of
+# one response and of a call of a stream of responses.
+_DESERIALIZING = (
+    "<_InactiveRpcError of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
+    '\tdetails = "Exception deserializing response!"\n\tdebug_error_string = "None"\n>'
+)
+_DESERIALIZING_STREAM = _DESERIALIZING.replace("_InactiveRpcError", "_MultiThreadedRendezvous")
+
+
+def test_client_reads_responses_within_upbs_limit_and_raises_pysparks_error_past_it():
     # The responses that the client API parses (SparkConnectClient._analyze, _results, config and
-    # the status of operations) are read of any depth, as the Rust transport reads the responses
-    # of DataFrame.schema and collect(), where PySpark's deserializer stops at 100 levels (see
-    # docs/compatibility.md). Bytes that do not parse raise PySpark's error of a response that
-    # gRPC's deserializer refuses: SparkConnectGrpcException of the status INTERNAL, of grpc's
-    # error of the call ("Exception deserializing response!").
+    # the status of operations) are read within upb's limit of 100 levels of messages below them,
+    # as PySpark's deserializer (upb's FromString) reads them, and as the Rust transport reads the
+    # responses of DataFrame.schema and collect(): a group of a field that the type does not know
+    # is a level too. A deeper response, of any depth, and bytes that do not parse raise PySpark's
+    # error of a response that gRPC's deserializer refuses: SparkConnectGrpcException of the
+    # status INTERNAL, of grpc's error of the call ("Exception deserializing response!").
     import pyspark.sql.connect.proto as pb2
-    from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
+    from pyspark.errors.exceptions.connect import (
+        SparkConnectException,
+        SparkConnectGrpcException,
+        StatusCode,
+    )
     from pyspark.sql.connect.client import SparkConnectClient
 
-    deep = pb2.AnalyzePlanResponse()
-    deep.schema.schema.CopyFrom(_deep_struct_type(40))
+    # AnalyzePlanResponse.schema -> Schema.schema -> the DataType of 32 structs, at level 2,
+    # whose DataType.Long is at level 99.
+    within = pb2.AnalyzePlanResponse()
+    within.schema.schema.CopyFrom(_deep_struct_type(32))
 
     class Session(_FakeSessionOfClient):
         session_id = "s"
-        response = deep.SerializeToString()
+        response = within.SerializeToString()
 
         def _analyze_plan(self, data):
             return Session.response
@@ -27654,9 +27678,10 @@ def test_client_reads_responses_of_any_depth_and_raises_pysparks_error_of_bad_on
     depth = 0
     while isinstance(schema, T.StructType):
         schema, depth = schema.fields[0].dataType, depth + 1
-    assert depth == 40
+    assert depth == 32
+    # ExecutePlanResponse.schema, of the DataType at level 1: of 32 structs, the Long at 98.
     response = pb2.ExecutePlanResponse()
-    response.schema.CopyFrom(_deep_struct_type(40))
+    response.schema.CopyFrom(_deep_struct_type(32))
 
     def responses(data):
         # The responses of the transport, which the results close.
@@ -27665,29 +27690,42 @@ def test_client_reads_responses_of_any_depth_and_raises_pysparks_error_of_bad_on
     assert [type(item).__name__ for item in client._results(
         responses(response.SerializeToString()), {})] == ["StructType"]
 
-    unary = (
-        "<_InactiveRpcError of RPC that terminated with:\n\tstatus = StatusCode.INTERNAL\n"
-        '\tdetails = "Exception deserializing response!"\n\tdebug_error_string = "None"\n>'
-    )
-    Session.response = b"\xff"
     operation = pb2.ConfigRequest.Operation()
     operation.get.keys.append("k")
-    for call in (lambda: client.schema(plan), lambda: client.config(operation),
-                 lambda: client._get_operation_statuses()):
+    calls = (lambda: client.schema(plan), lambda: client.config(operation),
+             lambda: client._get_operation_statuses())
+    # A response of no other field, of unknown groups to level 100, is read, as an empty one;
+    # one level more, or a million, as bytes that do not parse, raise PySpark's error.
+    Session.response = _unknown_groups(100)
+    assert client.config(operation).pairs == []
+    assert client._get_operation_statuses().ListFields() == []
+    with pytest.raises(SparkConnectException, match="No analyze result found!"):
+        client.schema(plan)
+    assert [type(item).__name__ for item in client._results(responses(Session.response), {})] == []
+    for data in (_unknown_groups(101), _unknown_groups(1_000_000), b"\xff"):
+        Session.response = data
+        for call in calls:
+            with pytest.raises(SparkConnectGrpcException) as error:
+                call()
+            assert error.value.getMessage() == _DESERIALIZING
+            assert error.value.getGrpcStatusCode() == StatusCode.INTERNAL
         with pytest.raises(SparkConnectGrpcException) as error:
-            call()
-        assert error.value.getMessage() == unary
-        assert error.value.getGrpcStatusCode() == StatusCode.INTERNAL
+            list(client._results(responses(data), {}))
+        assert error.value.getMessage() == _DESERIALIZING_STREAM
+    # Of the schema too: of 33 structs, the Long of an ExecutePlanResponse is at level 101.
+    response.schema.CopyFrom(_deep_struct_type(33))
     with pytest.raises(SparkConnectGrpcException) as error:
-        list(client._results(responses(b"\xff"), {}))
-    assert error.value.getMessage() == unary.replace("_InactiveRpcError", "_MultiThreadedRendezvous")
+        list(client._results(responses(response.SerializeToString()), {}))
+    assert error.value.getMessage() == _DESERIALIZING_STREAM
 
 
-def test_client_tables_of_responses_of_any_depth(mock_connect):
-    # SparkConnectClient.to_table reads a schema of a response nested past 100 levels, as
-    # DataFrame.collect() does, of the Rust transport.
+def test_client_tables_of_responses_within_upbs_limit(mock_connect):
+    # SparkConnectClient.to_table reads a schema of a response nested within upb's limit of 100
+    # levels, as DataFrame.collect() does, of the Rust transport, and raises PySpark's error of a
+    # deeper one, of a call of a stream of responses.
     import pyarrow as pa
     import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
 
     spark, service = mock_connect
     client = spark.client
@@ -27695,13 +27733,411 @@ def test_client_tables_of_responses_of_any_depth(mock_connect):
     sink = pa.BufferOutputStream()
     with pa.ipc.new_stream(sink, table.schema) as writer:
         writer.write_table(table)
-    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
-    service.execute_payload = message_field(7, _deep_struct_type(40).SerializeToString()) + (
-        message_field(2, varint_field(1, 2) + message_field(2, sink.getvalue().to_pybytes())))
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2. The schema of
+    # 32 structs has its Long at level 98.
+    batch = message_field(2, varint_field(1, 2) + message_field(2, sink.getvalue().to_pybytes()))
+    service.execute_payload = message_field(7, _deep_struct_type(32).SerializeToString()) + batch
     plan = pb2.Plan()
     plan.root.CopyFrom(spark.range(2)._plan.plan(client))
     result, schema, _ = client.to_table(plan, {})
     assert result.to_pydict() == {"id": [1, 2]} and schema.fieldNames() == ["a"]
+    # Of 33 structs, at level 101.
+    service.execute_payload = message_field(7, _deep_struct_type(33).SerializeToString()) + batch
+    with pytest.raises(SparkConnectGrpcException) as error:
+        client.to_table(plan, {})
+    assert error.value.getMessage() == _DESERIALIZING_STREAM
+
+
+def _arrow_batch_of_one_row():
+    """The fields of an ExecutePlanResponse of an Arrow batch of one row of ``id`` 0
+    (ExecutePlanResponse.arrow_batch=2: ArrowBatch.row_count=1, data=2)."""
+    import pyarrow as pa
+
+    table = pa.table({"id": pa.array([0], pa.int64())})
+    sink = pa.BufferOutputStream()
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    return message_field(2, varint_field(1, 1) + message_field(2, sink.getvalue().to_pybytes()))
+
+
+def test_the_responses_of_every_kind_of_call_nest_within_upbs_limit(mock_connect):
+    # As PySpark's client, whose deserializer of the responses of gRPC is upb's FromString, of its
+    # limit of 100 levels of messages below a response: of each kind of call, the analyses
+    # (DataFrame.schema and SparkSession.client's schema), the configuration (spark.conf and the
+    # client's config), the executions (collect(), toPandas() and the client's to_table), their
+    # reattachment, and the status of operations, a response of unknown groups nested 100 levels is
+    # read, and one of 101, or of a million (which the Rust transport does not decode, so it does
+    # not crash), raises PySpark's error of a response that gRPC's deserializer refuses, of the
+    # call of one response or of a stream.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    spark, service = mock_connect
+    client = spark.client
+    plan = pb2.Plan()
+    plan.root.CopyFrom(spark.range(1)._plan.plan(client))
+    operation = pb2.ConfigRequest.Operation()
+    operation.get.keys.append("spark.sql.session.timeZone")
+    batch = _arrow_batch_of_one_row()
+    # The settings that toPandas() reads.
+    service.confs = {
+        "spark.sql.execution.pandas.structHandlingMode": "legacy",
+        "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
+    }
+
+    def check(levels, calls, expected):
+        for name, call in calls:
+            if levels <= 100:
+                call()
+                continue
+            with pytest.raises(SparkConnectGrpcException) as error:
+                call()
+            assert error.value.getMessage() == expected, (name, levels)
+
+    for levels in (100, 101, 1_000_000):
+        extra = _unknown_groups(levels)
+        service.analyze_extra = extra
+        check(levels, [("schema", lambda: spark.range(1).schema),
+                       ("client.schema", lambda: client.schema(plan))], _DESERIALIZING)
+        service.analyze_extra = b""
+        service.config_extra = extra
+        check(levels, [("conf.get", lambda: spark.conf.get("spark.sql.session.timeZone")),
+                       ("client.config", lambda: client.config(operation))], _DESERIALIZING)
+        service.config_extra = b""
+        service.status_extra = extra
+        check(levels, [("status", lambda: client._get_operation_statuses())], _DESERIALIZING)
+        service.status_extra = b""
+        service.execute_payload = batch + extra
+        check(levels, [("collect", lambda: spark.range(1).collect()),
+                       ("toPandas", lambda: spark.range(1).toPandas()),
+                       ("client.to_table", lambda: client.to_table(plan, {}))],
+              _DESERIALIZING_STREAM)
+        # The first stream drops before its result is complete, and the stream of the reattachment
+        # of the execution has the deep response.
+        service.execute_payload = batch
+        service.stream_failure = "UNAVAILABLE"
+        service.reattach_payload = extra
+        reattached = len(service.reattach_requests)
+        check(levels, [("reattach", lambda: spark.range(1).collect())], _DESERIALIZING_STREAM)
+        assert len(service.reattach_requests) > reattached
+        service.stream_failure = None
+        service.reattach_payload = None
+
+
+def test_responses_take_upbs_limit_of_set_allow_oversize_protos():
+    # Once upb's SetAllowOversizeProtos(True) is called, upb's FromString reads messages of up to
+    # 65535 levels, and so does the Rust transport of the responses of each kind of call, also
+    # before pyspark.sql.connect.proto imports; a deeper response raises PySpark's error of it.
+    # Within that limit, a response whose messages of the fields of the protos (which the client
+    # keeps) nest more than 1024 levels raises the client's RecursionError, which protects its
+    # stack, as PySpark raises its own when it converts such a schema (from about 650 levels).
+    api_implementation = pytest.importorskip("google.protobuf.internal.api_implementation")
+    if api_implementation.Type() != "upb":
+        pytest.skip("of upb's SetAllowOversizeProtos, of a protobuf install of upb")
+    out = _run_dropin_script(
+        """
+        import json, sys
+        from google.protobuf.internal import api_implementation
+
+        api_implementation._c_module.SetAllowOversizeProtos(True)
+        sys.path.insert(0, "tests")
+        from _mock_connect_server import message_field, mock_connect_session, varint
+
+        def groups(levels):
+            return varint(1000 << 3 | 3) * levels + varint(1000 << 3 | 4) * levels
+
+        def outcome(call):
+            try:
+                call()
+                return "ok"
+            except Exception as error:
+                return type(error).__name__
+
+        out = {}
+        with mock_connect_session() as (spark, service):
+            # Of no import of the runtime, the transport asks upb for its limit.
+            assert "pyspark.sql.connect.proto" not in sys.modules
+            service.config_extra = groups(65535)
+            out["conf of 65535 levels, of no runtime"] = outcome(
+                lambda: spark.conf.get("spark.sql.session.timeZone"))
+            for levels in (101, 65535, 65536):
+                service.config_extra = groups(levels)
+                out[f"conf {levels}"] = outcome(
+                    lambda: spark.conf.get("spark.sql.session.timeZone"))
+                service.config_extra = b""
+                service.analyze_extra = groups(levels)
+                out[f"schema {levels}"] = outcome(lambda: spark.range(1).schema)
+                service.analyze_extra = b""
+            import pyspark.sql.connect.proto as pb2
+
+            def schema(levels):
+                data_type = pb2.DataType(long=pb2.DataType.Long())
+                for _ in range(levels):
+                    outer = pb2.DataType()
+                    outer.struct.fields.add(name="a").data_type.CopyFrom(data_type)
+                    data_type = outer
+                return data_type.SerializeToString()
+
+            # AnalyzePlanResponse.schema (2) -> Schema.schema (1): of 340 structs, the Long of
+            # the DataType at level 2 is at level 1023; of 341, a StructField is at 1025.
+            for structs in (340, 341):
+                service.data_type = schema(structs)
+                out[f"schema of {structs} structs"] = outcome(lambda: spark.range(1).schema)
+                plan = pb2.Plan()
+                plan.root.CopyFrom(spark.range(1)._plan.plan(spark.client))
+                out[f"client.schema of {structs} structs"] = outcome(
+                    lambda: spark.client.schema(plan))
+            try:
+                spark.range(1).schema
+            except RecursionError as error:
+                out["message"] = str(error)
+        print(json.dumps(out))
+        """
+    )
+    assert out == {
+        "conf of 65535 levels, of no runtime": "ok",
+        "conf 101": "ok",
+        "schema 101": "ok",
+        "conf 65535": "ok",
+        "schema 65535": "ok",
+        "conf 65536": "SparkConnectGrpcException",
+        "schema 65536": "SparkConnectGrpcException",
+        "schema of 340 structs": "ok",
+        "client.schema of 340 structs": "ok",
+        "schema of 341 structs": "RecursionError",
+        "client.schema of 341 structs": "RecursionError",
+        "message": "maximum recursion depth exceeded while decoding a response; the messages "
+        "of a response may be nested at most 1024 levels deep",
+    }
+
+
+def test_calls_on_threads_of_small_stacks_read_responses_to_the_bound():
+    # A call on a thread of a small stack, of threading.stack_size, reads its response as on any
+    # other: PySpark's calls run on a thread of 64 KiB, and so do the drop-in's, whose waits poll
+    # the futures of the RPCs (whose frames take tens of KiB each) on a stack of their own, as do
+    # the conversions of toPandas(), of many frames of Python. After
+    # SetAllowOversizeProtos(True), the responses whose messages nest to the bound of 1024 levels
+    # are read on a thread of 256 KiB: their decodes, copies and conversions, which recurse over
+    # the levels, run on stacks with room for them. Of the schemas of DataFrame.schema (and of its
+    # copy that the DataFrame keeps), dtypes, SparkSession.client.schema, to_table_as_iterator and
+    # collect(), of structs, of arrays and of user-defined types that the client fills, and of
+    # observed metrics. collect() of the schema of user-defined types may raise the RecursionError
+    # of the Python converters of their rows, as PySpark's, by the frames that a Python takes of
+    # them (of 3.11, of comprehensions too). The types of such responses, and those that the user
+    # makes, are made and operated on (`==`, `repr`, `json()`, `simpleString()`) of recursions over
+    # their levels on stacks with room too: on a thread of 128 KiB, a type of 200 structs that the
+    # user makes, and on one of 256 KiB the types of the responses at the bound, each operation
+    # gives what it gives on the main thread (`json()` of a type of 340 structs raises the
+    # RecursionError of the decoder of Python's `json` module of its 1020 levels).
+    api_implementation = pytest.importorskip("google.protobuf.internal.api_implementation")
+    if api_implementation.Type() != "upb":
+        pytest.skip("of upb's SetAllowOversizeProtos, of a protobuf install of upb")
+    out = _run_dropin_script(
+        """
+        import json, sys, threading
+        from google.protobuf.internal import api_implementation
+
+        api_implementation._c_module.SetAllowOversizeProtos(True)
+        sys.path.insert(0, "tests")
+        from _mock_connect_server import message_field, mock_connect_session, varint_field
+
+        def outcome(call):
+            # The result of `call`, or the name of its error.
+            try:
+                return call()
+            except Exception as error:
+                return type(error).__name__
+
+        def on_thread(stack_kib, call):
+            # The outcome of `call` on a new thread of `stack_kib` KiB of stack: an overflow of its
+            # stack ends the process.
+            box = {}
+
+            def target():
+                box["result"] = outcome(call)
+
+            threading.stack_size(stack_kib << 10)
+            try:
+                thread = threading.Thread(target=target)
+                thread.start()
+            finally:
+                threading.stack_size(0)
+            thread.join()
+            return box["result"]
+
+        def levels(value):
+            # The levels of a type of structs or arrays, or of a dict or a list, above its first
+            # leaf.
+            from pyspark.sql import types as T
+
+            count = 0
+            while True:
+                if isinstance(value, T.StructType):
+                    value = value.fields[0].dataType
+                elif isinstance(value, T.ArrayType):
+                    value = value.elementType
+                elif isinstance(value, (dict, list)) and value:
+                    value = next(iter(value.values())) if isinstance(value, dict) else value[0]
+                else:
+                    return [count, type(value).__name__]
+                count += 1
+
+        # DataType.long=7; DataType.struct=21: Struct.fields=1, StructField: name=1, data_type=2,
+        # nullable=3; DataType.array=20: Array.element_type=1, contains_null=2; DataType.udt=23:
+        # UDT.type=1, jvm_class=2, python_class=3, of no sql_type=5, which the client fills.
+        long_type = message_field(7, b"")
+        vector = message_field(23, message_field(1, "udt") + message_field(
+            2, "org.apache.spark.ml.linalg.VectorUDT") + message_field(
+            3, "pyspark.ml.linalg.VectorUDT"))
+
+        def struct_of(field_type):
+            field = message_field(1, "a") + message_field(2, field_type) + varint_field(3, 1)
+            return message_field(21, message_field(1, field))
+
+        def array_of(element):
+            return message_field(20, message_field(1, element) + varint_field(2, 1))
+
+        def nest(inner, count, wrap):
+            for _ in range(count):
+                inner = wrap(inner)
+            return inner
+
+        def ops_on_thread(stack_kib, make):
+            # Whether each operation of the type that `make` gives, on a thread of `stack_kib`
+            # KiB, gives what it gives on the main thread.
+            ops = {"==": lambda t: t == make(), "repr": lambda t: repr(t),
+                   "json": lambda t: t.json(), "simpleString": lambda t: t.simpleString()}
+            return {op: on_thread(stack_kib, lambda: outcome(lambda: f(make())))
+                    == outcome(lambda: f(make())) for op, f in ops.items()}
+
+        out = {}
+        with mock_connect_session() as (spark, service):
+            # Of responses of no depth, on a thread of 64 KiB: ExecutePlanResponse.arrow_batch=2,
+            # ArrowBatch.row_count=1, data=2, of one row of `id` 0, of the settings of toPandas().
+            import pyarrow as pa
+
+            table = pa.table({"id": pa.array([0], pa.int64())})
+            sink = pa.BufferOutputStream()
+            with pa.ipc.new_stream(sink, table.schema) as writer:
+                writer.write_table(table)
+            service.execute_payload = message_field(2, varint_field(1, 1) + message_field(
+                2, sink.getvalue().to_pybytes()))
+            service.confs = {
+                "spark.sql.execution.pandas.structHandlingMode": "legacy",
+                "spark.sql.execution.arrow.pyspark.selfDestruct.enabled": "false",
+            }
+            out["schema, 64 KiB"] = on_thread(64, lambda: spark.range(1).schema.simpleString())
+            out["conf.get, 64 KiB"] = on_thread(
+                64, lambda: spark.conf.get("spark.sql.session.timeZone"))
+            out["collect, 64 KiB"] = on_thread(
+                64, lambda: [list(row) for row in spark.range(1).collect()])
+            out["toPandas, 64 KiB"] = on_thread(64, lambda: spark.range(1).toPandas().to_dict())
+            # Of types of 200 structs that the user makes, on a thread of 128 KiB.
+            from pyspark.sql import types as T
+
+            def user_type():
+                data_type = T.LongType()
+                for _ in range(200):
+                    data_type = T.StructType([T.StructField("a", data_type)])
+                return data_type
+
+            out["user type, 128 KiB"] = on_thread(128, lambda: levels(user_type()))
+            out["user type ops, 128 KiB"] = ops_on_thread(128, user_type)
+            import pyspark.sql.connect.proto as pb2
+            from pyspark.sql import Observation
+            from pyspark.sql import functions as F
+
+            plan = pb2.Plan()
+            plan.root.CopyFrom(spark.range(1)._plan.plan(spark.client))
+            # At the bound, on a thread of 256 KiB: AnalyzePlanResponse.schema (2) ->
+            # Schema.schema (1) -> the DataType at level 2, of 340 structs (three messages each),
+            # of its Long at level 1023; of 509 arrays below a struct (two messages each), at
+            # 1024; of 339 structs of a VectorUDT, of its UDT at 1020. ExecutePlanResponse.schema
+            # (7) is the DataType at level 1.
+            for name, data_type in (("structs", nest(long_type, 340, struct_of)),
+                                    ("arrays", struct_of(nest(long_type, 509, array_of))),
+                                    ("udts", nest(vector, 339, struct_of))):
+                service.data_type = data_type
+                service.execute_payload = message_field(7, data_type)
+                df = spark.range(1)
+                out[f"{name}: schema"] = on_thread(256, lambda: levels(df.schema))
+                out[f"{name}: schema again"] = on_thread(256, lambda: levels(df.schema))
+                out[f"{name}: dtypes"] = on_thread(256, lambda: spark.range(1).dtypes[0][1])
+                out[f"{name}: client.schema"] = on_thread(
+                    256, lambda: levels(spark.client.schema(plan)))
+                out[f"{name}: to_table_as_iterator"] = on_thread(
+                    256, lambda: [levels(item)
+                                  for item in spark.client.to_table_as_iterator(plan, {})])
+                out[f"{name}: collect"] = on_thread(256, lambda: spark.range(1).collect())
+                out[f"{name}: ops"] = ops_on_thread(256, lambda: spark.range(1).schema)
+            service.execute_payload = b""
+            # ExecutePlanResponse.observed_metrics (6) -> ObservedMetrics (1): name=1, values=2,
+            # keys=3, plan_id=4 -> the Literal at level 2, of 510 arrays (Literal.array=22:
+            # Array.element_type=1, elements=2; Literal.long=7), of the Long of the types of its
+            # elements at level 1023.
+            literal, element = varint_field(7, 1), long_type
+            for _ in range(510):
+                literal = message_field(22, message_field(1, element) + message_field(2, literal))
+                element = array_of(element)
+            metric = (message_field(1, "m") + message_field(2, literal) + message_field(3, "x")
+                      + varint_field(4, 1))
+            service.execute_payloads = [message_field(6, metric)]
+
+            def observe():
+                observation = Observation("m")
+                df = spark.range(1).observe(observation, F.count(F.lit(1)).alias("x"))
+                df.collect()
+                return levels(observation.get), df.executionInfo is not None
+
+            out["observed metrics"] = on_thread(256, observe)
+        print(json.dumps(out))
+        """
+    )
+    same = {"==": True, "repr": True, "json": True, "simpleString": True}
+    expected = {
+        "schema, 64 KiB": "struct<id:bigint>",
+        "conf.get, 64 KiB": "UTC",
+        "collect, 64 KiB": [[0]],
+        "toPandas, 64 KiB": {"id": {"0": 0}},
+        "user type, 128 KiB": [200, "LongType"],
+        "user type ops, 128 KiB": same,
+        "observed metrics": [[511, "int"], True],
+    }
+    for name, depth, leaf, dtype in (
+        ("structs", 340, "LongType", "struct<a:" * 339 + "bigint" + ">" * 339),
+        ("arrays", 510, "LongType", "array<" * 509 + "bigint" + ">" * 509),
+        ("udts", 339, "VectorUDT", "struct<a:" * 338 + "vector" + ">" * 338),
+    ):
+        expected.update({
+            f"{name}: schema": [depth, leaf],
+            f"{name}: schema again": [depth, leaf],
+            f"{name}: dtypes": dtype,
+            f"{name}: client.schema": [depth, leaf],
+            f"{name}: to_table_as_iterator": [[depth, leaf]],
+            f"{name}: collect": [],
+            f"{name}: ops": same,
+        })
+    assert out.pop("udts: collect") in ([], "RecursionError")
+    del expected["udts: collect"]
+    assert out == expected
+
+
+def _run_dropin_script(script):
+    """The JSON that ``script`` prints of a Python of the drop-in, of the environment of this one
+    without ``PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION``, from the directory of the package."""
+    import pathlib
+    import subprocess
+    import sys
+    import textwrap
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    environment = {
+        k: v for k, v in os.environ.items() if k != "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"
+    }
+    result = subprocess.run([sys.executable, "-c", textwrap.dedent(script)], capture_output=True,
+                            text=True, timeout=300, cwd=root, env=environment)
+    assert result.returncode == 0, result.stdout[-2000:] + result.stderr[-3000:]
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
 
 def test_client_executes_the_plans_and_commands_it_is_given_as_pyspark(mock_connect):

@@ -257,6 +257,20 @@ fn _proto_parse_deep<'py>(
     parse_deep(class, &message::bytes_of(data)?)
 }
 
+/// Raise the `RecursionError` that the core raises of a response of the message type `name` of the
+/// bytes `data` whose kept messages nest past `spark_connect_proto::MAX_KEPT_DEPTH` levels, within
+/// the limit of the parses (see `spark_connect_proto::ClientCodec`), for the responses that
+/// `SparkSession.client` parses; of any other bytes, nothing, as its parse checks the limit.
+#[pyfunction]
+fn _proto_check_response_depth(name: &str, data: &[u8]) -> PyResult<()> {
+    match spark_connect_proto::response_depth_of(name, data) {
+        Err(too_deep) if too_deep.is_kept() => Err(pyo3::exceptions::PyRecursionError::new_err(
+            too_deep.to_string(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// The text format of `message`, as protobuf's `text_format.MessageToString` writes it.
 #[pyfunction]
 #[pyo3(signature = (message, as_one_line=false))]
@@ -299,6 +313,7 @@ fn _proto_unknown_field_pairs<'py>(
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
+    spark_connect_proto::set_depth_probe(codec::response_depth_probe);
     m.add("ProtoMessage", py.get_type::<message::PyMessage>())?;
     m.add(
         "ProtoRepeatedScalarContainer",
@@ -373,6 +388,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(message::_proto_register_classes, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_message_to_string, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_parse_deep, m)?)?;
+    m.add_function(wrap_pyfunction!(_proto_check_response_depth, m)?)?;
     m.add_function(wrap_pyfunction!(_proto_unknown_fields, m)?)?;
     Ok(())
 }

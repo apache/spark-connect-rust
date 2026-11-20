@@ -48,6 +48,19 @@ pub(crate) enum Json {
 }
 
 impl Json {
+    /// Drop the value, of any depth, of no recursion: the drop of a `Json` recurses once per level
+    /// of its arrays and objects, such as the JSON of a type of many levels.
+    pub(crate) fn drop_iteratively(self) {
+        let mut pending = vec![self];
+        while let Some(value) = pending.pop() {
+            match value {
+                Json::Array(items) => pending.extend(items),
+                Json::Object(entries) => pending.extend(entries.into_iter().map(|(_, item)| item)),
+                _ => {}
+            }
+        }
+    }
+
     /// The JSON value of the text `text`, as Python's `json.loads` reads it: standard JSON and the
     /// `NaN`, `Infinity` and `-Infinity` of Python's floats. The error is a message of the place.
     pub(crate) fn parse(text: &str) -> std::result::Result<Json, String> {
@@ -78,6 +91,13 @@ impl Json {
     }
 
     fn write(&self, out: &mut String, sorted: bool) {
+        // A level of a value of many levels, such as the JSON of a type of many levels, on a
+        // stack with room.
+        crate::expression::with_stack_for_a_level(|| self.write_level(out, sorted))
+    }
+
+    /// [`Json::write`] of one level of the value.
+    fn write_level(&self, out: &mut String, sorted: bool) {
         match self {
             Json::Null => out.push_str("null"),
             Json::Bool(true) => out.push_str("true"),
@@ -127,6 +147,13 @@ impl Json {
     /// larger int is its nearest float, as `serde_json` reads its text, and a float that is not
     /// finite is null, as `serde_json` makes a value of it. A key of several values has the last.
     pub(crate) fn to_serde(&self) -> serde_json::Value {
+        // A level of a value of many levels, such as the JSON of a type of many levels, on a
+        // stack with room.
+        crate::expression::with_stack_for_a_level(|| self.to_serde_level())
+    }
+
+    /// [`Json::to_serde`] of one level of the value.
+    fn to_serde_level(&self) -> serde_json::Value {
         match self {
             Json::Null => serde_json::Value::Null,
             Json::Bool(flag) => serde_json::Value::Bool(*flag),

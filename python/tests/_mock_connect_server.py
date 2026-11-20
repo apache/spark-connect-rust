@@ -441,6 +441,13 @@ def serve(connection):
             self.add_artifacts_requests = []
             # The DDL of the JSON of each JsonToDDL.
             self.ddl_string = ""
+            # The raw fields that end each response of AnalyzePlan, of Config (but the plan
+            # compression lookup) and of GetStatus, such as unknown fields of many levels, and
+            # those of a response that ReattachExecute streams before ResultComplete, or None.
+            self.analyze_extra = b""
+            self.config_extra = b""
+            self.status_extra = b""
+            self.reattach_payload = None
             with self.listener_condition:
                 # Late completion of an old RPC must not count towards the next test.
                 self.listener_epoch += 1
@@ -486,7 +493,8 @@ def serve(connection):
             # AnalyzePlanRequest.session_id=1, echoed as AnalyzePlanResponse.session_id=1, as the
             # server does: the client checks it.
             session_id = parse_message(request).get(1, [b""])[0]
-            return message_field(1, session_id) + self._analyze(request, context)
+            return message_field(1, session_id) + self._analyze(request, context) + (
+                self.analyze_extra)
 
         def _analyze(self, request, context):
             if self.is_recorded(request, "analyze"):
@@ -926,6 +934,8 @@ def serve(connection):
         def reattach_execute(self, request, context):
             if self.is_recorded(request, "reattach"):
                 self.reattach_requests.append(request)
+            if self.reattach_payload is not None:
+                yield self.reattach_payload
             # ExecutePlanResponse.result_complete=14.
             yield message_field(14, b"")
 
@@ -1009,9 +1019,15 @@ def serve(connection):
             return message_field(1, fields[1][0]) + b"".join(
                 message_field(3, message_field(1, operation_id) + varint_field(2, 1))
                 for operation_id in operation_status.get(1, [])
-            )
+            ) + self.status_extra
 
         def config(self, request, context):
+            response = self._config(request, context)
+            if PLAN_COMPRESSION_LOOKUP in request:
+                return response
+            return response + self.config_extra
+
+        def _config(self, request, context):
             # ConfigRequest.session_id=1, operation=3, Operation.get=2, Get.keys=1;
             # ConfigResponse.session_id=1, pairs=2, KeyValue.key=1, value=2.
             # The plan compression lookup of a client, which PySpark makes on its first plan, is

@@ -42,8 +42,10 @@ This workflow validates the pure-Rust implementation:
   (`apache-spark-connect-proto`, `apache-spark-connect-core`, `apache-spark-connect`,
   `apache-spark-connect-macros` and `apache-spark-connect-build`). `pyspark-rs` is not a
   default member, so the Python workflows build it separately.
-- **Test**: Runs `cargo test` on `apache-spark-connect` and `apache-spark-connect-core`, then
-  builds and tests `apache-spark-connect` with the `datafusion,polars` features
+- **Test**: Runs `cargo test` on `apache-spark-connect` and `apache-spark-connect-core`, then on
+  `apache-spark-connect-proto` on its own, whose prost has its limit of 100 nested messages there
+  (the tests of the crates before lift it), then builds and tests `apache-spark-connect` with the
+  `datafusion,polars` features
 - **No-stub audit**: Runs `scripts/audit_no_stubs.sh` to enforce the "100% coverage, zero stubs"
   rule (see [Design notes](architecture.md))
 - **Warnings**: The workflow sets `RUSTFLAGS` to `-D warnings`

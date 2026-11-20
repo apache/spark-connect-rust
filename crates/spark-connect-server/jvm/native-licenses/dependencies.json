@@ -1,17 +1,17 @@
 {
   "inputs": {
-    "Cargo.lock": "5b4c171a30c46e0e00bb46327d34e4affb5864ba0a63eedb1a708ff9998eba00",
+    "Cargo.lock": "34b57bf6fb2de5a1a67880548aa60e7f9a5596f3f1f55d2f3a16da33a4ab5d20",
     "Cargo.toml": "c6633f9ffab4f49000d4e4ca9b7496b6b3025ca711170970c7c74df16980a996",
     "LICENSE": "0d1dda3ddbb607c0ce754eddb23aa9b25b96f4f937b79b32605614c9ff1bfb96",
     "NOTICE": "f34ebcb547d17c3d7aab2d024c4685d4b17d49182480727b70cad2eccfc35274",
-    "crates/spark-connect-proto/Cargo.toml": "5b43301089f8496478820fa2b063e544c2255da7cf8f1a33240ea915f2fe28ec",
+    "crates/spark-connect-proto/Cargo.toml": "f072220b42ba66eafae612f3105853457d81986624beb5f60f1a72efaa4199bd",
     "crates/spark-connect-server/Cargo.toml": "9ec4b61425a7dce2121c78381d5504e25ae38a1bfe887ada79400cb055e59fb9",
     "crates/spark-connect-server/jni/Cargo.toml": "069fe443f8cd2b869644b9a22ec6b1a4ea53b7dd93e40b3e0dce5f57fa4087a1",
     "scripts/gen_binary_licenses.py": "59e36ee5da2b4e5cf17ede555cc6854e268e7f11137da72a1eac98ebf26f0608",
     "scripts/gen_native_binary_licenses.py": "018456a70b85ea09640d5410de56259ecb2906debd7617b99e1d79cd52ecbe0b"
   },
   "outputs": {
-    "LICENSE-binary": "a4d3b9700aed77ea2962f4e8afbf06267f364162d9832d3cfa96ce5a00adda84",
+    "LICENSE-binary": "12c6e070520f929d48de65a6e2a1b0626d1f8ffc1a185117a07ed5156226cc06",
     "NOTICE-binary": "56b4d3334d28705f5764f12c9dd72f8ae141fde0ecdc95565998a223583cf737"
   },
   "root_package": "spark-connect-jni",
@@ -395,6 +395,11 @@
           "Apache-2.0"
         ],
         [
+          "psm",
+          "0.1.31",
+          "MIT OR Apache-2.0"
+        ],
+        [
           "regex",
           "1.12.4",
           "MIT OR Apache-2.0"
@@ -432,6 +437,11 @@
         [
           "socket2",
           "0.6.4",
+          "MIT OR Apache-2.0"
+        ],
+        [
+          "stacker",
+          "0.1.24",
           "MIT OR Apache-2.0"
         ],
         [
@@ -918,6 +928,11 @@
           "Apache-2.0"
         ],
         [
+          "psm",
+          "0.1.31",
+          "MIT OR Apache-2.0"
+        ],
+        [
           "regex",
           "1.12.4",
           "MIT OR Apache-2.0"
@@ -955,6 +970,11 @@
         [
           "socket2",
           "0.6.4",
+          "MIT OR Apache-2.0"
+        ],
+        [
+          "stacker",
+          "0.1.24",
           "MIT OR Apache-2.0"
         ],
         [
@@ -1446,6 +1466,11 @@
           "Apache-2.0"
         ],
         [
+          "psm",
+          "0.1.31",
+          "MIT OR Apache-2.0"
+        ],
+        [
           "regex",
           "1.12.4",
           "MIT OR Apache-2.0"
@@ -1483,6 +1508,11 @@
         [
           "socket2",
           "0.6.4",
+          "MIT OR Apache-2.0"
+        ],
+        [
+          "stacker",
+          "0.1.24",
           "MIT OR Apache-2.0"
         ],
         [
@@ -1969,6 +1999,11 @@
           "Apache-2.0"
         ],
         [
+          "psm",
+          "0.1.31",
+          "MIT OR Apache-2.0"
+        ],
+        [
           "regex",
           "1.12.4",
           "MIT OR Apache-2.0"
@@ -2006,6 +2041,11 @@
         [
           "socket2",
           "0.6.4",
+          "MIT OR Apache-2.0"
+        ],
+        [
+          "stacker",
+          "0.1.24",
           "MIT OR Apache-2.0"
         ],
         [

@@ -156,14 +156,15 @@ struct RetryInfo {
     retry_delay: Option<prost_types::Duration>,
 }
 
-/// The `google.rpc.RetryInfo` detail of a status, if it has one.
+/// The `google.rpc.RetryInfo` detail of a status, if it has one, each message decoded within the
+/// limit of the nesting of the responses (see `spark_connect_proto::ClientCodec`).
 fn retry_info(status: &tonic::Status) -> Option<RetryInfo> {
-    StatusDetails::decode(status.details())
-        .ok()?
+    use spark_connect_proto::decode_status_detail;
+    decode_status_detail::<StatusDetails>("google.rpc.Status", status.details())?
         .details
         .into_iter()
         .find(|detail| detail.type_url.rsplit('/').next() == Some("google.rpc.RetryInfo"))
-        .and_then(|detail| RetryInfo::decode(detail.value.as_slice()).ok())
+        .and_then(|detail| decode_status_detail("google.rpc.RetryInfo", &detail.value))
 }
 
 /// The delay that the server asks for in the `RetryInfo` detail of a status, in milliseconds.

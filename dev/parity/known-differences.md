@@ -452,6 +452,59 @@ requests of the unpickled object pickle as it is then. This case still differs:
 
 ## Session and client (Connect)
 
+- **A response of 1025 to 65535 levels, of `SetAllowOversizeProtos(True)`** (intentional; the stack
+  guard of the client). Once upb's `SetAllowOversizeProtos(True)` is called, PySpark's client and
+  the drop-in read the responses of up to 65535 levels of nested messages, where both stop at 100
+  levels otherwise (see "The drop-in parses the protobufs ..." in `docs/compatibility.md`). A
+  response whose messages of the fields of the protos nest more than 1024 levels deep raises the
+  drop-in's `RecursionError` ("the messages of a response may be nested at most 1024 levels deep"),
+  as its conversions, copies and drops of the messages that it keeps recurse once per level. PySpark
+  reads such a response and converts its schemas and literals in Python, up to Python's recursion
+  limit, and upb's parser ends its process of a schema or a literal of 100,000 levels. So the
+  schemas of `DataFrame.schema` (of its copy), `collect()` and `toPandas()`, and the literals of the
+  observed metrics, of a few hundred levels (about 650 of arrays, 370 of structs) to 1024 are read
+  by the drop-in only, and those of more fail in both, where PySpark reads the schemas that
+  `SparkSession.client`'s `schema` and `to_table_as_iterator` return up to about 1,000 nested types
+  (2,000 levels of arrays, 3,000 of structs), and the messages that it keeps as they are, such as
+  the relation of the `SqlCommandResult` of `spark.sql`, of 10,000 levels too, which the drop-in
+  refuses past 1024 levels. Groups of fields that the types do not know, which a decoded response
+  does not keep, nest up to 65535 levels in both. The drop-in reads a response at its bound on a
+  thread of 256 KiB (`threading.stack_size`) too, and makes and operates on its types, as on the
+  types of as many levels that the user makes, on stacks that grow with their levels (see
+  `docs/compatibility.md`). On the main thread, where PySpark raises its `RecursionError` from about
+  100 nested structs (`copy.deepcopy`), 150 (`==` and pickling), 200 (`hash()` and `repr()`), 300
+  (`json()`) and 340 (`simpleString()` and `treeString()`), the drop-in compares, pickles and writes
+  the simple and tree strings of types of 500 structs, as far as tried, and raises its
+  `RecursionError` of `hash()` and `repr()` from about 500, and of `json()`, `copy.deepcopy` and
+  unpickling (of Python's `json` module) from about 330.
+
+- **The groups of a response, of protobuf's pure-Python implementation** (intentional; one count of
+  the levels). With `PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION=python`, the drop-in reads the
+  responses within the limit of the decoder of protobuf (`decoder.SetRecursionLimit`, 100 of none),
+  as PySpark does, and counts the groups of the fields that a type does not know as upb counts
+  them, a level each below the message that holds them. Protobuf's Python decoder counts them from
+  0 in each message, and stops at the limit itself: so of a response of groups exactly 100 levels
+  deep, PySpark raises "Exception deserializing response!" and the drop-in reads it, and of a
+  message at level 92 to 100 with 10 levels of groups below it, PySpark reads it and the drop-in
+  raises that error. A server of Spark, of proto3, sends no groups.
+
+- **An Arrow batch of 61 to 63 nested structs** (tracked; the limit of arrow-rs). The client reads
+  the Arrow batches of a result with arrow-rs, whose IPC stream reader verifies the flatbuffer of
+  each message within the default depth of flatbuffers' verifier, 64, and takes no other. So of a
+  result of a struct nested 61 to 63 levels, such as of `named_struct('a', ...)` nested so, PySpark
+  (pyarrow 26.0.1) reads the batches of `collect()`, `toPandas()` and `toArrow()`, where the drop-in
+  raises `PySparkRuntimeError` ("Failed to create Arrow stream reader: Parser error: Unable to get
+  root as message: DepthLimitReached"). From 64 levels both fail, PySpark with pyarrow's
+  `ArrowInvalid` ("Max recursion depth reached"), and up to 60 both read. Its protobuf schema nests
+  past the 100 levels of a response from 32 nested structs, so a server's result reaches the
+  difference only after `SetAllowOversizeProtos(True)`.
+
+- **A `grpc-status-details-bin` that does not decode** (tracked). The `google.rpc.Status` of the
+  details of a failure that does not decode, also of one nested past the limit of upb's parser,
+  is of no error of the server: the drop-in raises the `SparkConnectGrpcException` of the code
+  and the message of the status. PySpark's `rpc_status.from_call` raises protobuf's `DecodeError`
+  of it (`Error parsing message with type 'google.rpc.Status': Wire format was corrupt`).
+
 - **The check of the dependencies at `import pyspark.sql.connect` and `import pyspark.ml.connect`**
   (intentional; the transport is native). PySpark's packages run `check_dependencies()` when they
   are imported. That raises `PACKAGE_NOT_INSTALLED` without pandas 2.2.0, PyArrow 18.0.0, grpcio

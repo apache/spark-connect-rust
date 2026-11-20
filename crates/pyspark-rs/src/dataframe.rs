@@ -209,6 +209,23 @@ impl PyDataFrame {
                 .map_err(Box::new)
         })?;
         check_schema_conversion(py, schema.as_ref())?;
+        // The conversion of pyarrow and pandas, of calls of Python of many frames, on a stack with
+        // room for them, of a thread of a small stack too.
+        crate::on_grown_stack(|| {
+            self.to_pandas_of(py, batches, schema, info, settings, struct_handling_mode)
+        })
+    }
+
+    /// The pandas DataFrame of the batches of the result of [`Self::to_pandas`], of its settings.
+    fn to_pandas_of(
+        &self,
+        py: Python<'_>,
+        batches: Vec<arrow::record_batch::RecordBatch>,
+        schema: Option<spark_connect::types::DataType>,
+        info: spark_connect::session::ExecutionInfo,
+        settings: Vec<Option<String>>,
+        struct_handling_mode: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
         let mut table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         // As SparkConnectClient._execute_and_fetch with self_destruct, which copies each column
         // of each batch into its own allocation before the conversion, with its errors.
@@ -3721,7 +3738,8 @@ impl PyDataFrame {
     #[pyo3(name = "executionInfo")]
     #[doc = connect_doc!(DataFrame.executionInfo)]
     fn execution_info(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let Ok(info) = self.dataframe.execution_info() else {
+        // A copy of the observed metrics, of up to `spark_connect_proto::MAX_KEPT_DEPTH` levels.
+        let Ok(info) = crate::on_grown_stack(|| self.dataframe.execution_info()) else {
             return Ok(py.None());
         };
         // The lock is not held while Python code runs, which may read this property again.
@@ -8491,8 +8509,8 @@ pub(crate) fn execution_metrics<'py>(
     // The metrics as PySpark's client keeps them, the `Expression.Literal` messages that the
     // server sent, of `pyspark.sql.connect.proto`, which `PlanObservedMetrics.pairs` converts
     // when it is read, and so raises the `UNSUPPORTED_LITERAL` of a literal that PySpark does not
-    // convert there. They are parsed of any depth, as the transport reads the responses, so a
-    // struct nested past upb's limit reads as `collect()` reads it.
+    // convert there. They are parsed of any depth, as the transport has read their response
+    // within the limit of upb's parser (see `spark_connect_proto::ClientCodec`).
     let literal_cls = py
         .import("pyspark.sql.connect.proto")?
         .getattr("Expression")?
@@ -8524,10 +8542,14 @@ fn same_execution(
     a.operation_id == b.operation_id
         && a.metrics == b.metrics
         && a.observed_metrics.len() == b.observed_metrics.len()
-        && a.observed_metrics
-            .iter()
-            .zip(&b.observed_metrics)
-            .all(|(x, y)| x == y || x.encode_to_vec() == y.encode_to_vec())
+        // Of literals of up to `spark_connect_proto::MAX_KEPT_DEPTH` levels.
+        && (a.observed_metrics.is_empty()
+            || crate::on_grown_stack(|| {
+                a.observed_metrics
+                    .iter()
+                    .zip(&b.observed_metrics)
+                    .all(|(x, y)| x == y || x.encode_to_vec() == y.encode_to_vec())
+            }))
 }
 
 /// Convert an observed-metric literal to a Python value, as the metrics of an Observation.
@@ -8540,6 +8562,17 @@ fn same_execution(
 /// field names come from it, else from the literal's own `data_type`, else from the
 /// deprecated `struct_type`.
 pub(crate) fn literal_to_py(
+    py: Python<'_>,
+    literal: &spark_connect_proto::expression::Literal,
+    data_type: Option<&spark_connect_proto::DataType>,
+) -> PyResult<Py<PyAny>> {
+    // A level of a literal of many levels, of the observed metrics of a response, on a stack with
+    // room.
+    crate::pbmsg::grow(|| literal_to_py_level(py, literal, data_type))
+}
+
+/// [`literal_to_py`] of one level of a literal.
+fn literal_to_py_level(
     py: Python<'_>,
     literal: &spark_connect_proto::expression::Literal,
     data_type: Option<&spark_connect_proto::DataType>,
