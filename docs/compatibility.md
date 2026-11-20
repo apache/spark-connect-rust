@@ -2226,10 +2226,10 @@ PySpark's is, and a new plan at each read.
 
 ## SparkSession.client
 
-`spark.client` is PySpark Connect's `SparkConnectClient` (`pyspark.sql.connect.client`), with the
-public API of pyspark-client 4.3.0, over the Rust transport of the session. It sends the messages
-of `pyspark.sql.connect.proto` that it is given as they are, and reads their responses as PySpark's
-client does:
+`spark.client` is PySpark Connect's `SparkConnectClient` (of `pyspark.sql.connect.client.core`,
+which its package names too), with the public API of pyspark-client 4.3.0, over the Rust transport
+of the session. It sends the messages of `pyspark.sql.connect.proto` that it is given as they are,
+and reads their responses as PySpark's client does:
 
 - the analyses of a `pb2.Plan` (`schema`, `explain_string`, `same_semantics`, `semantic_hash`), the
   configuration requests of a `ConfigRequest.Operation` (`config`, which returns a `ConfigResult`),
@@ -2590,11 +2590,9 @@ pysparkfuncs.col.__doc__`), which the test compares with those of `pyspark-clien
   imports of `pyspark.core` when not `is_remote_only()`, which `pyspark-client` does not ship,
   the drop-in's module imports so too, in a block that does not run either: mypy takes them as
   `Any` and pyright reports their imports as of an unknown symbol, as with `pyspark-client`.
-- The classes that the drop-in implements in another way: the client of `SparkSession.client` has
-  the public API of PySpark Connect's `SparkConnectClient`, whose class is
-  `pyspark.sql.connect.client.SparkConnectClient` rather than `pyspark.sql.connect.client.core`'s;
-  and the internal expressions and plans of PySpark Connect, which annotate private attributes
-  (`DataFrameWriter._write`) and a few internal constructors, and which are `Any`.
+- The classes that the drop-in implements in another way: the internal expressions and plans of
+  PySpark Connect, which annotate private attributes (`DataFrameWriter._write`) and a few internal
+  constructors, and which are `Any`.
 - The classes of `pyspark.ml.connect` are those of the drop-in, of PySpark's API of `pyspark.ml`
   (see "Native ML classes of the full pyspark.ml API"), where `pyspark-client`'s modules of these
   names are its ML API on PyTorch, so a type checker types `LogisticRegression` of
@@ -3447,14 +3445,25 @@ SparkSession, its `conf`, `catalog`, `read`, `readStream`, `streams`, `udf`, `ud
 `dataSource`, `tvf` and `client`, and a DataFrame's `write`, `writeTo`, `writeStream`,
 `mergeInto` and its clauses, `na`, `stat`, `groupBy`, `cogroup`, `asTable` and the WindowSpec of
 its windows, and an `Observation`. So are `SparkSession.Hook`, nested in the session class, and
-the classes that `pyspark.sql.connect.client` names, which are of `pyspark.sql.connect.client.core`:
-its channel builders, `SparkConnectClient` and `RpcDeadlines`, which PySpark's module names too, of
-the `__all__` of its `core`. `PlanObservedMetrics`, `AnalyzeResult` and `ConfigResult` are of that
-`core` only, as PySpark's. The drop-in's `pyspark.sql.connect.client` has its own helpers and the
-names that it imports too, as the drop-in's client is that module, and an `__all__`, of the names
-that PySpark's `from pyspark.sql.connect.client import *` gives of its package, which has none:
-those classes, `getLogLevel` and `core`, but for its modules `artifact` and `reattach`, which the
-transport replaces, and `retries`, which imports grpc, and is imported when it is read.
+the classes of the client, which `pyspark.sql.connect.client.core` defines, as PySpark's: its
+channel builders, `SparkConnectClient` and `RpcDeadlines`, of its `__all__`, which its package
+names too, and `PlanObservedMetrics`, `AnalyzeResult` and `ConfigResult`, which only `core` names.
+The functions of these classes are of `core` too, where `inspect` finds their source, and their
+pickles and those of the results are PySpark's. The package `pyspark.sql.connect.client` is
+PySpark's, of Apache Spark as it is: of no `__all__`, it imports `*` of `core` and the `getLogLevel`
+of `pyspark.sql.connect.logging`. So its names, of `dir()` and of
+`from pyspark.sql.connect.client import *`, are PySpark's, those classes, `getLogLevel` and the
+modules `core` and `retries`, but for PySpark's modules `artifact` and `reattach`, which the
+transport replaces, and for `retries` until it is imported (by `get_retry_policies`,
+`set_retry_policies`, a `retry_policy` of `SparkConnectClient`, or an import of it), as it imports
+grpc: until then the package has no attribute `retries`, which PySpark's `core` imports. `core`
+defines PySpark's names, `PYSPARK_ROOT`, `_is_pyspark_source` and `_import_zstandard_if_available`
+too, and the private helpers of the drop-in. Of the names that PySpark's `core` imports, it has
+those that it imports too, such as `logger` and `os`, and those of `retries` (`RetryPolicy`,
+`Retrying`, `DefaultPolicy` and `DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME`) once they are read,
+which its `dir()` does not list, but not the others, such as `grpc`, `pd` and `ArtifactManager`.
+The package and `core` need none of pandas, PyArrow, grpc and protobuf, which PySpark's `core`
+imports, and import without them (see `dev/parity/known-differences.md`).
 The functions of `pyspark.sql.connect.functions` are of its modules (`builtin` and
 `partitioning`), and so are those of `pyspark.sql.connect.avro.functions` and
 `pyspark.sql.connect.protobuf.functions`: they are not those of `pyspark.sql.functions`,

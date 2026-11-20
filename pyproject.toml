@@ -190,6 +190,7 @@ extend-exclude = [
     "python/pyspark/sql/connect/shell/progress.py",
     "python/pyspark/sql/connect/logging.py",
     "python/pyspark/sql/connect/client/retries.py",
+    "python/pyspark/sql/connect/client/__init__.py",
     "python/pyspark/sql/connect/_typing.py",
     "python/pyspark/sql/connect/conversion.py",
     "python/pyspark/sql/geo_utils.py",

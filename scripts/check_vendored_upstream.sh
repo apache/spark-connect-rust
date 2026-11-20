@@ -137,6 +137,9 @@ VENDORED_FILES=(
   # The retry policies of SparkConnectClient.get_retry_policies and set_retry_policies, whose
   # parameters the Rust transport retries with.
   "sql/connect/client/retries.py"
+  # The package of the client, which exports the names of the `__all__` of its core module, the
+  # drop-in's, and getLogLevel, as PySpark's.
+  "sql/connect/client/__init__.py"
   "sql/connect/_typing.py"
   # The conversions of the storage levels and the cached relations of their messages.
   "sql/connect/conversion.py"

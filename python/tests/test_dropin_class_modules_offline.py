@@ -394,6 +394,368 @@ print("ok")
     assert result.returncode == 0 and result.stdout.strip() == "utils", result.stderr
 
 
+# The names of pyspark-client 4.3.0's pyspark.sql.connect.client, whose __init__ is
+# `from pyspark.sql.connect.client.core import *` and the getLogLevel of
+# pyspark.sql.connect.logging, of no `__all__`: those of `dir()` but its dunders, which its
+# `import *` gives too, before and after its submodules are imported, as its core imports them.
+REFERENCE_CLIENT_NAMES = [
+    "ChannelBuilder",
+    "DefaultChannelBuilder",
+    "RpcDeadlines",
+    "SparkConnectClient",
+    "artifact",
+    "core",
+    "getLogLevel",
+    "reattach",
+    "retries",
+]
+# Its modules that the drop-in does not have, as the Rust transport replaces them.
+CLIENT_MODULES_OF_THE_TRANSPORT = {"artifact", "reattach"}
+# The `__all__` of pyspark-client 4.3.0's pyspark.sql.connect.client.core, and the names that the
+# module's source binds at its top level, but by its imports.
+REFERENCE_CORE_ALL = [
+    "ChannelBuilder",
+    "DefaultChannelBuilder",
+    "RpcDeadlines",
+    "SparkConnectClient",
+]
+REFERENCE_CORE_DEFINED = [
+    "AnalyzeResult",
+    "ChannelBuilder",
+    "ConfigResult",
+    "DefaultChannelBuilder",
+    "PYSPARK_ROOT",
+    "PlanObservedMetrics",
+    "RpcDeadlines",
+    "SparkConnectClient",
+    "__all__",
+    "_import_zstandard_if_available",
+    "_is_pyspark_source",
+]
+
+CLIENT_NAMES_SCRIPT = """
+import ast, importlib.abc, importlib.util, json, sys
+
+blocked = sys.argv[1:]
+
+
+class Block(importlib.abc.MetaPathFinder):
+    def find_spec(self, name, path, target=None):
+        if any(name == b or name.startswith(b + ".") for b in blocked):
+            raise ImportError("blocked: " + name)
+
+
+sys.meta_path.insert(0, Block())
+
+
+def names(module):
+    star = {}
+    exec("from " + module.__name__ + " import *", star)
+    return [
+        sorted(n for n in dir(module) if not n.startswith("__")),
+        sorted(n for n in star if not n.startswith("__")),
+    ]
+
+
+def defined(module):
+    bound = set()
+    for node in ast.parse(open(module.__file__).read()).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            bound.update(t.id for t in targets if isinstance(t, ast.Name))
+    return sorted(bound)
+
+
+import pyspark.sql.connect.client as client
+
+out = {"package": names(client), "has_all": hasattr(client, "__all__"), "doc": client.__doc__}
+core = client.core
+out["core"] = names(core)
+out["core_all"] = core.__all__
+out["core_defined"] = defined(core)
+# The public names of core that PySpark's core does not have, and whether each is an import.
+reference = set(json.loads(sys.stdin.read()))
+out["core_extra"] = sorted(
+    (n, getattr(getattr(core, n), "__module__", "") != core.__name__)
+    for n in names(core)[0]
+    if not n.startswith("_") and n not in reference
+)
+if not blocked and importlib.util.find_spec("grpc") is not None:
+    import pyspark.sql.connect.client.retries
+
+    out["package_after"] = names(client)
+print(json.dumps(out))
+"""
+
+# The names of pyspark-client 4.3.0's pyspark.sql.connect.client.core, those of `dir()` but its
+# dunders, of its definitions and of its imports.
+REFERENCE_CORE_NAMES = (
+    "AnalyzeResult Any ArtifactManager CallSite ChannelBuilder CommonInlineUserDefinedDataSource "
+    "CommonInlineUserDefinedFunction CommonInlineUserDefinedTableFunction ConfigResult "
+    "ConnectProfilerCollector DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME DataType "
+    "DefaultChannelBuilder DefaultPolicy Dict ExecutePlanResponseReattachableIterator "
+    "ExecutionInfo FetchErrorDetailsResponse Iterable Iterator JavaUDF List LiteralExpression "
+    "Mapping MetricValue NoReturn Observation ObservedMetrics Optional PYSPARK_ROOT PlanMetrics "
+    "PlanObservedMetrics Progress ProgressHandler PySparkAssertionError "
+    "PySparkNotImplementedError PySparkValueError PythonDataSource PythonEvalType PythonUDF "
+    "PythonUDTF ResourceInformation RetryPolicy Retrying RpcDeadlines Set SparkConnectClient "
+    "SparkConnectException SparkConnectGrpcException SpecialAccumulatorIds StorageLevel "
+    "StructType TYPE_CHECKING Tuple Type Union _convert_arrow_table_to_pandas "
+    "_import_zstandard_if_available _is_pyspark_source any_pb2 atexit cast concurrent "
+    "convert_exception convert_observation_errors copy dataclass disable_gc error_details_pb2 "
+    "fields from_arrow_schema from_proto get_python_ver google grpc grpc_lib is_remote_only "
+    "logger logging os pa pb2 pd pickle platform proto_to_remote_cached_dataframe "
+    "proto_to_storage_level pyspark rpc_status specialAccumulatorSer storage_level_to_proto sys "
+    "text_format threading time traceback types urllib uuid weakref"
+).split()
+# The packages that PySpark's core imports, and the drop-in's does not need.
+CLIENT_OPTIONAL_PACKAGES = [
+    "pandas",
+    "pyarrow",
+    "numpy",
+    "grpc",
+    "grpc_status",
+    "google",
+    "zstandard",
+]
+
+
+@pytest.mark.parametrize("blocked", [[], CLIENT_OPTIONAL_PACKAGES], ids=["all", "blocked"])
+def test_the_client_package_and_its_core_have_pysparks_names(blocked):
+    # As pyspark-client's pyspark.sql.connect.client, in a new process: of no `__all__` and no
+    # docstring, its public names, of `dir()` and of its `import *`, are the classes of the
+    # `__all__` of its core, its getLogLevel and its modules, but `artifact` and `reattach`, which
+    # the Rust transport replaces, and `retries` until it is imported, as it imports grpc. Its
+    # core has PySpark's `__all__` and defines PySpark's names, besides private helpers of its
+    # own; its other public names are of the modules that it imports. Both import without
+    # pandas, PyArrow, NumPy, grpc, protobuf and zstandard, which PySpark's core imports.
+    import importlib.util
+    import json
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-c", CLIENT_NAMES_SCRIPT, *blocked],
+        input=json.dumps(REFERENCE_CORE_NAMES),
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert result.returncode == 0, result.stderr
+    out = json.loads(result.stdout)
+    unimported = CLIENT_MODULES_OF_THE_TRANSPORT | {"retries"}
+    expected = [n for n in REFERENCE_CLIENT_NAMES if n not in unimported]
+    assert out["package"] == [expected, expected]
+    assert out["has_all"] is False and out["doc"] is None
+    assert out["core_all"] == REFERENCE_CORE_ALL
+    assert out["core"][1] == REFERENCE_CORE_ALL
+    assert set(REFERENCE_CORE_DEFINED) <= set(out["core_defined"])
+    own = set(out["core_defined"]) - set(REFERENCE_CORE_DEFINED)
+    assert own and all(n.startswith("_") for n in own), sorted(own)
+    # Its public names that PySpark's core does not have: of the stdlib that its helpers import.
+    assert out["core_extra"] == [
+        ["Path", True],
+        ["contextvars", True],
+        ["functools", True],
+        ["inspect", True],
+        ["math", True],
+        ["warnings", True],
+    ]
+    public = {n for n in out["core"][0] if not n.startswith("_")}
+    assert public - {n for n, _ in out["core_extra"]} <= set(REFERENCE_CORE_NAMES)
+    if "package_after" in out:
+        after = [n for n in REFERENCE_CLIENT_NAMES if n not in CLIENT_MODULES_OF_THE_TRANSPORT]
+        assert out["package_after"] == [after, after]
+    else:
+        assert blocked or importlib.util.find_spec("grpc") is None
+
+
+# The modules and qualified names of the classes of pyspark-client 4.3.0's
+# pyspark.sql.connect.client.core, of the first line of their source, which `inspect` finds there.
+CORE_CLASSES = {
+    "SparkConnectClient": "class SparkConnectClient",
+    "ChannelBuilder": "class ChannelBuilder",
+    "DefaultChannelBuilder": "class DefaultChannelBuilder(ChannelBuilder):",
+    "RpcDeadlines": "@dataclass(frozen=True)",
+    "PlanObservedMetrics": "class PlanObservedMetrics(ObservedMetrics):",
+    "AnalyzeResult": "class AnalyzeResult:",
+    "ConfigResult": "class ConfigResult:",
+}
+
+
+@pytest.mark.parametrize("name", list(CORE_CLASSES))
+def test_the_classes_of_the_client_and_their_functions_are_of_its_core_as_pysparks(name):
+    # As PySpark's: the class, and each function of it, is of pyspark.sql.connect.client.core,
+    # which defines it, so that `inspect` finds its source there and a pickle of a function
+    # names it there, as PySpark's does.
+    import inspect
+
+    from pyspark.sql.connect.client import core
+
+    cls = getattr(core, name)
+    assert (cls.__module__, cls.__qualname__) == ("pyspark.sql.connect.client.core", name)
+    assert inspect.getmodule(cls) is core
+    assert inspect.getsourcefile(cls) == core.__file__
+    assert inspect.getsourcelines(cls)[0][0].startswith(CORE_CLASSES[name])
+    functions = [
+        member
+        for member in vars(cls).values()
+        if inspect.isfunction(member) and member.__qualname__.startswith(name + ".")
+    ]
+    assert functions
+    for function in functions:
+        assert function.__module__ == "pyspark.sql.connect.client.core", function
+        assert inspect.getmodule(function) is core
+        assert pickle.loads(pickle.dumps(function)) is function
+
+
+# The pickles of protocol 4 of pyspark-client 4.3.0's objects of `_pickled_objects`: of the
+# results of the client, its RPC deadlines and functions of its classes, all of
+# pyspark.sql.connect.client.core.
+REFERENCE_PICKLES = {
+    "ConfigResult": (
+        "8004956b000000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265"
+        "948c0c436f6e666967526573756c749493942981947d94288c057061697273945d94288c0161948c01319486"
+        "948c0162944e8694658c087761726e696e6773945d948c0177946175622e"
+    ),
+    "AnalyzeResult": (
+        "80049514010000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265"
+        "948c0d416e616c797a65526573756c749493942981947d94288c06736368656d61944e8c0e6578706c61696e"
+        "5f737472696e67948c0a3d3d20506c616e203d3d948c0b747265655f737472696e67944e8c0869735f6c6f63"
+        "616c94888c0c69735f73747265616d696e6794898c0b696e7075745f66696c6573945d948c016694618c0d73"
+        "7061726b5f76657273696f6e948c05342e332e30948c06706172736564944e8c1169735f73616d655f73656d"
+        "616e7469637394888c0d73656d616e7469635f68617368944b2a8c0d73746f726167655f6c6576656c944e8c"
+        "0a64646c5f737472696e67948c056120494e549475622e"
+    ),
+    "PlanObservedMetrics": (
+        "800495e1000000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265"
+        "948c13506c616e4f627365727665644d6574726963739493942981947d94288c055f6e616d65948c016f948c"
+        "085f6d657472696373945d948c17676f6f676c652e70726f746f6275662e6d657373616765948c195f496e74"
+        "65726e616c436f6e7374727563744d6573736167659493948c20737061726b2e636f6e6e6563742e45787072"
+        "657373696f6e2e4c69746572616c94859452947d948c0a73657269616c697a65649443023803947362618c05"
+        "5f6b657973945d948c016e946175622e"
+    ),
+    "PlanObservedMetrics of no metrics": (
+        "80049566000000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265"
+        "948c13506c616e4f627365727665644d6574726963739493942981947d94288c055f6e616d65948c016f948c"
+        "085f6d657472696373945d948c055f6b657973945d9475622e"
+    ),
+    "RpcDeadlines": (
+        "8004951b010000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265"
+        "948c0c527063446561646c696e65739493942981947d94288c19726561747461636861626c655f6578656375"
+        "74655f706c616e944d58028c1072656174746163685f65786563757465944d58028c0c616e616c797a655f70"
+        "6c616e94473ff80000000000008c0d6164645f617274696661637473944d100e8c06636f6e666967944e8c09"
+        "696e74657272757074944d58028c0f72656c656173655f73657373696f6e944d58028c0f6172746966616374"
+        "5f737461747573944d58028c0d636c6f6e655f73657373696f6e944d58028c0a6765745f737461747573944d"
+        "58028c1366657463685f6572726f725f64657461696c73944d580275622e"
+    ),
+    "SparkConnectClient.config": (
+        "80049541000000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265"
+        "948c19537061726b436f6e6e656374436c69656e742e636f6e6669679493942e"
+    ),
+    "DefaultChannelBuilder.__init__": (
+        "80049546000000000000008c1f7079737061726b2e73716c2e636f6e6e6563742e636c69656e742e636f7265"
+        "948c1e44656661756c744368616e6e656c4275696c6465722e5f5f696e69745f5f9493942e"
+    ),
+    "RpcDeadlines.disabled": (
+        "8004955a000000000000008c086275696c74696e73948c07676574617474729493948c1f7079737061726b2e"
+        "73716c2e636f6e6e6563742e636c69656e742e636f7265948c0c527063446561646c696e65739493948c0864"
+        "697361626c656494869452942e"
+    ),
+}
+
+
+def _pickled_objects():
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client.core import (
+        AnalyzeResult,
+        ConfigResult,
+        DefaultChannelBuilder,
+        PlanObservedMetrics,
+        RpcDeadlines,
+        SparkConnectClient,
+    )
+
+    return {
+        "ConfigResult": ConfigResult([("a", "1"), ("b", None)], ["w"]),
+        "AnalyzeResult": AnalyzeResult(
+            None, "== Plan ==", None, True, False, ["f"], "4.3.0", None, True, 42, None, "a INT"
+        ),
+        "PlanObservedMetrics": PlanObservedMetrics("o", [pb2.Expression.Literal(long=3)], ["n"]),
+        "PlanObservedMetrics of no metrics": PlanObservedMetrics("o", [], []),
+        "RpcDeadlines": RpcDeadlines(analyze_plan=1.5, config=None),
+        "SparkConnectClient.config": SparkConnectClient.config,
+        "DefaultChannelBuilder.__init__": DefaultChannelBuilder.__init__,
+        "RpcDeadlines.disabled": RpcDeadlines.disabled,
+    }
+
+
+@pytest.mark.parametrize("name", list(REFERENCE_PICKLES))
+def test_the_pickles_of_the_clients_results_are_pysparks(name):
+    # As PySpark's: the pickles of the results of the client, of its RPC deadlines and of the
+    # functions of its classes are those of pyspark-client, which name their classes in
+    # pyspark.sql.connect.client.core, and load as they were.
+    if name == "PlanObservedMetrics":
+        # Its metrics are messages, which pickle of protobuf's _InternalConstructMessage.
+        pytest.importorskip("google.protobuf")
+    data = pickle.dumps(_pickled_objects()[name], protocol=4)
+    assert data.hex() == REFERENCE_PICKLES[name]
+    assert pickle.dumps(pickle.loads(data), protocol=4) == data
+
+
+def test_the_classes_of_the_modules_of_the_client_are_theirs():
+    # The classes of the extension that PySpark has not, the responses of an execution of the
+    # client and the stub and the stream of the transport of the pandas-parity gate, are of
+    # pyspark._pyspark, which has them, and not of PySpark's modules of the client, whose names
+    # are PySpark's. Every class of those modules is so a name of its module, which a pickle of it
+    # names.
+    import gc
+
+    import pyspark.sql.connect.client as client
+    from pyspark import _pyspark
+    from pyspark.sql.connect.client import core
+
+    for name in ("ExecutePlanResponses", "RustConnectStub", "ResponseStream"):
+        cls = getattr(_pyspark, name)
+        assert (cls.__module__, cls.__qualname__) == ("pyspark._pyspark", name)
+        assert pickle.loads(pickle.dumps(cls)) is cls
+        assert not hasattr(client, name) and not hasattr(core, name)
+    modules = {m.__name__: m for m in (client, core)}
+    classes = [
+        cls
+        for cls in gc.get_objects()
+        if isinstance(cls, type)
+        and cls.__module__ in modules
+        and "<locals>" not in cls.__qualname__
+    ]
+    assert {cls.__qualname__ for cls in classes} >= set(CORE_CLASSES)
+    for cls in classes:
+        assert getattr(core, cls.__qualname__) is cls and cls.__module__ == core.__name__, cls
+        assert pickle.loads(pickle.dumps(cls)) is cls
+
+
+def test_pysparks_own_helpers_of_the_core_module_are_there():
+    # As PySpark's core, which has the directory of the pyspark package, whose files
+    # _is_pyspark_source tells, and _import_zstandard_if_available, which gives zstandard where
+    # it is installed, else None.
+    import os
+
+    import pyspark
+    from pyspark.sql.connect.client import core
+
+    assert core.PYSPARK_ROOT == os.path.dirname(pyspark.__file__)
+    assert core._is_pyspark_source(core.__file__)
+    assert not core._is_pyspark_source(os.__file__)
+    zstandard = core._import_zstandard_if_available()
+    try:
+        import zstandard as installed
+    except ImportError:
+        installed = None
+    assert zstandard is installed
+
+
 def test_the_ml_connect_package_has_check_dependencies_as_pysparks():
     # As PySpark's pyspark.ml.connect, whose __init__ imports the check_dependencies of
     # pyspark.sql.connect.utils (and runs it, which the drop-in's does not; see the test above).

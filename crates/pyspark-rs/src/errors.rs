@@ -708,13 +708,15 @@ fn unicode_encode_error(utf32le: &[u8], err: &SparkError) -> PyErr {
 }
 
 /// grpcio's `RpcError` of `error`, which PySpark's client leaves to grpc, unconverted (see
-/// `SparkError::grpcio`), as `_grpc_error` of `pyspark.sql.connect.client` makes it: None without
-/// grpcio, whose classes cannot be had, when the error is converted as any other.
+/// `SparkError::grpcio`), as `_grpc_error` of `pyspark.sql.connect.client.core` makes it: None
+/// without grpcio, whose classes cannot be had, when the error is converted as any other.
 fn grpcio_exception(error: &spark_connect_core::error::GrpcioError) -> Option<PyErr> {
     Python::attach(|py| {
-        let exception = py.import("pyspark.sql.connect.client").and_then(|client| {
-            client.call_method1("_grpc_error", crate::client::grpc_error_args(py, error))
-        });
+        let exception = py
+            .import("pyspark.sql.connect.client.core")
+            .and_then(|client| {
+                client.call_method1("_grpc_error", crate::client::grpc_error_args(py, error))
+            });
         match exception {
             Ok(exception) => Some(PyErr::from_value(exception)),
             // As PySpark, where the KeyboardInterrupt of a signal that comes while the error is
@@ -733,7 +735,7 @@ fn grpcio_exception(error: &spark_connect_core::error::GrpcioError) -> Option<Py
 /// grpcio's error of the call is handled, its `__context__`, and of the operation ID of an
 /// execution, which PySpark's `_handle_error` sets on any exception of it. Without grpcio, its
 /// context is an exception of the class name and the text of grpcio's error (see
-/// `pyspark.sql.connect.client._InactiveRpcError`); without protobuf, the `DecodeError` is the
+/// `pyspark.sql.connect.client.core._InactiveRpcError`); without protobuf, the `DecodeError` is the
 /// runtime's (see `pyspark.sql.connect.proto._rust.DecodeError`).
 fn rpc_status_value_error(
     err: &SparkError,
@@ -746,7 +748,7 @@ fn rpc_status_value_error(
             } else {
                 "_InactiveRpcError"
             };
-            py.import("pyspark.sql.connect.client")
+            py.import("pyspark.sql.connect.client.core")
                 .and_then(|client| client.getattr(class))
                 .and_then(|class| class.call1((grpcio.text.as_str(),)))
                 .ok()

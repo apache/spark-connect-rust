@@ -635,11 +635,11 @@ impl PySparkSessionBuilder {
 /// client, the channel builder of an object that is not one is `DefaultChannelBuilder(connection)`,
 /// whose errors are raised, such as the `TypeError` of the slicing of an object that is not a
 /// str, and its session ID, its user and its channel are read first, so that a builder of no
-/// `toChannel` raises its error (see `pyspark.sql.connect.client._checked_channel_builder`).
+/// `toChannel` raises its error (see `pyspark.sql.connect.client.core._checked_channel_builder`).
 pub(crate) fn url_of_channel_builder(connection: &Bound<'_, PyAny>) -> PyResult<String> {
     let channel_builder = connection
         .py()
-        .import("pyspark.sql.connect.client")?
+        .import("pyspark.sql.connect.client.core")?
         .getattr("_checked_channel_builder")?
         .call1((connection,))?;
     // Endpoint: the builder's host and port, which DefaultChannelBuilder exposes, of the error of
@@ -787,7 +787,7 @@ fn connected_session(
 
 /// Give `session`, a session object of `connection`, the state of the clients of PySpark's
 /// client of `connection`, of `userId` as it is given (see
-/// `pyspark.sql.connect.client._init_client_state`): as PySpark's `SparkSession(connection,
+/// `pyspark.sql.connect.client.core._init_client_state`): as PySpark's `SparkSession(connection,
 /// userId)` makes its client, whose `_builder` is the channel builder of `connection` and whose
 /// `_user_id` is `userId` unless the connection has one.
 fn init_client_state(
@@ -796,7 +796,7 @@ fn init_client_state(
     connection: &Bound<'_, PyAny>,
     user_id: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<()> {
-    py.import("pyspark.sql.connect.client")?
+    py.import("pyspark.sql.connect.client.core")?
         .getattr("_init_client_state")?
         .call1((session, connection, user_id))?;
     Ok(())
@@ -1111,7 +1111,7 @@ pub(crate) fn session_of_client(client: &Bound<'_, PyAny>) -> Option<SparkSessio
     static CLIENT_CLASS: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
         pyo3::sync::PyOnceLock::new();
     let class = CLIENT_CLASS
-        .import(py, "pyspark.sql.connect.client", "SparkConnectClient")
+        .import(py, "pyspark.sql.connect.client.core", "SparkConnectClient")
         .ok()?;
     if !client.is_instance(class).unwrap_or(false) {
         return None;
@@ -1382,7 +1382,7 @@ fn set_default_and_active(py: Python<'_>, session: &Py<PySparkSession>) -> PyRes
 /// Log the RPC deadlines of the client of `session`, a new session, as PySpark's
 /// `SparkConnectClient` logs them when it is made (`Spark Connect RPC deadlines: ...`): of the
 /// seconds of each, an int when it is whole, as PySpark's `RpcDeadlines` has them by default.
-/// Only where the logger of Spark Connect writes it, as `pyspark.sql.connect.client`, of its
+/// Only where the logger of Spark Connect writes it, as `pyspark.sql.connect.client.core`, of its
 /// `RpcDeadlines`, imports grpc. An error of the log is dropped, but the KeyboardInterrupt of a
 /// signal, which the creation of the session raises, as PySpark's raises it out of its log.
 fn log_rpc_deadlines(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
@@ -1417,7 +1417,7 @@ fn log_rpc_deadlines(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
                 Some(deadline) => kwargs.set_item(name, deadline.as_secs_f64())?,
             }
         }
-        py.import("pyspark.sql.connect.client")?
+        py.import("pyspark.sql.connect.client.core")?
             .getattr("_log_rpc_deadlines")?
             .call((), Some(&kwargs))?;
         Ok(())
@@ -4071,13 +4071,13 @@ impl PySparkSession {
 
     // The client of PySpark Connect's `session.client`, as far as the modules of PySpark that
     // build their own messages, such as `pyspark.ml`, use it: of their commands and of the ML
-    // cache, over the Rust transport (`pyspark.sql.connect.client`).
+    // cache, over the Rust transport (`pyspark.sql.connect.client.core`).
     #[getter]
     #[doc = connect_doc!(SparkSession.client)]
     fn client(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(slf
             .py()
-            .import("pyspark.sql.connect.client")?
+            .import("pyspark.sql.connect.client.core")?
             .getattr("_client_of")?
             .call1((slf,))?
             .unbind())
@@ -4837,13 +4837,13 @@ impl PySparkSession {
     // A new session of the same connection, as PySpark's `newSession()`: a session of none of
     // the server-side state of this one, of the user of `client._user_id`, as PySpark's new
     // client takes it, unless the connection has one (see
-    // `pyspark.sql.connect.client._new_session_of`).
+    // `pyspark.sql.connect.client.core._new_session_of`).
     #[pyo3(name = "newSession")]
     #[doc = connect_doc!(SparkSession.newSession)]
     fn new_session(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
         Ok(slf
             .py()
-            .import("pyspark.sql.connect.client")?
+            .import("pyspark.sql.connect.client.core")?
             .getattr("_new_session_of")?
             .call1((slf,))?
             .unbind())
@@ -4861,7 +4861,7 @@ impl PySparkSession {
     ) -> PyResult<Py<PyAny>> {
         Ok(slf
             .py()
-            .import("pyspark.sql.connect.client")?
+            .import("pyspark.sql.connect.client.core")?
             .getattr("_new_session_of")?
             .call1((slf, true, new_session_id))?
             .unbind())

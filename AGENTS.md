@@ -132,7 +132,7 @@ There are no justified non-gaps: anything in the diff is a real gap to close. Re
 diff until it shows none.
 
 `SparkSession.client` is not the gRPC `SparkConnectClient`: it has the public API of PySpark
-Connect's over the Rust transport (`python/pyspark/sql/connect/client/__init__.py`), which the
+Connect's over the Rust transport (`python/pyspark/sql/connect/client/core.py`), which the
 vendored `pyspark.ml` (and any module that builds its own `spark.connect` messages) uses -
 `execute_command(pb2.Command)`, `to_table(pb2.Plan)`, `schema(pb2.Plan)`, `config`, the ML cache
 RPCs, and the retry policies, which the transport retries with - with the

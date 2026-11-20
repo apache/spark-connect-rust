@@ -537,6 +537,21 @@ requests of the unpickled object pickle as it is then. This case still differs:
   each call starts, where PySpark reads it as each request is built, so a request that the
   transport builds during a call, such as a reattachment or a release in the background, has the
   user agent of the last call that started.
+- **The modules and names of `pyspark.sql.connect.client`** (intentional; the transport is
+  native). The package is PySpark's, and its `core` defines PySpark's classes and functions, of
+  PySpark's `__all__` (see `docs/compatibility.md`). PySpark's `core` imports the modules
+  `artifact`, `reattach` and `retries` of the package, so the package has those names as soon as it
+  is imported. The drop-in has no `artifact` and `reattach`, which the transport replaces (see
+  "Retry and reattach"), and the package has `retries`, which imports grpc, once it is imported, as
+  by `set_retry_policies`: before, `dir()` and `from pyspark.sql.connect.client import *` do not
+  give it, and `pyspark.sql.connect.client.retries` raises `AttributeError`, where
+  `import pyspark.sql.connect.client.retries` and `from pyspark.sql.connect.client import retries`
+  import it. Of the names that PySpark's `core` imports, the drop-in's has those that it imports
+  too, such as `os` and `logger`, and those of `retries` (`RetryPolicy`, `Retrying`,
+  `DefaultPolicy`, `DEFAULT_MAX_RETRY_EXCEPTION_ELAPSED_TIME`) as they are read, which its `dir()`
+  does not list; the others, such as `grpc`, `pd`, `pa`, `ArtifactManager` and `List`, it has not.
+  It has the names that its helpers import, `contextvars`, `functools`, `inspect`, `math`,
+  `warnings` and `Path`, which PySpark's has not.
 - **Retry and reattach** (intentional; DESIGN). Retries and reattachment live in the Rust
   transport. `client.retries` is PySpark's, vendored. `SparkConnectClient.set_retry_policies`
   makes the transport retry with the parameters of PySpark's own `DefaultPolicy` and `RetryPolicy`,
@@ -963,9 +978,6 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   `pyspark-client` see it, the type variables of the annotations of `pyspark.sql.types`, and the
   base and the internal class of PySpark Connect's classes that the drop-in implements natively,
   the `OptionUtils` of its readers and writers and its `StreamingQueryListenerBus`.
-- **`SparkSession.client`** (intentional; the drop-in's own class). The client has PySpark
-  Connect's public API, of the class `pyspark.sql.connect.client.SparkConnectClient` rather than
-  `pyspark.sql.connect.client.core`'s.
 - **The internals of PySpark Connect** (intentional). The private attributes of the Connect
   classes that PySpark annotates with its plans and expressions (`DataFrameWriter._write`, ...)
   are `Any`, as the drop-in builds them in Rust (`UNRESOLVED_IMPORTS` of the generator).

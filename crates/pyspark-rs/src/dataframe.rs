@@ -183,7 +183,7 @@ impl PyDataFrame {
     /// first plan of the session reads the plan compression settings then; then
     /// `SparkConnectClient.to_pandas` reads the settings of the conversion, in one request,
     /// and sends the plan; the Arrow result with the schema that the server sends is converted
-    /// by `pyspark.sql.connect.client._to_pandas`. The DataFrame keeps the information of the
+    /// by `pyspark.sql.connect.client.core._to_pandas`. The DataFrame keeps the information of the
     /// execution once the result is converted, as `_to_pandas` sets `_execution_info` after
     /// `SparkConnectClient.to_pandas` returns: a conversion that fails leaves `executionInfo` as
     /// it was.
@@ -231,7 +231,7 @@ impl PyDataFrame {
         // of each batch into its own allocation before the conversion, with its errors.
         if settings[2].as_deref() == Some("true") {
             table = py
-                .import("pyspark.sql.connect.client")?
+                .import("pyspark.sql.connect.client.core")?
                 .call_method1("_self_destruct_table", (table,))?
                 .unbind();
         }
@@ -247,7 +247,7 @@ impl PyDataFrame {
             None => kwargs.set_item("struct_handling_mode", &settings[1])?,
         }
         kwargs.set_item("self_destruct", &settings[2])?;
-        let pdf = py.import("pyspark.sql.connect.client")?.call_method(
+        let pdf = py.import("pyspark.sql.connect.client.core")?.call_method(
             "_to_pandas",
             (table, schema, metrics, observed),
             Some(&kwargs),
@@ -3585,7 +3585,7 @@ impl PyDataFrame {
     /// which its `toArrow` is made. A result without batches raises the `AssertionError` of its
     /// `assert table is not None`; a Spark server sends at least one batch. The metadata of the
     /// schema and of the fields of the table are those that PySpark reads of the server's stream
-    /// (`pyspark.sql.connect.client._table_as_received`).
+    /// (`pyspark.sql.connect.client.core._table_as_received`).
     fn _to_table(&self, py: Python<'_>) -> PyResult<(Py<PyAny>, Py<PyAny>)> {
         let (batches, schema) = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe
@@ -3597,7 +3597,7 @@ impl PyDataFrame {
         }
         let table = crate::pyarrow_export::record_batches_to_pyarrow(py, batches)?;
         let table = py
-            .import("pyspark.sql.connect.client")?
+            .import("pyspark.sql.connect.client.core")?
             .call_method1("_table_as_received", (table,))?
             .unbind();
         let schema = match &schema {
@@ -8717,7 +8717,7 @@ fn unsupported_literal_marker(
     literal: &spark_connect_proto::expression::Literal,
 ) -> PyResult<Py<PyAny>> {
     Ok(py
-        .import("pyspark.sql.connect.client")?
+        .import("pyspark.sql.connect.client.core")?
         .getattr("_UnsupportedLiteral")?
         .call1((literal_text(py, literal),))?
         .unbind())

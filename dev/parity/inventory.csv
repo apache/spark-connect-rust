@@ -1632,7 +1632,7 @@ sql/connect/readwriter.py,method,DataFrameWriterV2,createOrReplace,(self),1034,d
 sql/connect/readwriter.py,method,DataFrameWriterV2,append,(self),1043,done,readwriter.rs
 sql/connect/readwriter.py,method,DataFrameWriterV2,overwrite,"(self, condition)",1052,done,readwriter.rs
 sql/connect/readwriter.py,method,DataFrameWriterV2,overwritePartitions,(self),1062,done,readwriter.rs
-sql/connect/resource/profile.py,class,,ResourceProfile,,25,done,vendored (pyspark/sql/connect/resource/profile.py); the profile is created by SparkSession.client._create_profile (pyspark/sql/connect/client/__init__.py)
+sql/connect/resource/profile.py,class,,ResourceProfile,,25,done,vendored (pyspark/sql/connect/resource/profile.py); the profile is created by SparkSession.client._create_profile (pyspark/sql/connect/client/core.py)
 sql/connect/resource/profile.py,method,ResourceProfile,__init__,"(self, exec_req, task_req)",29,n/a,n/a: Python object-protocol/class-internal; not a client API method
 sql/connect/resource/profile.py,method,ResourceProfile,id,(self),68,done,vendored (pyspark/sql/connect/resource/profile.py): the server's profile id of SparkSession.client._create_profile
 sql/connect/session.py,class,,SparkSession,,115,done,

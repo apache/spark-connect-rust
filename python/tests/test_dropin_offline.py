@@ -4235,8 +4235,9 @@ def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
     # SparkConnectClient, of pyspark.sql.connect.client.core, which names them and whose `import *`
     # its package makes, and its PlanObservedMetrics, AnalyzeResult and ConfigResult, which only
     # that module names: their repr and a pickle by reference name them there. The package's
-    # `import *` gives the names that PySpark's gives, those classes, its getLogLevel and its core
-    # module, but its gRPC modules.
+    # `import *` gives the names that PySpark's gives, of a package of no `__all__`: those classes,
+    # its getLogLevel and its core module, and of its gRPC modules `retries` once it is imported
+    # (see test_dropin_class_modules_offline.py, which reads them in a new process).
     import pyspark.sql.connect.logging
     from pyspark.sql.connect import client
     from pyspark.sql.connect.client import core
@@ -4257,7 +4258,8 @@ def test_the_classes_of_the_client_are_of_its_core_module_as_pyspark():
         "ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient"]
     names = {}
     exec("from pyspark.sql.connect.client import *", names)
-    assert sorted(name for name in names if not name.startswith("__")) == [
+    assert not hasattr(client, "__all__")
+    assert sorted(name for name in names if not name.startswith("__") and name != "retries") == [
         "ChannelBuilder", "DefaultChannelBuilder", "RpcDeadlines", "SparkConnectClient", "core",
         "getLogLevel"]
     assert names["core"] is core
@@ -17440,7 +17442,7 @@ def test_a_to_pandas_that_fails_to_convert_leaves_the_execution_info_as_pyspark(
     # leaves `executionInfo` as it was, None or the object of the last execution, and one that
     # converts sets that of its execution. `collect` sets it before it converts its rows, as
     # PySpark's `_to_table` does.
-    import pyspark.sql.connect.client as client
+    import pyspark.sql.connect.client.core as client
 
     spark, service = mock_connect
     # The settings that toPandas reads.
@@ -27442,7 +27444,7 @@ def test_the_pickles_of_pysparks_observed_metrics_load_in_a_new_process_as_pyspa
 
 def test_to_pandas_attaches_the_metrics_of_an_execution_as_pyspark():
     import pyarrow as pa
-    from pyspark.sql.connect.client import _to_pandas
+    from pyspark.sql.connect.client.core import _to_pandas
 
     table = pa.table({"a": pa.array([1, 2], type=pa.int64())})
     options = {"timezone": "UTC", "struct_handling_mode": "legacy", "self_destruct": "false"}
@@ -28287,7 +28289,8 @@ def test_spent_retries_warn_where_pyspark_warns(caplog):
     import warnings
 
     from pyspark.errors.exceptions.connect import SparkConnectGrpcException
-    from pyspark.sql.connect.client import _warn_retries_exceeded, retries
+    from pyspark.sql.connect.client import retries
+    from pyspark.sql.connect.client.core import _warn_retries_exceeded
     from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
 
     message = "[RETRIES_EXCEEDED] The maximum number of retries has been exceeded."
@@ -29289,7 +29292,7 @@ def test_the_transport_retries_with_the_parameters_of_pyspark_s_own_policies_onl
     # PySpark's `Retrying` retries with them: of the first DefaultPolicy, and of none without one,
     # as a RetryPolicy retries no failure. PySpark's `Retrying` decides the others: a subclass, and
     # parameters that the transport does not wait, as a fraction of a millisecond.
-    from pyspark.sql.connect import client as connect_client
+    from pyspark.sql.connect.client import core as connect_client
     from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
 
     parameters = connect_client._retry_parameters
@@ -29323,7 +29326,7 @@ def test_pyspark_s_retrying_of_a_call_decides_as_pyspark_s_does():
     # error of a wait that `time.sleep` refuses, as PySpark's sleep raises it.
     pytest.importorskip("grpc")
     pytest.importorskip("grpc_status")
-    from pyspark.sql.connect import client as connect_client
+    from pyspark.sql.connect.client import core as connect_client
     from pyspark.sql.connect.client.retries import DefaultPolicy, RetryPolicy
 
     unavailable = (False, 14, "down", "UNAVAILABLE:down", [])
@@ -29348,7 +29351,7 @@ def test_the_logs_of_grpc_of_the_client_are_written_as_grpcio_writes_them(monkey
     import logging
     import re
 
-    from pyspark.sql.connect import client as connect_client
+    from pyspark.sql.connect.client import core as connect_client
 
     def no_grpcio(*args):
         raise ImportError("No module named 'grpc'")
@@ -29398,7 +29401,7 @@ def test_the_warning_of_spent_retries_is_of_the_location_of_pyspark_s_or_of_the_
     # retries of a RetryException is None of an infinite one and 0 of a negative one.
     import warnings
 
-    from pyspark.sql.connect import client as connect_client
+    from pyspark.sql.connect.client import core as connect_client
 
     locations = connect_client._retries_exceeded_locations
     locations.cache_clear()
@@ -29570,7 +29573,7 @@ def test_grpcio_s_error_of_a_call_is_of_grpc_s_public_classes_where_its_own_cann
     # classes of grpc, `RpcError` and `Call`, of grpcio's text, code, details and metadata.
     grpc = pytest.importorskip("grpc")
     from grpc import _channel
-    from pyspark.sql.connect import client as connect_client
+    from pyspark.sql.connect.client import core as connect_client
 
     class Changed(_channel._RPCState):
         def __init__(self, due, initial_metadata, trailing_metadata, code, details, extra):
