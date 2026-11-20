@@ -1001,6 +1001,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn negative_engine_ipc_row_counts_fail_before_forwarding() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))])
+            .unwrap();
+        let (data, _) = encode_batch(&batch).unwrap();
+        let session = Arc::new(Session::new(Arc::new(RegistrySession)));
+        let (guard, _) = session.operation("negative_row_count").unwrap();
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut offset = 7;
+        let mut output_schema = None;
+        let error = send_batch(
+            &sender,
+            "session",
+            "negative_row_count",
+            ResultBatch::Ipc {
+                data,
+                row_count: -1,
+            },
+            schema.as_ref(),
+            &mut offset,
+            &mut output_schema,
+            &guard,
+            Some(CHUNK_SIZE),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Internal);
+        assert_eq!(error.message(), "negative engine IPC row count");
+        assert_eq!(offset, 7);
+        assert!(output_schema.is_none());
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn overflowing_engine_batches_do_not_partially_emit() {
         use arrow::array::LargeStringArray;
         use arrow::datatypes::{DataType, Field, Schema};

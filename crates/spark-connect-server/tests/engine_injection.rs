@@ -1221,6 +1221,72 @@ async fn shutdown_releases_backend_session_while_a_result_remains_unread() {
     wait_for_count(&spy.streams_dropped, 1).await;
     wait_for_count(&spy.sessions_dropped, 1).await;
     assert!(!response.body().is_end_stream());
+    // The peer stays connected without reading, so only the bounded transport
+    // drain lets serve return. Disconnect it only afterwards.
+    tokio::time::timeout(Duration::from_secs(4), server.stop())
+        .await
+        .expect("serve must return within its bounded drain while the peer stays connected");
+    drop(response);
+    drop(upload);
+    drop(client);
+    connection.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn requests_handled_after_shutdown_begins_do_not_create_backend_sessions() {
+    let spy = Arc::new(Spy::default());
+    let mut server = start_server(spy.clone()).await;
+    // The cancellation of this execution shows that shutdown has closed the frontend.
+    let live_session = Uuid::new_v4().to_string();
+    let mut live = start_live(&mut server, reattachable_request(&live_session, LIVE)).await;
+    let (mut client, mut connection) = h2::client::handshake(
+        tokio::net::TcpStream::connect(server.address)
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut ping_pong = connection.ping_pong().unwrap();
+    let connection = tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    // A session that no request used before shutdown.
+    let body = request(&Uuid::new_v4().to_string(), 1).encode_to_vec();
+    let mut payload = vec![0];
+    payload.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    payload.extend_from_slice(&body);
+    let request = tonic::codegen::http::Request::builder()
+        .method("POST")
+        .uri(format!(
+            "http://{}/spark.connect.SparkConnectService/ExecutePlan",
+            server.address
+        ))
+        .header("content-type", "application/grpc")
+        .body(())
+        .unwrap();
+    let (response, mut upload) = client.send_request(request, false).unwrap();
+    // h2 can write the first PING ahead of the request headers; the second follows
+    // them, so its PONG shows that the server received the headers before shutdown.
+    for _ in 0..2 {
+        ping_pong.ping(h2::Ping::opaque()).await.unwrap();
+    }
+    server.shutdown.take().unwrap().send(()).unwrap();
+    assert_cancelled(&mut live).await;
+    // The handler runs once the body arrives, after shutdown has begun.
+    upload.send_data(payload.into(), true).unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(5), response)
+        .await
+        .expect("the request must be answered before the transport drain ends")
+        .unwrap();
+    let status = Status::from_header_map(response.headers())
+        .expect("the frontend must reject the request before it streams a result");
+    assert_eq!(status.code(), Code::Unavailable);
+    assert_eq!(status.message(), "server is shutting down");
+    assert_eq!(
+        *spy.factory_calls.lock().unwrap(),
+        vec![("alice".to_string(), live_session)]
+    );
+    assert_eq!(spy.prepares.load(Ordering::SeqCst), 1);
     drop(response);
     drop(upload);
     drop(client);
