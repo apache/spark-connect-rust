@@ -14,11 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The SparkSession of Spark Connect, the native class, under PySpark Connect's import path.
-
-As in PySpark, ``pyspark.sql.SparkSession`` is the classic class (``pyspark.sql.session``, of
-Apache Spark), whose builder makes a session of this class, which it is not a subclass of.
-"""
+# The SparkSession of Spark Connect, the native class, under PySpark Connect's import path.
+#
+# As in PySpark, ``pyspark.sql.SparkSession`` is the classic class (``pyspark.sql.session``, of
+# Apache Spark), whose builder makes a session of this class, which it is not a subclass of.
 from typing import Callable
 
 from pyspark._pyspark import SparkSession, _install_builder
