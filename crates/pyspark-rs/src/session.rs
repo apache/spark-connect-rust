@@ -887,13 +887,18 @@ fn call_execute_plan_hooks(
     }
     let bytes = message.call_method0("SerializeToString")?;
     let bytes = bytes.cast::<pyo3::types::PyBytes>()?.as_bytes();
-    let mut request =
-        crate::on_grown_stack(|| spark_connect_proto::ExecutePlanRequest::decode(bytes))
-            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-    // A hook may put in the plan of a DataFrame, which the Python plan sends as a placeholder.
-    spark_connect::plan::resolve_request(&mut request)
-        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-    Ok(request)
+    let request = crate::on_grown_stack(|| {
+        spark_connect::plan::BuiltOutside::decoded(
+            bytes,
+            spark_connect_proto::ExecutePlanRequest::decode,
+        )
+    })
+    .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+    // A hook may put in the plan of a DataFrame, which the Python plan sends as a placeholder:
+    // the core finds those of the relations of the plan as it walks them, and looks in its fields
+    // and in the messages of its extensions only when the encoding holds the type URL of another.
+    spark_connect::plan::resolve_request(request)
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 /// `f`, run while PySpark's `SparkSession._lock` is held, as its `with SparkSession._lock:`
@@ -3975,7 +3980,12 @@ impl PySparkSession {
     ) -> PyResult<Vec<Bound<'py, pyo3::types::PyBytes>>> {
         use prost::Message;
         let command = py
-            .detach(|| spark_connect_proto::Command::decode(command))
+            .detach(|| {
+                spark_connect::plan::BuiltOutside::decoded(
+                    command,
+                    spark_connect_proto::Command::decode,
+                )
+            })
             .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
         let responses = interruptible(py, &self.session, || {
             self.session

@@ -7934,8 +7934,11 @@ pub(crate) fn dataframe_of_python_plan(
             .and_then(|built| built.getattr("root"))
             .and_then(|relation| relation.call_method0("SerializeToString"))
             .and_then(|relation| {
-                spark_connect_proto::Relation::decode(
+                // With the type URLs of placeholders of its encoding, of which the core finds
+                // those of its relations as it walks them (see `plan::BuiltOutside`).
+                spark_connect::plan::BuiltOutside::decoded(
                     relation.cast::<pyo3::types::PyBytes>()?.as_bytes(),
+                    spark_connect_proto::Relation::decode,
                 )
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
             })

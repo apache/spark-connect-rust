@@ -64,6 +64,7 @@ dependencies = [
  "chrono",
  "datafusion",
  "futures",
+ "memchr",
  "polars",
  "prost",
  "prost-types",

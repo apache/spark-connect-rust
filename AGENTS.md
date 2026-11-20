@@ -164,9 +164,11 @@ the DataFrame encoded, built at the call, and which the core replaces wherever a
 an analysis built in Python holds a relation: every input of every relation
 (`plan::relation_inputs_of`), the relation of each command that holds one, the inputs of the plans
 of `pyspark.ml`, the messages of the extensions of a plugin's relations and commands
-(`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), and those of the extensions of
-the expressions of the relations and commands built in Python (`plan::resolve_own_fields`): "Plans
-of a DataFrame's relation" in `dev/parity/known-differences.md`.
+(`plan::resolve_relation_levels`, `resolve_command`, `resolve_analysis`), and those of the
+extensions of the expressions of the relations and commands built in Python
+(`plan::resolve_own_fields`), which it encodes and reads only when the bytes that the client gave
+hold a type URL of a placeholder that is not of one at the relations (`plan::BuiltOutside`):
+"Plans of a DataFrame's relation" in `dev/parity/known-differences.md`.
 
 ## 3. Close API gaps (three layers)
 
