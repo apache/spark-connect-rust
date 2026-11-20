@@ -112,6 +112,11 @@ struct SignalWatch {
     /// once it has ended, in place of the KeyboardInterrupt of the signal, as PySpark's
     /// `interrupt_operation` raises out of the `except KeyboardInterrupt` of an execution.
     interrupt_failure: Arc<Mutex<Option<SparkError>>>,
+    /// The error of the build of the request of the interrupt, of a value of the attributes of
+    /// the client that protobuf refuses or of a read of them that raised, which the wait raises in
+    /// place of the KeyboardInterrupt, as the error of `interrupt_failure`, and with which no
+    /// interrupt is sent.
+    interrupt_unbuilt: Mutex<Option<PyErr>>,
 }
 
 impl SignalWatch {
@@ -124,6 +129,16 @@ impl SignalWatch {
     }
 
     fn poll(&self) -> Watch {
+        // The wait whose interrupt could not be built ends at once, as PySpark raises the error of
+        // its build.
+        if self
+            .interrupt_unbuilt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return Watch::Abort;
+        }
         {
             let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
             if error.is_none() {
@@ -131,18 +146,28 @@ impl SignalWatch {
                 // handler that is an `Exception` ends the part of the call that PySpark's `except
                 // Exception` covers, if one runs, such as the lookup of the plan compression
                 // settings, and the call goes on, as PySpark's does (see `runtime::catching`).
-                let raised = Python::attach(|py| match crate::deliver::check_signals(py) {
-                    Ok(()) => None,
-                    Err(signal)
-                        if signal.is_instance_of::<pyo3::exceptions::PyException>(py)
-                            && spark_connect_core::runtime::catch_signal() =>
-                    {
-                        None
-                    }
-                    Err(signal) => {
-                        let keyboard_interrupt =
-                            signal.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py);
-                        Some((signal, keyboard_interrupt))
+                // An exception that a read of the attributes of the client of the call that waits
+                // raised meanwhile, that is not an `Exception`, as the `KeyboardInterrupt` of a
+                // signal handler that ran while a finalizer read them, acts as the exception of a
+                // signal handler that this poll caught (see `keep_for_nearest_call`).
+                let raised = Python::attach(|py| {
+                    let raised = match take_raised_of_waiting_call(&self.session) {
+                        Some(kept) => Err(kept),
+                        None => crate::deliver::check_signals(py),
+                    };
+                    match raised {
+                        Ok(()) => None,
+                        Err(signal)
+                            if signal.is_instance_of::<pyo3::exceptions::PyException>(py)
+                                && spark_connect_core::runtime::catch_signal() =>
+                        {
+                            None
+                        }
+                        Err(signal) => {
+                            let keyboard_interrupt =
+                                signal.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py);
+                            Some((signal, keyboard_interrupt))
+                        }
                     }
                 });
                 match raised {
@@ -174,12 +199,18 @@ impl SignalWatch {
             Some(operation_id) => {
                 // The request of the interrupt is of the attributes of the client of the call as
                 // they are now, as PySpark's `interrupt_operation` builds it once the
-                // KeyboardInterrupt is raised (see `reread_nearest_call`).
-                Python::attach(|py| {
-                    if let Err(error) = reread_nearest_call_of(py, &self.session) {
-                        raise_later(py, error);
-                    }
+                // KeyboardInterrupt is raised: an error of its build replaces the
+                // KeyboardInterrupt, and no interrupt is sent (see `reread_nearest_call`).
+                let unbuilt = Python::attach(|py| {
+                    reread_nearest_call_of(py, &self.session, ReadOf::Requests).err()
                 });
+                if let Some(unbuilt) = unbuilt {
+                    *self
+                        .interrupt_unbuilt
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = Some(unbuilt);
+                    return Watch::Abort;
+                }
                 self.interrupted.store(true, Ordering::SeqCst);
                 let session = self.session.clone();
                 let failure = Arc::clone(&self.interrupt_failure);
@@ -581,10 +612,26 @@ pub(crate) fn before_finalizer_request(session: &SparkSession) -> bool {
                 );
                 true
             }
-            Err(_) => false,
+            // As PySpark's finalizers, whose `except Exception` takes the error of the request,
+            // out of whose `__del__` another exception goes, which Python reports as an
+            // unraisable one: the read after the request is not made then, which would raise it
+            // again (see `after_finalizer_request`).
+            Err(error) => {
+                if !error.is_instance_of::<pyo3::exceptions::PyException>(py) {
+                    error.write_unraisable(py, None);
+                    FINALIZER_REPORTED.with(|reported| reported.set(true));
+                }
+                false
+            }
         }
     })
     .unwrap_or(true)
+}
+
+thread_local! {
+    /// Whether the read of the request of the finalizer that runs on this thread raised an
+    /// exception that is not an `Exception`, which was reported (see [`before_finalizer_request`]).
+    static FINALIZER_REPORTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 thread_local! {
@@ -594,11 +641,18 @@ thread_local! {
 }
 
 /// A call of [`run_interruptible`] that runs on this thread: the refresher of its session, which
-/// tells the clients of the session apart from those of another, and the token of the contextvar
-/// of the copy of a client whose method made it, of its refresh.
+/// tells the clients of the session apart from those of another, what it reads of the client of
+/// its session, the token of the contextvar of the copy of a client whose method made it, of its
+/// refresh, the exception that is not an `Exception` that a read of the attributes of its client
+/// for it raised, which its wait or its end raises (see [`keep_for_nearest_call`]), and the errors
+/// of the reads for the requests of its failures, which the failures carry (see
+/// [`before_failure_requests`]).
 struct CallOfThread {
     refresher: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    context: RequestContext,
     copy_token: Option<Py<PyAny>>,
+    raised: Option<PyErr>,
+    failure_errors: Vec<SparkError>,
 }
 
 /// A call of [`run_interruptible`] on this thread, as long as it lives. A call that runs during
@@ -615,11 +669,14 @@ struct Call<'a> {
 }
 
 impl<'a> Call<'a> {
-    /// Enter a call of `session`.
-    fn enter(session: &'a SparkSession) -> Self {
+    /// Enter a call of `session` of the request context `context`.
+    fn enter(session: &'a SparkSession, context: RequestContext) -> Self {
         let call = CallOfThread {
             refresher: session.user_context_refresher(),
+            context,
             copy_token: None,
+            raised: None,
+            failure_errors: Vec::new(),
         };
         let nested = CALLS.with(|calls| {
             let mut calls = calls.borrow_mut();
@@ -644,29 +701,67 @@ impl<'a> Call<'a> {
     }
 
     /// End the call, after which the thread has the context of the requests of the call during
-    /// which it ran, if it ran during another, read again of its client. An error of the read
-    /// that is not an `Exception`, as the `KeyboardInterrupt` of a signal handler that ran
-    /// meanwhile, is the error of the call.
-    fn end(mut self, py: Python<'_>) -> PyResult<()> {
+    /// which it ran, if it ran during another, read again of its client: the exception of that
+    /// read that is not an `Exception`, as the `KeyboardInterrupt` of a signal handler that ran
+    /// then, which the call raises in place of its outcome, as PySpark raises it where the signal
+    /// arrives, in the call; what the call keeps of the reads for it (see [`Ended`]).
+    fn end(mut self, py: Python<'_>) -> Ended {
         self.ended = true;
-        if self.leave() {
-            reread_nearest_call_of(py, self.session)?;
+        let (nested, ended) = self.leave();
+        let reread = if nested {
+            reread_after_call(py, self.session).err()
+        } else {
+            None
+        };
+        Ended { reread, ..ended }
+    }
+
+    /// End a call whose refresh failed of `error`, as [`Call::end`]: the exception of the read
+    /// that is not an `Exception`, or one that a read for the call kept, is raised in place of
+    /// `error`, which becomes its context.
+    fn end_unrefreshed(mut self, py: Python<'_>, error: PyErr) -> PyErr {
+        self.ended = true;
+        let (nested, mut ended) = self.leave();
+        ended.release_failure_errors(None);
+        // An exception that a read for the call kept replaces the error of the refresh, as at the
+        // end of a call that waited, and the exception of the read at its end replaces both.
+        let error = match ended.raised.take() {
+            Some(raised) => crate::errors::with_context(py, raised, error),
+            None => error,
+        };
+        match nested
+            .then(|| reread_after_call(py, self.session).err())
+            .flatten()
+        {
+            Some(reread) => crate::errors::with_context(py, reread, error),
+            None => error,
         }
-        Ok(())
     }
 
     /// Take the call off the stack of the thread, and give the thread its context of before the
-    /// call again, of a call that ran during another: whether it did.
-    fn leave(&mut self) -> bool {
-        // The token is released once the stack is no longer borrowed.
+    /// call again, of a call that ran during another: whether it did, and what the call keeps of
+    /// the reads for it.
+    fn leave(&mut self) -> (bool, Ended) {
+        // The token and the exceptions are taken once the stack is no longer borrowed.
         let call = CALLS.with(|calls| calls.borrow_mut().pop());
-        drop(call);
+        let ended = match call {
+            Some(call) => Ended {
+                reread: None,
+                raised: call.raised,
+                failure_errors: call.failure_errors,
+            },
+            None => Ended {
+                reread: None,
+                raised: None,
+                failure_errors: Vec::new(),
+            },
+        };
         match self.kept.take() {
             Some(kept) => {
                 drop(kept);
-                true
+                (true, ended)
             }
-            None => false,
+            None => (false, ended),
         }
     }
 }
@@ -676,18 +771,113 @@ impl Drop for Call<'_> {
         if self.ended {
             return;
         }
-        // A call that ends of an error of its refresh or of the reset of its state, which it
-        // raises: the thread has its context of before it again, read again as at the end of
-        // any other call, of an error that is not the call's.
-        if self.leave() {
-            let session = self.session;
-            let _ = Python::try_attach(|py| {
-                if let Err(error) = reread_nearest_call_of(py, session) {
-                    raise_later(py, error);
+        // A call that ends of a panic: the thread has its context of before it again, read again
+        // as at the end of any other call, and nothing raises what the call keeps.
+        let (nested, ended) = self.leave();
+        let session = self.session;
+        let _ = Python::try_attach(|py| {
+            if nested {
+                if let Err(reread) = reread_after_call(py, session) {
+                    reread.write_unraisable(py, None);
                 }
-            });
+            }
+            ended.drop_unraised(py);
+        });
+    }
+}
+
+/// What a call keeps of the reads of the attributes of its client for it, once it ended (see
+/// [`Call::end`]).
+struct Ended {
+    /// The exception, that is not an `Exception`, of the read at its end, of a call that ran
+    /// during another.
+    reread: Option<PyErr>,
+    /// The exception, that is not an `Exception`, that a read for it raised during it, which
+    /// its wait has not raised (see [`keep_for_nearest_call`]).
+    raised: Option<PyErr>,
+    /// The errors of the reads for the requests of its failures, which the failures carry (see
+    /// [`before_failure_requests`]).
+    failure_errors: Vec<SparkError>,
+}
+
+impl Ended {
+    /// Release the exceptions that the errors of the failures of the call carry, but that of
+    /// `failure`, the failure that the call returns, if it is one of them: a failure that the
+    /// call handled itself, as the failed lookup of the plan compression settings, drops the
+    /// exception of the read for it with it, as PySpark's `except Exception` takes it.
+    fn release_failure_errors(&mut self, failure: Option<&SparkError>) {
+        let kept = failure.and_then(crate::errors::callback_error_id);
+        crate::errors::release_callback_errors(
+            self.failure_errors
+                .drain(..)
+                .filter(|error| crate::errors::callback_error_id(error) != kept),
+        );
+    }
+
+    /// Report the exceptions that the call keeps, which nothing raises, as unraisable ones are.
+    fn drop_unraised(mut self, py: Python<'_>) {
+        self.release_failure_errors(None);
+        for raised in [self.reread.take(), self.raised.take()]
+            .into_iter()
+            .flatten()
+        {
+            raised.write_unraisable(py, None);
         }
     }
+}
+
+/// Give the thread the context of the call of `session` that runs on it again, if any, read again
+/// of its client of none of their errors, once a call or a finalizer that ran during it ended (see
+/// [`reread_nearest_call`]): the exception of the read that is not an `Exception`, as the
+/// `KeyboardInterrupt` or the `SystemExit` of a signal handler that ran meanwhile, is returned.
+fn reread_after_call(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
+    let Some(refresher) = session.user_context_refresher() else {
+        return Ok(());
+    };
+    reread_nearest_call(py, &refresher, session, ReadOf::Rest)
+}
+
+/// Keep `raised`, an exception that is not an `Exception` of a read of the attributes of a client
+/// for the nearest call of the session whose refresher is `refresher` that runs on the calling
+/// thread, for that call: its wait raises it at its next poll, as the exception of a signal
+/// handler, which interrupts the execution that it waits for when it is a `KeyboardInterrupt`
+/// (see [`SignalWatch::poll`]), or the call does when it returns, in place of its outcome. A call
+/// that already keeps one keeps the first, and the other is reported as an unraisable one is, as
+/// it is when no call takes it.
+fn keep_for_nearest_call(
+    py: Python<'_>,
+    refresher: &Arc<dyn std::any::Any + Send + Sync>,
+    raised: PyErr,
+) {
+    let unkept = CALLS.with(|calls| {
+        let Ok(mut calls) = calls.try_borrow_mut() else {
+            return Some(raised);
+        };
+        match calls.iter_mut().rev().find(|call| is_of(call, refresher)) {
+            Some(call) if call.raised.is_none() => {
+                call.raised = Some(raised);
+                None
+            }
+            _ => Some(raised),
+        }
+    });
+    if let Some(unkept) = unkept {
+        unkept.write_unraisable(py, None);
+    }
+}
+
+/// The exception that the call of `session` whose wait polls, the innermost call of the thread,
+/// keeps for it, which is taken (see [`keep_for_nearest_call`]).
+fn take_raised_of_waiting_call(session: &SparkSession) -> Option<PyErr> {
+    let refresher = session.user_context_refresher()?;
+    CALLS.with(|calls| {
+        let mut calls = calls.try_borrow_mut().ok()?;
+        let call = calls.last_mut()?;
+        if !is_of(call, &refresher) {
+            return None;
+        }
+        call.raised.take()
+    })
 }
 
 /// Whether `call` is a call of the session whose refresher is `refresher`.
@@ -787,12 +977,27 @@ impl ThreadRequestTarget for SparkConnectClient {
     fn give_tags(&self, _tags: Option<Vec<spark_connect::session::Tag>>) {}
 }
 
+/// How strictly a re-read reads the attributes of a client (see [`reread_nearest_call`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadOf {
+    /// For the rest of the requests of a call, once a call or a finalizer that ran during it
+    /// ended, of none of the errors of the values: as those of the artifacts are read.
+    Rest,
+    /// For the requests that a call builds of its own, when it builds them, of the errors of the
+    /// session ID, the user and the extensions, as those of a call of the mode 2 are read, which
+    /// replace the error of the call: of the details of its failure and of the configs of its
+    /// stack trace, as PySpark's `_handle_error` builds them, and of the interrupt of a signal,
+    /// as PySpark's `interrupt_operation` builds it in its `except KeyboardInterrupt`. The tags,
+    /// which none of them carries, are read of none of their errors.
+    Requests,
+}
+
 /// Give the requests of the calling thread the context of the nearest call of `session` that runs
 /// on it, if any, read again of the attributes of its client as they are now (see
 /// [`reread_nearest_call`]).
-fn reread_nearest_call_of(py: Python<'_>, session: &SparkSession) -> PyResult<()> {
+fn reread_nearest_call_of(py: Python<'_>, session: &SparkSession, read: ReadOf) -> PyResult<()> {
     match session.user_context_refresher() {
-        Some(refresher) => reread_nearest_call(py, &refresher, session),
+        Some(refresher) => reread_nearest_call(py, &refresher, session, read),
         None => Ok(()),
     }
 }
@@ -807,29 +1012,39 @@ fn reread_nearest_call_of(py: Python<'_>, session: &SparkSession) -> PyResult<()
 /// failure, and of the interrupt of a signal, are built (see [`before_failure_requests`] and
 /// [`SignalWatch::poll`]): the attributes may have changed meanwhile, as when a progress handler,
 /// or another thread, adds a user context extension. The client is the copy whose method made the
-/// call, of the token of its refresh, else the session's. The values are read as those of the
-/// artifacts are, of none of their errors: a value that cannot be read stays as it was, and so
-/// does the whole context when the values cannot be taken. An error of the read that is not an
-/// `Exception`, as the `KeyboardInterrupt` of a signal handler that ran meanwhile, is returned.
+/// call, of the token of its refresh, else the session's. Of [`ReadOf::Rest`], a value that
+/// cannot be read stays as it was, and so does the whole context when the values cannot be taken,
+/// and an exception of the read that is not an `Exception` is returned; of [`ReadOf::Requests`],
+/// of the call of a mode that handles its errors, the error of a value is returned, and the
+/// context stays as it was. A call of the mode of the artifacts that PySpark's client does not
+/// handle the errors of is read as of [`ReadOf::Rest`].
 fn reread_nearest_call(
     py: Python<'_>,
     refresher: &Arc<dyn std::any::Any + Send + Sync>,
     target: &dyn ThreadRequestTarget,
+    read: ReadOf,
 ) -> PyResult<()> {
-    let token = CALLS.with(|calls| {
+    let call = CALLS.with(|calls| {
         // The stack is only borrowed for a moment, by no code that reads the client.
         let calls = calls.try_borrow().ok()?;
         let call = calls.iter().rev().find(|call| is_of(call, refresher))?;
-        Some(call.copy_token.as_ref().map(|token| token.clone_ref(py)))
+        Some((
+            call.copy_token.as_ref().map(|token| token.clone_ref(py)),
+            call.context,
+        ))
     });
-    let Some(token) = token else {
+    let Some((token, context)) = call else {
         return Ok(());
     };
+    let strict = read == ReadOf::Requests && context.handles_errors();
     let Some(refresh) = refresher.downcast_ref::<Py<PyAny>>() else {
         return Ok(());
     };
     let reread = || -> PyResult<()> {
-        let values = refresh.bind(py).call_method1("_values_of_call", (token,))?;
+        let mode = if strict { 2 } else { 0 };
+        let values = refresh
+            .bind(py)
+            .call_method1("_values_of_call", (token, mode))?;
         let (session_id, user_id, global, own, tags): CallValues<'_> = values.extract()?;
         let read = |value: &Bound<'_, PyAny>| !value.is(py.Ellipsis().bind(py));
         // All of them are taken before any is given to the thread.
@@ -855,7 +1070,7 @@ fn reread_nearest_call(
                 }
                 crate::session::core_tags_of(&tags).map(Some)
             })
-            .transpose()?;
+            .transpose();
         target.give_request_context(
             session_id.unwrap_or_else(|| target.current_session_id()),
             user_id.unwrap_or_else(|| target.current_user_id()),
@@ -864,27 +1079,17 @@ fn reread_nearest_call(
         if let Some(own) = own {
             target.give_own(own);
         }
-        if let Some(tags) = tags {
+        // The tags, which only the executions read, of none of their errors.
+        if let Ok(Some(tags)) = tags {
             target.give_tags(tags);
         }
         Ok(())
     };
     match reread() {
-        Err(error) if !error.is_instance_of::<pyo3::exceptions::PyException>(py) => Err(error),
+        Err(error) if strict || !error.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+            Err(error)
+        }
         _ => Ok(()),
-    }
-}
-
-/// Raise `error`, of a re-read of the context of the requests of a thread that cannot raise it
-/// (see [`reread_nearest_call`]), once the thread can: the `KeyboardInterrupt` of a signal handler
-/// that ran during the read is raised again at the next check of the signals of the process, as
-/// the signal arrived then, and another exception is reported as an unraisable one is.
-fn raise_later(py: Python<'_>, error: PyErr) {
-    if error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
-        // SAFETY: as a signal that arrives, which needs no lock.
-        unsafe { pyo3::ffi::PyErr_SetInterrupt() };
-    } else {
-        error.write_unraisable(py, None);
     }
 }
 
@@ -903,17 +1108,27 @@ type CallValues<'py> = (
 /// The hook of the requests of the finalizers of a session once a request is built, or not sent
 /// (see `spark_connect::session::FinalizerRequestHook`): the thread has the context of the nearest
 /// call of the session that runs on it again, if any, of the attributes of its client as they are
-/// now (see [`reread_nearest_call`]). As [`before_finalizer_request`], a thread that is not one of
-/// Python, or an interpreter that shuts down, has none to read, and the errors of the read are not
-/// raised, as a finalizer's are not (see [`raise_later`]).
+/// now (see [`reread_after_call`]); an exception of the read that is not an `Exception` is kept
+/// for that call, which no call of the finalizer raises, whose wait raises it at its next poll, or
+/// the call when it returns (see [`keep_for_nearest_call`]). As [`before_finalizer_request`], a
+/// thread that is not one of Python, or an interpreter that shuts down, has none to read.
 pub(crate) fn after_finalizer_request(session: &SparkSession) {
+    // A finalizer whose read raised and was reported reads nothing more, as PySpark's `__del__`
+    // ends with the exception.
+    if FINALIZER_REPORTED.with(|reported| reported.replace(false)) {
+        return;
+    }
     // SAFETY: a read of the thread state of the current thread, which needs no lock.
     if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
         return;
     }
     let _ = Python::try_attach(|py| {
-        if let Err(error) = reread_nearest_call_of(py, session) {
-            raise_later(py, error);
+        if let Err(raised) = reread_after_call(py, session) {
+            // No call of the finalizer raises it, but the call during which it ran, at the next
+            // poll of its wait, as the exception of a signal handler.
+            if let Some(refresher) = session.user_context_refresher() {
+                keep_for_nearest_call(py, &refresher, raised);
+            }
         }
     });
 }
@@ -922,14 +1137,21 @@ pub(crate) fn after_finalizer_request(session: &SparkSession) {
 /// (see `spark_connect_core::client::set_failure_requests_hook`): the requests of the details of
 /// the error and of the configs of its stack trace are of the context of the nearest call of the
 /// session of `client` that runs on the calling thread, read again of the attributes of its client
-/// as they are now (see [`reread_nearest_call`]), as PySpark's `_handle_error` builds them of
-/// them. Only a thread of Python that runs such a call reads them, which a thread of the runtime
-/// is not: the failure of the interrupt of a signal, and of a background read of the responses of
-/// an execution, keep the context that they have. The errors of the read are not raised (see
-/// [`raise_later`]).
-pub(crate) fn before_failure_requests(client: &SparkConnectClient) {
+/// as they are now, of their errors (see [`ReadOf::Requests`]), as PySpark's `_handle_error`
+/// builds them of them; whether to send them. No request of the failure is sent when the read
+/// fails, as PySpark raises the error of the build of the request of the details before it sends
+/// anything: an `Exception` of it is the failure, in place of `failure`, the error of the server,
+/// which becomes its context, which the client raises, or drops when it handles the failure
+/// itself, as PySpark's `except Exception` takes it; another exception, as the
+/// `KeyboardInterrupt` of a signal handler, is kept for the call (see [`keep_for_nearest_call`]). Only a thread of Python that runs such a call reads them,
+/// which a thread of the runtime is not: the failure of the interrupt of a signal, and of a
+/// background read of the responses of an execution, keep the context that they have.
+pub(crate) fn before_failure_requests(
+    client: &SparkConnectClient,
+    failure: &SparkError,
+) -> Result<bool, SparkError> {
     let Some(refresher) = client.user_context_refresher() else {
-        return;
+        return Ok(true);
     };
     let of_a_call = CALLS.with(|calls| {
         calls
@@ -937,17 +1159,91 @@ pub(crate) fn before_failure_requests(client: &SparkConnectClient) {
             .is_ok_and(|calls| calls.iter().any(|call| is_of(call, &refresher)))
     });
     if !of_a_call {
-        return;
+        return Ok(true);
     }
     // SAFETY: a read of the thread state of the current thread, which needs no lock.
     if unsafe { pyo3::ffi::PyGILState_GetThisThreadState() }.is_null() {
-        return;
+        return Ok(true);
     }
-    let _ = Python::try_attach(|py| {
-        if let Err(error) = reread_nearest_call(py, &refresher, client) {
-            raise_later(py, error);
+    Python::try_attach(
+        |py| match reread_nearest_call(py, &refresher, client, ReadOf::Requests) {
+            Ok(()) => Ok(true),
+            Err(raised) if raised.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+                // Of the error of the server as its context, as PySpark raises the error of the
+                // build while it handles the failure.
+                let context = crate::errors::spark_error_to_py_exception(failure.clone());
+                let raised = crate::errors::with_context(py, raised, context);
+                let unbuilt = crate::errors::callback_error(raised);
+                keep_failure_error(&refresher, &unbuilt);
+                Err(unbuilt)
+            }
+            Err(raised) => {
+                keep_for_nearest_call(py, &refresher, raised);
+                Ok(false)
+            }
+        },
+    )
+    .unwrap_or(Ok(true))
+}
+
+/// Keep `failure`, the error of a read for the requests of a failure of the nearest call of the
+/// session whose refresher is `refresher` that runs on the calling thread, which the failure
+/// carries, for that call: the call releases its exception once it ended, unless it raises it
+/// (see [`Ended::release_failure_errors`]).
+fn keep_failure_error(refresher: &Arc<dyn std::any::Any + Send + Sync>, failure: &SparkError) {
+    CALLS.with(|calls| {
+        if let Ok(mut calls) = calls.try_borrow_mut() {
+            if let Some(call) = calls.iter_mut().rev().find(|call| is_of(call, refresher)) {
+                call.failure_errors.push(failure.clone());
+            }
         }
     });
+}
+
+/// `error`, the `KeyboardInterrupt` that a handler of the progress of the execution of the
+/// operation `operation_id`, which the nearest call of `session` that runs on the calling thread
+/// makes, raised, once the operation is interrupted on the server: as the `except
+/// KeyboardInterrupt` of PySpark's execution calls `interrupt_operation` of the client of the
+/// execution, the copy of a client whose method made it or the session's. The interrupt is a call
+/// of that client, whose request reads its attributes as they are now: an error of the call, as
+/// of a value of them that protobuf refuses, which sends no interrupt, replaces `error`, which
+/// becomes its context.
+pub(crate) fn interrupt_for_handler(
+    py: Python<'_>,
+    session: &SparkSession,
+    operation_id: &str,
+    error: PyErr,
+) -> PyErr {
+    let refresher = session.user_context_refresher();
+    let refresh = refresher
+        .as_ref()
+        .and_then(|refresher| refresher.downcast_ref::<Py<PyAny>>());
+    let token = refresher.as_ref().and_then(|refresher| {
+        CALLS.with(|calls| {
+            let calls = calls.try_borrow().ok()?;
+            let call = calls.iter().rev().find(|call| is_of(call, refresher))?;
+            call.copy_token.as_ref().map(|token| token.clone_ref(py))
+        })
+    });
+    // The calls of the thread are of the copy whose method made the execution, while the interrupt
+    // is made, as the calls of a method of the copy.
+    let entered = match (refresh, token) {
+        (Some(refresh), Some(token)) => refresh
+            .bind(py)
+            .call_method1("_enter_call_of", (token,))
+            .ok(),
+        _ => None,
+    };
+    let interrupted = interruptible(py, session, || session.interrupt_operation(operation_id));
+    if let (Some(refresh), Some(entered)) = (refresh, entered) {
+        if let Err(left) = refresh.bind(py).call_method1("_leave_call_of", (entered,)) {
+            left.write_unraisable(py, None);
+        }
+    }
+    match interrupted {
+        Ok(_) => error,
+        Err(failure) => crate::errors::with_context(py, failure, error),
+    }
 }
 
 /// The wait of [`interruptible_outcome`], of whose results a failed interrupt is the inner one
@@ -968,8 +1264,11 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     catch_interrupt_failure: bool,
     context: RequestContext,
 ) -> PyResult<Result<T, Box<SparkError>>> {
-    let call = Call::enter(session);
-    let refreshed = refresh_request_context(py, session, context)?;
+    let call = Call::enter(session, context);
+    let refreshed = match refresh_request_context(py, session, context) {
+        Ok(refreshed) => refreshed,
+        Err(error) => return Err(call.end_unrefreshed(py, error)),
+    };
     call.of_copy(py, refreshed.copy_token.as_ref());
     // As PySpark's requests, which read `SPARK_CONNECT_USER_AGENT` of `os.environ` as each is
     // built: of the environment as the call starts, read under the GIL, as Python changes it.
@@ -977,9 +1276,53 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     let outcome = wait_interruptible(py, session, f, catch_interrupt_failure);
     let read_tags = refreshed.without_tags && session.has_thread_tags();
     let handled_error = context.handles_errors() && matches!(outcome, Ok(Err(_)));
-    after_call(py, session, read_tags, handled_error, refreshed.copy_token)?;
-    call.end(py)?;
-    outcome
+    let after = after_call(py, session, read_tags, handled_error, refreshed.copy_token);
+    let mut ended = call.end(py);
+    ended.release_failure_errors(match &outcome {
+        Ok(Err(failure)) => Some(failure),
+        _ => None,
+    });
+    let raised = match ended.raised.take() {
+        // An exception that a read for the call raised, which its wait did not raise, in place of
+        // its outcome; the exception of a signal that ended the wait is raised all the same.
+        Some(raised) => match outcome {
+            Err(signal) => {
+                raised.write_unraisable(py, None);
+                Err(signal)
+            }
+            outcome => Err(replacing(py, raised, outcome)),
+        },
+        None => outcome,
+    };
+    // As PySpark's: the exception of the reset of the state of the call, which its `finally`
+    // makes, replaces the one that the call raises, which becomes its context; the exception of
+    // the read at the end of a call that ran during another, which arrives last, replaces both.
+    let raised = match after {
+        Ok(()) => raised,
+        Err(after) => Err(replacing(py, after, raised)),
+    };
+    match ended.reread.take() {
+        Some(reread) => Err(replacing(py, reread, raised)),
+        None => raised,
+    }
+}
+
+/// `raised`, which replaces `result`, the result of a call: the error that the call would raise
+/// is its context, as Python chains an exception raised while another is handled.
+fn replacing<T>(
+    py: Python<'_>,
+    raised: PyErr,
+    result: PyResult<Result<T, Box<SparkError>>>,
+) -> PyErr {
+    match result {
+        Ok(Ok(_)) => raised,
+        Ok(Err(failure)) => crate::errors::with_context(
+            py,
+            raised,
+            crate::errors::spark_error_to_py_exception(*failure),
+        ),
+        Err(error) => crate::errors::with_context(py, raised, error),
+    }
 }
 
 /// The wait of [`run_interruptible`].
@@ -994,6 +1337,7 @@ fn wait_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
         interrupted: AtomicBool::new(false),
         error: Mutex::new(None),
         interrupt_failure: Arc::new(Mutex::new(None)),
+        interrupt_unbuilt: Mutex::new(None),
     });
     let poll: Arc<WaitWatch> = {
         let watch = Arc::clone(&watch);
@@ -1013,7 +1357,25 @@ fn wait_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take();
+    let interrupt_unbuilt = watch
+        .interrupt_unbuilt
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take();
     let output: Result<T, Box<SparkError>> = output.map_err(Into::into);
+    // As PySpark's: the error of the build of the request of the interrupt replaces the
+    // KeyboardInterrupt, which becomes its context, as `interrupt_operation` raises out of the
+    // `except` clause, and no interrupt is sent.
+    if let Some(unbuilt) = interrupt_unbuilt {
+        let unbuilt = match signal {
+            Some(error) => crate::errors::with_context(py, unbuilt, error),
+            None => unbuilt,
+        };
+        if catch_interrupt_failure && unbuilt.is_instance_of::<pyo3::exceptions::PyException>(py) {
+            return Ok(Err(Box::new(crate::errors::callback_error(unbuilt))));
+        }
+        return Err(unbuilt);
+    }
     match signal {
         Some(error) => {
             // As PySpark's: the done call of a progress handler that raised while the signal ended

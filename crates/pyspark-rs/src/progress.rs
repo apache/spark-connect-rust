@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use spark_connect::progress::ProgressUpdate;
+use spark_connect::session::WeakSparkSession;
 use spark_connect::SparkSession;
 use spark_connect_core::error::SparkError;
 
@@ -59,7 +60,9 @@ pub(crate) fn session_progress(py: Python<'_>, session: &SparkSession) -> Arc<Se
         return Arc::clone(progress);
     }
     let shared = Arc::clone(&progress);
-    session.register_fallible_progress_handler(move |update| shared.notify(update));
+    // A weak handle, which the handler of the core session does not keep the session alive of.
+    let interrupted = session.downgrade();
+    session.register_fallible_progress_handler(move |update| shared.notify(update, &interrupted));
     install_unreturned_error_handler();
     registry.insert(id, Arc::clone(&progress));
     progress
@@ -93,6 +96,28 @@ fn install_unreturned_error_handler() {
             })
         });
     });
+}
+
+/// `error`, the exception of a handler of a progress of an execution of `session`, once the
+/// execution is interrupted on the server when it is a `KeyboardInterrupt` of a progress before the
+/// done one: as the `except KeyboardInterrupt` of PySpark's execution, around the calls of its
+/// handlers, interrupts the operation before it raises it, of the attributes of the client of the
+/// execution then, and the error of the interrupt replaces it, which becomes its context (see
+/// `interrupt::interrupt_for_handler`).
+fn interrupted_by_handler(
+    py: Python<'_>,
+    session: &WeakSparkSession,
+    update: &ProgressUpdate,
+    error: PyErr,
+) -> PyErr {
+    if update.done || !error.is_instance_of::<pyo3::exceptions::PyKeyboardInterrupt>(py) {
+        return error;
+    }
+    let (Some(session), Some(operation_id)) = (session.upgrade(), update.operation_id.as_deref())
+    else {
+        return error;
+    };
+    crate::interrupt::interrupt_for_handler(py, &session, operation_id, error)
 }
 
 /// Forget the progress of a stopped session.
@@ -151,14 +176,19 @@ impl SessionProgress {
     /// Call the handlers with `update`. The exception of a handler fails the execution that
     /// called it, and is raised in its caller, as PySpark's result loop raises it; that of the
     /// done call too, as PySpark's `Progress.__exit__` raises it from the execution.
-    fn notify(&self, update: &ProgressUpdate) -> Result<(), SparkError> {
+    fn notify(
+        &self,
+        update: &ProgressUpdate,
+        session: &WeakSparkSession,
+    ) -> Result<(), SparkError> {
         let bar = progress_bar_enabled();
         if self.count.load(Ordering::SeqCst) == 0 && !bar {
             return Ok(());
         }
         Python::attach(|py| {
-            self.notify_python(py, update, bar)
-                .map_err(crate::errors::callback_error)
+            self.notify_python(py, update, bar).map_err(|error| {
+                crate::errors::callback_error(interrupted_by_handler(py, session, update, error))
+            })
         })
     }
 

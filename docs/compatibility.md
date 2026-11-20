@@ -749,13 +749,16 @@ object whose last handle dropped: `before`, before the request is built, which i
 returns false, and `after`, once the thread has its context of before `before` again. The
 doc-hidden `spark_connect_core::client::set_failure_requests_hook` sets, once for the process, a
 function that a client calls on the thread that converts the failure of a call, an error of the
-server, before it builds the requests of the details of the error and of the configs of its stack
-trace. The per-thread state of a session and of its
-client (its tags, its user context extensions and its request context) is that of
-`spark_connect_core::runtime::calling_thread_id`: a future of a call that `block_on` polls on
-another thread, inside a `current_thread` runtime, reads and sets the state of the thread that
-calls, which ends with that thread, and the future of a `Watch::Interrupt` runs as a call of the
-thread that waits. A failed `SparkConnectClient::clone_session` (and so
+server, which it is given, before it builds the requests of the details of the error and of the
+configs of its stack trace, and which returns whether to send them: when it does not, the error of
+the server is the error of the call as it is, and an error of the function is the error of the call
+in place of it.
+The per-thread state of a session and of its client (its tags, its user context extensions and its
+request context) is that of `spark_connect_core::runtime::calling_thread_id`: a future of a call
+that `block_on` polls on another thread, inside a `current_thread` runtime, reads and sets the
+state of the thread that calls, which ends with that thread, and the future of a
+`Watch::Interrupt` runs as a call of the thread that waits. A failed
+`SparkConnectClient::clone_session` (and so
 `SparkSession::clone_session`) raises the error of the status of its RPC without the details and
 the stack trace of the server, which it no longer requests, as PySpark's `clone` leaves its
 failure to grpc, and its response is not checked against the session of the client (a session ID
@@ -2412,8 +2415,10 @@ session's own client, after which the requests of the method, as those of the de
 failure, carry the copy's again, as they are then. The requests of the details of the failure of a
 call, of the configs of its stack trace and of the interrupt of a signal read the attributes of the
 client of the call when they are built, as PySpark's, also those of the iterator of an execution of
-a copy after a call of the session between two of its `next()`; the other requests of a call carry
-those of the start of the call (see "`SparkConnectClient.thread_local`" in
+a copy after a call of the session between two of its `next()`, and the error of their build, as
+of an extension that is not an `Any`, is the error of the call, of no request of the failure and of
+no interrupt, which goes with a failure that the call handles itself; the other requests of a call
+carry those of the start of the call (see "`SparkConnectClient.thread_local`" in
 `dev/parity/known-differences.md`). The official tests of the client
 (`sql/tests/connect/client/test_client*.py`) mock the gRPC stub and the reattachable iterator of
 PySpark's client, which the drop-in does not have; those of its retries (`test_connect_retry.py`)

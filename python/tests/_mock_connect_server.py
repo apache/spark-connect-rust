@@ -425,6 +425,7 @@ def serve(connection):
             self.plan_compression_lookups = 0
             self.plan_compression_lookup_positions = []
             self.config_failure = None
+            self.plan_compression_lookup_error = None
             self.block_config = False
             self.plan_compression_lookup_delay = 0
             self.interrupt_failure = None
@@ -646,6 +647,9 @@ def serve(connection):
         # requests recorded before it, so that a test sees when it came.
         plan_compression_lookup_positions = []
         config_failure = None
+        # With `plan_compression_lookup_error` set as `execute_error` is, the next plan
+        # compression lookup fails with it, once.
+        plan_compression_lookup_error = None
         block_config = False
         # The seconds that the plan compression lookup of the first plan of a session takes.
         plan_compression_lookup_delay = 0
@@ -1024,6 +1028,9 @@ def serve(connection):
             if recorded:
                 self.config_requests.append(request)
                 self.rpc_events.append("config")
+            if lookup and self.plan_compression_lookup_error and not self.is_forgotten(request):
+                error, self.plan_compression_lookup_error = self.plan_compression_lookup_error, None
+                abort_with_error_info(context, error)
             if lookup and self.plan_compression_lookup_delay:
                 # The plan compression lookup that PySpark makes on the first plan, held for the
                 # seconds of the delay, as a slow server holds it.

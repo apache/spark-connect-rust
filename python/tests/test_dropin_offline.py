@@ -30978,6 +30978,546 @@ def test_the_failure_of_the_iterator_of_a_copy_reads_the_copy_as_pyspark(mock_co
     assert all(extensions(request) == ["type.googleapis.com/copyext"] for request in stack_trace)
 
 
+class _RaisingExtension:
+    # A global user context extension, an (ID, Any) pair when it is unpacked, whose unpacking
+    # raises `exception` while it is armed, as a signal handler or an attribute of the program
+    # may raise while the client reads its extensions.
+    def __init__(self, exception):
+        self.exception = exception
+        self.armed = False
+
+    def __iter__(self):
+        from pyspark.sql.connect.proto._rust import Any
+
+        if self.armed:
+            raise self.exception
+        return iter(("global_raising", Any(type_url="type.googleapis.com/raising")))
+
+
+def _failing_execution(service, error_id):
+    # The execution of the mock server reports a progress, which runs the progress handlers, and
+    # then fails with an error of the server of `error_id`.
+    _progress_of_one_stage(service)
+    service.stream_error = (
+        "[INTERNAL_ERROR] boom",
+        "org.apache.spark.SparkException",
+        {"errorClass": "INTERNAL_ERROR", "errorId": error_id},
+    )
+
+
+@pytest.mark.parametrize("of", ["copy", "session", "status"])
+def test_a_failure_of_a_client_that_holds_a_value_protobuf_refuses_raises_its_error_as_pyspark(
+    mock_connect, of
+):
+    # As PySpark's `_handle_error`, which builds the request of the details of a failure of the
+    # attributes of the client then, and raises the error of the build in place of the error of
+    # the server: a global extension that is not an `Any`, which a progress handler appends during
+    # an execution, of a copy of the client or of the client, or which the client holds when its
+    # GetStatus fails, raises protobuf's TypeError, of the error of the server as its context, and
+    # no request of the failure is sent.
+    import copy
+
+    spark, service = mock_connect
+    client = spark.client
+    configs = len(service.config_requests)
+    target = copy.copy(client) if of == "copy" else client
+    if of == "status":
+        service.get_status_error = (
+            "[INTERNAL_ERROR] boom",
+            "org.apache.spark.SparkException",
+            {"errorClass": "INTERNAL_ERROR", "errorId": "status-error"},
+        )
+        client.global_user_context_extensions.append(("bad", 5))
+        try:
+            with pytest.raises(TypeError) as raised:
+                client._get_operation_statuses()
+        finally:
+            service.get_status_error = None
+            client.global_user_context_extensions.pop()
+    else:
+        if of == "copy":
+            target.global_user_context_extensions = []
+        plan = spark.range(1)._plan.to_proto(target)
+        _failing_execution(service, "bad-error")
+        ran = []
+
+        def handler(**kwargs):
+            if ran or kwargs["done"]:
+                return
+            ran.append(True)
+            target.global_user_context_extensions.append(("bad", 5))
+
+        spark.registerProgressHandler(handler)
+        try:
+            with pytest.raises(TypeError) as raised:
+                target.to_table(plan, {})
+        finally:
+            spark.removeProgressHandler(handler)
+            service.stream_error = None
+            service.execute_payload = b""
+            if target.global_user_context_extensions:
+                target.global_user_context_extensions.pop()
+        assert ran == [True]
+    # The error of the server, which the client handled, is the context of the error of the build.
+    assert "[INTERNAL_ERROR] boom" in str(raised.value.__context__)
+    assert service.fetch_error_details_requests == []
+    assert len(service.config_requests) == configs
+    assert spark.range(1).collect() == []
+
+
+def test_an_exception_of_a_read_for_the_failure_of_a_call_is_raised_by_it_as_pyspark(
+    mock_connect, monkeypatch
+):
+    # As PySpark's `_handle_error`, out of which the exception of the build of the request of the
+    # details of a failure goes: a SystemExit that a read of the extensions of the client raises
+    # then, as of a signal handler that exits, is raised by the call, and no request of the
+    # failure is sent.
+    import copy
+    import sys
+
+    spark, service = mock_connect
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    extension = _RaisingExtension(SystemExit(3))
+    copied = copy.copy(spark.client)
+    copied.global_user_context_extensions = [extension]
+    plan = spark.range(1)._plan.to_proto(copied)
+    _failing_execution(service, "exit-error")
+    configs = len(service.config_requests)
+
+    def handler(**kwargs):
+        if not kwargs["done"]:
+            extension.armed = True
+
+    spark.registerProgressHandler(handler)
+    try:
+        with pytest.raises(SystemExit):
+            copied.to_table(plan, {})
+    finally:
+        spark.removeProgressHandler(handler)
+        extension.armed = False
+        service.stream_error = None
+        service.execute_payload = b""
+    assert service.fetch_error_details_requests == []
+    assert len(service.config_requests) == configs
+    assert unraisable == []
+
+
+@pytest.mark.parametrize("during", ["call", "finalizer"])
+def test_an_exception_of_a_read_at_the_end_of_a_call_during_a_call_is_raised_at_once(
+    mock_connect, monkeypatch, during
+):
+    # The attributes of the client of a call are read again once a call that ran during it ends,
+    # however it ends, or a finalizer that ran during it sent its request, of none of the errors
+    # of their values: an exception of the read that is not an `Exception`, a KeyboardInterrupt
+    # here, is raised by the call that ended, in place of the error of its refresh, which becomes
+    # its context, as PySpark raises a signal in the call that it arrives in; of a finalizer, which
+    # no call raises it from, by the call during which it ran, from its wait, as the exception of
+    # a signal handler. It is not raised again as a signal, which would run the handler of SIGINT.
+    import copy
+    import gc
+    import signal
+    import sys
+
+    spark, service = mock_connect
+    client = spark.client
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+    signals = []
+    previous = signal.signal(signal.SIGINT, lambda *_: signals.append("SIGINT"))
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+    held = [spark.range(1).localCheckpoint()]
+    extension = _RaisingExtension(KeyboardInterrupt("armed"))
+    copied = copy.copy(client)
+    copied.global_user_context_extensions = [extension]
+    plan = spark.range(2)._plan.to_proto(copied)
+    # A progress, which runs the handler, then the rows of the result.
+    _progress_of_one_stage(service)
+    progress = service.execute_payload
+    _two_row_range_results(service)
+    service.execute_payloads = [progress, service.execute_payload]
+    log = []
+
+    def handler(**kwargs):
+        if log or kwargs["done"]:
+            return
+        log.append("handler")
+        extension.armed = True
+        try:
+            if during == "call":
+                # A call of the session whose refresh fails, of an extension that is not an Any.
+                client.global_user_context_extensions.append(("bad", 5))
+                try:
+                    spark.range(1).schema
+                except BaseException as error:
+                    log.append((type(error).__name__, type(error.__context__).__name__))
+                finally:
+                    client.global_user_context_extensions.pop()
+            else:
+                held.clear()
+                gc.collect()
+            log.append("handler returned")
+        finally:
+            extension.armed = False
+
+    spark.registerProgressHandler(handler)
+    raised = None
+    try:
+        copied.to_table(plan, {})
+    except BaseException as error:
+        raised = error
+    finally:
+        spark.removeProgressHandler(handler)
+        signal.signal(signal.SIGINT, previous)
+        service.execute_payloads = None
+        service.execute_payload = b""
+    if during == "call":
+        assert raised is None, repr(raised)
+        assert log == ["handler", ("KeyboardInterrupt", "TypeError"), "handler returned"]
+    else:
+        assert isinstance(raised, KeyboardInterrupt) and str(raised) == "armed", repr(raised)
+        assert log == ["handler", "handler returned"]
+    assert signals == []
+    assert unraisable == []
+    assert spark.range(1).collect() == []
+
+
+def test_an_exception_of_a_read_after_a_finalizer_interrupts_the_wait_of_its_call(mock_connect):
+    # The exception that is not an `Exception` of the read of the attributes of the client of a
+    # call after a finalizer that ran during it, which no call of the finalizer raises, is raised
+    # by the wait of the call at its next poll, as the exception of a signal handler: a
+    # KeyboardInterrupt interrupts the execution that the call waits for, and is raised once the
+    # server cancelled it, rather than once the execution ended.
+    import gc
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+    held = [spark.range(1).localCheckpoint()]
+
+    class Countdown:
+        # A global extension whose read raises KeyboardInterrupt when its count of reads ends:
+        # the read of the finalizer, then the read after it.
+        left = None
+
+        def __iter__(self):
+            if self.left is not None:
+                self.left -= 1
+                if self.left == 0:
+                    self.left = None
+                    raise KeyboardInterrupt("after the finalizer")
+            return iter(("global_c", Any(type_url="type.googleapis.com/c")))
+
+    extension = Countdown()
+    client.global_user_context_extensions = [extension]
+    _progress_of_one_stage(service)
+    service.block_result_complete = True
+    ran = []
+
+    def handler(**kwargs):
+        if ran or kwargs["done"]:
+            return
+        ran.append(True)
+        extension.left = 2
+        held.clear()
+        gc.collect()
+
+    spark.registerProgressHandler(handler)
+    started = time.monotonic()
+    raised = None
+    try:
+        spark.range(1).collect()
+    except BaseException as error:
+        raised = error
+    finally:
+        spark.removeProgressHandler(handler)
+        service.block_result_complete = False
+        service.release_response()
+        service.execute_payload = b""
+        client.global_user_context_extensions = []
+    assert isinstance(raised, KeyboardInterrupt), repr(raised)
+    assert str(raised) == "after the finalizer"
+    assert time.monotonic() - started < 3
+    # The interrupt is of the execution of the collect, of a plan of a relation, not of the
+    # command of the finalizer, which the transport sends in the background.
+    (collect,) = (
+        request
+        for request in map(pb2.ExecutePlanRequest.FromString, service.execute_requests)
+        if request.plan.HasField("root")
+    )
+    (interrupt,) = map(pb2.InterruptRequest.FromString, service.interrupt_requests)
+    assert interrupt.operation_id == collect.operation_id
+
+
+def test_a_signal_pending_at_the_end_of_a_call_during_a_call_raises_from_it_as_pyspark(
+    mock_connect,
+):
+    # As PySpark, where a signal that arrives during a call of a progress handler raises from that
+    # call: a SIGINT that the wait of the call does not see before the call ends, which the read of
+    # the attributes of the client of the outer call at its end then sees, raises from the call at
+    # once, and the KeyboardInterrupt that the handler does not catch interrupts the execution on
+    # the server, as the `except KeyboardInterrupt` of PySpark's execution does, and is raised.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    # The state of the client of the session, which the end of a call reads again.
+    assert spark.client is not None
+    _progress_of_one_stage(service)
+    service.block_result_complete = True
+    service.block_config = True
+    seen = []
+
+    def interrupt_then_answer():
+        # The signal arrives after the first poll of the wait of the call, which ends before its
+        # next one, 200 ms later.
+        time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(0.08)
+        service.release_response()
+
+    def handler(**kwargs):
+        if seen or kwargs["done"]:
+            return
+        seen.append("handler")
+        threading.Thread(target=interrupt_then_answer).start()
+        try:
+            spark.conf.get("spark.sql.shuffle.partitions", "1")
+        except KeyboardInterrupt:
+            seen.append("nested raised KeyboardInterrupt")
+            raise
+        seen.append("nested returned")
+
+    spark.registerProgressHandler(handler)
+    started = time.monotonic()
+    raised = None
+    try:
+        spark.range(1).collect()
+    except BaseException as error:
+        # A KeyboardInterrupt, which pytest.raises does not take, fails the test as any other.
+        raised = error
+    finally:
+        spark.removeProgressHandler(handler)
+        service.block_result_complete = False
+        service.block_config = False
+        service.release_response()
+        service.execute_payload = b""
+    assert isinstance(raised, KeyboardInterrupt), repr(raised)
+    assert seen == ["handler", "nested raised KeyboardInterrupt"]
+    assert time.monotonic() - started < 3
+    # ExecutePlanRequest.operation_id=6; InterruptRequest.operation_id=6.
+    operation_id = parse_message(service.execute_requests[-1]).get(6, [b""])[0]
+    (interrupt,) = service.interrupt_requests
+    assert parse_message(interrupt)[6] == [operation_id]
+
+
+@pytest.mark.parametrize("unbuilt", [False, True])
+def test_the_interrupt_of_a_progress_handler_of_a_copy_is_of_the_copy_as_pyspark(
+    mock_connect, unbuilt
+):
+    # As the `except KeyboardInterrupt` of PySpark's execution, which calls `interrupt_operation`
+    # of the client of the execution: the interrupt that a KeyboardInterrupt of a progress handler
+    # sends during an execution of a copy of the client carries the extensions of the copy, and an
+    # extension of the copy that is not an `Any` fails its build, of protobuf's TypeError, which
+    # replaces the KeyboardInterrupt, its context, and no interrupt is sent.
+    import copy
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    copied = copy.copy(spark.client)
+    copied.global_user_context_extensions = [
+        ("global_x", Any(type_url="type.googleapis.com/copyext"))
+    ]
+    plan = spark.range(1)._plan.to_proto(copied)
+    _progress_of_one_stage(service)
+    service.block_result_complete = True
+
+    def handler(**kwargs):
+        if kwargs["done"]:
+            return
+        if unbuilt:
+            copied.global_user_context_extensions.append(("bad", 5))
+        raise KeyboardInterrupt("handler")
+
+    spark.registerProgressHandler(handler)
+    raised = None
+    try:
+        copied.to_table(plan, {})
+    except BaseException as error:
+        raised = error
+    finally:
+        spark.removeProgressHandler(handler)
+        service.block_result_complete = False
+        service.release_response()
+        service.execute_payload = b""
+    if unbuilt:
+        assert isinstance(raised, TypeError), repr(raised)
+        assert isinstance(raised.__context__, KeyboardInterrupt)
+        assert service.interrupt_requests == []
+    else:
+        assert isinstance(raised, KeyboardInterrupt) and str(raised) == "handler", repr(raised)
+        (interrupt,) = map(pb2.InterruptRequest.FromString, service.interrupt_requests)
+        assert [e.type_url for e in interrupt.user_context.extensions] == [
+            "type.googleapis.com/copyext"
+        ]
+
+
+def test_a_keyboard_interrupt_of_a_progress_handler_interrupts_the_execution_as_pyspark(
+    mock_connect,
+):
+    # As the `except KeyboardInterrupt` of PySpark's execution, around the calls of its progress
+    # handlers: a KeyboardInterrupt that a handler raises interrupts the operation on the server
+    # before it is raised.
+    spark, service = mock_connect
+    _progress_of_one_stage(service)
+    service.block_result_complete = True
+
+    def handler(**kwargs):
+        if not kwargs["done"]:
+            raise KeyboardInterrupt("handler")
+
+    spark.registerProgressHandler(handler)
+    raised = None
+    try:
+        spark.range(1).collect()
+    except BaseException as error:
+        raised = error
+    finally:
+        spark.removeProgressHandler(handler)
+        service.block_result_complete = False
+        service.release_response()
+        service.execute_payload = b""
+    assert isinstance(raised, KeyboardInterrupt) and str(raised) == "handler", repr(raised)
+    operation_id = parse_message(service.execute_requests[-1]).get(6, [b""])[0]
+    (interrupt,) = service.interrupt_requests
+    assert parse_message(interrupt)[6] == [operation_id]
+
+
+def test_the_error_of_a_read_for_a_failure_that_the_call_handles_goes_with_it_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's `except Exception` of the lookup of the plan compression settings, which takes
+    # the error of the build of the request of the details of its failure with the failure: an
+    # extension of the client that raises TypeError when the requests of the failed lookup are
+    # built leaves the execution, which goes on, of no error.
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    other = spark.newSession()
+    reads = []
+
+    class Extension:
+        # A global extension that raises TypeError on its second read, that of the failure of the
+        # lookup, after that of the refresh of the call.
+        def __iter__(self):
+            reads.append(True)
+            if len(reads) == 2:
+                raise TypeError("not now")
+            return iter(("global_x", Any(type_url="type.googleapis.com/x")))
+
+    other.client.global_user_context_extensions.append(Extension())
+    service.plan_compression_lookup_error = (
+        "[INTERNAL_ERROR] boom",
+        "org.apache.spark.SparkException",
+        {"errorClass": "INTERNAL_ERROR", "errorId": "lookup-error"},
+    )
+    try:
+        assert other.range(1).collect() == []
+    finally:
+        service.plan_compression_lookup_error = None
+        other.client.global_user_context_extensions.clear()
+        other.stop()
+    assert len(reads) >= 2
+    assert service.fetch_error_details_requests == []
+
+
+def test_the_exception_of_the_reset_of_a_failed_call_replaces_its_error_as_pyspark(mock_connect):
+    # As PySpark's `_handle_error`, which resets `inside_error_handling` in a `finally`: an
+    # exception of the reset, a KeyboardInterrupt here, replaces the error of the call, protobuf's
+    # TypeError of an extension that a progress handler appended, which becomes its context.
+    import threading
+
+    spark, service = mock_connect
+    client = spark.client
+    original = client.thread_local
+
+    class Local(threading.local):
+        armed = False
+
+        def __setattr__(self, name, value):
+            if name == "inside_error_handling" and type(self).armed:
+                raise KeyboardInterrupt("reset")
+            super().__setattr__(name, value)
+
+    client.thread_local = Local()
+    _failing_execution(service, "reset-error")
+
+    def handler(**kwargs):
+        if not kwargs["done"] and not Local.armed:
+            Local.armed = True
+            client.global_user_context_extensions.append(("bad", 5))
+
+    spark.registerProgressHandler(handler)
+    raised = None
+    try:
+        spark.range(1).collect()
+    except BaseException as error:
+        raised = error
+    finally:
+        spark.removeProgressHandler(handler)
+        Local.armed = False
+        client.thread_local = original
+        service.stream_error = None
+        service.execute_payload = b""
+        client.global_user_context_extensions.clear()
+    assert isinstance(raised, KeyboardInterrupt) and str(raised) == "reset", repr(raised)
+    assert isinstance(raised.__context__, TypeError)
+    assert service.fetch_error_details_requests == []
+
+
+def test_an_error_of_the_build_of_the_interrupt_of_a_signal_replaces_it_as_pyspark(mock_connect):
+    # As PySpark's `interrupt_operation` in the `except KeyboardInterrupt` of an execution, which
+    # builds its request of the attributes of the client then: a global extension that is not an
+    # `Any`, which another thread appended during the execution, raises protobuf's TypeError of the
+    # build, with the KeyboardInterrupt as its context, and no interrupt is sent.
+    import signal
+    import threading
+
+    spark, service = mock_connect
+    client = spark.client
+    _two_row_range_results(service)
+    service.block_result_complete = True
+
+    def append_then_interrupt():
+        client.global_user_context_extensions.append(("bad", 5))
+        os.kill(os.getpid(), signal.SIGINT)
+
+    timer = threading.Timer(0.3, append_then_interrupt)
+    timer.start()
+    raised = None
+    try:
+        spark.range(2).collect()
+    except BaseException as error:
+        # A KeyboardInterrupt, which pytest.raises does not take, fails the test as any other.
+        raised = error
+    finally:
+        timer.cancel()
+        service.block_result_complete = False
+        service.release_response()
+        service.execute_payload = b""
+        client.global_user_context_extensions.clear()
+    assert isinstance(raised, TypeError), repr(raised)
+    assert isinstance(raised.__context__, KeyboardInterrupt)
+    assert service.interrupt_requests == []
+
+
 def _interrupt_a_collect_with_sigint(spark, service):
     # Interrupt a collect that waits for the server, which has sent its first responses, with the
     # SIGINT of Ctrl-C, after which the server fails the interrupted execution with an error of
