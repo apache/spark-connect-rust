@@ -74,6 +74,22 @@ recover capacity, or restart the server. Abandoned sessions whose identifiers
 are lost remain until a restart. These admission bounds do not prevent one
 admitted query from consuming the hosting process's available resources.
 
+Each deferred query and session close has its own cleanup thread. A blocked
+close retains that owner's resources and admission without serializing unrelated
+query or session closes. A running closer uses one OS thread and may retain a
+daemon JVM attachment.
+
+Blocked closes that hold admission are limited to 64 query and 64 session owners
+per engine. Permits are released before detachment and thread exit, so cleanup
+threads and attachments from completed closes can overlap newly admitted work;
+these admission limits are not a strict global thread or attachment bound.
+
+If a closer thread cannot start, its owner's handles and permits stay retained
+for failed-cleanup retry by an explicit server close.
+
+Task cancellation and task frees still share a process-wide cleanup lane; a slow
+cancellation or task free can delay other task cleanup and admission recovery.
+
 Failed JNI cleanup retains its handles and admission permits and
 prevents a successful native shutdown. Retrying server close can recover from a
 temporary JNI attachment failure. A Java cleanup exception may follow partial
