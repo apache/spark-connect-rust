@@ -724,12 +724,25 @@ impl DataFrameWriterV2 {
     /// it holds. Not a stable API.
     #[doc(hidden)]
     pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_pickler_objects(
-            self.partition_cols
-                .iter()
-                .map(|column| crate::udf::PicklerHolder::Expression(column.expression()))
-                .collect(),
-        )
+        crate::udf::exclusive_pickler_objects(self.pickler_holders())
+    }
+
+    /// The owners of the relations built outside the core of the subqueries of the partitioning
+    /// columns of this writer, and of the errors of their parts that a request fails to build,
+    /// that it alone keeps alive, as [`DataFrameWriterV2::exclusive_pickler_objects`] gives the
+    /// objects of the picklers, which a Python wrapper reports to Python's garbage collector
+    /// (see `crate::udf::exclusive_owners`). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_owners(self.pickler_holders())
+    }
+
+    /// The partitioning columns of this writer, of which the exclusive walks start.
+    fn pickler_holders(&self) -> Vec<crate::udf::PicklerHolder<'_>> {
+        self.partition_cols
+            .iter()
+            .map(|column| crate::udf::PicklerHolder::Expression(column.expression()))
+            .collect()
     }
 
     /// Drop the plan that this writer writes and its partitioning columns, as

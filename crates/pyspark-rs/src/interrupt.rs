@@ -207,7 +207,16 @@ pub(crate) fn interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<T> {
-    interruptible_outcome(py, session, f)?.to_pyerr()
+    of_the_request(session, interruptible_outcome(py, session, f)?)
+}
+
+/// The outcome of a request of `session`, of its error as an exception converted of `session`
+/// as the session of the request (see [`crate::errors::of_request_session`]).
+fn of_the_request<T>(session: &SparkSession, outcome: Result<T, Box<SparkError>>) -> PyResult<T> {
+    match outcome {
+        Ok(value) => Ok(value),
+        Err(error) => crate::errors::of_request_session(session, || Err(error).to_pyerr()),
+    }
 }
 
 /// Run `f`, a wait that no session stands behind, without the GIL, on the calling thread: a
@@ -278,7 +287,7 @@ pub(crate) fn interruptible_without_user_context<T: Send, E: Send + Into<Box<Spa
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<T> {
-    run_interruptible(py, session, f, false, false)?.to_pyerr()
+    of_the_request(session, run_interruptible(py, session, f, false, false)?)
 }
 
 /// As [`interruptible_outcome`], for a call whose requests carry no user context extensions (see

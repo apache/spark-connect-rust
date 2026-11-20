@@ -196,15 +196,26 @@ impl ExpressionNode {
         &'a self,
         pending: &mut Vec<crate::udf::PicklerHolder<'a>>,
     ) {
-        use crate::udf::PicklerHolder::{Expression as Of, Subquery, Udf};
+        use crate::udf::PicklerHolder::{Expression as Of, Pickler, SentPlans, Subquery, Udf};
         match self {
             ExpressionNode::Literal(_)
             | ExpressionNode::ColumnReference(_)
             | ExpressionNode::UnresolvedStar(..)
             | ExpressionNode::UnresolvedRegex(..)
             | ExpressionNode::SQLExpression(_)
-            | ExpressionNode::UnresolvedNamedLambdaVariable(_)
-            | ExpressionNode::Sent(_) => {}
+            | ExpressionNode::UnresolvedNamedLambdaVariable(_) => {}
+            // The picklers of the holes of an expression that was sent, of a pickled Column, and
+            // the plans of its subqueries, of their holes.
+            ExpressionNode::Sent(sent) => {
+                pending.extend(
+                    sent.holes
+                        .0
+                        .iter()
+                        .filter_map(|hole| hole.pickler.as_ref())
+                        .map(Pickler),
+                );
+                pending.push(SentPlans(&sent.subqueries));
+            }
             ExpressionNode::UnresolvedFunction(function) => {
                 pending.extend(function.args.iter().map(Of));
             }
@@ -243,15 +254,30 @@ impl ExpressionNode {
     /// The expressions, the UDFs and the subqueries right below this node, which a deep copy of
     /// the functions of its UDFs replaces (see [`crate::udf::PicklerRebuild`]).
     pub(crate) fn parts_mut(&mut self) -> Vec<ExpressionPart<'_>> {
-        use ExpressionPart::{Expression as Of, Subquery, Udf};
+        use ExpressionPart::{Expression as Of, Pickler, Plan, Subquery, Udf};
         match self {
             ExpressionNode::Literal(_)
             | ExpressionNode::ColumnReference(_)
             | ExpressionNode::UnresolvedStar(..)
             | ExpressionNode::UnresolvedRegex(..)
             | ExpressionNode::SQLExpression(_)
-            | ExpressionNode::UnresolvedNamedLambdaVariable(_)
-            | ExpressionNode::Sent(_) => Vec::new(),
+            | ExpressionNode::UnresolvedNamedLambdaVariable(_) => Vec::new(),
+            ExpressionNode::Sent(sent) => {
+                let sent = &mut **sent;
+                let mut parts: Vec<ExpressionPart<'_>> = sent
+                    .holes
+                    .0
+                    .iter_mut()
+                    .map(|hole| Pickler(&mut hole.pickler))
+                    .collect();
+                parts.extend(
+                    sent.subqueries
+                        .0
+                        .iter_mut()
+                        .map(|(plan, ids)| Plan(plan, ids)),
+                );
+                parts
+            }
             ExpressionNode::UnresolvedFunction(function) => {
                 function.args.iter_mut().map(Of).collect()
             }
@@ -296,11 +322,14 @@ impl ExpressionNode {
     }
 }
 
-/// A part of an expression node, of [`ExpressionNode::parts_mut`].
+/// A part of an expression node, of [`ExpressionNode::parts_mut`]: of an expression as it was
+/// sent, the pickler of a hole and the plan of a subquery, of the plan IDs of its own.
 pub(crate) enum ExpressionPart<'a> {
     Expression(&'a mut Expression),
     Udf(&'a mut CommonInlineUserDefinedFunctionExpression),
     Subquery(&'a mut SubqueryExpression),
+    Pickler(&'a mut Option<crate::udf::CommandPickler>),
+    Plan(&'a mut Arc<LogicalPlan>, &'a crate::plan::PlanIds),
 }
 
 /// Record `error`, of an expression or a plan (`LogicalPlan::Unbuildable`) that the serialization
@@ -608,6 +637,9 @@ pub struct UnbuildableExpression {
     pub before: Option<SparkError>,
     pub after: Option<SparkError>,
     pub unrenderable: Option<SparkError>,
+    /// What the errors need alive while the expression lives, as the plan of a client's error
+    /// that the plan keeps (see [`Expression::unbuildable_owned`]).
+    pub owner: Option<crate::plan::RelationOwner>,
 }
 
 impl PartialEq for UnbuildableExpression {
@@ -709,14 +741,20 @@ fn origin_proto(origin: &crate::origin::Origin) -> proto::ExpressionCommon {
 
 /// An expression of [`ExpressionNode::Sent`]: the `spark.connect.Expression` of a Column as it
 /// was sent, its rendering, as `Column<'...'>` shows it, and its levels, as
-/// [`Expression::try_to_proto_with_levels`] counts them when the Column was pickled, and the
-/// plans that its subqueries refer to.
+/// [`Expression::try_to_proto_with_levels`] counts them when the Column was pickled, the plans
+/// that its subqueries refer to, and the holes of the commands of its UDFs, whose functions a
+/// request pickles when it builds the plan, as PySpark's unpickled Column keeps the functions of
+/// its UDFs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SentExpression {
     pub expression: proto::Expression,
     pub rendered: String,
     pub levels: usize,
     pub subqueries: SentSubqueries,
+    /// The holes of the expression, which a request fills with the messages that their
+    /// picklers give (see [`crate::udf::SentHole`]). Not a stable API.
+    #[doc(hidden)]
+    pub holes: crate::udf::SentHoles,
 }
 
 /// The plans that the subqueries of a [`SentExpression`] refer to by their plan IDs, which the
@@ -730,13 +768,13 @@ pub struct SentSubqueries(Vec<(Arc<LogicalPlan>, Arc<crate::plan::PlanIds>)>);
 
 impl SentSubqueries {
     /// The plans of `relations`, the relations of the plans that the subqueries of an expression
-    /// refer to, each of its levels. A relation of more levels than
+    /// refer to, each of its levels and its holes. A relation of more levels than
     /// [`crate::plan::MAX_PLAN_DEPTH`] is a `RecursionError`, as the API raises it when it sends
     /// one.
-    fn of(relations: Vec<(proto::Relation, usize)>) -> Result<Self> {
+    fn of(relations: Vec<(proto::Relation, usize, crate::udf::SentHoles)>) -> Result<Self> {
         relations
             .into_iter()
-            .map(|(relation, levels)| {
+            .map(|(relation, levels, holes)| {
                 if levels > crate::plan::MAX_PLAN_DEPTH {
                     return Err(crate::plan::too_deep_a_plan(levels));
                 }
@@ -746,6 +784,7 @@ impl SentSubqueries {
                     owner: None,
                     depth: levels,
                     observations: Vec::new(),
+                    holes,
                 });
                 let ids = Arc::new(crate::plan::PlanIds::new());
                 if let Some(plan_id) = plan_id {
@@ -755,6 +794,13 @@ impl SentSubqueries {
             })
             .collect::<Result<_>>()
             .map(SentSubqueries)
+    }
+}
+
+impl SentSubqueries {
+    /// The plans of the subqueries.
+    pub(crate) fn plans(&self) -> impl Iterator<Item = &Arc<LogicalPlan>> {
+        self.0.iter().map(|(plan, _)| plan)
     }
 }
 
@@ -992,6 +1038,17 @@ impl Expression {
         self.origin.as_deref()
     }
 
+    /// This expression of the origin `origin` in place of its own, as PySpark's unpickled
+    /// expression keeps the origin that it was pickled with: of a Column that its unpickle makes
+    /// again of its parts (see [`crate::origin::origin_of_encoded`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn with_origin(&self, origin: Option<crate::origin::Origin>) -> Expression {
+        Expression {
+            node: Arc::clone(&self.node),
+            origin: origin.map(Arc::new),
+        }
+    }
+
     /// Create a literal expression.
     pub fn literal(value: LiteralExpression) -> Self {
         Self::new(ExpressionNode::Literal(value))
@@ -1060,6 +1117,15 @@ impl Expression {
     #[doc(hidden)]
     pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
         crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Expression(self)])
+    }
+
+    /// The owners of the relations built outside the core of the plans of the subqueries of this
+    /// expression, and of the errors of its parts that a request fails to build, that it alone
+    /// holds, which a Python Column tells its garbage collector of, as PySpark's Column holds the
+    /// plan objects of its subqueries (see [`crate::udf::exclusive_owners`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_owners(vec![crate::udf::PicklerHolder::Expression(self)])
     }
 
     /// Render this expression to a human-readable string, mirroring the
@@ -1189,6 +1255,29 @@ impl Expression {
                 before,
                 after,
                 unrenderable,
+                owner: None,
+            },
+        )))
+    }
+
+    /// As [`Expression::unbuildable`] of `before` and `unrenderable`, of `owner`, which the
+    /// expression keeps alive while it lives: what the error of `before` needs, as the plan of
+    /// the Python client whose error a plan of that client keeps, which each request raises. Not
+    /// a stable API.
+    #[doc(hidden)]
+    pub fn unbuildable_owned(
+        expression: Expression,
+        before: SparkError,
+        unrenderable: Option<SparkError>,
+        owner: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+    ) -> Expression {
+        Expression::new(ExpressionNode::Unbuildable(Box::new(
+            UnbuildableExpression {
+                expression,
+                before: Some(before),
+                after: None,
+                unrenderable,
+                owner: Some(crate::plan::RelationOwner(owner)),
             },
         )))
     }
@@ -1305,6 +1394,26 @@ impl Expression {
         levels: usize,
         subqueries: Vec<(proto::Relation, usize)>,
     ) -> Result<Expression> {
+        let subqueries = subqueries
+            .into_iter()
+            .map(|(relation, levels)| (relation, levels, Default::default()))
+            .collect();
+        Expression::sent_with_holes(expression, rendered, levels, subqueries, Default::default())
+    }
+
+    /// As [`Expression::sent_with_subqueries`], of an expression and relations of subqueries of
+    /// holes, those of a pickled Column, which carries the functions of its UDFs as PySpark's
+    /// pickled Column carries them: each request that builds a plan of the expression pickles them
+    /// and fills the holes with their messages, as PySpark's unpickled Column pickles the
+    /// functions at each request (see [`crate::udf::SentHole`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn sent_with_holes(
+        expression: proto::Expression,
+        rendered: String,
+        levels: usize,
+        subqueries: Vec<(proto::Relation, usize, crate::udf::SentHoles)>,
+        holes: crate::udf::SentHoles,
+    ) -> Result<Expression> {
         if levels > MAX_EXPRESSION_DEPTH {
             return Err(SparkError::recursion_msg(format!(
                 "maximum recursion depth exceeded while unpickling an expression of {levels} \
@@ -1317,6 +1426,7 @@ impl Expression {
                 rendered,
                 levels,
                 subqueries: SentSubqueries::of(subqueries)?,
+                holes,
             },
         ))))
     }
@@ -1364,7 +1474,9 @@ impl Expression {
                 PicklerHolder::Udf(udf) => {
                     below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
                 }
-                PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) => {}
+                PicklerHolder::Plan(_)
+                | PicklerHolder::Pickler(_)
+                | PicklerHolder::SentPlans(_) => {}
             }
             // The first is visited first.
             pending.extend(below.into_iter().rev());
@@ -1471,7 +1583,29 @@ impl Expression {
                 // The clone recurses for each level of the expression: grow the stack for them
                 // all, as the clone of a raw relation does.
                 let stack = sent_expression_stack(sent.levels);
-                stacker::maybe_grow(stack, stack, || sent.expression.clone())
+                if sent.holes.is_empty() {
+                    return stacker::maybe_grow(stack, stack, || sent.expression.clone());
+                }
+                // Of the messages that the picklers of the holes give now, in the order of their
+                // build, as PySpark's unpickled Column pickles the functions of its UDFs.
+                let fill = crate::udf::SENT_FILL_STACK;
+                match stacker::maybe_grow(fill, fill, || {
+                    use prost::Message;
+                    sent.holes
+                        .fill(|| sent.expression.encode_to_vec())
+                        .and_then(|filled| match filled {
+                            Some(filled) => proto::Expression::decode(filled.as_slice())
+                                .map_err(|error| SparkError::connect_msg(error.to_string())),
+                            // The first build of a request, which meets the picklers.
+                            None => Ok(sent.expression.clone()),
+                        })
+                }) {
+                    Ok(filled) => filled,
+                    Err(error) => {
+                        record_unbuildable(&error);
+                        stacker::maybe_grow(stack, stack, || sent.expression.clone())
+                    }
+                }
             }
             ExpressionNode::Unbuildable(unbuildable) => unbuildable.to_proto(),
             ExpressionNode::PlanBuildOrigin(made) => made.to_proto(),
@@ -3025,6 +3159,7 @@ mod tests {
             rendered: original.render(),
             levels: 3,
             subqueries: SentSubqueries::default(),
+            holes: Default::default(),
         })));
         assert_eq!(sent.to_proto(), original.to_proto());
         assert_eq!(sent.render(), "+(a, 1) AS b");
@@ -3032,6 +3167,117 @@ mod tests {
         let over_original = Expression::function("abs", vec![original]);
         assert_eq!(over.to_proto(), over_original.to_proto());
         assert_eq!(over.render(), over_original.render());
+    }
+
+    #[test]
+    fn sent_expressions_of_holes_pickle_the_functions_of_their_udfs_at_each_request() {
+        // As PySpark's unpickled Column, which keeps the functions of its UDFs, and of the plans
+        // of its subqueries, and pickles them when a request builds a plan of it: the holes of the
+        // expression, and of the relations of its subqueries, are filled with the messages of
+        // their picklers at each request, in the order of the build; their picklers are those of
+        // the expression, which a deep copy replaces, and which the Column alone holds.
+        use crate::udf::{CommandPickler, PicklerCopies, SentHole, SentHoleKind, SentHoles};
+        use prost::Message;
+        let calls = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let pickler = |tag: &'static str| {
+            let calls = Arc::clone(&calls);
+            CommandPickler::with_output_type(tag, move |tag| {
+                calls.lock().unwrap().push(tag.to_string());
+                Ok(proto::PythonUdf {
+                    command: format!("<{tag}>").into_bytes().into(),
+                    ..Default::default()
+                }
+                .encode_to_vec())
+            })
+        };
+        let mut markers = crate::udf::SentHoleMarkers::new();
+        let (marker, in_subquery) = (markers.marker(), markers.marker());
+        let udf_of = |command: &[u8]| proto::Expression {
+            expr_type: Some(
+                proto::expression::ExprType::CommonInlineUserDefinedFunction(
+                    proto::CommonInlineUserDefinedFunction {
+                        function_name: "f".to_string(),
+                        function: Some(
+                            proto::common_inline_user_defined_function::Function::PythonUdf(
+                                proto::PythonUdf {
+                                    eval_type: 100,
+                                    command: command.to_vec().into(),
+                                    ..Default::default()
+                                },
+                            ),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            ),
+            ..Default::default()
+        };
+        let subquery = proto::Relation {
+            common: Some(proto::RelationCommon {
+                plan_id: Some(41),
+                ..Default::default()
+            }),
+            rel_type: Some(proto::relation::RelType::Project(Box::new(
+                proto::Project {
+                    expressions: vec![udf_of(&in_subquery)],
+                    ..Default::default()
+                },
+            ))),
+        };
+        let hole = |marker: &[u8], tag: &'static str| {
+            SentHoles(vec![SentHole {
+                marker: marker.to_vec(),
+                kind: SentHoleKind::PythonUdf,
+                pickler: Some(pickler(tag)),
+            }])
+        };
+        let sent = Expression::sent_with_holes(
+            udf_of(&marker),
+            "f()".to_string(),
+            2,
+            vec![(subquery, 1, hole(&in_subquery, "of the subquery"))],
+            hole(&marker, "of the expression"),
+        )
+        .unwrap();
+        let contains = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|w| w == part);
+        for _ in 0..2 {
+            let built = sent.try_to_proto().unwrap().encode_to_vec();
+            assert!(contains(&built, b"<of the expression>") && !contains(&built, &marker));
+        }
+        let (relation, _) = sent.subquery_relations().unwrap().pop().unwrap();
+        let relation = relation.encode_to_vec();
+        assert!(contains(&relation, b"<of the subquery>") && !contains(&relation, &in_subquery));
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["of the expression", "of the expression", "of the subquery"]
+        );
+        // Its picklers, those of the plans of its subqueries too, which it alone holds, and which
+        // a deep copy replaces.
+        assert_eq!(sent.exclusive_pickler_objects().len(), 2);
+        let picklers = sent.picklers();
+        assert_eq!(picklers.len(), 2);
+        let mut copies = PicklerCopies::new();
+        for original in &picklers {
+            copies.insert(original, pickler("copied"));
+        }
+        let copy = sent.with_pickler_copies(&copies);
+        drop((copies, picklers));
+        let built = copy.try_to_proto().unwrap().encode_to_vec();
+        assert!(contains(&built, b"<copied>"));
+        let (relation, _) = copy.subquery_relations().unwrap().pop().unwrap();
+        assert!(contains(&relation.encode_to_vec(), b"<copied>"));
+        // The plans of the subqueries of the copy are not shared with the original's.
+        let ExpressionNode::Sent(of_copy) = copy.node() else {
+            unreachable!()
+        };
+        let ExpressionNode::Sent(original) = sent.node() else {
+            unreachable!()
+        };
+        assert!(!Arc::ptr_eq(
+            &of_copy.subqueries.0[0].0,
+            &original.subqueries.0[0].0
+        ));
+        assert_eq!(copy.exclusive_pickler_objects().len(), 2);
     }
 
     // Additional tests for expression render() methods and uncovered branches

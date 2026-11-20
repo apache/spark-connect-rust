@@ -144,6 +144,12 @@ pub enum LogicalPlan {
         owner: Option<RelationOwner>,
         depth: usize,
         observations: Vec<(String, crate::observation::Observation)>,
+        /// The holes of the relation, of a pickled DataFrame, whose picklers a request calls when
+        /// it builds the plan, and whose messages it fills in, as PySpark's unpickled plan
+        /// pickles the functions of its UDFs at each request (see [`crate::udf::SentHole`]).
+        /// Not a stable API.
+        #[doc(hidden)]
+        holes: crate::udf::SentHoles,
     },
     /// Deduplicate: `df.distinct()` or `df.dropDuplicates()`.
     Deduplicate {
@@ -662,8 +668,20 @@ pub enum SetOpType {
 
 /// The plan ID of the next new node, of all the sessions of the process: as PySpark's
 /// `LogicalPlan._nextPlanId`, one counter, so that a column of a DataFrame of another session
-/// names no node of this session's plan.
+/// names no node of this session's plan. The plans that a client builds outside the core take
+/// theirs from it too ([`fresh_plan_id`]).
 static NEXT_PLAN_ID: AtomicI64 = AtomicI64::new(1);
+
+/// A new plan ID of the counter of the process, from which the core numbers the nodes of its
+/// plans, for a plan that a client builds outside the core, as PySpark's
+/// `LogicalPlan._fresh_plan_id()` numbers each plan: the Python client's `LogicalPlan` takes its
+/// IDs here, so that the ID of such a plan, which a DataFrame of it keeps as its plan ID
+/// ([`crate::dataframe::DataFrame::assign_plan_id`]), is of no other node of any session. Not a
+/// stable API.
+#[doc(hidden)]
+pub fn fresh_plan_id() -> i64 {
+    NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Plan IDs that stay the same each time a plan node is serialized, as PySpark assigns
 /// them once per plan. The server caches resolved plans keyed by the whole relation, so
@@ -688,7 +706,14 @@ struct PlanIdNodes {
 }
 
 impl PlanIdNodes {
+    /// Give the key of `node` the plan ID `id`, once the entries of the dropped nodes are pruned,
+    /// when the map has grown to twice the entries that it had at the last prune: so the map stays
+    /// of about the nodes that are alive, however the keys get their IDs, numbered or given.
     fn insert(&mut self, key: usize, node: &Arc<LogicalPlan>, id: i64) {
+        if self.ids.len() >= self.prune_at {
+            self.ids.retain(|_, (node, _, _)| node.strong_count() > 0);
+            self.prune_at = (self.ids.len() * 2).max(PlanIds::MIN_PRUNE_AT);
+        }
         let order = self.next_order;
         self.next_order += 1;
         self.ids.insert(key, (Arc::downgrade(node), id, order));
@@ -728,21 +753,53 @@ impl PlanIds {
         if let Some((_, id, _)) = nodes.ids.get(&key) {
             return *id;
         }
-        if nodes.ids.len() >= nodes.prune_at {
-            nodes.ids.retain(|_, (node, _, _)| node.strong_count() > 0);
-            nodes.prune_at = (nodes.ids.len() * 2).max(Self::MIN_PRUNE_AT);
-        }
         let id = NEXT_PLAN_ID.fetch_add(1, Ordering::Relaxed);
         nodes.insert(key, node, id);
         id
     }
 
     /// Give `node` the plan ID `id`, of a relation that this session sent: so a DataFrame of the
-    /// relation, such as one that was pickled, keeps the plan ID of the DataFrame it was of.
+    /// relation, such as one that was pickled, keeps the plan ID of the DataFrame it was of. The
+    /// counter of the process goes past `id`, so that no node is numbered `id` later: an ID of
+    /// the counter, such as that of a plan of the Python client ([`fresh_plan_id`]), is below it
+    /// already.
     pub(crate) fn assign(&self, node: &Arc<LogicalPlan>, id: i64) {
+        self.assign_key(node, Arc::as_ptr(node) as usize, id);
+    }
+
+    /// As [`PlanIds::assign`], the plan ID of the relation of `node` within the `WithRelations`
+    /// that sends it with the plans of its subqueries ([`PlanIds::root_id_of`]).
+    pub(crate) fn assign_root(&self, node: &Arc<LogicalPlan>, id: i64) {
+        self.assign_key(node, Arc::as_ptr(node) as usize | 1, id);
+    }
+
+    fn assign_key(&self, node: &Arc<LogicalPlan>, key: usize, id: i64) {
         NEXT_PLAN_ID.fetch_max(id.saturating_add(1), Ordering::Relaxed);
         let mut nodes = self.nodes.lock().unwrap_or_else(|e| e.into_inner());
-        nodes.insert(Arc::as_ptr(node) as usize, node, id);
+        nodes.insert(key, node, id);
+    }
+
+    /// Give each node of `plan` in these plan IDs the plan ID that it has in `from`, those of
+    /// another session, as PySpark's plan objects keep their plan IDs in any session that sends
+    /// them: so a DataFrame of `plan` in this session, such as a deep copy of a DataFrame into it
+    /// or a `DataFrame(df._plan, session)`, sends the plan IDs of the DataFrame, which the
+    /// columns of that DataFrame refer to, and a node with subqueries the root plan ID within its
+    /// `WithRelations` too. The plans of the subqueries keep the plan IDs of their own sessions,
+    /// which they are sent with. Computed without recursing, once for each node that several
+    /// nodes share.
+    pub(crate) fn assign_ids_of(&self, plan: &Arc<LogicalPlan>, from: &PlanIds) {
+        let mut seen = std::collections::HashSet::new();
+        let mut pending = vec![plan];
+        while let Some(node) = pending.pop() {
+            if !seen.insert(Arc::as_ptr(node) as usize) {
+                continue;
+            }
+            self.assign(node, from.id_of(node));
+            if has_subquery_references(node) {
+                self.assign_root(node, from.root_id_of(node));
+            }
+            pending.extend(node.inputs());
+        }
     }
 
     /// The live node of the plan ID `id` that was first given it, such as the DataFrame that a
@@ -1880,11 +1937,54 @@ pub(crate) fn subquery_plans(node: &LogicalPlan) -> Vec<&Arc<LogicalPlan>> {
             PicklerHolder::Udf(udf) => {
                 below.extend(udf.arguments.iter().map(PicklerHolder::Expression));
             }
-            PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) => {}
+            PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) | PicklerHolder::SentPlans(_) => {}
         }
         pending.extend(below.into_iter().rev());
     }
     plans
+}
+
+/// Whether `plan` is the node of a relation built outside the core whose build failed with
+/// `error` (see [`crate::dataframe::DataFrame::from_unbuilt_relation`]), rather than a plan over
+/// one.
+pub(crate) fn is_unbuilt_with(plan: &LogicalPlan, error: &SparkError) -> bool {
+    match plan {
+        LogicalPlan::Unbuildable { input, error: own } => {
+            matches!(input.as_ref(), LogicalPlan::Raw { .. })
+                && own.error_class == error.error_class
+                && own.params == error.params
+        }
+        _ => false,
+    }
+}
+
+/// Whether `node` is sent in a `WithRelations` of the plans that the subqueries of its own
+/// expressions refer to: of a subquery ([`subquery_plans`]), or of an expression as it was sent,
+/// of a pickled Column of subqueries, which sends the plans of its subqueries too.
+pub(crate) fn has_subquery_references(node: &LogicalPlan) -> bool {
+    use crate::udf::PicklerHolder;
+    if !subquery_plans(node).is_empty() {
+        return true;
+    }
+    let mut pending = Vec::new();
+    node.push_own_pickler_holders(&mut pending);
+    while let Some(holder) = pending.pop() {
+        match holder {
+            PicklerHolder::Expression(expression) => {
+                expression.node().push_pickler_holders(&mut pending)
+            }
+            PicklerHolder::Udf(udf) => {
+                pending.extend(udf.arguments.iter().map(PicklerHolder::Expression));
+            }
+            PicklerHolder::SentPlans(plans) => {
+                if plans.plans().next().is_some() {
+                    return true;
+                }
+            }
+            PicklerHolder::Subquery(_) | PicklerHolder::Plan(_) | PicklerHolder::Pickler(_) => {}
+        }
+    }
+    false
 }
 
 /// The relation of `node`, and the plans that the subqueries of its own expressions refer
@@ -2207,7 +2307,14 @@ impl LogicalPlan {
                 parts.extend(exprs.iter_mut().map(Of));
                 parts.push(Observation(name.as_str(), observation));
             }
-            LogicalPlan::Raw { observations, .. } => parts.push(Observations(observations)),
+            LogicalPlan::Raw {
+                observations,
+                holes,
+                ..
+            } => {
+                parts.push(Observations(observations));
+                parts.extend(holes.0.iter_mut().map(|hole| Pickler(&mut hole.pickler)));
+            }
             LogicalPlan::UnresolvedTableValuedFunction { arguments, .. } => {
                 parts.extend(arguments.iter_mut().map(Of));
             }
@@ -2497,6 +2604,16 @@ impl LogicalPlan {
             LogicalPlan::ToSchema { schema_reader, .. } => {
                 pending.extend(schema_reader.iter().map(Pickler));
             }
+            // The picklers of the holes of a relation that was sent, of a pickled DataFrame.
+            LogicalPlan::Raw { holes, .. } => {
+                pending.extend(
+                    holes
+                        .0
+                        .iter()
+                        .filter_map(|hole| hole.pickler.as_ref())
+                        .map(Pickler),
+                );
+            }
             LogicalPlan::Range { .. }
             | LogicalPlan::SetOperation { .. }
             | LogicalPlan::Limit { .. }
@@ -2504,7 +2621,6 @@ impl LogicalPlan {
             | LogicalPlan::Tail { .. }
             | LogicalPlan::ShowString { .. }
             | LogicalPlan::HtmlString { .. }
-            | LogicalPlan::Raw { .. }
             | LogicalPlan::Deduplicate { .. }
             | LogicalPlan::Sample { .. }
             | LogicalPlan::Repartition { .. }
@@ -2932,11 +3048,35 @@ impl LogicalPlan {
             LogicalPlan::Raw {
                 relation: raw,
                 depth,
+                holes,
                 ..
             } => {
                 // The clone recurses for each level of the relation: grow the stack for them all.
                 let stack = raw_relation_stack(*depth);
-                relation = stacker::maybe_grow(stack, stack, || raw.as_ref().clone());
+                relation = if holes.is_empty() {
+                    stacker::maybe_grow(stack, stack, || raw.as_ref().clone())
+                } else {
+                    // Of the messages that the picklers of the holes give now, in the order of
+                    // their build, as PySpark's unpickled plan pickles the functions of its UDFs.
+                    let fill = crate::udf::SENT_FILL_STACK;
+                    match stacker::maybe_grow(fill, fill, || {
+                        use prost::Message;
+                        holes
+                            .fill(|| raw.encode_to_vec())
+                            .and_then(|filled| match filled {
+                                Some(filled) => proto::Relation::decode(filled.as_slice())
+                                    .map_err(|error| SparkError::connect_msg(error.to_string())),
+                                // The first build of a request, which meets the picklers.
+                                None => Ok(raw.as_ref().clone()),
+                            })
+                    }) {
+                        Ok(filled) => filled,
+                        Err(error) => {
+                            crate::expression::record_unbuildable(&error);
+                            stacker::maybe_grow(stack, stack, || raw.as_ref().clone())
+                        }
+                    }
+                };
                 relation.common.get_or_insert_with(Default::default);
             }
 
@@ -5853,6 +5993,7 @@ mod deep_plan_tests {
             owner: None,
             depth,
             observations: Vec::new(),
+            holes: Default::default(),
         })
     }
 

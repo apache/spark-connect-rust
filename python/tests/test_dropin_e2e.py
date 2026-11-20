@@ -2488,6 +2488,280 @@ def test_deep_copies_copy_the_functions_of_udfs_as_pyspark(session):
     assert values(base.select(column)) == [7] and values(frame) == [7]
 
 
+def test_dataframes_of_the_plans_of_dataframes_build_them_at_each_request_as_pyspark(session):
+    # As PySpark's DataFrame(df._plan, session), which keeps the plan of df, of its plan ID, and
+    # builds it at each request: a plan whose UDF does not pickle makes a DataFrame whose requests
+    # raise the PicklingError, until the function pickles; its columns and those of df refer to
+    # one plan, so each resolves against the other, and a join of the two is a self-join, whose
+    # condition of their columns the server finds ambiguous, as in PySpark. In another session
+    # too, as a deep copy into another session, which runs the functions as they are then.
+    import copy
+    import pickle
+    import threading
+
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.functions import udf
+
+    state = {"lock": threading.Lock(), "value": "old"}
+    df = session.range(2).select(
+        "id", udf(lambda x: str(state["lock"] is None) + state["value"], "string")("id").alias("v"))
+    of = DataFrame(df._plan, session)
+    with pytest.raises(pickle.PicklingError, match="cannot pickle '_thread.lock' object"):
+        of.collect()
+    state["lock"] = None
+    assert sorted(of.select(df["v"]).collect()) == [Row(v="Trueold")] * 2
+    assert sorted(df.select(of["id"]).collect()) == [Row(id=0), Row(id=1)]
+    with pytest.raises(AnalysisException) as error:
+        df.join(of, df["id"] == of["id"]).collect()
+    assert error.value.getCondition() == "AMBIGUOUS_COLUMN_REFERENCE"
+    other = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).create()
+    try:
+        copied = copy.deepcopy(df, {id(session): other})
+        in_other = DataFrame(df._plan, other)
+        state["value"] = "new"
+        for frame in (copied, in_other):
+            assert frame.sparkSession is other
+            assert sorted(frame.select(df["v"]).collect()) == [Row(v="Truenew")] * 2
+    finally:
+        other.stop()
+
+
+def test_pickled_columns_and_dataframes_pickle_their_functions_at_each_request_as_pyspark(
+    session, tmp_path
+):
+    # As PySpark's pickles of a Column, a DataFrame and a table argument, which carry the
+    # functions of their UDFs, which the requests of the unpickled objects pickle: a plain pickle
+    # pickles a function of a script (of __main__) by reference, and the unpickled object runs it
+    # with the value that it reads at each request, as cloudpickle pickles it by value then; a
+    # cloudpickle pickles it by value, of the value then. A foreachBatch function that captures
+    # them runs them on the Python worker of the server, where they are PySpark's, which pickles
+    # the functions there.
+    import pickle
+    import sys
+
+    from pyspark import cloudpickle
+    from pyspark.sql.functions import udf, udtf
+
+    main = sys.modules["__main__"]
+    main._dropin_e2e_state = {"value": "old"}
+    exec("def _dropin_e2e_reads(x):\n    return _dropin_e2e_state['value']\n", main.__dict__)
+    try:
+        base = session.range(1)
+        column = udf(main._dropin_e2e_reads, "string")("id").alias("v")
+        frame = base.select(column)
+        table = frame.asTable()
+
+        @udtf(returnType="v string")
+        class Echo:
+            def eval(self, row):
+                yield (row["v"],)
+
+        loaded_column, loaded_table = (pickle.loads(pickle.dumps(held)) for held in (column, table))
+        loaded_frame = cloudpickle.loads(cloudpickle.dumps(frame))
+        for value in ("old", "new"):
+            main._dropin_e2e_state["value"] = value
+            assert base.select(loaded_column).collect() == [Row(v=value)]
+            assert Echo(loaded_table).collect() == [Row(v=value)]
+            # Of the value of its pickle, by value.
+            assert loaded_frame.collect() == [Row(v="old")]
+
+        (tmp_path / "input.txt").write_text("a\n")
+        name = "foreach_batch_captured_udfs_of_pickles"
+
+        def func(batch, batch_id):
+            # Each of its own write, as the DataFrame unpickles of a session of its own there.
+            for result in (batch.selectExpr("0 AS id").select(column), frame, Echo(table)):
+                result.write.mode("append").saveAsTable(name)
+
+        try:
+            query = (
+                session.readStream.format("text").load(str(tmp_path))
+                .writeStream.foreachBatch(func).trigger(availableNow=True).start()
+            )
+            query.awaitTermination()
+            assert session.table(name).collect() == [Row(v="new")] * 3
+        finally:
+            session.sql(f"DROP TABLE IF EXISTS {name}").collect()
+    finally:
+        del main._dropin_e2e_state, main._dropin_e2e_reads
+
+
+def test_pickles_of_many_udfs_pickle_each_function_in_its_place_as_pyspark(session, tmp_path):
+    # As PySpark's pickles of a Column or a DataFrame of many UDFs, also of subqueries, and of
+    # nested UDFs: the requests of the unpickled object pickle each function in its place, as
+    # does the Python worker of the server of a foreachBatch function that captures them, of the
+    # results of the objects that were pickled.
+    import functools
+    import json
+    import operator
+
+    from pyspark import cloudpickle
+    from pyspark.sql.functions import udf
+
+    udfs = [udf(lambda x, n=n: x + n, "long") for n in range(13)]
+
+    def total(columns):
+        return functools.reduce(operator.add, columns)
+
+    one = session.range(1).select(udfs[12]("id").alias("v"))
+    two = session.range(1).select((udfs[0]("id") + udfs[1]("id")).alias("v"))
+    nine = session.range(1).select(total([u("id") for u in udfs[2:11]]).alias("v"))
+    columns = {
+        "11 UDFs and a subquery of one": total([u("id") for u in udfs[:11]]) + one.scalar(),
+        "two subqueries of 2 and 9 UDFs": two.scalar() + nine.scalar(),
+        "nested UDFs": functools.reduce(lambda column, u: u(column), udfs[:12], F.col("id")),
+        "an IN subquery": F.when(udfs[0]("id").isin(nine.select("v")), 1).otherwise(udfs[1]("id")),
+    }
+    tens = session.range(1).select(total([u("id") for u in udfs[2:12]]).alias("v"))
+    frames = {
+        "12 UDFs": session.range(2).select(
+            *[u("id").alias(f"c{n}") for n, u in enumerate(udfs[:12])]),
+        "a subquery of 10 UDFs": session.range(2).select(
+            udfs[0]("id").alias("a"), tens.scalar().alias("s")),
+    }
+
+    def results(base, columns, frames):
+        found = {name: sorted(list(row) for row in base.select(column.alias("c")).collect())
+                 for name, column in columns.items()}
+        found.update({name: sorted(list(row) for row in frame.collect())
+                      for name, frame in frames.items()})
+        return found
+
+    expected = results(session.range(2), columns, frames)
+    loaded_columns = {name: cloudpickle.loads(cloudpickle.dumps(c)) for name, c in columns.items()}
+    loaded_frames = {name: cloudpickle.loads(cloudpickle.dumps(f)) for name, f in frames.items()}
+    assert results(session.range(2), loaded_columns, loaded_frames) == expected
+
+    source, out = tmp_path / "input", tmp_path / "out"
+    source.mkdir()
+    out.mkdir()
+    (source / "input.txt").write_text("a\n")
+
+    def func(batch, batch_id):
+        found = results(batch.sparkSession.range(2), columns, frames)
+        (out / f"{batch_id}.json").write_text(json.dumps(found))
+
+    query = (
+        session.readStream.format("text").load(str(source))
+        .writeStream.foreachBatch(func).trigger(availableNow=True).start()
+    )
+    query.awaitTermination()
+    assert query.exception() is None
+    (written,) = list(out.iterdir())
+    assert json.loads(written.read_text()) == expected
+
+
+def test_plans_over_the_plans_of_dataframes_unpickle_on_the_python_worker_as_pyspark(
+        session, tmp_path):
+    # As PySpark's plan object of a DataFrame, which pickles its fields and no session: a Column of
+    # the subquery of a DataFrame of a plan over `df._plan`, as `SubqueryAlias(df._plan, "s")`,
+    # whose build fails, pickles plainly, and a UDF and a foreachBatch function that capture it
+    # unpickle on the Python worker of the server, which has no class of the drop-in, where the
+    # requests of the Column raise the error of the plan, as PySpark's do: of a plan over the plan
+    # of a DataFrame that raises, and of a DataFrame whose option UTF-8 cannot encode, of the
+    # error of the protobuf of the worker.
+    import json
+    import pickle
+
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SubqueryAlias
+    from pyspark.sql.functions import udf
+
+    class FailingOver(SubqueryAlias):
+        def plan(self, session):
+            self._child.plan(session)
+            raise ValueError("fails over the plan")
+
+    unencodable = session.read.format("json").option("k", "\ud800").load(str(tmp_path / "none"))
+    columns = {
+        "failing": DataFrame(FailingOver(session.range(3)._plan, "s"), session),
+        "unencodable": DataFrame(SubqueryAlias(unencodable._plan, "s"), session),
+    }
+    columns = {name: frame.select(F.lit(1)).scalar() for name, frame in columns.items()}
+    pickle.loads(pickle.dumps(columns["unencodable"]))
+
+    @udf("string")
+    def kinds(v):
+        return ",".join(type(columns[name]).__name__ for name in sorted(columns))
+
+    assert session.range(1).select(kinds("id").alias("k")).collect() == [Row(k="Column,Column")]
+
+    source, out = tmp_path / "input", tmp_path / "out"
+    source.mkdir()
+    out.mkdir()
+    (source / "input.txt").write_text("a\n")
+
+    def func(batch, batch_id):
+        found = {}
+        for name, column in columns.items():
+            try:
+                batch.select(column).collect()
+                found[name] = "collected"
+            except Exception as error:
+                found[name] = [isinstance(error, ValueError), str(error).splitlines()[0]]
+        (out / f"{batch_id}.json").write_text(json.dumps(found))
+
+    query = (
+        session.readStream.format("text").load(str(source))
+        .writeStream.foreachBatch(func).trigger(availableNow=True).start()
+    )
+    query.awaitTermination()
+    assert query.exception() is None
+    (written,) = list(out.iterdir())
+    found = json.loads(written.read_text())
+    assert found["failing"] == [True, "fails over the plan"]
+    assert found["unencodable"][0] is True
+    assert "_DataFramePlan" not in found["unencodable"][1]
+
+
+def test_deep_copies_of_observed_dataframes_set_their_own_observations_in_any_session_as_pyspark(
+        session):
+    # As PySpark's deep copy of a DataFrame of observe(observation, ...), which copies the plan,
+    # and so the Observation, in the session of the DataFrame or in another one of the memo: the
+    # copy's Observation is of the name of the Observation, its own name or the one that observe
+    # gave it, and of its metrics, none yet; the actions of the copy set the copy, and that of a
+    # deep copy of a tuple of the DataFrame and the Observation; those of the DataFrame set the
+    # Observation. Of a plan of a UDF too, whose function the copy copies.
+    import copy
+
+    from pyspark.sql import Observation
+    from pyspark.sql.functions import udf
+
+    other = SparkSession.builder.remote(os.environ["SPARK_REMOTE"]).create()
+    try:
+        for name in ("deep_copy_named", None):
+            for of_udf in (False, True):
+                for into_other in (False, True):
+                    for of_tuple in (False, True):
+                        memo = {id(session): other} if into_other else {}
+                        observation = Observation(name)
+                        df = session.range(3)
+                        if of_udf:
+                            df = df.select(udf(lambda x: x + 1, "long")("id").alias("id"))
+                        df = df.observe(observation, F.count("id").alias("c"),
+                                        F.sum("id").alias("s"))
+                        if of_tuple:
+                            copied, copied_observation = copy.deepcopy((df, observation), memo)
+                        else:
+                            copied, copied_observation = copy.deepcopy(df, memo), None
+                        assert copied.sparkSession is (other if into_other else session)
+                        ((held_name, held),) = copied._plan.observations.items()
+                        assert held is not observation and held_name == observation._name
+                        assert held._name == observation._name
+                        if name is not None:
+                            assert held._name == name
+                        if of_tuple:
+                            assert held is copied_observation
+                        assert held.get == {} and observation.get == {}
+                        total = 6 if of_udf else 3
+                        assert len(copied.collect()) == 3
+                        assert held.get == {"c": 3, "s": total} and observation.get == {}
+                        assert len(df.collect()) == 3
+                        assert observation.get == {"c": 3, "s": total}
+    finally:
+        other.stop()
+
+
 def test_udfs_that_capture_functions_pickle_them_by_name_as_pyspark(session):
     # As PySpark's, the functions are of pyspark.sql.functions.builtin: a UDF that captures one
     # pickles it by its name, of which the Python worker of the server imports PySpark's.
@@ -5024,6 +5298,70 @@ def test_reads_of_a_schema_of_a_user_defined_type_of_arguments_raise_as_pyspark(
     assert df.count() == 1
     assert df.select("i").columns == ["i"]
     assert df.groupBy("i").count().collect() == [Row(i=1, count=1)]
+
+
+def test_a_deep_copy_converts_the_schema_before_it_copies_the_plan_as_pyspark(session):
+    # As official PySpark 4.3.0, whose copy.deepcopy looks `__deepcopy__` up through `__getattr__`,
+    # which reads the columns of a name of two underscores, and so converts the schema, before it
+    # copies the plan and then the session: of a schema that it does not convert, of a UDT whose
+    # __init__ takes arguments or of a nanosecond timestamp, the deep copy raises the error of the
+    # conversion before it copies the functions of the UDFs, also on a thread of no active
+    # session, where the copy of the session raises NO_ACTIVE_SESSION.
+    import copy
+    import threading
+
+    from pyspark.errors import PySparkRuntimeError
+
+    class Recorded:
+        copies = []
+
+        def __call__(self, x):
+            return x
+
+        def __deepcopy__(self, memo):
+            Recorded.copies.append(self)
+            return Recorded()
+
+    def on_a_thread(call):
+        raised = []
+
+        def run():
+            try:
+                call()
+            except BaseException as error:
+                raised.append(error)
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        return raised[0]
+
+    of_udt = session.createDataFrame(
+        [((1.0, 2.0), 1)],
+        StructType([StructField("p", _ArgPointUDT(2)), StructField("i", LongType())]),
+    ).select("p", F.udf(Recorded(), "long")("i").alias("u"))
+    with pytest.raises(TypeError, match="missing 1 required positional argument"):
+        copy.deepcopy(of_udt)
+    error = on_a_thread(lambda: copy.deepcopy(of_udt))
+    assert isinstance(error, TypeError) and "missing 1 required positional argument" in str(error)
+    session.conf.set("spark.sql.timestampNanosTypes.enabled", "true")
+    try:
+        of_nanos = session.sql(
+            "SELECT CAST('2020-01-01 00:00:00.123456789' AS TIMESTAMP_NTZ(9)) c, 1 i"
+        ).select("c", F.udf(Recorded(), "long")("i").alias("u"))
+        with pytest.raises(PySparkValueError) as raised:
+            copy.deepcopy(of_nanos)
+        assert raised.value.getCondition() == "UNSUPPORTED_OPERATION"
+        error = on_a_thread(lambda: copy.deepcopy(of_nanos))
+        assert isinstance(error, PySparkValueError)
+        assert error.getCondition() == "UNSUPPORTED_OPERATION"
+    finally:
+        session.conf.unset("spark.sql.timestampNanosTypes.enabled")
+    assert Recorded.copies == []
+    # Of a schema that converts, the copy of the session raises there.
+    plain = session.range(1).select(F.udf(Recorded(), "long")("id").alias("u"))
+    error = on_a_thread(lambda: copy.deepcopy(plain))
+    assert isinstance(error, PySparkRuntimeError) and error.getCondition() == "NO_ACTIVE_SESSION"
 
 
 def test_uses_of_the_json_of_a_type_of_a_user_defined_type_of_no_json_raise_its_error(session):

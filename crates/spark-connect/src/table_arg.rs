@@ -48,6 +48,13 @@ impl TableArg {
         }
     }
 
+    /// Whether the plan of this table argument is the plan of a relation built outside the core
+    /// whose build failed with `error` (see [`DataFrame::is_unbuilt_with`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn is_unbuilt_with(&self, error: &SparkError) -> bool {
+        crate::plan::is_unbuilt_with(&self.subquery.plan, error)
+    }
+
     /// The relation of the plan of this table argument, of the plan IDs of the session of its
     /// DataFrame, as that DataFrame sends it, and the levels of the plan, which a pickle of the
     /// table argument keeps: [`DataFrame::from_sent_relation_levels`] gives back a DataFrame of
@@ -93,6 +100,16 @@ impl TableArg {
         crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Subquery(
             &self.subquery,
         )])
+    }
+
+    /// The owners of the relations built outside the core of the plan of this table argument and
+    /// of its expressions that it alone keeps alive, as [`TableArg::exclusive_pickler_objects`]
+    /// gives the objects of the picklers, which a Python wrapper reports to Python's garbage
+    /// collector, as PySpark's table argument holds the plan objects of its DataFrame (see
+    /// `crate::udf::exclusive_owners`). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_owners(vec![crate::udf::PicklerHolder::Subquery(&self.subquery)])
     }
 
     /// Drop the plan and the expressions of this table argument, as [`DataFrame::clear_plan`]

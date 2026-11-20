@@ -250,10 +250,6 @@ class Extra:
 
 
 EXTRAS = {
-    # The drop-in's DataFrame pickles its plan with this parser of protobuf messages.
-    "pyspark.sql.connect.dataframe": Extra(
-        "from pyspark.sql.connect._column_reduce import parse_deep as parse_deep\n"
-    ),
     # The drop-in defines udf, udtf and arrow_udtf of pyspark.sql.connect.functions in these
     # modules, and their evaluation types.
     "pyspark.sql.connect.udf": Extra(

@@ -35,21 +35,31 @@ def _reduce_column(
     levels: int = 1,
     build_error: Optional[tuple[str, str, Any]] = None,
     repr_error: Optional[tuple[str, str, Any]] = None,
-    subqueries: Optional[list[tuple[bytes, int]]] = None,
+    subqueries: Optional[list[tuple[bytes, int, list[tuple[bytes, str, Any]]]]] = None,
+    holes: Optional[list[tuple[bytes, str, Any]]] = None,
 ) -> tuple[Callable[..., Any], tuple[Any, ...]]:
     """The ``__reduce__`` of a Column of the bytes of its ``spark.connect.Expression`` and of its
     rendering, as PySpark Connect's Column pickles its expression: the function of
     ``pyspark.sql.connect._column_reduce``, which gives back the Column, which sends the
     expression as it is. A CASE WHEN gives its branches and else value too, as Columns, so the
     Column gives back a CASE WHEN. A sort order gives its child Column and its sort method, so
-    the Column gives back a sort order. A Column of subqueries gives the bytes and the levels of
-    the relation of each plan that they refer to, which the Column sends with the expression.
+    the Column gives back a sort order. A Column of subqueries gives the bytes, the levels and the
+    holes of the relation of each plan that they refer to, which the Column sends with the
+    expression. ``holes`` are those of the expression: the objects of the functions of its UDFs,
+    whose commands the requests of the Column pickle, as PySpark's Column keeps the functions.
     cloudpickle pickles that function by value, also to a Python worker of the server, where it
-    gives back PySpark Connect's Column, and ``pickle`` by reference."""
+    gives back PySpark Connect's Column, and ``pickle`` by reference, which pickles the functions
+    as PySpark's pickle does: by reference, and of the error of a lambda. Of holes, of the
+    expression or of a subquery, the function that fills them on a worker comes last
+    (``_column_reduce.fill_holes``), so that only the pickle of a Column of holes carries its
+    code."""
+    of_holes = bool(holes) or any(len(held) > 2 and held[2] for held in subqueries or [])
     args: tuple[Any, ...] = (expression, rendered, branches, else_value, sort, levels)
-    if build_error is not None or repr_error is not None or subqueries:
+    if build_error is not None or repr_error is not None or subqueries or of_holes:
         # The errors of an expression that a request does not build, and of its ``__repr__``.
         args += (build_error, repr_error)
-    if subqueries:
-        args += (subqueries,)
+    if subqueries or of_holes:
+        args += (subqueries or None,)
+    if of_holes:
+        args += (holes or None, _column_reduce.fill_holes)
     return _column_reduce.column_of, args

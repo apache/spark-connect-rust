@@ -474,6 +474,22 @@ impl Column {
         )?))
     }
 
+    /// As [`Column::sent_with_subqueries`], of an expression and relations of subqueries of holes,
+    /// those of a pickled Column, whose functions each request of a plan of the Column pickles
+    /// (see [`Expression::sent_with_holes`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn sent_with_holes(
+        expression: proto::Expression,
+        rendered: String,
+        levels: usize,
+        subqueries: Vec<(proto::Relation, usize, crate::udf::SentHoles)>,
+        holes: crate::udf::SentHoles,
+    ) -> spark_connect_core::error::Result<Column> {
+        Ok(Column::new(Expression::sent_with_holes(
+            expression, rendered, levels, subqueries, holes,
+        )?))
+    }
+
     /// Mirrors `pyspark.sql.column.Column.over` - window function application.
     pub fn over(self, window_spec: WindowSpec) -> Column {
         // Convert window frame spec if present

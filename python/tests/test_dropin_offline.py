@@ -2728,10 +2728,23 @@ def test_sql_utils_reexports_the_exceptions_of_pyspark(mock_connect):
     assert "TABLE_OR_VIEW_NOT_FOUND" in str(error.value)
 
 
-def test_pickled_sort_columns_are_sort_orders_as_pyspark(mock_connect):
+@pytest.fixture(params=[False, True], ids=["origins off", "origins on"])
+def origin_capture(request, monkeypatch):
+    # The capture of the origins of expressions off and on, which an active session turns on for
+    # the process, as PySpark's `is_debugging_enabled` caches it (`_enable_debugging_cache`), so
+    # that the round trips of a test keep the origins of what they copy whichever an earlier test
+    # left. What a test compares it builds at one line, so that the origins of the two are alike.
+    import pyspark.errors.utils as utils
+
+    monkeypatch.setattr(utils, "_enable_debugging_cache", request.param)
+    return request.param
+
+
+def test_pickled_sort_columns_are_sort_orders_as_pyspark(mock_connect, origin_capture):
     # As PySpark's SortOrder: a pickled, cloudpickled or deep-copied sort Column is a sort order
-    # again, so orderBy, Window.orderBy and repartitionByRange send it as the Column built
-    # without the pickling, not wrapped in another ASC NULLS FIRST.
+    # again, of the origin that it was made with, so orderBy, Window.orderBy and
+    # repartitionByRange send it as the Column built without the pickling, not wrapped in another
+    # ASC NULLS FIRST.
     import copy
 
     import cloudpickle
@@ -2776,10 +2789,10 @@ def test_pickled_sort_columns_are_sort_orders_as_pyspark(mock_connect):
     assert sort_orders(twice) == sort_orders(direct)
 
 
-def test_pickled_when_columns_chain_as_pyspark(mock_connect):
+def test_pickled_when_columns_chain_as_pyspark(mock_connect, origin_capture):
     # As PySpark's CaseWhen: a pickled, cloudpickled or deep-copied when() Column keeps its CASE
-    # WHEN, so when() and otherwise() chain on it, and the chain sends the plan of the chain
-    # built without the pickling.
+    # WHEN, of the origin that it was made with, so when() and otherwise() chain on it, and the
+    # chain sends the plan of the chain built without the pickling.
     import copy
 
     import cloudpickle
@@ -2798,13 +2811,16 @@ def test_pickled_when_columns_chain_as_pyspark(mock_connect):
     def chain(when):
         return when.when(F.col("id") > 5, "huge").otherwise("small")
 
+    def sent_chain(when):
+        return sent_expression(df.select(chain(when).alias("x")))
+
     direct = F.when(F.col("id") > 0, "big")
-    expected = sent_expression(df.select(chain(direct).alias("x")))
+    expected = sent_chain(direct)
     for copied in (pickle.loads(pickle.dumps(direct)),
                    cloudpickle.loads(cloudpickle.dumps(direct)),
                    copy.deepcopy(direct)):
         assert repr(chain(copied)) == repr(chain(direct))
-        assert sent_expression(df.select(chain(copied).alias("x"))) == expected
+        assert sent_chain(copied) == expected
         # otherwise() of a pickled when(), and a when() after the chain, which PySpark rejects.
         assert repr(copied.otherwise("n")) == repr(direct.otherwise("n"))
         with pytest.raises(PySparkTypeError) as error:
@@ -2818,10 +2834,11 @@ def _deep_addition(column, levels):
     return column
 
 
-def test_pickled_deep_columns_round_trip_and_send_as_they_were(mock_connect):
+def test_pickled_deep_columns_round_trip_and_send_as_they_were(mock_connect, origin_capture):
     # As PySpark's Column, which pickles its expression tree and unpickles at any depth: a column
     # of 60, 100 or 300 additions round-trips, and so do a CASE WHEN, a sort order and a window
-    # expression over it, each sending the expression that it sends without the pickling.
+    # expression over it, each sending the expression that it sends without the pickling, of the
+    # origins that it was made with.
     import cloudpickle
     from pyspark.sql import functions as F
     from pyspark.sql.window import Window
@@ -2843,14 +2860,16 @@ def test_pickled_deep_columns_round_trip_and_send_as_they_were(mock_connect):
         df.orderBy(column).collect()
         return parse_message(parse_message(sent_root())[7][0])[2]
 
+    def sent_window(column):
+        return sent_expressions(F.sum(column).over(Window.partitionBy("id")))
+
     for levels in (60, 100, 300):
         direct = _deep_addition(F.col("id"), levels)
         for copied in (pickle.loads(pickle.dumps(direct)),
                        cloudpickle.loads(cloudpickle.dumps(direct))):
             assert repr(copied) == repr(direct)
             assert sent_expressions(copied) == sent_expressions(direct)
-            assert sent_expressions(F.sum(copied).over(Window.partitionBy("id"))) == (
-                sent_expressions(F.sum(direct).over(Window.partitionBy("id"))))
+            assert sent_window(copied) == sent_window(direct)
         when = F.when(direct > 0, direct).otherwise(direct)
         copied = pickle.loads(pickle.dumps(when))
         assert repr(copied) == repr(when)
@@ -2882,6 +2901,50 @@ def test_pickled_deep_dataframes_round_trip_and_send_as_they_were(mock_connect):
         sent = _sent_plan(service.execute_requests)[1][0]
         copied.collect()
         assert _sent_plan(service.execute_requests)[1][0] == sent
+
+
+def test_pickled_deep_dataframes_and_columns_of_udfs_pickle_their_functions_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's pickle of a DataFrame and a Column, which keeps their plan objects, of the
+    # functions of their UDFs: a DataFrame of 300 levels over a UDF, and a Column of 600 levels
+    # over a UDF, round-trip, and the requests of the copies pickle the functions as they are
+    # then, also on a thread of 512 KiB.
+    import threading
+
+    import cloudpickle
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    _PICKLING.update(tag="<at the pickle>", fails=False)
+    df = spark.range(1).select(F.udf(_tagged("t"), "string")("id").alias("v"))
+    for i in range(300):
+        df = df.withColumn(f"c{i}", F.col("v"))
+    column = F.udf(_tagged("t"), "string")("id")
+    for _ in range(600):
+        column = F.concat(column, F.lit("x"))
+    copies = [cloudpickle.loads(cloudpickle.dumps(df)), pickle.loads(pickle.dumps(column))]
+    _PICKLING["tag"] = "<at the request>"
+    errors = []
+
+    def requests():
+        try:
+            copies[0].explain()
+            assert b"<at the request>" in service.analyze_requests[-1]
+            spark.range(1).select(copies[1]).explain()
+            assert b"<at the request>" in service.analyze_requests[-1]
+        except BaseException as error:
+            errors.append(error)
+
+    size = threading.stack_size(512 << 10)
+    try:
+        thread = threading.Thread(target=requests)
+    finally:
+        threading.stack_size(size)
+    thread.start()
+    thread.join()
+    assert errors == []
+    _PICKLING["tag"] = "<at the pickle>"
 
 
 def _project_levels(relation):
@@ -4943,6 +5006,11 @@ def test_udtf_return_types_are_converted_when_plans_are_built_as_pyspark(mock_co
     assert (len(service.analyze_requests), len(service.execute_requests)) == sent
 
 
+def _identity(x):
+    # A function of the module, which a plain pickle pickles by reference.
+    return x
+
+
 def test_pickles_of_types_that_do_not_convert_fail_where_the_plan_is_built_as_pyspark(
         mock_connect):
     # As PySpark's pickles of a Column, a DataFrame and a table argument, which keep the output
@@ -4950,8 +5018,8 @@ def test_pickles_of_types_that_do_not_convert_fail_where_the_plan_is_built_as_py
     # unpickled object is built: a type that pyspark_types_to_proto_types does not convert, such
     # as AtomicType() of a UDF without Arrow or a StructType changed to hold it after the call,
     # pickles, and raises its UNSUPPORTED_OPERATION at the requests of the unpickled Column and
-    # table argument, and at the unpickle of a DataFrame, which builds its plan. A function that
-    # does not pickle still raises at the pickle (see "UDFs" in known-differences.md).
+    # table argument, and at the unpickle of a DataFrame, which builds its plan. A plain pickle
+    # pickles the function of a UDF by reference, and fails at a lambda, as PySpark's.
     import threading
 
     import cloudpickle
@@ -4974,24 +5042,33 @@ def test_pickles_of_types_that_do_not_convert_fail_where_the_plan_is_built_as_py
 
     df = spark.range(2)
     mutated = T.StructType([T.StructField("a", T.LongType())])
-    columns = [F.udf(lambda x: x, T.AtomicType(), useArrow=False)("id"),
-               F.udf(lambda x: x, mutated)("id")]
-    mutated.fields[0].dataType = T.AtomicType()
-    sent = (len(service.analyze_requests), len(service.execute_requests))
-    for column in columns:
-        for dumps, loads in ((pickle.dumps, pickle.loads),
-                             (cloudpickle.dumps, cloudpickle.loads)):
-            restored = loads(dumps(column))
-            assert repr(restored) == repr(column)
-            unsupported(lambda: df.select(restored).schema, "data type AtomicType()")
+    for function, pickles in ((lambda x: x, [cloudpickle]), (_identity, [pickle, cloudpickle])):
+        columns = [F.udf(function, T.AtomicType(), useArrow=False)("id"),
+                   F.udf(function, mutated)("id")]
+        mutated.fields[0].dataType = T.AtomicType()
+        sent = (len(service.analyze_requests), len(service.execute_requests))
+        for column in columns:
+            for module in pickles:
+                restored = module.loads(module.dumps(column))
+                assert repr(restored) == repr(column)
+                unsupported(lambda: df.select(restored).schema, "data type AtomicType()")
+        mutated = T.StructType([T.StructField("a", T.LongType())])
     frame = F.udtf(Handler, returnType=5)(F.lit(1))
     data = cloudpickle.dumps(frame)
     unsupported(lambda: cloudpickle.loads(data), "data type 5")
-    table = pickle.loads(pickle.dumps(frame.asTable()))
+    # A plain pickle pickles the handler class by reference, as PySpark's: of the module.
+    table = F.udtf(_ReturnTypeHandler, returnType=5)(F.lit(1)).asTable()
+    table = pickle.loads(pickle.dumps(table))
     unsupported(lambda: F.udtf(Handler, returnType="x int")(table).schema, "data type 5")
+    with pytest.raises(AttributeError, match="Can't pickle local object"):
+        pickle.dumps(frame.asTable())
     assert (len(service.analyze_requests), len(service.execute_requests)) == sent
-    with pytest.raises(pickle.PicklingError):
+    # The plain pickle of a Column of a local lambda fails at the lambda, as PySpark's does; its
+    # cloudpickle at the lock that the lambda reads, which PySpark's pickles by value too.
+    with pytest.raises(AttributeError, match="^Can't pickle local object .*<lambda>'$"):
         pickle.dumps(F.udf(lambda x: (lock, x)[1], "long")("id"))
+    with pytest.raises(TypeError, match="^cannot pickle '_thread.lock' object$"):
+        cloudpickle.dumps(F.udf(lambda x: (lock, x)[1], "long")("id"))
 
 
 def test_udtfs_are_created_as_pyspark(mock_connect):
@@ -5200,10 +5277,11 @@ def test_time_values_are_sent_as_pyspark(mock_connect):
     assert parse_message(parse_message(expression[1][0])[26][0]) == {1: [nanos], 2: [6]}
 
 
-def test_window_specs_pickle_as_pyspark(mock_connect):
+def test_window_specs_pickle_as_pyspark(mock_connect, origin_capture):
     # As PySpark's WindowSpec, which pickles its partition, order and frame: a pickled, cloudpickled
-    # or copied WindowSpec has the repr of the spec and sends the window of the spec, so a UDF or
-    # foreachBatch function can capture a window.
+    # or copied WindowSpec has the repr of the spec and sends the window of the spec, of the
+    # origins of the Columns that it was made of, so a UDF or foreachBatch function can capture a
+    # window.
     import copy
 
     import cloudpickle
@@ -5227,13 +5305,16 @@ def test_window_specs_pickle_as_pyspark(mock_connect):
         Window.orderBy(F.col("x").desc_nulls_first()).rowsBetween(Window.currentRow, 2),
         Window.partitionBy(),
     ]
+    def sent_over(spec):
+        return sent_expression(df.select(F.sum("id").over(spec).alias("s")))
+
     for spec in specs:
-        expected = sent_expression(df.select(F.sum("id").over(spec).alias("s")))
+        expected = sent_over(spec)
         for copied in (pickle.loads(pickle.dumps(spec)),
                        cloudpickle.loads(cloudpickle.dumps(spec)),
-                       copy.copy(spec)):
+                       copy.copy(spec), copy.deepcopy(spec)):
             assert repr(copied) == repr(spec)
-            assert sent_expression(df.select(F.sum("id").over(copied).alias("s"))) == expected
+            assert sent_over(copied) == expected
 
 
 def test_time_types_parse_as_pyspark(mock_connect):
@@ -8855,10 +8936,10 @@ def test_decimal_type_methods():
     assert d.typeName() == "decimal"
 
 
-def test_columns_pickle_as_their_expressions_as_pyspark():
+def test_columns_pickle_as_their_expressions_as_pyspark(origin_capture):
     # As PySpark Connect's Columns, which pickle their expressions: pickle, cloudpickle and
-    # deepcopy give back a Column of the expression as it was sent, of its repr, and the
-    # expressions over it are those over the original. The expression of a Column, `_expr`,
+    # deepcopy give back a Column of the expression as it was sent, of its repr and of its
+    # origins, and the expressions over it are those over the original. The expression of a Column, `_expr`,
     # pickles too, as PySpark's expression, a Python object, pickles its fields: as the
     # expression of the unpickled Column.
     import copy
@@ -8907,17 +8988,18 @@ def test_sent_plans_of_pickled_relations_send_them_as_they_were_sent():
     relation = proto.Relation()
     relation.common.plan_id = 7
     relation.range.end = 3
-    plan = sent_plan(relation)
+    data = relation.SerializeToString()
+    plan = sent_plan(data)
     assert plan._root_plan_id == 7
     sent = plan.plan(None)
-    assert sent == relation and sent is not relation
+    assert sent == relation and sent is not plan.plan(None)
     unnumbered = proto.Relation()
     unnumbered.range.end = 3
-    assert sent_plan(unnumbered).plan(None) == unnumbered
+    assert sent_plan(unnumbered.SerializeToString()).plan(None) == unnumbered
     with pytest.raises(ValueError, match="^bad count$"):
-        sent_plan(relation, ("ValueError", "bad count", None)).plan(None)
+        sent_plan(data, ("ValueError", "bad count", None)).plan(None)
     with pytest.raises(PySparkTypeError) as error:
-        sent_plan(relation, ("PySparkTypeError", "NOT_ITERABLE", {"objectName": "Column"})).plan(
+        sent_plan(data, ("PySparkTypeError", "NOT_ITERABLE", {"objectName": "Column"})).plan(
             None
         )
     assert error.value.getCondition() == "NOT_ITERABLE"
@@ -12360,6 +12442,1118 @@ def test_deep_copies_copy_the_functions_of_udfs_as_pyspark(mock_connect):
     # A Column that the call copies twice is copied once.
     twice = copy.deepcopy([first, first])
     assert twice[0] is twice[1]
+
+
+# What `_Tagged` objects pickle of: the tag of the time of the pickling, and whether to fail.
+_PICKLING = {"tag": "<at the pickle>", "fails": False}
+
+
+class _Tagged:
+    # A callable object of the module, which pickle and cloudpickle pickle by reference to its
+    # class, of the tag of `_PICKLING` when it is pickled, and which fails to pickle when that says.
+    tag = None
+
+    def __call__(self, x):
+        return self.tag
+
+    def __reduce__(self):
+        if _PICKLING["fails"]:
+            raise TypeError("cannot pickle it now")
+        return (_tagged, (_PICKLING["tag"],))
+
+
+def _tagged(tag):
+    tagged = _Tagged()
+    tagged.tag = tag
+    return tagged
+
+
+def _of_a_lambda(x):
+    return x
+
+
+# A lambda of the module, which pickle cannot pickle by reference.
+_module_lambda = lambda x: x  # noqa: E731
+
+
+def test_pickles_hold_the_functions_of_their_udfs_as_pyspark(mock_connect):
+    # As PySpark's pickles of a Column, a DataFrame and a table argument, which hold the objects
+    # of their plans, of the functions of their UDFs, whose commands the requests of the unpickled
+    # objects pickle: a plain pickle fails at a lambda, and pickles a function or a callable object
+    # by reference, which the unpickled object pickles at each of its requests, as it is then, so
+    # a request that cannot pickle it fails; cloudpickle raises the error of the function itself.
+    # A plain pickle of a DataFrame fails at the lambda of a UDF of its plan before its session, as
+    # PySpark's pickles the plan first.
+    import cloudpickle
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+
+    spark, service = mock_connect
+    base = spark.range(1)
+
+    @F.udtf(returnType="id bigint")
+    class Rows:
+        def eval(self, row):
+            yield (row["id"],)
+
+    holders = {
+        "column": (lambda udf: udf("id"), lambda held: base.select(held), [pickle, cloudpickle]),
+        "dataframe": (lambda udf: base.select(udf("id")), lambda held: held, [cloudpickle]),
+        "table argument": (lambda udf: base.select(udf("id")).asTable(), Rows, [pickle,
+                                                                                cloudpickle]),
+    }
+    for name, (hold, plan_of, modules) in holders.items():
+        for module in (pickle, cloudpickle):
+            for lambda_ in (lambda x: x, _module_lambda):
+                held = hold(F.udf(lambda_, "long"))
+                if module is cloudpickle:
+                    module.loads(module.dumps(held))
+                    continue
+                with pytest.raises((AttributeError, pickle.PicklingError), match="<lambda>"):
+                    module.dumps(held)
+        for module in modules:
+            _PICKLING.update(tag="<at the pickle>", fails=False)
+            data = module.dumps(hold(F.udf(_tagged("t"), "string")))
+            assert b"<at the pickle>" in data
+            _PICKLING["tag"] = "<at the request>"
+            loaded = module.loads(data)
+            for _ in range(2):
+                plan_of(loaded).explain()
+                request = service.analyze_requests[-1]
+                assert b"<at the request>" in request and b"<at the pickle>" not in request, name
+            _PICKLING["fails"] = True
+            with pytest.raises(pickle.PicklingError, match="TypeError: cannot pickle it now$"):
+                plan_of(loaded).explain()
+            _PICKLING["fails"] = False
+        _PICKLING["fails"] = True
+        try:
+            with pytest.raises(TypeError, match="^cannot pickle it now$"):
+                cloudpickle.dumps(hold(F.udf(_tagged("t"), "string")))
+            with pytest.raises(pickle.PicklingError):
+                CloudPickleSerializer().dumps(hold(F.udf(_tagged("t"), "string")))
+        finally:
+            _PICKLING["fails"] = False
+    # A plain pickle of a DataFrame of a function that it pickles fails at the session.
+    with pytest.raises(AttributeError, match="SparkSession.__reduce__.<locals>.creator"):
+        pickle.dumps(base.select(F.udf(_of_a_lambda, "long")("id")))
+
+
+def test_the_holes_of_pickled_udfs_are_filled_on_a_python_worker_as_pyspark(mock_connect):
+    # As PySpark's plan objects on a Python worker of the server, whose PySpark has no Rust
+    # client: the relation and the expression of a pickle hold the markers of the commands of their
+    # UDFs, which `_column_reduce.fill_holes` fills with the messages that PySpark's to_plan builds
+    # of the objects of the pickle, the output type and the function of a UDF, the return type
+    # and the handler class of a UDTF, and a type, in the fields of the message that held the
+    # marker, of the lengths of what they hold; the rest of the message stays.
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect._column_reduce import fill_holes, sent_plan
+    from pyspark.sql.connect.types import UnparsedDataType, pyspark_types_to_proto_types
+
+    spark, _ = mock_connect
+    serializer = CloudPickleSerializer()
+    _PICKLING.update(tag="t", fails=False)
+    long_name = "x" * 300
+    column = F.udf(_tagged("t"), "string")(F.col("id")).alias(long_name)
+    _, args = column.__reduce__()
+    # The function that fills the holes comes with them, last.
+    expression, holes = args[0], args[-2]
+    assert args[-1] is fill_holes
+    ((marker, kind, payload),) = holes
+    assert kind == "udf" and marker in expression and payload[1] == T.StringType()
+    filled = proto.Expression.FromString(fill_holes(expression, holes))
+    udf = filled.alias.expr.common_inline_user_defined_function
+    assert filled.alias.name == [long_name] and udf.function_name == "_Tagged"
+    assert udf.python_udf.output_type == pyspark_types_to_proto_types(T.StringType())
+    # The eval type and the Python version of the message that held the marker.
+    held = proto.Expression.FromString(expression).alias.expr.common_inline_user_defined_function
+    assert held.python_udf.command == marker
+    assert (udf.python_udf.eval_type, udf.python_udf.python_ver) == (
+        held.python_udf.eval_type, held.python_udf.python_ver)
+    assert udf.python_udf.eval_type in (100, 101) and udf.python_udf.python_ver
+    function, return_type = serializer.loads(udf.python_udf.command)
+    assert function.tag == "t" and return_type == T.StringType()
+
+    @F.udtf(returnType="id bigint")
+    class Rows:
+        def eval(self, row):
+            yield (row["id"],)
+
+    schema = T.StructType([T.StructField("id", T.LongType())])
+    df = Rows(spark.range(1).asTable()).to(schema)
+    _, args = df.__reduce__()
+    holes, relation = args[0], args[2]
+    assert [kind for _, kind, _ in holes] == ["udtf", "datatype"]
+    # The function that fills the holes, before whether the unpickle requests the schema.
+    assert args[-2] is fill_holes and args[-1] is True
+    plan = sent_plan(relation, holes=holes, fill=fill_holes).plan(None)
+    assert plan.to_schema.schema == pyspark_types_to_proto_types(schema)
+    udtf = plan.to_schema.input.with_relations.root.common_inline_user_defined_table_function
+    assert udtf.python_udtf.return_type == pyspark_types_to_proto_types(
+        UnparsedDataType("id bigint"))
+    assert serializer.loads(udtf.python_udtf.command).__name__ == "Rows"
+    assert plan.common.plan_id == proto.Relation.FromString(relation).common.plan_id
+    with pytest.raises(ValueError, match="no place of the command of a UDF"):
+        fill_holes(relation, [(_hole_marker(99), "udf", payload)])
+
+
+def test_the_fill_of_holes_on_a_python_worker_takes_every_kind_of_hole_as_pyspark():
+    # As PySpark's to_plan of the objects that a pickle carries, on a Python worker: the fill finds
+    # the field of a marker past fields of every wire type, builds a UDF of a type of a DDL
+    # string, a UDTF of no return type, or of the message of its function, raises PySpark's
+    # UDTF_SERIALIZATION_ERROR of a handler that does not pickle, and refuses a message that holds
+    # the marker in no message of its kind, or behind a group, which Spark Connect does not use.
+    import threading
+
+    from pyspark.errors import PySparkPicklingError
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect._column_reduce import fill_holes
+    from pyspark.sql.connect.types import UnparsedDataType, pyspark_types_to_proto_types
+
+    marker = _hole_marker(0)
+    expression = proto.Expression()
+    udf = expression.common_inline_user_defined_function
+    udf.function_name = "f"
+    # Of a double and a float, of the fixed wire types, before the function.
+    udf.arguments.add().literal.double = 1.5
+    udf.arguments.add().literal.float = 2.5
+    udf.python_udf.eval_type = 100
+    udf.python_udf.command = marker
+    data = expression.SerializeToString()
+    filled = proto.Expression.FromString(fill_holes(data, [(marker, "udf", (_identity, "int"))]))
+    sent = filled.common_inline_user_defined_function
+    assert [arg.literal.double or arg.literal.float for arg in sent.arguments] == [1.5, 2.5]
+    assert sent.python_udf.output_type == pyspark_types_to_proto_types(UnparsedDataType("int"))
+    assert CloudPickleSerializer().loads(sent.python_udf.command) == (_identity, "int")
+
+    relation = proto.Relation()
+    udtf = relation.common_inline_user_defined_table_function
+    udtf.function_name = "t"
+    udtf.python_udtf.eval_type = 300
+    udtf.python_udtf.command = marker
+    data = relation.SerializeToString()
+    filled = proto.Relation.FromString(
+        fill_holes(data, [(marker, "udtf", (_ReturnTypeHandler, "t", None))]))
+    sent = filled.common_inline_user_defined_table_function.python_udtf
+    assert not sent.HasField("return_type") and sent.eval_type == 300
+    assert CloudPickleSerializer().loads(sent.command) is _ReturnTypeHandler
+    built = proto.PythonUDTF(command=b"<handler>")
+    built.return_type.CopyFrom(pyspark_types_to_proto_types(T.LongType()))
+    filled = proto.Relation.FromString(
+        fill_holes(data, [(marker, "udtf-call", built.SerializeToString)]))
+    sent = filled.common_inline_user_defined_table_function.python_udtf
+    assert (sent.command, sent.return_type, sent.eval_type) == (
+        b"<handler>", built.return_type, 300)
+    untyped = proto.PythonUDTF(command=b"<untyped>").SerializeToString
+    filled = proto.Relation.FromString(fill_holes(data, [(marker, "udtf-call", untyped)]))
+    sent = filled.common_inline_user_defined_table_function.python_udtf
+    assert sent.command == b"<untyped>" and not sent.HasField("return_type")
+
+    # A message of fields of the fixed wire types (64 and 32 bits) before that of the function:
+    # they stay as they are.
+    fixed = b"\x09" + b"\x01" * 8 + b"\x15" + b"\x02" * 4
+    function = proto.PythonUDF(eval_type=100, command=marker).SerializeToString()
+    data = fixed + b"\x1a" + bytes([len(function)]) + function
+    filled = fill_holes(data, [(marker, "udf", (_identity, "int"))])
+    assert filled.startswith(fixed + b"\x1a")
+    sent = proto.PythonUDF.FromString(filled[len(fixed) + 2:])
+    assert sent.eval_type == 100 and len(filled) == len(fixed) + 2 + filled[len(fixed) + 1]
+
+    class Unpicklable:
+        lock = threading.Lock()
+
+    with pytest.raises(PySparkPicklingError) as error:
+        fill_holes(data, [(marker, "udtf", (Unpicklable, "u", None))])
+    assert error.value.getCondition() == "UDTF_SERIALIZATION_ERROR"
+    assert error.value.getMessageParameters()["name"] == "u"
+    for wrong in (proto.PythonUDF(command=marker).SerializeToString(), b"\x0b" + marker):
+        with pytest.raises(ValueError, match="no place of the command of a UDF"):
+            fill_holes(wrong, [(marker, "udf", (_identity, "int"))])
+
+
+def _hole_marker(number):
+    # A marker of a hole, as the core makes them: of a token of 32 digits and of a number of 20,
+    # so that every marker is of one width.
+    return b"spark-connect-rust-udf-" + b"0" * 32 + b"-" + b"%020d" % number
+
+
+class _Numbered:
+    # A function of a number, which a pickle pickles by reference to its class and of its number,
+    # and which records each of its picklings in `pickled`, if it is given one.
+    def __init__(self, number, pickled=None):
+        self.number, self.pickled = number, pickled
+
+    def __call__(self, x):
+        return x + self.number
+
+    def __reduce__(self):
+        if self.pickled is not None:
+            self.pickled.append(self.number)
+        return (_Numbered, (self.number,))
+
+
+# The numbers of the picklings of each `_Recorded`, of it or of its unpickled copies, in turn.
+_RECORDED = []
+
+
+class _Recorded(_Numbered):
+    # A numbered function whose every pickling, also of its unpickled copies, is recorded.
+    def __reduce__(self):
+        _RECORDED.append(self.number)
+        return (_Recorded, (self.number,))
+
+
+def _udf_commands_of(message):
+    # The commands of the UDFs of `message`, a message of the drop-in's protobuf runtime, in the
+    # order of its fields, depth first.
+    commands, pending = [], [message]
+    while pending:
+        current = pending.pop()
+        below = []
+        for field, value in current.ListFields():
+            if field.name == "python_udf":
+                commands.append(value.command)
+            elif field.type == field.TYPE_MESSAGE:
+                below.extend([value] if hasattr(value, "ListFields") else list(value))
+        pending.extend(reversed(below))
+    return commands
+
+
+def test_the_fill_of_holes_finds_each_marker_whole_in_its_own_place_as_pyspark():
+    # As PySpark's plan objects on a Python worker, each of which pickles the function of its UDF
+    # in its place, in the order of the build: the markers are of one width, so none is the
+    # prefix of another, as the markers of the numbers 1 and 10 of no fixed width are; a marker is
+    # a hole only as the whole value of a field, so one within the bytes of a literal stays as it
+    # is; the holes are pickled in their order, the order of the build, which may differ from that
+    # of the encoding, as a group map builds its initial state before its function, which it
+    # encodes first; and a message of any depth is filled without recursion.
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect._column_reduce import fill_holes
+
+    serializer = CloudPickleSerializer()
+    markers = [_hole_marker(number) for number in range(12)]
+    assert len({len(marker) for marker in markers}) == 1
+    projection = proto.Relation()
+    # The bytes of a literal that hold a marker, before the UDF of the marker.
+    within = b"<" + markers[1] + b">"
+    projection.project.expressions.add().literal.binary = within
+    for marker in markers:
+        udf = projection.project.expressions.add().common_inline_user_defined_function
+        udf.function_name = "f"
+        udf.python_udf.eval_type = 100
+        udf.python_udf.command = marker
+    pickled = []
+    holes = [(marker, "udf", (_Numbered(number, pickled), "long"))
+             for number, marker in enumerate(markers)][::-1]
+    filled = proto.Relation.FromString(fill_holes(projection.SerializeToString(), holes))
+    functions = [serializer.loads(command)[0] for command in _udf_commands_of(filled)]
+    assert [function.number for function in functions] == list(range(12))
+    assert filled.project.expressions[0].literal.binary == within
+    assert pickled == list(range(12))[::-1]
+    only_within = proto.Relation()
+    only_within.project.expressions.add().literal.binary = within
+    with pytest.raises(ValueError, match="no place of the command of a UDF"):
+        fill_holes(only_within.SerializeToString(), [(markers[1], "udf", (_identity, "long"))])
+    deep = proto.Expression()
+    inner = deep
+    for _ in range(3000):
+        inner = inner.alias.expr
+    inner.common_inline_user_defined_function.python_udf.command = markers[0]
+    filled = fill_holes(deep.SerializeToString(), [(markers[0], "udf", (_Numbered(7), "long"))])
+    # (Of the client's own parse of any depth: upb's `FromString` stops at 100 levels.)
+    from pyspark.sql.connect._column_reduce import parse_deep
+
+    (command,) = _udf_commands_of(parse_deep(proto.Expression, filled))
+    assert serializer.loads(command)[0].number == 7
+
+
+def test_the_fill_of_many_holes_reads_the_bytes_once_on_a_python_worker():
+    # As the fill of the core, the fill on a Python worker reads the bytes once, however many
+    # holes they have: 4,000 holes of 4,000 UDFs of names of 1 KB, which a fill of one read of the
+    # bytes for each hole reads 4,000 times, are filled in a time of one read and of the picklings.
+    # The bound is of a loaded machine.
+    import time
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect._column_reduce import fill_holes
+
+    markers = [_hole_marker(number) for number in range(4000)]
+    projection = proto.Relation()
+    for marker in markers:
+        udf = projection.project.expressions.add().common_inline_user_defined_function
+        udf.function_name = "f" * 1000
+        udf.python_udf.command = marker
+    data = projection.SerializeToString()
+    holes = [(marker, "udf", (_identity, "long")) for marker in markers]
+    started = time.perf_counter()
+    filled = fill_holes(data, holes)
+    took = time.perf_counter() - started
+    assert took < 5, f"the fill took {took:.1f} s"
+    commands = _udf_commands_of(proto.Relation.FromString(filled))
+    assert len(commands) == 4000
+    assert CloudPickleSerializer().loads(commands[-1]) == (_identity, "long")
+
+
+def test_pickles_of_many_udfs_carry_the_holes_of_each_part_in_its_place_as_pyspark(mock_connect):
+    # As PySpark's pickle of a Column of the plan objects of its UDFs and of its subqueries: the
+    # pickle carries the holes of the expression and those of the relation of its subquery each
+    # with its part, of markers of one width, so a part holds no hole of another whose marker
+    # starts with its own; the requests of the unpickled Column, and the fill on a worker, pickle
+    # each function in its place.
+    import functools
+    import operator
+
+    from pyspark import cloudpickle
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect._column_reduce import fill_holes
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    serializer = CloudPickleSerializer()
+    udfs = [F.udf(_Numbered(number), "long") for number in range(12)]
+    sub = spark.range(1).select(udfs[11]("id").alias("v"))
+    column = (functools.reduce(operator.add, [udf("id") for udf in udfs[:11]])
+              + sub.scalar()).alias("c")
+    _, args = column.__reduce__()
+    expression, subqueries, holes = args[0], args[8], args[9]
+    assert [marker[-20:] for marker, _, _ in holes] == [b"%020d" % n for n in range(11)]
+    ((relation, _, relation_holes),) = subqueries
+    assert [marker[-20:] for marker, _, _ in relation_holes] == [b"%020d" % 11]
+
+    def numbers_of(commands):
+        return [serializer.loads(command)[0].number for command in commands]
+
+    assert numbers_of(_udf_commands_of(proto.Expression.FromString(
+        fill_holes(expression, holes)))) == list(range(11))
+    assert numbers_of(_udf_commands_of(proto.Relation.FromString(
+        fill_holes(relation, relation_holes)))) == [11]
+    for module in (pickle, cloudpickle):
+        loaded = module.loads(module.dumps(column))
+        spark.range(2).select(loaded).collect()
+        sent = base_pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+        assert numbers_of(_udf_commands_of(sent)) == list(range(12))
+
+
+def test_plans_of_the_python_client_over_unpickled_dataframes_send_their_functions_as_pyspark(
+        mock_connect):
+    # As PySpark's plan objects that hold `df._plan.plan(session)` of an unpickled DataFrame, of the
+    # relation of `df` with the commands of its UDFs, which `plan(session)` pickles then, as
+    # PySpark's builds them: the placeholder of the relation holds the filled relation, which a
+    # plan of the Python client sends in its place, as the input of a projection of a changed
+    # plan ID and in the message of an extension of an expression, of no marker of a hole.
+    from pyspark import cloudpickle
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import proto
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    df = spark.range(2).select(F.udf(_Recorded(5), "long")("id").alias("v"))
+    unpickled = cloudpickle.loads(cloudpickle.dumps(df))
+    _RECORDED.clear()
+
+    class Over(LogicalPlan):
+        def __init__(self):
+            super().__init__(None)
+
+        def plan(self, session):
+            relation = self._create_proto_relation()
+            relation.project.input.CopyFrom(unpickled._plan.plan(session))
+            relation.project.input.common.plan_id = 424242
+            relation.project.expressions.add().unresolved_attribute.unparsed_identifier = "v"
+            extension = relation.project.expressions.add().extension
+            extension.type_url = "type.googleapis.com/spark.connect.Relation"
+            extension.value = unpickled._plan.plan(session).SerializeToString()
+            return relation
+
+    frame = DataFrame(Over(), spark)
+    frame.collect()
+    sent = base_pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+    assert b"spark-connect-rust-udf-" not in sent.SerializeToString()
+    assert sent.project.input.common.plan_id == 424242
+    (command,) = _udf_commands_of(sent.project.input)
+    assert CloudPickleSerializer().loads(command)[0].number == 5
+    held = proto.Relation.FromString(sent.project.expressions[1].extension.value)
+    (command,) = _udf_commands_of(held)
+    assert CloudPickleSerializer().loads(command)[0].number == 5
+    # Pickled when each `plan(session)` built the relation of the unpickled DataFrame.
+    assert _RECORDED == [5, 5]
+
+
+def test_the_requests_of_a_dataframe_of_a_failed_plan_raise_exceptions_of_their_own_as_pyspark(
+        mock_connect):
+    # As PySpark's DataFrame(plan, session), whose plan raises a new exception each time that a
+    # request builds it: each request raises an exception of its own, of the class, the arguments,
+    # the state, the cause and the context of the one of the build, and keeps no frame of a
+    # request after it, of an exception whose arguments do not make it again too, such as an
+    # error of PySpark's error classes.
+    import gc
+    import weakref
+
+    from pyspark.errors import PySparkValueError
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, _ = mock_connect
+
+    class Pair(Exception):
+        def __init__(self, first, second):
+            super().__init__(f"{first}-{second}")
+            self.second = second
+
+    def raising(make):
+        class Raising(LogicalPlan):
+            def __init__(self):
+                super().__init__(None)
+
+            def plan(self, session):
+                try:
+                    raise KeyError("inner")
+                except KeyError:
+                    raise make()  # noqa: B904
+
+        return DataFrame(Raising(), spark)
+
+    class Sentinel:
+        pass
+
+    def request(frame, error):
+        local = Sentinel()
+        with pytest.raises(error):
+            frame.collect()
+        return weakref.ref(local)
+
+    for make, error in ((lambda: ValueError("bad", 1), ValueError),
+                        (lambda: PySparkValueError(errorClass="CANNOT_BE_EMPTY",
+                                                   messageParameters={"item": "x"}),
+                         PySparkValueError),
+                        (lambda: Pair("a", "b"), Pair)):
+        frame = raising(make)
+        raised = []
+        for _ in range(2):
+            with pytest.raises(error) as info:
+                frame.collect()
+            raised.append(info.value)
+        first, second = raised
+        assert first is not second and type(first) is type(second) is error
+        assert first.args == second.args and str(first) == str(second)
+        assert vars(first).keys() == vars(second).keys()
+        assert repr(first.__context__) == repr(second.__context__) == repr(KeyError("inner"))
+        if error is PySparkValueError:
+            assert second.getCondition() == "CANNOT_BE_EMPTY"
+            assert second.getMessageParameters() == {"item": "x"}
+        if error is Pair:
+            assert second.second == "b"
+        del raised, first, second, info
+        alive = request(frame, error)
+        gc.collect()
+        assert alive() is None
+
+
+# The builds of the plans of the tests that count them, of a function that a pickle names by
+# reference, so that the builds of an unpickled plan count here too.
+_BUILDS = []
+
+
+def _count_build():
+    _BUILDS.append(1)
+
+
+class _TwoArguments(Exception):
+    # An exception whose __init__ takes more than the arguments that it keeps.
+    def __init__(self, first, second):
+        super().__init__(first)
+        self.second = second
+
+
+def test_pickles_of_plans_that_failed_to_build_raise_their_errors_as_pyspark(mock_connect):
+    # As PySpark's pickles, which carry the plan objects, which the unpickled objects build again:
+    # the pickle of a DataFrame of a plan whose build raised, of a Column of its subquery, of its
+    # table argument and of a DataFrame over it carries the plan, and the unpickle builds it again,
+    # of a new error of its own, of any class, a subclass of PySpark's error classes or of its
+    # Connect exceptions too, of its arguments of any types, of its state, also of an object that
+    # does not pickle, such as a lock, and of its cause: the unpickle of a DataFrame raises it, but
+    # NOT_ITERABLE for an AttributeError, as PySpark's reads the columns of the new DataFrame, and
+    # the requests of the unpickled Column and table argument, and of their pickles again, raise
+    # it, with no request sent. A plan that holds the DataFrame of it pickles, as PySpark's.
+    import threading
+
+    from pyspark import cloudpickle
+    from pyspark.errors import AnalysisException, PySparkTypeError, PySparkValueError
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, service = mock_connect
+
+    class Custom(Exception):
+        pass
+
+    class Specific(PySparkValueError):
+        pass
+
+    def failing(make):
+        class Failing(LogicalPlan):
+            def __init__(self):
+                super().__init__(None)
+
+            def plan(self, session):
+                _count_build()
+                raise make()
+
+        return DataFrame(Failing(), spark)
+
+    def locked():
+        error = Custom("locked")
+        error.lock = threading.Lock()
+        return error
+
+    @F.udtf(returnType="id bigint")
+    class Rows:
+        def eval(self, row):
+            yield (row["id"],)
+
+    def raises(call, error, condition=None):
+        with pytest.raises(error) as info:
+            call()
+        if condition is not None:
+            assert info.value.getCondition() == condition
+        return info.value
+
+    cases = [
+        (lambda: ValueError("bad value"), ValueError, None),
+        (lambda: KeyError("boom"), KeyError, None),
+        (lambda: Custom("custom", 1), Custom, None),
+        (lambda: _TwoArguments("a", "b"), _TwoArguments, None),
+        (locked, Custom, None),
+        (lambda: PySparkValueError(errorClass="CANNOT_BE_EMPTY", messageParameters={"item": "x"}),
+         PySparkValueError, "CANNOT_BE_EMPTY"),
+        (lambda: Specific(errorClass="VALUE_NOT_BETWEEN",
+                          messageParameters={"arg_name": "n", "min": 1, "max": 10}),
+         Specific, "VALUE_NOT_BETWEEN"),
+        (lambda: AnalysisException(message="analysis failed", errorClass="TABLE_OR_VIEW_NOT_FOUND",
+                                   messageParameters={"relationName": "`t`"}),
+         AnalysisException, "TABLE_OR_VIEW_NOT_FOUND"),
+        (lambda: _chained_from(KeyError("inner")), ValueError, None),
+        (lambda: AttributeError("nope"), AttributeError, None),
+    ]
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    for make, error, condition in cases:
+        bad = failing(make)
+        expected = make()
+        if error is AttributeError:
+            raises(lambda: cloudpickle.loads(cloudpickle.dumps(bad)), PySparkTypeError,
+                   "NOT_ITERABLE")
+        else:
+            del _BUILDS[:]
+            first = raises(lambda: cloudpickle.loads(cloudpickle.dumps(bad)), error, condition)
+            second = raises(lambda: cloudpickle.loads(cloudpickle.dumps(bad)), error, condition)
+            # Of a build of the plan of each unpickle.
+            assert len(_BUILDS) == 2
+            assert first is not second and type(first) is type(expected)
+            assert first.args == expected.args and str(first) == str(expected)
+            if isinstance(expected, PySparkValueError):
+                assert first.getMessageParameters() == expected.getMessageParameters()
+            if error is _TwoArguments:
+                assert first.second == "b"
+            if expected.__cause__ is not None:
+                assert repr(first.__cause__) == repr(expected.__cause__)
+        raises(lambda: cloudpickle.loads(cloudpickle.dumps(bad.select("x"))),
+               PySparkTypeError if error is AttributeError else error)
+        column = cloudpickle.loads(cloudpickle.dumps(bad.scalar()))
+        table = cloudpickle.loads(cloudpickle.dumps(bad.asTable()))
+        for _ in range(2):
+            raises(lambda: spark.range(1).select(column).collect(), error, condition)
+            raises(lambda: Rows(table).collect(), error, condition)
+            column = cloudpickle.loads(cloudpickle.dumps(column))
+            table = cloudpickle.loads(cloudpickle.dumps(table))
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+
+    # A plan that holds its DataFrame, and an error that holds it: the pickler's memo takes them,
+    # and the unpickle of the DataFrame within the plan raises its error, as PySpark's.
+    held = []
+
+    class Holding(LogicalPlan):
+        def __init__(self):
+            super().__init__(None)
+
+        def plan(self, session):
+            raise ValueError("bad", held)
+
+    plan = Holding()
+    df = DataFrame(plan, spark)
+    plan.df = df
+    held.append(df)
+    for obj in (df, df.scalar(), df.asTable()):
+        with pytest.raises(ValueError) as raised:
+            cloudpickle.loads(cloudpickle.dumps(obj))
+        assert raised.value.args[0] == "bad"
+
+
+def _chained_from(inner):
+    # The ValueError of a `raise ... from inner`, of its cause.
+    try:
+        raise ValueError("outer") from inner
+    except ValueError as error:
+        return error
+
+
+def test_pickles_of_a_dataframe_whose_plan_and_error_hold_it_do_not_recurse_as_pyspark(
+        mock_connect):
+    # As PySpark's pickle of a DataFrame of a plan that holds the DataFrame, through its error too,
+    # which its memo of the objects that it pickled takes: the drop-in's pickle carries the plan,
+    # of no pickle of its own within it, so it does not recurse, also under a recursion limit high
+    # enough to let a recursion of the pickler run out of the stack of the thread, as a workload of
+    # deep plans sets it (in a process of its own).
+    import subprocess
+    import sys
+    import textwrap
+
+    _, service = mock_connect
+    code = textwrap.dedent("""
+        import sys
+        sys.setrecursionlimit(200000)
+        from pyspark import cloudpickle
+        from pyspark.sql import SparkSession
+        from pyspark.sql.connect.dataframe import DataFrame
+        from pyspark.sql.connect.plan import LogicalPlan
+
+        spark = SparkSession.builder.remote(sys.argv[1]).getOrCreate()
+        box = []
+
+        class Bad(LogicalPlan):
+            def plan(self, session):
+                raise ValueError("bad", box)
+
+        plan = Bad(None)
+        df = DataFrame(plan, spark)
+        box.append(df)
+        plan.df = df
+        for obj in (df, df.scalar(), df.asTable(), df.select("x")):
+            data = cloudpickle.dumps(obj)
+            assert len(data) < 1 << 20, len(data)
+        try:
+            cloudpickle.loads(cloudpickle.dumps(df))
+        except ValueError as error:
+            assert error.args[0] == "bad"
+        print("pickled")
+    """)
+    done = subprocess.run([sys.executable, "-c", code, service.remote], capture_output=True,
+                          text=True, timeout=600)
+    assert done.returncode == 0, done.stderr[-2000:]
+    assert done.stdout.strip().endswith("pickled")
+
+
+from pyspark.sql.connect.plan import SubqueryAlias as _SubqueryAlias  # noqa: E402
+
+
+class _FailingOver(_SubqueryAlias):
+    # A plan over the plan of a DataFrame, which builds it and then raises, of a class that a
+    # plain pickle names.
+    def plan(self, session):
+        self._child.plan(session)
+        raise ValueError("fails over the plan")
+
+
+def test_plans_over_the_plan_of_a_dataframe_pickle_with_no_session_as_pyspark(
+        mock_connect, monkeypatch):
+    # As PySpark's plan object of a DataFrame, which pickles its fields and no session: the plan of
+    # a DataFrame of the core (`df._plan`) that a plan of the Python client holds, as a
+    # SubqueryAlias does, pickles of the relation of the DataFrame as it was sent and of the error
+    # of one that does not build, as a plan of a class that PySpark has. So a plain pickle of a
+    # Column of the subquery of a DataFrame of such a plan that fails to build, and of its table
+    # argument, pickles, and the unpickle needs no class of the drop-in's plan module, as on the
+    # server's Python worker; the requests of the unpickled objects, and of their pickles again,
+    # raise the error of the plan, with no request sent. The pickle carries the Observations of
+    # the plan too, and copy copies the plan as it copies PySpark's plan object.
+    import copy
+
+    from pyspark import cloudpickle
+    from pyspark.sql import Observation
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect import plan as plans
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SubqueryAlias
+
+    spark, service = mock_connect
+
+    @F.udtf(returnType="id bigint")
+    class Rows:
+        def eval(self, row):
+            yield (row["id"],)
+
+    unencodable = spark.read.format("json").option("k", "\ud800").load("none")
+    frames = [
+        DataFrame(_FailingOver(spark.range(3)._plan, "s"), spark),
+        DataFrame(SubqueryAlias(unencodable._plan, "s"), spark),
+    ]
+    objects = [
+        (lambda frame: frame.select(F.lit(1)).scalar(),
+         lambda column: spark.range(1).select(column).collect()),
+        (lambda frame: frame.asTable(), lambda table: Rows(table).collect()),
+    ]
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    for frame in frames:
+        for make, request in objects:
+            held = make(frame)
+            with pytest.raises(Exception) as expected:
+                request(held)
+            assert isinstance(expected.value, ValueError)
+            for dumps in (pickle.dumps, cloudpickle.dumps):
+                data = dumps(held)
+                assert b"_DataFramePlan" not in data
+                with monkeypatch.context() as patched:
+                    patched.delattr(plans, "_DataFramePlan")
+                    loaded = pickle.loads(data)
+                for _ in range(2):
+                    with pytest.raises(type(expected.value)) as raised:
+                        request(loaded)
+                    if type(expected.value) is ValueError:
+                        assert str(raised.value) == str(expected.value)
+                    loaded = pickle.loads(dumps(loaded))
+    # The plan of a DataFrame of a plan that did not build, or of a DataFrame over it, whose pickle
+    # carries that plan, and whose unpickled plan pickles plainly again, of the error of the build
+    # of that plan; and a stream writer of such a DataFrame, whose unpickle requests no schema.
+    for of in (frames[0], frames[0].select("id")):
+        over = SubqueryAlias(of._plan, "s")
+        for _ in range(2):
+            over = pickle.loads(pickle.dumps(over))
+            with pytest.raises(ValueError, match="fails over the plan"):
+                DataFrame(over, spark).collect()
+    writer = cloudpickle.loads(cloudpickle.dumps(frames[0].writeStream))
+    with pytest.raises(ValueError, match="fails over the plan"):
+        writer.format("memory").queryName("q").start()
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+    # The Observations of the plan, of which the unpickled plan has copies, as PySpark's.
+    observation = Observation("o")
+    observed = spark.range(3).observe(observation, F.count(F.lit(1)).alias("c"))
+    for dumps in (pickle.dumps, cloudpickle.dumps):
+        loaded = pickle.loads(dumps(SubqueryAlias(observed._plan, "s")))
+        ((name, copied),) = loaded.observations.items()
+        assert name == "o" and type(copied) is type(observation) and copied is not observation
+    # A copy of the plan, as copy copies PySpark's plan object, of its fields: of the DataFrame
+    # itself, and of a deep copy of it and of its Observations.
+    shallow = copy.copy(observed._plan)
+    assert type(shallow) is type(observed._plan) and shallow._df is observed
+    deep = copy.deepcopy(SubqueryAlias(observed._plan, "s"))
+    assert type(deep._child) is type(observed._plan) and deep._child._df is not observed
+    ((name, copied),) = deep.observations.items()
+    assert name == "o" and copied is not observation
+
+
+def test_plans_that_a_cloudpickle_gave_back_pickle_plainly_again_as_pyspark(mock_connect):
+    # As PySpark's plan objects, which a plain pickle names by their classes: the plan of a
+    # DataFrame (`df._plan`) that a cloudpickle gave back, which unpickled of the functions of the
+    # drop-in's module that the pickle carried by value, pickles plainly again, of those functions
+    # by their names, as one that a plain pickle gave back does; and so does the plan of a
+    # DataFrame over a plan that did not build, whose unpickled plan builds that plan.
+    import operator
+
+    from pyspark import cloudpickle
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import SubqueryAlias
+
+    spark, service = mock_connect
+    df = spark.range(3).select(F.udf(operator.neg, "long")("id").alias("v"))
+    expected = pickle.loads(pickle.dumps(df._plan)).plan(spark.client).SerializeToString()
+    for first in (pickle.dumps, cloudpickle.dumps):
+        loaded = pickle.loads(first(df._plan))
+        for _ in range(2):
+            loaded = pickle.loads(pickle.dumps(loaded))
+            assert loaded.plan(spark.client).SerializeToString() == expected
+    failing = DataFrame(_FailingOver(spark.range(3)._plan, "s"), spark)
+    for of in (failing, failing.select("id")):
+        loaded = pickle.loads(cloudpickle.dumps(SubqueryAlias(of._plan, "s")))
+        for _ in range(2):
+            loaded = pickle.loads(pickle.dumps(loaded))
+            with pytest.raises(ValueError, match="fails over the plan"):
+                DataFrame(loaded, spark).collect()
+    assert service.execute_requests == []
+
+
+def test_the_plans_of_dataframes_build_their_deferred_plans_of_the_client_given_as_pyspark(
+        mock_connect):
+    # As PySpark's plan of a DataFrame, whose `plan(client)` and `to_proto(client)` build the plan
+    # objects of the subqueries of its Columns of the client that they are given: the plan that an
+    # unpickled Column of the subquery of a DataFrame of a plan that did not build keeps is built
+    # of the session of that client, not of the active session, also of a DataFrame of another
+    # session, and so are those of `DataFrame(plan, session)` of a plan over such a DataFrame.
+    from pyspark import cloudpickle
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan, SubqueryAlias
+
+    spark, service = mock_connect
+    other = spark.newSession()
+    names = {spark.client._session_id: "spark", other.client._session_id: "other"}
+
+    class Named(LogicalPlan):
+        def __init__(self):
+            super().__init__(None)
+
+        def plan(self, session):
+            raise ValueError("built by " + names.get(session._session_id, "another"))
+
+    column = pickle.loads(cloudpickle.dumps(DataFrame(Named(), spark).select(F.lit(1)).scalar()))
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    for of, client in ((spark, spark), (spark, other), (other, other), (other, spark)):
+        plan = of.range(1).select(column)._plan
+        built_by = "built by " + names[client.client._session_id]
+        for build in (plan.plan, plan.to_proto):
+            with pytest.raises(ValueError, match=built_by):
+                build(client.client)
+        with pytest.raises(ValueError, match=built_by):
+            DataFrame(SubqueryAlias(plan, "s"), client).collect()
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+
+
+def test_an_unpickled_column_of_a_failed_plan_builds_it_of_the_session_of_each_request_as_pyspark(
+        mock_connect):
+    # As PySpark's Column of the subquery of a DataFrame of a plan, which keeps the plan object and
+    # builds it at each request, of the client of the request: a Column of the subquery of a
+    # DataFrame of a plan that did not build, unpickled on a thread that has no active session,
+    # builds the plan at each request and not when it is unpickled, of the session of the request,
+    # also on a thread that has no active session and of another session, and its pickle carries
+    # the plan again.
+    import threading
+
+    from pyspark import cloudpickle
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, service = mock_connect
+    other = spark.newSession()
+    first = spark.client._session_id
+
+    class Failing(LogicalPlan):
+        def __init__(self):
+            super().__init__(None)
+
+        def plan(self, session):
+            _count_build()
+            raise ValueError("of the first" if session._session_id == first else "of another")
+
+    def on_a_thread(work):
+        done = {}
+
+        def run():
+            try:
+                done["value"] = work()
+            except Exception as error:
+                done["error"] = error
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        thread.join()
+        if "error" in done:
+            raise done["error"]
+        return done["value"]
+
+    data = cloudpickle.dumps(DataFrame(Failing(), spark).select(F.lit(1)).scalar())
+    del _BUILDS[:]
+    column = on_a_thread(lambda: pickle.loads(data))
+    assert _BUILDS == []
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+    requests = [
+        (lambda: spark.range(1).select(column).collect(), "of the first"),
+        (lambda: on_a_thread(lambda: spark.range(1).select(column).collect()), "of the first"),
+        (lambda: on_a_thread(lambda: spark.range(1).select(column).schema), "of the first"),
+        (lambda: other.range(1).select(column).collect(), "of another"),
+    ]
+    for _ in range(2):
+        del _BUILDS[:]
+        for request, message in requests:
+            with pytest.raises(ValueError, match=message):
+                request()
+        assert len(_BUILDS) == len(requests)
+        column = pickle.loads(cloudpickle.dumps(column))
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+
+
+def test_a_dataframe_of_a_failed_plan_keeps_no_frame_of_its_build_as_pyspark(mock_connect):
+    # As PySpark's DataFrame of a plan, which keeps the plan and not the exceptions of its builds:
+    # the exception that the drop-in keeps, and its cause and its context, which it keeps as copies,
+    # keep no traceback, so no frame of the call that made the DataFrame is kept alive, nor its
+    # locals; the exception of each request has its own copies of them, of no traceback either.
+    import gc
+    import weakref
+
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, _ = mock_connect
+
+    class Chained(LogicalPlan):
+        def __init__(self, caused):
+            super().__init__(None)
+            self.caused = caused
+
+        def plan(self, session):
+            try:
+                {}["missing"]
+            except KeyError as inner:
+                if self.caused:
+                    raise ValueError("outer") from inner
+                raise ValueError("outer")  # noqa: B904
+
+    class Sentinel:
+        pass
+
+    def made(caused):
+        local = Sentinel()
+        return DataFrame(Chained(caused), spark), weakref.ref(local)
+
+    for caused in (False, True):
+        df, alive = made(caused)
+        gc.collect()
+        assert alive() is None
+        raised = []
+        for _ in range(2):
+            with pytest.raises(ValueError) as error:
+                df.collect()
+            raised.append(error.value)
+        for error in raised:
+            chained = error.__cause__ if caused else error.__context__
+            assert isinstance(chained, KeyError) and chained.__traceback__ is None
+            assert error.__suppress_context__ is caused
+        assert raised[0].__context__ is not raised[1].__context__
+
+
+def test_dataframes_of_plans_raise_the_base_exceptions_of_their_builds_when_they_are_made(
+        mock_connect):
+    # A DataFrame(plan, session) builds its plan when it is made: an exception of the build that
+    # is not an Exception, as the KeyboardInterrupt of a Ctrl-C while it runs or a SystemExit, is
+    # raised there, where it comes, as PySpark's program raises it where it is then, and a later
+    # DataFrame of the plan builds it again; an Exception is kept, for each request to raise.
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan, Range
+
+    spark, _ = mock_connect
+    raising = []
+
+    class Interrupted(Range):
+        def plan(self, session):
+            if raising:
+                raise raising.pop()
+            return super().plan(session)
+
+    for error in (KeyboardInterrupt(), SystemExit(3), GeneratorExit()):
+        plan = Interrupted(0, 3, 1)
+        raising.append(error)
+        with pytest.raises(type(error)):
+            DataFrame(plan, spark)
+        assert DataFrame(plan, spark)._relation_placeholder()
+
+    class Failing(LogicalPlan):
+        def __init__(self):
+            super().__init__(None)
+
+        def plan(self, session):
+            raise ValueError("kept")
+
+    df = DataFrame(Failing(), spark)
+    with pytest.raises(ValueError, match="kept"):
+        df.collect()
+
+
+def test_dataframes_of_one_plan_free_a_cycle_through_the_functions_of_its_udfs_as_pyspark(
+        mock_connect):
+    # As PySpark's DataFrames of one plan object, `DataFrame(df._plan, session)` and `copy.copy`,
+    # which both hold the object, so the collector frees a cycle through the functions of the
+    # UDFs of the plan, which keep either DataFrame or both; one of them still sends the plan
+    # after the other is freed.
+    import copy
+    import gc
+    import weakref
+
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+
+    spark, _ = mock_connect
+
+    class Sentinel:
+        pass
+
+    def cycle(make, kept):
+        sentinel = Sentinel()
+        box = [sentinel]
+        df = spark.range(1).select(F.udf(lambda x: len(box) + x, "long")("id"))
+        made = make(df)
+        box.extend([df, made] if kept == 2 else [made])
+        return weakref.ref(sentinel)
+
+    makes = (lambda df: DataFrame(df._plan, spark), copy.copy,
+             lambda df: DataFrame(DataFrame(df._plan, spark)._plan, spark))
+    for make in makes:
+        for kept in (1, 2):
+            alive = cycle(make, kept)
+            gc.collect()
+            assert alive() is None
+    df = spark.range(1).select(F.udf(lambda x: x, "long")("id"))
+    made = DataFrame(df._plan, spark)
+    del df
+    gc.collect()
+    made.collect()
+
+
+def test_deep_copies_keep_the_root_plan_ids_of_plans_of_subqueries_as_pyspark(mock_connect):
+    # As PySpark's deep copy of a plan, which keeps its _plan_id and its _root_plan_id: a deep
+    # copy of a DataFrame of UDFs and a subquery, whose plan is copied with copies of the
+    # functions, in its session or another, and a DataFrame of its plan in another session, have
+    # the plan IDs of the DataFrame.
+    import copy
+
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+
+    spark, service = mock_connect
+    times = F.udf(_Numbered(7), "long")
+    sub = spark.range(1, 3).select(times("id").alias("w"))
+    df = spark.range(3).select(times("id").alias("v"), sub.select(F.max("w")).scalar().alias("s"))
+    ids = (df._plan._plan_id, df._plan._root_plan_id)
+    assert ids[0] != ids[1]
+    other = SparkSession.builder.remote(service.remote).create()
+    try:
+        for copied in (copy.deepcopy(df), copy.deepcopy(df, {id(spark): other}),
+                       DataFrame(df._plan, other)):
+            assert (copied._plan._plan_id, copied._plan._root_plan_id) == ids
+    finally:
+        other.stop()
+
+
+def test_pickles_carry_the_fill_of_holes_only_of_holes(mock_connect):
+    # The function that fills the holes on a Python worker of the server, which cloudpickle
+    # pickles by value, is in the pickle of a DataFrame, a Column or a table argument of holes
+    # only.
+    from pyspark import cloudpickle
+    from pyspark.sql import functions as F
+
+    spark, _ = mock_connect
+    udf = F.udf(_identity, "long")
+    for plain, of_holes in ((spark.range(1), spark.range(1).select(udf("id"))),
+                            (F.col("id") + 1, udf("id")),
+                            (spark.range(1).asTable(), spark.range(1).select(udf("id")).asTable())):
+        assert b"fill_holes" not in cloudpickle.dumps(plain)
+        assert b"fill_holes" in cloudpickle.dumps(of_holes)
+
+
+def test_the_plans_of_the_python_client_keep_pysparks_counter_of_plan_ids():
+    # As PySpark's LogicalPlan, of the class attribute of its next plan ID, which numbers the plans
+    # of the module where it runs without the Rust core; the core numbers the others.
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    assert "_nextPlanId" in dir(LogicalPlan) and isinstance(LogicalPlan._nextPlanId, int)
 
 
 def test_unpicklable_functions_raise_picklingerror_as_pyspark(mock_connect):
@@ -16002,6 +17196,55 @@ def test_a_deep_copy_copies_the_session_with_the_objects_of_its_call_as_pyspark(
         with pytest.raises(PySparkAssertionError, match="Expected session ID does not match"):
             copy.deepcopy(other.range(1))
         assert copy.deepcopy(df, {id(spark): other}).sparkSession is other
+    finally:
+        other.stop()
+
+
+def test_deep_copies_into_another_session_hold_the_functions_of_their_udfs_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's copy.deepcopy of a DataFrame, which copies its plan, of deep copies of the
+    # functions of its UDFs, and then its session, with the memo of the call: a copy into another
+    # session, of a memo that maps the session to it, holds the functions as a copy in the session
+    # does, the function itself and a copy of a callable object, which its requests pickle as they
+    # are then, and copies of its Observations, of the plan IDs of the DataFrame, which the columns
+    # of the DataFrame refer to. The copy requests its schema, as PySpark's reconstruction of it
+    # reads its columns, and nothing else.
+    import copy
+
+    from pyspark.sql import Observation, SparkSession
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+    other = SparkSession.builder.remote(service.remote).create()
+    try:
+        box = ["<old>"]
+        marked = _Marked("<old>")
+        observation = Observation("o")
+        df = spark.range(1).select(
+            F.udf(lambda x: box[0], "string")("id").alias("a"),
+            F.udf(marked, "string")("id").alias("b"),
+        ).observe(observation, F.count(F.lit(1)).alias("c"))
+        df.schema
+        sent = (len(service.analyze_requests), len(service.execute_requests))
+        copied, copied_observation = copy.deepcopy((df, observation), {id(spark): other})
+        assert (len(service.analyze_requests), len(service.execute_requests)) == (
+            sent[0] + 1, sent[1])
+        assert copied.sparkSession is other
+        assert copied_observation is not observation
+        box[0] = marked.mark = "<new>"
+        copied.select(df["a"], df["b"]).explain()
+        request = service.analyze_requests[-1]
+        # The lambda, of the new value, and the copy of the callable object, of the old one.
+        assert b"<new>" in request and b"<old>" in request
+        root = base_pb2.AnalyzePlanRequest.FromString(request).explain.plan.root
+        refers_to = df["a"]._expr.to_plan(None).unresolved_attribute.plan_id
+        assert root.project.input.common.plan_id == refers_to
+        assert root.project.expressions[0].unresolved_attribute.plan_id == refers_to
+        df.explain()
+        assert b"<old>" not in service.analyze_requests[-1]
+        assert copied._observations() == {"o": copied_observation}
     finally:
         other.stop()
 
@@ -22799,6 +24042,155 @@ def test_the_relations_of_dataframes_in_expressions_and_changed_ones_are_sent_as
     assert sent().root.limit.input == expected
 
 
+def test_dataframes_of_plans_that_fail_to_build_raise_at_each_request_as_pyspark(
+    mock_connect, capsys
+):
+    # As PySpark's DataFrame(plan, session), which keeps the plan and builds it at each request: a
+    # DataFrame of a plan that fails to build, of the class or of a subclass, is made, and each of
+    # its requests, and of the DataFrames over it, raises the error of the build, with no request
+    # sent. Of the plan of a DataFrame (`df._plan`), the requests build the plan of that DataFrame:
+    # they pickle the functions of its UDFs, of the PicklingError and the traceback of each
+    # pickling that fails, and raise the error of an option that UTF-8 cannot encode. The requests
+    # of a DataFrame of another plan whose build raises raise the exception of that build, which a
+    # pickle of the DataFrame carries, as PySpark's unpickle builds the plan; the DataFrame keeps
+    # the plan alive while it lives.
+    import gc
+    import threading
+    import weakref
+
+    from pyspark.serializers import CloudPickleSerializer
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+
+    spark, service = mock_connect
+    lock = threading.Lock()
+
+    class Frame(DataFrame):
+        pass
+
+    unpicklable = spark.range(1).select(F.udf(lambda x: lock is not None, "boolean")("id"))
+    unencodable = spark.read.format("json").option("k", "\ud800").load("p")
+    sent = (len(service.analyze_requests), len(service.execute_requests))
+
+    def schema_of(frame):
+        return lambda: frame.schema
+
+    for cls in (DataFrame, Frame):
+        for source, error in ((unpicklable, pickle.PicklingError),
+                              (unencodable, UnicodeEncodeError)):
+            made = cls(source._plan, spark)
+            assert type(made) is cls
+            over = made.select("*")
+            for request in (schema_of(made), made.collect, over.collect, made.collect):
+                with pytest.raises(error):
+                    request()
+    capsys.readouterr()
+    frame = DataFrame(unpicklable._plan, spark)
+    for _ in range(2):
+        with pytest.raises(pickle.PicklingError, match="cannot pickle '_thread.lock' object"):
+            frame.count()
+    assert capsys.readouterr().err.count("TypeError: cannot pickle '_thread.lock' object") == 2
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+
+    class Failing(LogicalPlan):
+        def __init__(self):
+            super().__init__(None)
+
+        def plan(self, session):
+            raise KeyError("boom")
+
+    def requests_of(frame):
+        for request in ("collect", "schema", "over", "collect"):
+            with pytest.raises(KeyError, match="boom"):
+                if request == "schema":
+                    frame.schema
+                elif request == "over":
+                    frame.select("*").count()
+                else:
+                    frame.collect()
+
+    plan = Failing()
+    frame = DataFrame(plan, spark)
+    assert frame["id"]._expr.to_plan(None).unresolved_attribute.plan_id == plan._plan_id
+    requests_of(frame)
+    data = CloudPickleSerializer().dumps(frame)
+    with pytest.raises(KeyError, match="boom"):
+        CloudPickleSerializer().loads(data)
+    assert (len(service.analyze_requests), len(service.execute_requests)) == sent
+    alive = weakref.ref(plan)
+    del plan, frame
+    gc.collect()
+    assert alive() is None
+
+
+def test_dataframes_of_plans_keep_the_plan_ids_of_their_plans_as_pyspark(mock_connect):
+    # As PySpark's DataFrame(plan, session), which keeps the plan, of the _plan_id that the plan
+    # took of the one counter of the plans of the process when it was made: the columns of the
+    # DataFrame refer to that ID, and its relation is sent of it. The plan of a DataFrame
+    # (`df._plan`) is of the plan IDs of the DataFrame, and a DataFrame of it is of the plan of
+    # that DataFrame, in any session, so that the columns of either resolve against the other, as
+    # those of two DataFrames of one plan do in PySpark. The plans of the Python client and the
+    # relations of the core are numbered of one counter, so none has the ID of another.
+    from pyspark.sql import SparkSession
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan, Range, SubqueryAlias
+    from pyspark.sql.connect.proto import base_pb2
+
+    spark, service = mock_connect
+
+    def refers_to(column):
+        return column._expr.to_plan(None).unresolved_attribute.plan_id
+
+    def sent():
+        return base_pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan.root
+
+    df = spark.range(3).withColumn("v", F.col("id") * 10)
+    assert df._plan._plan_id == df._plan._root_plan_id == refers_to(df["id"])
+    assert df._plan._plan_id_with_rel is None
+    other = SparkSession.builder.remote(service.remote).create()
+    try:
+        for session in (spark, other):
+            frame = DataFrame(df._plan, session)
+            assert frame.sparkSession is session
+            assert refers_to(frame["v"]) == refers_to(df["v"]) == frame._plan._plan_id
+            frame.select(df["v"]).collect()
+            root = sent()
+            assert root.project.input.common.plan_id == refers_to(df["v"])
+            assert root.project.expressions[0].unresolved_attribute.plan_id == refers_to(df["v"])
+    finally:
+        other.stop()
+    # A plan of subqueries: its plan ID is that of the WithRelations, and its root one of its own.
+    scalar = spark.range(1).select(df.select(F.max("v")).scalar())
+    assert scalar._plan._plan_id_with_rel == scalar._plan._plan_id != scalar._plan._root_plan_id
+    scalar.collect()
+    assert sent().common.plan_id == scalar._plan._plan_id
+    assert sent().with_relations.root.common.plan_id == scalar._plan._root_plan_id
+    # And so of a pickled Column of a subquery, which sends the plan of its subquery so too.
+    unpickled = pickle.loads(pickle.dumps(df.select(F.max("v")).scalar()))
+    scalar = spark.range(1).select(unpickled)
+    assert scalar._plan._plan_id_with_rel == scalar._plan._plan_id != scalar._plan._root_plan_id
+    scalar.collect()
+    assert sent().common.plan_id == scalar._plan._plan_id
+    assert sent().with_relations.root.common.plan_id == scalar._plan._root_plan_id
+    # A plan of the Python client, of its plan ID.
+    plan = SubqueryAlias(df._plan, "s")
+    frame = DataFrame(plan, spark)
+    assert refers_to(frame["id"]) == plan._plan_id
+    frame.collect()
+    assert sent().common.plan_id == plan._plan_id
+    ids = set()
+    for end in range(3):
+        ids |= {
+            Range(0, end, 1)._plan_id,
+            refers_to(spark.range(end)["id"]),
+            refers_to(DataFrame(Range(0, end, 1), spark).select("id")["id"]),
+        }
+    assert len(ids) == 9
+    assert LogicalPlan(None)._plan_id > max(ids)
+
+
 def test_plans_of_plugins_send_the_relations_of_their_dataframes_in_their_extensions(
     mock_connect,
 ):
@@ -23236,6 +24628,104 @@ def test_cycles_through_a_dataframe_of_a_python_plan_are_collected_as_pyspark(mo
     del derived
     gc.collect()
     assert kept() is None
+
+
+def test_cycles_through_the_plans_of_the_python_client_are_collected_as_pyspark(mock_connect):
+    # As PySpark's DataFrames, Columns and the objects that hold them, Python objects that hold
+    # their plan objects: a cycle through a plan of the Python client of a DataFrame(plan, session)
+    # and an object that alone holds it, through the relation of the DataFrame or the subqueries of
+    # the expressions of a plan or of a Column, of a plan that builds or not, is freed by the
+    # garbage collector, as is one through the plan that an unpickled Column of the subquery of a
+    # DataFrame of a plan that did not build keeps, to build it at its requests, and an unpickled
+    # table argument of it. A holder that shares the plan, alive outside the cycle, keeps it alive
+    # until it is freed.
+    import gc
+    import weakref
+
+    from pyspark import cloudpickle
+    from pyspark.sql import Window
+    from pyspark.sql import functions as F
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import Range
+
+    spark, _ = mock_connect
+    other = spark.range(3)
+
+    class Sentinel:
+        pass
+
+    class Kept(Range):
+        def __init__(self, box):
+            super().__init__(0, 3, 1)
+            self.box = box
+
+    class Failing(Kept):
+        def plan(self, session):
+            raise ValueError("fails", self.box)
+
+    def scalar(df):
+        return df.select(F.max("id")).scalar()
+
+    holders = {
+        "the DataFrame": lambda df: df,
+        "a DataFrame derived from it": lambda df: df.filter("id > 0"),
+        "a DataFrame over a subquery of it": lambda df: spark.range(1).select(scalar(df)),
+        "a Column of its subquery": scalar,
+        "the expression of a Column of its subquery": lambda df: scalar(df)._expr,
+        "a table argument of it": lambda df: df.asTable(),
+        "a window specification": lambda df: Window.partitionBy(scalar(df)),
+        "an ordered window specification": lambda df: Window.orderBy(scalar(df)),
+        "grouped data": lambda df: other.groupBy(scalar(df)),
+        "a merge builder": lambda df: other.mergeInto("t", scalar(df) == F.col("id")),
+        "a merge clause": lambda df: other.mergeInto("t", F.lit(True)).whenMatched(scalar(df) > 0),
+        "a writer": lambda df: other.writeTo("t").partitionedBy(scalar(df)),
+    }
+
+    def cycle(plan_class, make):
+        box = [Sentinel()]
+        box.append(make(DataFrame(plan_class(box), spark)))
+        return weakref.ref(box[0])
+
+    for name, make in holders.items():
+        for plan_class in (Kept, Failing):
+            alive = cycle(plan_class, make)
+            gc.collect()
+            assert alive() is None, (name, plan_class.__name__)
+
+    @F.udtf(returnType="id bigint")
+    class Rows:
+        def eval(self, row):
+            yield (row["id"],)
+
+    def unpickled_cycle(make, request):
+        # The box of the unpickled plan, which the error of a request of the unpickled object
+        # gives, keeps the object.
+        held = pickle.loads(cloudpickle.dumps(make(DataFrame(Failing([Sentinel()]), spark))))
+        with pytest.raises(ValueError) as raised:
+            request(held)
+        box = raised.value.args[1]
+        del raised
+        box.append(held)
+        return weakref.ref(box[0])
+
+    for make, request in [
+        (scalar, lambda column: spark.range(1).select(column).collect()),
+        (lambda df: df.asTable(), lambda table: Rows(table).collect()),
+    ]:
+        alive = unpickled_cycle(make, request)
+        gc.collect()
+        assert alive() is None
+
+    box = [Sentinel()]
+    df = DataFrame(Kept(box), spark)
+    box.append(scalar(df))
+    alive = weakref.ref(box[0])
+    del box
+    gc.collect()
+    assert alive() is not None
+    del df
+    gc.collect()
+    assert alive() is None
 
 
 @pytest.mark.parametrize("schema", [

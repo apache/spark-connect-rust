@@ -330,18 +330,20 @@ impl PyGroupedData {
     /// columns, which Python's garbage collector sees: the DataFrame is reported, which reports
     /// the objects of the plan that the two share, and so are the functions of the UDFs of the
     /// grouping that these grouped data and their cogroups alone keep alive (see
-    /// [`crate::gc::Holders`]). So a reference cycle through these grouped data and the function
-    /// of a UDF, or the DataFrame, is collected, as PySpark collects it.
+    /// [`crate::gc::Holders`]), and the plans of the Python client that the subqueries and the
+    /// errors of the grouping keep. So a reference cycle through these grouped data and the
+    /// function of a UDF, such a plan, or the DataFrame, is collected, as PySpark collects it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
         visit.call(&self.frame)?;
+        let holders = self.holders.count();
         crate::udf_command::visit_pickler_objects(
-            self.grouped_data
-                .exclusive_pickler_objects(self.holders.count()),
+            self.grouped_data.exclusive_pickler_objects(holders),
             &visit,
-        )
+        )?;
+        crate::udf_command::visit_owners(self.grouped_data.exclusive_owners(holders), &visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the grouped data

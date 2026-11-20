@@ -7204,6 +7204,3 @@ class DataFrameStatFunctions(ParentDataFrameStatFunctions):
         >>> dataset.sampleBy(sf.col("key"), fractions={2: 1.0}, seed=0).count()
         33
         """
-
-# Names of the drop-in's module that PySpark's does not have.
-from pyspark.sql.connect._column_reduce import parse_deep as parse_deep

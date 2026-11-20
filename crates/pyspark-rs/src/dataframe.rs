@@ -39,6 +39,12 @@ pub struct PyDataFrame {
     /// and the grouped data, the writers and the other objects of it that keep it and a clone of
     /// its plan, each with a share (see [`crate::gc::Holders`]).
     plan_holders: crate::gc::Holders,
+    /// The DataFrame of the same plan that answers for it, as `DataFrame(df._plan, session)` and
+    /// `copy.copy(df)` are of the plan of `df`, and the share of its holders that this DataFrame
+    /// holds with its clone of the plan: this DataFrame keeps that one alive and reports it, as
+    /// PySpark's DataFrames of one plan object both hold it, so a reference cycle through either
+    /// is freed (see [`PyDataFrame::of_shared_plan`]).
+    plan_of: Option<(Py<PyDataFrame>, crate::gc::Share)>,
     /// The answers that PySpark keeps for each DataFrame once it has them, `isStreaming` (a
     /// `cached_property`), `semanticHash`, `isEmpty` and `inputFiles` (`functools.cache`): later
     /// calls do not ask again, also after the session stopped. (`isLocal` is cached in the core.)
@@ -88,6 +94,15 @@ const EAGER_EVAL: [&str; 3] = [
     "spark.sql.repl.eagerEval.maxNumRows",
     "spark.sql.repl.eagerEval.truncate",
 ];
+
+/// The relation of a DataFrame as its pickle carries it, the description of the error of a plan
+/// that does not build instead, and the holes of the functions of its UDFs (see
+/// `PyDataFrame::pickled_relation`).
+type PickledRelation<'py> = (
+    Bound<'py, pyo3::types::PyBytes>,
+    Option<Bound<'py, PyTuple>>,
+    Bound<'py, PyList>,
+);
 
 impl PyDataFrame {
     /// The names of the columns of the schema of this DataFrame, as Rust callers need them. Not
@@ -280,6 +295,7 @@ impl PyDataFrame {
             support_repr_html: std::sync::atomic::AtomicBool::new(false),
             gc_ready: crate::gc::GcReady::new(),
             plan_holders: crate::gc::Holders::new(),
+            plan_of: None,
             is_streaming: std::sync::OnceLock::new(),
             semantic_hash: std::sync::OnceLock::new(),
             is_empty: std::sync::OnceLock::new(),
@@ -307,18 +323,84 @@ impl PyDataFrame {
         }
     }
 
+    /// The relation of this DataFrame as its pickle carries it, the error of a plan that does not
+    /// build instead, and the holes of the functions of its UDFs: the relation is built of holes
+    /// in place of their commands, as PySpark's pickle carries the functions of its plan objects
+    /// ([`crate::udf_command::PickleHoles`]); a plan that does not build, of a value that PySpark
+    /// converts when it builds the plan, pickles of its error ([`crate::column::described_error`]),
+    /// and a plan of the Python client whose build raised, of that plan, which the unpickle builds
+    /// again, as PySpark's does.
+    fn pickled_relation<'py>(&self, py: Python<'py>) -> PyResult<PickledRelation<'py>> {
+        use pyo3::types::PyBytes;
+        let (holes, copies) = crate::udf_command::PickleHoles::of(py, self.dataframe.picklers());
+        let built = if copies.is_empty() {
+            crate::origin::pickling(|| self.dataframe.to_relation())
+        } else {
+            let marked = self.dataframe.with_pickler_copies(&copies);
+            crate::origin::pickling(|| marked.to_relation())
+        };
+        Ok(match built {
+            Ok(relation) => {
+                let relation = crate::encode_on_grown_stack(relation);
+                let holes = holes.holes_of(py, &relation)?;
+                (PyBytes::new(py, &relation), None, holes)
+            }
+            // Of the DataFrame of the plan of a kept error itself, or of one over it.
+            Err(error) => match crate::column::described_error_of(
+                py,
+                &error,
+                !self.dataframe.is_unbuilt_with(&error),
+            )? {
+                Some(description) => (PyBytes::new(py, b""), Some(description), PyList::empty(py)),
+                None => return Err(crate::errors::spark_error_to_py_exception(error)),
+            },
+        })
+    }
+
     /// A share of the holders of the plan of the DataFrame `frame`, for an object that keeps
     /// `frame` and a clone of its plan, of which `shares_plan` tells whether it is a clone of that
     /// plan: else, or when `frame` is borrowed mutably, a share that is not counted, so that
-    /// nothing of the plan is reported (see [`crate::gc::Holders`]).
+    /// nothing of the plan is reported (see [`crate::gc::Holders`]). Of a DataFrame of the plan of
+    /// another ([`PyDataFrame::of_shared_plan`]), a share of the holders of that one, which
+    /// answers for the plan, and which `frame` keeps alive.
     pub(crate) fn plan_share(
         frame: &Py<PyDataFrame>,
         shares_plan: impl FnOnce(&DataFrame) -> bool,
     ) -> crate::gc::Share {
         Python::attach(|py| match frame.try_borrow(py) {
-            Ok(frame) if shares_plan(&frame.dataframe) => frame.plan_holders.share(),
+            Ok(frame) if shares_plan(&frame.dataframe) => match &frame.plan_of {
+                None => frame.plan_holders.share(),
+                Some((of, _)) => match of.try_borrow(py) {
+                    Ok(of) if of.dataframe.shares_plan_with(&frame.dataframe) => {
+                        of.plan_holders.share()
+                    }
+                    _ => crate::gc::Share::none(),
+                },
+            },
             _ => crate::gc::Share::none(),
         })
+    }
+
+    /// The DataFrame of `dataframe`, whose plan is the plan of `of`, as `DataFrame(df._plan,
+    /// session)` and `copy.copy(df)` are of the plan of `df`: it keeps the DataFrame that answers
+    /// for the plan to the garbage collector, `of` or the one that `of` keeps for its plan, and a
+    /// share of its holders, as the other objects that keep a DataFrame and a clone of its plan
+    /// do (see [`crate::gc::Holders`]), so that the functions of the UDFs of the plan, which may
+    /// keep both DataFrames, are reported by that one, as PySpark's DataFrames of one plan object
+    /// both hold the object, which the collector sees through each of them. A `dataframe` of
+    /// another plan is made as any other.
+    fn of_shared_plan(of: &Bound<'_, PyDataFrame>, dataframe: DataFrame) -> PyDataFrame {
+        let py = of.py();
+        let reporter = match &of.borrow().plan_of {
+            Some((reporter, _)) => reporter.clone_ref(py),
+            None => of.clone().unbind(),
+        };
+        let mut frame = PyDataFrame::new(dataframe);
+        let share = PyDataFrame::plan_share(&reporter, |reported| {
+            reported.shares_plan_with(&frame.dataframe)
+        });
+        frame.plan_of = Some((reporter, share));
+        frame
     }
 
     /// Whether this DataFrame is streaming, of the answer that `isStreaming` keeps, asked once,
@@ -364,11 +446,9 @@ impl PyDataFrame {
     /// as the read of the columns raises it ([`columns_read_error`]).
     fn fresh_schema_request(&self, py: Python<'_>) -> PyResult<spark_connect::types::DataType> {
         let session = self.dataframe.spark_session();
-        let relation = self
-            .dataframe
-            .to_relation()
-            .to_pyerr()
-            .map_err(|err| columns_read_error(py, err))?;
+        let relation =
+            crate::errors::of_request_session(&session, || self.dataframe.to_relation().to_pyerr())
+                .map_err(|err| columns_read_error(py, err))?;
         let fresh = DataFrame::from_sent_relation(session.clone(), relation);
         let schema = interruptible(py, &session, || fresh.schema())?;
         // As the read of the columns, which converts the schema (see `check_python_schema`).
@@ -883,33 +963,72 @@ fn watermark_argument(
 impl PyDataFrame {
     /// A DataFrame of `plan`, a plan of the Python client (`pyspark.sql.connect.plan`), such as
     /// the plans of `pyspark.ml`, as PySpark Connect's `DataFrame(plan, session)`: of the
-    /// relation of `plan.plan(session.client)`, which the client sends as it is.
+    /// relation of `plan.plan(session.client)`, which the client sends as it is, of the
+    /// `_plan_id` of the plan, as PySpark's DataFrame keeps its plan and so its plan ID, which its
+    /// columns refer to. The relation is the root of the `to_proto` of the plan, as PySpark's
+    /// requests build it. A plan whose build raises makes a DataFrame whose requests raise the
+    /// exception of the build, as PySpark's DataFrame keeps the plan and its requests build it
+    /// (see `errors::kept_error`); no plan (`None`) is PySpark's `MISSING_VALID_PLAN`. The plan
+    /// of a DataFrame of the core (`DataFrame._plan`) gives a DataFrame of the plan of that
+    /// DataFrame, as PySpark's is of the plan object of the DataFrame (`DataFrame::of_plan_in`):
+    /// its requests build the plan, and so pickle the functions of its UDFs and raise the errors
+    /// of its build, at each request.
     #[new]
     fn py_new(
         plan: &Bound<'_, PyAny>,
         session: &Bound<'_, crate::session::PySparkSession>,
     ) -> PyResult<Self> {
-        use prost::Message;
-        let relation = plan
-            .call_method1("plan", (session.getattr("client")?,))?
-            .call_method0("SerializeToString")?;
-        let relation = spark_connect_proto::Relation::decode(
-            relation.cast::<pyo3::types::PyBytes>()?.as_bytes(),
-        )
-        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        // The plan, as PySpark Connect's DataFrame keeps it, keeps the models whose cached
-        // objects on the server the relation refers to (`__source_instance__`).
-        let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> =
-            std::sync::Arc::new(plan.clone().unbind());
+        let py = plan.py();
+        if plan.is_none() {
+            return Err(crate::errors::raise_pyspark(
+                py,
+                "PySparkRuntimeError",
+                "MISSING_VALID_PLAN",
+                &[("operator", "__init__")],
+            ));
+        }
+        if let Some(of) = dataframe_of_plan(plan)? {
+            let dataframe = of
+                .borrow()
+                .dataframe
+                .of_plan_in(session.borrow().session.clone());
+            return Ok(PyDataFrame::of_shared_plan(&of, dataframe));
+        }
+        let (dataframe, _) = dataframe_of_python_plan(plan, session)?;
+        Ok(PyDataFrame::new(dataframe))
+    }
+
+    /// The DataFrame of `plan`, a plan of the Python client that a pickled DataFrame of it carried
+    /// in place of the relation that its build did not give, as PySpark's pickle carries its plan
+    /// objects: its build again, as PySpark's unpickle builds the plan, of its error at each
+    /// request if it raises again (see [`dataframe_of_python_plan`]). Of a DataFrame over the
+    /// plan (`derived`), whose relation the pickle could not carry, one that builds now gives a
+    /// DataFrame whose requests raise the `RuntimeError` of [`derived_plan_error`], rather than
+    /// the DataFrame of the plan alone. Not a stable API.
+    #[staticmethod]
+    fn _of_python_plan(
+        plan: &Bound<'_, PyAny>,
+        session: &Bound<'_, crate::session::PySparkSession>,
+        derived: bool,
+    ) -> PyResult<PyDataFrame> {
         Ok(PyDataFrame::new(
-            DataFrame::from_relation(session.borrow().session.clone(), relation, Some(owner))
-                .to_pyerr()?,
+            rebuilt_python_plan(plan, session, derived)?.0,
         ))
     }
 
+    /// The plan ID of the plan of this DataFrame, by which its columns refer to it, and that of its
+    /// relation within the `WithRelations` that sends it with the plans of its subqueries, if it
+    /// has subqueries, for the `_plan_id` and `_root_plan_id` of `DataFrame._plan`, as those of
+    /// PySpark's plan of a DataFrame.
+    fn _plan_ids(&self) -> (i64, Option<i64>) {
+        self.dataframe.plan_id_and_root()
+    }
+
     /// As a DataFrame of PySpark Connect, a Python object whose plan Python's garbage collector
-    /// sees: the Python objects that only this DataFrame keeps alive, the plans of `pyspark.ml`
-    /// that `DataFrame(plan, session)` keeps, are reported to the collector. So a reference cycle
+    /// sees: the Python objects that only this DataFrame keeps alive, the plans of the Python
+    /// client, such as of `pyspark.ml`, that `DataFrame(plan, session)` keeps, also through the
+    /// subqueries of its expressions, and the plans that the errors of its expressions keep, are
+    /// reported to the collector. So a reference cycle
     /// through this DataFrame is freed, as PySpark frees it: a `pyspark.ml` model whose summary
     /// keeps `model.transform(dataset)`, whose plan keeps the model, is released then. So are the
     /// functions of its UDFs, which a request pickles when it builds the plan, as the plan of
@@ -922,6 +1041,10 @@ impl PyDataFrame {
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
+        }
+        // The DataFrame whose plan this one shares, which answers for the plan.
+        if let Some((of, _)) = &self.plan_of {
+            visit.call(of)?;
         }
         let holders = self.plan_holders.count();
         for owner in self.dataframe.exclusive_relation_owners(holders) {
@@ -960,6 +1083,7 @@ impl PyDataFrame {
         if self.gc_ready.get() {
             self.plan_holders = crate::gc::Holders::new();
             self.dataframe.clear_plan();
+            self.plan_of = None;
             self.schema_object = None;
             let kept = self
                 .execution_info_object
@@ -970,9 +1094,13 @@ impl PyDataFrame {
         }
     }
 
-    /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`.
+    /// The bytes of the relation of this DataFrame as it is sent, for the plan of `_plan`, built of
+    /// its session (see `errors::of_request_session`).
     fn _relation_bytes<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
-        let relation = self.dataframe.to_relation().to_pyerr()?;
+        let session = self.dataframe.spark_session();
+        let relation = crate::errors::of_request_session(&session, || {
+            self.dataframe.to_relation().to_pyerr()
+        })?;
         Ok(pyo3::types::PyBytes::new(
             py,
             &crate::encode_on_grown_stack(relation),
@@ -982,47 +1110,50 @@ impl PyDataFrame {
     /// The bytes of the placeholder of the relation of this DataFrame, which the plan of `_plan`
     /// sends in its place: one extension that holds the relation encoded, which the core builds
     /// now, as PySpark's `plan(session)` builds the relation, with its errors, and replaces the
-    /// placeholder with when the plan reaches it, also after this DataFrame is gone.
+    /// placeholder with when the plan reaches it, also after this DataFrame is gone. It is built
+    /// of the session of `client`, the client that the plan is built of, as PySpark's plan builds
+    /// the plan objects of the subqueries of its Columns of it, or else of the session of this
+    /// DataFrame (see `errors::of_request_session`).
+    #[pyo3(signature = (client=None))]
     fn _relation_placeholder<'py>(
         &self,
         py: Python<'py>,
+        client: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, pyo3::types::PyBytes>> {
         use prost::Message;
-        let placeholder = self
-            .dataframe
-            .standalone_placeholder_relation()
-            .to_pyerr()?;
+        let session = client
+            .and_then(crate::session::session_of_client)
+            .unwrap_or_else(|| self.dataframe.spark_session());
+        let placeholder = crate::errors::of_request_session(&session, || {
+            self.dataframe.standalone_placeholder_relation().to_pyerr()
+        })?;
         Ok(pyo3::types::PyBytes::new(py, &placeholder.encode_to_vec()))
     }
 
-    /// A DataFrame pickles, as PySpark Connect's, of its session, which gives back the active
-    /// session of its ID, of its plan, here the bytes of its relation, and of the
-    /// `_support_repr_html` and the `_cached_schema` of its state. The session unpickles first: so
-    /// on a Python worker of the server, which has no active session, a pickled DataFrame raises
-    /// `NO_ACTIVE_SESSION`, as PySpark's does. The unpickled DataFrame has copies of the
-    /// Observations of this one (see `DataFrame::from_sent_relation`).
+    /// A DataFrame pickles, as PySpark Connect's, of its plan, here the bytes of its relation and
+    /// the functions of its UDFs, of its session, which gives back the active session of its ID,
+    /// and of the `_support_repr_html` and the `_cached_schema` of its state. The functions
+    /// unpickle first and then the session, as PySpark's plan and session: so on a Python worker
+    /// of the server, which has no active session, a pickled DataFrame raises
+    /// `NO_ACTIVE_SESSION`, as PySpark's does, and a plain pickle fails at the first function
+    /// that it cannot pickle, a lambda, and else at the session. The unpickled DataFrame has
+    /// copies of the Observations of this one (see `DataFrame::from_sent_relation`).
     ///
     /// PySpark's pickle keeps the objects of the plan, which it does not build, and its unpickle
     /// builds the plan, as pickle looks the `__setstate__` of the new DataFrame up through its
-    /// `__getattr__`, which reads its columns. So a plan that does not build, of a value that
-    /// PySpark converts when it builds the plan, pickles of its error instead of its relation,
-    /// which the unpickle raises ([`crate::column::described_error`]).
+    /// `__getattr__`, which reads its columns. So the relation is of holes in place of the
+    /// commands of the UDFs, and the pickle carries the functions, the objects of their picklers,
+    /// which the requests of the unpickled DataFrame pickle, as PySpark's unpickled plan pickles
+    /// them at each request ([`crate::udf_command::PickleHoles`]). A plan that does not build, of
+    /// a value that PySpark converts when it builds the plan, pickles of its error instead of its
+    /// relation, which the unpickle raises ([`crate::column::described_error`]); of a plan of the
+    /// Python client whose build raised, of that plan, which the unpickle builds again, as
+    /// PySpark's does, of its own error then.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
-        use pyo3::types::PyBytes;
         let py = slf.py();
         let this = slf.borrow();
         let session = this.spark_session(py)?;
-        let (relation, build_error) = match crate::origin::pickling(|| this.dataframe.to_relation())
-        {
-            Ok(relation) => (
-                PyBytes::new(py, &crate::encode_on_grown_stack(relation)),
-                None,
-            ),
-            Err(error) => match crate::column::described_error(py, &error)? {
-                Some(description) => (PyBytes::new(py, b""), Some(description)),
-                None => return Err(crate::errors::spark_error_to_py_exception(error)),
-            },
-        };
+        let (relation, build_error, holes) = this.pickled_relation(py)?;
         // The schema that this DataFrame cached, of the types of PySpark, when they hold it: the
         // `StructType` that it keeps as an object, of `to`, of a map function or of an unpickle,
         // as it is now, as PySpark's state carries the object; else that of the server, of new
@@ -1047,7 +1178,29 @@ impl PyDataFrame {
                     .load(std::sync::atomic::Ordering::SeqCst),
                 cached_schema,
                 build_error,
+                holes,
             ))
+    }
+
+    /// The reduce of the plan of this DataFrame (`DataFrame._plan`), as PySpark's plan object of a
+    /// DataFrame pickles of its fields and of no session: the plan of `_column_reduce.sent_plan`
+    /// of the relation of this DataFrame as it was sent, of its holes and of the error of a plan
+    /// that does not build, as its pickle carries them (see `__reduce__`), a `LogicalPlan` on the
+    /// client and on a Python worker of the server, whose PySpark has no class of the drop-in,
+    /// which `DataFrame(plan, session)` and PySpark's DataFrame of a plan over it build alike. So
+    /// a plan of the Python client over the plan of this DataFrame, such as a `SubqueryAlias`,
+    /// pickles plainly too, and unpickles on the worker, as PySpark's plan does. Not a stable API.
+    fn _plan_reduce<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyTuple>> {
+        let py = slf.py();
+        let (relation, build_error, holes) = slf.borrow().pickled_relation(py)?;
+        let reduce_module = py.import("pyspark.sql.connect._column_reduce")?;
+        let fill = if holes.is_empty() {
+            py.None().into_bound(py)
+        } else {
+            reduce_module.getattr("fill_holes")?
+        };
+        let args = (relation, build_error, holes, fill).into_pyobject(py)?;
+        PyTuple::new(py, [reduce_module.getattr("sent_plan")?, args.into_any()])
     }
 
     /// The reduce of a pickle at `protocol`, as PySpark Connect's DataFrame pickles its plan before
@@ -1097,10 +1250,17 @@ impl PyDataFrame {
     /// object, of `to` or of a map function, as the same object, the schema that its
     /// reconstruction requests (see `copy_schema`), and an `executionInfo` of its own, None
     /// until it executes, as that of PySpark's `DataFrame(plan, session)`.
-    fn __copy__(&self, py: Python<'_>) -> PyResult<PyDataFrame> {
-        let requested = self.fresh_schema_request(py)?;
-        let mut copy = self.copy_of(self.dataframe.shallow_copy());
-        copy.schema_object = self
+    fn __copy__(slf: &Bound<'_, Self>) -> PyResult<PyDataFrame> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let requested = this.fresh_schema_request(py)?;
+        let mut copy = PyDataFrame::of_shared_plan(slf, this.dataframe.shallow_copy());
+        copy.support_repr_html.store(
+            this.support_repr_html
+                .load(std::sync::atomic::Ordering::SeqCst),
+            std::sync::atomic::Ordering::SeqCst,
+        );
+        copy.schema_object = this
             .schema_object
             .as_ref()
             .map(|schema| schema.clone_ref(py));
@@ -1120,23 +1280,27 @@ impl PyDataFrame {
     /// and `PySparkAssertionError` where another one is, while `copy.copy` keeps the session.
     /// PySpark's copy of the plan deep-copies the function of each UDF of it, with `memo`, before
     /// the session: so do these (`deep_copied_picklers`), of which, and of the copies of the
-    /// Observations, the plan of a copy in the session of this DataFrame is made, which its
-    /// requests build, as PySpark's copy does: they pickle the copied functions, warn of a window
-    /// of no partitions, and give the `and` of the conditions of a join the origin of its call
-    /// site then. A copy in another session is of the relation (`deep_copy_with_pickler_copies`).
-    fn __deepcopy__(&self, py: Python<'_>, memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+    /// Observations, the plan of the copy is made, which its requests build, as PySpark's copy
+    /// does: they pickle the copied functions, warn of a window of no partitions, and give the
+    /// `and` of the conditions of a join the origin of its call site then. A copy in another
+    /// session, of a memo that maps the session or of another active session of its ID, has the
+    /// plan IDs of this DataFrame there (`deep_copy_with_pickler_copies`).
+    fn __deepcopy__(slf: &Bound<'_, Self>, memo: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
+        let py = slf.py();
+        let this = slf.borrow();
+        let this = &*this;
         // As PySpark's: `copy.deepcopy` looks up `__deepcopy__` through `__getattr__`, whose check
-        // reads the columns, so the schema is requested unless it is cached. On a stopped session,
-        // that request raises the SparkConnectException of its closed client, before the session
-        // is copied, which raises a PySparkRuntimeError.
-        let session = self.dataframe.spark_session();
-        interruptible(py, &session, || self.dataframe.schema())
+        // reads the columns, so the schema is requested unless it is cached, and converted, of the
+        // errors of its conversion (see `own_schema`), before the functions of the UDFs and the
+        // session are copied. On a stopped session, that request raises the SparkConnectException
+        // of its closed client, before the session is copied, which raises a PySparkRuntimeError.
+        this.own_schema(py)
             .map_err(|err| columns_read_error(py, err))?;
         // As PySpark's copy of the plan, which copies the objects of `pyspark.ml` that it keeps
         // (see `__reduce_ex__`): the TypeError of the lock of a model, after a copy of the
         // `_summary_dataset` of the training summary of a DataFrame of a method of the summary, of
         // its requests of its schema.
-        if let Some(block) = crate::ml::object::pickle_block(py, &self.dataframe)? {
+        if let Some(block) = crate::ml::object::pickle_block(py, &this.dataframe)? {
             if let spark_connect::ml::MlPickleBlock::SummarySession(dataset) = block {
                 let dataset = Py::new(py, PyDataFrame::new(dataset))?;
                 py.import("copy")?
@@ -1145,7 +1309,7 @@ impl PyDataFrame {
             let protocol = pyo3::types::PyInt::new(py, 4).into_any();
             return Err(crate::ml::object::lock_pickle_error(py, &protocol));
         }
-        let observations = self
+        let observations = this
             .dataframe
             .observations()
             .into_iter()
@@ -1156,27 +1320,39 @@ impl PyDataFrame {
                 ))
             })
             .collect::<PyResult<Vec<_>>>()?;
-        let copies = crate::udf_command::deep_copied_picklers(py, self.dataframe.picklers(), memo)?;
+        let copies = crate::udf_command::deep_copied_picklers(py, this.dataframe.picklers(), memo)?;
         let session = py
             .import("copy")?
             .call_method1(
                 pyo3::intern!(py, "deepcopy"),
-                (self.spark_session(py)?, memo),
+                (this.spark_session(py)?, memo),
             )?
             .extract::<PyRef<'_, crate::session::PySparkSession>>()?
             .session
             .clone();
         let copy = crate::on_grown_stack(|| {
-            self.dataframe
+            this.dataframe
                 .deep_copy_with_pickler_copies(session, observations, &copies)
         })
         .to_pyerr()?;
+        // Of the plan of this DataFrame, when nothing of it is copied, which this one answers for
+        // to the garbage collector ([`PyDataFrame::of_shared_plan`]).
+        let mut copy = if copy.shares_plan_with(&this.dataframe) {
+            let shared = PyDataFrame::of_shared_plan(slf, copy);
+            shared.support_repr_html.store(
+                this.support_repr_html
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                std::sync::atomic::Ordering::SeqCst,
+            );
+            shared
+        } else {
+            this.copy_of(copy)
+        };
         // As PySpark's reconstruction of the copy, which requests its schema, as the copy has none,
         // and keeps it, before it sets the deep copy of the state, of the schema that it keeps as
         // an object too, which the deep copy of the plan shares in `memo`.
-        let mut copy = self.copy_of(copy);
         let requested = copy.fresh_schema_request(py)?;
-        if let Some(schema) = &self.schema_object {
+        if let Some(schema) = &this.schema_object {
             copy.schema_object = Some(
                 py.import("copy")?
                     .call_method1(pyo3::intern!(py, "deepcopy"), (schema.bind(py), memo))?
@@ -1195,11 +1371,19 @@ impl PyDataFrame {
     /// DataFrame has the cached schema of the pickled one, the objects that it is of, or none
     /// when it had none, so that its `schema` requests it again then. Without
     /// `request_schema`, of an object that PySpark pickles of the plan of the DataFrame, as a
-    /// DataStreamWriter, the schema is not requested.
+    /// DataStreamWriter, the schema is not requested. `holes` are those of the relation, of the
+    /// functions of its UDFs, which each request pickles (see `udf_command::sent_holes`).
     #[staticmethod]
     #[pyo3(signature = (
-        session, relation, levels=1, support_repr_html=false, cached_schema=None, request_schema=true
+        session,
+        relation,
+        levels=1,
+        support_repr_html=false,
+        cached_schema=None,
+        request_schema=true,
+        holes=None
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn _of_relation(
         py: Python<'_>,
         session: &Bound<'_, crate::session::PySparkSession>,
@@ -1208,7 +1392,9 @@ impl PyDataFrame {
         support_repr_html: bool,
         cached_schema: Option<&Bound<'_, PyAny>>,
         request_schema: bool,
+        holes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyDataFrame> {
+        let holes = crate::udf_command::sent_holes(holes)?;
         let session = session.borrow().session.clone();
         let known_schema = cached_schema
             .filter(|schema| !schema.is_none())
@@ -1219,8 +1405,9 @@ impl PyDataFrame {
         // The errors become Python exceptions on the caller's stack, which runs no Python code
         // on the grown one.
         let dataframe = crate::on_grown_stack(|| {
-            spark_connect_proto::Relation::decode(relation)
-                .map(|relation| DataFrame::from_sent_relation_levels(session, relation, levels))
+            spark_connect_proto::Relation::decode(relation).map(|relation| {
+                DataFrame::from_sent_relation_with_holes(session, relation, levels, holes)
+            })
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
@@ -4645,15 +4832,18 @@ impl ClauseCondition {
     }
 
     /// Report the condition to Python's garbage collector, as PySpark's clause holds it: an
-    /// object as it is, and the functions of the UDFs that a Column alone keeps alive, as the
-    /// Column reports them.
+    /// object as it is, and the functions of the UDFs and the plans of the Python client that a
+    /// Column alone keeps alive, as the Column reports them.
     fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         match self {
             ClauseCondition::None => Ok(()),
-            ClauseCondition::Column(column) => crate::udf_command::visit_pickler_objects(
-                column.expression().exclusive_pickler_objects(),
-                visit,
-            ),
+            ClauseCondition::Column(column) => {
+                crate::udf_command::visit_pickler_objects(
+                    column.expression().exclusive_pickler_objects(),
+                    visit,
+                )?;
+                crate::udf_command::visit_owners(column.expression().exclusive_owners(), visit)
+            }
             ClauseCondition::Object(object) => visit.call(object),
         }
     }
@@ -4843,6 +5033,7 @@ impl PyMergeIntoWriter {
                     writer.exclusive_pickler_objects(),
                     &visit,
                 )?;
+                crate::udf_command::visit_owners(writer.exclusive_owners(), &visit)?;
             }
         }
         Ok(())
@@ -6825,6 +7016,7 @@ impl PyDataFrameWriterV2 {
                     writer.exclusive_pickler_objects(),
                     &visit,
                 )?;
+                crate::udf_command::visit_owners(writer.exclusive_owners(), &visit)?;
             }
         }
         Ok(())
@@ -7600,6 +7792,124 @@ fn columns_read_error(py: Python<'_>, err: PyErr) -> PyErr {
         "NOT_ITERABLE",
         &[("objectName", "Column")],
     )
+}
+
+/// The DataFrame of `plan`, a plan of the Python client of `session`, as `DataFrame(plan, session)`
+/// makes it, and the error that it keeps when its build failed: of the relation of
+/// `plan.to_proto(session.client)`, of
+/// the plan ID of the plan. A plan whose build raises an `Exception` gives a DataFrame that keeps
+/// it, of which each request raises a new exception ([`crate::errors::kept_error`]), as each of
+/// PySpark's requests builds the plan and raises; another exception of the build, such as the
+/// `KeyboardInterrupt` of a Ctrl-C while it runs or a `SystemExit`, is raised now, as it would be
+/// where PySpark's program is then, which goes on after it.
+pub(crate) fn dataframe_of_python_plan(
+    plan: &Bound<'_, PyAny>,
+    session: &Bound<'_, crate::session::PySparkSession>,
+) -> PyResult<(DataFrame, Option<spark_connect_core::error::SparkError>)> {
+    use prost::Message;
+    let py = plan.py();
+    let core_session = session.borrow().session.clone();
+    let client = session.getattr("client")?;
+    // The plan, as PySpark Connect's DataFrame keeps it, keeps the models whose cached objects on
+    // the server the relation refers to (`__source_instance__`).
+    let owner: std::sync::Arc<dyn std::any::Any + Send + Sync> =
+        std::sync::Arc::new(plan.clone().unbind());
+    // Of the session of the build, the plans that the Columns of the subqueries of the plan build
+    // again (`errors::of_request_session`), as PySpark's plan builds them of its client.
+    let built = crate::errors::of_request_session(&core_session, || {
+        plan.call_method1("to_proto", (client,))
+            .and_then(|built| built.getattr("root"))
+            .and_then(|relation| relation.call_method0("SerializeToString"))
+            .and_then(|relation| {
+                spark_connect_proto::Relation::decode(
+                    relation.cast::<pyo3::types::PyBytes>()?.as_bytes(),
+                )
+                .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+            })
+            .and_then(|relation| {
+                DataFrame::from_relation(
+                    core_session.clone(),
+                    relation,
+                    Some(std::sync::Arc::clone(&owner)),
+                )
+                .to_pyerr()
+            })
+    });
+    let (dataframe, kept) = match built {
+        Ok(dataframe) => (dataframe, None),
+        Err(exception) if exception.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+            let (error, owner) = crate::errors::kept_error(py, plan, exception)?;
+            (
+                DataFrame::from_unbuilt_relation(core_session, Some(owner), error.clone()),
+                Some(error),
+            )
+        }
+        Err(exception) => return Err(exception),
+    };
+    // The plan ID of the plan, of the counter of the core (`LogicalPlan._fresh_plan_id`), of no
+    // other node; one that is not an int, of an object that is not such a plan, leaves the plan
+    // ID of the core.
+    if let Some(plan_id) = plan
+        .getattr(pyo3::intern!(py, "_plan_id"))
+        .ok()
+        .filter(|id| id.is_exact_instance_of::<pyo3::types::PyInt>())
+        .and_then(|id| id.extract::<i64>().ok())
+    {
+        dataframe.assign_plan_id(plan_id);
+    }
+    Ok((dataframe, kept))
+}
+
+/// The DataFrame of `plan`, a plan of the Python client whose build failed when an object over it
+/// was pickled, which the pickle carried, as PySpark's pickle carries its plan objects: built
+/// again, as PySpark builds the plan when the unpickled object is used, of its error if it raises
+/// again ([`dataframe_of_python_plan`]). Of an object `derived` from the DataFrame of the plan,
+/// such as a DataFrame over it or a Column of its subquery, whose own plan the pickle could not
+/// carry, a plan that builds now gives a DataFrame whose requests raise the error of
+/// [`derived_plan_error`]. With the error of each request of the DataFrame, if it has one.
+pub(crate) fn rebuilt_python_plan(
+    plan: &Bound<'_, PyAny>,
+    session: &Bound<'_, crate::session::PySparkSession>,
+    derived: bool,
+) -> PyResult<(DataFrame, Option<spark_connect_core::error::SparkError>)> {
+    let (dataframe, kept) = dataframe_of_python_plan(plan, session)?;
+    if kept.is_some() || !derived {
+        return Ok((dataframe, kept));
+    }
+    let error = derived_plan_error();
+    Ok((
+        DataFrame::from_unbuilt_relation(session.borrow().session.clone(), None, error.clone()),
+        Some(error),
+    ))
+}
+
+/// The error of the requests of an unpickled object over a plan of the Python client that failed
+/// to build when the object was pickled and builds when it was unpickled: the pickle carries the
+/// plan, and not the plan of the object over it, which it could not build.
+pub(crate) fn derived_plan_error() -> spark_connect_core::error::SparkError {
+    spark_connect_core::error::SparkError::builtin_runtime_msg(
+        "the plan of the Python client that the pickled object was made over failed to build \
+         when it was pickled and builds when it is unpickled, so the pickle has no plan of the \
+         object itself",
+    )
+}
+
+/// The DataFrame of `plan`, if it is the plan of a DataFrame of the core, `DataFrame._plan`
+/// (`pyspark.sql.connect.plan._DataFramePlan`, of that class itself): a DataFrame of it is of the
+/// plan of that DataFrame, as PySpark's `DataFrame(df._plan, session)` is of the plan object of
+/// `df`.
+fn dataframe_of_plan<'py>(plan: &Bound<'py, PyAny>) -> PyResult<Option<Bound<'py, PyDataFrame>>> {
+    let py = plan.py();
+    static PLAN_OF_DATAFRAME: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+        pyo3::sync::PyOnceLock::new();
+    let class = PLAN_OF_DATAFRAME.import(py, "pyspark.sql.connect.plan", "_DataFramePlan")?;
+    if !plan.get_type().is(class) {
+        return Ok(None);
+    }
+    Ok(plan
+        .getattr(pyo3::intern!(py, "_df"))
+        .ok()
+        .and_then(|df| df.cast_into::<PyDataFrame>().ok()))
 }
 
 /// The error of a value that protobuf refuses in a field of a plan, which PySpark's plan raises as

@@ -182,7 +182,10 @@ impl PyColumnExpression {
         crate::udf_command::visit_pickler_objects(
             self.column.expression().exclusive_pickler_objects(),
             &visit,
-        )
+        )?;
+        // The plans of the Python client of the relations of the plans of its subqueries, and of
+        // the errors of its parts, which it alone holds, as PySpark's holds those plan objects.
+        crate::udf_command::visit_owners(self.column.expression().exclusive_owners(), &visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the expression is
@@ -225,10 +228,9 @@ impl PyColumnExpression {
 
     /// The `spark.connect.Expression` of this expression, of `pyspark.sql.connect.proto`. One
     /// too deep to be sent is the `RecursionError` that PySpark's `to_plan`, which recurses,
-    /// raises.
+    /// raises. Built of the session of the client `session` (see `errors::of_client_session`).
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let _ = session;
-        expression_message(py, &self.column)
+        crate::errors::of_client_session(session, || expression_message(py, &self.column))
     }
 }
 
@@ -918,7 +920,10 @@ impl PyColumn {
         crate::udf_command::visit_pickler_objects(
             self.column.expression().exclusive_pickler_objects(),
             &visit,
-        )
+        )?;
+        // The plans of the Python client of the relations of the plans of its subqueries, and of
+        // the errors of its parts, which it alone holds, as PySpark's holds those plan objects.
+        crate::udf_command::visit_owners(self.column.expression().exclusive_owners(), &visit)
     }
 
     /// The shallow copy of a Column, as PySpark's `copy.copy`, which shares the expression of the
@@ -972,35 +977,45 @@ impl PyColumn {
     /// the unpickled Column is a sort order of `orderBy`, `Window.orderBy` and the others.
     /// A Column too deep to be sent is the `RecursionError` that PySpark's pickler raises for it.
     /// A user-set attribute of the instance is the reduce's state, as of a plain object, so
-    /// that `pickle` keeps it, as it does of PySpark's Column. The function of a UDF of the
-    /// Column is pickled now, into the command of the expression, as PySpark's pickle of the
-    /// Column pickles the function with it; one that does not pickle raises the error of its
-    /// pickling. A Column of subqueries pickles the relations of the plans that they refer to
-    /// too, of their plan IDs, after the expression, as PySpark's pickle keeps the plan objects of
-    /// its subqueries: the unpickled Column sends them in the `WithRelations` of the relation that
+    /// that `pickle` keeps it, as it does of PySpark's Column. The expression is of holes in place
+    /// of the commands of its UDFs, and the pickle carries their functions, the objects of their
+    /// picklers, as PySpark's pickle of the Column carries the functions: a plain pickle pickles a
+    /// function by reference and fails at a lambda, and the requests of the unpickled Column
+    /// pickle the functions as they are then ([`crate::udf_command::PickleHoles`]). A Column of
+    /// subqueries pickles the relations of the plans that they refer to too, of their plan IDs
+    /// and their holes, after the expression, as PySpark's pickle keeps the plan objects of its
+    /// subqueries: the unpickled Column sends them in the `WithRelations` of the relation that
     /// holds it, as PySpark's plan sends the plans of its subqueries.
     fn __reduce__<'py>(slf: &Bound<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let this = slf.borrow();
+        let (holes, copies) =
+            crate::udf_command::PickleHoles::of(py, this.column.expression().picklers());
+        let marked = if copies.is_empty() {
+            this.column.expression().clone()
+        } else {
+            this.column.expression().with_pickler_copies(&copies)
+        };
         // Of an expression that a request fails to build, as PySpark's Column of an alias of a
         // name that protobuf refuses: its proto of what this client builds, and the errors of
         // a request and of the `__repr__` of it, which the unpickled Column raises as it did.
-        let (expression, levels, unbuildable) = crate::origin::pickling(|| {
-            this.column
-                .expression()
-                .try_to_proto_with_levels_and_unbuildable()
-        })
-        .to_pyerr()?;
-        if let Some(exception) = unbuildable
-            .as_ref()
-            .and_then(crate::errors::callback_exception)
-        {
-            return Err(exception);
-        }
-        let mut build_error = unbuildable
-            .as_ref()
-            .map(|error| error_description(py, error))
-            .transpose()?;
-        // A plan of a subquery that does not build pickles of its error, as a DataFrame does,
+        let (expression, levels, unbuildable) =
+            crate::origin::pickling(|| marked.try_to_proto_with_levels_and_unbuildable())
+                .to_pyerr()?;
+        let mut build_error = match unbuildable.as_ref() {
+            None => None,
+            // The error of a plan that raised when it was built, which the pickle carries, as
+            // that of a plan of PySpark's unpickled Column raises when it is built again; the
+            // exception of another callback is raised.
+            Some(error) => match described_error(py, error)? {
+                Some(description) => Some(description),
+                None => match crate::errors::callback_exception(error) {
+                    Some(exception) => return Err(exception),
+                    None => Some(error_description(py, error)?),
+                },
+            },
+        };
+        // A plan of a subquery that does not build pickles of its error, or of the plan of the
+        // Python client whose build raised, which the unpickle builds again, as a DataFrame does,
         // which the requests of the unpickled Column raise; one that does not pickle, or that is
         // too deep, raises its error. A CASE WHEN and a sort order are given back of their parts,
         // which pickle their subqueries.
@@ -1010,12 +1025,13 @@ impl PyColumn {
             ExpressionNode::CaseWhen(_) | ExpressionNode::SortOrder(_)
         );
         if build_error.is_none() && !of_parts {
-            match crate::origin::pickling(|| this.column.expression().subquery_relations()) {
+            match crate::origin::pickling(|| marked.subquery_relations()) {
                 Ok(relations) => {
                     for (relation, levels) in relations {
-                        let relation =
-                            pyo3::types::PyBytes::new(py, &crate::encode_on_grown_stack(relation));
-                        subqueries.push((relation, levels));
+                        let relation = crate::encode_on_grown_stack(relation);
+                        let relation_holes = holes.holes_of(py, &relation)?;
+                        let relation = pyo3::types::PyBytes::new(py, &relation);
+                        subqueries.push((relation, levels, relation_holes));
                     }
                 }
                 Err(error) => match described_error(py, &error)? {
@@ -1031,7 +1047,9 @@ impl PyColumn {
             .err()
             .map(|error| error_description(py, &error))
             .transpose()?;
-        let expression = pyo3::types::PyBytes::new(py, &crate::encode_on_grown_stack(expression));
+        let expression = crate::encode_on_grown_stack(expression);
+        let expression_holes = holes.holes_of(py, &expression)?;
+        let expression = pyo3::types::PyBytes::new(py, &expression);
         let column = |expr: &spark_connect::expression::Expression| -> PyResult<Py<PyColumn>> {
             Py::new(py, PyColumn::new(Column::new(expr.clone())))
         };
@@ -1072,16 +1090,18 @@ impl PyColumn {
                 build_error,
                 repr_error,
                 subqueries,
+                expression_holes,
             ))?;
         crate::group::reduce_with_state(&reduce, slf.as_any())
     }
 
     /// The Column of `expression`, the bytes of a `spark.connect.Expression`, and of its
     /// `rendered` rendering, of its `levels`, as a pickled Column unpickles: it sends the
-    /// expression as it is, and the relations of `subqueries`, the bytes of the relation of each
-    /// plan that its subqueries refer to and its levels, in the `WithRelations` of the relation
-    /// that holds it. The CASE WHEN of `branches` and `else_value`, the Columns of its parts, is
-    /// built as it was.
+    /// expression as it is, of its `holes` filled with the commands of the functions of its UDFs
+    /// at each request (see `udf_command::sent_holes`), and the relations of `subqueries`, the
+    /// bytes of the relation of each plan that its subqueries refer to, its levels and its holes,
+    /// in the `WithRelations` of the relation that holds it. The CASE WHEN of `branches` and
+    /// `else_value`, the Columns of its parts, is built as it was.
     #[staticmethod]
     #[pyo3(signature = (
         expression,
@@ -1091,7 +1111,8 @@ impl PyColumn {
         levels=1,
         build_error=None,
         repr_error=None,
-        subqueries=None
+        subqueries=None,
+        holes=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn _of_expression(
@@ -1102,7 +1123,8 @@ impl PyColumn {
         levels: usize,
         build_error: Option<&Bound<'_, PyAny>>,
         repr_error: Option<&Bound<'_, PyAny>>,
-        subqueries: Option<Vec<(Bound<'_, pyo3::types::PyBytes>, usize)>>,
+        subqueries: Option<Vec<Bound<'_, PyTuple>>>,
+        holes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyColumn> {
         if let Some(branches) = branches {
             let branches = branches
@@ -1118,39 +1140,66 @@ impl PyColumn {
             if let Some(else_value) = else_value {
                 case_when = case_when.with_else(else_value.column.expression().clone());
             }
+            // Of the origin that the CASE WHEN was pickled with, as PySpark's unpickled one keeps
+            // it, and not of the call that unpickles it.
             return Ok(PyColumn::new(Column::new(
                 spark_connect::expression::Expression::new(ExpressionNode::CaseWhen(Box::new(
                     case_when,
-                ))),
+                )))
+                .with_origin(spark_connect::origin::origin_of_encoded(expression)),
             )));
         }
         use prost::Message;
-        let subqueries: Vec<(&[u8], usize)> = subqueries
+        // Each the bytes, the levels and the holes of a relation; a pickle of an earlier client
+        // has no holes.
+        let subqueries = subqueries
             .iter()
             .flatten()
-            .map(|(relation, levels)| (relation.as_bytes(), *levels))
-            .collect();
+            .map(|subquery| {
+                let relation = subquery.get_item(0)?.cast_into::<pyo3::types::PyBytes>()?;
+                let levels: usize = subquery.get_item(1)?.extract()?;
+                let holes = match subquery.get_item(2) {
+                    Ok(holes) => crate::udf_command::sent_holes(Some(&holes))?,
+                    Err(_) => Default::default(),
+                };
+                Ok((relation, levels, holes))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let holes = crate::udf_command::sent_holes(holes)?;
         // Decoded, and then built or dropped, on a stack that holds its levels.
         // The errors become Python exceptions on the caller's stack, which runs no Python code
         // on the grown one.
         let column = crate::on_grown_stack(|| {
             let relations = subqueries
-                .iter()
-                .map(|(relation, levels)| {
-                    spark_connect_proto::Relation::decode(*relation)
-                        .map(|relation| (relation, *levels))
+                .into_iter()
+                .map(|(relation, levels, holes)| {
+                    spark_connect_proto::Relation::decode(relation.as_bytes())
+                        .map(|relation| (relation, levels, holes))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             spark_connect_proto::Expression::decode(expression).map(|expression| {
-                Column::sent_with_subqueries(expression, rendered, levels, relations)
+                Column::sent_with_holes(expression, rendered, levels, relations, holes)
             })
         })
         .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
         .to_pyerr()?;
         // The errors that the pickled Column raised when a request built its plan and when its
         // `__repr__` rendered it.
-        let before = build_error.map(error_of_description).transpose()?;
         let unrenderable = repr_error.map(error_of_description).transpose()?;
+        if let Some((plan, _)) = build_error.map(described_plan).transpose()?.flatten() {
+            // Built at each request, of the session of the request, as PySpark's Column builds the
+            // plan objects of its subqueries.
+            let (before, owner) = crate::errors::unpickled_plan_error(plan.py(), &plan)?;
+            return Ok(PyColumn::new(Column::new(
+                spark_connect::expression::Expression::unbuildable_owned(
+                    column.expression().clone(),
+                    before,
+                    unrenderable,
+                    owner,
+                ),
+            )));
+        }
+        let before = build_error.map(error_of_description).transpose()?;
         Ok(PyColumn::new(Column::new(
             spark_connect::expression::Expression::unbuildable(
                 column.expression().clone(),
@@ -1159,6 +1208,20 @@ impl PyColumn {
                 unrenderable,
             ),
         )))
+    }
+
+    /// `column` of the origin of `expression`, the bytes of the expression of a pickled Column, as
+    /// PySpark's unpickled expression keeps the origin that it was pickled with: of a Column that
+    /// the unpickle makes again of its parts, a sort order of the method of its direction, which
+    /// takes the origin of its call otherwise (`_column_reduce.column_of`). Not a stable API.
+    #[staticmethod]
+    fn _with_origin_of(column: PyRef<'_, PyColumn>, expression: &[u8]) -> PyColumn {
+        PyColumn::new(Column::new(
+            column
+                .column
+                .expression()
+                .with_origin(spark_connect::origin::origin_of_encoded(expression)),
+        ))
     }
 
     /// As PySpark's Column, which has no `__str__` of its own for `_with_origin` to wrap: no
@@ -1525,15 +1588,30 @@ const PYSPARK_ERROR_CLASSES: [(spark_connect_core::error::SparkErrorKind, &str);
 /// as [`error_description`] gives it, of which `pyspark.sql.connect._column_reduce.raise_error`
 /// raises the error again: a builtin `TypeError`, `ValueError`, `OverflowError` or
 /// `AttributeError` of its message, the error of UTF-8 of its value, or an error of one of
-/// PySpark's error classes, of its error class and parameters. None for the error of another
-/// kind, which no pickle keeps.
+/// PySpark's error classes, of its error class and parameters; and of the error that a plan of
+/// the Python client raised when it was built, which a plan keeps, the plan itself
+/// ([`plan_description`]), of an object over the DataFrame of the plan. None for the error of
+/// another kind, which no pickle keeps.
 pub(crate) fn described_error<'py>(
     py: Python<'py>,
     error: &spark_connect_core::error::SparkError,
 ) -> PyResult<Option<Bound<'py, PyTuple>>> {
+    described_error_of(py, error, true)
+}
+
+/// As [`described_error`], of an object over the DataFrame of the plan of a kept error when
+/// `derived`, and else of the DataFrame of the plan itself.
+pub(crate) fn described_error_of<'py>(
+    py: Python<'py>,
+    error: &spark_connect_core::error::SparkError,
+    derived: bool,
+) -> PyResult<Option<Bound<'py, PyTuple>>> {
     use pyo3::types::PyBytes;
     use pyo3::IntoPyObjectExt;
     use spark_connect_core::error::SparkErrorKind as K;
+    if let Some(plan) = crate::errors::kept_plan(py, error) {
+        return plan_description(&plan, derived).map(Some);
+    }
     let none = || py.None().into_bound(py);
     let (kind, text, payload) = match error.kind {
         K::BuiltinTypeError => ("TypeError", error.message.clone(), none()),
@@ -1573,6 +1651,37 @@ pub(crate) fn described_error<'py>(
         ],
     )
     .map(Some)
+}
+
+/// The description of the error of `plan`, a plan of the Python client whose build raised, which
+/// a plan keeps ([`crate::errors::kept_error`]): `("plan", "derived" or "", plan)`, as PySpark's
+/// pickle carries its plan objects, whose unpickled object builds the plan again and raises a new
+/// error of its own, also on a Python worker of the server, of the class, the arguments, the
+/// state and the chain that the build gives then, as PySpark's does. The pickler pickles `plan`
+/// with the rest of the object, so that its memo of the objects that it pickled takes a plan that
+/// reaches the object back, as through an error that holds it. Of an object over the DataFrame of
+/// the plan (`derived`), such as a DataFrame over it or a Column of its subquery, whose own plan
+/// the pickle does not carry.
+fn plan_description<'py>(plan: &Bound<'py, PyAny>, derived: bool) -> PyResult<Bound<'py, PyTuple>> {
+    use pyo3::IntoPyObjectExt;
+    let py = plan.py();
+    PyTuple::new(
+        py,
+        [
+            "plan".into_bound_py_any(py)?,
+            if derived { "derived" } else { "" }.into_bound_py_any(py)?,
+            plan.clone(),
+        ],
+    )
+}
+
+/// The plan of the Python client of `description`, of [`plan_description`], and whether the
+/// object is over the DataFrame of the plan, if it is the description of one.
+pub(crate) fn described_plan<'py>(
+    description: &Bound<'py, PyAny>,
+) -> PyResult<Option<(Bound<'py, PyAny>, bool)>> {
+    let (kind, text, payload): (String, String, Bound<'py, PyAny>) = description.extract()?;
+    Ok((kind == "plan").then_some((payload, text == "derived")))
 }
 
 /// The error of `description`, of [`error_description`].

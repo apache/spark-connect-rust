@@ -34,6 +34,32 @@ pub fn set_current(origin: Origin) -> OriginGuard {
     OriginGuard { _private: () }
 }
 
+/// The origin of the expression of `encoded`, the encoding of a `spark.connect.Expression`, which
+/// its common fields carry: that which a pickled Column keeps of the origin of its expression, as
+/// PySpark's pickled expression keeps its `origin`, so that a Column that its unpickle makes again
+/// of its parts, as a sort order or a CASE WHEN, keeps it rather than take the origin of the call
+/// that unpickles it (see [`crate::expression::Expression::with_origin`]). Only the common fields
+/// are decoded, of a time of the length of the encoding. None of no origin, or of an encoding
+/// that is not an expression. Not a stable API.
+#[doc(hidden)]
+pub fn origin_of_encoded(encoded: &[u8]) -> Option<Origin> {
+    use prost::Message;
+    // The common fields of an expression alone, of the number of the field of its encoding.
+    #[derive(Clone, PartialEq, prost::Message)]
+    struct CommonOf {
+        #[prost(message, optional, tag = "18")]
+        common: Option<spark_connect_proto::ExpressionCommon>,
+    }
+    let common = CommonOf::decode(encoded).ok()?.common?;
+    match common.origin?.function? {
+        spark_connect_proto::origin::Function::PythonOrigin(origin) => Some(Origin {
+            fragment: origin.fragment,
+            call_site: origin.call_site,
+        }),
+        _ => None,
+    }
+}
+
 /// Unsets the current origin when dropped. See [`set_current`].
 #[must_use]
 pub struct OriginGuard {
@@ -51,6 +77,39 @@ mod tests {
     use super::*;
     use crate::expression::Expression;
     use spark_connect_proto as proto;
+
+    #[test]
+    fn the_origin_of_an_encoded_expression_is_that_of_its_common_fields() {
+        // As PySpark's pickled expression, which keeps its origin: the origin of the encoding of
+        // an expression, which a pickled Column carries, is given back of its common fields
+        // alone, of a deep expression too, and an expression made again of it takes it.
+        use prost::Message;
+        let origin = Origin {
+            fragment: "desc".to_string(),
+            call_site: "script.py:7".to_string(),
+        };
+        let made = {
+            let _origin = set_current(origin.clone());
+            Expression::column("a")
+        };
+        let mut deep = Expression::column("b");
+        for _ in 0..200 {
+            deep = Expression::function("+", vec![deep, Expression::column("b")]);
+        }
+        let deep = deep.with_origin(Some(origin.clone()));
+        let encoded = made.to_proto().encode_to_vec();
+        assert_eq!(origin_of_encoded(&encoded), Some(origin.clone()));
+        let deep_encoding =
+            stacker::maybe_grow(1 << 20, 16 << 20, || deep.to_proto().encode_to_vec());
+        assert_eq!(origin_of_encoded(&deep_encoding), Some(origin.clone()));
+        let plain = Expression::column("a");
+        assert_eq!(origin_of_encoded(&plain.to_proto().encode_to_vec()), None);
+        assert_eq!(origin_of_encoded(b"\xff\xff"), None);
+        let kept = plain.with_origin(origin_of_encoded(&encoded));
+        assert_eq!(kept.origin(), Some(&origin));
+        assert_eq!(kept.to_proto(), made.to_proto());
+        assert!(kept.with_origin(None).origin().is_none());
+    }
 
     #[test]
     fn expressions_carry_the_origin_of_their_construction() {

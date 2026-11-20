@@ -132,6 +132,23 @@ impl MergeIntoWriter {
     /// its clauses: the plan once the DataFrame does not share it. Not a stable API.
     #[doc(hidden)]
     pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_pickler_objects(self.pickler_holders())
+    }
+
+    /// The owners of the relations built outside the core and of the errors of the expressions
+    /// that a request fails to build, of the source plan, the condition and the clauses of this
+    /// merge, that it alone keeps alive, as [`MergeIntoWriter::exclusive_pickler_objects`] gives
+    /// the objects of the picklers, which a Python wrapper reports to Python's garbage collector,
+    /// as PySpark's merge builder holds the plan objects of the subqueries of its Columns (see
+    /// `crate::udf::exclusive_owners`). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_owners(self.pickler_holders())
+    }
+
+    /// The source plan, once the DataFrame does not share it, the condition and the conditions
+    /// and the values of the clauses of this merge, of which the exclusive walks start.
+    fn pickler_holders(&self) -> Vec<crate::udf::PicklerHolder<'_>> {
         use crate::udf::PicklerHolder::{Expression as Of, Plan};
         let mut holders = Vec::new();
         if Arc::strong_count(&self.source_plan) == 1 {
@@ -148,7 +165,7 @@ impl MergeIntoWriter {
             let values = clause.assignments.iter().flatten();
             holders.extend(values.map(|(_, value)| Of(value.expression())));
         }
-        crate::udf::exclusive_pickler_objects(holders)
+        holders
     }
 
     /// Drop the source plan, the condition and the clauses of this merge, as
