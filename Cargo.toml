@@ -92,6 +92,7 @@ should_implement_trait = "allow"
 [workspace.dependencies]
 # gRPC / protobuf. The client of tonic only, its channel and generated code: the crates that test
 # against a gRPC server of their own enable its `server` and `router` in their dev-dependencies.
+# The unpublished spark-connect-server enables them in its normal dependencies.
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen"] }
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"

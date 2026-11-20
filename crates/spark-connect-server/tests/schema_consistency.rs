@@ -241,6 +241,80 @@ fn views(rows: usize) -> RecordBatch {
     .unwrap()
 }
 
+fn materialized_view() -> RecordBatch {
+    RecordBatch::try_new(
+        strings(DataType::LargeUtf8, false).schema(),
+        vec![Arc::new(LargeStringArray::from(vec![text(0)]))],
+    )
+    .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn materialized_views_can_mix_with_matching_arrow_and_ipc_batches() {
+    let view = views(1);
+    let large = strings(DataType::LargeUtf8, false);
+    let materialized = materialized_view();
+    let data = ipc(&large);
+    for use_ipc in [false, true] {
+        for view_first in [false, true] {
+            let other = if use_ipc {
+                Batch::Ipc(data.clone(), 1)
+            } else {
+                Batch::Arrow(large.clone())
+            };
+            let mut batches = vec![Batch::Arrow(view.clone()), other];
+            let mut expected = vec![materialized.clone(), large.clone()];
+            if !view_first {
+                batches.reverse();
+                expected.reverse();
+            }
+            let (responses, status) = execute(BatchCase {
+                schema: view.schema(),
+                batches,
+            })
+            .await;
+            assert!(status.is_none(), "{status:?}");
+            assert!(responses.last().is_some_and(|response| matches!(
+                response.response_type,
+                Some(proto::execute_plan_response::ResponseType::ResultComplete(
+                    _
+                ))
+            )));
+            assert_eq!(output_batches(&responses), expected);
+            if use_ipc {
+                let output = assembled_batches(&responses, true);
+                let ipc_index = if view_first { 1 } else { 0 };
+                assert_eq!(output[ipc_index].data.as_ref(), data.as_slice());
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn materialized_views_cannot_mix_with_preserved_view_ipc() {
+    let view = views(1);
+    let materialized = materialized_view();
+    let data = ipc(&view);
+    for view_first in [false, true] {
+        let mut batches = vec![Batch::Arrow(view.clone()), Batch::Ipc(data.clone(), 1)];
+        if !view_first {
+            batches.reverse();
+        }
+        let (responses, status) = execute(BatchCase {
+            schema: view.schema(),
+            batches,
+        })
+        .await;
+        assert_schema_error(&responses, status);
+        let expected = if view_first {
+            materialized.clone()
+        } else {
+            view.clone()
+        };
+        assert_eq!(output_batches(&responses), vec![expected]);
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn view_ipc_remains_unchanged_for_small_and_oversized_batches() {
     for rows in [2, LARGE_ROWS] {
