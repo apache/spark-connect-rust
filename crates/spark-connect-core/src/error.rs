@@ -1103,8 +1103,8 @@ pub fn grpcio_error(status: &Status, call: GrpcCall) -> GrpcioError {
             }
         }
     }
-    // As gRPC's core gives the call details that are not base64, empty.
-    if !status.details().is_empty() || crate::metadata::has_undecoded_details(status) {
+    // As gRPC's core gives the call empty details, of base64 or that it does not decode.
+    if !status.details().is_empty() || crate::metadata::has_empty_details(status) {
         trailing_metadata.push((
             "grpc-status-details-bin".to_string(),
             status.details().to_vec(),
@@ -1138,8 +1138,9 @@ pub(crate) const STATUS_DECODE_ERROR: &str =
 /// (`_call_iter`), which raise it in place of the error, its context: the `ValueError` of a
 /// `google.rpc.Status`, of its `grpc-status-details-bin`, that is not of its code or of its
 /// details, as of metadata past gRPC's soft limit, whose call fails `RESOURCE_EXHAUSTED` of the
-/// details of an error of the server, or of details that are not base64, which gRPC's core gives
-/// the call empty, a status of the code `OK` (see [`crate::metadata`]); or protobuf's
+/// details of an error of the server, or of empty details, of base64 or that gRPC's core does not
+/// decode, which it gives the call empty, a status of the code `OK` (see [`crate::metadata`]); or
+/// protobuf's
 /// `DecodeError` of details that are not a `google.rpc.Status` ([`STATUS_DECODE_ERROR`]). The
 /// text of the `ValueError` is grpc_status's: `Code in Status proto (StatusCode.INTERNAL) doesn't
 /// match status code (StatusCode.RESOURCE_EXHAUSTED)`, of a code that is not one of gRPC's
@@ -1154,7 +1155,7 @@ pub(crate) fn from_call_error(status: &Status, call: GrpcCall) -> Option<SparkEr
 
 /// As [`from_call_error`], in the dialect of grpcio if `grpcio`.
 fn from_call_error_in(status: &Status, call: GrpcCall, grpcio: bool) -> Option<SparkError> {
-    if !grpcio || (status.details().is_empty() && !crate::metadata::has_undecoded_details(status)) {
+    if !grpcio || (status.details().is_empty() && !crate::metadata::has_empty_details(status)) {
         return None;
     }
     let message = match RpcStatus::decode(status.details()) {
@@ -2756,10 +2757,12 @@ mod tests {
             mismatch(&undecodable, GrpcCall::Unary).as_deref(),
             Some(STATUS_DECODE_ERROR)
         );
-        // Of details that were not base64, which gRPC's core gives the call empty: a status of
-        // the code OK.
+        // Of empty details, which gRPC's core gives the call of an empty value of base64 or of
+        // one that it does not decode: a status of the code OK.
         let mut empty = Status::internal("boom");
-        empty.set_source(std::sync::Arc::new(crate::metadata::UndecodedDetails));
+        empty.set_source(std::sync::Arc::new(crate::metadata::EmptyDetails {
+            refused: None,
+        }));
         assert_eq!(
             mismatch(&empty, GrpcCall::ServerStreaming).as_deref(),
             Some(
