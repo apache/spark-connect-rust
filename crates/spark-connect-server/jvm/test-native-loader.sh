@@ -53,12 +53,27 @@ esac
   -I "$JAVA_HOME/include" -I "$JAVA_HOME/include/$JNI_PLATFORM" \
   "$BUILD_DIR/fixture.c" -o "$LIBRARY"
 TEST_CLASS=org.apache.spark.sql.connect.nativebridge.engine.NativeLibraryLoaderTest
-"$JAVA_HOME/bin/java" -Xcheck:jni "-Djava.io.tmpdir=$BUILD_DIR/tmp" \
+run_loader_test() {
+  local name="$1" marker="$2"
+  shift 2
+  local log="$BUILD_DIR/$name.log"
+  "$JAVA_HOME/bin/java" -Xcheck:jni "-Djava.io.tmpdir=$BUILD_DIR/tmp" \
+    "$@" 2>&1 | tee "$log" || return
+  if grep -Eq 'WARNING in native method|WARNING: JNI local refs:|FATAL ERROR in native method' "$log"; then
+    echo "native loader $name triggered a JNI diagnostic" >&2
+    return 1
+  fi
+  if ! grep -Eq "$marker" "$log"; then
+    echo "native loader $name success marker missing" >&2
+    return 1
+  fi
+}
+run_loader_test fixture '^NATIVE_LIBRARY_LOADER_OK checks=[1-9][0-9]*$' \
   -cp "$BUILD_DIR/classes" "$TEST_CLASS" "$LIBRARY"
 if [[ $# -eq 2 ]]; then
   NATIVE_JAR="$(cd "$(dirname "$2")" && pwd)/$(basename "$2")"
   [[ -f "$NATIVE_JAR" ]] || { echo "native JAR not found: $NATIVE_JAR" >&2; exit 1; }
-  "$JAVA_HOME/bin/java" -Xcheck:jni "-Djava.io.tmpdir=$BUILD_DIR/tmp" \
+  run_loader_test packaged '^NATIVE_PACKAGED_LOAD_OK$' \
     -cp "$BUILD_DIR/classes:$NATIVE_JAR" "$TEST_CLASS" --load-packaged
 fi
 if [[ -n "$(find "$BUILD_DIR/tmp" -mindepth 1 -print -quit)" ]]; then

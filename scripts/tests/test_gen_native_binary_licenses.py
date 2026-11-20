@@ -22,7 +22,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "gen_native_binary_licenses.py"
 SPEC = importlib.util.spec_from_file_location("gen_native_binary_licenses", SCRIPT)
@@ -131,7 +131,7 @@ class NativeLicenseTests(unittest.TestCase):
             self.generate()
 
     def test_cargo_tree_resolves_native_normal_edges_without_wheel_features(self):
-        result = unittest.mock.Mock(returncode=0, stdout=b"tree", stderr=b"")
+        result = Mock(returncode=0, stdout=b"tree", stderr=b"")
         with patch.object(gen.subprocess, "run", return_value=result) as run:
             gen.cargo_tree(self.root, gen.TARGETS[1])
         args = run.call_args.args[0]

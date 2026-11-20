@@ -84,6 +84,8 @@ jobs:
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Install Rust MSRV
         # Use runner-provided rustup to keep actions limited to actions/*.
@@ -142,6 +144,9 @@ jobs:
 
       - name: Test native JAR packaging
         run: python3 -B crates/spark-connect-server/jvm/test_package_native.py
+
+      - name: Test native loader runner guards
+        run: python3 -B crates/spark-connect-server/jvm/test_native_loader_runner.py
 
       - name: Test C bridge
         run: crates/spark-connect-server/jni/test-c-bridge.sh
@@ -287,6 +292,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-python@v5
         with:
@@ -354,6 +361,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-java@v4
         with:

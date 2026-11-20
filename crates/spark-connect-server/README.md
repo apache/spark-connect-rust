@@ -672,6 +672,7 @@ cargo clippy -p spark-connect-server -p spark-connect-jni --all-targets --no-dep
 crates/spark-connect-server/jni/test-c-bridge.sh
 crates/spark-connect-server/jni/test-c-bridge.sh --sanitize
 python3 -B crates/spark-connect-server/jvm/test_acceptance_guards.py
+python3 -B crates/spark-connect-server/jvm/test_native_loader_runner.py
 python3 -B crates/spark-connect-server/jvm/test_package_native.py
 crates/spark-connect-server/jvm/test-native-loader.sh
 ```
