@@ -2292,8 +2292,9 @@ impl SparkConnectClient {
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/spark.connect.SparkConnectService/ExecutePlan",
         );
+        let codec = crate::bytes_codec::ClientBytesCodec::<ExecutePlanResponse>::default();
         let resp = grpc
-            .server_streaming(req, path, crate::bytes_codec::BytesCodec)
+            .server_streaming(req, path, codec)
             .await
             .map_err(SparkError::from_grpc_status)?;
         Ok(resp.into_inner())
@@ -2312,8 +2313,9 @@ impl SparkConnectClient {
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/spark.connect.SparkConnectService/ReattachExecute",
         );
+        let codec = crate::bytes_codec::ClientBytesCodec::<ExecutePlanResponse>::default();
         let resp = grpc
-            .server_streaming(req, path, crate::bytes_codec::BytesCodec)
+            .server_streaming(req, path, codec)
             .await
             .map_err(SparkError::from_grpc_status)?;
         Ok(resp.into_inner())
@@ -2383,12 +2385,10 @@ impl SparkConnectClient {
         let path = tonic::codegen::http::uri::PathAndQuery::from_static(
             "/spark.connect.SparkConnectService/AnalyzePlan",
         );
-        let resp = within_deadline(
-            deadline,
-            grpc.unary(req, path, crate::bytes_codec::BytesCodec),
-        )
-        .await
-        .map_err(SparkError::from_grpc_status)?;
+        let codec = crate::bytes_codec::ClientBytesCodec::<AnalyzePlanResponse>::default();
+        let resp = within_deadline(deadline, grpc.unary(req, path, codec))
+            .await
+            .map_err(SparkError::from_grpc_status)?;
         Ok(resp.into_inner())
     }
 

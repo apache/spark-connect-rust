@@ -931,6 +931,12 @@ fn need_conversion_of_fields(py: Python<'_>, fields: &Bound<'_, PyList>) -> PyRe
 /// The types that `obj` holds are read as PySpark's call of their `needConversion` reads them
 /// (see `child_need_conversion`).
 fn need_conversion_of_object(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    // A level of the type objects of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| need_conversion_of_object_level(py, obj))
+}
+
+/// [`need_conversion_of_object`] of one level of a type object.
+fn need_conversion_of_object_level(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     fn of_child(py: Python<'_>, kept: &KeptType, snapshot: &DataType) -> PyResult<bool> {
         match kept.kept(py) {
             Some(object) => child_need_conversion(py, object.bind(py)),
@@ -1294,6 +1300,17 @@ fn nested_lowered_in<'py>(
     depth: i32,
     fields_only: bool,
 ) -> PyResult<Option<Bound<'py, PyAny>>> {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| nested_lowered_in_level(py, data_type, depth, fields_only))
+}
+
+/// [`nested_lowered_in`] of one level.
+fn nested_lowered_in_level<'py>(
+    py: Python<'py>,
+    data_type: &DataType,
+    depth: i32,
+    fields_only: bool,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
     if depth <= 0 {
         return Ok(None);
     }
@@ -1398,6 +1415,17 @@ fn converter_flag_is_other(
     object: Option<&Bound<'_, PyAny>>,
     nullable: bool,
 ) -> PyResult<bool> {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| converter_flag_is_other_level(py, data_type, object, nullable))
+}
+
+/// [`converter_flag_is_other`] of one level.
+fn converter_flag_is_other_level(
+    py: Python<'_>,
+    data_type: &DataType,
+    object: Option<&Bound<'_, PyAny>>,
+    nullable: bool,
+) -> PyResult<bool> {
     if !crate::infer::needs_converter(data_type, nullable) {
         return Ok(false);
     }
@@ -1480,6 +1508,12 @@ fn converter_flag_is_other(
 /// str, a type is a `StructField`, or a type, `obj` itself or one in it, is of a Python subclass,
 /// whose JSON is of its own methods.
 pub(crate) fn has_other_flag(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| has_other_flag_level(py, obj))
+}
+
+/// [`has_other_flag`] of one level.
+fn has_other_flag_level(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
     if is_subclass_object(obj) {
         return Ok(true);
     }
@@ -1545,6 +1579,12 @@ const COLLATIONS_METADATA_KEY: &str = "__COLLATIONS";
 /// field then writes the types of `removeCollations(self.dataType)`, of the base classes of its
 /// strings, arrays and maps, and the collations in its metadata, as the core's JSON does.
 fn has_collations(data_type: &DataType) -> bool {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| has_collations_level(data_type))
+}
+
+/// [`has_collations`] of one level.
+fn has_collations_level(data_type: &DataType) -> bool {
     match data_type {
         DataType::String { collation } => collation != "UTF8_BINARY",
         DataType::Array { element_type, .. } => has_collations(element_type),
@@ -1562,6 +1602,17 @@ fn has_collations(data_type: &DataType) -> bool {
 /// Returns whether one of them is other than a bool, or one type is written of its own object.
 /// `collated` is of a type in a field that has collations (see `has_collations`).
 fn keep_flags_in_json(
+    py: Python<'_>,
+    json: &Bound<'_, PyAny>,
+    obj: &Bound<'_, PyAny>,
+    collated: bool,
+) -> PyResult<bool> {
+    // A level of the JSON of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| keep_flags_in_json_level(py, json, obj, collated))
+}
+
+/// [`keep_flags_in_json`] of one level of a type object.
+fn keep_flags_in_json_level(
     py: Python<'_>,
     json: &Bound<'_, PyAny>,
     obj: &Bound<'_, PyAny>,
@@ -1687,7 +1738,17 @@ fn type_json_value<'py>(
     py: Python<'py>,
     obj: &Bound<'py, PyAny>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
-    let json = py_json_value(py, &py_to_data_type_as_given(obj)?.json_value(), false)?;
+    // Of a type of many levels, whose JSON values and copies recurse over its levels as they
+    // are made, on a stack with room for a level (the recursions below grow on their own).
+    crate::pbmsg::grow(|| type_json_value_level(py, obj))
+}
+
+/// [`type_json_value`] of one level.
+fn type_json_value_level<'py>(
+    py: Python<'py>,
+    obj: &Bound<'py, PyAny>,
+) -> PyResult<(Bound<'py, PyAny>, bool)> {
+    let json = py_json_value(py, py_to_data_type_as_given(obj)?.json_value(), false)?;
     let mut other = keep_flags_in_json(py, &json, obj, false)?;
     // As PySpark's `jsonValue` of an array, a map and a struct, of `self.typeName()`: of a Python
     // subclass, the name of its class, or its own `typeName`.
@@ -1705,6 +1766,13 @@ fn type_json_value<'py>(
 /// The `json()` of the type object `obj`: the core's text, or else `json.dumps` of its
 /// `jsonValue` when a flag is other than a bool, as PySpark's `json()` writes it.
 fn type_json_text(obj: &Bound<'_, PyAny>) -> PyResult<String> {
+    // Of a type of many levels, whose JSON values and copies recurse over its levels as they
+    // are made, on a stack with room for a level (the recursions below grow on their own).
+    crate::pbmsg::grow(|| type_json_text_level(obj))
+}
+
+/// [`type_json_text`] of one level.
+fn type_json_text_level(obj: &Bound<'_, PyAny>) -> PyResult<String> {
     let py = obj.py();
     let (json, other) = type_json_value(py, obj)?;
     if !other {
@@ -1718,9 +1786,12 @@ fn json_dumps(py: Python<'_>, json: &Bound<'_, PyAny>) -> PyResult<String> {
     let kwargs = pyo3::types::PyDict::new(py);
     kwargs.set_item("separators", (",", ":"))?;
     kwargs.set_item("sort_keys", true)?;
-    py.import("json")?
-        .call_method("dumps", (json,), Some(&kwargs))?
-        .extract()
+    // Of the JSON of a type of many levels, which the encoder of Python recurses over in C.
+    grow_for_json(|| {
+        py.import("json")?
+            .call_method("dumps", (json,), Some(&kwargs))?
+            .extract()
+    })
 }
 
 /// The `json()` text of the type object `schema`, as PySpark's `json()` writes it, when the core's
@@ -1753,11 +1824,21 @@ fn field_json_value<'py>(
     py: Python<'py>,
     field: &Bound<'py, PyStructField>,
 ) -> PyResult<(Bound<'py, PyAny>, bool)> {
+    // Of a type of many levels, whose JSON values and copies recurse over its levels as they
+    // are made, on a stack with room for a level (the recursions below grow on their own).
+    crate::pbmsg::grow(|| field_json_value_level(py, field))
+}
+
+/// [`field_json_value`] of one level.
+fn field_json_value_level<'py>(
+    py: Python<'py>,
+    field: &Bound<'py, PyStructField>,
+) -> PyResult<(Bound<'py, PyAny>, bool)> {
     let v = field
         .borrow()
         .current_field_of(py, MetadataOf::AsGiven)?
         .json_value();
-    let json = py_json_value(py, &v, true)?;
+    let json = py_json_value(py, v, true)?;
     let other = keep_flags_in_json(py, &json, field.as_any(), false)?;
     Ok((json, other))
 }
@@ -1868,6 +1949,12 @@ pub(crate) enum MetadataOf {
 /// The `UnicodeEncodeError` of the first str of `value`, of metadata, that UTF-8 cannot encode:
 /// of the keys and the values of its dicts and the items of its lists and tuples, in their order.
 fn check_metadata_strs(value: &Bound<'_, PyAny>) -> PyResult<()> {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| check_metadata_strs_level(value))
+}
+
+/// [`check_metadata_strs`] of one level.
+fn check_metadata_strs_level(value: &Bound<'_, PyAny>) -> PyResult<()> {
     if let Ok(text) = value.cast::<pyo3::types::PyString>() {
         text.to_cow()?;
     } else if let Ok(dict) = value.cast::<pyo3::types::PyDict>() {
@@ -1908,6 +1995,12 @@ const FIELD_JSON_KEYS: [&str; 4] = ["name", "type", "nullable", "metadata"];
 /// the keys of its objects in the order of PySpark's `jsonValue`. The core's JSON objects
 /// sort their keys, as `json()` does; the metadata of a field stays in that order.
 fn ordered_json_text(v: &serde_json::Value, field: bool) -> String {
+    // A level of the JSON of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| ordered_json_text_level(v, field))
+}
+
+/// [`ordered_json_text`] of one level of a JSON value.
+fn ordered_json_text_level(v: &serde_json::Value, field: bool) -> String {
     let Some(object) = v.as_object() else {
         return v.to_string();
     };
@@ -1953,12 +2046,65 @@ fn ordered_json_text(v: &serde_json::Value, field: bool) -> String {
 /// dicts have the keys in the order of PySpark's, as `json.dumps(t.jsonValue())` shows.
 fn py_json_value<'py>(
     py: Python<'py>,
-    v: &serde_json::Value,
+    v: serde_json::Value,
     field: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
-    py.import("json")?
-        .getattr("loads")?
-        .call1((ordered_json_text(v, field),))
+    let text = ordered_json_text(&v, field);
+    drop_json_value(v);
+    // Of the JSON of a type of many levels, which the decoder of Python recurses over in C, once
+    // per level, on a stack with room for them; of a shallow one, as it is.
+    let loads = || py.import("json")?.getattr("loads")?.call1((text.as_str(),));
+    if json_text_depth(&text) > SHALLOW_JSON_LEVELS {
+        grow_for_json(loads)
+    } else {
+        loads()
+    }
+}
+
+/// The levels of JSON that Python's decoder of `json` reads on any stack that holds a level of a
+/// conversion (of `pbmsg::grow`), of its frames of a few hundred bytes a level.
+const SHALLOW_JSON_LEVELS: usize = 64;
+
+/// The levels of the arrays and objects of the JSON text `text`, nested in each other, at their
+/// deepest.
+fn json_text_depth(text: &str) -> usize {
+    let (mut depth, mut deepest, mut in_string, mut escaped) = (0usize, 0usize, false, false);
+    for byte in text.bytes() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                deepest = deepest.max(depth);
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    deepest
+}
+
+/// Drop `value`, a JSON value of any depth, of no recursion: the drop of `serde_json` recurses
+/// once per level of arrays and objects.
+fn drop_json_value(value: serde_json::Value) {
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::Array(items) => pending.extend(items),
+            serde_json::Value::Object(entries) => {
+                pending.extend(entries.into_iter().map(|(_, item)| item))
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The `toInternal` or `fromInternal` (the `_to_internal` or `_from_internal` of the shim
@@ -1978,6 +2124,12 @@ fn shim_conversion<'py>(
 /// `needConversion` of `data_type`, as PySpark's: that of a year-month interval is false with
 /// `PYSPARK_YM_INTERVAL_LEGACY=1`, with which `df.collect` returns the internal integers.
 fn need_conversion(py: Python<'_>, data_type: &DataType) -> PyResult<bool> {
+    // A level of a type of many levels, such as the schema of a response, on a stack with room.
+    crate::pbmsg::grow(|| need_conversion_level(py, data_type))
+}
+
+/// [`need_conversion`] of one level of a type.
+fn need_conversion_level(py: Python<'_>, data_type: &DataType) -> PyResult<bool> {
     Ok(match data_type {
         DataType::YearMonthInterval { .. } => !py
             .import("os")?
@@ -2087,7 +2239,7 @@ impl PyDataType {
             return slf.call_method0(pyo3::intern!(py, "typeName"));
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     // As PySpark's `DataType.needConversion`, false of a type of its class only.
     #[pyo3(name = "needConversion")]
@@ -2256,6 +2408,13 @@ fn has_pyspark_attributes(data_type: &DataType) -> bool {
 /// holds the attributes that a user set: `StringType() == MyString()` is
 /// `MyString().__eq__(StringType())`, false in both orders.
 fn data_type_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
+    // Of a type of many levels, whose JSON values and copies recurse over its levels as they
+    // are made, on a stack with room for a level (the recursions below grow on their own).
+    crate::pbmsg::grow(|| data_type_eq_level(a, b))
+}
+
+/// [`data_type_eq`] of one level.
+fn data_type_eq_level(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>) -> PyResult<bool> {
     if !b.is_instance_of::<PyDataType>() {
         return Ok(false);
     }
@@ -2405,7 +2564,7 @@ impl PyNullType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(NullType.needConversion)]
@@ -2499,7 +2658,7 @@ impl PyBooleanType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(BooleanType.needConversion)]
@@ -2587,7 +2746,7 @@ impl PyByteType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(ByteType.needConversion)]
@@ -2674,7 +2833,7 @@ impl PyShortType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(ShortType.needConversion)]
@@ -2761,7 +2920,7 @@ impl PyIntegerType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(IntegerType.needConversion)]
@@ -2848,7 +3007,7 @@ impl PyLongType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(LongType.needConversion)]
@@ -2935,7 +3094,7 @@ impl PyFloatType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(FloatType.needConversion)]
@@ -3027,7 +3186,7 @@ impl PyDoubleType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(DoubleType.needConversion)]
@@ -3146,7 +3305,7 @@ impl PyDecimalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(DecimalType.needConversion)]
@@ -3322,7 +3481,7 @@ impl PyStringType {
             return slf.call_method0(pyo3::intern!(py, "simpleString"));
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(StringType.needConversion)]
@@ -3452,7 +3611,7 @@ impl PyBinaryType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(BinaryType.needConversion)]
@@ -3543,7 +3702,7 @@ impl PyDateType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -3628,7 +3787,7 @@ impl PyTimestampType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -3722,7 +3881,7 @@ impl PyTimestampNTZType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -3947,18 +4106,22 @@ impl PyArrayType {
         elementType: &Bound<'_, PyAny>,
         containsNull: Py<PyAny>,
     ) -> PyResult<()> {
-        let et = nested_data_type(elementType, "elementType")?;
-        let contains_null = containsNull.bind(slf.py()).is_truthy()?;
-        let mut this = slf.borrow_mut();
-        this.as_super().inner = Some(DataType::Array {
-            element_type: Box::new(et.clone()),
-            contains_null,
-        });
-        this.element_type = et;
-        this.contains_null = contains_null;
-        this.element_object = KeptType::of(elementType);
-        this.contains_null_object = containsNull;
-        Ok(())
+        // Of a type of many levels, whose lowering and copies recurse over its levels, on a
+        // stack with room for a level (the recursions below grow on their own).
+        crate::pbmsg::grow(|| {
+            let et = nested_data_type(elementType, "elementType")?;
+            let contains_null = containsNull.bind(slf.py()).is_truthy()?;
+            let mut this = slf.borrow_mut();
+            this.as_super().inner = Some(DataType::Array {
+                element_type: Box::new(et.clone()),
+                contains_null,
+            });
+            this.element_type = et;
+            this.contains_null = contains_null;
+            this.element_object = KeptType::of(elementType);
+            this.contains_null_object = containsNull;
+            Ok(())
+        })
     }
     /// The type of the state that PySpark pickled, of `elementType` and `containsNull`, which
     /// pickle sets as attributes (see `set_pickled_state`).
@@ -3985,11 +4148,14 @@ impl PyArrayType {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        // Mirror pyspark: ArrayType(<elementType repr>, <containsNull>).
-        let el = self.element_object.object(py, &self.element_type)?;
-        let el_repr: String = el.bind(py).repr()?.extract()?;
-        let contains_null: String = self.contains_null_object.bind(py).str()?.extract()?;
-        Ok(format!("ArrayType({}, {})", el_repr, contains_null))
+        // Mirror pyspark: ArrayType(<elementType repr>, <containsNull>). A level of the repr of a
+        // type of many levels, on a stack with room.
+        crate::pbmsg::grow(|| {
+            let el = self.element_object.object(py, &self.element_type)?;
+            let el_repr: String = el.bind(py).repr()?.extract()?;
+            let contains_null: String = self.contains_null_object.bind(py).str()?.extract()?;
+            Ok(format!("ArrayType({}, {})", el_repr, contains_null))
+        })
     }
     // As PySpark's, of the `simpleString()` of the element type object (see
     // `child_simple_string`).
@@ -4223,22 +4389,26 @@ impl PyMapType {
         valueType: &Bound<'_, PyAny>,
         valueContainsNull: Py<PyAny>,
     ) -> PyResult<()> {
-        let kt = nested_data_type(keyType, "keyType")?;
-        let vt = nested_data_type(valueType, "valueType")?;
-        let value_contains_null = valueContainsNull.bind(slf.py()).is_truthy()?;
-        let mut this = slf.borrow_mut();
-        this.as_super().inner = Some(DataType::Map {
-            key_type: Box::new(kt.clone()),
-            value_type: Box::new(vt.clone()),
-            value_contains_null,
-        });
-        this.key_type = kt;
-        this.value_type = vt;
-        this.value_contains_null = value_contains_null;
-        this.key_object = KeptType::of(keyType);
-        this.value_object = KeptType::of(valueType);
-        this.value_contains_null_object = valueContainsNull;
-        Ok(())
+        // Of a type of many levels, whose lowering and copies recurse over its levels, on a
+        // stack with room for a level (the recursions below grow on their own).
+        crate::pbmsg::grow(|| {
+            let kt = nested_data_type(keyType, "keyType")?;
+            let vt = nested_data_type(valueType, "valueType")?;
+            let value_contains_null = valueContainsNull.bind(slf.py()).is_truthy()?;
+            let mut this = slf.borrow_mut();
+            this.as_super().inner = Some(DataType::Map {
+                key_type: Box::new(kt.clone()),
+                value_type: Box::new(vt.clone()),
+                value_contains_null,
+            });
+            this.key_type = kt;
+            this.value_type = vt;
+            this.value_contains_null = value_contains_null;
+            this.key_object = KeptType::of(keyType);
+            this.value_object = KeptType::of(valueType);
+            this.value_contains_null_object = valueContainsNull;
+            Ok(())
+        })
     }
     /// The type of the state that PySpark pickled, of `keyType`, `valueType` and
     /// `valueContainsNull`, which pickle sets as attributes (see `set_pickled_state`).
@@ -4267,22 +4437,25 @@ impl PyMapType {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        // Mirror pyspark: MapType(<keyType repr>, <valueType repr>, <valueContainsNull>).
-        let k: String = self
-            .key_object
-            .object(py, &self.key_type)?
-            .bind(py)
-            .repr()?
-            .extract()?;
-        let v: String = self
-            .value_object
-            .object(py, &self.value_type)?
-            .bind(py)
-            .repr()?
-            .extract()?;
-        let value_contains_null: String =
-            self.value_contains_null_object.bind(py).str()?.extract()?;
-        Ok(format!("MapType({}, {}, {})", k, v, value_contains_null))
+        // Mirror pyspark: MapType(<keyType repr>, <valueType repr>, <valueContainsNull>). A level
+        // of the repr of a type of many levels, on a stack with room.
+        crate::pbmsg::grow(|| {
+            let k: String = self
+                .key_object
+                .object(py, &self.key_type)?
+                .bind(py)
+                .repr()?
+                .extract()?;
+            let v: String = self
+                .value_object
+                .object(py, &self.value_type)?
+                .bind(py)
+                .repr()?
+                .extract()?;
+            let value_contains_null: String =
+                self.value_contains_null_object.bind(py).str()?.extract()?;
+            Ok(format!("MapType({}, {}, {})", k, v, value_contains_null))
+        })
     }
     // As PySpark's, of the `simpleString()` of the key and value type objects (see
     // `child_simple_string`).
@@ -4659,24 +4832,28 @@ impl PyStructField {
         nullable: Py<PyAny>,
         metadata: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<()> {
-        let py = slf.py();
-        let data_type = nested_data_type(dataType, "dataType")?;
-        let name = field_name(name)?;
-        let md = match metadata {
-            Some(d) => kept_metadata(py, d)?,
-            None => Metadata::new(),
-        };
-        let field = StructField {
-            name,
-            data_type,
-            nullable: nullable.bind(py).is_truthy()?,
-            metadata: md,
-        };
-        let this = Self::build(py, field, metadata, nullable, KeptType::of(dataType))?;
-        // The parts that this replaces are freed after the borrow ends.
-        let replaced = std::mem::replace(&mut *slf.borrow_mut(), this);
-        drop(replaced);
-        Ok(())
+        // Of a type of many levels, whose lowering and copies recurse over its levels, on a
+        // stack with room for a level (the recursions below grow on their own).
+        crate::pbmsg::grow(|| {
+            let py = slf.py();
+            let data_type = nested_data_type(dataType, "dataType")?;
+            let name = field_name(name)?;
+            let md = match metadata {
+                Some(d) => kept_metadata(py, d)?,
+                None => Metadata::new(),
+            };
+            let field = StructField {
+                name,
+                data_type,
+                nullable: nullable.bind(py).is_truthy()?,
+                metadata: md,
+            };
+            let this = Self::build(py, field, metadata, nullable, KeptType::of(dataType))?;
+            // The parts that this replaces are freed after the borrow ends.
+            let replaced = std::mem::replace(&mut *slf.borrow_mut(), this);
+            drop(replaced);
+            Ok(())
+        })
     }
     /// The field of the state that PySpark pickled, of `name`, `dataType`, `nullable` and
     /// `metadata`, which pickle sets as attributes (see `set_pickled_state`).
@@ -4771,14 +4948,17 @@ impl PyStructField {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        // Mirror pyspark: StructField('name', <DataType repr>, nullable).
-        let dt = self.data_type_object.object(py, &self.field.data_type)?;
-        let dt_repr: String = dt.bind(py).repr()?.extract()?;
-        let nullable: String = self.nullable.bind(py).str()?.extract()?;
-        Ok(format!(
-            "StructField('{}', {}, {})",
-            self.field.name, dt_repr, nullable
-        ))
+        // Mirror pyspark: StructField('name', <DataType repr>, nullable). A level of the repr of a
+        // type of many levels, on a stack with room.
+        crate::pbmsg::grow(|| {
+            let dt = self.data_type_object.object(py, &self.field.data_type)?;
+            let dt_repr: String = dt.bind(py).repr()?.extract()?;
+            let nullable: String = self.nullable.bind(py).str()?.extract()?;
+            Ok(format!(
+                "StructField('{}', {}, {})",
+                self.field.name, dt_repr, nullable
+            ))
+        })
     }
     /// As PySpark's `DataType.__eq__`: of a field of the class of `self` or a subclass of it, as
     /// `isinstance(other, self.__class__)`, and of its `__dict__`, of the parameters and of the
@@ -5125,15 +5305,19 @@ impl PyStructType {
     /// which sets the `fields`, the `names` and the `_needConversion` of the struct.
     #[pyo3(signature = (fields=None))]
     fn __init__(slf: &Bound<'_, Self>, fields: Option<Bound<'_, PyAny>>) -> PyResult<()> {
-        let py = slf.py();
-        let (base, parts) = Self::parts_of(py, fields)?;
-        let mut this = slf.borrow_mut();
-        this.as_super().inner = Some(base);
-        // The parts that this replaces are freed after the borrow ends.
-        let replaced = std::mem::replace(&mut *this, parts);
-        drop(this);
-        drop(replaced);
-        Ok(())
+        // Of a type of many levels, whose lowering and copies recurse over its levels, on a
+        // stack with room for a level (the recursions below grow on their own).
+        crate::pbmsg::grow(|| {
+            let py = slf.py();
+            let (base, parts) = Self::parts_of(py, fields)?;
+            let mut this = slf.borrow_mut();
+            this.as_super().inner = Some(base);
+            // The parts that this replaces are freed after the borrow ends.
+            let replaced = std::mem::replace(&mut *this, parts);
+            drop(this);
+            drop(replaced);
+            Ok(())
+        })
     }
 
     /// The struct of the state that PySpark pickled, of `fields`, `names`, `_needConversion` and
@@ -5494,12 +5678,15 @@ impl PyStructType {
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
-        // Mirror pyspark: StructType([str(field), ...]), each field as its own repr shows it.
-        let mut parts = Vec::with_capacity(self.fields.bind(py).len());
-        for field in self.fields.bind(py).iter() {
-            parts.push(field.str()?.extract::<String>()?);
-        }
-        Ok(format!("StructType([{}])", parts.join(", ")))
+        // Mirror pyspark: StructType([str(field), ...]), each field as its own repr shows it. A
+        // level of the repr of a type of many levels, on a stack with room.
+        crate::pbmsg::grow(|| {
+            let mut parts = Vec::with_capacity(self.fields.bind(py).len());
+            for field in self.fields.bind(py).iter() {
+                parts.push(field.str()?.extract::<String>()?);
+            }
+            Ok(format!("StructType([{}])", parts.join(", ")))
+        })
     }
 }
 
@@ -5541,7 +5728,7 @@ impl PyCharType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(CharType.needConversion)]
@@ -5644,7 +5831,7 @@ impl PyVarcharType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     #[doc = connect_doc!(VarcharType.needConversion)]
@@ -5747,7 +5934,7 @@ impl PyTimeType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -5832,7 +6019,7 @@ impl PyTimestampNTZNanosType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -5912,7 +6099,7 @@ impl PyTimestampLTZNanosType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -6002,7 +6189,7 @@ impl PyCalendarIntervalType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -6140,7 +6327,7 @@ impl PyYearMonthIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -6319,7 +6506,7 @@ impl PyDayTimeIntervalType {
         py: Python<'py>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -6447,7 +6634,7 @@ impl PyVariantType {
             return type_name_of(slf.as_any());
         }
         let v = py_to_data_type(slf.as_any())?.json_value();
-        py_json_value(py, &v, false)
+        py_json_value(py, v, false)
     }
     #[pyo3(name = "needConversion")]
     fn __obj_need_conversion(slf: &Bound<'_, Self>) -> PyResult<bool> {
@@ -6887,6 +7074,12 @@ pub fn parse_datatype_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
 /// field access so schema introspection yields the proper classes (not a bare `DataType`).
 /// Whether `data_type` has a user-defined type.
 pub(crate) fn has_udt(data_type: &DataType) -> bool {
+    // A level of a type of many levels, such as the schema of a response, on a stack with room.
+    crate::pbmsg::grow(|| has_udt_level(data_type))
+}
+
+/// [`has_udt`] of one level.
+fn has_udt_level(data_type: &DataType) -> bool {
     match data_type {
         DataType::Udt { .. } => true,
         DataType::Array { element_type, .. } => has_udt(element_type),
@@ -6905,6 +7098,12 @@ pub(crate) fn has_udt(data_type: &DataType) -> bool {
 /// `StructField` as a type or a type of its class only. Two such types of the same JSON, such as
 /// `UserDefinedType`s of other parameters, are told apart only by their objects.
 fn holds_objects(data_type: &DataType) -> bool {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| holds_objects_level(data_type))
+}
+
+/// [`holds_objects`] of one level.
+fn holds_objects_level(data_type: &DataType) -> bool {
     match data_type {
         DataType::Udt { .. } | DataType::Unparsed { .. } => true,
         DataType::Array { element_type, .. } => holds_objects(element_type),
@@ -6922,6 +7121,16 @@ fn holds_objects(data_type: &DataType) -> bool {
 /// holds of `holds`: the field of a struct, the type of a field, the element of an array, or the
 /// key or the value of a map, which `holds` reads, as their own children.
 fn keeps_object_of(
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    holds: fn(Python<'_>, &Bound<'_, PyAny>) -> PyResult<bool>,
+) -> PyResult<bool> {
+    // A level of the type objects of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| keeps_object_of_level(py, obj, holds))
+}
+
+/// [`keeps_object_of`] of one level of a type object.
+fn keeps_object_of_level(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
     holds: fn(Python<'_>, &Bound<'_, PyAny>) -> PyResult<bool>,
@@ -7001,6 +7210,17 @@ fn holds_metadata(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<bool> {
 /// kept, so that a type that the client keeps as its object is named by it, which its JSON does
 /// not tell apart from another of the same JSON; else of its core type.
 fn child_simple_string(py: Python<'_>, kept: &KeptType, snapshot: &DataType) -> PyResult<String> {
+    // A level of the objects of a type of many levels, such as the schema of a response, on a
+    // stack with room.
+    crate::pbmsg::grow(|| child_simple_string_level(py, kept, snapshot))
+}
+
+/// [`child_simple_string`] of one level.
+fn child_simple_string_level(
+    py: Python<'_>,
+    kept: &KeptType,
+    snapshot: &DataType,
+) -> PyResult<String> {
     match kept.kept(py) {
         Some(object) => object
             .bind(py)
@@ -7016,6 +7236,12 @@ fn child_simple_string(py: Python<'_>, kept: &KeptType, snapshot: &DataType) -> 
 /// the object itself, as PySpark's base `_as_nullable` returns `self`, so that a
 /// `UserDefinedType`, a `DecimalType` or a type of its class only stays the object it was.
 fn as_nullable<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| as_nullable_level(obj))
+}
+
+/// [`as_nullable`] of one level.
+fn as_nullable_level<'py>(obj: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     let py = obj.py();
     if obj.is_instance_of::<PyArrayType>() {
         let element = as_nullable(&obj.getattr(pyo3::intern!(py, "elementType"))?)?;
@@ -7130,6 +7356,12 @@ fn held_objects_eq(a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>, core: &DataType) 
 /// `pyspark.sql.types._udt_field_converters`: of a user-defined type, which deserializes them,
 /// or of a GEOMETRY or a GEOGRAPHY, which makes their Python objects.
 pub(crate) fn has_converted_values(data_type: &DataType) -> bool {
+    // A level of a type of many levels, on a stack with room.
+    crate::pbmsg::grow(|| has_converted_values_level(data_type))
+}
+
+/// [`has_converted_values`] of one level.
+fn has_converted_values_level(data_type: &DataType) -> bool {
     match data_type {
         DataType::Udt { .. } | DataType::Geometry { .. } | DataType::Geography { .. } => true,
         DataType::Array { element_type, .. } => has_converted_values(element_type),
@@ -7148,6 +7380,12 @@ pub(crate) fn has_converted_values(data_type: &DataType) -> bool {
 /// The `simpleString()` of `data_type` as PySpark's: of the Python class of each of its
 /// user-defined types, such as `vector` of a `VectorUDT`, which the Rust core does not know.
 pub(crate) fn simple_string_with_udts(py: Python<'_>, data_type: &DataType) -> PyResult<String> {
+    // A level of a type of many levels, such as the schema of a response, on a stack with room.
+    crate::pbmsg::grow(|| simple_string_with_udts_level(py, data_type))
+}
+
+/// [`simple_string_with_udts`] of one level of a type.
+fn simple_string_with_udts_level(py: Python<'_>, data_type: &DataType) -> PyResult<String> {
     Ok(match data_type {
         DataType::Udt { .. } => data_type_to_py(py, data_type)?
             .bind(py)
@@ -7186,7 +7424,35 @@ pub(crate) fn simple_string_with_udts(py: Python<'_>, data_type: &DataType) -> P
     })
 }
 
+/// The stack that the decoder and the encoder of Python's `json` take of the JSON of a type of
+/// many levels, which they recurse over in C, once per level, up to Python's recursion limit
+/// (about 1,000 levels, of a few hundred KiB), and the segment that a call with less room left
+/// takes.
+const JSON_STACK_RED_ZONE: usize = if cfg!(debug_assertions) {
+    4 << 20
+} else {
+    512 << 10
+};
+const JSON_STACK_SEGMENT: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+/// Run `f`, a call of Python's `json` of the JSON of a type of many levels, on a stack with room
+/// for its recursion, of a thread of a small stack too.
+fn grow_for_json<T>(f: impl FnOnce() -> T) -> T {
+    stacker::maybe_grow(JSON_STACK_RED_ZONE, JSON_STACK_SEGMENT, f)
+}
+
 pub(crate) fn data_type_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
+    // A level of a type of many levels, such as the schema of a response, on a stack with room (its
+    // copies of the types below it grow on their own).
+    crate::pbmsg::grow(|| data_type_to_py_level(py, dt))
+}
+
+/// [`data_type_to_py`] of one level of a type.
+fn data_type_to_py_level(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
     if matches!(
         dt,
         DataType::Struct { .. } | DataType::Array { .. } | DataType::Map { .. }
@@ -7458,6 +7724,13 @@ fn udt_of_json(py: Python<'_>, json: &str) -> PyResult<Py<PyAny>> {
 /// `__init__` takes arguments would not raise. A type of no user-defined type is made as
 /// `data_type_to_py` makes it.
 pub(crate) fn schema_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
+    // A level of a type of many levels, such as the schema of a response, on a stack with room (its
+    // copies of the types below it grow on their own).
+    crate::pbmsg::grow(|| schema_to_py_level(py, dt))
+}
+
+/// [`schema_to_py`] of one level of a type.
+fn schema_to_py_level(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>> {
     if !has_udt(dt) {
         return data_type_to_py(py, dt);
     }
@@ -7530,6 +7803,13 @@ pub(crate) fn schema_to_py(py: Python<'_>, dt: &DataType) -> PyResult<Py<PyAny>>
 /// JSON of the schema, and a schema made of it, have the `sqlType` as PySpark's have. A class that
 /// does not import keeps its type as it is, as before.
 fn with_udt_sql_types(py: Python<'_>, dt: &DataType) -> Option<DataType> {
+    // A level of a type of many levels, such as the schema of a response, on a stack with room (its
+    // copies of the types beside a filled one grow on their own).
+    crate::pbmsg::grow(|| with_udt_sql_types_level(py, dt))
+}
+
+/// [`with_udt_sql_types`] of one level of a type.
+fn with_udt_sql_types_level(py: Python<'_>, dt: &DataType) -> Option<DataType> {
     match dt {
         DataType::Udt {
             type_str,
@@ -7581,21 +7861,32 @@ fn with_udt_sql_types(py: Python<'_>, dt: &DataType) -> Option<DataType> {
             })
         }
         DataType::Struct { fields } => {
-            let mut filled = false;
-            let fields = fields
-                .iter()
-                .map(|field| match with_udt_sql_types(py, &field.data_type) {
-                    Some(data_type) => {
-                        filled = true;
-                        StructField {
-                            data_type,
-                            ..field.clone()
-                        }
-                    }
-                    None => field.clone(),
-                })
-                .collect();
-            filled.then_some(DataType::Struct { fields })
+            // Of no copy of the fields before one of them is filled, nor of a type that a filled
+            // one replaces.
+            let (first, filled) = fields.iter().enumerate().find_map(|(index, field)| {
+                with_udt_sql_types(py, &field.data_type).map(|filled| (index, filled))
+            })?;
+            let field_of = |field: &StructField, data_type| StructField {
+                name: field.name.clone(),
+                data_type,
+                nullable: field.nullable,
+                metadata: field.metadata.clone(),
+            };
+            let mut filled_fields = Vec::with_capacity(fields.len());
+            filled_fields.extend(
+                fields[..first]
+                    .iter()
+                    .map(|field| field_of(field, field.data_type.clone())),
+            );
+            filled_fields.push(field_of(&fields[first], filled));
+            filled_fields.extend(fields[first + 1..].iter().map(|field| {
+                let data_type = with_udt_sql_types(py, &field.data_type)
+                    .unwrap_or_else(|| field.data_type.clone());
+                field_of(field, data_type)
+            }));
+            Some(DataType::Struct {
+                fields: filled_fields,
+            })
         }
         _ => None,
     }
@@ -7650,6 +7941,15 @@ pub(crate) fn py_to_data_type_as_given(obj: &Bound<'_, PyAny>) -> PyResult<DataT
 
 /// The lowering of [`py_to_data_type`], of the metadata as `metadata` takes it.
 fn lower_type(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<DataType> {
+    // A level of a type object of many levels, of a response or that the user makes, whose
+    // lowering recurses through the objects of its fields, elements and values: on a stack with
+    // room, of a thread of a small stack too (its copies of the core types that they keep grow on
+    // their own).
+    crate::pbmsg::grow(|| lower_type_level(obj, metadata))
+}
+
+/// [`lower_type`] of one level of a type object.
+fn lower_type_level(obj: &Bound<'_, PyAny>, metadata: MetadataOf) -> PyResult<DataType> {
     if let Ok(g) = obj.extract::<PyRef<PyGeometryType>>() {
         return Ok(DataType::Geometry { srid: g.srid });
     }

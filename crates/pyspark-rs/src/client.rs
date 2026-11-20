@@ -153,7 +153,12 @@ impl PyExecutePlanResponses {
         };
         let of_response = ExecutionInfo {
             metrics: response.metrics.clone(),
-            observed_metrics: response.observed_metrics.clone(),
+            // Of literals of up to `spark_connect_proto::MAX_KEPT_DEPTH` levels.
+            observed_metrics: if response.observed_metrics.is_empty() {
+                Vec::new()
+            } else {
+                crate::on_grown_stack(|| response.observed_metrics.clone())
+            },
             operation_id: None,
         };
         let (metrics, observed) = crate::dataframe::execution_metrics(py, &of_response)?;

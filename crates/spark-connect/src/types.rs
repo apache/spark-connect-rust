@@ -20,7 +20,8 @@ pub use metadata::Metadata;
 /// All concrete types are variants of this enum. Each variant carries the data
 /// needed to fully specify that type (e.g., DecimalType carries precision and scale).
 // Not `Eq` (only `PartialEq`): a Struct field's metadata holds arbitrary JSON values, of floats.
-#[derive(Debug, Clone, PartialEq)]
+// `Clone` is of its own (see below), of a stack that grows with the levels of a type.
+#[derive(Debug, PartialEq)]
 pub enum DataType {
     /// `pyspark.sql.types.NullType`
     Null,
@@ -99,6 +100,100 @@ pub enum DataType {
     /// `pyspark.sql.connect.types.UnparsedDataType` - a DDL type string left for
     /// the server to parse (round-trips through the `unparsed` proto).
     Unparsed { data_type_string: String },
+}
+impl Clone for DataType {
+    /// A copy of the type, which recurses once per level of an array, a map, a struct or a
+    /// user-defined type: of each such level on a stack with room for it, so that a type of many
+    /// levels, such as the schema of a response or a type that a user makes, is copied on a thread
+    /// of a small stack too.
+    fn clone(&self) -> Self {
+        use crate::expression::with_stack_for_a_level as grow;
+        match self {
+            DataType::Array {
+                element_type,
+                contains_null,
+            } => grow(|| DataType::Array {
+                element_type: element_type.clone(),
+                contains_null: *contains_null,
+            }),
+            DataType::Map {
+                key_type,
+                value_type,
+                value_contains_null,
+            } => grow(|| DataType::Map {
+                key_type: key_type.clone(),
+                value_type: value_type.clone(),
+                value_contains_null: *value_contains_null,
+            }),
+            DataType::Struct { fields } => grow(|| DataType::Struct {
+                fields: fields.clone(),
+            }),
+            DataType::Udt {
+                type_str,
+                jvm_class,
+                python_class,
+                serialized_python_class,
+                sql_type,
+            } => grow(|| DataType::Udt {
+                type_str: type_str.clone(),
+                jvm_class: jvm_class.clone(),
+                python_class: python_class.clone(),
+                serialized_python_class: serialized_python_class.clone(),
+                sql_type: sql_type.clone(),
+            }),
+            DataType::Null => DataType::Null,
+            DataType::Boolean => DataType::Boolean,
+            DataType::Byte => DataType::Byte,
+            DataType::Short => DataType::Short,
+            DataType::Integer => DataType::Integer,
+            DataType::Long => DataType::Long,
+            DataType::Float => DataType::Float,
+            DataType::Double => DataType::Double,
+            DataType::Decimal { precision, scale } => DataType::Decimal {
+                precision: *precision,
+                scale: *scale,
+            },
+            DataType::String { collation } => DataType::String {
+                collation: collation.clone(),
+            },
+            DataType::Char { length } => DataType::Char { length: *length },
+            DataType::Varchar { length } => DataType::Varchar { length: *length },
+            DataType::Binary => DataType::Binary,
+            DataType::Date => DataType::Date,
+            DataType::Timestamp => DataType::Timestamp,
+            DataType::TimestampNtz => DataType::TimestampNtz,
+            DataType::Time { precision } => DataType::Time {
+                precision: *precision,
+            },
+            DataType::TimestampNtzNanos { precision } => DataType::TimestampNtzNanos {
+                precision: *precision,
+            },
+            DataType::TimestampLtzNanos { precision } => DataType::TimestampLtzNanos {
+                precision: *precision,
+            },
+            DataType::CalendarInterval => DataType::CalendarInterval,
+            DataType::YearMonthInterval {
+                start_field,
+                end_field,
+            } => DataType::YearMonthInterval {
+                start_field: *start_field,
+                end_field: *end_field,
+            },
+            DataType::DayTimeInterval {
+                start_field,
+                end_field,
+            } => DataType::DayTimeInterval {
+                start_field: *start_field,
+                end_field: *end_field,
+            },
+            DataType::Variant => DataType::Variant,
+            DataType::Geometry { srid } => DataType::Geometry { srid: *srid },
+            DataType::Geography { srid } => DataType::Geography { srid: *srid },
+            DataType::Unparsed { data_type_string } => DataType::Unparsed {
+                data_type_string: data_type_string.clone(),
+            },
+        }
+    }
 }
 
 /// Field-index constants for [`DataType::YearMonthInterval`], mirroring
@@ -469,11 +564,20 @@ impl DataType {
     /// struct field holds its values as `serde_json` values, which hold an int of 64 bits and a
     /// finite float: [`DataType::json`] writes them exactly.
     pub fn json_value(&self) -> serde_json::Value {
-        self.json_tree().to_serde()
+        let tree = self.json_tree();
+        let value = tree.to_serde();
+        tree.drop_iteratively();
+        value
     }
 
     /// The JSON value of the type, of the metadata of its fields as they are.
     pub(crate) fn json_tree(&self) -> Json {
+        // A level of a type of many levels, on a stack with room.
+        crate::expression::with_stack_for_a_level(|| self.json_tree_level())
+    }
+
+    /// [`DataType::json_tree`] of one level of the type.
+    fn json_tree_level(&self) -> Json {
         let text = |text: String| Json::Str(text);
         let object = |entries: Vec<(&str, Json)>| {
             Json::Object(
@@ -588,7 +692,9 @@ impl DataType {
     /// bits too.
     pub fn json(&self) -> String {
         let mut out = String::new();
-        self.json_tree().write_sorted(&mut out);
+        let tree = self.json_tree();
+        tree.write_sorted(&mut out);
+        tree.drop_iteratively();
         out
     }
 
@@ -604,6 +710,7 @@ impl DataType {
         lowered_json_in(self, &mut value);
         let mut out = String::new();
         value.write_sorted(&mut out);
+        value.drop_iteratively();
         out
     }
 
@@ -838,8 +945,14 @@ impl DataType {
     }
 
     /// Converts from a protobuf DataType, mirroring
-    /// `pyspark.sql.connect.types.proto_schema_to_pyspark_data_type`.
+    /// `pyspark.sql.connect.types.proto_schema_to_pyspark_data_type`. A type of many levels, such
+    /// as the schema of a response, converts on a stack that grows for its levels.
     pub fn from_proto(proto: &spark_connect_proto::DataType) -> Result<DataType> {
+        crate::expression::with_stack_for_a_level(|| Self::from_proto_level(proto))
+    }
+
+    /// [`DataType::from_proto`] of one level of a type.
+    fn from_proto_level(proto: &spark_connect_proto::DataType) -> Result<DataType> {
         match &proto.kind {
             Some(spark_connect_proto::data_type::Kind::Null(_)) => Ok(DataType::Null),
             Some(spark_connect_proto::data_type::Kind::Boolean(_)) => Ok(DataType::Boolean),
@@ -996,7 +1109,10 @@ impl StructField {
     /// `__COLLATIONS` of its metadata, by their paths, and not in its type, as Spark writes them.
     /// The values of the metadata are `serde_json` values (see [`DataType::json_value`]).
     pub fn json_value(&self) -> serde_json::Value {
-        self.json_tree().to_serde()
+        let tree = self.json_tree();
+        let value = tree.to_serde();
+        tree.drop_iteratively();
+        value
     }
 
     /// The JSON value of the field, of its metadata as it is.
@@ -1028,7 +1144,9 @@ impl StructField {
     /// The JSON text of the field, mirroring `StructField.json()` (see [`DataType::json`]).
     pub fn json(&self) -> String {
         let mut out = String::new();
-        self.json_tree().write_sorted(&mut out);
+        let tree = self.json_tree();
+        tree.write_sorted(&mut out);
+        tree.drop_iteratively();
         out
     }
 
@@ -1065,6 +1183,12 @@ impl DataType {
     /// `True == 1`. Not a stable API.
     #[doc(hidden)]
     pub fn eq_as_python(&self, other: &DataType) -> bool {
+        // A level of types of many levels, on a stack with room.
+        crate::expression::with_stack_for_a_level(|| self.eq_as_python_level(other))
+    }
+
+    /// [`DataType::eq_as_python`] of one level of the types.
+    fn eq_as_python_level(&self, other: &DataType) -> bool {
         match (self, other) {
             (DataType::Struct { fields: a }, DataType::Struct { fields: b }) => {
                 a.len() == b.len() && a.iter().zip(b).all(|(a, b)| a.eq_as_python(b))
@@ -1288,6 +1412,24 @@ impl DataType {
     /// Appends the tree below `self`, whose path from the root is `path`; see
     /// [`DataType::tree_string_with_names`].
     fn append_tree<F, N>(
+        &self,
+        out: &mut String,
+        prefix: &str,
+        remaining: i32,
+        path: &mut Vec<TreeStep>,
+        text: &mut TreeText<'_, F, N>,
+    ) where
+        F: FnMut(&[TreeStep], TreeFlag, bool) -> String,
+        N: FnMut(&[TreeStep], &DataType) -> Option<String>,
+    {
+        // A level of a type of many levels, on a stack with room.
+        crate::expression::with_stack_for_a_level(|| {
+            self.append_tree_level(out, prefix, remaining, path, text)
+        })
+    }
+
+    /// [`DataType::append_tree`] of one level of the type.
+    fn append_tree_level<F, N>(
         &self,
         out: &mut String,
         prefix: &str,
@@ -1536,6 +1678,18 @@ fn visit_collations(
     path: &str,
     collations: &mut serde_json::Map<String, serde_json::Value>,
 ) {
+    // A level of a type of many levels, on a stack with room.
+    crate::expression::with_stack_for_a_level(|| {
+        visit_collations_level(data_type, path, collations)
+    })
+}
+
+/// [`visit_collations`] of one level of a type.
+fn visit_collations_level(
+    data_type: &DataType,
+    path: &str,
+    collations: &mut serde_json::Map<String, serde_json::Value>,
+) {
     match data_type {
         DataType::Array { element_type, .. } => {
             visit_collations(element_type, &format!("{path}.element"), collations)
@@ -1657,6 +1811,12 @@ fn take_field_collations(metadata: &mut Metadata) -> Result<CollationsMap> {
 /// of a depth that [`Json::parse`] refuses is written too. Another unparsed type, of a DDL
 /// string, which starts with neither, stays `unparsed(...)`.
 fn lowered_json_in(data_type: &DataType, value: &mut Json) {
+    // A level of a type of many levels, on a stack with room.
+    crate::expression::with_stack_for_a_level(|| lowered_json_in_level(data_type, value))
+}
+
+/// [`lowered_json_in`] of one level of a type.
+fn lowered_json_in_level(data_type: &DataType, value: &mut Json) {
     match data_type {
         DataType::Unparsed { data_type_string } => {
             if data_type_string.trim_start().starts_with(['{', '"']) {
@@ -1706,6 +1866,12 @@ fn lowered_json_in(data_type: &DataType, value: &mut Json) {
 /// 64 bits and the floats that `serde_json` does not hold, as PySpark's `fromJson` takes the dicts
 /// of `json.loads`: of the same places of the JSON that the parser reads.
 fn exact_metadata_in(data_type: &mut DataType, value: &Json) {
+    // A level of a type of many levels, on a stack with room.
+    crate::expression::with_stack_for_a_level(|| exact_metadata_in_level(data_type, value))
+}
+
+/// [`exact_metadata_in`] of one level of a type.
+fn exact_metadata_in_level(data_type: &mut DataType, value: &Json) {
     match data_type {
         DataType::Array { element_type, .. } => {
             if let Some(element) = value.member("elementType") {

@@ -1950,16 +1950,19 @@ def _request_values(state: dict[str, Any], mode: int) -> tuple[Any, ...]:
 
 def _parse_response(message_class: Any, data: bytes, streaming: bool = False) -> Any:
     """The response of the server of the bytes ``data``, a message of ``message_class``, as
-    PySpark's client has the response of gRPC, of any depth, as the Rust transport reads the
-    responses (where PySpark's deserializer stops at 100 levels, see docs/compatibility.md). Bytes
-    that do not parse raise PySpark's error of a response that gRPC's deserializer refuses: the
+    PySpark's client has the response of gRPC, whose deserializer is upb's ``FromString``: of at
+    most 100 levels of messages, or 65535 once upb's ``SetAllowOversizeProtos(True)`` is called,
+    as the Rust transport reads the responses, whose ``RecursionError`` of a response whose kept
+    messages nest more than 1024 levels it raises too (see docs/compatibility.md). Bytes that do
+    not parse raise PySpark's error of a response that gRPC's deserializer refuses: the
     ``SparkConnectGrpcException`` of the status ``INTERNAL`` of grpc's error of the call
     (``_MultiThreadedRendezvous`` of a call of a stream of responses, ``streaming``, else
     ``_InactiveRpcError``), whose details are "Exception deserializing response!"."""
     from pyspark.sql.connect.proto._rust import DecodeError
 
     try:
-        return _pyspark._proto_parse_deep(message_class, data)
+        _pyspark._proto_check_response_depth(message_class.DESCRIPTOR.full_name, data)
+        return message_class.FromString(data)
     except DecodeError:
         from pyspark.errors.exceptions.connect import SparkConnectGrpcException, StatusCode
 

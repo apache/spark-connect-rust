@@ -56,7 +56,8 @@ pub fn get_runtime() -> &'static Runtime {
 /// leaves for the nested `block_on`.
 ///
 /// The future is driven from the heap, so that the stack of the calling thread holds no copy of
-/// it, however large it is.
+/// it, however large it is, and is polled on a stack with room for its polls: that of the thread,
+/// or, of a thread of a small stack, a segment of a few MiB.
 pub fn block_on<F>(f: F) -> F::Output
 where
     F: std::future::Future + Send,
@@ -71,11 +72,35 @@ where
     let watch = WAIT_WATCH.with(|watch| watch.borrow().clone());
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| drive(f, watch))
+            tokio::task::block_in_place(|| on_wait_stack(|| drive(f, watch)))
         }
         Ok(_) => block_on_other_thread(f),
-        _ => drive(f, watch),
+        _ => on_wait_stack(|| drive(f, watch)),
     }
+}
+
+/// The stack that the polls of the future of a wait take, and the segment that a wait on a thread
+/// with less room left polls it on: the futures of the RPCs nest tonic's, hyper's, the deadlines'
+/// and the retries', whose polls keep frames of tens of KiB each, so that the polls of an analysis
+/// or an execution take up to about 320 KiB of stack in a release build (many times that in a
+/// debug one), more than a thread of a small stack has, such as a Python thread of 256 KiB, of
+/// `threading.stack_size`. A thread of 512 KiB has the room, so its waits map no segment.
+const WAIT_STACK_RED_ZONE: usize = if cfg!(debug_assertions) {
+    4 << 20
+} else {
+    448 << 10
+};
+const WAIT_STACK_SEGMENT: usize = if cfg!(debug_assertions) {
+    16 << 20
+} else {
+    4 << 20
+};
+
+/// Run `f`, which drives the future of a wait, on the stack of the thread when it has room for the
+/// polls of the future, as the main thread of Python and the threads of the runtime have, else on
+/// a segment of [`WAIT_STACK_SEGMENT`].
+fn on_wait_stack<R>(f: impl FnOnce() -> R) -> R {
+    stacker::maybe_grow(WAIT_STACK_RED_ZONE, WAIT_STACK_SEGMENT, f)
 }
 
 /// What a wait for the server does at a poll of the signals of the process (see
@@ -211,7 +236,11 @@ pub fn catch_signal() -> bool {
 /// Run `f` on this thread, with `watch` called by the waits for the server that `f` makes on this
 /// thread, as [`block_on`] makes them: the waits poll `watch` every [`POLL_INTERVAL`] while the
 /// future of each waits. A wait on another thread (see [`block_on`]) does not poll it. The watch of
-/// `f` ends with it, and the watch of an enclosing call is restored.
+/// `f` ends with it, and the watch of an enclosing call is restored. `f`, a call of the client that
+/// waits for the server and reads its responses, runs on a stack with room for the polls of its
+/// waits and for its recursions over the responses, which nest up to
+/// `spark_connect_proto::MAX_KEPT_DEPTH` levels of messages: of a thread of a small stack, on a
+/// segment of a few MiB, as [`block_on`] polls its future.
 pub fn with_wait_watch<R>(watch: Arc<WaitWatch>, f: impl FnOnce() -> R) -> R {
     struct Restore(Option<Arc<WaitWatch>>);
 
@@ -224,7 +253,7 @@ pub fn with_wait_watch<R>(watch: Arc<WaitWatch>, f: impl FnOnce() -> R) -> R {
 
     let previous = WAIT_WATCH.with(|current| current.replace(Some(watch)));
     let _restore = Restore(previous);
-    f()
+    on_wait_stack(f)
 }
 
 /// How often a wait for the server polls its [`WaitWatch`].
@@ -254,11 +283,11 @@ where
     };
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| drive(f))
+            tokio::task::block_in_place(|| on_wait_stack(|| drive(f)))
         }
         // The wait runs on another thread, which does not poll the watch (see `block_on`).
         Ok(_) => Some(block_on_other_thread(f)),
-        _ => drive(f),
+        _ => on_wait_stack(|| drive(f)),
     }
 }
 

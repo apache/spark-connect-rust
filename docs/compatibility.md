@@ -689,6 +689,21 @@ PySpark's request, such as `to_date_with_format`, `first_with_ignore_nulls`,
 `from_json_with_options` (of name and value pairs) and `make_interval_with_parts` (of an `Option`
 of each part).
 
+The client decodes the responses of the server within the limit of prost's decoder, of 100 levels of
+nested messages, and a deeper response is prost's error of its limit (`[Internal error] failed to
+decode Protobuf message: ...: recursion limit reached`), also in a build of prost's
+`no-recursion-limit` feature (which another crate of the build may enable, as the Python binding
+does), where a response decoded at any depth and one of some thousands of levels ended the process:
+the codec of the generated client, `apache-spark-connect-proto`'s `ClientCodec`, scans the bytes of
+each response for the levels of their messages before prost decodes them, and so do the raw RPCs of
+`SparkConnectClient` (`execute_plan_raw`, `reattach_execute_raw` and `analyze_plan_raw`) and the
+reads of the `grpc-status-details-bin` of a failure. The generated server of the `server` feature,
+whose bindings share the codec, decodes the requests that it receives as prost does, of no limit of
+the responses. `ClientCodec` and its `ClientDecodeError`, the source of the status of a response
+that the client fails to decode, are new, and so is `prost::Name` of each message of the proto
+crate, of its full name in the package `spark.connect` and of the type URL
+`type.googleapis.com/spark.connect.<name>`, so that `prost_types::Any::from_msg` packs it.
+
 The core also adds doc-hidden items that the Python client uses, which are not a stable API, such as
 the `plan_build` module of a `PlanBuildListener` of the process, `WeakSparkSession`,
 `TableArg::relation_with_levels`, `SparkSession::add_unencodable_tag`, of a tag that UTF-8 cannot
@@ -1885,8 +1900,9 @@ constructor given a message for a field or a repeated field (`Plan(root=relation
 `extend` and `insert`, while `CopyFrom` (of a message of `protobuf`'s of the type too), `==`,
 `copy.deepcopy`, the value of a map and the mappings of a constructor copy any depth, and the
 drop-in's own parses of the messages that PySpark builds in Python (`Column._expr`, a type of
-`pyspark_types_to_proto_types`, the requests that session hooks see) and of the responses of the
-server (see "SparkSession.client") take any depth. Once upb's `SetAllowOversizeProtos(True)`
+`pyspark_types_to_proto_types`, the requests that session hooks see) take any depth, while the
+responses of the server are read within the limit, as upb reads them (see
+[What "drop-in" means](#what-drop-in-means)). Once upb's `SetAllowOversizeProtos(True)`
 (`api_implementation._c_module`) is called, before the package imports or after (also of a reference
 to the function taken before, which a parse that reaches the limit of 100 levels asks upb of again,
 as upb tells of no other way), the limit is 65535 levels, as upb's; upb's parser, which recurses on
@@ -2620,41 +2636,95 @@ run time, has a file of the package as its source.
 
 The drop-in parses the protobufs that a pickled Column or DataFrame carries, and the requests that
 session hooks see, at any depth that PySpark's serializer reaches, where the parsers of protobuf and
-prost stop at 100 nested messages. Its Rust client enables prost's `no-recursion-limit` feature,
-which applies to every message the drop-in decodes. So it also decodes server responses deeper than
-100 nested messages, such as the schema of a struct nested 34 levels deep, which PySpark's client
-rejects with "Exception deserializing response!", and so do the actions of a DataFrame of the
-observed metrics of a struct nested as deep (`collect()`, `toPandas()`, its `executionInfo` and the
-`Observation`'s `get`) and the messages of the responses that `SparkSession.client` parses (of
-`schema`, `config`, `to_table`, the results of commands and the statuses of operations), of the
-runtime's parse of any depth. A response that does not parse, of the drop-in's Rust client or of
-`SparkSession.client`, raises PySpark's error of a response that gRPC's deserializer refuses: the
-`SparkConnectGrpcException` of the status `INTERNAL`, of the text of grpc's error of the call
+prost stop at 100 nested messages: its Rust client enables prost's `no-recursion-limit` feature for
+them. It decodes the responses of the server as PySpark's client does, whose deserializer is upb's
+`FromString`: of at most 100 levels of messages below a response, counted as upb and prost count
+them (a message, a map entry and a group are each a level, also a group of a field that the type
+does not know, while the other fields that the type does not know are not), whatever the features of
+prost. The client scans the bytes of each response for the levels of their messages, with a stack of
+its own, before prost decodes them; so does `SparkSession.client` of the messages of the responses
+that it parses (of `schema`, `config`, `to_table`, the results of commands and the statuses of
+operations). Prost then decodes them as before, and refuses some bytes that upb reads, which a
+server of Spark does not send: a field that the type knows of another wire type (which upb keeps as
+a field that the type does not know), a varint that does not end and a tag of 0. Of protobuf's
+pure-Python implementation, the limit is that of its `decoder.SetRecursionLimit` (100 of none),
+counted as upb counts it, where its decoder counts the groups of the fields that a type does not
+know from 0 in each message, and stops at the limit itself: so a response of such groups exactly 100
+levels deep fails in PySpark, and one of a message at level 92 to 100 with 10 levels of such groups
+below it is read in PySpark, where the drop-in reads the first and refuses the second (a server, of
+proto3, sends no groups). So a column of a struct nested 31 levels deep is read, and of one nested
+32 levels deep the schema, `collect()`, `toPandas()` and the observed metrics (of `collect()`,
+`toPandas()`, `executionInfo` and the `Observation`'s `get`) fail, as in PySpark, without a crash at
+any depth (of a thread of a small stack too, see below). A response that is deeper, or that does not
+parse, raises PySpark's error of a response that gRPC's deserializer refuses, of each kind of call
+(an analysis, a configuration request, the status of operations, an execution and its reattachment):
+the `SparkConnectGrpcException` of the status `INTERNAL`, of the text of grpc's error of the call
 (`_InactiveRpcError`, or `_MultiThreadedRendezvous` of an execution) whose details are "Exception
 deserializing response!" (and whose `debug_error_string` is `None`), where the error of the Rust API
-is prost's (`[Internal] failed to decode Protobuf message: ...`): the codec of the client tags its
-own failure, so a status of the server of the same text (of a server of tonic that fails to decode a
-request) is the server's error. The server is trusted, as SECURITY.md sets out, so this is not a
-bound on the responses. The error of grpcio of such a response, of those details and no
-`debug_error_string`, is also the one that PySpark's client sees elsewhere: the error that a retry
-policy is asked of (its `details()`, and its `debug_error_string()`, `None`), the error that the
-`GRPC Error received` log gives, the warning of a release that fails in the background
-(`ReleaseExecute failed with exception: ...`), and the error of a call that PySpark leaves to grpc
-(`cloneSession()`, the uploads of `copyFromLocalToFs` and of the caching of artifacts). As grpcio's,
-the `debug_error_string()` of such an error of a stream, `_MultiThreadedRendezvous`, waits forever
-for a debug string that nothing sets; a policy that the client asks of a stream that it reads in the
-background, as of the events of the streaming query listeners or of the removal of a model, and the
-log of such an error, run on a thread of their own (`pyspark-apart`), so that such a wait holds only
-its call, as in grpcio, and not the delivery thread of the client, which runs the Python of every
-other request in the background. A call that the client makes in the background awaits the log of
-its error (`GRPC Error received`, and `Received ErrorInfo`) before it goes on with it, so that the
-log precedes what follows, such as the warning that the listener bus ends with, as PySpark's handler
-thread logs the error before it warns. The query context loggers log grpcio's error of the call that
-failed as the exception that PySpark handles as it builds its exception, of its text:
-`_InactiveRpcError` of a call of one response, such as `AnalyzePlan`, and `_MultiThreadedRendezvous`
-of a stream, of the `debug_error_string` of grpcio 1.85, the name of the code and the details, where
-it was a `_MultiThreadedRendezvous` of either, of the `debug_error_string` of an older grpcio
-(`UNKNOWN:Error received from peer {grpc_message:...}`).
+is prost's error of its limit (`[Internal error] failed to decode Protobuf message: DataType.kind:
+...: recursion limit reached`, of the fields that lead past the limit): the codec of the client tags
+its own failure, so a status of the server of the same text (of a server of tonic that fails to
+decode a request) is the server's error. Once upb's `SetAllowOversizeProtos(True)` is called, also
+before the drop-in's protobuf runtime is imported (a response past 100 levels asks upb for its
+limit), a response of up to 65535 levels is read, as upb reads it, decoded on a stack that grows for
+its levels, and a deeper one raises the same error, where upb's parser, which recurses on the stack,
+ends PySpark's process of a schema or a literal of 100,000 levels. As of the runtime's own parses, a
+call of a reference to the function taken before the runtime is installed that sets it back to False
+is not seen once a response found it set. Within the limit of 65535 levels, a response whose
+messages of the fields that their types have (which the decoded response keeps) nest more than 1024
+levels deep raises the client's `RecursionError` ("the messages of a response may be nested at most
+1024 levels deep"), which bounds the stack that the conversions, copies and drops of them take.
+PySpark converts the schemas and the literals of its responses in Python, up to Python's recursion
+limit: it raises its own `RecursionError` of the schema of `DataFrame.schema` (of its copy), of
+`collect()` and of `toPandas()`, and of the literals of the observed metrics, from a few hundred
+levels (about 650 of arrays, 370 of structs), so that these are read by the drop-in only from there
+to 1024 levels and fail in both past it; it reads the schemas that `SparkSession.client`'s `schema`
+and `to_table_as_iterator` return up to about 1,000 nested types (2,000 levels of arrays, 3,000 of
+structs), and the messages that it keeps as they are, such as the relation of the `SqlCommandResult`
+of `spark.sql`, of 10,000 levels too, where the drop-in raises its `RecursionError` past 1024
+levels. The waits of the client for the server, whose futures nest those of tonic, hyper, the
+deadlines and the retries (of frames of tens of KiB), and its decodes, copies and conversions of the
+responses, run on stacks with room for them, of a thread of a small stack (of
+`threading.stack_size`) too: a call on a thread of 64 KiB reads its response, as PySpark's does, and
+one on a thread of 256 KiB reads a response at that bound. So do the types that the calls return,
+and the types of as many levels that the user makes: they are made, compared, written, copied and
+lowered for the requests on stacks that grow with their levels, so that their `==`, `repr()`,
+`json()`, `jsonValue()`, `fromJson`, `simpleString()`, `treeString()`, `toNullable()`,
+`needConversion()`, `hash()` and pickling give on a thread of 128 KiB what they give on the main
+thread, and so do `copy.deepcopy` and unpickling, which parse the JSON of the type with Python's
+`json` module, on one of 256 KiB (they overflow one of 128 KiB from about 200 nested structs, where
+PySpark's overflow it from about 100). On the main thread, `json()`, `jsonValue()` and `fromJson`
+raise the `RecursionError` of Python's `json` module of a JSON of more than about 1,000 levels (of
+about 330 nested structs), and so do `copy.deepcopy` and unpickling, and `hash()` and `repr()` raise
+their own of about 500 structs, while `==`, `simpleString()`, `treeString()`, `toNullable()` and
+pickling take the types of 500 structs, as far as tried. PySpark's raise their `RecursionError` from
+about 100 nested structs (`copy.deepcopy`), 150 (`==` and pickling), 200 (`hash()` and `repr()`),
+300 (`json()`) and 340 (`simpleString()` and `treeString()`), and its `repr()` overflows a thread of
+256 KiB from about 150. The `grpc-status-details-bin` of a failure is read within the same limit;
+one past it is of no error of the server, as one that does not decode, where PySpark raises
+protobuf's `DecodeError` of the `google.rpc.Status`. The server is trusted, as SECURITY.md sets out,
+so the limit is not a bound on the size of the responses.
+
+The error of grpcio of a response that the client fails to decode, of the details "Exception
+deserializing response!" and no `debug_error_string`, is also the one that PySpark's client sees
+elsewhere: the error that a retry policy is asked of (its `details()`, and its
+`debug_error_string()`, `None`), the error that the `GRPC Error received` log gives, the warning of
+a release that fails in the background (`ReleaseExecute failed with exception: ...`), and the error
+of a call that PySpark leaves to grpc (`cloneSession()`, the uploads of `copyFromLocalToFs` and of
+the caching of artifacts). As grpcio's, the `debug_error_string()` of such an error of a stream,
+`_MultiThreadedRendezvous`, waits forever for a debug string that nothing sets; a policy that the
+client asks of a stream that it reads in the background, as of the events of the streaming query
+listeners or of the removal of a model, and the log of such an error, run on a thread of their own
+(`pyspark-apart`), so that such a wait holds only its call, as in grpcio, and not the delivery
+thread of the client, which runs the Python of every other request in the background. A call that
+the client makes in the background awaits the log of its error (`GRPC Error received`, and `Received
+ErrorInfo`) before it goes on with it, so that the log precedes what follows, such as the warning
+that the listener bus ends with, as PySpark's handler thread logs the error before it warns. The
+query context loggers log grpcio's error of the call that failed as the exception that PySpark
+handles as it builds its exception, of its text: `_InactiveRpcError` of a call of one response, such
+as `AnalyzePlan`, and `_MultiThreadedRendezvous` of a stream, of the `debug_error_string` of grpcio
+1.85, the name of the code and the details, where it was a `_MultiThreadedRendezvous` of either, of
+the `debug_error_string` of an older grpcio (`UNKNOWN:Error received from peer {grpc_message:...}`).
 
 The drop-in also sends a plan that PySpark's client cannot encode: from about 50 nested
 expressions, PySpark raises upb's `DecodeError: Exceeded upb_DecodeOptions_MaxDepth` before it
