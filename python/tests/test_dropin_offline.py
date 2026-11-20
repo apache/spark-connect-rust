@@ -28476,10 +28476,27 @@ def test_a_status_whose_details_do_not_match_it_raises_grpc_status_s_value_error
     assert spark.range(1).collect() == []
 
 
+def _http2_frame(kind, flags, stream, payload=b""):
+    # A frame of HTTP/2 of the type `kind`, the flags `flags` and the stream `stream`.
+    import struct
+
+    return struct.pack(">I", len(payload))[1:] + bytes([kind, flags]) + struct.pack(
+        ">I", stream
+    ) + payload
+
+
 def _resetting_server(reason):
     # A server of HTTP/2 that resets the stream of each call with the error code `reason` before
     # any response, as Spark's server of grpc-java resets a call whose metadata the client's
-    # settings do not take: its port.
+    # settings do not take: its listening socket.
+    import struct
+
+    return _raw_http2_server(lambda stream: _http2_frame(3, 0, stream, struct.pack(">I", reason)))
+
+
+def _raw_http2_server(respond):
+    # A server of HTTP/2 that answers the headers of each call on its stream with the frames that
+    # `respond` gives of the stream: its listening socket.
     import socket
     import struct
     import threading
@@ -28487,11 +28504,7 @@ def _resetting_server(reason):
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(8)
-
-    def frame(kind, flags, stream, payload=b""):
-        return struct.pack(">I", len(payload))[1:] + bytes([kind, flags]) + struct.pack(
-            ">I", stream
-        ) + payload
+    frame = _http2_frame
 
     def serve(connection):
         with connection:
@@ -28519,7 +28532,7 @@ def _resetting_server(reason):
                     if kind == 4 and not flags & 1:
                         connection.sendall(frame(4, 1, 0))
                     elif kind == 1:
-                        connection.sendall(frame(3, 0, stream, struct.pack(">I", reason)))
+                        connection.sendall(respond(stream))
             except (EOFError, OSError):
                 pass
 
@@ -28561,6 +28574,67 @@ def test_a_stream_that_the_server_resets_fails_as_grpcio_s():
         finally:
             spark.stop()
             listener.close()
+
+
+def test_details_of_an_error_that_grpc_s_core_cannot_read_fail_as_grpc_status_reads_them():
+    # As gRPC's core, which gives the call the `grpc-status-details-bin` of an error that is not
+    # base64 empty, and PySpark's `rpc_status.from_call`, which reads them as a google.rpc.Status:
+    # of the code OK, which raises its ValueError, and of base64 that is not a google.rpc.Status,
+    # protobuf's DecodeError, raised as grpcio's error of the call is handled, its context. Another
+    # binary value that is not base64 fails the call itself, as gRPC's core fails it.
+    pytest.importorskip("grpc")
+    pytest.importorskip("grpc_status")
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+
+    def literal(name, value):
+        return b"\x00" + bytes([len(name)]) + name.encode() + bytes([len(value)]) + value.encode()
+
+    answer = {}
+
+    def respond(stream):
+        # A response of its trailers only, of an error and of the details of the test.
+        block = b"\x88" + literal("content-type", "application/grpc")
+        block += literal("grpc-status", "13") + literal("grpc-message", "boom")
+        block += literal(*answer["details"])
+        return _http2_frame(1, 5, stream, block)
+
+    listener = _raw_http2_server(respond)
+    port = listener.getsockname()[1]
+    spark = SparkSession.builder.remote(f"sc://127.0.0.1:{port}").create()
+    ok = "Code in Status proto (StatusCode.OK) doesn't match status code (StatusCode.INTERNAL)"
+    corrupt = "Error parsing message with type 'google.rpc.Status': Wire format was corrupt"
+    try:
+        spark.client.set_retry_policies([])
+        calls = [
+            (lambda: spark.conf.get("k"), "_InactiveRpcError"),
+            (lambda: spark.range(1).collect(), "_MultiThreadedRendezvous"),
+        ]
+        for details, exception, text, trailing in [
+            ("!!!*", "ValueError", ok, b""),
+            ("a", "ValueError", ok, b""),
+            ("YWJj", "DecodeError", corrupt, b"abc"),
+        ]:
+            answer["details"] = ("grpc-status-details-bin", details)
+            for call, name in calls:
+                with pytest.raises(Exception) as error:
+                    call()
+                assert (type(error.value).__name__, str(error.value)) == (exception, text)
+                context = error.value.__context__
+                assert type(context).__name__ == name
+                assert list(context.trailing_metadata()) == [
+                    ("grpc-status-details-bin", trailing)
+                ]
+        answer["details"] = ("x-d-bin", "!!!*")
+        for call, name in calls:
+            with pytest.raises(SparkConnectGrpcException) as error:
+                call()
+            assert error.value.getMessage().startswith(f"<{name} of RPC")
+            assert error.value.getMessage().split("details = ")[1].split("\n")[0] == (
+                "\"Stream removed (Error parsing 'x-d-bin' metadata: illegal base64 encoding)\""
+            )
+    finally:
+        spark.stop()
+        listener.close()
 
 
 def test_a_message_over_the_size_limit_of_a_call_is_grpcio_s_resource_exhausted():

@@ -230,10 +230,11 @@ pub struct SparkError {
     /// convert it (`cloneSession`, `copyFromLocalToFs`, and the caching of artifacts), which the
     /// Python binding raises as grpcio's `RpcError`; or, of an error of the kind
     /// [`SparkErrorKind::BuiltinValueError`], the error of the call whose `google.rpc.Status` does
-    /// not match it, of which PySpark raises the `ValueError` of `rpc_status.from_call` as it
-    /// handles it, its `__context__` (see `proto_mismatch_error`). Only in the dialect of
-    /// grpcio (see [`crate::set_grpcio_dialect`]); the Rust client converts these failures as any
-    /// other.
+    /// not match it, or whose details are not one, of which PySpark raises the `ValueError` of
+    /// `rpc_status.from_call`, or protobuf's `DecodeError` of `Error parsing message with type
+    /// 'google.rpc.Status': ...`, as it handles it, its `__context__` (see `from_call_error`).
+    /// Only in the dialect of grpcio (see [`crate::set_grpcio_dialect`]); the Rust client converts
+    /// these failures as any other.
     #[doc(hidden)]
     pub grpcio: Option<Box<GrpcioError>>,
 }
@@ -1102,7 +1103,8 @@ pub fn grpcio_error(status: &Status, call: GrpcCall) -> GrpcioError {
             }
         }
     }
-    if !status.details().is_empty() {
+    // As gRPC's core gives the call details that are not base64, empty.
+    if !status.details().is_empty() || crate::metadata::has_undecoded_details(status) {
         trailing_metadata.push((
             "grpc-status-details-bin".to_string(),
             status.details().to_vec(),
@@ -1124,46 +1126,61 @@ pub(crate) fn grpcio_error_text(status: &Status, call: GrpcCall) -> String {
     grpcio_status(status).text(call)
 }
 
-/// In the dialect of grpcio, the `ValueError` that `grpc_status.rpc_status.from_call` raises of
-/// grpcio's error of the failed call of the kind `call` that ended with `status`, whose
-/// `google.rpc.Status`, of its `grpc-status-details-bin`, is not of its code or of its details, as
-/// of metadata past gRPC's soft limit, whose call fails `RESOURCE_EXHAUSTED` of the details of an
-/// error of the server (see [`crate::metadata`]): PySpark's client reads the status of each failed
-/// call of it as it handles it (`_handle_rpc_error`), and so does its `DefaultPolicy`, of a
-/// `RetryInfo`, and the iterator of a reattachable execution (`_call_iter`), which raise this in
-/// place of the error, its context. Its text is that of grpc_status: `Code in Status proto
-/// (StatusCode.INTERNAL) doesn't match status code (StatusCode.RESOURCE_EXHAUSTED)`, of a code
-/// that is not one of gRPC's `Invalid status code <code>`, or `Message in Status proto (...)
-/// doesn't match status details (...)`. None of a status of no details, or of details that the
-/// status matches, and out of the dialect of grpcio.
-pub(crate) fn proto_mismatch_error(status: &Status, call: GrpcCall) -> Option<SparkError> {
-    proto_mismatch_error_in(status, call, crate::connector::grpcio_dialect())
+/// The text of protobuf's `DecodeError` of details of a status that are not a `google.rpc.Status`,
+/// as upb gives it, which grpc_status's `rpc_status.from_call` raises (see [`from_call_error`]).
+pub(crate) const STATUS_DECODE_ERROR: &str =
+    "Error parsing message with type 'google.rpc.Status': Wire format was corrupt";
+
+/// In the dialect of grpcio, the error that `grpc_status.rpc_status.from_call` raises of grpcio's
+/// error of the failed call of the kind `call` that ended with `status`, as PySpark's client reads
+/// the status of each failed call of it as it handles it (`_handle_rpc_error`), and so do its
+/// `DefaultPolicy`, of a `RetryInfo`, and the iterator of a reattachable execution
+/// (`_call_iter`), which raise it in place of the error, its context: the `ValueError` of a
+/// `google.rpc.Status`, of its `grpc-status-details-bin`, that is not of its code or of its
+/// details, as of metadata past gRPC's soft limit, whose call fails `RESOURCE_EXHAUSTED` of the
+/// details of an error of the server, or of details that are not base64, which gRPC's core gives
+/// the call empty, a status of the code `OK` (see [`crate::metadata`]); or protobuf's
+/// `DecodeError` of details that are not a `google.rpc.Status` ([`STATUS_DECODE_ERROR`]). The
+/// text of the `ValueError` is grpc_status's: `Code in Status proto (StatusCode.INTERNAL) doesn't
+/// match status code (StatusCode.RESOURCE_EXHAUSTED)`, of a code that is not one of gRPC's
+/// `Invalid status code <code>`, or `Message in Status proto (...) doesn't match status details
+/// (...)`. Both are errors of the kind [`SparkErrorKind::BuiltinValueError`] of grpcio's error of
+/// the call (see [`SparkError::grpcio`]), which the Python binding raises as their classes. None
+/// of a status of no details, or of details that the status matches, and out of the dialect of
+/// grpcio.
+pub(crate) fn from_call_error(status: &Status, call: GrpcCall) -> Option<SparkError> {
+    from_call_error_in(status, call, crate::connector::grpcio_dialect())
 }
 
-/// As [`proto_mismatch_error`], in the dialect of grpcio if `grpcio`.
-fn proto_mismatch_error_in(status: &Status, call: GrpcCall, grpcio: bool) -> Option<SparkError> {
-    if !grpcio || status.details().is_empty() {
+/// As [`from_call_error`], in the dialect of grpcio if `grpcio`.
+fn from_call_error_in(status: &Status, call: GrpcCall, grpcio: bool) -> Option<SparkError> {
+    if !grpcio || (status.details().is_empty() && !crate::metadata::has_undecoded_details(status)) {
         return None;
     }
-    let proto = RpcStatus::decode(status.details()).ok()?;
-    let grpcio = grpcio_status(status);
-    let message = if proto.code != grpcio.code as i32 {
-        if (0..=16).contains(&proto.code) {
-            format!(
-                "Code in Status proto (StatusCode.{}) doesn't match status code (StatusCode.{})",
-                status_code_name(tonic::Code::from_i32(proto.code)),
-                status_code_name(grpcio.code)
-            )
-        } else {
-            format!("Invalid status code {}", proto.code)
+    let message = match RpcStatus::decode(status.details()) {
+        Err(_) => STATUS_DECODE_ERROR.to_string(),
+        Ok(proto) => {
+            let grpcio = grpcio_status(status);
+            if proto.code != grpcio.code as i32 {
+                if (0..=16).contains(&proto.code) {
+                    format!(
+                        "Code in Status proto (StatusCode.{}) doesn't match status code \
+                         (StatusCode.{})",
+                        status_code_name(tonic::Code::from_i32(proto.code)),
+                        status_code_name(grpcio.code)
+                    )
+                } else {
+                    format!("Invalid status code {}", proto.code)
+                }
+            } else if proto.message != grpcio.details {
+                format!(
+                    "Message in Status proto ({}) doesn't match status details ({})",
+                    proto.message, grpcio.details
+                )
+            } else {
+                return None;
+            }
         }
-    } else if proto.message != grpcio.details {
-        format!(
-            "Message in Status proto ({}) doesn't match status details ({})",
-            proto.message, grpcio.details
-        )
-    } else {
-        return None;
     };
     let mut error = SparkError::builtin_value_msg(message);
     error.grpcio = Some(Box::new(grpcio_error(status, call)));
@@ -2696,7 +2713,7 @@ mod tests {
             .encode_to_vec()
         };
         let mismatch = |status: &Status, call| {
-            proto_mismatch_error_in(status, call, true).map(|error| {
+            from_call_error_in(status, call, true).map(|error| {
                 assert_eq!(error.kind, SparkErrorKind::BuiltinValueError);
                 let grpcio = error.grpcio.as_deref().unwrap();
                 assert_eq!(grpcio.call, call);
@@ -2733,11 +2750,31 @@ mod tests {
             mismatch(&message, GrpcCall::Unary).as_deref(),
             Some("Message in Status proto (other) doesn't match status details (failed)")
         );
+        // Of details that are not a `google.rpc.Status`, protobuf's DecodeError.
+        let undecodable = Status::with_details(tonic::Code::Internal, "boom", b"abc"[..].into());
+        assert_eq!(
+            mismatch(&undecodable, GrpcCall::Unary).as_deref(),
+            Some(STATUS_DECODE_ERROR)
+        );
+        // Of details that were not base64, which gRPC's core gives the call empty: a status of
+        // the code OK.
+        let mut empty = Status::internal("boom");
+        empty.set_source(std::sync::Arc::new(crate::metadata::UndecodedDetails));
+        assert_eq!(
+            mismatch(&empty, GrpcCall::ServerStreaming).as_deref(),
+            Some(
+                "Code in Status proto (StatusCode.OK) doesn't match status code \
+                 (StatusCode.INTERNAL)"
+            )
+        );
         // A status that its details match, one of no details, and the Rust client's dialect.
         let matched =
             Status::with_details(tonic::Code::Internal, "failed", proto(13, "failed").into());
         assert!(mismatch(&matched, GrpcCall::Unary).is_none());
         assert!(mismatch(&Status::internal("failed"), GrpcCall::Unary).is_none());
-        assert!(proto_mismatch_error_in(&code, GrpcCall::Unary, false).is_none());
+        assert!(from_call_error_in(&code, GrpcCall::Unary, false).is_none());
+        assert!(grpcio_error(&Status::internal("failed"), GrpcCall::Unary)
+            .trailing_metadata
+            .is_empty());
     }
 }

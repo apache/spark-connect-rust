@@ -2411,12 +2411,14 @@ def _grpc_error(
     ``ReattachExecute``, else an ``_InactiveRpcError``, of the code ``code``, the details
     ``details``, the ``debug_error_string`` ``debug_error_string`` and the trailing metadata
     ``trailing_metadata``, whose binary entries are bytes, as ``grpc_status.rpc_status`` reads
-    them. The ``debug_error_string`` of a response that the transport failed to decode is None,
-    as grpcio's of a response that it fails to deserialize: ``debug_error_string()`` of such a
-    ``_MultiThreadedRendezvous`` waits for one, which nothing sets, as grpcio's does. Those classes are grpcio's private ones, made of its private ``_RPCState``: where they
-    cannot be made so, as of another version of grpcio, the error is of the public classes of
-    grpc of the same names, of grpcio's text of the call, ``text`` (see ``_rpc_error_classes``).
-    Raises ImportError without grpcio."""
+    them, each grpcio's ``_Metadatum`` of its key and value where it has one. The
+    ``debug_error_string`` of a response that the transport failed to decode is None, as grpcio's
+    of a response that it fails to deserialize: ``debug_error_string()`` of such a
+    ``_MultiThreadedRendezvous`` waits for one, which nothing sets, as grpcio's does. Those classes
+    are grpcio's private ones, made of its private ``_RPCState``: where they cannot be made so, as
+    of another version of grpcio, the error is of the public classes of grpc of the same names, of
+    grpcio's text of the call, ``text`` (see ``_rpc_error_classes``). Raises ImportError without
+    grpcio."""
     import grpc
 
     status = next(
@@ -2429,6 +2431,12 @@ def _grpc_error(
     try:
         from grpc import _channel
 
+        try:
+            from grpc._cython import cygrpc
+
+            metadata = tuple(cygrpc._Metadatum(key, value) for key, value in metadata)
+        except Exception:  # noqa: BLE001 - of plain tuples where grpcio has no _Metadatum
+            pass
         state = _channel._RPCState((), (), metadata, status, details)
         state.debug_error_string = debug_error_string
         if streaming:

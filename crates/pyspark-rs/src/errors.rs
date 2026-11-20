@@ -701,12 +701,14 @@ fn grpcio_exception(error: &spark_connect_core::error::GrpcioError) -> Option<Py
     })
 }
 
-/// PySpark's `ValueError` of `grpc_status.rpc_status.from_call` of the failed call of `grpcio`,
-/// whose `google.rpc.Status` does not match it (see
-/// `spark_connect_core::error::SparkError::grpcio`): raised as grpcio's error of the call is
-/// handled, its `__context__`, and of the operation ID of an execution, which PySpark's
-/// `_handle_error` sets on any exception of it. Without grpcio, its context is an exception of the
-/// class name and the text of grpcio's error (see `pyspark.sql.connect.client._InactiveRpcError`).
+/// PySpark's error of `grpc_status.rpc_status.from_call` of the failed call of `grpcio`, whose
+/// `google.rpc.Status` does not match it, its `ValueError`, or whose details are not one,
+/// protobuf's `DecodeError` (see `spark_connect_core::error::SparkError::grpcio`): raised as
+/// grpcio's error of the call is handled, its `__context__`, and of the operation ID of an
+/// execution, which PySpark's `_handle_error` sets on any exception of it. Without grpcio, its
+/// context is an exception of the class name and the text of grpcio's error (see
+/// `pyspark.sql.connect.client._InactiveRpcError`); without protobuf, the `DecodeError` is the
+/// runtime's (see `pyspark.sql.connect.proto._rust.DecodeError`).
 fn rpc_status_value_error(
     err: &SparkError,
     grpcio: &spark_connect_core::error::GrpcioError,
@@ -747,7 +749,11 @@ fn rpc_status_value_error(
             }
             None => context,
         };
-        let raised = exceptions::PyValueError::new_err(message);
+        let raised = if message.starts_with("Error parsing message with type ") {
+            crate::pbmsg::decode_error_of(py, message)
+        } else {
+            exceptions::PyValueError::new_err(message)
+        };
         if let Some(context) = context {
             set_context(py, raised.value(py), context);
         }

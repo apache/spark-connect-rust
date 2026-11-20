@@ -450,7 +450,7 @@ impl Retrying {
     /// These retries, of the calls of a reattachable execution if `reads`, the failures of whose
     /// `google.rpc.Status` does not match them end the call, of the `ValueError` of grpc_status,
     /// before the policy or the decider sees them, as the `_call_iter` of PySpark's iterator reads
-    /// the status of each failure first (see [`crate::error::proto_mismatch_error`]).
+    /// the status of each failure first (see [`crate::error::from_call_error`]).
     pub(crate) fn reading_status_first(mut self, reads: bool) -> Self {
         self.reads_status_first = reads;
         self
@@ -481,7 +481,7 @@ impl Retrying {
     /// wait before it, which this awaits. It is not when the policy cannot retry the failure,
     /// or once its retries are spent: `status` is then the error of the call.
     pub(crate) async fn backoff(&mut self, status: &tonic::Status) -> Backoff {
-        let mismatch = || crate::error::proto_mismatch_error(status, self.call);
+        let mismatch = || crate::error::from_call_error(status, self.call);
         if self.reads_status_first {
             if let Some(mismatch) = mismatch() {
                 return Backoff::Failed(Box::new(mismatch));

@@ -482,8 +482,10 @@ retried: hyper now takes a header list of up to 16 MiB, which the channel checks
 connection still advertises 16 KiB as the size of a header list that it takes, as grpcio's channel
 does, so that a server that honours it, as grpc-java's, resets the stream of a call of more rather
 than sending it. A binary value (of a name ending in `-bin`) that is not base64 fails the call
-`INTERNAL`, `Error parsing '<name>' metadata: illegal base64 encoding`, where tonic panicked of such
-a `grpc-status-details-bin`. A stream that the server resets fails its call of the code that gRPC's
+`INTERNAL`, `Error parsing '<name>' metadata: illegal base64 encoding`, as gRPC's core fails it, but
+the `grpc-status-details-bin` of an error, which gRPC's core gives the call empty, where tonic
+panicked of it: the error is of its code and message, of empty details. A stream that the server
+resets fails its call of the code that gRPC's
 core gives the reason, `CANCELLED` of `CANCEL`, `UNAVAILABLE` of `REFUSED_STREAM`,
 `RESOURCE_EXHAUSTED` of `ENHANCE_YOUR_CALM`, `PERMISSION_DENIED` of `INADEQUATE_SECURITY` and
 `INTERNAL` of any other, where tonic's channel gave them all `UNKNOWN`, which
@@ -493,8 +495,10 @@ is, of `received metadata size exceeds soft limit (<size> vs. 8192);  <entries>`
 the server's error, which gRPC's core still gives the call; a reset stream has gRPC core's details,
 `Stream removed (RST_STREAM (Received RST_STREAM with error code <reason>))`; and a failure whose
 `google.rpc.Status` (its `grpc-status-details-bin`) is not of its code or its details, as of
-metadata past the soft limit, is the `ValueError` of grpc_status's `rpc_status.from_call` where
-PySpark's client reads the status (see `SparkError::grpcio`, not a stable API).
+metadata past the soft limit or of empty details, a status of the code `OK`, is the `ValueError` of
+grpc_status's `rpc_status.from_call` where PySpark's client reads the status, and one whose details
+are not a `google.rpc.Status` is protobuf's `DecodeError` (`Error parsing message with type
+'google.rpc.Status': Wire format was corrupt`) there (see `SparkError::grpcio`, not a stable API).
 
 `PythonUDFPayload` and `LogicalPlan::CommonInlineUdtf` add a `pickler` field, which is not a
 stable API: the pickling of the command of a UDF or UDTF of the Python client, which a request
@@ -3642,7 +3646,12 @@ status code (StatusCode.RESOURCE_EXHAUSTED)`, where it was the `SparkConnectGrpc
 their message, is that `ValueError`, raised as grpcio's error of the call is handled (its
 `__context__`), of no log of the error where the `DefaultPolicy` or the iterator of a reattachable
 execution reads it, and after `GRPC Error received` where `_handle_rpc_error` does (see
-`dev/parity/known-differences.md`). A channel that cannot connect fails its calls with
+`dev/parity/known-differences.md`). So is the failure of the `grpc-status-details-bin` of an error
+that is not base64, which gRPC's core gives the call empty, a status of the code `OK` (`Code in
+Status proto (StatusCode.OK) doesn't match status code (StatusCode.INTERNAL)`), where the drop-in
+failed the call of its own `INTERNAL`, and of details of base64 that are not a `google.rpc.Status`
+protobuf's `DecodeError`, as PySpark's `rpc_status.from_call` raises it. A channel that cannot
+connect fails its calls with
 `UNAVAILABLE`, which the retry policy retries, of the last error of its addresses: of a plaintext
 server that accepts the connection and never answers, grpcio's `failed to connect to all addresses;
 last error: UNKNOWN: ipv4:127.0.0.1:15002: connection attempt timed out before receiving SETTINGS
