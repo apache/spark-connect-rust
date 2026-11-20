@@ -1078,16 +1078,23 @@ fn set_waiter(registry: &Inflight, operation_id: &str, waiter: Option<std::threa
 }
 
 /// The hook of [`set_failure_requests_hook`].
-static FAILURE_REQUESTS_HOOK: std::sync::OnceLock<fn(&SparkConnectClient)> =
-    std::sync::OnceLock::new();
+type FailureRequestsHook = fn(&SparkConnectClient, &SparkError) -> Result<bool>;
+
+/// The hook of [`set_failure_requests_hook`].
+static FAILURE_REQUESTS_HOOK: std::sync::OnceLock<FailureRequestsHook> = std::sync::OnceLock::new();
 
 /// Set, once for the process, the function that a client calls on the thread that converts the
-/// failure of a call, an error that the server raised, before it builds the requests that it sends
-/// for it, of the details of the error and of the configs of its stack trace: a binding brings the
-/// context of the requests of that thread up to date then, of the attributes of its client, as
-/// PySpark builds those requests of them. A later call does nothing. Not a stable API.
+/// failure of a call, an error that the server raised, which it is given, before it builds the
+/// requests that it sends for it, of the details of the error and of the configs of its stack
+/// trace: a binding brings the context of the requests of that thread up to date then, of the
+/// attributes of its client, as PySpark builds those requests of them, and returns whether to send
+/// them. When it does not, the
+/// error of the server is the error of the call as it is, of no details and of the stack trace
+/// that its message has; an error of the hook is the error of the call in place of it, of no
+/// requests either, as PySpark raises the error of the build of the request of the details. A
+/// later call does nothing. Not a stable API.
 #[doc(hidden)]
-pub fn set_failure_requests_hook(hook: fn(&SparkConnectClient)) {
+pub fn set_failure_requests_hook(hook: FailureRequestsHook) {
     let _ = FAILURE_REQUESTS_HOOK.set(hook);
 }
 
@@ -2851,9 +2858,14 @@ impl SparkConnectClient {
             return error;
         };
         // The requests of the failure are of the context of the calling thread as it is now, as
-        // PySpark builds them of the attributes of its client then.
+        // PySpark builds them of the attributes of its client then, and none is sent when the
+        // binding cannot build them.
         if let Some(hook) = FAILURE_REQUESTS_HOOK.get() {
-            hook(self);
+            match hook(self, &error) {
+                Ok(true) => {}
+                Ok(false) => return error,
+                Err(unbuilt) => return unbuilt,
+            }
         }
         let details = match &server.error_id {
             Some(error_id) => {

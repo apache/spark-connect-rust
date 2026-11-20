@@ -1865,16 +1865,33 @@ class _RequestContext:
             return _COPY_CALL.set(None)
         return None
 
-    def _values_of_call(self, token: Any = None) -> tuple[Any, ...]:
+    def _enter_call_of(self, token: Any) -> Any:
+        # Make the calls that the calling thread makes from now on calls of the client of the call
+        # whose refresh held the contextvar of `token` (see `_hold`), the copy of a client whose
+        # method made it, as calls of its methods, until `_leave_call_of` takes the returned
+        # token: as PySpark's execution calls `interrupt_operation` of the client of the execution.
+        if token is None or token.old_value is contextvars.Token.MISSING:
+            return None
+        return _COPY_CALL.set(token.old_value)
+
+    def _leave_call_of(self, token: Any) -> None:
+        # The calls of the calling thread are of the client that they were of before
+        # `_enter_call_of` gave `token`.
+        if token is not None:
+            _COPY_CALL.reset(token)
+
+    def _values_of_call(self, token: Any = None, mode: int = 0) -> tuple[Any, ...]:
         # The values of the requests of a call of a client of this session that runs on the calling
-        # thread, read again of none of their errors, as those of the mode 0, once a call or a
-        # finalizer that ran during it ended, as PySpark's requests of the rest of the call read
-        # the attributes of its client then: of the copy of a client whose method made the call,
-        # of the token of the contextvar of its refresh (see `_hold`), else of the session.
+        # thread, read again as PySpark's requests of the rest of the call read the attributes of
+        # its client then: of the copy of a client whose method made the call, of the token of the
+        # contextvar of its refresh (see `_hold`), else of the session. Of the mode 0, of none of
+        # their errors, once a call or a finalizer that ran during it ended; of the mode 2, of
+        # those of the session ID, the user and the extensions, when the requests of the details
+        # of its failure or of the interrupt of a signal are built, which read no tags.
         state = self.state
         if token is not None and token.old_value is not contextvars.Token.MISSING:
             state = token.old_value[1]
-        return _request_values(state, 0)
+        return _request_values(state, mode, strict_tags=False)
 
     def _after_call(self, read_tags: bool, handled_error: bool, token: Any = None) -> None:
         # What PySpark's client leaves in the `thread_local` of the calling thread once a call
@@ -1897,10 +1914,10 @@ class _RequestContext:
                 _COPY_CALL.reset(token)
 
 
-def _request_values(state: dict[str, Any], mode: int) -> tuple[Any, ...]:
+def _request_values(state: dict[str, Any], mode: int, strict_tags: bool = True) -> tuple[Any, ...]:
     # The session ID, the user, the global extensions, the extensions of the thread and the tags
     # of the thread of the requests of the client of `state`, of the errors of the mode of
-    # `_RequestContext`.
+    # `_RequestContext`, those of the tags of none unless `strict_tags`.
     def read(strict: bool, value: Any) -> Any:
         if strict:
             return value()
@@ -1944,7 +1961,7 @@ def _request_values(state: dict[str, Any], mode: int) -> tuple[Any, ...]:
         read(identity, user_id),
         read(extensions, global_extensions),
         read(extensions, own_extensions),
-        read(extensions, tags),
+        read(extensions and strict_tags, tags),
     )
 
 

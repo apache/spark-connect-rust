@@ -327,6 +327,32 @@ pub(crate) fn is_base_exception_only(err: &SparkError) -> bool {
             .is_some_and(|value| value == "true")
 }
 
+/// The ID of the exception of the Python callback that `err` is the error of, if it is one, which
+/// tells two such errors apart.
+pub(crate) fn callback_error_id(err: &SparkError) -> Option<u64> {
+    callback_id(err)
+}
+
+/// Release the exceptions of the Python callbacks that `errors` are the errors of, which no caller
+/// raises: as the errors that a call dropped, as a failure that it handled itself.
+pub(crate) fn release_callback_errors(errors: impl IntoIterator<Item = SparkError>) {
+    let ids: Vec<u64> = errors
+        .into_iter()
+        .filter_map(|err| callback_id(&err))
+        .collect();
+    if ids.is_empty() {
+        return;
+    }
+    let released: Vec<PyErr> = {
+        let mut exceptions = CALLBACK_EXCEPTIONS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        ids.iter().filter_map(|id| exceptions.remove(id)).collect()
+    };
+    // Dropped once the map is no longer locked, as a drop can run Python code.
+    drop(released);
+}
+
 /// The ID of the exception of the Python callback that `err` is the error of, if it is one.
 fn callback_id(err: &SparkError) -> Option<u64> {
     if err.error_class != PYTHON_CALLBACK_ERROR {

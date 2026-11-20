@@ -637,18 +637,32 @@ requests of the unpickled object pickle as it is then. This case still differs:
   a call sends after its first carry them as they were at the start of the call, or at the end of
   a call or a finalizer of its session that ran during it, where PySpark's read them when they are
   built, so a change of them by a progress handler or by another thread meanwhile is not in them.
-  A `KeyboardInterrupt` that a signal handler raises while the transport reads them at the end of
-  a call that ran during another is the error of that call, whose result is dropped. A finalizer
-  whose last reference a thread of the transport drops, not a thread of Python, sends the context
-  of the last call of that thread, else of the session, where PySpark's finalizers run on a thread
-  of Python. A request of more than one value that protobuf refuses raises the error of the
-  session ID, of the user and of the extensions before that of a tag, where PySpark's execution
-  raises that of the tag before those of the user and of the extensions; and the request of the
-  details of the failure of a call whose requests carry no extensions (of `ReleaseSession`,
-  `GetStatus` and the artifacts) carries the extensions of the last call when one of them is not
-  an `Any`, where PySpark's `_fetch_enriched_error` raises the `TypeError` of protobuf in place of
-  the error of the server. An extension that is not an `Any` raises upb's `TypeError`, which
-  names the runtime's class of `Any` (`pyspark.sql.connect.proto._rust.any_pb2.Any`) where
+  Read for the requests of the failure of a call, a value of them that protobuf refuses, or an
+  `Exception` of their read, is the failure in place of the error of the server, which becomes its
+  context, of no request of the failure, as PySpark raises the error of the build of the request of
+  its details while it handles the failure, and goes with a failure that the call handles itself,
+  as the failed lookup of the plan compression settings; read for the interrupt of a signal, it
+  replaces the `KeyboardInterrupt`, which becomes its context, and no interrupt is sent, as
+  PySpark's `interrupt_operation` raises it in its `except KeyboardInterrupt`. Read at the end of a
+  call or a finalizer that ran during a call, a value that cannot be read stays as it was. An
+  exception of a read that is not an `Exception`, as the `KeyboardInterrupt` or the `SystemExit`
+  of a signal handler that runs then: at the end of a call that ran during a call, it is raised by
+  that call, in place of its result, or of the error of its refresh, which becomes its context, as
+  PySpark raises a signal in the call that it arrives in, also when an attribute of the client
+  raises it, which PySpark does not read then; for the failure of a call or after a finalizer that
+  ran during it, it is raised by the wait of that call at its next poll, as the exception of a
+  signal handler, a `KeyboardInterrupt` of which interrupts the execution that it waits for, or by
+  the call when it returns. A `KeyboardInterrupt` of a progress handler interrupts the execution
+  too, as the `except KeyboardInterrupt` around PySpark's handlers does, of the attributes of the
+  client of the execution (an error of its build replaces the `KeyboardInterrupt`, and no
+  interrupt is sent), before the done call of the handlers, where PySpark interrupts it after that
+  call. A finalizer whose last reference a thread of the transport drops, not a thread of Python,
+  sends the context of the last call of that thread, else of the session, where PySpark's
+  finalizers run on a thread of Python. A request of more than one value that protobuf refuses
+  raises the error of the session ID, of the user and of the extensions before that of a tag,
+  where PySpark's execution raises that of the tag before those of the user and of the
+  extensions. An extension that is not an `Any` raises upb's `TypeError`,
+  which names the runtime's class of `Any` (`pyspark.sql.connect.proto._rust.any_pb2.Any`) where
   PySpark's names `google.protobuf.any_pb2.Any`. A failed request leaves `inside_error_handling`
   False in the `thread_local`, as PySpark's `_handle_error` does, which the drop-in does not read:
   PySpark's raises the error of a request as grpc gives it while it is True. A `copy.copy` of a
