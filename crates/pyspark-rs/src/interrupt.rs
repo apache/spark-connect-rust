@@ -154,8 +154,10 @@ impl SignalWatch {
                 // An exception that a read of the attributes of the client of the call that waits
                 // raised meanwhile, that is not an `Exception`, as the `KeyboardInterrupt` of a
                 // signal handler that ran while a finalizer read them, acts as the exception of a
-                // signal handler that this poll caught (see `keep_for_nearest_call`).
-                let raised = Python::attach(|py| {
+                // signal handler that this poll caught (see `keep_for_nearest_call`). A wait that
+                // the interpreter cannot take the GIL for any more, as of a daemon thread at the
+                // exit, ends.
+                let Some(raised) = Python::try_attach(|py| {
                     let raised = match take_raised_of_waiting_call(&self.session) {
                         Some(kept) => Err(kept),
                         None => crate::deliver::check_signals(py),
@@ -174,7 +176,9 @@ impl SignalWatch {
                             Some((signal, keyboard_interrupt))
                         }
                     }
-                });
+                }) else {
+                    return Watch::Abort;
+                };
                 match raised {
                     None => return Watch::Continue,
                     Some((signal, keyboard_interrupt)) => {
@@ -212,10 +216,11 @@ impl SignalWatch {
                 if self.interrupt_failure_is_set() {
                     return Watch::Abort;
                 }
-                // After the interrupt, a second signal ends the wait, as PySpark's wait does.
-                return match Python::attach(crate::deliver::check_signals) {
-                    Ok(()) => Watch::Continue,
-                    Err(_) => Watch::Abort,
+                // After the interrupt, a second signal ends the wait, as PySpark's wait does, and
+                // so does an interpreter that the GIL cannot be taken of any more.
+                return match Python::try_attach(crate::deliver::check_signals) {
+                    Some(Ok(())) => Watch::Continue,
+                    Some(Err(_)) | None => Watch::Abort,
                 };
             }
         }
@@ -225,9 +230,11 @@ impl SignalWatch {
                 // they are now, as PySpark's `interrupt_operation` builds it once the
                 // KeyboardInterrupt is raised: an error of its build replaces the
                 // KeyboardInterrupt, and no interrupt is sent (see `reread_nearest_call`).
-                let unbuilt = Python::attach(|py| {
+                let Some(unbuilt) = Python::try_attach(|py| {
                     reread_nearest_call_of(py, &self.session, ReadOf::Requests).err()
-                });
+                }) else {
+                    return Watch::Abort;
+                };
                 if let Some(unbuilt) = unbuilt {
                     *self
                         .interrupt_unbuilt
@@ -239,7 +246,9 @@ impl SignalWatch {
                 // interrupts the operation: the exception of the record replaces the
                 // KeyboardInterrupt, which becomes its context, and nothing is interrupted.
                 if let Err(raised) = crate::client_log::interrupted(&operation_id) {
-                    Python::attach(|py| {
+                    // Of an interpreter that the GIL cannot be taken of any more, as of a daemon
+                    // thread at the exit, the wait ends too.
+                    let _ = Python::try_attach(|py| {
                         let raised = crate::errors::spark_error_to_py_exception(raised);
                         let mut error = self.error.lock().unwrap_or_else(|e| e.into_inner());
                         *error = Some(match error.take() {
@@ -280,12 +289,56 @@ impl SignalWatch {
 /// `stop()` for that of another thread, and the waits of the listener bus for the deliveries and
 /// the lifecycle operations of other threads, as a signal interrupts the acquire of PySpark's
 /// locks.
+///
+/// For Python's garbage collector, the call is counted as one that may clone and drop any part of
+/// plans and expressions (see [`crate::gc::detach`]), unless its caller set how it is counted
+/// first, as [`interruptible_of`], [`interruptible_of_values`] and
+/// [`interruptible_without_parts`] do, and `crate::gc::in_use_of_values` before it.
 pub(crate) fn interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     py: Python<'_>,
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<T> {
     of_the_request(session, interruptible_outcome(py, session, f)?)
+}
+
+/// As [`interruptible`], for a call that clones no part of plans and expressions, nor drops one
+/// that a holder reports, without the GIL: it is not counted for the garbage collector, which
+/// sees the parts while it runs (see [`crate::gc::detach_without_parts`]). Of the calls of
+/// streaming queries and their manager, the listener bus, the configuration, the catalog and
+/// the session, whose requests are of identifiers, protobufs and values only.
+pub(crate) fn interruptible_without_parts<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<T> {
+    crate::gc::without_parts(|| interruptible(py, session, f))
+}
+
+/// As [`interruptible`], for a call that clones and drops only the parts that `holders` hold,
+/// directly or below, without the GIL, as a request of a DataFrame builds its plan: those parts
+/// are busy while it runs, which their [`crate::gc::SharedPart`]s report nothing of, and the call
+/// is not counted as one that may clone any part (see [`crate::gc::of_parts`]).
+pub(crate) fn interruptible_of<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    holders: &[&crate::gc::Parts],
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<T> {
+    crate::gc::of_parts(py, holders, || interruptible(py, session, f))
+}
+
+/// As [`interruptible_of`], for a call that clones and drops only the parts that `values` hold,
+/// directly or below: values of the core that the caller holds for the time of the call, such as
+/// the clone of the DataFrame of an ML fit or a writer of a copy of a state (see
+/// [`crate::gc::of_values`]).
+pub(crate) fn interruptible_of_values<'a, T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    values: impl IntoIterator<Item = spark_connect::gc::PartRef<'a>>,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<T> {
+    crate::gc::of_values(py, values, || interruptible(py, session, f))
 }
 
 /// The outcome of a request of `session`, of its error as an exception converted of `session`
@@ -300,7 +353,8 @@ fn of_the_request<T>(session: &SparkSession, outcome: Result<T, Box<SparkError>>
 /// Run `f`, a wait that no session stands behind, without the GIL, on the calling thread: a
 /// wait of `block_on_abortable` that a signal of the process ends, as the acquire of PySpark's
 /// lock is interrupted by one. `f` returns None then, and the exception of the signal is raised.
-/// Without a signal, `f` returns its output.
+/// Without a signal, `f` returns its output. It waits for a lock of the core and clones no part,
+/// so it is not counted for the garbage collector (see [`crate::gc::detach_without_parts`]).
 pub(crate) fn abortable_without_session<T: Send>(
     py: Python<'_>,
     f: impl FnOnce() -> Option<T> + Send,
@@ -313,17 +367,20 @@ pub(crate) fn abortable_without_session<T: Send>(
             if error.is_some() {
                 return Watch::Abort;
             }
-            // Takes the GIL for the check only, as the wait runs without it.
-            match Python::attach(crate::deliver::check_signals) {
-                Ok(()) => Watch::Continue,
-                Err(raised) => {
+            // Takes the GIL for the check only, as the wait runs without it; of an interpreter
+            // that the GIL cannot be taken of any more, as of a daemon thread at the exit, the
+            // wait ends.
+            match Python::try_attach(crate::deliver::check_signals) {
+                Some(Ok(())) => Watch::Continue,
+                Some(Err(raised)) => {
                     *error = Some(raised);
                     Watch::Abort
                 }
+                None => Watch::Abort,
             }
         })
     };
-    match py.detach(|| with_wait_watch(poll, f)) {
+    match crate::gc::detach_without_parts(py, || with_wait_watch(poll, f)) {
         Some(output) => Ok(output),
         None => Err(signal
             .lock()
@@ -365,10 +422,42 @@ pub(crate) fn interruptible_without_user_context<T: Send, E: Send + Into<Box<Spa
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<T> {
-    of_the_request(
-        session,
-        run_interruptible(py, session, f, false, RequestContext::Identity)?,
-    )
+    // Of the session alone, which clones no part (see `interruptible_without_parts`).
+    let outcome = crate::gc::without_parts(|| {
+        run_interruptible(py, session, f, false, RequestContext::Identity)
+    });
+    of_the_request(session, outcome?)
+}
+
+/// As [`interruptible_outcome`], for a call that clones and drops only the parts that `values`
+/// hold (see [`interruptible_of_values`]).
+pub(crate) fn interruptible_outcome_of_values<'a, T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    values: impl IntoIterator<Item = spark_connect::gc::PartRef<'a>>,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<Result<T, Box<SparkError>>> {
+    crate::gc::of_values(py, values, || interruptible_outcome(py, session, f))
+}
+
+/// As [`interruptible_outcome`], for a call that clones no part (see
+/// [`interruptible_without_parts`]).
+pub(crate) fn interruptible_outcome_without_parts<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<Result<T, Box<SparkError>>> {
+    crate::gc::without_parts(|| interruptible_outcome(py, session, f))
+}
+
+/// As [`interruptible_caught`], for a call that clones no part (see
+/// [`interruptible_without_parts`]).
+pub(crate) fn interruptible_caught_without_parts<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<Result<T, Box<SparkError>>> {
+    crate::gc::without_parts(|| interruptible_caught(py, session, f))
 }
 
 /// As [`interruptible_outcome`], for a call whose requests carry no user context extensions (see
@@ -381,7 +470,8 @@ pub(crate) fn interruptible_outcome_without_user_context<
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<Result<T, Box<SparkError>>> {
-    run_interruptible(py, session, f, false, RequestContext::Identity)
+    // Of the session alone, which clones no part (see `interruptible_without_parts`).
+    crate::gc::without_parts(|| run_interruptible(py, session, f, false, RequestContext::Identity))
 }
 
 /// As [`interruptible_without_user_context`], for the `CloneSession` of `cloneSession`, whose
@@ -391,7 +481,9 @@ pub(crate) fn interruptible_of_clone<T: Send, E: Send + Into<Box<SparkError>>>(
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<T> {
-    run_interruptible(py, session, f, false, RequestContext::Clone)?.to_pyerr()
+    // Of the session alone, which clones no part (see `interruptible_without_parts`).
+    crate::gc::without_parts(|| run_interruptible(py, session, f, false, RequestContext::Clone))?
+        .to_pyerr()
 }
 
 /// As [`interruptible`], for a call of the artifacts, whose requests PySpark's ArtifactManager
@@ -410,7 +502,8 @@ pub(crate) fn interruptible_of_artifacts<T: Send, E: Send + Into<Box<SparkError>
     } else {
         RequestContext::UnhandledArtifacts
     };
-    run_interruptible(py, session, f, false, context)?.to_pyerr()
+    // Of files and bytes, which clone no part (see `interruptible_without_parts`).
+    crate::gc::without_parts(|| run_interruptible(py, session, f, false, context))?.to_pyerr()
 }
 
 /// As [`interruptible`], for a call that continues an execution that an earlier call started,
@@ -423,6 +516,16 @@ pub(crate) fn interruptible_continuation<T: Send, E: Send + Into<Box<SparkError>
     f: impl FnOnce() -> Result<T, E> + Send,
 ) -> PyResult<T> {
     run_interruptible(py, session, f, false, RequestContext::Continuation)?.to_pyerr()
+}
+
+/// As [`interruptible_continuation`], for a call that clones no part (see
+/// [`interruptible_without_parts`]): the next event of the listener bus.
+pub(crate) fn interruptible_continuation_without_parts<T: Send, E: Send + Into<Box<SparkError>>>(
+    py: Python<'_>,
+    session: &SparkSession,
+    f: impl FnOnce() -> Result<T, E> + Send,
+) -> PyResult<T> {
+    crate::gc::without_parts(|| interruptible_continuation(py, session, f))
 }
 
 /// What a call reads of the client of its session before it sends its requests, as PySpark's
@@ -1338,7 +1441,9 @@ pub(crate) fn interrupt_for_handler(
             .ok(),
         _ => None,
     };
-    let interrupted = interruptible(py, session, || session.interrupt_operation(operation_id));
+    // Of the operation's identifier.
+    let interrupted =
+        interruptible_without_parts(py, session, || session.interrupt_operation(operation_id));
     if let (Some(refresh), Some(entered)) = (refresh, entered) {
         if let Err(left) = refresh.bind(py).call_method1("_leave_call_of", (entered,)) {
             left.write_unraisable(py, None);
@@ -1368,6 +1473,9 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     catch_interrupt_failure: bool,
     context: RequestContext,
 ) -> PyResult<Result<T, Box<SparkError>>> {
+    // How its wait without the GIL is counted for the garbage collector, which a caller of the
+    // binding sets for it alone, not for the Python code that the call runs (see `crate::gc`).
+    let counting = crate::gc::take_counting();
     let call = Call::enter(session, context);
     let refreshed = match refresh_request_context(py, session, context) {
         Ok(refreshed) => refreshed,
@@ -1393,7 +1501,7 @@ fn run_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     // As PySpark's requests, which read `SPARK_CONNECT_USER_AGENT` of `os.environ` as each is
     // built: of the environment as the call starts, read under the GIL, as Python changes it.
     session.refresh_user_agent();
-    let mut outcome = wait_interruptible(py, session, f, catch_interrupt_failure);
+    let mut outcome = wait_interruptible(py, session, f, catch_interrupt_failure, counting);
     // As PySpark's `_handle_error`, which raises the error of a call as it is while the thread
     // handles another failure of the client (`inside_error_handling`), as of a call that a handler
     // of a log of that conversion makes: before it sets the operation ID of an execution on it,
@@ -1462,6 +1570,7 @@ fn wait_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
     session: &SparkSession,
     f: impl FnOnce() -> Result<T, E> + Send,
     catch_interrupt_failure: bool,
+    counting: crate::gc::Counting,
 ) -> PyResult<Result<T, Box<SparkError>>> {
     let watch = Arc::new(SignalWatch {
         session: session.clone(),
@@ -1475,7 +1584,9 @@ fn wait_interruptible<T: Send, E: Send + Into<Box<SparkError>>>(
         let watch = Arc::clone(&watch);
         Arc::new(move || watch.poll())
     };
-    let output = crate::client_log::of_its_own_logs(|| py.detach(|| with_wait_watch(poll, f)));
+    let output = crate::client_log::of_its_own_logs(|| {
+        crate::gc::run_detached(py, counting, || with_wait_watch(poll, f))
+    });
     // Of a handler of a signal, or a KeyboardInterrupt that Python code of the client raised in
     // the call after the last check of the wait, as PySpark raises it out of the call there.
     let signal = watch

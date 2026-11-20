@@ -389,11 +389,11 @@ impl DataFrameWriter {
         self.session.clone()
     }
 
-    /// Whether this writer writes the plan of `dataframe`, which it shares (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of this writer to the shared parts of the plan that it writes (see
+    /// [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        Arc::ptr_eq(&self.input_plan, &dataframe.plan)
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        vec![crate::gc::PartRef::Plan(&self.input_plan)]
     }
 
     /// Drop the plan that this writer writes, as [`DataFrame::clear_plan`] drops the plan of a
@@ -709,40 +709,17 @@ impl DataFrameWriterV2 {
         self.session.clone()
     }
 
-    /// Whether this writer writes the plan of `dataframe`, which it shares (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of this writer to the shared parts of the plan that it writes and of its
+    /// partitioning columns (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        Arc::ptr_eq(&self.input_plan, &dataframe.plan)
-    }
-
-    /// The objects of the picklers of the UDFs of the partitioning columns of this writer that it
-    /// alone keeps alive, as [`DataFrame::exclusive_pickler_objects`] gives those of a DataFrame,
-    /// which a Python wrapper reports to Python's garbage collector, as PySpark's writer, of
-    /// Python objects, holds the Columns of `partitionedBy`. The plan that it writes is not
-    /// visited: the wrapper of its DataFrame, which the wrapper of the writer keeps, reports what
-    /// it holds. Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_pickler_objects(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_pickler_objects(self.pickler_holders())
-    }
-
-    /// The owners of the relations built outside the core of the subqueries of the partitioning
-    /// columns of this writer, and of the errors of their parts that a request fails to build,
-    /// that it alone keeps alive, as [`DataFrameWriterV2::exclusive_pickler_objects`] gives the
-    /// objects of the picklers, which a Python wrapper reports to Python's garbage collector
-    /// (see `crate::udf::exclusive_owners`). Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_owners(&self) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_owners(self.pickler_holders())
-    }
-
-    /// The partitioning columns of this writer, of which the exclusive walks start.
-    fn pickler_holders(&self) -> Vec<crate::udf::PicklerHolder<'_>> {
-        self.partition_cols
-            .iter()
-            .map(|column| crate::udf::PicklerHolder::Expression(column.expression()))
-            .collect()
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = vec![crate::gc::PartRef::Plan(&self.input_plan)];
+        held.extend(
+            self.partition_cols
+                .iter()
+                .map(|column| crate::gc::PartRef::Expression(column.expression())),
+        );
+        held
     }
 
     /// Drop the plan that this writer writes and its partitioning columns, as

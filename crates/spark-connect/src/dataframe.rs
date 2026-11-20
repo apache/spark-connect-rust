@@ -42,7 +42,6 @@ impl Drop for CheckpointRef {
 ///
 /// Mirrors `pyspark.sql.DataFrame`.
 /// Clones and transformations share immutable plan nodes with their inputs.
-#[derive(Clone)]
 pub struct DataFrame {
     pub(crate) session: SparkSession,
     pub(crate) plan: Arc<LogicalPlan>,
@@ -57,6 +56,21 @@ pub struct DataFrame {
     // `DataFrame._execution_info`: exact clones share it, and a derived DataFrame, of
     // another plan, has its own, which is empty until it executes.
     execution: ExecutionSlot,
+}
+
+/// A DataFrame of the same plan, of which the check of the clones of a binding is told (see
+/// [`crate::gc::check_clones_with`]).
+impl Clone for DataFrame {
+    fn clone(&self) -> Self {
+        crate::gc::cloned(Arc::as_ptr(&self.plan) as usize);
+        DataFrame {
+            session: self.session.clone(),
+            plan: Arc::clone(&self.plan),
+            schema_cache: Arc::clone(&self.schema_cache),
+            is_local_cache: Arc::clone(&self.is_local_cache),
+            execution: Arc::clone(&self.execution),
+        }
+    }
 }
 
 /// Where a DataFrame keeps the information of its last execution.
@@ -524,6 +538,8 @@ impl DataFrame {
         plan: LogicalPlan,
         schema: Option<Arc<DataType>>,
     ) -> Self {
+        // The inputs of the node were cloned to make it.
+        crate::gc::cloned_into(&plan);
         DataFrame {
             session,
             plan: Arc::new(plan),
@@ -1563,94 +1579,11 @@ impl DataFrame {
         crate::plan::is_unbuilt_with(&self.plan, error)
     }
 
-    /// The objects of the picklers of the UDFs and the UDTFs of the plan of this DataFrame that
-    /// it keeps alive with the clones of it of which the caller answers, `holders` holders of
-    /// its plan with this DataFrame, as [`DataFrame::exclusive_relation_owners`] gives the owners
-    /// of its relations, which a Python wrapper reports to Python's garbage collector too: a
-    /// function of a UDF may keep the DataFrame of the UDF, as the bound method of an object that
-    /// keeps the DataFrame does (see `crate::udf::exclusive_pickler_objects`). The wrapper answers
-    /// for the clones that the objects that keep it hold, such as its grouped data and its
-    /// writers, as what they hold is reachable through the wrapper too. Nothing is returned when
-    /// the plan has other holders. Not a stable API.
+    /// The references of this DataFrame to the shared parts of its plan (see [`crate::gc`]): its
+    /// plan. Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_pickler_objects(
-        &self,
-        holders: usize,
-    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        if Arc::strong_count(&self.plan) != holders {
-            return Vec::new();
-        }
-        crate::udf::exclusive_pickler_objects(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
-    }
-
-    /// The owners of the Observations of the plan of this DataFrame (see
-    /// [`Observation::with_owner`](crate::observation::Observation::with_owner)) that it keeps
-    /// alive with the clones of it of which the caller answers, `holders` holders of its plan with
-    /// this DataFrame, as [`DataFrame::exclusive_relation_owners`] counts them: every `Arc` below
-    /// its plan down to the node of such an Observation is held once, and so is the owner. A
-    /// Python wrapper reports them to Python's garbage collector, as the Python Observation that
-    /// the plan of an `observe` holds, as PySpark's plan does, may keep the DataFrame. An owner
-    /// that another plan or clone shares is not returned, so that the collector does not count a
-    /// reference twice. Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_observation_owners(
-        &self,
-        holders: usize,
-    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        let mut owners = Vec::new();
-        if Arc::strong_count(&self.plan) != holders {
-            return owners;
-        }
-        let mut pending: Vec<&LogicalPlan> = vec![self.plan.as_ref()];
-        while let Some(plan) = pending.pop() {
-            let held: Vec<&crate::observation::Observation> = match plan {
-                LogicalPlan::Observe {
-                    observation: Some(observation),
-                    ..
-                } => vec![observation],
-                LogicalPlan::Raw { observations, .. } => observations
-                    .iter()
-                    .map(|(_, observation)| observation)
-                    .collect(),
-                _ => Vec::new(),
-            };
-            for observation in held {
-                if let Some(owner) = observation.owner() {
-                    if Arc::strong_count(owner) == 1 {
-                        owners.push(owner.as_ref());
-                    }
-                }
-            }
-            pending.extend(
-                plan.inputs()
-                    .into_iter()
-                    .filter(|input| Arc::strong_count(input) == 1)
-                    .map(|input| input.as_ref()),
-            );
-        }
-        owners
-    }
-
-    /// The owners of the relations built outside the core (`from_relation`), and of the errors
-    /// of the expressions that a request fails to build (`Expression::unbuildable_owned`), that
-    /// this DataFrame keeps alive with the clones of it of which the caller answers, `holders`
-    /// holders of its plan with this DataFrame, as [`DataFrame::exclusive_pickler_objects`]
-    /// counts them: every `Arc` below its plan down to such an owner, also through the
-    /// expressions of the plan and the plans of their subqueries, is held once. A Python wrapper
-    /// reports them to Python's garbage collector, so that a reference cycle through the wrapper
-    /// can be freed, as through a DataFrame of PySpark Connect, a Python object: a `pyspark.ml`
-    /// model's summary keeps a DataFrame whose plan keeps the model. An owner that another plan,
-    /// expression or DataFrame shares is not returned, so that the collector does not count a
-    /// reference twice (see `crate::udf::exclusive_owners`). Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_relation_owners(
-        &self,
-        holders: usize,
-    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        if Arc::strong_count(&self.plan) != holders {
-            return Vec::new();
-        }
-        crate::udf::exclusive_owners(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        vec![crate::gc::PartRef::Plan(&self.plan)]
     }
 
     /// Drop the plan of this DataFrame, which becomes an empty relation of its session: the
@@ -1659,12 +1592,6 @@ impl DataFrame {
     #[doc(hidden)]
     pub fn clear_plan(&mut self) {
         self.plan = cleared_plan();
-    }
-
-    /// Whether `other` holds the plan of this DataFrame, as a clone of it does. Not a stable API.
-    #[doc(hidden)]
-    pub fn shares_plan_with(&self, other: &DataFrame) -> bool {
-        Arc::ptr_eq(&self.plan, &other.plan)
     }
 
     /// The DataFrame of `relation`, as `from_relation`, of a relation without placeholders, of
@@ -1799,6 +1726,7 @@ impl DataFrame {
     /// as PySpark's `isLocal` keeps one for each DataFrame. Not a stable API.
     #[doc(hidden)]
     pub fn shallow_copy(&self) -> DataFrame {
+        crate::gc::cloned(Arc::as_ptr(&self.plan) as usize);
         DataFrame {
             session: self.session.clone(),
             plan: Arc::clone(&self.plan),
@@ -1885,6 +1813,7 @@ impl DataFrame {
         let plan = crate::udf::PicklerRebuild::new(copies, &observations)
             .plan(&self.plan, Some(self.session.plan_ids()))
             .unwrap_or_else(|| Arc::clone(&self.plan));
+        self.cloned_for(&plan);
         if !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared()) {
             session
                 .plan_ids()
@@ -1908,10 +1837,35 @@ impl DataFrame {
         let plan = crate::udf::PicklerRebuild::new(copies, &[])
             .plan(&self.plan, Some(self.session.plan_ids()))
             .unwrap_or_else(|| Arc::clone(&self.plan));
+        self.cloned_for(&plan);
         DataFrame {
             session: self.session.clone(),
             plan,
             schema_cache: Arc::new(Mutex::new(self.cached_schema())),
+            is_local_cache: Arc::new(Mutex::new(None)),
+            execution: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Tell the check of the clones of a binding of the clone that `plan` is, of the plan of this
+    /// DataFrame or of a node rebuilt over its inputs, of which its inputs are clones.
+    fn cloned_for(&self, plan: &Arc<LogicalPlan>) {
+        if Arc::ptr_eq(plan, &self.plan) {
+            crate::gc::cloned(Arc::as_ptr(plan) as usize);
+        } else {
+            crate::gc::cloned_into(plan);
+        }
+    }
+
+    /// The DataFrame of `plan`, a plan that another value of `session` holds, of no schema
+    /// cached and an information of executions of its own.
+    pub(crate) fn of_shared_plan(session: SparkSession, plan: Arc<LogicalPlan>) -> DataFrame {
+        // Of a clone of the plan, which the check of the clones of a binding is told of.
+        crate::gc::cloned(Arc::as_ptr(&plan) as usize);
+        DataFrame {
+            session,
+            plan,
+            schema_cache: Arc::new(Mutex::new(None)),
             is_local_cache: Arc::new(Mutex::new(None)),
             execution: Arc::new(Mutex::new(None)),
         }
@@ -1931,13 +1885,7 @@ impl DataFrame {
                 .plan_ids()
                 .assign_ids_of(&self.plan, self.session.plan_ids());
         }
-        DataFrame {
-            session,
-            plan: Arc::clone(&self.plan),
-            schema_cache: Arc::new(Mutex::new(None)),
-            is_local_cache: Arc::new(Mutex::new(None)),
-            execution: Arc::new(Mutex::new(None)),
-        }
+        DataFrame::of_shared_plan(session, Arc::clone(&self.plan))
     }
 
     /// Give the plan of this DataFrame the plan ID `id` in its session, which its relation is
@@ -6697,13 +6645,22 @@ mod plan_construction_tests {
         }
     }
 
-    /// The owners of the relations built outside the core that only one DataFrame keeps are the
-    /// ones that a Python wrapper reports to the garbage collector: a relation that two plans
-    /// share is reported by neither, and a cleared plan keeps none. A clone of the DataFrame that
-    /// the caller answers for, as the wrapper answers for those of its grouped data, is one more
-    /// holder of the plan, and no other one may hold it then.
+    /// The objects of the owners and the picklers among the parts that `roots` reach.
+    fn objects_of_parts<T: Copy + 'static>(roots: &[crate::gc::PartRef<'_>]) -> Vec<T> {
+        crate::gc::tests::references(roots)
+            .values()
+            .filter_map(|(_, part)| part.object()?.downcast_ref::<T>().copied())
+            .collect()
+    }
+
+    /// The references that DataFrames give to the shared parts of their plans, with those of the
+    /// parts below them, are every reference to those parts, as a Python wrapper counts them for
+    /// the garbage collector (see `crate::gc`): of a DataFrame of a relation built outside the
+    /// core and of its owner, of one derived from it, of its clones, and of a cleared plan, which
+    /// holds no owner.
     #[test]
-    fn exclusive_relation_owners_are_those_only_this_dataframe_keeps() {
+    fn held_parts_of_dataframes_are_every_reference_to_their_parts() {
+        use crate::gc::tests::assert_exact;
         let spark = session();
         let relation = proto::Relation {
             common: None,
@@ -6713,41 +6670,41 @@ mod plan_construction_tests {
             })),
         };
         let df = DataFrame::from_relation(spark.clone(), relation, Some(Arc::new(7u8))).unwrap();
-        let owners = df.exclusive_relation_owners(1);
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+        assert_exact(&df.held_parts());
+        assert_eq!(objects_of_parts::<u8>(&df.held_parts()), vec![7]);
 
         let derived = df.filter(crate::functions::col("a").gt(crate::column::lit(0)));
-        assert!(df.exclusive_relation_owners(1).is_empty());
-        assert!(derived.exclusive_relation_owners(1).is_empty());
+        assert_exact(&[df.held_parts(), derived.held_parts()].concat());
         drop(df);
-        assert_eq!(derived.exclusive_relation_owners(1).len(), 1);
+        assert_exact(&derived.held_parts());
+        assert_eq!(objects_of_parts::<u8>(&derived.held_parts()), vec![7]);
 
         let copy = derived.clone();
-        assert!(copy.shares_plan_with(&derived));
-        assert!(derived.exclusive_relation_owners(1).is_empty());
-        assert_eq!(derived.exclusive_relation_owners(2).len(), 1);
         let other = copy.clone();
-        assert!(derived.exclusive_relation_owners(2).is_empty());
-        drop((copy, other));
+        let joined = derived.join(&copy, None, crate::plan::JoinType::Inner);
+        assert_exact(
+            &[
+                derived.held_parts(),
+                copy.held_parts(),
+                other.held_parts(),
+                joined.held_parts(),
+            ]
+            .concat(),
+        );
+        drop((copy, other, joined));
         let mut derived = derived;
-        assert!(derived.exclusive_relation_owners(2).is_empty());
-        assert_eq!(derived.exclusive_relation_owners(1).len(), 1);
         derived.clear_plan();
-        assert!(derived.exclusive_relation_owners(1).is_empty());
-        assert!(spark
-            .range(3)
-            .unwrap()
-            .exclusive_relation_owners(1)
-            .is_empty());
-        assert!(!spark.range(3).unwrap().shares_plan_with(&derived));
+        assert_exact(&derived.held_parts());
+        assert!(objects_of_parts::<u8>(&derived.held_parts()).is_empty());
     }
 
-    /// The owners that the plan of a DataFrame holds through the subqueries of its expressions,
-    /// and the owners of the errors of its expressions, are of the same walk, as long as no
-    /// other plan, expression or DataFrame shares the way to them.
+    /// The parts of the plan of a DataFrame reach the owners of the relations of the subqueries of
+    /// its expressions and the owners of the errors of its expressions, with every reference to
+    /// them, of the Columns and the DataFrames that share them too.
     #[test]
-    fn exclusive_relation_owners_reach_the_subqueries_and_the_errors_of_the_expressions() {
+    fn held_parts_reach_the_subqueries_and_the_errors_of_the_expressions() {
+        use crate::gc::tests::assert_exact;
+        use crate::gc::PartRef;
         let spark = session();
         let relation = proto::Relation {
             common: None,
@@ -6760,17 +6717,17 @@ mod plan_construction_tests {
         let subquery = inner.select([crate::functions::max(crate::functions::col("a"))]);
         let scalar = subquery.scalar();
         let outer = spark.range(1).unwrap().select([scalar.clone()]);
-        // The Column, the DataFrame of the subquery and the DataFrame of the relation share it.
-        assert!(outer.exclusive_relation_owners(1).is_empty());
-        assert!(scalar.expression().exclusive_owners().is_empty());
-        drop(inner);
-        assert!(outer.exclusive_relation_owners(1).is_empty());
-        drop(subquery);
-        assert_eq!(scalar.expression().exclusive_owners().len(), 0);
-        drop(scalar);
-        let owners = outer.exclusive_relation_owners(1);
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+        let all = [
+            inner.held_parts(),
+            subquery.held_parts(),
+            vec![PartRef::Expression(scalar.expression())],
+            outer.held_parts(),
+        ]
+        .concat();
+        assert_exact(&all);
+        drop((inner, subquery, scalar));
+        assert_exact(&outer.held_parts());
+        assert_eq!(objects_of_parts::<u8>(&outer.held_parts()), vec![7]);
 
         let failing = Expression::unbuildable_owned(
             crate::functions::col("a").expression().clone(),
@@ -6780,16 +6737,14 @@ mod plan_construction_tests {
         );
         let failing = Column::from(failing);
         let of_error = spark.range(1).unwrap().select([failing.clone()]);
-        assert!(of_error.exclusive_relation_owners(1).is_empty());
-        assert_eq!(failing.expression().exclusive_owners().len(), 0);
-        drop(of_error);
-        let owners = failing.expression().exclusive_owners();
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].downcast_ref::<u16>(), Some(&9));
-        let of_error = spark.range(1).unwrap().select([failing]);
-        let owners = of_error.exclusive_relation_owners(1);
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].downcast_ref::<u16>(), Some(&9));
+        assert_exact(
+            &[
+                of_error.held_parts(),
+                vec![PartRef::Expression(failing.expression())],
+            ]
+            .concat(),
+        );
+        assert_eq!(objects_of_parts::<u16>(&of_error.held_parts()), vec![9]);
     }
 
     #[test]
@@ -7589,13 +7544,20 @@ mod plan_construction_tests {
         ]);
         let unpickled =
             DataFrame::from_sent_relation_with_holes(spark.clone(), relation, 2, holes).unwrap();
-        // The picklers of the holes, which a deep copy copies, and which the DataFrame alone holds.
+        // The picklers of the holes, which a deep copy copies, are parts of the plan, as is the
+        // pickler of a UDF of a DataFrame over it, which shares the plan.
         assert_eq!(unpickled.picklers().len(), 2);
-        assert_eq!(unpickled.exclusive_pickler_objects(1).len(), 2);
+        let picklers = |roots: &[crate::gc::PartRef<'_>]| {
+            crate::gc::tests::references(roots)
+                .values()
+                .filter(|(_, part)| matches!(part, crate::gc::Part::Pickler(_)))
+                .count()
+        };
+        crate::gc::tests::assert_exact(&unpickled.held_parts());
+        assert_eq!(picklers(&unpickled.held_parts()), 2);
         let over = unpickled.select([udf_column("c", udf_pickler("over", Arc::clone(&never)))]);
-        // What the DataFrame and the one over it share is told of by neither.
-        assert!(unpickled.exclusive_pickler_objects(1).is_empty());
-        assert_eq!(over.exclusive_pickler_objects(1).len(), 1);
+        crate::gc::tests::assert_exact(&[unpickled.held_parts(), over.held_parts()].concat());
+        assert_eq!(picklers(&over.held_parts()), 3);
         let contains = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|w| w == part);
         for _ in 0..2 {
             let sent = over.relation().unwrap().encode_to_vec();
@@ -7812,12 +7774,12 @@ mod plan_construction_tests {
         );
     }
 
-    /// The owners of the Observations that only one DataFrame keeps are the ones that a Python
-    /// wrapper reports to the garbage collector, as for the owners of its relations: an owner of
-    /// a plan that another DataFrame shares, or that another clone of the Observation holds too, is
-    /// reported by none, and a cleared plan keeps none.
+    /// The parts of a plan reach the owners of its Observations, which a Python wrapper reports to
+    /// the garbage collector: a clone of an Observation that the plan does not hold, such as the
+    /// one of the caller and those that `observations` gives, is a reference outside the parts.
     #[test]
-    fn exclusive_observation_owners_are_those_only_this_dataframe_keeps() {
+    fn held_parts_reach_the_owners_of_the_observations_of_the_plan() {
+        use crate::gc::tests::{assert_exact, outside_references};
         use crate::observation::Observation;
         let spark = session();
         let observation = Observation::new("o").with_owner(Arc::new(7u8));
@@ -7829,29 +7791,21 @@ mod plan_construction_tests {
             .range(3)
             .unwrap()
             .observed_with(&observation, name, count);
-        // The clone that the plan holds and this one share the owner, so neither reports it.
-        assert!(observed.exclusive_observation_owners(1).is_empty());
+        assert_eq!(outside_references(&observed.held_parts()), 1);
         drop(observation);
-        let owners = observed.exclusive_observation_owners(1);
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+        assert_exact(&observed.held_parts());
+        assert_eq!(objects_of_parts::<u8>(&observed.held_parts()), vec![7]);
 
         let derived = observed.filter(crate::functions::col("id").gt(crate::column::lit(0)));
-        assert!(observed.exclusive_observation_owners(1).is_empty());
-        assert!(derived.exclusive_observation_owners(1).is_empty());
+        assert_exact(&[observed.held_parts(), derived.held_parts()].concat());
         drop(observed);
-        assert_eq!(derived.exclusive_observation_owners(1).len(), 1);
-        let copy = derived.clone();
-        assert!(derived.exclusive_observation_owners(1).is_empty());
-        assert_eq!(derived.exclusive_observation_owners(2).len(), 1);
-        drop(copy);
-        // The Observations of the plan that `observations` gives are clones that share the owner.
         let held = derived.observations();
-        assert!(derived.exclusive_observation_owners(1).is_empty());
+        assert_eq!(outside_references(&derived.held_parts()), 1);
         drop(held);
+        assert_exact(&derived.held_parts());
         let mut derived = derived;
         derived.clear_plan();
-        assert!(derived.exclusive_observation_owners(1).is_empty());
+        assert!(objects_of_parts::<u8>(&derived.held_parts()).is_empty());
     }
 
     /// As PySpark's `LogicalPlan.observations`: the Observations along the children of a plan,

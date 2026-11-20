@@ -624,7 +624,7 @@ impl PySparkSessionBuilder {
             .map(|(key, value)| (key.as_str(), value.as_deref()))
             .collect();
         let conf = session.conf();
-        let warnings = interruptible(py, session, || {
+        let warnings = crate::interrupt::interruptible_without_parts(py, session, || {
             conf.set_pairs(&pairs, Some(true)).map_err(Box::new)
         })?;
         // As PySpark's `RuntimeConf._set_all`, which warns each warning of the server.
@@ -912,7 +912,7 @@ fn connected_session(
         Some(user) => with_user_id(&url, user)?,
         None => url,
     };
-    py.detach(|| {
+    crate::gc::detach_without_parts(py, || {
         configure(with_channel_credentials(
             SparkSession::builder().remote(&url),
             credentials,
@@ -1404,7 +1404,7 @@ impl PyExitHook {
                     session.release_session().map_err(Box::new)
                 }),
             )?;
-            py.detach(|| session.close());
+            crate::gc::detach_without_parts(py, || session.close());
         }
         Ok(())
     }
@@ -1435,7 +1435,7 @@ pub fn _close_sessions_at_exit(py: Python<'_>) {
             .lock()
             .unwrap_or_else(|e| e.into_inner()),
     );
-    py.detach(|| {
+    crate::gc::detach_without_parts(py, || {
         for session in &sessions {
             session.close_at_once();
         }
@@ -1982,7 +1982,7 @@ impl PySparkSession {
         let unparsed = DataType::Unparsed {
             data_type_string: json,
         };
-        let df = interruptible(py, &self.session, || {
+        let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
                 .create_dataframe_from_arrow_with_options(batches, unparsed, &options)
                 .map_err(Box::new)
@@ -2028,7 +2028,9 @@ impl PySparkSession {
             }
             if data.len()? > 0 {
                 let options =
-                    interruptible(py, &self.session, || self.session.arrow_input_options())?;
+                    crate::interrupt::interruptible_without_parts(py, &self.session, || {
+                        self.session.arrow_input_options()
+                    })?;
                 let width: usize = if ndim == 1 {
                     1
                 } else {
@@ -2058,7 +2060,9 @@ impl PySparkSession {
         {
             return Ok(None);
         }
-        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
+        let options = crate::interrupt::interruptible_without_parts(py, &self.session, || {
+            self.session.arrow_input_options()
+        })?;
         let large = options.use_large_var_types() == Some("true");
         if pandas {
             // As PySpark's conversion of a frame of a struct, which first deduplicates the names
@@ -2197,7 +2201,7 @@ impl PySparkSession {
                 ));
             };
             let schema = DataType::Struct { fields };
-            let df = interruptible(py, &self.session, || {
+            let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
                 self.session
                     .create_dataframe(Vec::new(), schema)
                     .map_err(Box::new)
@@ -2208,7 +2212,9 @@ impl PySparkSession {
         // request before it converts any data, and before it iterates data of no length.
         let options = match options {
             Some(options) => options,
-            None => interruptible(py, &self.session, || self.session.arrow_input_options())?,
+            None => crate::interrupt::interruptible_without_parts(py, &self.session, || {
+                self.session.arrow_input_options()
+            })?,
         };
         // Each row, and each value that inference and the converters take, is a step of the
         // budget, whose checkpoints let other threads run and signals interrupt the conversion,
@@ -2438,7 +2444,7 @@ impl PySparkSession {
         let names: std::sync::Arc<[String]> = fields.iter().map(|f| f.name.clone()).collect();
         let schema = DataType::Struct { fields };
         // The rows are made of the values without the GIL.
-        let df = interruptible(py, &self.session, || {
+        let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             let rows: Vec<Row> = values
                 .into_iter()
                 .map(|values| StructValue::new(names.clone(), values).into())
@@ -2498,7 +2504,9 @@ impl PySparkSession {
         // Of the settings that createDataFrame read in one request, as PySpark reads them.
         let options = match options {
             Some(options) => options.clone(),
-            None => interruptible(py, &self.session, || self.session.arrow_input_options())?,
+            None => crate::interrupt::interruptible_without_parts(py, &self.session, || {
+                self.session.arrow_input_options()
+            })?,
         };
         // The option is always set, as the importer requires it.
         let timezone = options.timezone().unwrap_or("UTC").to_owned();
@@ -2540,7 +2548,7 @@ impl PySparkSession {
         }
         let options = with_schema_json(options, crate::types::schema_json_text(Some(schema))?);
         let batches = crate::pyarrow_import::table_batches(&table)?;
-        let df = interruptible(py, &self.session, || {
+        let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
                 .create_dataframe_from_arrow_with_options(batches, Some(spark_schema), &options)
                 .map_err(Box::new)
@@ -2629,7 +2637,7 @@ impl PySparkSession {
             ));
         }
         let batches = crate::pyarrow_import::table_batches(&table)?;
-        let df = interruptible(py, &self.session, || {
+        let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
                 .create_dataframe_from_arrow_with_options(batches, None, &settings.options)
                 .map_err(Box::new)
@@ -2685,7 +2693,9 @@ impl PySparkSession {
         }
         // As PySpark's createDataFrame, which reads every setting of its conversions in one
         // request before it converts the array, and so before the checks of its columns.
-        let options = interruptible(py, &self.session, || self.session.arrow_input_options())?;
+        let options = crate::interrupt::interruptible_without_parts(py, &self.session, || {
+            self.session.arrow_input_options()
+        })?;
         let width: usize = if ndim == 1 {
             1
         } else {
@@ -2732,7 +2742,7 @@ impl PySparkSession {
         }
         let options = with_schema_json(options, crate::types::schema_json_text(schema_object)?);
         let batches = crate::pyarrow_import::table_batches(&table)?;
-        let df = interruptible(py, &self.session, || {
+        let df = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
                 .create_dataframe_from_arrow_with_options(batches, schema, &options)
                 .map_err(Box::new)
@@ -2992,15 +3002,17 @@ impl PySparkSession {
         let df = match (options, schema_json) {
             // Of no rows, as an empty frame, of no settings: the schema alone.
             (None, Some(json)) => schema_text_dataframe(&self.session, json)?.dataframe,
-            (options, json) => interruptible(py, &self.session, || {
-                match options.map(|options| with_schema_json(options, json)) {
-                    Some(options) => self
-                        .session
-                        .create_dataframe_with_options(rows, schema, &options),
-                    None => self.session.create_dataframe(rows, schema),
-                }
-                .map_err(Box::new)
-            })?,
+            (options, json) => {
+                crate::interrupt::interruptible_without_parts(py, &self.session, || {
+                    match options.map(|options| with_schema_json(options, json)) {
+                        Some(options) => self
+                            .session
+                            .create_dataframe_with_options(rows, schema, &options),
+                        None => self.session.create_dataframe(rows, schema),
+                    }
+                    .map_err(Box::new)
+                })?
+            }
         };
         Ok(PyDataFrame::new(match names {
             Some(names) if !names.is_empty() => {
@@ -3020,7 +3032,9 @@ impl PySparkSession {
     ) -> PyResult<PandasArrowSettings> {
         let options = match options {
             Some(options) => options.clone(),
-            None => interruptible(py, &self.session, || self.session.arrow_input_options())?,
+            None => crate::interrupt::interruptible_without_parts(py, &self.session, || {
+                self.session.arrow_input_options()
+            })?,
         };
         Ok(PandasArrowSettings {
             safecheck: options.safecheck(),
@@ -3063,13 +3077,15 @@ impl PySparkSession {
         // signal that ends that read raises its exception, which the default does not replace.
         let safecheck = match safecheck {
             Some(safecheck) => safecheck,
-            None => crate::interrupt::interruptible_outcome(py, &self.session, || {
-                self.session
-                    .conf()
-                    .get("spark.sql.execution.pandas.convertToArrowArraySafely")
-                    .map_err(Box::new)
-            })?
-            .map_or(true, |value| value.is_none_or(|value| value == "true")),
+            None => {
+                crate::interrupt::interruptible_outcome_without_parts(py, &self.session, || {
+                    self.session
+                        .conf()
+                        .get("spark.sql.execution.pandas.convertToArrowArraySafely")
+                        .map_err(Box::new)
+                })?
+                .map_or(true, |value| value.is_none_or(|value| value == "true"))
+            }
         };
         if safecheck {
             message.push_str(
@@ -3394,7 +3410,14 @@ impl PySparkSession {
             ));
         }
         // The statement runs to completion at once, so other Python threads go on meanwhile,
-        // to interrupt it for one.
+        // to interrupt it for one: of the plans of the DataFrames of its references and of the
+        // expressions of its arguments, which its plan is built of.
+        let parts = pos
+            .iter()
+            .chain(named.values())
+            .map(spark_connect::gc::PartRef::Expression)
+            .chain(references.iter().flat_map(|(df, _)| df.held_parts()));
+        let _in_use = crate::gc::in_use_of_values(py, parts);
         let df = interruptible(py, &session, || {
             session
                 .sql_with_references(&query, pos, named, references)
@@ -3518,9 +3541,11 @@ impl PySparkSession {
             // As PySpark's createDataFrame, which reads every setting of its conversions in one
             // request before it converts a pandas DataFrame that is not empty.
             let options = if data.len()? > 0 {
-                Some(interruptible(py, &self.session, || {
-                    self.session.arrow_input_options()
-                })?)
+                Some(crate::interrupt::interruptible_without_parts(
+                    py,
+                    &self.session,
+                    || self.session.arrow_input_options(),
+                )?)
             } else {
                 None
             };
@@ -3630,19 +3655,20 @@ impl PySparkSession {
                     fields: fields.clone(),
                 };
                 let ipc: Vec<u8> = ipc.extract()?;
-                let frame = interruptible(py, &self.session, || {
-                    match options.as_ref() {
-                        Some(options) => self
-                            .session
-                            .create_dataframe_from_inline_arrow_ipc_with_options(
-                                ipc, schema, options,
-                            ),
-                        None => self
-                            .session
-                            .create_dataframe_from_inline_arrow_ipc(ipc, schema),
-                    }
-                    .map_err(Box::new)
-                })?;
+                let frame =
+                    crate::interrupt::interruptible_without_parts(py, &self.session, || {
+                        match options.as_ref() {
+                            Some(options) => self
+                                .session
+                                .create_dataframe_from_inline_arrow_ipc_with_options(
+                                    ipc, schema, options,
+                                ),
+                            None => self
+                                .session
+                                .create_dataframe_from_inline_arrow_ipc(ipc, schema),
+                        }
+                        .map_err(Box::new)
+                    })?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -3696,19 +3722,20 @@ impl PySparkSession {
                     fields: fields.clone(),
                 };
                 let ipc: Vec<u8> = ipc.extract()?;
-                let frame = interruptible(py, &self.session, || {
-                    match options.as_ref() {
-                        Some(options) => self
-                            .session
-                            .create_dataframe_from_inline_arrow_ipc_with_options(
-                                ipc, schema, options,
-                            ),
-                        None => self
-                            .session
-                            .create_dataframe_from_inline_arrow_ipc(ipc, schema),
-                    }
-                    .map_err(Box::new)
-                })?;
+                let frame =
+                    crate::interrupt::interruptible_without_parts(py, &self.session, || {
+                        match options.as_ref() {
+                            Some(options) => self
+                                .session
+                                .create_dataframe_from_inline_arrow_ipc_with_options(
+                                    ipc, schema, options,
+                                ),
+                            None => self
+                                .session
+                                .create_dataframe_from_inline_arrow_ipc(ipc, schema),
+                        }
+                        .map_err(Box::new)
+                    })?;
                 // Match pandas row input: explicit nonempty field names travel
                 // through toDF as well as the local relation's logical schema.
                 return Ok(PyDataFrame::new(
@@ -3765,9 +3792,11 @@ impl PySparkSession {
         let options = if data.len().is_ok_and(|n| n == 0) {
             None
         } else {
-            Some(interruptible(py, &self.session, || {
-                self.session.arrow_input_options()
-            })?)
+            Some(crate::interrupt::interruptible_without_parts(
+                py,
+                &self.session,
+                || self.session.arrow_input_options(),
+            )?)
         };
         // Preserve schema parsing, ignored-argument warnings, and pandas/Arrow routing.
         // Only a native StructType opts into this explicit integer optimization;
@@ -3789,17 +3818,23 @@ impl PySparkSession {
                         let schema = DataType::Struct {
                             fields: fields.clone(),
                         };
-                        let df = interruptible(py, &self.session, || {
-                            match options.as_ref() {
-                                Some(options) => {
-                                    self.session.create_dataframe_from_columns_with_options(
-                                        columns, schema, options,
-                                    )
+                        let df = crate::interrupt::interruptible_without_parts(
+                            py,
+                            &self.session,
+                            || {
+                                match options.as_ref() {
+                                    Some(options) => {
+                                        self.session.create_dataframe_from_columns_with_options(
+                                            columns, schema, options,
+                                        )
+                                    }
+                                    None => {
+                                        self.session.create_dataframe_from_columns(columns, schema)
+                                    }
                                 }
-                                None => self.session.create_dataframe_from_columns(columns, schema),
-                            }
-                            .map_err(Box::new)
-                        })?;
+                                .map_err(Box::new)
+                            },
+                        )?;
                         return Ok(PyDataFrame::new(df));
                     }
                 }
@@ -4040,7 +4075,7 @@ impl PySparkSession {
                         self.session.close_after_releases()
                     })?;
                 } else {
-                    py.detach(|| self.session.close_at_once());
+                    crate::gc::detach_without_parts(py, || self.session.close_at_once());
                 }
                 unbuilt.map_or(Ok(()), Err)
             };
@@ -4147,7 +4182,8 @@ impl PySparkSession {
             // Of the str of the type as it is, a lone surrogate too, as PySpark formats it.
             Some(other) => return Err(crate::types::not_a_type_error(other)),
         };
-        interruptible(py, &self.session, || {
+        // Of names and a type.
+        crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
                 .register_java_function_with(&name, &java_class_name, return_type, aggregate)
                 .map_err(Box::new)
@@ -4182,7 +4218,8 @@ impl PySparkSession {
             Vec::new(),
             payload,
         );
-        interruptible(py, &self.session, || {
+        // Of the bytes of the pickled command, of no part.
+        crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session.register_function(udf_expr).map_err(Box::new)
         })
     }
@@ -4232,7 +4269,8 @@ impl PySparkSession {
         } else {
             command.extract()?
         };
-        interruptible(py, &self.session, || {
+        // Of the bytes of the pickled handler class, of no part.
+        crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session.register_table_function(
                 &name,
                 return_type.as_ref(),
@@ -4248,22 +4286,25 @@ impl PySparkSession {
     /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
     /// `ExecutePlanResponse`: for the `execute_command` of `client`. The command is decoded, and
     /// the responses encoded, with the GIL released, as the execution waits: a command or a
-    /// response of many values (the vocabulary of a model) takes as long as it is large.
+    /// response of many values (the vocabulary of a model) takes as long as it is large. Its
+    /// placeholders of DataFrames are replaced in between, with the GIL held (see
+    /// `client::resolved`).
     fn _execute_command<'py>(
         &self,
         py: Python<'py>,
         command: &[u8],
     ) -> PyResult<Vec<Bound<'py, pyo3::types::PyBytes>>> {
         use prost::Message;
-        let command = py
-            .detach(|| {
-                spark_connect::plan::BuiltOutside::decoded(
-                    command,
-                    spark_connect_proto::Command::decode,
-                )
-            })
-            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
-        let responses = interruptible(py, &self.session, || {
+        let command = crate::gc::detach_without_parts(py, || {
+            spark_connect::plan::BuiltOutside::decoded(
+                command,
+                spark_connect_proto::Command::decode,
+            )
+        })
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        // Its placeholders replaced with the GIL held, so that its request reads no DataFrame.
+        let command = crate::client::resolved(&self.session, command)?;
+        let responses = crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session
                 .execute_command_proto(command)
                 .map(|responses| {
@@ -4310,7 +4351,7 @@ impl PySparkSession {
         // Of no wait, and no poll of the signals, when no release is in flight, as of a session
         // that the program dropped, which a finalizer may close.
         if !self.session.has_releases_to_wait_for() {
-            py.detach(|| self.session.close_at_once());
+            crate::gc::detach_without_parts(py, || self.session.close_at_once());
             return Ok(());
         }
         crate::interrupt::abortable_without_session(py, || self.session.close_after_releases())
@@ -4810,7 +4851,9 @@ impl PySparkSession {
     /// The type of the DDL string `ddl`, as the server parses it, as PySpark Connect's
     /// `SparkSession._parse_ddl`, of a `DDLParse` of an `AnalyzePlanRequest`.
     fn _parse_ddl(&self, py: Python<'_>, ddl: &str) -> PyResult<Py<PyAny>> {
-        let data_type = interruptible(py, &self.session, || self.session.parse_ddl(ddl))?;
+        let data_type = crate::interrupt::interruptible_without_parts(py, &self.session, || {
+            self.session.parse_ddl(ddl)
+        })?;
         crate::dataframe::check_schema_conversion(py, Some(&data_type))?;
         crate::types::data_type_to_py(py, &data_type)
     }
@@ -4896,7 +4939,7 @@ impl PySparkSession {
     fn version(&self, py: Python<'_>) -> PyResult<String> {
         // A `functools.cached_property` of PySpark's.
         crate::client_log::of_cached_property("version", || {
-            interruptible(py, &self.session, || {
+            crate::interrupt::interruptible_without_parts(py, &self.session, || {
                 self.session.version().map_err(Box::new)
             })
         })
@@ -4932,7 +4975,7 @@ impl PySparkSession {
     #[pyo3(name = "interruptAll")]
     #[doc = connect_doc!(SparkSession.interruptAll)]
     fn interrupt_all(&self, py: Python<'_>) -> PyResult<Vec<String>> {
-        interruptible(py, &self.session, || {
+        crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session.interrupt_all().map_err(Box::new)
         })
     }
@@ -4943,7 +4986,7 @@ impl PySparkSession {
     #[doc = connect_doc!(SparkSession.interruptTag)]
     fn interrupt_tag(&self, py: Python<'_>, tag: &Bound<'_, PyAny>) -> PyResult<Vec<String>> {
         let tag = interrupted_id(tag)?;
-        interruptible(py, &self.session, || {
+        crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session.interrupt_tag(&tag).map_err(Box::new)
         })
     }
@@ -4957,7 +5000,7 @@ impl PySparkSession {
         op_id: &Bound<'_, PyAny>,
     ) -> PyResult<Vec<String>> {
         let op_id = interrupted_id(op_id)?;
-        interruptible(py, &self.session, || {
+        crate::interrupt::interruptible_without_parts(py, &self.session, || {
             self.session.interrupt_operation(&op_id)
         })
     }
@@ -4994,7 +5037,7 @@ impl PySparkSession {
     fn to_ddl(&self, py: Python<'_>, r#struct: &Bound<'_, PyAny>) -> PyResult<String> {
         let json: String = r#struct.call_method0("json")?.extract()?;
         let session = self.session.clone();
-        interruptible(py, &session, || {
+        crate::interrupt::interruptible_without_parts(py, &session, || {
             session.json_to_ddl(&json).map_err(Box::new)
         })
     }

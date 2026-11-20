@@ -178,35 +178,13 @@ pub(crate) fn deep_copied_picklers(
     Ok(copies)
 }
 
-/// The Python objects of the picklers of `objects`, of the UDFs of a DataFrame or a Column that
-/// only it holds, which its `__traverse__` reports.
-pub(crate) fn visit_pickler_objects(
-    objects: Vec<&(dyn std::any::Any + Send + Sync)>,
-    visit: &pyo3::PyVisit<'_>,
-) -> Result<(), pyo3::PyTraverseError> {
-    for object in objects {
-        if let Some(command) = object.downcast_ref::<PythonCommand>() {
-            visit.call(&command.object)?;
-        }
-    }
-    Ok(())
-}
-
-/// Visit `owners`, owners of the relations of plans of the Python client and of the errors of the
-/// expressions that a request fails to build, which a Column, a table argument, or another object
-/// that holds Columns alone holds (`Expression::exclusive_owners`, `TableArg::exclusive_owners`):
-/// the Python objects among them, the plan of a relation, or the tuple of the plan and the
-/// exception of a kept error.
-pub(crate) fn visit_owners(
-    owners: Vec<&(dyn std::any::Any + Send + Sync)>,
-    visit: &pyo3::PyVisit<'_>,
-) -> Result<(), pyo3::PyTraverseError> {
-    for owner in owners {
-        if let Some(object) = owner.downcast_ref::<Py<PyAny>>() {
-            visit.call(object)?;
-        }
-    }
-    Ok(())
+/// The Python object of `object`, the object of a pickler, if it is the command of a function of
+/// the binding: the function of a UDF and its output type, a UDTF or a data type, which the
+/// garbage collector sees through the parts that hold the pickler (see `crate::gc`).
+pub(crate) fn python_object_of(object: &(dyn std::any::Any + Send + Sync)) -> Option<&Py<PyAny>> {
+    object
+        .downcast_ref::<PythonCommand>()
+        .map(|command| &command.object)
 }
 
 /// The bytes of `command`, the pickle of a command.

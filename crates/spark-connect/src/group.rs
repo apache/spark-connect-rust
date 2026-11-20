@@ -159,43 +159,23 @@ impl GroupedData {
         &self.grouping_sets
     }
 
-    /// The objects of the picklers of the UDFs of the grouping of these grouped data, of their
-    /// grouping columns, pivot column and values and grouping sets, that they keep alive with the
-    /// clones of them of which the caller answers, `holders` holders of each expression with
-    /// these, as [`DataFrame::exclusive_pickler_objects`] gives those of the plan of a DataFrame.
-    /// A Python wrapper reports them to Python's garbage collector, as PySpark's grouped data, of
-    /// Python objects, holds its grouping columns; it answers for the clones that the cogroups
-    /// of it hold, which keep it. The plan of their DataFrame is not visited: the wrapper of the
-    /// DataFrame, which the wrapper of the grouped data keeps, reports what it holds. Not a
-    /// stable API.
+    /// The references of these grouped data to the shared parts of their plan and grouping (see
+    /// [`crate::gc`]): the plan of their DataFrame, and the expressions of their grouping columns,
+    /// pivot column and values and grouping sets. Not a stable API.
     #[doc(hidden)]
-    pub fn exclusive_pickler_objects(
-        &self,
-        holders: usize,
-    ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_pickler_objects_held_by(self.walked_expressions(), holders)
-    }
-
-    /// The owners of the relations built outside the core of the subqueries of the grouping of
-    /// these grouped data, and of the errors of its parts that a request fails to build, that
-    /// they keep alive with the clones of them of which the caller answers, as
-    /// [`GroupedData::exclusive_pickler_objects`] gives the objects of the picklers, which a
-    /// Python wrapper reports to Python's garbage collector (see
-    /// `crate::udf::exclusive_owners`). Not a stable API.
-    #[doc(hidden)]
-    pub fn exclusive_owners(&self, holders: usize) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        crate::udf::exclusive_owners_held_by(self.walked_expressions(), holders)
-    }
-
-    /// The grouping columns, the pivot column and values and the grouping sets of these grouped
-    /// data, of which the exclusive walks start.
-    fn walked_expressions(&self) -> impl Iterator<Item = &Expression> {
-        self.group_cols
-            .iter()
-            .map(Column::expression)
-            .chain(&self.pivot_col)
-            .chain(&self.pivot_values)
-            .chain(self.grouping_sets.iter().flatten().map(Column::expression))
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        use crate::gc::PartRef::Expression as Of;
+        let mut held = self.dataframe.held_parts();
+        held.extend(self.group_cols.iter().map(|column| Of(column.expression())));
+        held.extend(self.pivot_col.iter().map(Of));
+        held.extend(self.pivot_values.iter().map(Of));
+        held.extend(
+            self.grouping_sets
+                .iter()
+                .flatten()
+                .map(|column| Of(column.expression())),
+        );
+        held
     }
 
     /// Drop the plan of the DataFrame and the grouping of these grouped data, as
@@ -775,11 +755,11 @@ impl StatFunctions {
         self.dataframe.spark_session()
     }
 
-    /// Whether these statistics are of the plan of `dataframe`, which they share (see
-    /// [`DataFrame::shares_plan_with`]). Not a stable API.
+    /// The references of these statistics to the shared parts of the plan of their DataFrame
+    /// (see [`crate::gc`]). Not a stable API.
     #[doc(hidden)]
-    pub fn shares_plan_with(&self, dataframe: &DataFrame) -> bool {
-        self.dataframe.shares_plan_with(dataframe)
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        self.dataframe.held_parts()
     }
 
     /// Drop the plan of the DataFrame of these statistics, as [`DataFrame::clear_plan`] does. Not
@@ -1073,6 +1053,15 @@ impl CoGroupedData {
         self.right.clear_plan();
     }
 
+    /// The references of the cogroups to the shared parts of the plans and the groupings of both
+    /// grouped data (see [`GroupedData::held_parts`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn held_parts(&self) -> Vec<crate::gc::PartRef<'_>> {
+        let mut held = self.left.held_parts();
+        held.extend(self.right.held_parts());
+        held
+    }
+
     /// Apply a pandas UDF to each cogroup (`cogroup(...).applyInPandas`).
     ///
     /// `func` is built on the Python side (cloudpickled, eval type
@@ -1112,11 +1101,15 @@ mod tests {
             .expect("failed to build session")
     }
 
-    /// The owners that grouped data report are those of the subqueries and of the errors of their
-    /// grouping that they and the clones of them that their caller answers for alone hold.
+    /// The references that grouped data and their cogroups give to the shared parts of their
+    /// plan and grouping, with those of the parts below them, are every reference to those
+    /// parts (see `crate::gc`): of the grouping columns, the subqueries of their expressions,
+    /// the owners of their relations and the errors of their expressions.
     #[test]
-    fn exclusive_owners_are_those_of_the_grouping_that_the_grouped_data_alone_hold() {
+    fn held_parts_of_grouped_data_are_every_reference_to_their_parts() {
         use crate::functions::{col, max};
+        use crate::gc::tests::assert_exact;
+        use crate::gc::PartRef;
         let spark = session();
         let relation = spark_connect_proto::Relation {
             common: None,
@@ -1132,27 +1125,57 @@ mod tests {
         drop(inner);
         let grouped = spark.range(3).unwrap().group_by([scalar.clone()]);
         // The Column shares the grouping expression.
-        assert!(grouped.exclusive_owners(1).is_empty());
+        assert_exact(
+            &[
+                grouped.held_parts(),
+                vec![PartRef::Expression(scalar.expression())],
+            ]
+            .concat(),
+        );
         drop(scalar);
-        let owners = grouped.exclusive_owners(1);
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+        let held = grouped.held_parts();
+        assert_exact(&held);
+        // The owner of the relation of the subquery is among the parts below the grouping.
+        let parts = crate::gc::tests::references(&held);
+        assert!(parts
+            .values()
+            .any(|(_, part)| part.object().and_then(|o| o.downcast_ref::<u8>()) == Some(&7)));
+        drop((parts, held));
         let clone = grouped.clone();
-        assert!(grouped.exclusive_owners(1).is_empty());
-        assert_eq!(grouped.exclusive_owners(2).len(), 1);
-        drop(clone);
+        let pivoted = grouped
+            .pivot(col("id"), Some(vec![crate::row::Value::Long(1)]))
+            .unwrap();
+        assert_exact(
+            &[
+                grouped.held_parts(),
+                clone.held_parts(),
+                pivoted.held_parts(),
+            ]
+            .concat(),
+        );
+        let cogrouped = grouped.cogroup(&clone);
+        assert_exact(
+            &[
+                grouped.held_parts(),
+                clone.held_parts(),
+                pivoted.held_parts(),
+                cogrouped.held_parts(),
+            ]
+            .concat(),
+        );
+        drop((clone, pivoted, cogrouped));
 
-        // An expression that a request fails to build, as the grouping column itself.
+        // An expression that a request fails to build, as the grouping column itself, and the
+        // grouping sets.
         let failing = Column::from(Expression::unbuildable_owned(
             col("a").expression().clone(),
             SparkError::builtin_runtime_msg("of the plan"),
             None,
             Arc::new(9u16),
         ));
-        let grouped = spark.range(3).unwrap().group_by([failing]);
-        let owners = grouped.exclusive_owners(1);
-        assert_eq!(owners.len(), 1);
-        assert_eq!(owners[0].downcast_ref::<u16>(), Some(&9));
+        let grouped = spark.range(3).unwrap().group_by([failing.clone()]);
+        let sets = GroupedData::new_grouping_sets(spark.range(3).unwrap(), vec![vec![failing]]);
+        assert_exact(&[grouped.held_parts(), sets.held_parts()].concat());
     }
 
     #[test]

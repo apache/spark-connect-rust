@@ -535,12 +535,52 @@ For every method matching a pyspark name:
   a struct is not valid then). The offline test
   `test_objects_traversed_while_they_are_created_do_not_crash` makes a collection meet each such
   class there; add a new one to it.
-  A `__traverse__` reports each Python object once: what several objects share, such as the
-  plan `Arc` of a DataFrame and of its grouped data, is reported by none of them, unless one
-  answers for the others. A class that keeps a DataFrame and a clone of its plan, as grouped data
-  and the writers do, reports the DataFrame and holds a `crate::gc::Share` of its
-  `crate::gc::Holders` with the clone (`PyDataFrame::plan_share`), so that the DataFrame reports
-  what the plan holds; else the DataFrame reports nothing of its plan while the object lives.
+  A `__traverse__` reports each Python object once, for each reference that it holds. The parts
+  of plans and expressions that hold Python objects (the functions of UDFs in their picklers,
+  the plans of the Python client and the Observations as owners), which several values of the
+  core share as `Arc`s, are seen through one `crate::gc::SharedPart` each, which mirrors the part
+  and its references (see `crate::gc`). A class that keeps a value of the core of plans or
+  expressions holds a `crate::gc::Parts` of the references of the value (its `held_parts`, of
+  `spark_connect::gc`, each field once) for as long as it holds the value, reports it in
+  `__traverse__`, and releases it in `__clear__` and before it replaces the value; a state that
+  shallow copies share reports through one Python object that each copy holds (the `WriterParts`
+  of a `WriterState`). A value that a class keeps without a `Parts` of it, as a Rust structure
+  keeps one, keeps its parts alive and unreported (a `SharedPart` reports only while every
+  reference to its part is of a holder that reports it), which is safe but leaves its cycles
+  uncollected. A field of the core that holds a part goes in `spark_connect::gc` (`Part::held`),
+  whose tests check that the references that it gives are every reference to each part: a
+  reference given twice would let the collector free what a holder still uses.
+  The collector must get the same references of an object in each of its passes, and the Rust code
+  that runs without the GIL clones and drops parts meanwhile (a request builds its plan without
+  it), which changes whether a part is covered: so every release of the GIL is counted for the
+  collector, as what it may clone or drop (`Python::detach` and the C functions that release it
+  are disallowed methods of `crates/pyspark-rs/clippy.toml`). A call that clones and drops only
+  the parts of the holders that it names, as a request of a DataFrame of its plan, goes through
+  `interrupt::interruptible_of` (`crate::gc::of_parts`, `in_use`); one of the parts of values of
+  the core that it holds, such as the clone of a DataFrame that an ML fit is of or the copy of a
+  writer's state that a write runs on, through `interrupt::interruptible_of_values`
+  (`crate::gc::of_values`, `in_use_of_values`, `detach_of_values`): the `SharedPart`s that those
+  reach are busy until it ends. It must reach no part through anything else, such as a weak
+  reference, a registry or another holder: the placeholders of a message that Python code built
+  are replaced with the GIL held (`client::resolved`). A call that clones no part and drops none
+  that a holder reports, of sessions, identifiers, protobufs and bytes, goes through
+  `crate::gc::detach_without_parts` or `interrupt::interruptible_without_parts`, which count
+  nothing: name such a call only when every path that it runs is of these. A call of code that the
+  binding does not know, which may clone or drop any part, goes through `crate::gc::detach` (and
+  an `interrupt::interruptible` that nothing marks): no `SharedPart` reports anything while it
+  runs. Code that runs without the GIL outside these calls, on a thread of the runtime or of the
+  core, may drop a value of the core that no holder reports, but must not clone a part, nor drop a
+  `Parts` or a value that a `Parts` covers. The tests check the calls that they make: the core
+  tells the binding of each new reference to a part (a `Clone` of the core's part types, a new
+  DataFrame's inputs, a lookup of a plan ID, which a new kind of reference must tell
+  `spark_connect::gc::cloned` of too), and a reference made without the GIL, outside a counted
+  call, to a part that no call marks busy fails the test (`crate::gc::check_clone`, the
+  `conftest.py` of `python/tests`, which also fails one between tests and after the last). As the
+  core tells only of some of its clones, a test of the offline suite also watches the parts that
+  are reported, with the GIL held, while calls of the main APIs run, of nothing that the core
+  tells (`crate::gc::_watch_reported_parts`,
+  `test_no_part_that_the_collector_sees_is_cloned_without_the_gil_by_a_call`): add a call of a new
+  API that runs without the GIL to it.
 - **Streaming listeners and progress holders:** Keep progress holders (`StreamingQueryProgress`,
   `StateOperatorProgress`, etc.) as faithful pure-Python implementations parsed from server
   JSON, not Rust-backed. The listener bus (subscribe/dispatch) is genuinely Rust-backed;

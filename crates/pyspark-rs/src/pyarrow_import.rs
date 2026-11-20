@@ -130,9 +130,11 @@ pub(crate) fn create_dataframe(
     let options = match (empty, options) {
         (true, _) => None,
         (false, Some(options)) => Some(options.clone()),
-        (false, None) => Some(crate::interrupt::interruptible(py, session, || {
-            session.arrow_input_options()
-        })?),
+        (false, None) => Some(crate::interrupt::interruptible_without_parts(
+            py,
+            session,
+            || session.arrow_input_options(),
+        )?),
     };
     let result = helper.getattr("prepare_table")?.call1((
         table,
@@ -187,12 +189,13 @@ pub(crate) fn create_dataframe(
     } else {
         table_batches(&normalized)?
     };
-    let dataframe = crate::interrupt::interruptible(py, session, || match options.as_ref() {
-        Some(options) => {
-            session.create_dataframe_from_arrow_with_options(batches, spark_schema, options)
-        }
-        None => session.create_dataframe_from_arrow(batches, spark_schema),
-    })?;
+    let dataframe =
+        crate::interrupt::interruptible_without_parts(py, session, || match options.as_ref() {
+            Some(options) => {
+                session.create_dataframe_from_arrow_with_options(batches, spark_schema, options)
+            }
+            None => session.create_dataframe_from_arrow(batches, spark_schema),
+        })?;
     // As in PySpark, column names are applied with toDF only when there are any.
     let dataframe = match names {
         Some(names) if !names.is_empty() => {

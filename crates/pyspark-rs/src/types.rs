@@ -8252,7 +8252,9 @@ pub(crate) fn schema_data_type(
 ) -> PyResult<DataType> {
     if schema.is_instance_of::<pyo3::types::PyString>() {
         let ddl: String = schema.extract()?;
-        let parsed = crate::interrupt::interruptible(py, session, || session.parse_ddl(&ddl))?;
+        // Of the text of the type, as `_parse_ddl`.
+        let parsed =
+            crate::interrupt::interruptible_without_parts(py, session, || session.parse_ddl(&ddl))?;
         // As PySpark converts the parsed type from its proto, which fails for a nanosecond timestamp
         // and for a spatial type of an SRID that PySpark does not take.
         crate::dataframe::check_schema_conversion(py, Some(&parsed))?;

@@ -414,40 +414,79 @@ DataFrame or table argument, which hold the functions as PySpark's do: a plain p
 lambda fails at the lambda, and one of a function that pickles by reference pickles, which the
 requests of the unpickled object pickle as it is then. This case still differs:
 
-- **Garbage collection** (tracked). A DataFrame or a Column reports the functions of its UDFs that
-  it alone holds to Python's garbage collector, and the plans of the Python client that it alone
-  holds: the plan of a `DataFrame(plan, session)`, which its relation keeps, as PySpark's DataFrame
-  keeps the plan object, also through the subqueries of the expressions of a plan, and the plan that
-  an unpickled Column of the subquery of a DataFrame of a plan that did not build keeps, to build it
-  at its requests. So do grouped data and their cogroups, a table argument, a window specification,
-  the writers, `na`, `stat`, a merge builder and its clauses, the rows of `toLocalIterator`, and the
-  expression of a Column and of a table argument (`_expr`, `_subquery_expr`) and its copies, of the
-  Columns and the plans that they hold, and an `ArrayType`, a `MapType`, a `StructField` and a
-  `StructType`, of the types, flags, metadata and fields that they hold, as PySpark's `__dict__`
-  holds them, and the readers, the writers and the session builder, of the objects of their options
-  and of the arguments that the writers keep, through one object of them that their shallow copies
-  share. Those that hold their DataFrame report it, which reports the functions of the plan that
-  they share (`crate::gc::Holders`), and so do the DataFrames of the plan of another,
-  `DataFrame(df._plan, session)`, `copy.copy(df)` and a deep copy of nothing to copy, which keep
-  `df`: the whole of `df`, its attributes, its cached schema and its `executionInfo`, where
-  PySpark's keep the plan object alone. A function or a plan of the Python client that two of these
-  objects share, through one Rust value of a plan or of an expression that both hold, is reported by
-  none: a Column and a DataFrame of it; a Column and its expression (`_expr`), its `copy.copy` or
-  its `copy.deepcopy`, which share its expression, but for the UDFs that a deep copy copies and the
-  nodes above them; two DataFrames of plans of their own, such as a DataFrame and one derived from
-  it; and a DataFrame and a Column of its subquery, or a table argument of it, which holds the plan
-  and not the DataFrame. The holders share one reference to it, which the Rust value holds, and
-  which the collector would count as that of the holder that reports it, so it could clear the
-  object with that holder while another holder, still alive, reaches it. So a reference cycle that
-  keeps two of its holders, such as through a bound method of an object that keeps both the Column
-  and the DataFrame, or through a plan of the Python client that keeps both its DataFrame and a
-  Column of its subquery, is not collected, where PySpark collects it, as each of its holders, a
-  Python object, holds a reference of its own. A stream writer holds its DataFrame, where PySpark's
-  holds the plan, so a DataFrame that keeps its stream writer is freed by the collector rather than
-  at its last reference. The attributes of the clients of a session, their `thread_local` and their
-  lists, are kept by the session as long as it lives, which no Python object reports, so a reference
-  cycle through them, such as an attribute of the client or of its `thread_local` that keeps a
-  DataFrame of the session, is not collected, where PySpark's client, a Python object, is.
+- **Garbage collection** (tracked). Python's garbage collector sees the plans and the expressions
+  that DataFrames, Columns and the objects that hold them share, as it sees PySpark's plan objects:
+  each part of a plan or of an expression that holds a function of a UDF, a plan of the Python
+  client, the plan of an error that it keeps or a Python Observation, directly or below it, has a
+  Python object (`SharedPart`), to which each holder of a reference to the part holds a reference
+  and reports it, so a reference cycle through such an object and any of its holders, one or
+  several, is collected, as PySpark collects it (see `docs/compatibility.md`). These cases still
+  differ:
+  - The native classes of `pyspark.ml.connect`, but for the reader and writer of its `readwrite`
+    module, report to the collector none of the Python objects that they hold in Rust: the training
+    summary of a model (PySpark's `_summary`) and the dataset that the model keeps for it, the
+    model's `_java_obj`, the Python values of their params, and the models of a `OneVsRestModel`, a
+    `CrossValidatorModel` and a `TrainValidationSplitModel`. So a reference cycle through such an
+    object and one of those is never collected: through a model and its summary
+    (`model.summary.model = model`), or a function of a UDF of the summary's dataset that keeps the
+    model, the model is never freed, nor its object in the server's ML cache, where PySpark's model
+    keeps its summary as its `_summary` attribute, and the summary the dataset as its
+    `_summary_dataset`, so that the collector frees both cycles. A cycle through the dataset alone
+    is collected once the model is freed: a `SharedPart` reports its references only while every
+    reference to its part is of a `SharedPart` or an object of the binding that reports it, so the
+    collector never frees an object that such a holder reaches.
+  - While a call of the binding runs without the GIL, a collection frees no cycle through the parts
+    that the call may clone or drop, which the call keeps alive anyway; it frees the others, as
+    PySpark's collector does. The collector must get the same references of an object in each of
+    its passes over the objects: one that it got in the first pass and not in the second would be of
+    an object that it takes for unreachable while a live holder reaches it, whose weak references it
+    would clear and whose finalizers it would run; and a call without the GIL may clone and drop
+    parts meanwhile, which changes whether every reference to a part is seen, as a request does as
+    it builds its plan. So, from before a call releases the GIL until after it takes it back, no
+    `SharedPart` of a part that it may clone or drop reports a reference:
+    - a call that builds a request of the plans of the objects that it is given, a DataFrame and
+      what it holds, grouped data, a writer and the copy of its state, an Observation, a model, a
+      dataset or the arguments of a call of an ML object, such as the actions, the analyses, the
+      views, `cache` and `checkpoint`, the writes of `write`, `writeTo`, `mergeInto` and
+      `writeStream`, `DataFrame.stat`, `spark.sql` of arguments, `observe`, the flows of a
+      declarative pipeline, and the fits, transforms, evaluations and fetches of
+      `pyspark.ml.connect`, may clone and drop only the parts of those plans: theirs are the busy
+      ones;
+    - any other call clones and drops no part, and makes none busy, such as the waits and the calls
+      of streaming queries, of `spark.streams` and of the listener bus, the calls of the
+      configuration, the catalog and the session, the events of a declarative pipeline, and the
+      commands, plans and analyses that the Python client builds (`SparkSession.client`), whose
+      placeholders of DataFrames the binding replaces with the relations of the DataFrames before
+      the call, with the GIL held, as PySpark builds their relations before its requests;
+    - the events that a listener of the Rust API of the session gets, whose code the binding does
+      not know, may clone or drop any part, and no `SharedPart` reports a reference while one runs;
+      the Python API registers no such listener.
+    In the child of a fork, of the fork handler of the binding (`os.register_at_fork`), which
+    `os.fork()` runs, as `multiprocessing` forks, the calls of the forking thread alone are counted,
+    the only ones there, and the parts that the calls of the other threads of the parent made busy
+    are not; the child of a fork that runs no fork handlers of Python, as one that a C extension
+    makes itself, keeps the counts and the busy parts of all the threads of the parent, and collects
+    none of the cycles that they keep from being collected. A call of a daemon thread that the
+    interpreter ends at its exit, before the call takes the GIL back, may keep the collections of
+    the exit from freeing them.
+  - On a free-threaded build of CPython (`Py_GIL_DISABLED`), no part has a `SharedPart`, so no cycle
+    through a function of a UDF, a plan of the Python client, an error that a plan keeps or an
+    Observation that a plan holds is collected: the binding finds the `SharedPart` of a part again
+    by the address of the part, which only the GIL keeps from racing with the free of the
+    `SharedPart`, and the counts and the marks of the calls without the GIL need it too.
+  - `gc.get_referents` of a DataFrame, a Column or another object that holds a plan gives the
+    `SharedPart`s of its parts that are seen (whose every reference is of a holder that reports it,
+    and that no call that runs without the GIL may clone or drop), and that of a writer the
+    `WriterParts` of its state, which its shallow copies share and which gives those of the state,
+    where PySpark's objects give their plan objects through their `__dict__`; the `SharedPart` of
+    the pickler of a UDF gives the tuple of its function and its return type.
+  - The attributes of the clients of a session, their `thread_local` and their lists, are kept by
+    the session as long as it lives, which no Python object reports, so a reference cycle through
+    them, such as an attribute of the client or of its `thread_local` that keeps a DataFrame of the
+    session, is not collected, where PySpark's client, a Python object, is. The core client of the
+    session holds them, which reads them at each request of any thread, and which every DataFrame,
+    reader, catalog and query of the session holds, with the threads of the core, so that no
+    Python object can answer for all of their references to them.
 
 ## Session and client (Connect)
 

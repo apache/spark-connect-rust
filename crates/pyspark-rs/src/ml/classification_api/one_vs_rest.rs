@@ -3,7 +3,6 @@
 //! with its classifier and its other params as Python values (as PySpark's `PipelineModel`).
 use super::*;
 use crate::errors::ResultExt;
-use crate::interrupt::interruptible;
 use crate::ml::pipeline_api::{load_metadata_dict, load_params_instance, metadata_str, writable};
 use spark_connect::ml::{
     join_path, save_metadata, Metadata, OneVsRestModel as CoreOneVsRestModel, SubModel,
@@ -618,7 +617,8 @@ fn save_metadata_at(
     default_map: String,
     num_classes: Option<usize>,
 ) -> PyResult<()> {
-    interruptible(py, session, || {
+    // Of strings.
+    crate::interrupt::interruptible_without_parts(py, session, || {
         let version = session.version()?;
         let mut metadata = Metadata::new(class, uid, &version, param_map, default_map);
         if let Some(num_classes) = num_classes {

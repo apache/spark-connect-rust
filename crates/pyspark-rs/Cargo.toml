@@ -39,6 +39,11 @@ stacker = "0.1"
 # holds no copy of the keys; the wheel bundles this version through Arrow already.
 hashbrown = { version = "0.17", default-features = false }
 
+[build-dependencies]
+# The cfgs of the interpreter that the extension is built for, as PyO3's (`Py_GIL_DISABLED` of a
+# free-threaded build, see `build.rs`); the version of PyO3's own.
+pyo3-build-config = "0.29"
+
 [target.'cfg(unix)'.dependencies]
 # The local time and the thread of the lines of gRPC's log that the client writes to stderr.
 libc = "0.2"

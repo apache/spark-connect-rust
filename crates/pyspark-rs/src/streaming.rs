@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use crate::dataframe::{PyDataFrame, WriterState};
 use crate::errors::spark_error_to_py_exception;
-use crate::interrupt::{interruptible, interruptible_caught};
+use crate::interrupt::interruptible;
 use crate::options::{
     option_key, put_option_skip_none, put_shared_option, reader_option_text, skip_none_shared,
     stream_option_text, utf32le_of, DefaultedOption, OptionKey, OptionText, UnencodableOptions,
@@ -77,9 +77,8 @@ fn post_listener_event<'a>(
                 )?;
             }
             // Native callbacks keep their usual ability to wait for Python work.
-            None if started => py.detach(|| listener.on_event(event)),
-            None => py
-                .detach(|| listener.try_on_event(event).map_err(Box::new))
+            None if started => crate::gc::detach(py, || listener.on_event(event)),
+            None => crate::gc::detach(py, || listener.try_on_event(event).map_err(Box::new))
                 .map_err(ListenerDispatchError::Native)?,
         }
     }
@@ -1256,24 +1255,23 @@ pub struct PyDataStreamWriter {
     /// The state of the writer, which a shallow copy of it shares, as PySpark's `_write_stream`.
     /// It keeps the functions of `foreachBatch` and `foreach` as their pickles, as PySpark's
     /// `WriteStreamOperationStart` does, and not the functions.
+    /// It holds the plan that is streamed, and not the DataFrame, as PySpark's writer holds the
+    /// plan of its DataFrame.
     inner: Arc<WriterState<DataStreamWriter>>,
-    /// The DataFrame that is streamed, as the Python object of `df.writeStream`, as PySpark's
-    /// plan of its writer.
-    frame: Py<PyDataFrame>,
-    /// Set once the value is written, as `__traverse__` reads `frame`, which is not valid while
+    /// The object of the parts of the state, which the shallow copies of this writer share and
+    /// report, which reports them (see [`crate::dataframe::WriterParts`]).
+    parts: Option<Py<crate::dataframe::WriterParts>>,
+    /// Set once the value is written, as `__clear__` replaces `inner`, which is not valid while
     /// the object is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
 }
 
 impl PyDataStreamWriter {
-    pub fn new(writer: DataStreamWriter, frame: Py<PyDataFrame>) -> Self {
+    pub fn new(writer: DataStreamWriter) -> Self {
+        let inner = Arc::new(WriterState::of_parts(writer, DataStreamWriter::held_parts));
         PyDataStreamWriter {
-            inner: Arc::new(WriterState::of_frame(
-                writer,
-                &frame,
-                DataStreamWriter::shares_plan_with,
-            )),
-            frame,
+            parts: crate::dataframe::writer_parts(&inner),
+            inner,
             gc_ready: crate::gc::GcReady::new(),
         }
     }
@@ -1364,7 +1362,7 @@ impl PyDataStreamWriter {
             py,
             PyDataStreamWriter {
                 inner: Arc::clone(&this.inner),
-                frame: this.frame.clone_ref(py),
+                parts: this.parts.as_ref().map(|parts| parts.clone_ref(py)),
                 gc_ready: crate::gc::GcReady::new(),
             },
         )?;
@@ -1373,20 +1371,23 @@ impl PyDataStreamWriter {
     }
 
     /// As PySpark's stream writer, a Python object that holds the plan of its DataFrame, which
-    /// Python's garbage collector sees: the DataFrame is reported, which reports the objects of
-    /// the plan that the two share (see [`crate::gc::Holders`]). The functions of `foreachBatch`
-    /// and `foreach` are kept as their pickles, as PySpark keeps them, so nothing else is held.
+    /// Python's garbage collector sees: the object of the parts of its state, which a shallow
+    /// copy shares, is reported, which reports the parts of the plan (see [`crate::gc`]). The
+    /// functions of `foreachBatch` and `foreach` are kept as their pickles, as PySpark keeps them,
+    /// so nothing else is held. Only an `Option<Py<_>>` is read, which is `None` while the object
+    /// is created.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
-        if !self.gc_ready.get() {
-            return Ok(());
+        if let Some(parts) = &self.parts {
+            visit.call(parts)?;
         }
-        visit.call(&self.frame)
+        Ok(())
     }
 
     /// Drop this writer's reference to its state, of which it keeps a cleared copy; a copy of the
     /// writer keeps the state.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
+            self.parts = None;
             self.inner = Arc::new(self.inner.cleared(DataStreamWriter::clear_plan));
         }
     }
@@ -1425,10 +1426,12 @@ impl PyDataStreamWriter {
                 commands.append((kind, command, payload.python_ver.as_str()))?;
             }
         }
+        // A DataFrame of the plan, which the pickle keeps as PySpark's keeps the plan.
+        let frame = Bound::new(py, PyDataFrame::new(writer.dataframe()))?;
         let args = PyTuple::new(
             py,
             [
-                this.frame.clone_ref(py).into_any().into_bound(py),
+                frame.into_any(),
                 writer.get_format().into_pyobject(py)?.into_any(),
                 writer.get_output_mode().into_pyobject(py)?.into_any(),
                 str_dict(py, writer.get_options())?.into_any(),
@@ -1488,7 +1491,7 @@ impl PyDataStreamWriter {
                 _ => writer.foreach(payload),
             };
         }
-        Bound::new(py, PyDataStreamWriter::new(writer, frame))
+        Bound::new(py, PyDataStreamWriter::new(writer))
     }
 
     // The output mode, which PySpark sets in its protobuf string field at once, as
@@ -1694,7 +1697,9 @@ impl PyDataStreamWriter {
             Some(path) if path.is_truthy()? => Some(crate::readwriter::writer_path(path)?),
             _ => None,
         };
-        // Memory/console/foreach sinks take no path; the core treats "" as unset.
+        // Memory/console/foreach sinks take no path; the core treats "" as unset. Of the plan and
+        // the picklers of the writer, which the command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         let query = interruptible(py, &writer.spark_session(), || {
             writer
                 .start_with_event_handler(path.as_deref().unwrap_or(""), post_started_event)
@@ -1724,6 +1729,8 @@ impl PyDataStreamWriter {
         } else {
             None
         };
+        // Of the plan and the picklers of the writer, which the command is built of.
+        let _in_use = crate::gc::in_use_of_values(py, writer.held_parts());
         let query = interruptible(py, &writer.spark_session(), || {
             match &table {
                 Some(table) => writer.to_table_with_event_handler(table, post_started_event),
@@ -2008,7 +2015,9 @@ impl PyStreamingQuery {
     #[getter]
     #[doc = connect_doc!(StreamingQuery.isActive)]
     fn isActive(&self, py: Python<'_>) -> PyResult<bool> {
-        interruptible(py, &self.inner.spark_session(), || self.inner.is_active())
+        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
+            self.inner.is_active()
+        })
     }
 
     // The status of the query, as PySpark's: a dict of its `message`, `isDataAvailable` and
@@ -2016,9 +2025,10 @@ impl PyStreamingQuery {
     #[getter]
     #[doc = connect_doc!(StreamingQuery.status)]
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let status = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.status().map_err(Box::new)
-        })?;
+        let status =
+            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
+                self.inner.status().map_err(Box::new)
+            })?;
         let dict = PyDict::new(py);
         dict.set_item("message", status.status_message)?;
         dict.set_item("isDataAvailable", status.is_data_available)?;
@@ -2028,7 +2038,7 @@ impl PyStreamingQuery {
 
     #[doc = connect_doc!(StreamingQuery.stop)]
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
-        interruptible(py, &self.inner.spark_session(), || {
+        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
             self.inner.stop().map_err(Box::new)
         })
     }
@@ -2041,7 +2051,7 @@ impl PyStreamingQuery {
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<bool>> {
         let timeout_ms = pyspark_timeout_ms(timeout)?;
-        interruptible(py, &self.inner.spark_session(), || {
+        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
             self.inner
                 .await_termination_ms(timeout_ms)
                 .map_err(Box::new)
@@ -2052,9 +2062,10 @@ impl PyStreamingQuery {
     #[getter]
     #[doc = connect_doc!(StreamingQuery.lastProgress)]
     fn lastProgress<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
-        let progress = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.last_progress().map_err(Box::new)
-        })?;
+        let progress =
+            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
+                self.inner.last_progress().map_err(Box::new)
+            })?;
         match progress {
             Some(json) => progress_from_json(py, &json).map(Some),
             None => Ok(None),
@@ -2065,7 +2076,7 @@ impl PyStreamingQuery {
     #[getter]
     #[doc = connect_doc!(StreamingQuery.recentProgress)]
     fn recentProgress<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
-        interruptible(py, &self.inner.spark_session(), || {
+        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
             self.inner.recent_progress().map_err(Box::new)
         })?
         .iter()
@@ -2075,7 +2086,7 @@ impl PyStreamingQuery {
 
     #[doc = connect_doc!(StreamingQuery.processAllAvailable)]
     fn processAllAvailable(&self, py: Python<'_>) -> PyResult<()> {
-        interruptible(py, &self.inner.spark_session(), || {
+        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
             self.inner.process_all_available().map_err(Box::new)
         })
     }
@@ -2086,9 +2097,10 @@ impl PyStreamingQuery {
     #[doc = connect_doc!(StreamingQuery.explain)]
     fn explain(&self, py: Python<'_>, extended: ProtoBool) -> PyResult<()> {
         let extended = extended.value(py)?;
-        let plan = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.explain(extended).map_err(Box::new)
-        })?;
+        let plan =
+            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
+                self.inner.explain(extended).map_err(Box::new)
+            })?;
         py.import("builtins")?.call_method1("print", (plan,))?;
         Ok(())
     }
@@ -2098,9 +2110,10 @@ impl PyStreamingQuery {
     // its Java exception, and with its JVM stack trace, and of the error class as its reason.
     #[doc = connect_doc!(StreamingQuery.exception)]
     fn exception(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
-        let exception = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.exception().map_err(Box::new)
-        })?;
+        let exception =
+            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
+                self.inner.exception().map_err(Box::new)
+            })?;
         let Some(exception) = exception else {
             return Ok(None);
         };
@@ -2225,17 +2238,19 @@ impl PyStreamingQueryManager {
     #[getter]
     #[doc = connect_doc!(StreamingQueryManager.active)]
     fn active(&self, py: Python<'_>) -> PyResult<Vec<PyStreamingQuery>> {
-        let queries = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.active().map_err(Box::new)
-        })?;
+        let queries =
+            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
+                self.inner.active().map_err(Box::new)
+            })?;
         Ok(queries.into_iter().map(PyStreamingQuery::new).collect())
     }
 
     #[doc = connect_doc!(StreamingQueryManager.get)]
     fn get(&self, py: Python<'_>, id: &str) -> PyResult<Option<PyStreamingQuery>> {
-        let query = interruptible(py, &self.inner.spark_session(), || {
-            self.inner.get(id).map_err(Box::new)
-        })?;
+        let query =
+            crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
+                self.inner.get(id).map_err(Box::new)
+            })?;
         Ok(query.map(PyStreamingQuery::new))
     }
 
@@ -2247,7 +2262,7 @@ impl PyStreamingQueryManager {
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Option<bool>> {
         let timeout_ms = pyspark_timeout_ms(timeout)?;
-        interruptible(py, &self.inner.spark_session(), || {
+        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
             self.inner
                 .await_any_termination_ms(timeout_ms)
                 .map_err(Box::new)
@@ -2256,7 +2271,7 @@ impl PyStreamingQueryManager {
 
     #[doc = connect_doc!(StreamingQueryManager.resetTerminated)]
     fn resetTerminated(&self, py: Python<'_>) -> PyResult<()> {
-        interruptible(py, &self.inner.spark_session(), || {
+        crate::interrupt::interruptible_without_parts(py, &self.inner.spark_session(), || {
             self.inner.reset_terminated().map_err(Box::new)
         })
     }
@@ -2282,17 +2297,21 @@ impl PyStreamingQueryManager {
         let registration = Arc::clone(&adapter);
         // As PySpark's append, whose `except Exception` also catches the error of an interrupt
         // that the server failed, which replaces the KeyboardInterrupt of a signal.
-        match interruptible_caught(py, &self.inner.spark_session(), || {
-            self.inner
-                .add_listener(registration)
-                .map(|id| {
-                    // Set once, by the only call that adds this adapter, as soon as the bus has
-                    // the registration: a signal that ends the wait below then leaves it
-                    // removable, as PySpark's append leaves the listener in its bus.
-                    let _ = adapter.id.set(id);
-                })
-                .map_err(Box::new)
-        })? {
+        match crate::interrupt::interruptible_caught_without_parts(
+            py,
+            &self.inner.spark_session(),
+            || {
+                self.inner
+                    .add_listener(registration)
+                    .map(|id| {
+                        // Set once, by the only call that adds this adapter, as soon as the bus has
+                        // the registration: a signal that ends the wait below then leaves it
+                        // removable, as PySpark's append leaves the listener in its bus.
+                        let _ = adapter.id.set(id);
+                    })
+                    .map_err(Box::new)
+            },
+        )? {
             Ok(()) => Ok(()),
             Err(error) => {
                 // As PySpark's append, which then removes the listener from its bus: the
@@ -2359,9 +2378,11 @@ impl PyStreamingQueryManager {
             let Some(id) = first else {
                 return Ok(());
             };
-            match interruptible_caught(py, &self.inner.spark_session(), || {
-                self.inner.remove_listener_found(&id).map_err(Box::new)
-            })? {
+            match crate::interrupt::interruptible_caught_without_parts(
+                py,
+                &self.inner.spark_session(),
+                || self.inner.remove_listener_found(&id).map_err(Box::new),
+            )? {
                 // The bus is read again once this is tried: a call that removed this
                 // registration first leaves the next match to this one, which may have been
                 // added since the bus was read.
@@ -2395,9 +2416,11 @@ impl PyStreamingQueryManager {
     // `StreamingQueryManager.close`. A server removal failure warns and keeps the
     // listeners registered, as PySpark Connect's does, so close can be retried.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
-        if let Err(error) = interruptible_caught(py, &self.inner.spark_session(), || {
-            self.inner.close().map_err(Box::new)
-        })? {
+        if let Err(error) = crate::interrupt::interruptible_caught_without_parts(
+            py,
+            &self.inner.spark_session(),
+            || self.inner.close().map_err(Box::new),
+        )? {
             // Of PySpark's `StreamingQueryListenerBus.remove`, which its `close` calls.
             return warn(
                 py,
@@ -2417,7 +2440,7 @@ impl PyStreamingQueryManager {
     /// method: its listener bus reads the events itself.
     fn _stream_listener_events(&self, py: Python<'_>) -> PyResult<PyListenerEventStream> {
         let session = self.inner.spark_session();
-        let stream = interruptible(py, &session, || {
+        let stream = crate::interrupt::interruptible_without_parts(py, &session, || {
             self.inner.listener_event_stream().map_err(Box::new)
         })?;
         Ok(PyListenerEventStream::new(stream, session))
@@ -2462,9 +2485,10 @@ impl PyListenerEventStream {
         // thread would freeze the whole interpreter between events, and a signal of the process
         // ends it with its exception, as it ends the other waits of the client for the server.
         // The events of the stream that started it, of its request.
-        let next = crate::interrupt::interruptible_continuation(py, &self.session, || {
-            Ok::<_, Box<SparkError>>(stream.next())
-        })?;
+        let next =
+            crate::interrupt::interruptible_continuation_without_parts(py, &self.session, || {
+                Ok::<_, Box<SparkError>>(stream.next())
+            })?;
         match next {
             Some(Ok((event_type, event_json))) => Ok(Some((event_type, event_json))),
             Some(Err(e)) => Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!(

@@ -488,7 +488,8 @@ pub(super) fn save_with_stages(
         ("language", serde_json::json!("Python").to_string()),
     ]);
     let default_map = default_params_json(instance)?;
-    interruptible(py, session, || {
+    // Of strings.
+    crate::interrupt::interruptible_without_parts(py, session, || {
         let version = session.version()?;
         let metadata = Metadata::new(class, &uid, &version, param_map, default_map);
         save_metadata(session, path, &metadata.to_json()).map_err(Box::new)
@@ -615,7 +616,7 @@ pub(super) fn load_metadata_dict<'py>(
     session: &SparkSession,
     path: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
-    let text = interruptible(py, session, || {
+    let text = crate::interrupt::interruptible_without_parts(py, session, || {
         load_metadata_text(session, path).map_err(Box::new)
     })?;
     let metadata = py.import("json")?.call_method1("loads", (text,))?;

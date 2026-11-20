@@ -12,7 +12,7 @@ use crate::plan_args::PlanArgs;
 // Re-exported for the modules that raise through `crate::stat_arguments::not_expected_type`.
 pub(crate) use crate::errors::not_expected_type;
 use crate::errors::ResultExt;
-use crate::interrupt::interruptible;
+use crate::interrupt::interruptible_of_values;
 
 fn is_sequence(value: &Bound<'_, PyAny>) -> bool {
     value.is_instance_of::<PyList>() || value.is_instance_of::<PyTuple>()
@@ -281,7 +281,8 @@ pub(crate) fn cov(
         string_argument(col1, "col1")?,
         string_argument(col2, "col2")?,
     );
-    interruptible(py, &stat.spark_session(), || {
+    // Of the plan of the statistics' DataFrame, which the request builds over.
+    interruptible_of_values(py, &stat.spark_session(), stat.held_parts(), || {
         stat.cov(&col1, &col2).map_err(Box::new)
     })
 }
@@ -310,7 +311,7 @@ pub(crate) fn corr(
         }
     }
     // The method, checked, is "pearson", which the core's default sends.
-    interruptible(py, &stat.spark_session(), || {
+    interruptible_of_values(py, &stat.spark_session(), stat.held_parts(), || {
         stat.corr(&col1, &col2, None).map_err(Box::new)
     })
 }
@@ -431,7 +432,9 @@ pub(crate) fn approx_quantile(
     }
     let refs: Vec<&str> = columns.iter().map(String::as_str).collect();
     let df = stat.approx_quantile(refs, quantiles, error);
-    let rows = interruptible(py, &df.spark_session(), || df.collect().map_err(Box::new))?;
+    let rows = interruptible_of_values(py, &df.spark_session(), df.held_parts(), || {
+        df.collect().map_err(Box::new)
+    })?;
     // One row, of the array of the quantiles of each column.
     let per_column: Vec<Vec<f64>> = match rows.first().and_then(|row| row.get(0)) {
         Some(Value::List(columns)) => columns

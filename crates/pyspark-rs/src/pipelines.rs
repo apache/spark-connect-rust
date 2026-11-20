@@ -16,7 +16,7 @@ use spark_connect_proto as proto;
 use crate::column::PyColumn;
 use crate::dataframe::PyDataFrame;
 use crate::errors::ResultExt;
-use crate::interrupt::interruptible;
+use crate::interrupt::{interruptible_of_values, interruptible_without_parts};
 use crate::session::PySparkSession;
 use crate::types::py_to_proto_data_type;
 
@@ -68,7 +68,7 @@ pub fn pipeline_create_dataflow_graph(
     sql_conf: Option<HashMap<String, String>>,
 ) -> PyResult<String> {
     let sess = session.session.clone();
-    interruptible(session.py(), &sess, || {
+    interruptible_without_parts(session.py(), &sess, || {
         pipelines::create_dataflow_graph(
             &sess,
             default_catalog,
@@ -144,7 +144,7 @@ pub fn pipeline_define_output(
     };
     let sess = session.session.clone();
     let gid = dataflow_graph_id.to_string();
-    interruptible(session.py(), &sess, || {
+    interruptible_without_parts(session.py(), &sess, || {
         pipelines::define_output(&sess, &gid, spec).map_err(Box::new)
     })
 }
@@ -171,7 +171,8 @@ pub fn pipeline_define_flow(
         target.to_string(),
     );
     let scl = scl(scl_file, scl_line);
-    interruptible(session.py(), &sess, || {
+    // Of the plan of the relation, which the command builds.
+    interruptible_of_values(session.py(), &sess, df.held_parts(), || {
         pipelines::define_flow(
             &sess,
             &gid,
@@ -245,7 +246,7 @@ pub fn pipeline_define_auto_cdc_flow(
         target.to_string(),
     );
     let scl = scl(scl_file, scl_line);
-    interruptible(session.py(), &sess, || {
+    interruptible_without_parts(session.py(), &sess, || {
         pipelines::define_auto_cdc_flow(
             &sess,
             &gid,
@@ -273,7 +274,7 @@ pub fn pipeline_define_sql_graph_elements(
         sql_text.to_string(),
         sql_file_path.to_string(),
     );
-    interruptible(session.py(), &sess, || {
+    interruptible_without_parts(session.py(), &sess, || {
         pipelines::define_sql_graph_elements(&sess, &gid, &text, &path).map_err(Box::new)
     })
 }
@@ -301,10 +302,12 @@ impl PyPipelineRunStream {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<(String, i64)>> {
         loop {
-            // The responses of the run that started it, of its request.
-            let resp = crate::interrupt::interruptible_continuation(py, &self.session, || {
-                self.inner.next_response()
-            })?;
+            // The responses of the run that started it, of its request: protobufs alone.
+            let resp = crate::interrupt::interruptible_continuation_without_parts(
+                py,
+                &self.session,
+                || self.inner.next_response(),
+            )?;
             let Some(resp) = resp else {
                 return Ok(None); // stream complete -> StopIteration
             };
@@ -340,7 +343,7 @@ pub fn pipeline_start_run(
 ) -> PyResult<PyPipelineRunStream> {
     let sess = session.session.clone();
     let gid = dataflow_graph_id.to_string();
-    let inner = interruptible(session.py(), &sess, || {
+    let inner = interruptible_without_parts(session.py(), &sess, || {
         pipelines::start_run(
             &sess,
             &gid,

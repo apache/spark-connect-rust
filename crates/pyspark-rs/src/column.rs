@@ -47,6 +47,9 @@ pub(crate) fn column_reference_name(column: PyRef<'_, PyColumn>) -> Option<Strin
 )]
 pub struct PyColumn {
     pub(crate) column: Column,
+    /// The reference of the Column to the parts of its expression, which `__traverse__` reports
+    /// (see [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
     /// Set once the value is written, so that `__traverse__` reads nothing else of an object that
     /// the garbage collector traverses while it is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
@@ -55,10 +58,21 @@ pub struct PyColumn {
 impl PyColumn {
     pub fn new(column: Column) -> Self {
         PyColumn {
+            parts: expression_parts(&column),
             column,
             gc_ready: crate::gc::GcReady::new(),
         }
     }
+}
+
+/// The reference of an object that holds `column` to the parts of its expression.
+fn expression_parts(column: &Column) -> crate::gc::Parts {
+    Python::attach(|py| {
+        crate::gc::Parts::of(
+            py,
+            [spark_connect::gc::PartRef::Expression(column.expression())],
+        )
+    })
 }
 
 /// Helper to convert Python object to Column.
@@ -130,7 +144,10 @@ fn is_literal_operand(value: &Bound<'_, PyAny>, with_timedelta: bool) -> PyResul
 #[pyclass(name = "_ColumnExpression", module = "pyspark.sql.connect.expressions")]
 pub struct PyColumnExpression {
     column: Column,
-    /// Set once the value is written, as `__traverse__` reads `column` (see
+    /// The reference of the expression to its parts, which `__traverse__` reports (see
+    /// [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
+    /// Set once the value is written, as `__traverse__` reads `parts` (see
     /// [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
 }
@@ -139,6 +156,7 @@ impl PyColumnExpression {
     /// The expression of `column`.
     pub(crate) fn new(column: Column) -> Self {
         PyColumnExpression {
+            parts: expression_parts(&column),
             column,
             gc_ready: crate::gc::GcReady::new(),
         }
@@ -172,26 +190,22 @@ impl PyColumnExpression {
     }
 
     /// As PySpark's expression, a Python object whose fields Python's garbage collector sees: the
-    /// functions of its UDFs, also of the plan of a subquery, that only this expression keeps
-    /// alive are reported, as those of a Column, so that a reference cycle through a function and
-    /// the expression is collected, as PySpark collects it.
+    /// parts of the expression, of the functions of its UDFs and the plans of the Python client
+    /// of the plans of its subqueries and of the errors of its parts, as those of a Column (see
+    /// [`crate::gc`]), so that a reference cycle through one of them and the expression is
+    /// collected, as PySpark collects it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        crate::udf_command::visit_pickler_objects(
-            self.column.expression().exclusive_pickler_objects(),
-            &visit,
-        )?;
-        // The plans of the Python client of the relations of the plans of its subqueries, and of
-        // the errors of its parts, which it alone holds, as PySpark's holds those plan objects.
-        crate::udf_command::visit_owners(self.column.expression().exclusive_owners(), &visit)
+        self.parts.visit(&visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the expression is
-    /// replaced by one that holds nothing, which drops the objects that `__traverse__` reported.
+    /// replaced by one that holds nothing, which drops the parts that `__traverse__` reported.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
+            self.parts.release();
             self.column = Column::new(spark_connect::expression::Expression::column(""));
         }
     }
@@ -909,21 +923,16 @@ impl PyColumn {
     }
 
     /// As a Column of PySpark Connect, a Python object whose expression Python's garbage collector
-    /// sees: the functions of its UDFs, which a request pickles when it builds a plan of the
-    /// Column, as PySpark's expression keeps them, that only this Column keeps alive are reported
-    /// to the collector, so that a reference cycle through a function and the Column is freed, as
-    /// PySpark frees it.
+    /// sees: the parts of its expression (see [`crate::gc`]), of the functions of its UDFs, which
+    /// a request pickles when it builds a plan of the Column, as PySpark's expression keeps them,
+    /// and of the plans of the Python client of its subqueries and of the errors of its parts,
+    /// whichever other objects share them, so that a reference cycle through one of them and the
+    /// Column is freed, as PySpark frees it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        crate::udf_command::visit_pickler_objects(
-            self.column.expression().exclusive_pickler_objects(),
-            &visit,
-        )?;
-        // The plans of the Python client of the relations of the plans of its subqueries, and of
-        // the errors of its parts, which it alone holds, as PySpark's holds those plan objects.
-        crate::udf_command::visit_owners(self.column.expression().exclusive_owners(), &visit)
+        self.parts.visit(&visit)
     }
 
     /// The shallow copy of a Column, as PySpark's `copy.copy`, which shares the expression of the

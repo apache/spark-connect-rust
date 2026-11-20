@@ -2037,6 +2037,43 @@ def test_the_models_and_summaries_of_fits_have_pysparks_java_obj_of_their_call_j
         unbound._summary
 
 
+def test_a_model_that_keeps_its_dataset_keeps_the_functions_of_its_plan(ml_mock):
+    # A fitted model keeps the dataset of its training summary as a value of the core, which the
+    # garbage collector does not see, as it recreates the summary of the dataset on the server:
+    # the functions of the UDFs of the dataset's plan are kept as they are while the model lives,
+    # also when they are in a reference cycle through the dataset, never cleared, as PySpark's
+    # model keeps its `_summary_dataset`; the cycle is collected once the model is gone.
+    import weakref
+
+    import pyspark.ml.connect as connect
+    from pyspark.ml.linalg import Vectors
+    from pyspark.sql import functions as F
+
+    spark, service = ml_mock
+
+    class Job:
+        def __init__(self):
+            self.state = "<live>"
+
+        def f(self, x):
+            return x
+
+    job = Job()
+    frame = spark.createDataFrame([(1.0, Vectors.dense(0.0, 1.0))], ["label", "features"])
+    frame = frame.withColumn("w", F.udf(job.f, "double")("label"))
+    service.execute_payload = _operator_info("model-of-a-udf-dataset")
+    model = connect.regression.LinearRegression().fit(frame)
+    job.held = frame
+    freed = weakref.ref(job)
+    del job, frame
+    for _ in range(3):
+        gc.collect()
+    assert freed() is not None and vars(freed())["state"] == "<live>"
+    del model
+    gc.collect()
+    assert freed() is None
+
+
 def test_the_dataframe_members_of_a_summary_of_its_constructor_read_its_summary_dataset(ml_mock):
     # As PySpark's invoke_remote_attribute_relation: of a summary whose `java_obj` starts with the
     # `summary` method (`"<id>.summary"`, as PySpark names the training summary of a fit), a

@@ -643,7 +643,8 @@ fn server_default(py: Python<'_>, fetch: &serde_json::Value) -> PyResult<Py<PyAn
         })
         .collect::<PyResult<Vec<_>>>()?;
     let target = spark_connect::ml::MlTarget::helper(&session);
-    let output = interruptible(py, &session, || {
+    // A fetch of the ML helper, of strings.
+    let output = crate::interrupt::interruptible_without_parts(py, &session, || {
         spark_connect::ml::fetch(&target, attr, args).map_err(Box::new)
     })?;
     super::object::fetch_output_to_py(py, output)

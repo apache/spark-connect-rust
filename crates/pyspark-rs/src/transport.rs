@@ -86,7 +86,7 @@ fn until_signal<T: Send>(
     py: Python<'_>,
     future: impl std::future::Future<Output = T> + Send,
 ) -> Result<T, PyErr> {
-    py.detach(|| {
+    crate::gc::detach_without_parts(py, || {
         block_on(async {
             let signal = async {
                 let mut ticks = tokio::time::interval(POLL_INTERVAL);

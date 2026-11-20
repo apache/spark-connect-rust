@@ -288,7 +288,10 @@ impl PyFrameBound {
 )]
 pub struct PyWindowSpec {
     pub(crate) spec: WindowSpec,
-    /// Set once the value is written, as `__traverse__` reads `spec`, which is not valid while
+    /// The references of the specification to the parts of its partitioning and ordering, which
+    /// `__traverse__` reports (see [`crate::gc::Parts`]).
+    parts: crate::gc::Parts,
+    /// Set once the value is written, as `__traverse__` reads `parts`, which is not valid while
     /// the object is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
 }
@@ -296,6 +299,7 @@ pub struct PyWindowSpec {
 impl PyWindowSpec {
     pub fn new(spec: WindowSpec) -> Self {
         PyWindowSpec {
+            parts: Python::attach(|py| crate::gc::Parts::of(py, spec.held_parts())),
             spec,
             gc_ready: crate::gc::GcReady::new(),
         }
@@ -450,22 +454,22 @@ impl PyWindowSpec {
     }
 
     /// As PySpark's window specification, a Python object that holds its partitioning and
-    /// ordering columns, which Python's garbage collector sees: the functions of the UDFs that the
-    /// specification alone keeps alive are reported, and the plans of the Python client that the
-    /// subqueries and the errors of its columns keep, so that a reference cycle through them is
+    /// ordering columns, which Python's garbage collector sees: the parts of its columns, of the
+    /// functions of their UDFs and of the plans of the Python client that their subqueries and
+    /// errors keep, are reported (see [`crate::gc`]), so that a reference cycle through them is
     /// collected, as PySpark collects it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        crate::udf_command::visit_pickler_objects(self.spec.exclusive_pickler_objects(), &visit)?;
-        crate::udf_command::visit_owners(self.spec.exclusive_owners(), &visit)
+        self.parts.visit(&visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the specification
-    /// drops its columns, and so the objects that `__traverse__` reported.
+    /// drops its columns, and so the parts that `__traverse__` reported.
     fn __clear__(&mut self) {
         if self.gc_ready.get() {
+            self.parts.release();
             self.spec = WindowSpec::new();
         }
     }

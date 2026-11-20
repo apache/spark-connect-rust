@@ -899,7 +899,12 @@ fn rpc_status_value_error(
 
 /// Maps a SparkError to a Python exception, attempting to raise the correct typed
 /// exception based on the error kind. Falls back to PyRuntimeError if import fails.
+///
+/// Python work of the binding, which a daemon thread does not run once the interpreter exits
+/// (see `deliver::python_work`): its thread waits until the process ends instead, so that the
+/// finalization does not end it in the imports and the Python code of the build.
 pub fn spark_error_to_py_exception(err: SparkError) -> PyErr {
+    let _work = crate::deliver::python_work();
     if let Some(grpcio) = err.grpcio.as_deref() {
         if err.kind == SparkErrorKind::BuiltinValueError {
             return rpc_status_value_error(&err, Some(grpcio));

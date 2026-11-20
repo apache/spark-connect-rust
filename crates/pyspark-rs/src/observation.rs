@@ -378,7 +378,7 @@ fn owner_observation<'py>(
 /// The clone of the state of `observation` that a plan holds, which keeps `observation` alive, as
 /// PySpark's plan holds the Observation itself: so the plan's Observations are the Python
 /// Observations, of their classes and attributes, and a DataFrame reports them to Python's
-/// garbage collector (`DataFrame::exclusive_observation_owners`).
+/// garbage collector (see `crate::gc`).
 fn held_by_the_plan(observation: &Bound<'_, PyObservation>) -> Observation {
     let owner: Arc<dyn std::any::Any + Send + Sync> =
         Arc::new(observation.clone().into_any().unbind());
@@ -506,7 +506,14 @@ pub(crate) fn observe(
     // the text of a str name, in the place of the name of a plan without the mirror.
     observation.borrow_mut().inner = Observation::new(&crate::plan_args::rendered(&name)?);
     let inner = held_by_the_plan(observation);
-    // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once.
+    // As PySpark's `Observation._on`, which reads the `isStreaming` of the DataFrame, asked once:
+    // of the plan of the DataFrame, which the observed plan is built over and the request of
+    // `isStreaming` is built of, and of the expressions of the metrics.
+    let parts = df
+        .held_parts()
+        .into_iter()
+        .chain(exprs.iter().map(spark_connect::gc::PartRef::Expression));
+    let _in_use = crate::gc::in_use_of_values(py, parts);
     let observed = crate::interrupt::interruptible(py, &df.spark_session(), || {
         df.observe_with_streaming(&inner, exprs, || frame.streaming_once())
     })?;

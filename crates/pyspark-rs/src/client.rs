@@ -41,12 +41,25 @@ use spark_connect_core::retries::{
 };
 use spark_connect_proto as proto;
 
-use crate::interrupt::interruptible;
+use crate::errors::ResultExt;
 
 /// The message of `bytes`, decoded on a stack that holds its levels, as a plan of any depth may be.
 fn decode<M: Message + Default + Send>(bytes: &[u8]) -> PyResult<M> {
     crate::on_grown_stack(|| M::decode(bytes))
         .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+/// `message` with the placeholders of its relations replaced by the relations of their DataFrames,
+/// with the GIL held, as PySpark builds the relations of its plans before its request: so the
+/// request reads no DataFrame, and does not keep the garbage collector from seeing the parts of
+/// plans while it runs (see [`crate::gc`]). Its error is of the request of `session`.
+pub(crate) fn resolved<M: spark_connect::plan::Resolvable + Send>(
+    session: &SparkSession,
+    message: BuiltOutside<M>,
+) -> PyResult<BuiltOutside<M>> {
+    crate::errors::of_request_session(session, || {
+        crate::on_grown_stack(|| message.resolved()).to_pyerr()
+    })
 }
 
 /// The bytes of the `AnalyzePlanResponse` of the server to `request`, the bytes of an
@@ -58,8 +71,11 @@ pub(crate) fn analyze_plan<'py>(
     session: &SparkSession,
     request: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let request = BuiltOutside::decoded(request, decode::<proto::AnalyzePlanRequest>)?;
-    let response = interruptible(py, session, || {
+    let request = resolved(
+        session,
+        BuiltOutside::decoded(request, decode::<proto::AnalyzePlanRequest>)?,
+    )?;
+    let response = crate::interrupt::interruptible_without_parts(py, session, || {
         crate::on_grown_stack(|| session.analyze_plan_proto(request)).map_err(Box::new)
     })?;
     Ok(PyBytes::new(py, &crate::encode_on_grown_stack(response)))
@@ -106,16 +122,17 @@ pub(crate) fn compressed_plan<'py>(
     session: &SparkSession,
     plan: &[u8],
 ) -> PyResult<Option<Bound<'py, PyBytes>>> {
-    let plan = BuiltOutside::decoded(plan, decode::<proto::Plan>)?;
+    let plan = resolved(session, BuiltOutside::decoded(plan, decode::<proto::Plan>)?)?;
+    // Of the protobufs of the plan, of no placeholder.
     let compress =
         || crate::on_grown_stack(|| session.compressed_plan_proto(plan)).map_err(Box::new);
     // As PySpark's `_try_compress_and_set_plan`, which reads nothing of its client once the
     // settings are looked up, as it sends nothing: the user, the session ID and the extensions of
     // the client are read only for the request of the lookup.
     let compressed = if session.known_plan_compression().is_some() {
-        crate::interrupt::interruptible_continuation(py, session, compress)?
+        crate::interrupt::interruptible_continuation_without_parts(py, session, compress)?
     } else {
-        interruptible(py, session, compress)?
+        crate::interrupt::interruptible_without_parts(py, session, compress)?
     };
     Ok(compressed.map(|plan| PyBytes::new(py, &plan.encode_to_vec())))
 }
@@ -128,7 +145,7 @@ pub(crate) fn config<'py>(
     request: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
     let request: proto::ConfigRequest = decode(request)?;
-    let response = interruptible(py, session, || {
+    let response = crate::interrupt::interruptible_without_parts(py, session, || {
         session.config_proto(request).map_err(Box::new)
     })?;
     Ok(PyBytes::new(py, &response.encode_to_vec()))
@@ -170,7 +187,9 @@ pub(crate) fn execute_plan(
             Ok((name, crate::observation::state_of_execution(observation)?))
         })
         .collect::<PyResult<Vec<_>>>()?;
-    let execution = interruptible(py, session, || {
+    let plan = resolved(session, plan)?;
+    // Of the protobufs of the plan, of no placeholder, and of the Observations, which it moves.
+    let execution = crate::interrupt::interruptible_without_parts(py, session, || {
         crate::on_grown_stack(|| match log {
             Some(log) => session.execute_plan_proto_logged(plan, observations, reported, log),
             None => session.execute_plan_proto(plan, observations, reported),
@@ -218,7 +237,7 @@ impl PyExecutePlanResponses {
         let session = self.session.clone();
         // As PySpark's iterator of the responses, whose reattaches and releases copy the request
         // of the execution: nothing of the client is read again.
-        let next = crate::interrupt::interruptible_continuation(py, &session, || {
+        let next = crate::interrupt::interruptible_continuation_without_parts(py, &session, || {
             execution.next_response().map_err(Box::new)
         });
         let response = match next {
@@ -264,7 +283,7 @@ impl PyExecutePlanResponses {
     /// progress handlers, which take the GIL themselves.
     fn finish(&mut self, py: Python<'_>) {
         if let Some(execution) = self.execution.take() {
-            py.detach(move || drop(execution));
+            crate::gc::detach_without_parts(py, move || drop(execution));
         }
     }
 }
@@ -524,22 +543,24 @@ impl RetriesListener for RetriesWarning {
         // execution does not catch, as its `except Exception` that converts a failure: a
         // KeyboardInterrupt of it interrupts nothing (see `crate::interrupt::interruptible`).
         let error = crate::errors::raised_in_handling(error);
-        match handled {
+        // Of an interpreter that the GIL cannot be taken of any more, as of a daemon thread at the
+        // exit, the error has no context.
+        let _ = Python::try_attach(|py| match handled {
             // As PySpark's `_handle_rpc_error`, which logs while the `except` of the call handles
             // grpcio's `RpcError`: the exception of a log has it as its context.
-            Handled::Rpc(failure) => Python::attach(|py| {
+            Handled::Rpc(failure) => {
                 if let Some(context) = rpc_error_of(py, failure) {
                     crate::errors::set_callback_context(py, &error, context);
                 }
-            }),
+            }
             // As the `except Exception as e` of PySpark's lookup of the plan compression, whose
             // log of the exception that it caught is in it: the exception of the log has that
             // exception, the argument of the log, as its context.
-            Handled::Error(caught) => Python::attach(|py| {
+            Handled::Error(caught) => {
                 let context = crate::errors::exception_of(py, caught);
                 crate::errors::set_callback_context(py, &error, context);
-            }),
-        }
+            }
+        });
         error
     }
 }
@@ -560,14 +581,19 @@ fn sleep_of_python(seconds: f64, watched: bool) -> LongSleep {
             sleep(py).map_err(crate::errors::callback_error)
         }));
     }
-    let slept = Python::attach(|py| match sleep(py) {
+    // From the wait of the call, without the GIL: of an interpreter that the GIL cannot be taken of
+    // any more, as of a daemon thread at the exit, the core waits it, as a wait that the listener
+    // does not sleep, which the next poll of its watch ends, as that cannot take the GIL either
+    // (see `interrupt::SignalWatch::poll`).
+    let slept = Python::try_attach(|py| match sleep(py) {
         Ok(()) => Some(Ok(())),
         // The KeyboardInterrupt of a signal that came while it slept is the watch's, which ends the
         // wait of the core as of a signal that came while it waited: the execution in flight is
         // interrupted, as PySpark's `except KeyboardInterrupt` interrupts it.
         Err(error) if watched && crate::deliver::keep_interrupt(py, &error) => None,
         Err(error) => Some(Err(crate::errors::callback_error(error))),
-    });
+    })
+    .flatten();
     Box::pin(std::future::ready(slept))
 }
 

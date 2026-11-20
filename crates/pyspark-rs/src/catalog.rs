@@ -9,7 +9,7 @@ use spark_connect::catalog::{
 use spark_connect_core::error::SparkError;
 
 use crate::dataframe::PyDataFrame;
-use crate::interrupt::interruptible;
+use crate::interrupt::interruptible_without_parts;
 
 /// PySpark's FutureWarning of the deprecated `dbName` of the catalog method `method`, of the line
 /// `line` of its `warnings.warn` in `pyspark.sql.connect.catalog` (see `warn_as_pyspark`).
@@ -227,7 +227,7 @@ impl PyCatalog {
         py: Python<'_>,
         f: impl FnOnce(&Catalog) -> Result<T, Box<SparkError>> + Send,
     ) -> PyResult<T> {
-        interruptible(py, self.catalog.spark_session(), || f(&self.catalog))
+        interruptible_without_parts(py, self.catalog.spark_session(), || f(&self.catalog))
     }
 }
 
@@ -645,7 +645,7 @@ impl PyCatalog {
         let description = description.map(crate::str_argument).transpose()?;
         let schema = table_schema_proto(schema)?;
         let options = crate::options::str_kwargs_skip_none(options)?;
-        interruptible(py, self.catalog.spark_session(), || {
+        interruptible_without_parts(py, self.catalog.spark_session(), || {
             self.catalog
                 .create_table_with(
                     &tableName,

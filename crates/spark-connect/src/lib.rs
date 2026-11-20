@@ -24,6 +24,8 @@ pub mod dataframe;
 pub mod datasource;
 pub mod expression;
 pub mod functions;
+#[doc(hidden)]
+pub mod gc;
 pub mod group;
 pub mod merge;
 pub mod ml;
