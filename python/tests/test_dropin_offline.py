@@ -24129,6 +24129,91 @@ def test_the_relations_of_dataframes_in_expressions_and_changed_ones_are_sent_as
     assert sent().root.limit.input == expected
 
 
+def test_every_message_built_in_python_sends_the_relations_of_its_dataframes_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's messages, which hold the relations of df._plan.plan(session) as they are: each
+    # message that the client is given sends the relation of a DataFrame that it holds as an input
+    # and in the extension of an expression, and a string that is the placeholder's type URL as it
+    # is: the relation of a DataFrame(plan, session), the plan of to_table, a command, an analysis
+    # and the request of a session hook. The core reads the fields of such a message only when its
+    # encoding holds a type URL that is not of a placeholder at its relations, as the last two do.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.dataframe import DataFrame
+    from pyspark.sql.connect.plan import LogicalPlan
+    from pyspark.sql.connect.proto import example_plugins_pb2 as plugins
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = mock_connect
+    client = spark.client
+    source = spark.range(3).withColumnRenamed("id", "k")
+    relation = pb2.Relation.FromString(source._relation_bytes())
+    url = "type.googleapis.com/spark.connect.rust.DataFramePlaceholder"
+
+    def project(kind):
+        built = pb2.Relation()
+        built.project.input.CopyFrom(source._plan.plan(client))
+        expression = built.project.expressions.add()
+        if kind == "expression":
+            expression.extension.Pack(plugins.ExamplePluginRelation(input=source._plan.plan(client)))
+        else:
+            expression.unresolved_attribute.unparsed_identifier = url if kind == "string" else "k"
+        return built
+
+    def check(sent, kind):
+        assert sent.project.input == relation, kind
+        expression = sent.project.expressions[0]
+        if kind == "expression":
+            message = plugins.ExamplePluginRelation()
+            assert expression.extension.Unpack(message) and message.input == relation
+        else:
+            name = url if kind == "string" else "k"
+            assert expression.unresolved_attribute.unparsed_identifier == name
+
+    def executed():
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).plan
+
+    class Built(LogicalPlan):
+        def __init__(self, kind):
+            super().__init__(None)
+            self.kind = kind
+
+        def plan(self, session):
+            return project(self.kind)
+
+    kinds = ("input", "expression", "string")
+    for kind in kinds:
+        DataFrame(Built(kind), spark).collect()
+        check(executed().root, kind)
+        list(client.to_table_as_iterator(pb2.Plan(root=project(kind)), {}))
+        check(executed().root, kind)
+        command = pb2.Command()
+        command.write_operation.input.CopyFrom(project(kind))
+        command.write_operation.source = "noop"
+        client.execute_command(command)
+        check(executed().command.write_operation.input, kind)
+        client._analyze("schema", plan=pb2.Plan(root=project(kind)))
+        check(pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1]).schema.plan.root, kind)
+
+    hooked = []
+
+    class Hook(SparkSession.Hook):
+        def on_execute_plan(self, request):
+            request.plan.root.CopyFrom(project(hooked[-1]))
+            return request
+
+    builder = SparkSession.builder.remote(service.remote)
+    builder._registerHook(lambda _: Hook())
+    other = builder.create()
+    try:
+        for kind in kinds:
+            hooked.append(kind)
+            other.range(1).collect()
+            check(executed().root, kind)
+    finally:
+        other.stop()
+
+
 def test_dataframes_of_plans_that_fail_to_build_raise_at_each_request_as_pyspark(
     mock_connect, capsys
 ):

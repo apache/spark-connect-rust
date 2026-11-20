@@ -1375,14 +1375,16 @@ impl SparkSession {
     /// Execute `command`, a command built outside the core, such as the ML commands of
     /// `pyspark.ml`, and return the responses of the server, as the Python client's
     /// `execute_command` reads them, without Observations, as `pyspark.ml` runs them. The
-    /// placeholders of its relations are replaced, as `DataFrame::from_relation` does. Not a
-    /// stable API.
+    /// placeholders of its relations are replaced, as `DataFrame::from_relation` does, of the
+    /// search that its encoding allows, if the core is given it (see
+    /// [`crate::plan::BuiltOutside`]). Not a stable API.
     #[doc(hidden)]
     pub fn execute_command_proto(
         &self,
-        mut command: spark_connect_proto::Command,
+        command: impl Into<crate::plan::BuiltOutside<spark_connect_proto::Command>>,
     ) -> Result<Vec<spark_connect_proto::ExecutePlanResponse>> {
-        crate::plan::resolve_command(&mut command)?;
+        let (mut command, urls) = command.into().into_parts();
+        crate::plan::resolve_command(&mut command, urls)?;
         let Some(command_type) = command.command_type else {
             return Err(SparkError::value_msg("a command of no command type"));
         };
@@ -1402,25 +1404,28 @@ impl SparkSession {
     #[doc(hidden)]
     pub fn execute_plan_proto(
         &self,
-        plan: proto::Plan,
+        plan: impl Into<crate::plan::BuiltOutside<proto::Plan>>,
         observations: Vec<(String, crate::observation::Observation)>,
         reported: bool,
     ) -> Result<crate::dataframe::PlanExecution> {
-        crate::dataframe::PlanExecution::start(self, plan, observations, reported)
+        crate::dataframe::PlanExecution::start(self, plan.into(), observations, reported)
     }
 
     /// The response of the server to `request`, an analysis built outside the core, such as the
     /// analyses of PySpark's `SparkConnectClient.schema`, `explain_string`, `same_semantics` and
-    /// `semantic_hash`: of this session, with the placeholders of its plans replaced, retried and
-    /// checked as the analyses of the core are. Not a stable API.
+    /// `semantic_hash`: of this session, with the placeholders of its plans replaced, of the search
+    /// that the encoding of the request allows, if the core is given it (see
+    /// [`crate::plan::BuiltOutside`]), retried and checked as the analyses of the core are. Not a
+    /// stable API.
     #[doc(hidden)]
     pub fn analyze_plan_proto(
         &self,
-        mut request: proto::AnalyzePlanRequest,
+        request: impl Into<crate::plan::BuiltOutside<proto::AnalyzePlanRequest>>,
     ) -> Result<proto::AnalyzePlanResponse> {
+        let (mut request, urls) = request.into().into_parts();
         request.session_id = self.client.session_id().to_string();
         if let Some(analyze) = request.analyze.as_mut() {
-            crate::plan::resolve_analysis(analyze)?;
+            crate::plan::resolve_analysis(analyze, urls)?;
         }
         block_on(self.client.analyze_plan(request))
     }

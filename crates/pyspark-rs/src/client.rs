@@ -26,6 +26,9 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyList};
 use spark_connect::dataframe::PlanExecution;
+// The messages of the client, with the type URLs of placeholders of their encodings, of which the
+// core finds those of their relations as it walks them.
+use spark_connect::plan::BuiltOutside;
 use spark_connect::session::{ExecutionInfo, SparkSession};
 use spark_connect_core::client::{ResultChunking, RpcDeadlines};
 use spark_connect_core::error::SparkError;
@@ -48,7 +51,7 @@ pub(crate) fn analyze_plan<'py>(
     session: &SparkSession,
     request: &[u8],
 ) -> PyResult<Bound<'py, PyBytes>> {
-    let request: proto::AnalyzePlanRequest = decode(request)?;
+    let request = BuiltOutside::decoded(request, decode::<proto::AnalyzePlanRequest>)?;
     let response = interruptible(py, session, || {
         crate::on_grown_stack(|| session.analyze_plan_proto(request)).map_err(Box::new)
     })?;
@@ -79,7 +82,7 @@ pub(crate) fn execute_plan(
     observations: Vec<(String, Bound<'_, PyAny>)>,
     reported: bool,
 ) -> PyResult<PyExecutePlanResponses> {
-    let plan: proto::Plan = decode(plan)?;
+    let plan = BuiltOutside::decoded(plan, decode::<proto::Plan>)?;
     let observations = observations
         .into_iter()
         .map(|(name, observation)| {

@@ -1457,17 +1457,25 @@ impl DataFrame {
     /// `pyspark.ml`, which the core sends as it is, keeping `owner`, if any, alive while any
     /// DataFrame of it is. The placeholders of `relation`, which stand for the DataFrames that
     /// the plans of `pyspark.ml` take as input (see `placeholder_relation`), are replaced by
-    /// the relations of those DataFrames. The Observations of the DataFrame that it holds as its
-    /// child are those of its plan, as PySpark's plans of `pyspark.ml` collect them. Not a stable
-    /// API.
+    /// the relations of those DataFrames, of the search that its encoding allows, if the core is
+    /// given it (see [`crate::plan::BuiltOutside`]). The Observations of the DataFrame that it
+    /// holds as its child are those of its plan, as PySpark's plans of `pyspark.ml` collect them.
+    /// Not a stable API.
     #[doc(hidden)]
     pub fn from_relation(
         session: SparkSession,
-        mut relation: proto::Relation,
+        relation: impl Into<crate::plan::BuiltOutside<proto::Relation>>,
         owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
     ) -> Result<DataFrame> {
-        let observations = crate::plan::child_observations(&relation);
-        let depth = crate::plan::resolve_relation_levels(&mut relation)?;
+        let (mut relation, urls) = relation.into().into_parts();
+        // Those of the DataFrames of its placeholders, of which an encoding of no type URL of a
+        // placeholder holds none.
+        let observations = if urls == Some(0) {
+            Vec::new()
+        } else {
+            crate::plan::child_observations(&relation)
+        };
+        let depth = crate::plan::resolve_relation_levels(&mut relation, urls)?;
         Ok(DataFrame::from_raw_relation(
             session,
             relation,
@@ -3723,16 +3731,18 @@ pub struct PlanExecution {
 }
 
 impl PlanExecution {
-    /// Start the execution of `plan`, with its placeholders replaced, whose observed metrics set
-    /// `observations`, and whose progress reaches the progress handlers of the session when
-    /// `reported`, as PySpark's `Progress` of the execution reports it.
+    /// Start the execution of `plan`, with its placeholders replaced (see
+    /// [`crate::plan::BuiltOutside`]), whose observed metrics set `observations`, and whose
+    /// progress reaches the progress handlers of the session when `reported`, as PySpark's
+    /// `Progress` of the execution reports it.
     pub(crate) fn start(
         session: &SparkSession,
-        mut plan: proto::Plan,
+        plan: crate::plan::BuiltOutside<proto::Plan>,
         observations: Vec<(String, crate::observation::Observation)>,
         reported: bool,
     ) -> Result<PlanExecution> {
-        crate::plan::resolve_plan(&mut plan)?;
+        let (mut plan, urls) = plan.into_parts();
+        crate::plan::resolve_plan(&mut plan, urls)?;
         // As PySpark's request, whose operation ID the client assigns before it sends it.
         let operation_id = uuid::Uuid::new_v4().to_string();
         let request = proto::ExecutePlanRequest {

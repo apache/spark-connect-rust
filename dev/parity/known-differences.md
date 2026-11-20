@@ -590,8 +590,10 @@ requests of the unpickled object pickle as it is then. This case still differs:
   ML commands, anywhere in the message of the extension of a relation or of a command (a
   plugin's, as Delta Lake's `merge`), and in the extensions of the expressions of the relations and
   the commands built in Python, which the core finds by the type URL of the placeholder in the
-  encoding of their fields (`plan::resolve_own_fields`). A placeholder whose `common` a plan changes
-  (`plan.common.plan_id = ...`) is sent with that `common` merged, as PySpark's changed relation.
+  encoding of their fields (`plan::resolve_own_fields`), when the bytes of the message that the
+  client gives hold a type URL that is not of a placeholder at its relations (`plan::BuiltOutside`).
+  A placeholder whose `common` a plan changes (`plan.common.plan_id = ...`) is sent with that
+  `common` merged, as PySpark's changed relation.
 - **A channel builder without a host** (intentional; the transport is native). The builders of
   `pyspark.sql.SparkSession` and `pyspark.sql.connect.session.SparkSession` are PySpark's two
   builders, with its errors: `CONNECT_URL_NOT_SET`, a `PySparkRuntimeError`, and

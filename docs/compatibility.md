@@ -625,6 +625,15 @@ the wait watch of the call returned a `Watch::Interrupt`. The doc-hidden
 not take, with which each execution of the thread fails; exhaustive matches on it must handle them,
 or have a wildcard arm.
 
+The doc-hidden `plan::BuiltOutside` is a message that a client built outside the core, with the type
+URLs of the placeholders of DataFrames in the encoding that `BuiltOutside::decoded` decodes it of:
+the core reads the fields of its relations and commands and the messages of its extensions for
+placeholders only when that encoding holds a type URL that is not of a placeholder at its
+relations. The doc-hidden `DataFrame::from_relation`, `SparkSession::execute_plan_proto`,
+`execute_command_proto` and `analyze_plan_proto` take `impl Into<BuiltOutside<_>>`, of which a
+message passed as before is read everywhere, as it was; and the doc-hidden `plan::resolve_request`
+takes one and returns the request, where it changed a request in place.
+
 ## Native ML objects: fetch, summaries, save and load (Rust API)
 
 `spark_connect::ml` reads and writes the server-side objects of Spark Connect ML as PySpark 4.3.0
@@ -2172,9 +2181,13 @@ merged into its own, as protobuf's `MergeFrom` sets the fields, so its plan ID i
 in the message of an extension. The core does not walk the expressions of a plan built in Python: of
 each relation of the plan of a kind that holds expressions (a projection, a filter, a join, an
 aggregation, ...), it encodes the fields other than its inputs, and reads them for a placeholder
-only when the encoding holds the type URL of one, so a plan of no such extension costs that
-encoding; the relations that the core builds, such as that of a placeholder, are not encoded. The
-messages of extensions are read in a time of their length, however deep they nest.
+only when the encoding holds the type URL of one; the relations that the core builds, such as that
+of a placeholder, are not encoded. It encodes and reads them, and the messages of extensions, only
+when the bytes that the client gives of the message (of `plan(session)`, or of the plan, the
+command, the analysis or the request of a hook) hold a type URL of a placeholder that is not of one
+at the relations of the plan, which the core meets as it walks them: so a plan whose placeholders
+are all at its relations, or that holds none, costs a search of its bytes for the URL, and no
+encoding. The messages of extensions are read in a time of their length, however deep they nest.
 
 The `observations` of a DataFrame's plan (`df._plan.observations`) are the Observations of the
 DataFrame by their names, as PySpark's `LogicalPlan.observations`: those of `observe` on it and on
