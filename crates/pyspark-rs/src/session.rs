@@ -1024,6 +1024,29 @@ pub(crate) fn unconnected_session() -> PyResult<SparkSession> {
     Ok(UNCONNECTED.get_or_init(|| session).clone())
 }
 
+/// The session of `client`, the client that a plan of the Python client or an expression is built
+/// of, as `plan(session)`, `to_proto(session)` and `to_plan(session)` are given it: the session of
+/// the drop-in's `SparkConnectClient`, or a session itself, and none of another object. PySpark
+/// builds the plan objects that such a plan holds of that client, also those of the subqueries of
+/// its Columns.
+pub(crate) fn session_of_client(client: &Bound<'_, PyAny>) -> Option<SparkSession> {
+    let py = client.py();
+    if let Ok(session) = client.cast::<PySparkSession>() {
+        return Some(session.try_borrow().ok()?.session.clone());
+    }
+    static CLIENT_CLASS: pyo3::sync::PyOnceLock<Py<pyo3::types::PyType>> =
+        pyo3::sync::PyOnceLock::new();
+    let class = CLIENT_CLASS
+        .import(py, "pyspark.sql.connect.client", "SparkConnectClient")
+        .ok()?;
+    if !client.is_instance(class).unwrap_or(false) {
+        return None;
+    }
+    let session = client.getattr(pyo3::intern!(py, "_session")).ok()?;
+    let session = session.cast::<PySparkSession>().ok()?;
+    Some(session.try_borrow().ok()?.session.clone())
+}
+
 /// The Python object of `session`, one per session as PySpark has them: its live object, or
 /// else a new one, which the registry holds weakly. So the DataFrames, the streams and the
 /// clients of a session give back the session's object, as PySpark's do.

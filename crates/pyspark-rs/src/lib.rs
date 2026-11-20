@@ -160,6 +160,7 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(types::parse_datatype_json, m)?)?;
     m.add_function(wrap_pyfunction!(connect_bridge::_data_type_proto, m)?)?;
     m.add_function(wrap_pyfunction!(connect_bridge::_data_type_of_proto, m)?)?;
+    m.add_function(wrap_pyfunction!(connect_bridge::_fresh_plan_id, m)?)?;
     m.add_function(wrap_pyfunction!(column::column_reference_name, m)?)?;
 
     m.add_function(wrap_pyfunction!(pandas_input::_pandas_string_ipc, m)?)?;

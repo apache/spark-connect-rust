@@ -1477,6 +1477,30 @@ impl DataFrame {
         ))
     }
 
+    /// The DataFrame of a relation built outside the core whose build failed with `error`, as the
+    /// `plan(session)` of a plan of the Python client that raises: each request of it raises
+    /// `error`, as PySpark's `DataFrame(plan, session)` keeps the plan and raises the error of its
+    /// build at its requests, and the DataFrames over it are made as over any other. It keeps
+    /// `owner`, if any, alive while any DataFrame of it is, as [`DataFrame::from_relation`] does.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn from_unbuilt_relation(
+        session: SparkSession,
+        owner: Option<Arc<dyn std::any::Any + Send + Sync>>,
+        error: SparkError,
+    ) -> DataFrame {
+        DataFrame::from_raw_relation(session, proto::Relation::default(), owner, 1, Vec::new())
+            .unbuildable(error)
+    }
+
+    /// Whether the plan of this DataFrame is the plan of a relation built outside the core whose
+    /// build failed with `error`, of [`DataFrame::from_unbuilt_relation`], rather than a plan
+    /// over one. Not a stable API.
+    #[doc(hidden)]
+    pub fn is_unbuilt_with(&self, error: &SparkError) -> bool {
+        crate::plan::is_unbuilt_with(&self.plan, error)
+    }
+
     /// The objects of the picklers of the UDFs and the UDTFs of the plan of this DataFrame that
     /// it keeps alive with the clones of it of which the caller answers, `holders` holders of
     /// its plan with this DataFrame, as [`DataFrame::exclusive_relation_owners`] gives the owners
@@ -1545,41 +1569,26 @@ impl DataFrame {
         owners
     }
 
-    /// The owners of the relations built outside the core (`from_relation`) that this DataFrame
-    /// keeps alive with the clones of it of which the caller answers, `holders` holders of its
-    /// plan with this DataFrame, as [`DataFrame::exclusive_pickler_objects`] counts them: every
-    /// `Arc` below its plan down to such an owner is held once. A Python wrapper reports them to
-    /// Python's garbage collector, so that a reference cycle through the wrapper can be freed, as
-    /// through a DataFrame of PySpark Connect, a Python object: a `pyspark.ml` model's summary
-    /// keeps a DataFrame whose plan keeps the model. An owner that another plan shares is not
-    /// returned, so that the collector does not count a reference twice. Not a stable API.
+    /// The owners of the relations built outside the core (`from_relation`), and of the errors
+    /// of the expressions that a request fails to build (`Expression::unbuildable_owned`), that
+    /// this DataFrame keeps alive with the clones of it of which the caller answers, `holders`
+    /// holders of its plan with this DataFrame, as [`DataFrame::exclusive_pickler_objects`]
+    /// counts them: every `Arc` below its plan down to such an owner, also through the
+    /// expressions of the plan and the plans of their subqueries, is held once. A Python wrapper
+    /// reports them to Python's garbage collector, so that a reference cycle through the wrapper
+    /// can be freed, as through a DataFrame of PySpark Connect, a Python object: a `pyspark.ml`
+    /// model's summary keeps a DataFrame whose plan keeps the model. An owner that another plan,
+    /// expression or DataFrame shares is not returned, so that the collector does not count a
+    /// reference twice (see `crate::udf::exclusive_owners`). Not a stable API.
     #[doc(hidden)]
     pub fn exclusive_relation_owners(
         &self,
         holders: usize,
     ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        let mut owners = Vec::new();
         if Arc::strong_count(&self.plan) != holders {
-            return owners;
+            return Vec::new();
         }
-        let mut pending: Vec<&LogicalPlan> = vec![self.plan.as_ref()];
-        while let Some(plan) = pending.pop() {
-            if let LogicalPlan::Raw {
-                owner: Some(owner), ..
-            } = plan
-            {
-                if Arc::strong_count(&owner.0) == 1 {
-                    owners.push(owner.0.as_ref());
-                }
-            }
-            pending.extend(
-                plan.inputs()
-                    .into_iter()
-                    .filter(|input| Arc::strong_count(input) == 1)
-                    .map(|input| input.as_ref()),
-            );
-        }
-        owners
+        crate::udf::exclusive_owners(vec![crate::udf::PicklerHolder::Plan(&self.plan)])
     }
 
     /// Drop the plan of this DataFrame, which becomes an empty relation of its session: the
@@ -1612,6 +1621,7 @@ impl DataFrame {
                 owner: owner.map(crate::plan::RelationOwner),
                 depth,
                 observations,
+                holes: Default::default(),
             },
         )
     }
@@ -1626,7 +1636,7 @@ impl DataFrame {
     #[doc(hidden)]
     pub fn from_sent_relation(session: SparkSession, relation: proto::Relation) -> DataFrame {
         // A relation of one level holds no plan, as a relation built without a pickled plan.
-        DataFrame::from_sent_relation_at(session, relation, 1)
+        DataFrame::from_sent_relation_at(session, relation, 1, Default::default())
     }
 
     /// As [`DataFrame::from_sent_relation`], for a relation of `levels` levels, as the plan of
@@ -1639,17 +1649,35 @@ impl DataFrame {
         relation: proto::Relation,
         levels: usize,
     ) -> Result<DataFrame> {
+        DataFrame::from_sent_relation_with_holes(session, relation, levels, Default::default())
+    }
+
+    /// As [`DataFrame::from_sent_relation_levels`], of a relation of `holes`, those of a pickled
+    /// DataFrame, which carries the functions of its UDFs as PySpark's pickled plan carries them:
+    /// each request of the DataFrame pickles them and fills the holes with their messages, as
+    /// PySpark's unpickled plan pickles the functions at each request (see
+    /// [`crate::udf::SentHole`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn from_sent_relation_with_holes(
+        session: SparkSession,
+        relation: proto::Relation,
+        levels: usize,
+        holes: crate::udf::SentHoles,
+    ) -> Result<DataFrame> {
         if levels > crate::plan::MAX_PLAN_DEPTH {
             return Err(crate::plan::too_deep_a_plan(levels));
         }
-        Ok(DataFrame::from_sent_relation_at(session, relation, levels))
+        Ok(DataFrame::from_sent_relation_at(
+            session, relation, levels, holes,
+        ))
     }
 
-    /// The DataFrame of `relation`, of `levels` levels, which is within the bound.
+    /// The DataFrame of `relation`, of `levels` levels, which is within the bound, of `holes`.
     fn from_sent_relation_at(
         session: SparkSession,
         relation: proto::Relation,
         levels: usize,
+        holes: crate::udf::SentHoles,
     ) -> DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
         let observations = plan_id
@@ -1661,20 +1689,30 @@ impl DataFrame {
                     .collect()
             })
             .unwrap_or_default();
-        DataFrame::from_sent_relation_with(session, relation, levels, observations)
+        DataFrame::from_sent_relation_with(session, relation, levels, observations, holes)
     }
 
-    /// The DataFrame of `relation`, of `levels` levels, which has `observations`, and keeps the
-    /// plan ID of `relation`.
+    /// The DataFrame of `relation`, of `levels` levels and of `holes`, which has `observations`,
+    /// and keeps the plan ID of `relation`.
     fn from_sent_relation_with(
         session: SparkSession,
         relation: proto::Relation,
         levels: usize,
         observations: Vec<(String, crate::observation::Observation)>,
+        holes: crate::udf::SentHoles,
     ) -> DataFrame {
         let plan_id = relation.common.as_ref().and_then(|common| common.plan_id);
         // The relation is sent as it is, and its clone and drop take the stack of its levels.
-        let dataframe = DataFrame::from_raw_relation(session, relation, None, levels, observations);
+        let dataframe = DataFrame::new(
+            session,
+            LogicalPlan::Raw {
+                relation: Box::new(relation),
+                owner: None,
+                depth: levels,
+                observations,
+                holes,
+            },
+        );
         if let Some(plan_id) = plan_id {
             dataframe
                 .session
@@ -1745,8 +1783,13 @@ impl DataFrame {
         observations: Vec<(String, crate::observation::Observation)>,
     ) -> Result<DataFrame> {
         let relation = self.to_relation()?;
-        let mut copy =
-            DataFrame::from_sent_relation_with(session, relation, self.plan_levels(), observations);
+        let mut copy = DataFrame::from_sent_relation_with(
+            session,
+            relation,
+            self.plan_levels(),
+            observations,
+            Default::default(),
+        );
         copy.schema_cache = Arc::new(Mutex::new(self.cached_schema()));
         Ok(copy)
     }
@@ -1765,9 +1808,9 @@ impl DataFrame {
     /// which pickles the copied functions at each request, as PySpark's copy does. A copy of no
     /// such copies shares the plan, of which its requests build the relation, as those of
     /// PySpark's copy build its plan objects: each warns of a window of no partitions and gives
-    /// the `and` of the conditions of a join the origin of its call site. A copy in another
-    /// session, of plan IDs of its own, is that of [`DataFrame::deep_copy_with`], whose relation
-    /// carries the plan IDs. Not a stable API.
+    /// the `and` of the conditions of a join the origin of its call site. So is a copy in another
+    /// session, whose plan IDs give the nodes of the plan of the copy the plan IDs that they have
+    /// in the session of this DataFrame (see [`DataFrame::of_plan_in`]). Not a stable API.
     #[doc(hidden)]
     pub fn deep_copy_with_pickler_copies(
         &self,
@@ -1775,12 +1818,16 @@ impl DataFrame {
         observations: Vec<(String, crate::observation::Observation)>,
         copies: &crate::udf::PicklerCopies,
     ) -> Result<DataFrame> {
-        if !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared()) {
-            return self.deep_copy_with(session, observations);
-        }
+        // A rebuilt node has the plan ID of the node that it is a copy of in the session of this
+        // DataFrame, and so in another session of the copy below.
         let plan = crate::udf::PicklerRebuild::new(copies, &observations)
-            .plan(&self.plan, Some(session.plan_ids()))
+            .plan(&self.plan, Some(self.session.plan_ids()))
             .unwrap_or_else(|| Arc::clone(&self.plan));
+        if !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared()) {
+            session
+                .plan_ids()
+                .assign_ids_of(&plan, self.session.plan_ids());
+        }
         Ok(DataFrame {
             session,
             plan,
@@ -1788,6 +1835,71 @@ impl DataFrame {
             is_local_cache: Arc::new(Mutex::new(None)),
             execution: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// This DataFrame with the copies `copies` of the picklers of its UDFs, in its session, of the
+    /// same plan IDs and Observations: the plan is rebuilt above each pickler that has a copy, as
+    /// a pickle of the DataFrame builds its relation with the copies that give the markers of its
+    /// holes (see [`crate::udf::SentHole`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn with_pickler_copies(&self, copies: &crate::udf::PicklerCopies) -> DataFrame {
+        let plan = crate::udf::PicklerRebuild::new(copies, &[])
+            .plan(&self.plan, Some(self.session.plan_ids()))
+            .unwrap_or_else(|| Arc::clone(&self.plan));
+        DataFrame {
+            session: self.session.clone(),
+            plan,
+            schema_cache: Arc::new(Mutex::new(self.cached_schema())),
+            is_local_cache: Arc::new(Mutex::new(None)),
+            execution: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// The DataFrame of the plan of this DataFrame in `session`, as PySpark's
+    /// `DataFrame(df._plan, session)` is of the plan object of `df`: the same plan, and so the same
+    /// plan IDs and Observations, which its requests build, as those of this DataFrame do, with
+    /// no schema cached and an information of executions of its own. In another session, the
+    /// plan IDs of that session give each node of the plan the plan ID that it has in the session
+    /// of this DataFrame, as PySpark's plan objects keep their plan IDs in any session that sends
+    /// them. Not a stable API.
+    #[doc(hidden)]
+    pub fn of_plan_in(&self, session: SparkSession) -> DataFrame {
+        if !Arc::ptr_eq(self.session.plan_ids_shared(), session.plan_ids_shared()) {
+            session
+                .plan_ids()
+                .assign_ids_of(&self.plan, self.session.plan_ids());
+        }
+        DataFrame {
+            session,
+            plan: Arc::clone(&self.plan),
+            schema_cache: Arc::new(Mutex::new(None)),
+            is_local_cache: Arc::new(Mutex::new(None)),
+            execution: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Give the plan of this DataFrame the plan ID `id` in its session, which its relation is
+    /// sent with and its columns refer to, as PySpark's `DataFrame(plan, session)` of a plan built
+    /// outside the core keeps the `_plan_id` of the plan: `id` is of the counter of the plan IDs
+    /// of the process ([`crate::plan::fresh_plan_id`]), as the Python client's plans take theirs,
+    /// so it is of no other node. Not a stable API.
+    #[doc(hidden)]
+    pub fn assign_plan_id(&self, id: i64) {
+        self.session.plan_ids().assign(&self.plan, id);
+    }
+
+    /// The plan ID of the plan of this DataFrame in its session, by which its columns refer to it,
+    /// and the plan ID of its relation within the `WithRelations` that sends it with the plans of
+    /// its subqueries, if it has subqueries: PySpark's `_plan_id` and `_root_plan_id` of the plan
+    /// of a DataFrame, of which the plan of `DataFrame._plan` of the Python client is made. Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn plan_id_and_root(&self) -> (i64, Option<i64>) {
+        let ids = self.session.plan_ids();
+        let id = ids.id_of(&self.plan);
+        let root =
+            crate::plan::has_subquery_references(&self.plan).then(|| ids.root_id_of(&self.plan));
+        (id, root)
     }
 
     /// The levels of the plan of this DataFrame, as a pickled DataFrame records them for
@@ -6530,6 +6642,55 @@ mod plan_construction_tests {
         assert!(!spark.range(3).unwrap().shares_plan_with(&derived));
     }
 
+    /// The owners that the plan of a DataFrame holds through the subqueries of its expressions,
+    /// and the owners of the errors of its expressions, are of the same walk, as long as no
+    /// other plan, expression or DataFrame shares the way to them.
+    #[test]
+    fn exclusive_relation_owners_reach_the_subqueries_and_the_errors_of_the_expressions() {
+        let spark = session();
+        let relation = proto::Relation {
+            common: None,
+            rel_type: Some(proto::relation::RelType::Sql(proto::Sql {
+                query: "SELECT 1 AS a".to_string(),
+                ..Default::default()
+            })),
+        };
+        let inner = DataFrame::from_relation(spark.clone(), relation, Some(Arc::new(7u8))).unwrap();
+        let subquery = inner.select([crate::functions::max(crate::functions::col("a"))]);
+        let scalar = subquery.scalar();
+        let outer = spark.range(1).unwrap().select([scalar.clone()]);
+        // The Column, the DataFrame of the subquery and the DataFrame of the relation share it.
+        assert!(outer.exclusive_relation_owners(1).is_empty());
+        assert!(scalar.expression().exclusive_owners().is_empty());
+        drop(inner);
+        assert!(outer.exclusive_relation_owners(1).is_empty());
+        drop(subquery);
+        assert_eq!(scalar.expression().exclusive_owners().len(), 0);
+        drop(scalar);
+        let owners = outer.exclusive_relation_owners(1);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+
+        let failing = Expression::unbuildable_owned(
+            crate::functions::col("a").expression().clone(),
+            SparkError::builtin_runtime_msg("of the plan"),
+            None,
+            Arc::new(9u16),
+        );
+        let failing = Column::from(failing);
+        let of_error = spark.range(1).unwrap().select([failing.clone()]);
+        assert!(of_error.exclusive_relation_owners(1).is_empty());
+        assert_eq!(failing.expression().exclusive_owners().len(), 0);
+        drop(of_error);
+        let owners = failing.expression().exclusive_owners();
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].downcast_ref::<u16>(), Some(&9));
+        let of_error = spark.range(1).unwrap().select([failing]);
+        let owners = of_error.exclusive_relation_owners(1);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].downcast_ref::<u16>(), Some(&9));
+    }
+
     #[test]
     fn is_local_only_for_a_local_relation_itself() {
         let spark = session();
@@ -7031,8 +7192,8 @@ mod plan_construction_tests {
     /// of its plan with the plan: the plan of the copy holds the copies of the picklers and of the
     /// Observations that it is given, of the plan IDs of the DataFrame, so its requests pickle
     /// the copies and its actions set the copied Observations. So is a copy of no copies of
-    /// picklers, of the plan, which its requests build; a copy in another session is of the
-    /// relation.
+    /// picklers, of the plan, which its requests build, and a copy in another session, of the plan
+    /// IDs of the DataFrame there.
     #[test]
     fn a_deep_copy_of_copies_of_picklers_holds_them_of_the_plan_ids_as_pyspark_deep_copies() {
         use crate::observation::Observation;
@@ -7076,12 +7237,23 @@ mod plan_construction_tests {
         report_count(&copy, 3);
         assert_eq!(counts(&given), [3]);
         assert!(counts(&observation).is_empty());
-        // In another session: the copy of the relation.
+        // In another session: of the copies of the picklers too, and of the plan IDs of the
+        // DataFrame, of each node, which the columns of the DataFrame refer to.
         let other = spark.new_session();
         let moved = df
-            .deep_copy_with_pickler_copies(other, Vec::new(), &copies)
+            .deep_copy_with_pickler_copies(other.clone(), Vec::new(), &copies)
             .unwrap();
-        assert!(matches!(moved.plan.as_ref(), LogicalPlan::Raw { .. }));
+        assert!(!matches!(moved.plan.as_ref(), LogicalPlan::Raw { .. }));
+        assert!(moved.session.is_same_session(&other));
+        assert!(contains(&sent(&moved), b"<copied>") && !contains(&sent(&moved), b"<original>"));
+        assert_eq!(other.plan_ids().id_of(&moved.plan), ids.id_of(&df.plan));
+        let input = |frame: &DataFrame| Arc::clone(frame.plan.inputs()[0]);
+        assert_eq!(
+            other.plan_ids().id_of(&input(&moved)),
+            ids.id_of(&input(&df))
+        );
+        // As the copy in the session of the DataFrame, of the same plan IDs.
+        assert_eq!(sent(&moved), sent(&copy));
         // Of no copies of picklers: the plan, rebuilt above the copy of the Observation, which
         // sends the relation of the DataFrame, and the plan itself of no Observation.
         let again = observation.detached();
@@ -7101,6 +7273,251 @@ mod plan_construction_tests {
             .deep_copy_with_pickler_copies(spark.clone(), Vec::new(), &PicklerCopies::new())
             .unwrap();
         assert!(Arc::ptr_eq(&shared.plan, &unobserved.plan));
+        // A plan of subqueries, rebuilt above the copies of its picklers: the root plan ID
+        // within its `WithRelations` too, in the session of the DataFrame and in another, as
+        // PySpark's copy keeps the `_root_plan_id` of its plan.
+        let of_subquery = df.select([Column::new(Expression::new(ExpressionNode::Subquery(
+            Box::new(df.subquery(crate::expression::SubqueryType::Scalar)),
+        )))]);
+        let (id, root) = of_subquery.plan_id_and_root();
+        assert!(root.is_some_and(|root| root != id));
+        for session in [spark.clone(), other.clone()] {
+            let copy = of_subquery
+                .deep_copy_with_pickler_copies(session, Vec::new(), &copies)
+                .unwrap();
+            assert!(!Arc::ptr_eq(&copy.plan, &of_subquery.plan));
+            assert_eq!(copy.plan_id_and_root(), (id, root));
+            let sent = copy.relation().unwrap();
+            let Some(proto::relation::RelType::WithRelations(with)) = sent.rel_type.as_ref() else {
+                panic!("a relation of subqueries is sent in a WithRelations");
+            };
+            let sent_root = with.root.as_ref().and_then(|r| r.common.as_ref());
+            assert_eq!(sent_root.and_then(|common| common.plan_id), root);
+            assert!(contains(&sent.encode_to_vec(), b"<copied>"));
+        }
+    }
+
+    /// As PySpark's `DataFrame(df._plan, session)`, of the plan object of `df`, of its plan IDs:
+    /// a DataFrame of the plan of a DataFrame is of the same plan, of no cached schema, in its
+    /// session or in another, whose plan IDs give each node of the plan its plan ID, and the root
+    /// within the `WithRelations` of a node of subqueries its root plan ID. A DataFrame of a plan
+    /// built outside the core keeps the plan ID of that plan, of the counter of the plan IDs of the
+    /// process, of which no other node is numbered.
+    #[test]
+    fn a_dataframe_of_the_plan_of_another_keeps_its_plan_ids_as_pyspark() {
+        use prost::Message;
+        let spark = session();
+        let other = spark.new_session();
+        let df = spark.range(3).unwrap().select([crate::column::col("id")]);
+        *df.schema_cache.lock().unwrap() = Some(Arc::new(DataType::Struct { fields: vec![] }));
+        let (id, root) = df.plan_id_and_root();
+        assert_eq!(id, df.plan_id());
+        assert_eq!(root, None);
+        for session in [spark.clone(), other.clone()] {
+            let of = df.of_plan_in(session.clone());
+            assert!(Arc::ptr_eq(&of.plan, &df.plan) && of.session.is_same_session(&session));
+            assert!(of.cached_schema().is_none());
+            assert_eq!(of.plan_id(), id);
+            assert_eq!(
+                of.relation().unwrap().encode_to_vec(),
+                df.relation().unwrap().encode_to_vec()
+            );
+        }
+        // A plan of a subquery: the root plan ID within its `WithRelations`, in either session.
+        let subquery = spark.range(1).unwrap().select([Column::new(Expression::new(
+            ExpressionNode::Subquery(Box::new(
+                df.subquery(crate::expression::SubqueryType::Scalar),
+            )),
+        ))]);
+        let (with_relations, root) = subquery.plan_id_and_root();
+        let root = root.expect("a plan of subqueries has a root plan ID");
+        assert_ne!(root, with_relations);
+        let sent = subquery.relation().unwrap();
+        assert_eq!(
+            sent.common.as_ref().and_then(|c| c.plan_id),
+            Some(with_relations)
+        );
+        let moved = subquery.of_plan_in(other.clone());
+        assert_eq!(moved.plan_id_and_root(), (with_relations, Some(root)));
+        assert_eq!(moved.relation().unwrap(), sent);
+        // So is a plan of an expression as it was sent, of a pickled Column of a subquery.
+        let (expression, levels) = Expression::new(ExpressionNode::Subquery(Box::new(
+            df.subquery(crate::expression::SubqueryType::Scalar),
+        )))
+        .try_to_proto_with_levels()
+        .unwrap();
+        let relations = Expression::new(ExpressionNode::Subquery(Box::new(
+            df.subquery(crate::expression::SubqueryType::Scalar),
+        )))
+        .subquery_relations()
+        .unwrap();
+        let sent_column = Column::sent_with_subqueries(expression, "s".into(), levels, relations);
+        let of_sent = spark.range(1).unwrap().select([sent_column.unwrap()]);
+        let (with_relations, root) = of_sent.plan_id_and_root();
+        let root = root.expect("a plan of a sent subquery has a root plan ID");
+        let sent = of_sent.relation().unwrap();
+        assert_eq!(
+            sent.common.as_ref().and_then(|c| c.plan_id),
+            Some(with_relations)
+        );
+        let Some(proto::relation::RelType::WithRelations(of_relations)) = sent.rel_type.as_ref()
+        else {
+            panic!("a relation of a sent subquery is sent in a WithRelations");
+        };
+        let sent_root = of_relations.root.as_ref().unwrap();
+        assert_eq!(
+            sent_root.common.as_ref().and_then(|c| c.plan_id),
+            Some(root)
+        );
+        assert_eq!(of_sent.of_plan_in(other.clone()).relation().unwrap(), sent);
+        // The plan ID that a DataFrame of a relation built outside the core is given, as the
+        // Python client's plans take theirs of the counter, and the nodes numbered after it.
+        let plan_id = crate::plan::fresh_plan_id();
+        let raw =
+            DataFrame::from_relation(spark.clone(), proto::Relation::default(), None).unwrap();
+        raw.assign_plan_id(plan_id);
+        assert_eq!(raw.plan_id(), plan_id);
+        assert_eq!(
+            raw.relation().unwrap().common.and_then(|c| c.plan_id),
+            Some(plan_id)
+        );
+        let later = spark.range(1).unwrap();
+        assert!(later.plan_id() > plan_id && crate::plan::fresh_plan_id() > later.plan_id());
+    }
+
+    /// As PySpark's DataFrame of a plan whose build raises, whose requests build the plan: a
+    /// DataFrame of a relation built outside the core whose build failed raises the error of the
+    /// build at each request, and so does each DataFrame over it, while it keeps the owner of the
+    /// relation alive.
+    #[test]
+    fn a_dataframe_of_a_relation_whose_build_failed_raises_its_error_at_each_request() {
+        let spark = session();
+        let owner: Arc<dyn std::any::Any + Send + Sync> = Arc::new("plan");
+        let weak = Arc::downgrade(&owner);
+        let failed = DataFrame::from_unbuilt_relation(
+            spark.clone(),
+            Some(owner),
+            SparkError::value_msg("the build failed"),
+        );
+        let over = failed.select([crate::column::col("id")]);
+        for frame in [&failed, &over, &failed] {
+            let error = frame.relation().unwrap_err();
+            assert_eq!(error.message(), "the build failed");
+        }
+        assert!(weak.upgrade().is_some());
+        drop((failed, over));
+        assert!(weak.upgrade().is_none());
+    }
+
+    /// As PySpark's unpickled plan, which keeps the functions of its UDFs and pickles them when a
+    /// request builds it: a DataFrame of a relation that was sent of holes calls their picklers at
+    /// each request, in their turn among the picklers of the plan over it, and fills the holes with
+    /// their messages; a pickler that fails fails the request, and the picklers after it are not
+    /// called. Its holes are those that a deep copy copies and that its garbage collector is told
+    /// of, as the functions of the UDFs of a plan.
+    #[test]
+    fn a_dataframe_of_a_sent_relation_of_holes_pickles_them_at_each_request_in_turn() {
+        use crate::udf::{CommandPickler, PythonUDFPayload, SentHole, SentHoleKind, SentHoles};
+        use prost::Message;
+        let spark = session();
+        let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+        let udf_pickler = |tag: &'static str, fails: Arc<std::sync::atomic::AtomicBool>| {
+            let calls = Arc::clone(&calls);
+            CommandPickler::with_output_type(tag, move |tag| {
+                calls.lock().unwrap().push(tag.to_string());
+                if fails.load(std::sync::atomic::Ordering::SeqCst) {
+                    return Err(SparkError::value_msg(format!("{tag} does not pickle")));
+                }
+                Ok(proto::PythonUdf {
+                    output_type: Some(DataType::Long.to_proto()),
+                    command: format!("<{tag}>").into_bytes().into(),
+                    ..Default::default()
+                }
+                .encode_to_vec())
+            })
+        };
+        let never = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let fails = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let udf_column = |tag: &'static str, pickler: CommandPickler| {
+            Column::new(
+                ExpressionNode::CommonInlineUserDefinedFunction(Box::new(
+                    CommonInlineUserDefinedFunctionExpression::new(
+                        tag.to_string(),
+                        true,
+                        vec![],
+                        PythonUDFPayload::pickled_at_build(
+                            DataType::Long,
+                            100,
+                            pickler,
+                            "3.11".into(),
+                        ),
+                    ),
+                ))
+                .into(),
+            )
+        };
+        // The relation of a pickle: the commands of its UDFs are markers.
+        let mut markers = crate::udf::SentHoleMarkers::new();
+        let (first, second) = (markers.marker(), markers.marker());
+        let marked = |marker: &[u8]| {
+            let marker = marker.to_vec();
+            CommandPickler::with_output_type((), move |_| {
+                Ok(proto::PythonUdf {
+                    command: marker.clone().into(),
+                    ..Default::default()
+                }
+                .encode_to_vec())
+            })
+        };
+        let pickled = spark.range(2).unwrap().select([
+            udf_column("a", marked(&first)),
+            udf_column("b", marked(&second)),
+        ]);
+        let relation = pickled.relation().unwrap();
+        let holes = SentHoles(vec![
+            SentHole {
+                marker: first,
+                kind: SentHoleKind::PythonUdf,
+                pickler: Some(udf_pickler("first", Arc::clone(&fails))),
+            },
+            SentHole {
+                marker: second,
+                kind: SentHoleKind::PythonUdf,
+                pickler: Some(udf_pickler("second", Arc::clone(&never))),
+            },
+        ]);
+        let unpickled =
+            DataFrame::from_sent_relation_with_holes(spark.clone(), relation, 2, holes).unwrap();
+        // The picklers of the holes, which a deep copy copies, and which the DataFrame alone holds.
+        assert_eq!(unpickled.picklers().len(), 2);
+        assert_eq!(unpickled.exclusive_pickler_objects(1).len(), 2);
+        let over = unpickled.select([udf_column("c", udf_pickler("over", Arc::clone(&never)))]);
+        // What the DataFrame and the one over it share is told of by neither.
+        assert!(unpickled.exclusive_pickler_objects(1).is_empty());
+        assert_eq!(over.exclusive_pickler_objects(1).len(), 1);
+        let contains = |bytes: &[u8], part: &[u8]| bytes.windows(part.len()).any(|w| w == part);
+        for _ in 0..2 {
+            let sent = over.relation().unwrap().encode_to_vec();
+            assert!(contains(&sent, b"<first>") && contains(&sent, b"<second>"));
+            assert!(contains(&sent, b"<over>") && !contains(&sent, b"spark-connect-rust-udf-"));
+        }
+        assert_eq!(
+            *calls.lock().unwrap(),
+            ["first", "second", "over", "first", "second", "over"]
+        );
+        calls.lock().unwrap().clear();
+        fails.store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = over.relation().unwrap_err();
+        assert_eq!(error.message(), "first does not pickle");
+        assert_eq!(*calls.lock().unwrap(), ["first"]);
+        // A relation of more levels than the bound is a `RecursionError`, of holes too.
+        let deep = DataFrame::from_sent_relation_with_holes(
+            spark,
+            proto::Relation::default(),
+            crate::plan::MAX_PLAN_DEPTH + 1,
+            SentHoles::default(),
+        );
+        assert!(deep.is_err());
     }
 
     /// As PySpark's unpickled plan, which has copies of the Observations of the pickled one: a
@@ -7608,6 +8025,24 @@ mod plan_construction_tests {
             assert!(spark.plan_ids().len() <= 1024, "{}", spark.plan_ids().len());
         }
         assert_eq!(plan_ids_of(&kept.relation().unwrap()), kept_ids);
+    }
+
+    #[test]
+    fn plan_ids_given_to_dropped_nodes_are_pruned_too() {
+        // As the plan IDs that a session numbers, those that it gives, as of the DataFrames of
+        // plans of the Python client (`DataFrame::assign_plan_id`), are pruned once their nodes
+        // are gone: so a process that makes and drops such DataFrames keeps about the entries of
+        // the live ones, as PySpark keeps nothing of a dropped plan.
+        let spark = session().new_session();
+        let kept = spark.range(1).unwrap();
+        let id = crate::plan::fresh_plan_id();
+        kept.assign_plan_id(id);
+        for _ in 0..5000 {
+            let made = spark.range(2).unwrap();
+            made.assign_plan_id(crate::plan::fresh_plan_id());
+            assert!(spark.plan_ids().len() <= 1024, "{}", spark.plan_ids().len());
+        }
+        assert_eq!(kept.plan_id_and_root(), (id, None));
     }
 
     #[test]

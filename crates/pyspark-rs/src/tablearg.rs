@@ -72,10 +72,12 @@ impl PyTableArg {
 
     // The `spark.connect.Expression` of the table argument, as PySpark Connect's
     // `TableArg.to_plan`: that of its subquery expression, of `pyspark.sql.connect.proto`, of
-    // its plan ID, its partitioning, its ordering and its single partition.
+    // its plan ID, its partitioning, its ordering and its single partition, built of the session
+    // of the client `session` (see `errors::of_client_session`).
     fn to_plan(&self, py: Python<'_>, session: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
-        let _ = session;
-        crate::column::expression_message(py, &self.inner.to_column())
+        crate::errors::of_client_session(session, || {
+            crate::column::expression_message(py, &self.inner.to_column())
+        })
     }
 
     /// The subquery expression of the table argument, as PySpark Connect's
@@ -146,28 +148,50 @@ impl PyTableArg {
     /// its partitioning and its ordering and of its single partition, of which
     /// `pyspark.sql.connect._column_reduce.table_arg_of` gives back the table argument, as
     /// `_of_relation` and the calls that made it, with no request, as PySpark's unpickle sends
-    /// none. A plan that does not build pickles of its error, which the requests of the
-    /// unpickled table argument raise ([`crate::column::described_error`]), as PySpark's raise it
-    /// when they build the plan. It keeps the ID of its session rather than the session, which
-    /// pickles of a local function, as PySpark's table argument holds no session: so a plain
-    /// pickle of it succeeds. A user-set attribute is the state, as of a plain object.
+    /// none. The relation is of holes in place of the commands of its UDFs, and the pickle
+    /// carries their functions, which the requests of the unpickled table argument pickle, as
+    /// PySpark's pickle carries the functions of its plan ([`crate::udf_command::PickleHoles`]).
+    /// A plan that does not build pickles of its error, which the requests of the unpickled table
+    /// argument raise ([`crate::column::described_error`]), as PySpark's raise it when they build
+    /// the plan; of a plan of the Python client whose build raised, of that plan, which the
+    /// unpickle builds again, as PySpark's table argument builds the plan objects that it carries. It keeps the ID of its session rather than the session, which pickles of a local
+    /// function, as PySpark's table argument holds no session: so a plain pickle of it succeeds
+    /// but for a function that it does not pickle. A user-set attribute is the state, as of a
+    /// plain object.
     fn __reduce__<'py>(slf: &Bound<'py, Self>) -> PyResult<Bound<'py, PyAny>> {
         use pyo3::types::PyBytes;
         use spark_connect::expression::ExpressionNode;
         let py = slf.py();
         let this = slf.borrow();
-        let (relation, levels, build_error) =
-            match crate::origin::pickling(|| this.inner.relation_with_levels()) {
-                Ok((relation, levels)) => (
-                    PyBytes::new(py, &crate::encode_on_grown_stack(relation)),
-                    levels,
-                    None,
+        let (holes, copies) = crate::udf_command::PickleHoles::of(py, this.inner.picklers());
+        let built = if copies.is_empty() {
+            crate::origin::pickling(|| this.inner.relation_with_levels())
+        } else {
+            let marked = this.inner.with_pickler_copies(&copies);
+            crate::origin::pickling(|| marked.relation_with_levels())
+        };
+        let (relation, levels, build_error, holes) = match built {
+            Ok((relation, levels)) => {
+                let relation = crate::encode_on_grown_stack(relation);
+                let holes = holes.holes_of(py, &relation)?;
+                (PyBytes::new(py, &relation), levels, None, holes)
+            }
+            // Of the table argument of the DataFrame of the plan of a kept error itself, or of
+            // one over it.
+            Err(error) => match crate::column::described_error_of(
+                py,
+                &error,
+                !this.inner.is_unbuilt_with(&error),
+            )? {
+                Some(description) => (
+                    PyBytes::new(py, b""),
+                    1,
+                    Some(description),
+                    pyo3::types::PyList::empty(py),
                 ),
-                Err(error) => match crate::column::described_error(py, &error)? {
-                    Some(description) => (PyBytes::new(py, b""), 1, Some(description)),
-                    None => return Err(crate::errors::spark_error_to_py_exception(error)),
-                },
-            };
+                None => return Err(crate::errors::spark_error_to_py_exception(error)),
+            },
+        };
         let subquery = this.inner.to_column();
         let ExpressionNode::Subquery(subquery) = subquery.expression().node() else {
             unreachable!("a table argument is a subquery expression");
@@ -185,6 +209,16 @@ impl PyTableArg {
                 })
                 .collect::<PyResult<Vec<_>>>()
         };
+        let reduce_module = py
+            .import("pyspark.sql.connect.dataframe")?
+            .getattr("_column_reduce")?;
+        // The function that fills the holes on a Python worker of the server, of holes only, so
+        // that only the pickle of a table argument of holes carries its code.
+        let fill = if holes.is_empty() {
+            None
+        } else {
+            Some(reduce_module.getattr("fill_holes")?)
+        };
         let args = (
             this.session_id.clone(),
             relation,
@@ -193,12 +227,11 @@ impl PyTableArg {
             columns(&subquery.order_spec)?,
             subquery.with_single_partition == Some(true),
             build_error,
+            holes,
+            fill,
         )
             .into_pyobject(py)?;
-        let table_arg_of = py
-            .import("pyspark.sql.connect.dataframe")?
-            .getattr("_column_reduce")?
-            .getattr("table_arg_of")?;
+        let table_arg_of = reduce_module.getattr("table_arg_of")?;
         let reduce = pyo3::types::PyTuple::new(py, [table_arg_of, args.into_any()])?.into_any();
         crate::group::reduce_with_state(&reduce, slf.as_any())
     }
@@ -206,30 +239,41 @@ impl PyTableArg {
     /// The table argument of `relation`, the bytes of the relation of `levels` levels of the plan
     /// of a DataFrame of `session`, as a pickled table argument unpickles
     /// (`_column_reduce.table_arg_of`): the `asTable()` of the DataFrame of the relation, of its
-    /// plan ID, as `DataFrame._of_relation` gives it, with no request. Of `build_error`, the
+    /// plan ID, as `DataFrame._of_relation` gives it, with no request, of `holes`, whose
+    /// functions each request pickles (see `udf_command::sent_holes`). Of `build_error`, the
     /// description of the error of a plan that did not build, each request of a plan of it
     /// raises the error.
     #[staticmethod]
-    #[pyo3(signature = (session, relation, levels=1, build_error=None))]
+    #[pyo3(signature = (session, relation, levels=1, build_error=None, holes=None))]
     fn _of_relation(
         session: &Bound<'_, crate::session::PySparkSession>,
         relation: &[u8],
         levels: usize,
         build_error: Option<&Bound<'_, PyAny>>,
+        holes: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<PyTableArg> {
-        let session = session.borrow().session.clone();
+        let holes = crate::udf_command::sent_holes(holes)?;
+        let python_session = session;
+        let session = python_session.borrow().session.clone();
         let session_id = session.session_id().to_string();
         let dataframe = match build_error {
-            Some(description) => {
-                let error = crate::column::error_of_description(description)?;
-                DataFrame::from_sent_relation(session, Default::default()).unbuildable(error)
-            }
+            // The plan of the Python client whose build failed, built again, as PySpark's table
+            // argument builds the plan objects that it carries.
+            Some(description) => match crate::column::described_plan(description)? {
+                Some((plan, derived)) => {
+                    crate::dataframe::rebuilt_python_plan(&plan, python_session, derived)?.0
+                }
+                None => {
+                    let error = crate::column::error_of_description(description)?;
+                    DataFrame::from_sent_relation(session, Default::default()).unbuildable(error)
+                }
+            },
             None => {
                 use prost::Message;
                 // Decoded, and then built or dropped, on a stack that holds its levels.
                 crate::on_grown_stack(|| {
                     spark_connect_proto::Relation::decode(relation).map(|relation| {
-                        DataFrame::from_sent_relation_levels(session, relation, levels)
+                        DataFrame::from_sent_relation_with_holes(session, relation, levels, holes)
                     })
                 })
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?
@@ -248,7 +292,10 @@ impl PyTableArg {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        crate::udf_command::visit_pickler_objects(self.inner.exclusive_pickler_objects(), &visit)
+        crate::udf_command::visit_pickler_objects(self.inner.exclusive_pickler_objects(), &visit)?;
+        // The plans of the Python client of the relations of its plan, which it alone holds, as
+        // PySpark's table argument holds the plan objects of its DataFrame.
+        crate::udf_command::visit_owners(self.inner.exclusive_owners(), &visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the table argument

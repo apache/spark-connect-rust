@@ -39,9 +39,9 @@ from pyspark.sql.connect.logging import logger
 
 class LogicalPlan:
     _lock: Lock = Lock()
-    # The plan IDs of these plans start past those that the Rust core gives the relations of a
-    # session (from 1), so that the two never number a relation the same.
-    _nextPlanId: int = 1 << 48
+    # The next plan ID, as PySpark's, of the plans of the module where it runs without the Rust
+    # core, as the tests run it on a Python worker of the server; the core numbers the others.
+    _nextPlanId: int = 0
 
     def __init__(
         self, child: Optional["LogicalPlan"], references: Optional[Sequence["LogicalPlan"]] = None
@@ -70,13 +70,17 @@ class LogicalPlan:
 
     @staticmethod
     def _fresh_plan_id() -> int:
-        plan_id: Optional[int] = None
-        with LogicalPlan._lock:
-            plan_id = LogicalPlan._nextPlanId
-            LogicalPlan._nextPlanId += 1
-
-        assert plan_id is not None
-        return plan_id
+        # Of the one counter of the process from which the Rust core numbers the relations of its
+        # plans too, as PySpark's numbers all of its plans: so the ID of a plan, which a
+        # DataFrame(plan, session) keeps, is of no other relation.
+        try:
+            from pyspark import _pyspark
+        except ImportError:
+            with LogicalPlan._lock:
+                plan_id = LogicalPlan._nextPlanId
+                LogicalPlan._nextPlanId += 1
+            return plan_id
+        return _pyspark._fresh_plan_id()
 
     def _create_proto_relation(self) -> "proto.Relation":
         plan = proto.Relation()
@@ -149,21 +153,32 @@ class LogicalPlan:
 
 class _DataFramePlan(LogicalPlan):
     """The plan of a DataFrame of the Rust core, as its ``DataFrame._plan``: its relation, as the
-    core sends it, of the plan IDs of its session.
+    core sends it, of the plan IDs of its session, which are its ``_plan_id`` and
+    ``_root_plan_id``, as PySpark's plan of a DataFrame is the plan whose IDs the columns of the
+    DataFrame refer to.
 
     Its ``plan`` is a placeholder that holds that relation, which the core builds at the call, as
     PySpark's ``plan`` builds the relation, and replaces the placeholder with when the plan built
     over it reaches the core, as ``DataFrame(plan, session)`` or a command does, also after the
     DataFrame is gone. It is one message, an extension whose value holds the relation encoded, so
     a plan of ``pyspark.ml`` over a deep DataFrame is never decoded in Python, as protobuf decoders
-    limit the depth of what they decode."""
+    limit the depth of what they decode. ``DataFrame(df._plan, session)`` is a DataFrame of the
+    plan of ``df`` itself, as PySpark's is of the plan object of ``df``."""
 
     def __init__(self, df: Any) -> None:
-        super().__init__(None)
+        # Of the plan IDs of the DataFrame rather than of new ones: LogicalPlan's attributes, set
+        # here.
+        self._child = None
+        self._references: Sequence[LogicalPlan] = []
         self._df = df
+        plan_id, root_plan_id = df._plan_ids()
+        self._root_plan_id = plan_id if root_plan_id is None else root_plan_id
+        self._plan_id_with_rel: Optional[int] = None if root_plan_id is None else plan_id
 
     def plan(self, session: Any) -> "proto.Relation":
-        return proto.Relation.FromString(self._df._relation_placeholder())
+        # Built of the session of the client ``session``, as PySpark's plan builds the plan objects
+        # that it holds of the client that it is given.
+        return proto.Relation.FromString(self._df._relation_placeholder(session))
 
     @property
     def observations(self) -> dict[str, Any]:
@@ -171,6 +186,35 @@ class _DataFramePlan(LogicalPlan):
         # plan by their names, which the DataFrame gives the executions of the client, and so do
         # the plans over it, such as a ``SubqueryAlias``: those of the core's plan.
         return self._df._observations()
+
+    def __reduce__(self) -> tuple[Any, tuple[Any, ...]]:
+        # As PySpark's plan object of a DataFrame, which pickles its fields and no session: the
+        # plan of the relation of the DataFrame as it was sent (``_column_reduce.sent_plan``), of
+        # the functions of its UDFs, of the error of a plan that does not build and of the
+        # Observations of the plan, a LogicalPlan on the client and on a Python worker of the
+        # server, which has no class of the drop-in. So a plan of the Python client over this
+        # one, such as a ``SubqueryAlias``, pickles plainly and unpickles on the worker, as
+        # PySpark's does.
+        unpickle, args = self._df._plan_reduce()
+        return unpickle, (*args, self.observations)
+
+    def __copy__(self) -> "_DataFramePlan":
+        # As PySpark's shallow copy of a plan object, of the same fields, as `copy` copies an
+        # object without a reduce of its own: the plan of the same DataFrame.
+        copied = object.__new__(type(self))
+        copied.__dict__.update(self.__dict__)
+        return copied
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> "_DataFramePlan":
+        # As PySpark's deep copy of a plan object, of deep copies of its fields, as `copy` copies
+        # an object without a reduce of its own: the plan of a deep copy of the DataFrame, of
+        # copies of the functions of its UDFs and of its Observations.
+        import copy
+
+        copied = object.__new__(type(self))
+        memo[id(self)] = copied
+        copied.__dict__.update(copy.deepcopy(self.__dict__, memo))
+        return copied
 
 
 class Read(LogicalPlan):

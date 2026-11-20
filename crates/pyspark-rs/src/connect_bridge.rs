@@ -175,3 +175,12 @@ fn unsupported_data_type(py: Python<'_>, node: &[u8]) -> PyErr {
         Err(err) => err,
     }
 }
+
+/// A new plan ID of the counter from which the core numbers the nodes of its plans, for a plan of
+/// `pyspark.sql.connect.plan`, as PySpark's `LogicalPlan._fresh_plan_id()` takes one of its
+/// counter for each plan: one counter for both, so that the `_plan_id` of such a plan, which a
+/// `DataFrame(plan, session)` keeps, is of no other node of any session.
+#[pyfunction]
+pub fn _fresh_plan_id() -> i64 {
+    spark_connect::plan::fresh_plan_id()
+}

@@ -451,13 +451,15 @@ impl PyWindowSpec {
 
     /// As PySpark's window specification, a Python object that holds its partitioning and
     /// ordering columns, which Python's garbage collector sees: the functions of the UDFs that the
-    /// specification alone keeps alive are reported, so that a reference cycle through them is
+    /// specification alone keeps alive are reported, and the plans of the Python client that the
+    /// subqueries and the errors of its columns keep, so that a reference cycle through them is
     /// collected, as PySpark collects it.
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         if !self.gc_ready.get() {
             return Ok(());
         }
-        crate::udf_command::visit_pickler_objects(self.spec.exclusive_pickler_objects(), &visit)
+        crate::udf_command::visit_pickler_objects(self.spec.exclusive_pickler_objects(), &visit)?;
+        crate::udf_command::visit_owners(self.spec.exclusive_owners(), &visit)
     }
 
     /// Break a reference cycle that the garbage collector found unreachable: the specification

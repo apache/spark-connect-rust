@@ -173,14 +173,29 @@ impl GroupedData {
         &self,
         holders: usize,
     ) -> Vec<&(dyn std::any::Any + Send + Sync)> {
-        let expressions = self
-            .group_cols
+        crate::udf::exclusive_pickler_objects_held_by(self.walked_expressions(), holders)
+    }
+
+    /// The owners of the relations built outside the core of the subqueries of the grouping of
+    /// these grouped data, and of the errors of its parts that a request fails to build, that
+    /// they keep alive with the clones of them of which the caller answers, as
+    /// [`GroupedData::exclusive_pickler_objects`] gives the objects of the picklers, which a
+    /// Python wrapper reports to Python's garbage collector (see
+    /// `crate::udf::exclusive_owners`). Not a stable API.
+    #[doc(hidden)]
+    pub fn exclusive_owners(&self, holders: usize) -> Vec<&(dyn std::any::Any + Send + Sync)> {
+        crate::udf::exclusive_owners_held_by(self.walked_expressions(), holders)
+    }
+
+    /// The grouping columns, the pivot column and values and the grouping sets of these grouped
+    /// data, of which the exclusive walks start.
+    fn walked_expressions(&self) -> impl Iterator<Item = &Expression> {
+        self.group_cols
             .iter()
             .map(Column::expression)
             .chain(&self.pivot_col)
             .chain(&self.pivot_values)
-            .chain(self.grouping_sets.iter().flatten().map(Column::expression));
-        crate::udf::exclusive_pickler_objects_held_by(expressions, holders)
+            .chain(self.grouping_sets.iter().flatten().map(Column::expression))
     }
 
     /// Drop the plan of the DataFrame and the grouping of these grouped data, as
@@ -1095,6 +1110,49 @@ mod tests {
             .remote("sc://localhost:15002")
             .get_or_create()
             .expect("failed to build session")
+    }
+
+    /// The owners that grouped data report are those of the subqueries and of the errors of their
+    /// grouping that they and the clones of them that their caller answers for alone hold.
+    #[test]
+    fn exclusive_owners_are_those_of_the_grouping_that_the_grouped_data_alone_hold() {
+        use crate::functions::{col, max};
+        let spark = session();
+        let relation = spark_connect_proto::Relation {
+            common: None,
+            rel_type: Some(spark_connect_proto::relation::RelType::Sql(
+                spark_connect_proto::Sql {
+                    query: "SELECT 1 AS a".to_string(),
+                    ..Default::default()
+                },
+            )),
+        };
+        let inner = DataFrame::from_relation(spark.clone(), relation, Some(Arc::new(7u8))).unwrap();
+        let scalar = inner.select([max(col("a"))]).scalar();
+        drop(inner);
+        let grouped = spark.range(3).unwrap().group_by([scalar.clone()]);
+        // The Column shares the grouping expression.
+        assert!(grouped.exclusive_owners(1).is_empty());
+        drop(scalar);
+        let owners = grouped.exclusive_owners(1);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].downcast_ref::<u8>(), Some(&7));
+        let clone = grouped.clone();
+        assert!(grouped.exclusive_owners(1).is_empty());
+        assert_eq!(grouped.exclusive_owners(2).len(), 1);
+        drop(clone);
+
+        // An expression that a request fails to build, as the grouping column itself.
+        let failing = Column::from(Expression::unbuildable_owned(
+            col("a").expression().clone(),
+            SparkError::builtin_runtime_msg("of the plan"),
+            None,
+            Arc::new(9u16),
+        ));
+        let grouped = spark.range(3).unwrap().group_by([failing]);
+        let owners = grouped.exclusive_owners(1);
+        assert_eq!(owners.len(), 1);
+        assert_eq!(owners[0].downcast_ref::<u16>(), Some(&9));
     }
 
     #[test]
