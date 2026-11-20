@@ -55,6 +55,11 @@ jobs:
           # member), whose build script compiles its UDFs to WASM; `tests/wasm-udf-wasi`
           # compiles its UDFs for WASI.
           rustup target add wasm32-unknown-unknown wasm32-wasip1
+      - name: Set up JDK for workspace JNI headers
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
       - name: Cache cargo & target
         uses: actions/cache@v4
         with:

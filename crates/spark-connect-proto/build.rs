@@ -34,10 +34,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").ok_or("OUT_DIR is not set")?);
     let full_set = out_dir.join("spark_connect_descriptor_set_full.bin");
-    // The client's codec is prost's, of its errors of a response tagged (see src/codec.rs).
     tonic_prost_build::configure()
-        .build_server(false)
+        .build_server(cfg!(feature = "server"))
         .build_client(true)
+        // async_trait repeats Future's must_use on generated server methods.
+        .trait_attribute("SparkConnectService", "#[allow(clippy::double_must_use)]")
+        // Tag client response decoding errors. Generated server bindings share this codec;
+        // their error sources stay local and are not sent to clients.
         .codec_path("crate::ClientCodec")
         .bytes(".")
         .file_descriptor_set_path(&full_set)

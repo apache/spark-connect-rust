@@ -4,6 +4,8 @@
 //! here at the crate root. The generated gRPC client is
 //! [`spark_connect_service_client::SparkConnectServiceClient`], of the codec [`ClientCodec`],
 //! which tags the status of a response that the client fails to decode.
+//! Enable the optional `server` feature for `spark_connect_service_server`
+//! bindings. Embeddings configure tonic's transport server features separately.
 //!
 //! Baseline protocol version: see `proto/PROTO_VERSION.txt` / `proto/SPARK_SHA.txt`.
 
