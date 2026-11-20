@@ -28,6 +28,7 @@ import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.EnumSet;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -39,25 +40,34 @@ import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import org.apache.arrow.memory.OutOfMemoryException;
 import org.apache.spark.SimpleFutureAction;
 import org.apache.spark.SparkContext;
-import org.apache.spark.SparkEnv;
 import org.apache.spark.SparkException;
 import org.apache.spark.SparkThrowable;
+import org.apache.spark.connect.proto.CommonInlineUserDefinedFunction;
+import org.apache.spark.connect.proto.CommonInlineUserDefinedTableFunction;
 import org.apache.spark.connect.proto.Relation;
+import org.apache.spark.connect.proto.Relation.RelTypeCase;
+import org.apache.spark.connect.proto.ScalarScalaUDF;
+import org.apache.spark.connect.proto.TypedAggregateExpression;
 import org.apache.spark.rdd.RDD;
+import org.apache.spark.rpc.RpcEnvFileServer;
+import org.apache.spark.scheduler.DAGScheduler;
 import org.apache.spark.sql.AnalysisException;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.artifact.ArtifactManager;
 import org.apache.spark.sql.catalyst.analysis.UnresolvedExecuteImmediate;
 import org.apache.spark.sql.catalyst.plans.logical.Command;
 import org.apache.spark.sql.catalyst.plans.logical.InsertIntoDir;
@@ -84,19 +94,22 @@ import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.types.UserDefinedType;
 import org.apache.spark.sql.types.VarcharType;
 import org.apache.spark.util.ThreadUtils;
+import org.apache.spark.util.Utils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.sparkproject.connect.protobuf.InvalidProtocolBufferException;
 import org.sparkproject.connect.protobuf.Message;
 
 import scala.Option;
 import scala.Tuple2;
-import scala.collection.immutable.Range$;
-import scala.concurrent.duration.Duration;
+import scala.jdk.javaapi.CollectionConverters;
 import scala.reflect.ClassTag;
 import scala.reflect.ClassTag$;
 import scala.runtime.AbstractFunction0;
 import scala.runtime.AbstractFunction1;
 import scala.runtime.AbstractFunction2;
 import scala.runtime.BoxedUnit;
+import scala.util.Try;
 
 /**
  * A query engine for the Rust-owned frontend. The JNI boundary passes Catalyst inputs and Arrow
@@ -111,49 +124,96 @@ import scala.runtime.BoxedUnit;
  * The caller retains ownership of the original SparkSession and shared SparkContext.
  */
 public final class SparkJvmEngine implements AutoCloseable {
+  private static final Logger LOG = LoggerFactory.getLogger(SparkJvmEngine.class);
   static final int MAX_IPC_BYTES = 64 * 1024 * 1024;
-  private static final int MAX_BATCH_ROWS = 10000;
+  private static final int DEFAULT_BATCH_ROWS = 10000;
+  // Status values follow the gRPC status-code numbering.
+  private static final int STATUS_CANCELLED = 1;
+  private static final int STATUS_INVALID_ARGUMENT = 3;
+  private static final int STATUS_NOT_FOUND = 5;
+  private static final int STATUS_RESOURCE_EXHAUSTED = 8;
+  private static final int STATUS_FAILED_PRECONDITION = 9;
+  private static final int STATUS_UNIMPLEMENTED = 12;
+  private static final int STATUS_INTERNAL = 13;
+  private static final int CONFIG_GET = 1;
+  private static final int CONFIG_GET_OPTION = 2;
+  private static final int CONFIG_GET_WITH_DEFAULT = 3;
+  private static final int CONFIG_GET_ALL = 4;
+  private static final int CONFIG_IS_MODIFIABLE = 5;
+  private static final int CONFIG_SET = 6;
+  private static final int CONFIG_UNSET = 7;
+  private static final int CONFIG_SET_SILENT = 8;
+  private static final long SHUTDOWN_POLL_MILLIS = 100;
   private static final String SHUFFLE_FILE_CLEANUP =
       "spark.sql.classic.shuffleDependency.fileCleanup.enabled";
-  private static final Set<String> RELATIONS = Set.of(
-      "RANGE", "LOCAL_RELATION", "SQL", "PROJECT", "FILTER", "LIMIT", "OFFSET", "TAIL",
-      "JOIN", "SORT", "AGGREGATE", "DEDUPLICATE", "SET_OP", "SUBQUERY_ALIAS", "TO_DF",
-      "WITH_COLUMNS_RENAMED", "WITH_COLUMNS", "DROP", "REPARTITION",
-      "REPARTITION_BY_EXPRESSION", "HINT", "READ");
+  // Compiler-generated Cleaner frame name in the pinned Spark build.
+  private static final String ARTIFACT_GLOBAL_CLEANUP_METHOD =
+      "org$apache$spark$sql$artifact$ArtifactManager$$cleanUpGlobalResources";
+  /**
+   * Maximum result partitions running or buffered, including the partition being delivered.
+   * Nonpositive or unset values use the scheduler's default parallelism for each query.
+   */
+  static final String FETCH_MAX_CONCURRENT_PARTITIONS =
+      "spark.connect.native.fetch.maxConcurrentPartitions";
+  /** Target bound on fetched but undelivered IPC bytes; one partition is always admitted. */
+  static final String FETCH_MAX_BUFFERED_BYTES = "spark.connect.native.fetch.maxBufferedBytes";
+  private static final EnumSet<RelTypeCase> RELATIONS = EnumSet.of(
+      RelTypeCase.RANGE, RelTypeCase.LOCAL_RELATION, RelTypeCase.SQL, RelTypeCase.PROJECT,
+      RelTypeCase.FILTER, RelTypeCase.LIMIT, RelTypeCase.OFFSET, RelTypeCase.TAIL,
+      RelTypeCase.JOIN, RelTypeCase.SORT, RelTypeCase.AGGREGATE, RelTypeCase.DEDUPLICATE,
+      RelTypeCase.SET_OP, RelTypeCase.SUBQUERY_ALIAS, RelTypeCase.TO_DF,
+      RelTypeCase.WITH_COLUMNS_RENAMED, RelTypeCase.WITH_COLUMNS, RelTypeCase.DROP,
+      RelTypeCase.REPARTITION, RelTypeCase.REPARTITION_BY_EXPRESSION,
+      RelTypeCase.HINT, RelTypeCase.READ);
 
   private final org.apache.spark.sql.classic.SparkSession base;
   private final SparkContext sparkContext;
   private final Pattern redactionPattern;
-  private final SparkEnv sparkEnv;
   private final ClassLoader classLoader;
+  private final int fetchMaxConcurrentPartitions;
+  private final long fetchMaxBufferedBytes;
   private final AtomicBoolean closed = new AtomicBoolean();
   private final Set<Session> sessions = ConcurrentHashMap.newKeySet();
   private final Set<Task> tasks = ConcurrentHashMap.newKeySet();
   private boolean closeComplete;
-  private Throwable closeFailure;
 
   public SparkJvmEngine(SparkSession session) {
-    if (!(Objects.requireNonNull(session, "session")
-        instanceof org.apache.spark.sql.classic.SparkSession)) {
-      throw new IllegalArgumentException("a classic Spark session is required");
-    }
-    base = (org.apache.spark.sql.classic.SparkSession) session;
-    sparkContext = base.sparkContext();
-    // SparkContext configuration is fixed after startup. Cache the host policy rather
-    // than cloning the whole SparkConf for each Config RPC or reading session overrides.
-    redactionPattern = sparkContext.getConf().get(
-        org.apache.spark.internal.config.package$.MODULE$.SECRET_REDACTION_PATTERN()).pattern();
-    sparkEnv = SparkEnv.get();
-    ClassLoader current = Thread.currentThread().getContextClassLoader();
-    classLoader = current == null ? getClass().getClassLoader() : current;
+    // The configured fetch policy comes from the host, not a client session.
+    // Use an eighth of the heap as a soft IPC target: Spark's result transfer
+    // transiently holds several serialized copies of each partition.
+    this(Objects.requireNonNull(session, "session"),
+        session.sparkContext().getConf().getInt(FETCH_MAX_CONCURRENT_PARTITIONS, 0),
+        session.sparkContext().getConf().getSizeAsBytes(
+            FETCH_MAX_BUFFERED_BYTES, Long.toString(Runtime.getRuntime().maxMemory() / 8)));
   }
 
-  /** Allocate this control before invoking a blocking planner or cursor method. */
+  // Package-local so tests can exercise fetch windows without restarting SparkContext.
+  SparkJvmEngine(SparkSession session, int maxConcurrentPartitions, long maxBufferedBytes) {
+    if (!(Objects.requireNonNull(session, "session")
+        instanceof org.apache.spark.sql.classic.SparkSession classic)) {
+      throw new IllegalArgumentException("a classic Spark session is required");
+    }
+    base = classic;
+    sparkContext = base.sparkContext();
+    // SparkContext configuration is fixed after startup. Cache the host policy rather
+    // than cloning the whole SparkConf for each configuration access or reading session overrides.
+    redactionPattern = sparkContext.getConf().get(
+        org.apache.spark.internal.config.package$.MODULE$.SECRET_REDACTION_PATTERN()).pattern();
+    ClassLoader current = Thread.currentThread().getContextClassLoader();
+    classLoader = current == null ? getClass().getClassLoader() : current;
+    fetchMaxConcurrentPartitions = maxConcurrentPartitions;
+    fetchMaxBufferedBytes = Math.max(1L, maxBufferedBytes);
+  }
+
+  /** Allocate one control per operation before invoking a planner or cursor, then close it. */
   public Task newTask(String description) {
     ensureOpen();
     Task task = new Task(Objects.requireNonNull(description, "description"));
     tasks.add(task);
-    if (closed.get()) task.cancel();
+    if (closed.get()) {
+      task.close();
+      ensureOpen();
+    }
     return task;
   }
 
@@ -179,17 +239,17 @@ public final class SparkJvmEngine implements AutoCloseable {
   }
 
   private void ensureOpen() {
-    if (closed.get()) throw new EngineException(9, "JVM engine is closed");
+    if (closed.get()) throw new EngineException(STATUS_FAILED_PRECONDITION, "JVM engine is closed");
   }
 
   /**
    * Idempotently release this engine's tasks and sessions without stopping the shared
    * SparkContext. Once passed to NativeEngineServer, drain that server before calling this.
-   * A partial cleanup failure remains visible on later closes without replaying its side effects.
+   * Cancellation and worker-drain failures can be retried. A partial resource-teardown failure
+   * remains visible on later closes without replaying its side effects.
    */
   @Override
   public synchronized void close() {
-    throwFailure(closeFailure);
     if (closeComplete) return;
     closed.set(true);
     Throwable failure = null;
@@ -199,15 +259,13 @@ public final class SparkJvmEngine implements AutoCloseable {
     for (Session session : sessions) {
       try { session.close(); } catch (Throwable error) { failure = recordFailure(failure, error); }
     }
-    closeFailure = failure;
+    // Child owners retain nonreplayable cleanup failures. Cancellation/worker drain
+    // can recover, so retry those owners on a later close instead of freezing the error.
     throwFailure(failure);
     closeComplete = true;
   }
 
-  @FunctionalInterface
-  private interface Action<T> { T run() throws Exception; }
-
-  /** A small stable error surface for the native adapter's tonic Status mapping. */
+  /** A stable error surface using the gRPC status-code numbering. */
   public static final class EngineException extends RuntimeException {
     private static final long serialVersionUID = 1L;
     private final int code;
@@ -226,9 +284,9 @@ public final class SparkJvmEngine implements AutoCloseable {
   }
 
   private static EngineException engineError(Exception error) {
-    if (error instanceof EngineException) return (EngineException) error;
-    if (error instanceof OutOfMemoryException) {
-      return arrowAllocationFailure((OutOfMemoryException) error);
+    if (error instanceof EngineException engine) return engine;
+    if (error instanceof OutOfMemoryException allocation) {
+      return arrowAllocationFailure(allocation, error);
     }
     if (error instanceof SparkException) {
       // Executor conversion errors arrive inside Spark's task-failure wrapper. Preserve only
@@ -237,30 +295,54 @@ public final class SparkJvmEngine implements AutoCloseable {
       Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
       for (Throwable cause = error.getCause(); cause != null && seen.add(cause);
           cause = cause.getCause()) {
-        if (cause instanceof EngineException && ((EngineException) cause).code() == 8) {
-          return new EngineException(8, cause.getMessage(), error);
+        if (cause instanceof EngineException resource
+            && resource.code() == STATUS_RESOURCE_EXHAUSTED) {
+          return new EngineException(STATUS_RESOURCE_EXHAUSTED, resource.getMessage(), error);
+        }
+        if (cause instanceof OutOfMemoryException allocation) {
+          return arrowAllocationFailure(allocation, error);
         }
       }
     }
-    int code = 13;
+    int code = STATUS_INTERNAL;
     // The pinned planner uses InvalidPlanInput for malformed client plans even though its
     // legacy message-only constructor labels them INTERNAL_ERROR. Its concrete type is the
     // input-validation contract; arbitrary Spark internal exceptions still map to INTERNAL.
     if (error instanceof InvalidProtocolBufferException || error instanceof InvalidPlanInput) {
-      code = 3;
-    } else if (error instanceof SparkThrowable && !((SparkThrowable) error).isInternalError()) {
-      if (error instanceof NoSuchElementException) code = 5;
-      else if (error instanceof AnalysisException || error instanceof IllegalArgumentException) code = 3;
+      code = STATUS_INVALID_ARGUMENT;
+    } else if (error instanceof SparkThrowable structured && !structured.isInternalError()) {
+      if (error instanceof NoSuchElementException) code = STATUS_NOT_FOUND;
+      else if (error instanceof AnalysisException || error instanceof IllegalArgumentException) {
+        code = STATUS_INVALID_ARGUMENT;
+      }
     }
     return new EngineException(code, error.getMessage(), error);
   }
 
   private static EngineException interrupted(Throwable error) {
-    return new EngineException(1, "JVM engine operation was interrupted", error);
+    return new EngineException(STATUS_CANCELLED, "JVM engine operation was interrupted", error);
   }
 
-  static EngineException arrowAllocationFailure(OutOfMemoryException error) {
-    return new EngineException(8, "JVM Arrow allocation failed: " + error.getMessage(), error);
+  private static EngineException arrowAllocationFailure(
+      OutOfMemoryException error, Throwable cause) {
+    return new EngineException(STATUS_RESOURCE_EXHAUSTED,
+        "JVM Arrow allocation failed: " + error.getMessage(), cause);
+  }
+
+  @SuppressWarnings("unchecked")
+  static <E extends Exception> RuntimeException executorConversionFailure(Exception error) throws E {
+    Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+    for (Throwable cause = error; cause != null && seen.add(cause); cause = cause.getCause()) {
+      if (cause instanceof OutOfMemoryException allocation) {
+        // Pinned Arrow's exception holds a nonserializable Optional. Preserve its message
+        // and stack without retaining the cause so Spark can serialize this typed status.
+        EngineException failure = arrowAllocationFailure(allocation, null);
+        failure.setStackTrace(allocation.getStackTrace());
+        return failure;
+      }
+    }
+    // Scala iterators can throw undeclared checked exceptions; preserve every other failure.
+    throw (E) error;
   }
 
   /** Cancellation is independent of a query/session lock and remains usable during preparation. */
@@ -274,35 +356,39 @@ public final class SparkJvmEngine implements AutoCloseable {
     private boolean executionStarted;
     private Thread running;
     private final Object cancellation = new Object();
-    private Throwable cancellationFailure;
+    private boolean cancellationDelivered;
 
     private Task(String description) { this.description = description; }
 
     public void cancel() {
       synchronized (cancellation) {
-        throwFailure(cancellationFailure);
-        try {
-          boolean cancelJobs;
-          synchronized (this) {
-            if (completed || cancelled) return;
-            cancelled = true;
-            if (running != null) running.interrupt();
-            cancelJobs = executionStarted || running != null;
-          }
-          // Active preparation/analysis can submit Spark jobs too (for example, parallel file
-          // listing). An idle task that never began fetching has no scheduler work to cancel.
-          if (cancelJobs) sparkContext.cancelJobGroupAndFutureJobs(jobGroup);
-        } catch (Throwable error) {
-          cancellationFailure = error;
-          throw error;
+        boolean cancelJobs;
+        synchronized (this) {
+          if (completed || cancellationDelivered) return;
+          cancelled = true;
+          if (running != null) running.interrupt();
+          cancelJobs = executionStarted || running != null;
         }
+        // Request and delivery are separate: a failed delivery may be retried. A stopped
+        // context accepts no jobs, but query close must still await its execution worker.
+        if (cancelJobs && !sparkContext.isStopped()) {
+          try {
+            sparkContext.cancelJobGroupAndFutureJobs(jobGroup);
+          } catch (RuntimeException error) {
+            // The context can stop between the check and the scheduler call.
+            if (!sparkContext.isStopped()) throw error;
+          }
+        }
+        cancellationDelivered = true;
       }
     }
 
     private boolean isCancelled() { return cancelled; }
 
     private void check() {
-      if (cancelled) throw new EngineException(1, "JVM engine operation was cancelled");
+      if (cancelled) {
+        throw new EngineException(STATUS_CANCELLED, "JVM engine operation was cancelled");
+      }
     }
 
     private synchronized void complete() { completed = true; }
@@ -314,17 +400,22 @@ public final class SparkJvmEngine implements AutoCloseable {
 
     private EngineException taskError(Exception error) {
       if (isCancelled() && !(error instanceof EngineException)) {
-        return new EngineException(1, "JVM engine operation was cancelled", error);
+        return new EngineException(STATUS_CANCELLED, "JVM engine operation was cancelled", error);
       }
       return engineError(error);
     }
 
-    private <T> T run(Session session, Action<T> action) {
+    private <T> T run(Session session, Callable<T> action) {
       Thread thread = Thread.currentThread();
       boolean previousInterrupted;
       synchronized (this) {
         check();
-        if (running != null) throw new EngineException(9, "task is already executing");
+        if (completed) {
+          throw new EngineException(STATUS_FAILED_PRECONDITION, "task is already complete");
+        }
+        if (running != null) {
+          throw new EngineException(STATUS_FAILED_PRECONDITION, "task is already executing");
+        }
         previousInterrupted = Thread.interrupted();
         running = thread;
       }
@@ -333,17 +424,15 @@ public final class SparkJvmEngine implements AutoCloseable {
         // the running mark covered before any caller/Spark code and until restoration ends.
         Properties previousProperties = sparkContext.getLocalProperties();
         ClassLoader previousLoader = thread.getContextClassLoader();
-        SparkEnv previousEnv = SparkEnv.get();
         Option<SparkSession> previousSession = SparkSession.getActiveSession();
         try {
           if (session != null) session.activeTasks.add(this);
-          SparkEnv.set(sparkEnv);
           thread.setContextClassLoader(classLoader);
           sparkContext.setLocalProperties(new Properties());
           sparkContext.setJobGroup(jobGroup, description, true);
           SparkSession.setActiveSession(session == null ? base : session.spark);
           check();
-          if (session == null) return action.run();
+          if (session == null) return action.call();
           session.ensureOpen();
           return session.holder.withSession(
               new AbstractFunction1<org.apache.spark.sql.classic.SparkSession, T>() {
@@ -351,7 +440,7 @@ public final class SparkJvmEngine implements AutoCloseable {
                 public T apply(org.apache.spark.sql.classic.SparkSession ignored) {
                   try {
                     check();
-                    return action.run();
+                    return action.call();
                   } catch (InterruptedException error) {
                     throw interrupted(error);
                   } catch (Exception error) {
@@ -365,7 +454,6 @@ public final class SparkJvmEngine implements AutoCloseable {
           else SparkSession.clearActiveSession();
           sparkContext.setLocalProperties(previousProperties);
           thread.setContextClassLoader(previousLoader);
-          SparkEnv.set(previousEnv);
         }
       } catch (InterruptedException error) {
         throw interrupted(error);
@@ -388,6 +476,7 @@ public final class SparkJvmEngine implements AutoCloseable {
   /** Independent Catalyst catalog/configuration; identity and wire lifetime remain in Rust. */
   public final class Session implements AutoCloseable {
     private final org.apache.spark.sql.classic.SparkSession spark;
+    private final ArtifactManager artifacts;
     private final SessionHolder holder;
     private final ReentrantReadWriteLock catalog = new ReentrantReadWriteLock(true);
     private final AtomicBoolean released = new AtomicBoolean();
@@ -398,6 +487,9 @@ public final class SparkJvmEngine implements AutoCloseable {
 
     private Session(String userId, String sessionId) {
       spark = base.newSession();
+      // Spark initializes this lazily. Capture it while opening so even a never-used
+      // session can close without first constructing resources after the host stops.
+      artifacts = spark.artifactManager();
       try {
         holder = new SessionHolder(userId, sessionId, spark);
       } catch (Throwable error) {
@@ -418,7 +510,9 @@ public final class SparkJvmEngine implements AutoCloseable {
 
     private void ensureOpen() {
       SparkJvmEngine.this.ensureOpen();
-      if (released.get()) throw new EngineException(9, "JVM engine session is closed");
+      if (released.get()) {
+        throw new EngineException(STATUS_FAILED_PRECONDITION, "JVM engine session is closed");
+      }
     }
 
     public Query prepare(byte[] relationBytes, Task task) {
@@ -453,7 +547,7 @@ public final class SparkJvmEngine implements AutoCloseable {
       Objects.requireNonNull(relationBytes, "relationBytes");
       return task.run(this, () -> {
         if (opcode < 0 || opcode > 2) {
-          throw new EngineException(12, "unsupported analysis opcode: " + opcode);
+          throw new EngineException(STATUS_UNIMPLEMENTED, "unsupported analysis opcode: " + opcode);
         }
         catalog.readLock().lockInterruptibly();
         try {
@@ -478,10 +572,7 @@ public final class SparkJvmEngine implements AutoCloseable {
     private Dataset<Row> analyzedFrame(byte[] relationBytes, Task task) throws IOException {
       task.check();
       ensureOpen();
-      if (Boolean.parseBoolean(spark.conf().get(SHUFFLE_FILE_CLEANUP))) {
-        throw new EngineException(12, SHUFFLE_FILE_CLEANUP
-            + " has not been validated by the JVM engine");
-      }
+      checkExecutionSettings();
       Relation relation = Relation.parseFrom(relationBytes);
       validateRelations(relation);
       LogicalPlan logical = new SparkConnectPlanner(holder, Option.empty())
@@ -494,9 +585,16 @@ public final class SparkJvmEngine implements AutoCloseable {
       rejectCommands(execution.analyzed());
       Dataset<Row> frame = new Dataset<>(execution, Encoders.row(execution.analyzed().schema()));
       if (frame.isStreaming()) {
-        throw new EngineException(12, "streaming queries are unsupported");
+        throw new EngineException(STATUS_UNIMPLEMENTED, "streaming queries are unsupported");
       }
       return frame;
+    }
+
+    private void checkExecutionSettings() {
+      if (Boolean.parseBoolean(spark.conf().get(SHUFFLE_FILE_CLEANUP).trim())) {
+        throw new EngineException(STATUS_UNIMPLEMENTED, SHUFFLE_FILE_CLEANUP
+            + " has not been validated by the JVM engine");
+      }
     }
 
     private void rejectCommands(LogicalPlan logical) {
@@ -512,7 +610,8 @@ public final class SparkJvmEngine implements AutoCloseable {
               || node instanceof InsertIntoDir || node instanceof UnresolvedExecuteImmediate;
         }
       })) {
-        throw new EngineException(12, "SQL commands and external writes are unsupported");
+        throw new EngineException(STATUS_UNIMPLEMENTED,
+            "SQL commands and external writes are unsupported");
       }
     }
 
@@ -520,18 +619,24 @@ public final class SparkJvmEngine implements AutoCloseable {
      * Internal typed fields: non-negative big-endian signed 32-bit pair count, then UTF-8 key
      * length/data and nullable value length/data (signed -1 means absent). No Spark Connect
      * request/response envelopes cross here.
+     * Opcodes are 1=Get, 2=GetOption, 3=GetWithDefault, 4=GetAll, 5=IsModifiable,
+     * 6=Set, 7=Unset and 8=SetSilent. Opcodes 1 through 5 read configuration;
+     * 6 through 8 mutate it.
      */
     public byte[] config(int opcode, byte[] fields, Task task) {
       List<Pair> input = decodePairs(fields);
       return task.run(this, () -> {
-        Lock access = configLock(opcode);
+        if (opcode < CONFIG_GET || opcode > CONFIG_SET_SILENT) {
+          throw new EngineException(STATUS_UNIMPLEMENTED, "unsupported config opcode: " + opcode);
+        }
+        Lock access = opcode <= CONFIG_IS_MODIFIABLE ? catalog.readLock() : catalog.writeLock();
         access.lockInterruptibly();
         try {
           task.check();
           ensureOpen();
           List<Pair> output = new ArrayList<>();
           switch (opcode) {
-            case 1:
+            case CONFIG_GET:
               for (Pair pair : input) {
                 String value = spark.conf().get(pair.key);
                 if (isRedacted(redactionPattern, pair.key, value)) {
@@ -540,7 +645,7 @@ public final class SparkJvmEngine implements AutoCloseable {
                 output.add(new Pair(pair.key, value));
               }
               break;
-            case 2:
+            case CONFIG_GET_OPTION:
               for (Pair pair : input) {
                 Option<String> stored = spark.conf().getOption(pair.key);
                 String value = stored.isDefined() ? stored.get() : null;
@@ -548,15 +653,17 @@ public final class SparkJvmEngine implements AutoCloseable {
                     isRedacted(redactionPattern, pair.key, value) ? null : value));
               }
               break;
-            case 3:
+            case CONFIG_GET_WITH_DEFAULT:
               for (Pair pair : input) {
                 String value = spark.conf().get(pair.key, pair.value);
                 output.add(new Pair(pair.key,
                     isRedacted(redactionPattern, pair.key, value) ? pair.value : value));
               }
               break;
-            case 4:
-              if (input.size() > 1) throw new EngineException(3, "getAll accepts one prefix");
+            case CONFIG_GET_ALL:
+              if (input.size() > 1) {
+                throw new EngineException(STATUS_INVALID_ARGUMENT, "getAll accepts one prefix");
+              }
               String prefix = input.isEmpty() ? "" : input.get(0).key;
               spark.conf().getAllAsJava().entrySet().stream()
                   .filter(entry -> !isRedacted(redactionPattern, entry.getKey(), entry.getValue()))
@@ -565,26 +672,26 @@ public final class SparkJvmEngine implements AutoCloseable {
                   .forEach(entry -> output.add(new Pair(
                       entry.getKey().substring(prefix.length()), entry.getValue())));
               break;
-            case 5:
+            case CONFIG_IS_MODIFIABLE:
               for (Pair pair : input) {
                 output.add(new Pair(pair.key, Boolean.toString(spark.conf().isModifiable(pair.key))));
               }
               break;
-            case 6:
-            case 7:
+            case CONFIG_SET:
+            case CONFIG_UNSET:
               applyConfig(opcode, input, task);
               break;
-            case 8:
-              // A separate result preserves setter-error provenance. JNI/task/admission
+            case CONFIG_SET_SILENT:
+              // A separate result preserves setter-error provenance. Task/admission
               // failures still fail the call rather than becoming silent Set warnings.
-              if (input.size() != 1) throw new EngineException(3, "silent set accepts one key");
+              if (input.size() != 1) {
+                throw new EngineException(STATUS_INVALID_ARGUMENT, "silent set accepts one key");
+              }
               String warning = applyConfig(opcode, input, task);
               if (warning != null) output.add(new Pair(input.get(0).key, warning));
               break;
-            default:
-              throw new EngineException(12, "unsupported config opcode: " + opcode);
           }
-          task.complete();
+          if (opcode <= CONFIG_IS_MODIFIABLE) task.complete();
           return encodePairs(output);
         } finally {
           access.unlock();
@@ -592,28 +699,15 @@ public final class SparkJvmEngine implements AutoCloseable {
       });
     }
 
-    private Lock configLock(int opcode) {
-      // JNI contract: 1..5 are reads; 6..8 mutate. Unknown opcodes cannot come from Rust;
-      // conservatively keep them exclusive until the task's normal validation rejects them.
-      switch (opcode) {
-        case 1:
-        case 2:
-        case 3:
-        case 4:
-        case 5:
-          return catalog.readLock();
-        default:
-          return catalog.writeLock();
-      }
-    }
-
     private String applyConfig(int opcode, List<Pair> input, Task task) {
-      boolean silent = opcode == 8;
+      boolean silent = opcode == CONFIG_SET_SILENT;
       Map<String, String> previous = new LinkedHashMap<>();
       Set<String> attempted = new LinkedHashSet<>();
       Map<String, String> explicit = spark.conf().getAllAsJava();
       for (Pair pair : input) {
-        if (opcode == 6 && pair.value == null) throw new EngineException(3, "missing config value");
+        if (opcode == CONFIG_SET && pair.value == null) {
+          throw new EngineException(STATUS_INVALID_ARGUMENT, "missing config value");
+        }
         if (!previous.containsKey(pair.key)) previous.put(pair.key, explicit.get(pair.key));
       }
       task.check();
@@ -628,13 +722,14 @@ public final class SparkJvmEngine implements AutoCloseable {
           // input-validation boundary maps an unstructured IllegalArgumentException to a client
           // error; the same exception from arbitrary Spark execution is INTERNAL.
           try {
-            if (opcode != 7) spark.conf().set(pair.key, pair.value);
+            if (opcode != CONFIG_UNSET) spark.conf().set(pair.key, pair.value);
             else spark.conf().unset(pair.key);
+            if (SHUFFLE_FILE_CLEANUP.equals(pair.key)) checkExecutionSettings();
           } catch (Throwable error) {
             setterFailure = error;
             if (!silent && error instanceof IllegalArgumentException) {
-              if (!(error instanceof SparkThrowable) || !((SparkThrowable) error).isInternalError()) {
-                throw new EngineException(3, error.getMessage(), error);
+              if (!(error instanceof SparkThrowable structured) || !structured.isInternalError()) {
+                throw new EngineException(STATUS_INVALID_ARGUMENT, error.getMessage(), error);
               }
             }
             throw error;
@@ -666,11 +761,12 @@ public final class SparkJvmEngine implements AutoCloseable {
             restored = false;
           }
         }
-        if (silent && error == setterFailure && restored) {
+        if (silent && error instanceof Exception && error == setterFailure && restored) {
           // Match Spark's silent Set diagnostics without retaining rejected values/messages.
-          String reason = error instanceof SparkThrowable
-              ? ((SparkThrowable) error).getCondition() : null;
-          if (reason == null) reason = error.getClass().getName();
+          String reason = error instanceof SparkThrowable structured
+              ? structured.getCondition() : null;
+          if (reason == null) reason = error instanceof EngineException
+              ? "UNSUPPORTED_EXECUTION_SETTING" : error.getClass().getName();
           synchronized (task) {
             task.check();
             if (error instanceof InterruptedException || Thread.currentThread().isInterrupted()) {
@@ -697,30 +793,81 @@ public final class SparkJvmEngine implements AutoCloseable {
       for (Query query : queries) {
         try { query.close(); } catch (Throwable error) { failure = recordFailure(failure, error); }
       }
-      // A partial Spark cleanup is not generally replayable (for example, artifact cache
-      // cleanup decrements reference counts). Preserve the failure and its owners instead.
-      if (failure == null) {
-        catalog.writeLock().lock();
+      // Delegated cancellation/drain failures can recover. Only this session's actual
+      // resource teardown is nonreplayable (artifact cleanup can decrement reference counts).
+      throwFailure(failure);
+      catalog.writeLock().lock();
+      try {
+        // These resources belong to this newSession only. Never close SessionHolder or Spark.
         try {
-          // These resources belong to this newSession only. Never close SessionHolder or Spark.
-          try {
-            spark.sessionState().catalog().clearTempTables();
-          } catch (Throwable error) {
-            failure = recordFailure(failure, error);
-          }
-          try {
-            spark.artifactManager().close();
-          } catch (Throwable error) {
-            failure = recordFailure(failure, error);
-          }
-        } finally {
-          catalog.writeLock().unlock();
+          spark.sessionState().catalog().clearTempTables();
+        } catch (Throwable error) {
+          failure = recordFailure(failure, error);
         }
+        try {
+          closeArtifacts();
+        } catch (Throwable error) {
+          failure = recordFailure(failure, error);
+        }
+      } finally {
+        catalog.writeLock().unlock();
       }
       closeFailure = failure;
       throwFailure(failure);
       sessions.remove(this);
       closeComplete = true;
+    }
+
+    private void closeArtifacts() {
+      try {
+        artifacts.close();
+      } catch (RuntimeException error) {
+        if (!sparkContext.isStopped()) throw error;
+        boolean globalCleanupFailed = false;
+        for (StackTraceElement frame : error.getStackTrace()) {
+          if (frame.getClassName().equals("org.apache.spark.sql.artifact.ArtifactManager$")
+              && frame.getMethodName().equals(ARTIFACT_GLOBAL_CLEANUP_METHOD)) {
+            globalCleanupFailed = true;
+            break;
+          }
+        }
+        if (!globalCleanupFailed) throw error;
+        // Pinned Spark's one-shot Cleaner can fail on the global SparkEnv or environment
+        // update after host stop begins. Its global work is idempotent; local teardown has
+        // not started. Finish global work through the owner, then local teardown once.
+        // Never restore SparkEnv: it is process-global and belongs to the host.
+        Throwable failure = null;
+        try {
+          RpcEnvFileServer files = sparkContext.env().rpcEnv().fileServer();
+          removeArtifacts(sparkContext.addedFiles().remove(spark.sessionUUID()), files::removeFile);
+          removeArtifacts(sparkContext.addedArchives().remove(spark.sessionUUID()), files::removeFile);
+          removeArtifacts(sparkContext.addedJars().remove(spark.sessionUUID()), files::removeJar);
+          try {
+            Utils.deleteRecursively(artifacts.artifactPath().toFile());
+          } catch (Exception cleanup) {
+            // Scala does not declare this checked exception in the Java signature.
+            if (!(cleanup instanceof IOException)) throw cleanup;
+            // Match pinned ArtifactManager: directory deletion is best effort; failures
+            // removing registered resources above must still remain visible to the owner.
+            LOG.warn("Unable to remove native session artifact directory", cleanup);
+          }
+        } catch (Throwable cleanup) {
+          failure = cleanup;
+        }
+        // A directory-delete failure must not skip cache/refcount and classloader cleanup.
+        try { artifacts.close(); } catch (Throwable cleanup) {
+          failure = recordFailure(failure, cleanup);
+        }
+        if (failure != null) {
+          recordFailure(failure, error);
+          throwFailure(failure);
+        }
+      }
+    }
+
+    private void removeArtifacts(Option<scala.collection.concurrent.Map<String, Object>> paths,
+        Consumer<String> remove) {
+      if (paths.isDefined()) CollectionConverters.asJava(paths.get()).keySet().forEach(remove);
     }
   }
 
@@ -739,7 +886,7 @@ public final class SparkJvmEngine implements AutoCloseable {
       timeZone = session.spark.sessionState().conf().sessionLocalTimeZone();
       largeVarTypes = session.spark.sessionState().conf().arrowUseLargeVarTypes();
       int configured = session.spark.sessionState().conf().arrowMaxRecordsPerBatch();
-      maxRows = configured > 0 ? configured : MAX_BATCH_ROWS;
+      maxRows = configured > 0 ? configured : DEFAULT_BATCH_ROWS;
       local = frame.isLocal();
       schemaIpc = createSchemaIpc(schema, timeZone, largeVarTypes);
     }
@@ -769,7 +916,7 @@ public final class SparkJvmEngine implements AutoCloseable {
     private final byte[] schemaIpc;
     private final boolean local;
     private final ReentrantLock cursor = new ReentrantLock();
-    // Scheduler callbacks never take the cursor lock or run JNI/client work.
+    // Scheduler callbacks never take the cursor lock or run caller work.
     private final Object results = new Object();
     private boolean released;
     private Throwable closeFailure;
@@ -782,6 +929,16 @@ public final class SparkJvmEngine implements AutoCloseable {
     private List<Tuple2<byte[], Long>[]> partitionBatches;
     private int nextPartition;
     private int nextBatch;
+
+    // Fetch window, guarded by results. Partitions [nextPartition, submitted) are admitted,
+    // including the slot reserved for the current submission. Until sizes are known, start at
+    // two and double after each delivered partition while the byte budget allows.
+    private int submitted;
+    private int finishedJobs;
+    private int window;
+    private int maxWindow;
+    private long largestPartitionBytes;
+    private Throwable jobFailure;
 
     private Query(Session session, Dataset<Row> frame, Task task) {
       this.session = session;
@@ -796,6 +953,7 @@ public final class SparkJvmEngine implements AutoCloseable {
 
     public byte[] schemaIpc() { return schemaIpc.clone(); }
     public boolean isLocal() { return local; }
+    /** Always false because preparation rejects streaming plans. */
     public boolean isStreaming() { return false; }
 
     private void runWorker() {
@@ -819,25 +977,7 @@ public final class SparkJvmEngine implements AutoCloseable {
                     partitionBatches = new ArrayList<>(Collections.nCopies(count, null));
                   }
                   if (count == 0) return null;
-                  SimpleFutureAction<BoxedUnit> action = sparkContext.submitJob(
-                      batches, new CollectArrowPartition(), Range$.MODULE$.apply(0, count),
-                      new AbstractFunction2<Object, Tuple2<byte[], Long>[], BoxedUnit>() {
-                        @Override
-                        public BoxedUnit apply(Object partition, Tuple2<byte[], Long>[] fetched) {
-                          synchronized (results) {
-                            if (!released && pullFailure == null) {
-                              partitionBatches.set((Integer) partition, fetched);
-                              results.notifyAll();
-                            }
-                          }
-                          return BoxedUnit.UNIT;
-                        }
-                      },
-                      new AbstractFunction0<BoxedUnit>() {
-                        @Override
-                        public BoxedUnit apply() { return BoxedUnit.UNIT; }
-                      });
-                  awaitJob(action);
+                  runJobs(batches, count);
                   return null;
                 }
               });
@@ -856,34 +996,168 @@ public final class SparkJvmEngine implements AutoCloseable {
       }
     }
 
-    private void awaitJob(SimpleFutureAction<BoxedUnit> action) {
+    // Package-local: job-start events are asynchronous, so tests read the window directly.
+    int submittedPartitions() {
+      synchronized (results) { return submitted; }
+    }
+
+    // Caller holds results. Counts the partition being delivered, so a window of one is
+    // sequential and a partition larger than the byte budget is still fetched alone.
+    private int windowLimit() {
+      if (largestPartitionBytes <= 0) return window;
+      return (int) Math.max(1, Math.min(window, fetchMaxBufferedBytes / largestPartitionBytes));
+    }
+
+    // Caller holds results. Both cancellation paths stop admission before the next submit.
+    private boolean stopping() {
+      return jobFailure != null || released || pullFailure != null
+          || task.isCancelled() || sparkContext.isStopped();
+    }
+
+    private EngineException contextStopped() {
+      return new EngineException(STATUS_INTERNAL, "hosting SparkContext stopped during execution");
+    }
+
+    private SimpleFutureAction<BoxedUnit> submitPartition(
+        RDD<Tuple2<byte[], Long>> batches, int partition) {
+      // One job per partition keeps Spark's maxResultSize check per partition and lets the
+      // window slide. The owner explicitly cancels sibling jobs after a partition fails.
+      SimpleFutureAction<BoxedUnit> action = sparkContext.submitJob(
+          batches, new CollectArrowPartition(),
+          CollectionConverters.asScala(Collections.<Object>singletonList(partition)).toSeq(),
+          new AbstractFunction2<Object, Tuple2<byte[], Long>[], BoxedUnit>() {
+            @Override
+            public BoxedUnit apply(Object ignored, Tuple2<byte[], Long>[] fetched) {
+              long bytes = 0;
+              for (Tuple2<byte[], Long> batch : fetched) bytes += batch._1().length;
+              synchronized (results) {
+                largestPartitionBytes = Math.max(largestPartitionBytes, bytes);
+                if (!released && pullFailure == null) {
+                  partitionBatches.set(partition, fetched);
+                  results.notifyAll();
+                }
+              }
+              return BoxedUnit.UNIT;
+            }
+          },
+          new AbstractFunction0<BoxedUnit>() {
+            @Override
+            public BoxedUnit apply() { return BoxedUnit.UNIT; }
+          });
+      // Runs after the result callback, on the scheduler thread; it only records and notifies.
+      action.onComplete(new AbstractFunction1<Try<BoxedUnit>, BoxedUnit>() {
+        @Override
+        public BoxedUnit apply(Try<BoxedUnit> outcome) {
+          synchronized (results) {
+            finishedJobs++;
+            if (outcome.isFailure() && jobFailure == null) jobFailure = outcome.failed().get();
+            results.notifyAll();
+          }
+          return BoxedUnit.UNIT;
+        }
+      }, ThreadUtils.sameThread());
+      return action;
+    }
+
+    /** Stay in scope until admitted work completes or its owning scheduler shuts down. */
+    private void runJobs(RDD<Tuple2<byte[], Long>> batches, int count) {
+      DAGScheduler scheduler = sparkContext.dagScheduler();
+      if (scheduler == null) throw contextStopped();
+      List<SimpleFutureAction<BoxedUnit>> actions = new ArrayList<>();
       EngineException interruption = null;
-      // Cancellation interrupts the owner, but scope/plan cleanup must await the job too.
-      for (;;) {
-        try {
-          ThreadUtils.awaitReady(action, Duration.Inf());
-          break;
-        } catch (Exception error) {
-          if (!(error instanceof InterruptedException)) throw task.taskError(error);
-          if (interruption == null) interruption = interrupted(error);
-          try { action.cancel(); } catch (Throwable cancel) { recordFailure(interruption, cancel); }
+      Throwable failure = null;
+      try {
+        // Cluster resources can change after engine startup. Resolve the scheduler default
+        // for this query, inside the failure boundary because a concurrent host stop throws.
+        int maximum = fetchMaxConcurrentPartitions;
+        if (maximum <= 0) {
+          maximum = Math.max(1, sparkContext.defaultParallelism());
+        }
+        synchronized (results) {
+          maxWindow = maximum;
+          window = Math.min(2, maxWindow);
+        }
+        for (;;) {
+          int partition;
+          synchronized (results) {
+            while (!stopping() && submitted < count
+                && submitted - nextPartition >= windowLimit()) {
+              results.wait(SHUTDOWN_POLL_MILLIS);
+            }
+            if (stopping() || submitted == count) break;
+            partition = submitted++;
+          }
+          actions.add(submitPartition(batches, partition));
+        }
+      } catch (InterruptedException error) {
+        interruption = interrupted(error);
+      } catch (Throwable error) {
+        failure = error;
+        if (error instanceof RuntimeException && sparkContext.isStopped()) {
+          failure = contextStopped();
+          failure.addSuppressed(error);
         }
       }
+      // Cancellation interrupts the owner, but scope/plan cleanup must await every job too.
+      boolean cancellationRequested = false;
+      for (;;) {
+        synchronized (results) {
+          if (sparkContext.isStopped() && failure == null && submitted < count) {
+            failure = contextStopped();
+          }
+          if (finishedJobs == actions.size()) break;
+          // Spark can discard a queued JobSubmitted during stop without completing its
+          // future. Only after stop() has drained the scheduler and its event loop has
+          // exited can this scope leave without that callback; never invent completion.
+          if (sparkContext.isStopped() && sparkContext.dagScheduler() == null
+              && !scheduler.eventProcessLoop().isActive()) {
+            if (failure == null) failure = contextStopped();
+            break;
+          }
+          boolean cancel = interruption != null || failure != null || stopping();
+          if (!cancel || cancellationRequested) {
+            try {
+              results.wait(SHUTDOWN_POLL_MILLIS);
+            } catch (InterruptedException error) {
+              if (interruption == null) interruption = interrupted(error);
+              // A new interrupt also retries any earlier failed scheduler cancellation.
+              cancellationRequested = false;
+            }
+            continue;
+          }
+        }
+        // Request every sibling's stop outside the callback monitor before awaiting them.
+        for (SimpleFutureAction<BoxedUnit> pending : actions) {
+          if (!pending.isCompleted()) {
+            try { pending.cancel(); } catch (Throwable error) {
+              failure = recordFailure(failure, error);
+            }
+          }
+        }
+        cancellationRequested = true;
+      }
       if (interruption != null) throw interruption;
-      // Inspect the completed Try to retain the executor's original failure.
-      action.value().get().get();
+      Throwable failed;
+      synchronized (results) { failed = jobFailure; }
+      if (failed != null && failure == null && sparkContext.isStopped()) failure = contextStopped();
+      // Scheduler cancellation errors must not hide the executor's original failure.
+      if (failed != null && failure != null) recordFailure(failed, failure);
+      if (failed == null) failed = failure;
+      // The completed Try's failure retains the executor's original message.
+      if (failed instanceof Exception exception) throw task.taskError(exception);
+      throwFailure(failed);
       task.check();
     }
 
     private EngineException cursorClosed() {
-      return new EngineException(9, "query cursor is closed");
+      return new EngineException(STATUS_FAILED_PRECONDITION, "query cursor is closed");
     }
 
     // Caller holds results. The failure guard makes later scheduler callbacks discard data.
     private void fail(Throwable error) {
       pullFailure = error instanceof InterruptedException
           ? interrupted(error)
-          : error instanceof Exception ? task.taskError((Exception) error) : error;
+          : error instanceof Exception exception ? task.taskError(exception) : error;
       partitionBatches = null;
       results.notifyAll();
     }
@@ -928,6 +1202,8 @@ public final class SparkJvmEngine implements AutoCloseable {
                   if (nextBatch == batches.length) {
                     partitionBatches.set(nextPartition++, null);
                     nextBatch = 0;
+                    window = (int) Math.min(2L * window, maxWindow);
+                    results.notifyAll();
                     continue;
                   }
                   Tuple2<byte[], Long> batch = batches[nextBatch];
@@ -937,7 +1213,8 @@ public final class SparkJvmEngine implements AutoCloseable {
               }
               if (workerFinished) {
                 if (partitionBatches != null && nextPartition < partitionBatches.size()) {
-                  throw new EngineException(13, "Spark job completed without a partition result");
+                  throw new EngineException(STATUS_INTERNAL,
+                      "Spark job completed without a partition result");
                 }
                 partitionBatches = null;
                 ended = true;
@@ -984,11 +1261,11 @@ public final class SparkJvmEngine implements AutoCloseable {
             try {
               if (plan != null) plan.cleanupResources();
             } catch (Throwable error) {
-              failure = recordFailure(failure, error);
+              closeFailure = error;
             }
           }
-          closeFailure = failure == null ? closeFailure : recordFailure(closeFailure, failure);
-          throwFailure(closeFailure);
+          if (closeFailure != null) failure = recordFailure(failure, closeFailure);
+          throwFailure(failure);
           session.queries.remove(this);
         } finally {
           cursor.unlock();
@@ -1011,45 +1288,46 @@ public final class SparkJvmEngine implements AutoCloseable {
 
   private static void validateResultType(DataType type, boolean nested) {
     if (type instanceof UserDefinedType || type instanceof CharType || type instanceof VarcharType
-        || (type instanceof StringType && ((StringType) type).collationId()
+        || (type instanceof StringType string && string.collationId()
             != ((StringType) DataTypes.StringType).collationId())) {
-      throw new EngineException(12, "result type cannot be preserved by Arrow schema transport: "
-          + type.catalogString());
+      throw new EngineException(STATUS_UNIMPLEMENTED,
+          "result type cannot be preserved by Arrow schema transport: " + type.catalogString());
     }
-    if (type instanceof StructType) {
-      StructType original = (StructType) type;
+    if (type instanceof StructType original) {
       StructField[] fields = org.apache.spark.sql.catalyst.util.package$.MODULE$
           .removeInternalMetadata(original).fields();
       Set<String> names = nested ? new HashSet<>() : Collections.emptySet();
       for (int i = 0; i < fields.length; i++) {
         StructField field = fields[i];
         if (nested && !names.add(field.name())) {
-          throw new EngineException(12,
+          throw new EngineException(STATUS_UNIMPLEMENTED,
               "duplicate nested field names cannot be preserved by Arrow schema transport: "
                   + field.name());
         }
         // CHAR/VARCHAR's raw type annotation is semantic even though its name is internal.
         if (original.fields()[i].metadata().contains("__CHAR_VARCHAR_TYPE_STRING")) {
-          throw new EngineException(12,
+          throw new EngineException(STATUS_UNIMPLEMENTED,
               "CHAR/VARCHAR result metadata cannot be preserved by Arrow schema transport: "
                   + field.name());
         }
         if (!field.metadata().isEmpty()) {
-          throw new EngineException(12,
+          throw new EngineException(STATUS_UNIMPLEMENTED,
               "result field metadata cannot be preserved by Arrow schema transport: " + field.name());
         }
         validateResultType(field.dataType(), true);
       }
-    } else if (type instanceof ArrayType) {
-      validateResultType(((ArrayType) type).elementType(), true);
-    } else if (type instanceof MapType) {
-      validateResultType(((MapType) type).keyType(), true);
-      validateResultType(((MapType) type).valueType(), true);
+    } else if (type instanceof ArrayType array) {
+      validateResultType(array.elementType(), true);
+    } else if (type instanceof MapType map) {
+      validateResultType(map.keyType(), true);
+      validateResultType(map.valueType(), true);
     }
   }
 
   static byte[] checkedIpc(byte[] bytes) {
-    if (bytes.length > MAX_IPC_BYTES) throw new EngineException(8, "Arrow batch exceeds 64 MiB");
+    if (bytes.length > MAX_IPC_BYTES) {
+      throw new EngineException(STATUS_RESOURCE_EXHAUSTED, "Arrow batch exceeds 64 MiB");
+    }
     return bytes;
   }
 
@@ -1060,43 +1338,40 @@ public final class SparkJvmEngine implements AutoCloseable {
   }
 
   private static void throwFailure(Throwable failure) {
-    if (failure instanceof Error) throw (Error) failure;
-    if (failure instanceof RuntimeException) throw (RuntimeException) failure;
-    if (failure != null) throw new EngineException(13, "JVM engine cleanup failed", failure);
+    if (failure instanceof Error error) throw error;
+    if (failure instanceof RuntimeException exception) throw exception;
+    if (failure != null) {
+      throw new EngineException(STATUS_INTERNAL, "JVM engine cleanup failed", failure);
+    }
   }
 
   private static void validateRelations(Message message) {
-    if (message instanceof Relation) {
-      Relation relation = (Relation) message;
-      String kind = relation.getRelTypeCase().name();
+    if (message instanceof Relation relation) {
+      RelTypeCase kind = relation.getRelTypeCase();
       if (!RELATIONS.contains(kind)) {
-        throw new EngineException(12, "unsupported JVM engine relation: " + kind);
+        throw new EngineException(STATUS_UNIMPLEMENTED, "unsupported JVM engine relation: " + kind);
       }
       if (relation.hasRead() && !relation.getRead().hasNamedTable()) {
-        throw new EngineException(12, "only named-table reads are supported in this prototype");
+        throw new EngineException(STATUS_UNIMPLEMENTED, "only named-table reads are supported");
       }
     }
-    String type = message.getDescriptorForType().getFullName();
-    if (type.endsWith("CommonInlineUserDefinedFunction")
-        || type.endsWith("CommonInlineUserDefinedTableFunction")
-        || type.endsWith("TypedAggregateExpression") || type.endsWith("ScalarScalaUDF")) {
-      throw new EngineException(12, "user-defined functions are unsupported in this prototype");
+    if (message instanceof CommonInlineUserDefinedFunction
+        || message instanceof CommonInlineUserDefinedTableFunction
+        || message instanceof TypedAggregateExpression || message instanceof ScalarScalaUDF) {
+      throw new EngineException(STATUS_UNIMPLEMENTED,
+          "user-defined function inputs are unsupported");
     }
     for (Object field : message.getAllFields().values()) {
-      if (field instanceof Message) validateRelations((Message) field);
-      else if (field instanceof List<?>) {
-        for (Object item : (List<?>) field) {
-          if (item instanceof Message) validateRelations((Message) item);
+      if (field instanceof Message nested) validateRelations(nested);
+      else if (field instanceof List<?> values) {
+        for (Object item : values) {
+          if (item instanceof Message nested) validateRelations(nested);
         }
       }
     }
   }
 
-  private static final class Pair {
-    private final String key;
-    private final String value;
-    private Pair(String key, String value) { this.key = key; this.value = value; }
-  }
+  private record Pair(String key, String value) {}
 
   private static boolean isRedacted(Pattern pattern, String key, String value) {
     return pattern.matcher(key).find() || value != null && pattern.matcher(value).find();
@@ -1104,31 +1379,37 @@ public final class SparkJvmEngine implements AutoCloseable {
 
   private static List<Pair> decodePairs(byte[] bytes) {
     Objects.requireNonNull(bytes, "fields");
-    if (bytes.length > MAX_IPC_BYTES) throw new EngineException(8, "config fields exceed 64 MiB");
+    if (bytes.length > MAX_IPC_BYTES) {
+      throw new EngineException(STATUS_RESOURCE_EXHAUSTED, "config fields exceed 64 MiB");
+    }
     try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(bytes))) {
       int count = input.readInt();
       if (count < 0 || count > input.available() / 8) {
-        throw new EngineException(3, "invalid config field count");
+        throw new EngineException(STATUS_INVALID_ARGUMENT, "invalid config field count");
       }
       List<Pair> result = new ArrayList<>(count);
       for (int i = 0; i < count; i++) result.add(new Pair(readString(input, false), readString(input, true)));
-      if (input.available() != 0) throw new EngineException(3, "trailing config field bytes");
+      if (input.available() != 0) {
+        throw new EngineException(STATUS_INVALID_ARGUMENT, "trailing config field bytes");
+      }
       return result;
     } catch (IOException error) {
-      throw new EngineException(3, "invalid config fields", error);
+      throw new EngineException(STATUS_INVALID_ARGUMENT, "invalid config fields", error);
     }
   }
 
   private static String readString(DataInputStream input, boolean nullable) throws IOException {
     int len = input.readInt();
     if (len == -1 && nullable) return null;
-    if (len < 0 || len > input.available()) throw new EngineException(3, "invalid config string length");
+    if (len < 0 || len > input.available()) {
+      throw new EngineException(STATUS_INVALID_ARGUMENT, "invalid config string length");
+    }
     byte[] bytes = input.readNBytes(len);
     try {
       return StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
           .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString();
     } catch (CharacterCodingException error) {
-      throw new EngineException(3, "invalid config UTF-8", error);
+      throw new EngineException(STATUS_INVALID_ARGUMENT, "invalid config UTF-8", error);
     }
   }
 

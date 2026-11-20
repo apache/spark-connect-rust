@@ -17,9 +17,9 @@
 
 """Check acceptance's shutdown and listener ownership evidence; no Spark needed."""
 
-from pathlib import Path
 import json
 import os
+from pathlib import Path
 import signal
 import subprocess
 import sys
@@ -28,19 +28,40 @@ import unittest
 from unittest.mock import patch
 
 from run_acceptance import (
-    SHUTDOWN_COMPLETE, listener_owner_pids, shutdown_error, engine_validation_commands, record_jni_check,
+    SHUTDOWN_COMPLETE,
+    engine_validation_commands,
+    listener_owner_pids,
+    record_jni_check,
+    runtime_skip_evidence,
+    shutdown_error,
 )
 
 
+class RuntimeSkipEvidenceTest(unittest.TestCase):
+    def test_readonly_skip_preserves_an_unexpected_reason_and_raw_marker(self):
+        reason = "unexpected filesystem capability; running ordinary cleanup instead"
+        marker = "STOPPED_CONTEXT_READONLY_SKIPPED: " + reason
+        content = "SparkContext stopped\n" + marker + "\nSTOPPED_CONTEXT_CLEANUP_OK\n"
+        self.assertEqual(runtime_skip_evidence(content), [
+            {"case": "stopped-context-readonly-artifacts", "marker": marker, "reason": reason},
+        ])
+
+    def test_only_the_exact_skip_marker_is_reported(self):
+        content = ("STOPPED_CONTEXT_CLEANUP_OK\n"
+                   "log prefix STOPPED_CONTEXT_READONLY_SKIPPED: not a case marker\n"
+                   "STOPPED_CONTEXT_READONLY_SKIPPED_EXTRA: not a case marker\n")
+        self.assertEqual(runtime_skip_evidence(content), [])
+
+
 class EngineValidationCommandsTest(unittest.TestCase):
-    def test_executor_and_result_size_commands_preserve_common_guards(self):
+    def test_engine_validation_commands_preserve_common_guards(self):
         common = ["spark-submit", "--master", "local[2]", "--driver-memory", "1g",
                   "--driver-java-options", "-Xcheck:jni", "--conf", "spark.ui.enabled=false",
                   "--conf", "spark.driver.host=127.0.0.1",
                   "--conf", "spark.driver.bindAddress=127.0.0.1"]
         original = list(common)
-        cluster, result_size, combined_size = engine_validation_commands(
-            common, Path("tests with spaces.jar"))
+        (cluster, result_size, per_partition_size, config_testing,
+         global_environment) = engine_validation_commands(common, Path("tests with spaces.jar"))
         self.assertEqual(common, original)
         name, command, marker = cluster
         self.assertEqual(name, "ipc-separate-executor")
@@ -62,16 +83,32 @@ class EngineValidationCommandsTest(unittest.TestCase):
         self.assertEqual(bounded[bounded.index("--master") + 1], "local[2]")
         self.assertIn("spark.driver.maxResultSize=1m", bounded)
         self.assertEqual(bounded[-1], "--result-size-only")
-        name, combined, marker = combined_size
-        self.assertEqual(name, "combined-result-size")
-        self.assertEqual(marker, "NATIVE_ENGINE_COMBINED_RESULT_SIZE_OK")
-        self.assertEqual(combined[combined.index("--master") + 1], "local[2]")
-        self.assertIn("spark.driver.maxResultSize=1m", combined)
-        self.assertEqual(combined[combined.index("--class") + 1],
+        name, per_partition, marker = per_partition_size
+        self.assertEqual(name, "per-partition-result-size")
+        self.assertEqual(marker, "NATIVE_ENGINE_PER_PARTITION_RESULT_SIZE_OK")
+        self.assertEqual(per_partition[per_partition.index("--master") + 1], "local[2]")
+        self.assertIn("spark.driver.maxResultSize=1m", per_partition)
+        self.assertEqual(per_partition[per_partition.index("--class") + 1],
                          "org.apache.spark.sql.connect.nativebridge.engine."
                          "NativeEngineSchedulingTest")
-        self.assertEqual(combined[-1], "--result-size-only")
-        for command in (command, bounded, combined):
+        self.assertEqual(per_partition[-1], "--result-size-only")
+        name, testing, marker = config_testing
+        self.assertEqual(name, "engine-config-testing")
+        self.assertEqual(marker,
+                         "CONFIG_UNSET_DEFAULT: true (rejection and atomic rollback checked)")
+        self.assertEqual(testing[:2], ["env", "SPARK_TESTING=1"])
+        self.assertEqual(testing[testing.index("--class") + 1],
+                         "org.apache.spark.sql.connect.nativebridge.engine."
+                         "NativeEngineConfigConsistencyTest")
+        self.assertEqual(testing[-1], "tests with spaces.jar")
+        name, global_env, marker = global_environment
+        self.assertEqual(name, "global-environment-lifecycle")
+        self.assertEqual(marker, "GLOBAL_ENVIRONMENT_LIFECYCLE_OK")
+        self.assertEqual(global_env[global_env.index("--class") + 1],
+                         "org.apache.spark.sql.connect.nativebridge.engine."
+                         "GlobalEnvironmentLifecycleTest")
+        self.assertEqual(global_env[-1], "tests with spaces.jar")
+        for command in (command, bounded, per_partition, testing, global_env):
             self.assertIn("spark.ui.enabled=false", command)
             self.assertIn("spark.driver.host=127.0.0.1", command)
             self.assertIn("spark.driver.bindAddress=127.0.0.1", command)
@@ -105,7 +142,7 @@ class ShutdownEvidenceTest(unittest.TestCase):
                          "embedded server reported failed resource cleanup")
 
     def test_successful_per_call_attachment_fallback_is_accepted(self):
-        content = ("JVM cleanup lane attachment failed; using per-call attachment: temporary failure\n"
+        content = ("JVM cleanup worker attachment failed; using per-call attachment: temporary failure\n"
                    + SHUTDOWN_COMPLETE + "\n")
         self.assertIsNone(shutdown_error(content, 128 + signal.SIGTERM))
 
@@ -131,6 +168,43 @@ class JniDiagnosticTest(unittest.TestCase):
         record_jni_check(report, "FATAL ERROR in native method: expected probe warning\n")
         self.assertFalse(report["jni_check_clean"])
         self.assertIn("JNI check warning", report["error"])
+
+    def test_local_reference_capacity_warning_is_rejected(self):
+        report = {}
+        record_jni_check(report, "WARNING: JNI local refs: 33, exceeds capacity: 32\n")
+        self.assertFalse(report["jni_check_clean"])
+        self.assertIn("JNI check warning", report["error"])
+
+    def test_smoke_rejects_local_reference_capacity_warning(self):
+        # Run the actual smoke validator with a fake Spark command, so the exact
+        # -Xcheck:jni marker is rejected without starting a JVM or loading JNI.
+        with tempfile.TemporaryDirectory(prefix="native JNI diagnostic ") as directory:
+            root = Path(directory)
+            jvm = root / "project" / "jvm"
+            jvm.mkdir(parents=True)
+            smoke = jvm / "test-jni-smoke.sh"
+            smoke.write_bytes(Path(__file__).with_name("test-jni-smoke.sh").read_bytes())
+            build = jvm / "build.sh"
+            build.write_text("#!/bin/bash\nexit 0\n")
+            build.chmod(0o755)
+            spark = root / "spark home"
+            (spark / "bin").mkdir(parents=True)
+            submit = spark / "bin" / "spark-submit"
+            submit.write_text("#!/bin/bash\nprintf '%s\\n' "
+                              "'WARNING: JNI local refs: 33, exceeds capacity: 32' "
+                              "'NATIVE_JNI_SMOKE_OK: fake Spark command'\n")
+            submit.chmod(0o755)
+            library = root / "native artifact.so"
+            library.touch()
+            environment = os.environ.copy()
+            environment.update(SPARK_HOME=str(spark), NATIVE_TEST_PYTHON=sys.executable)
+            result = subprocess.run(["/bin/bash", str(smoke), str(library)], env=environment,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("real JNI smoke triggered a JNI diagnostic", result.stderr)
+            reports = list((jvm.parent / ".build" / "jvm-native").glob("*/result.json"))
+            self.assertEqual(len(reports), 1)
+            self.assertFalse(json.loads(reports[0].read_text())["passed"])
 
     def test_clean_log_does_not_add_a_failure(self):
         report = {}
@@ -161,6 +235,44 @@ class AssertionModeTest(unittest.TestCase):
                     else:
                         self.assertIn("acceptance checks require Python assertions", result.stderr)
                         self.assertNotIn("FileNotFoundError", result.stderr)
+
+
+class AcceptanceEnvironmentTest(unittest.TestCase):
+    def test_exported_testing_mode_does_not_reach_default_validation(self):
+        # Run the real runner with a fake first Spark command. It records only the
+        # testing flag and exits before any JVM or native library can be loaded.
+        with tempfile.TemporaryDirectory(prefix="native acceptance environment ") as directory:
+            root = Path(directory)
+            project = root / "project"
+            jvm = project / "jvm"
+            jvm.mkdir(parents=True)
+            runner = jvm / "run_acceptance.py"
+            runner.write_bytes(Path(__file__).with_name("run_acceptance.py").read_bytes())
+            artifacts = project / ".build" / "jvm"
+            artifacts.mkdir(parents=True)
+            for name in ("spark-connect-native-bridge.jar", "bridge-test.jar"):
+                (artifacts / name).touch()
+            spark = root / "spark home"
+            (spark / "bin").mkdir(parents=True)
+            submit = spark / "bin" / "spark-submit"
+            submit.write_text('#!/bin/bash\nprintf "%s" "${SPARK_TESTING-unset}" '
+                              '> "$NATIVE_ENV_CAPTURE"\nexit 19\n')
+            submit.chmod(0o755)
+            library = root / "native artifact.so"
+            library.touch()
+            capture = root / "testing mode"
+            report = root / "acceptance.json"
+            environment = os.environ.copy()
+            environment.update(SPARK_TESTING="1", PYTHONOPTIMIZE="0",
+                               NATIVE_ENV_CAPTURE=str(capture))
+            result = subprocess.run(
+                [sys.executable, "-B", str(runner), "--library", str(library),
+                 "--spark-home", str(spark), "--output", str(report)],
+                env=environment, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertEqual(capture.read_text(), "unset")
+            first = json.loads(report.read_text())["results"][0]
+            self.assertEqual((first["name"], first["exit_code"]), ("engine-smoke", 19))
 
 
 class ListenerOwnershipTest(unittest.TestCase):

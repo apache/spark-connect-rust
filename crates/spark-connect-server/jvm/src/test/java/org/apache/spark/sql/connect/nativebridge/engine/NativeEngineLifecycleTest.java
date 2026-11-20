@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.connect.nativebridge.engine;
 
+import static org.apache.spark.sql.connect.nativebridge.engine.TestSupport.require;
+
 import java.io.ByteArrayInputStream;
 import java.lang.management.ManagementFactory;
 import java.net.InetAddress;
@@ -59,17 +61,17 @@ import org.apache.spark.connect.proto.ReleaseExecuteRequest;
 import org.apache.spark.connect.proto.ReleaseSessionRequest;
 import org.apache.spark.connect.proto.SQL;
 import org.apache.spark.connect.proto.SparkConnectServiceGrpc;
-import org.apache.spark.sql.SparkSession;
-import org.apache.spark.sql.Row;
 import org.apache.spark.ml.linalg.VectorUDT;
-import org.apache.spark.sql.types.DataTypes;
-import org.apache.spark.sql.types.StructField;
-import org.apache.spark.sql.types.StructType;
+import org.apache.spark.sql.Row;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.SparkSessionExtensions;
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan;
 import org.apache.spark.sql.catalyst.rules.Rule;
 import org.apache.spark.sql.connect.service.SparkConnectService$;
 import org.apache.spark.sql.internal.SQLConf;
+import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.sql.types.StructField;
+import org.apache.spark.sql.types.StructType;
 import org.apache.spark.sql.util.ArrowUtils$;
 import org.sparkproject.connect.grpc.ManagedChannel;
 import org.sparkproject.connect.grpc.ManagedChannelBuilder;
@@ -705,21 +707,11 @@ public final class NativeEngineLifecycleTest {
     }
     String cleanup = "spark.sql.classic.shuffleDependency.fileCleanup.enabled";
     Map<String, String> before = getAllConfig(stub, session);
-    setConfig(stub, session, cleanup, "true");
-    try {
-      unsupportedPlan(stub, session, Relation.newBuilder().setRange(Range.newBuilder()
-          .setStart(0).setEnd(1).setStep(1)).build());
-    } finally {
-      if (before.containsKey(cleanup)) {
-        setConfig(stub, session, cleanup, before.get(cleanup));
-      } else {
-        stub.withDeadlineAfter(30, TimeUnit.SECONDS).config(ConfigRequest.newBuilder()
-            .setSessionId(session).setOperation(ConfigRequest.Operation.newBuilder()
-                .setUnset(ConfigRequest.Unset.newBuilder().addKeys(cleanup))).build());
-      }
-      require(before.equals(getAllConfig(stub, session)),
-          "cleanup guard test changed explicit configuration state");
-    }
+    expectUnsupported(() -> setConfig(stub, session, cleanup, "true"));
+    require(before.equals(getAllConfig(stub, session)),
+        "cleanup guard test changed explicit configuration state");
+    analyze(stub, schemaRequest(session, Relation.newBuilder().setRange(Range.newBuilder()
+        .setStart(0).setEnd(1).setStep(1)).build()));
   }
 
   private static void unsupportedPlan(SparkConnectServiceGrpc.SparkConnectServiceBlockingStub stub,
@@ -806,9 +798,5 @@ public final class NativeEngineLifecycleTest {
         "analysis did not return a struct schema");
     require(response.getSchema().getSchema().getStruct().getFieldsCount() == 1,
         "analysis schema field count changed");
-  }
-
-  private static void require(boolean condition, String message) {
-    if (!condition) throw new AssertionError(message);
   }
 }
