@@ -745,8 +745,7 @@ def test_every_native_class_has_its_bare_name_as_its_c_name(objects):
     made = [
         F.col("a")._expr,
         SparkSession._active_session,
-        objects["spark"]._copy_thread_tags(),
-        objects["spark"]._copy_thread_user_context_extensions(),
+        objects["spark"]._downgrade(),
         objects["streams"]._sqlb,
         inspect.getattr_static(native.LogisticRegression, "maxIter"),
     ]

@@ -301,10 +301,10 @@ impl PyPipelineRunStream {
 
     fn __next__(&mut self, py: Python<'_>) -> PyResult<Option<(String, i64)>> {
         loop {
-            let resp = crate::interrupt::interruptible_outcome(py, &self.session, || {
+            // The responses of the run that started it, of its request.
+            let resp = crate::interrupt::interruptible_continuation(py, &self.session, || {
                 self.inner.next_response()
-            })?
-            .to_pyerr()?;
+            })?;
             let Some(resp) = resp else {
                 return Ok(None); // stream complete -> StopIteration
             };

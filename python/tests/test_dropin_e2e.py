@@ -628,6 +628,76 @@ def test_client_members_that_pysparks_tests_read_as_pyspark(session):
     assert other.is_stopped
 
 
+def test_client_attributes_its_requests_read_and_its_closed_channel_as_pyspark(session):
+    # As PySpark Connect's client: the tags of its thread_local, its `_session_id` and its
+    # `_user_id` are what its requests read when they are built, of the errors of protobuf for a
+    # value that a field does not take (the tags only of the executions); a conf that is kept of a
+    # session that the program dropped raises NO_ACTIVE_SESSION; and once `close()` closed its
+    # channel, its requests raise grpc's ValueError of a closed channel when `_closed` is False.
+    import gc
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    bad = "^bad argument type for built-in operation$"
+    other = session.newSession()
+    client = other.client
+    user = client._user_id
+    client.thread_local.tags = {"good", 5}
+    with pytest.raises(TypeError, match=bad):
+        other.range(1).collect()
+    assert other.range(2).schema is not None
+    client.thread_local.tags = {"good"}
+    assert other.range(1).collect() == [Row(id=0)]
+    for name in ("_session_id", "_user_id"):
+        value = getattr(client, name)
+        setattr(client, name, 5)
+        with pytest.raises(TypeError, match=bad):
+            other.range(3).filter("id > 1").schema
+        setattr(client, name, value)
+    assert client._user_id == user and other.range(1).count() == 1
+    client.close()
+    client._closed = False
+    with pytest.raises(ValueError, match="^Cannot invoke RPC: Channel closed!$"):
+        other.range(1).collect()
+    with pytest.raises(ValueError, match="^Cannot invoke RPC on closed channel!$"):
+        other.range(4).filter("id > 2").schema
+    other.stop()
+
+    other = session.newSession()
+    conf = other.conf
+    other.range(1).collect()
+    del other
+    gc.collect()
+    with pytest.raises(SparkConnectException) as error:
+        conf.get("spark.sql.shuffle.partitions")
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+
+
+def test_a_server_side_session_change_leaves_the_channel_open_as_pyspark(session, tmp_path):
+    # As PySpark's `_verify_response_integrity` of a response of another server-side session,
+    # which sets `_closed = True` of an open channel: the requests raise NO_ACTIVE_SESSION but
+    # those of the artifacts, which are sent, and once `_closed` is False, they are sent again.
+    import uuid
+
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    other = session.newSession()
+    other.range(1).collect()
+    client = other.client
+    observed = client._server_session_id
+    client._server_session_id = str(uuid.uuid4())
+    with pytest.raises(SparkConnectException):
+        other.range(1).collect()
+    assert client.is_closed and other.is_stopped
+    module = tmp_path / "session_change_module.py"
+    module.write_text("value = 1\n")
+    other.addArtifacts(str(module), pyfile=True)
+    client._server_session_id = observed
+    client._closed = False
+    assert other.range(2).count() == 2
+    other.stop()
+
+
 def test_client_of_a_connection_string_as_pyspark(session):
     # As PySpark Connect's SparkConnectClient(connection, ...): a client of a session of its own,
     # of the plans that it is given, built without a DataFrame, whose executions may be not

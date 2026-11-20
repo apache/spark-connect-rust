@@ -51,6 +51,30 @@ def varint_field(field, value):
     return varint(field * 8) + varint(value & (2**64 - 1))
 
 
+def abort_with_error_info(context, error):
+    # Abort the call of `context` with the error `error`, (message, reason, metadata), as the
+    # server does, of an INTERNAL status whose details are the ErrorInfo of the reason and the
+    # metadata, such as an `errorId` of the details that FetchErrorDetails gives.
+    import grpc
+
+    message, reason, metadata = error
+    # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
+    # ErrorInfo.reason=1, domain=2, metadata=3 (entries of key=1, value=2).
+    info = message_field(1, reason) + message_field(2, "org.apache.spark")
+    for key, value in metadata.items():
+        info += message_field(3, message_field(1, key) + message_field(2, value))
+    status = (
+        varint_field(1, grpc.StatusCode.INTERNAL.value[0])
+        + message_field(2, message)
+        + message_field(
+            3,
+            message_field(1, "type.googleapis.com/google.rpc.ErrorInfo") + message_field(2, info),
+        )
+    )
+    context.set_trailing_metadata((("grpc-status-details-bin", status),))
+    context.abort(grpc.StatusCode.INTERNAL, message)
+
+
 def parse_message(data):
     """Decode protobuf wire bytes into {field: [value, ...]}: varints as ints and
     length-delimited fields as bytes (decode nested messages with another call)."""
@@ -363,7 +387,13 @@ def serve(connection):
             self.query_payload = None
             self.execute_failure = None
             self.execute_error = None
+            self.get_status_error = None
+            self.fetch_error_details_requests = []
             self.stream_failure = None
+            self.stream_error = None
+            self.interrupted_error = None
+            self.clone_error = None
+            self.clone_response_fields = b""
             self.reattach_requests = []
             self.retry_info_failures = []
             # The InterruptRequests of each Interrupt, and the operations that they interrupt.
@@ -534,7 +564,22 @@ def serve(connection):
         # before ResultComplete, as a dropped stream does. Each ReattachExecute is recorded in
         # `reattach_requests`.
         stream_failure = None
+        # With `stream_error` set as `execute_error` is, ExecutePlan streams its responses and
+        # then fails with it, as a query that fails once it ran a while; with `interrupted_error`
+        # set so, an execution that an Interrupt ends fails with it rather than a plain
+        # CANCELLED, as the server's OPERATION_CANCELED of an error ID; with `clone_error` set so,
+        # each CloneSession fails with it.
+        stream_error = None
+        interrupted_error = None
+        clone_error = None
+        # Raw CloneSessionResponse fields that each CloneSession answers with after its own, as a
+        # session ID (1) or a server-side session ID (2) of the response that the test sets.
+        clone_response_fields = b""
         reattach_requests = []
+        # The FetchErrorDetails requests, as `fetched_error_ids` has their error IDs, and the
+        # failure of GetStatus, of the form of `execute_error`.
+        fetch_error_details_requests = []
+        get_status_error = None
         # With `execute_error` set to (message, reason, metadata), ExecutePlan fails as the
         # server does for an error that it raised: INTERNAL, with a google.rpc.Status of an
         # ErrorInfo of `reason` and `metadata` in grpc-status-details-bin.
@@ -764,6 +809,8 @@ def serve(connection):
                 held_operation_id = parse_message(request).get(6, [b""])[0]
                 released = self.wait_for_response(response_gate, held_operation_id, 5)
                 if released == "interrupted":
+                    if self.interrupted_error:
+                        abort_with_error_info(context, self.interrupted_error)
                     context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
                 if not released:
                     with self.listener_condition:
@@ -789,23 +836,7 @@ def serve(connection):
                 )
                 context.abort(getattr(grpc.StatusCode, code), message)
             if self.execute_error:
-                message, reason, metadata = self.execute_error
-                # google.rpc: Status.code=1, message=2, details=3; Any.type_url=1, value=2;
-                # ErrorInfo.reason=1, domain=2, metadata=3 (entries of key=1, value=2).
-                info = message_field(1, reason) + message_field(2, "org.apache.spark")
-                for key, value in metadata.items():
-                    info += message_field(3, message_field(1, key) + message_field(2, value))
-                status = (
-                    varint_field(1, grpc.StatusCode.INTERNAL.value[0])
-                    + message_field(2, message)
-                    + message_field(
-                        3,
-                        message_field(1, "type.googleapis.com/google.rpc.ErrorInfo")
-                        + message_field(2, info),
-                    )
-                )
-                context.set_trailing_metadata((("grpc-status-details-bin", status),))
-                context.abort(grpc.StatusCode.INTERNAL, message)
+                abort_with_error_info(context, self.execute_error)
             # ExecutePlanRequest.operation_id=6; ExecutePlanResponse.operation_id=12,
             # response_id=13, result_complete=14.
             operation_id = parse_message(request).get(6, [b""])[0]
@@ -844,9 +875,13 @@ def serve(connection):
                     status = retry_info_status(code, delay_ms)
                     context.set_trailing_metadata((("grpc-status-details-bin", status),))
                 context.abort(getattr(grpc.StatusCode, code), "stream dropped")
+            if self.stream_error:
+                abort_with_error_info(context, self.stream_error)
             if block_result_complete:
                 released = self.wait_for_response(response_gate, operation_id, 30)
                 if released == "interrupted":
+                    if self.interrupted_error:
+                        abort_with_error_info(context, self.interrupted_error)
                     context.abort(grpc.StatusCode.CANCELLED, "Operation has been canceled")
                 if not released:
                     context.abort(
@@ -902,6 +937,7 @@ def serve(connection):
             # FetchErrorDetailsRequest.error_id=3.
             if self.is_recorded(request, "fetch_error_details"):
                 self.fetched_error_ids.append(parse_message(request)[3][0].decode())
+                self.fetch_error_details_requests.append(request)
             return self.error_details
 
         # CloneSession records the requests and answers with the new session id, the one
@@ -912,20 +948,29 @@ def serve(connection):
         def clone_session(self, request, context):
             if self.is_recorded(request, "clone"):
                 self.clone_requests.append(request)
+            if self.clone_error:
+                abort_with_error_info(context, self.clone_error)
             # CloneSessionRequest.session_id=1, new_session_id=4; CloneSessionResponse
             # .session_id=1, new_session_id=3.
             fields = parse_message(request)
             new_id = fields.get(4, [self.cloned_session_id.encode()])[0]
-            return message_field(1, fields[1][0]) + message_field(3, new_id)
+            return (
+                message_field(1, fields[1][0])
+                + message_field(3, new_id)
+                + self.clone_response_fields
+            )
 
         def get_status(self, request, context):
             # GetStatusRequest.session_id=1, operation_status=5, OperationStatusRequest
             # .operation_ids=1; GetStatusResponse.session_id=1, operation_statuses=3,
             # OperationStatus.operation_id=1, state=2. Each operation that the request names is
             # OPERATION_STATE_UNKNOWN=1, as the server answers of an operation that it does not
-            # know.
+            # know. With `get_status_error` set as `execute_error` is, it fails as ExecutePlan
+            # does then.
             if self.is_recorded(request, "get_status"):
                 self.get_status_requests.append(request)
+            if self.get_status_error:
+                abort_with_error_info(context, self.get_status_error)
             fields = parse_message(request)
             operation_status = parse_message(fields.get(5, [b""])[0])
             return message_field(1, fields[1][0]) + b"".join(

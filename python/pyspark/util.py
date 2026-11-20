@@ -1,5 +1,6 @@
 """PySpark utilities for Rust-backed client."""
 import contextlib
+import copy
 import faulthandler
 import functools
 import itertools
@@ -177,10 +178,9 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
     """
     # As PySpark's of Spark Connect, the only mode of this client: `f` is the session, whose
     # `thread_local` of its client, of this thread when the function is decorated, the threads of
-    # the function inherit, with the session as their active one. As PySpark's, which gives each
-    # thread the one copy of each attribute of the `thread_local`, the threads share that copy of
-    # the tags and of the user context extensions.
-    from pyspark.sql.connect.client import _thread_local_copies
+    # the function inherit, with the session as their active one. Each thread is given the one
+    # copy of each attribute of the `thread_local`, so the threads share the copy of the tags and
+    # of the user context extensions.
     from pyspark.sql.connect.session import SparkSession
 
     session = f
@@ -189,7 +189,14 @@ def inheritable_thread_target(f: Union[Callable, "SparkSession"]) -> Callable:
         assert isinstance(session, SparkSession), (
             "f is expected to be SparkSession for spark connect"
         )
-        session_client_thread_local_attrs = _thread_local_copies(session.client.thread_local)
+        thread_local = session.client.thread_local
+        session_client_thread_local_attrs = [
+            (attr, copy.deepcopy(value))
+            for (
+                attr,
+                value,
+            ) in thread_local.__dict__.items()
+        ]
 
         @functools.wraps(ff)
         def inner(*args: Any, **kwargs: Any) -> Any:

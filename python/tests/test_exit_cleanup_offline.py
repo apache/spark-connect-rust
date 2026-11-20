@@ -73,6 +73,10 @@ _CHILD = textwrap.dedent("""
         print(spark.client.clone()._session_id, flush=True)
     if mode == "stop":
         spark.stop()
+    if mode == "bad_global_extension":
+        # An extension that is not an Any, which fails the clean_cache of the exit, whose request
+        # carries the extensions, and not the release, whose request carries none.
+        spark.client.global_user_context_extensions.append(("bad", 5))
     if mode == "set_after_creation":
         os.environ["SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"] = "true"
     if mode == "unset_after_creation":
@@ -208,6 +212,14 @@ def test_c_release_variable_values_as_pyspark(exit_service, value, released):
     _, (session_id,) = _run_child(exit_service.remote, "plain", variable=value)
     expected = ["clean_cache", "release_session"] if released else ["clean_cache"]
     assert _exit_requests(exit_service, session_id) == expected
+
+
+def test_c_release_at_exit_carries_no_user_context_extensions(exit_service):
+    # As PySpark's `_on_exit`, whose `_cleanup_ml_cache` fails to build its request of an extension
+    # that is not an Any, and whose `release_session` builds one of no extensions: the release is
+    # sent all the same.
+    _, (session_id,) = _run_child(exit_service.remote, "bad_global_extension", variable="true")
+    assert _exit_requests(exit_service, session_id) == ["release_session"]
 
 
 def test_d_variable_is_read_when_the_session_is_made(exit_service):

@@ -2461,7 +2461,8 @@ impl PyListenerEventStream {
         // (arbitrarily far apart on a live query), so the wait releases the GIL, or a daemon
         // thread would freeze the whole interpreter between events, and a signal of the process
         // ends it with its exception, as it ends the other waits of the client for the server.
-        let next = interruptible(py, &self.session, || {
+        // The events of the stream that started it, of its request.
+        let next = crate::interrupt::interruptible_continuation(py, &self.session, || {
             Ok::<_, Box<SparkError>>(stream.next())
         })?;
         match next {

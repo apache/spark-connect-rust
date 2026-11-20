@@ -2970,7 +2970,7 @@ def test_global_user_context_extensions_are_a_list_that_the_requests_take_as_pys
     # As PySpark Connect's SparkConnectClient, whose global_user_context_extensions is a list
     # attribute of the client, of the IDs and the Any that add_global_user_context_extension
     # appends, which its requests read: a change of the list, or a list that it is set to, is
-    # what the requests carry. Its copies and pickles are plain lists.
+    # what the requests carry. It is a plain list, as its copies are.
     import copy
 
     from pyspark.sql.connect.client import SparkConnectClient
@@ -3009,8 +3009,8 @@ def test_global_user_context_extensions_are_a_list_that_the_requests_take_as_pys
     assert type(copy.copy(client.global_user_context_extensions)) is list
     copied = copy.deepcopy(client.global_user_context_extensions)
     assert type(copied) is list and copied == [("global_set", packed("set"))]
-    # A pickle names a plain list (the Any of the Rust runtime of the list does not pickle).
-    assert client.global_user_context_extensions.__reduce_ex__(2)[0] is list
+    # It is a plain list, as PySpark's.
+    assert type(client.global_user_context_extensions) is list
 
     # Removing a global extension rebinds the list, as PySpark's, which a list read before keeps.
     before = client.global_user_context_extensions

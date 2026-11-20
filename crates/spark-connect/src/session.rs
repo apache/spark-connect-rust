@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use spark_connect_core::channel::ChannelBuilder;
 use spark_connect_core::client::{ExecutePlanHook, SparkConnectClient};
 use spark_connect_core::error::{Result, SparkError};
-use spark_connect_core::runtime::{block_on, check_callback_depth};
+use spark_connect_core::runtime::{block_on, calling_thread_id, check_callback_depth};
 use spark_connect_core::thread_entries::forget_when_thread_ends;
 use spark_connect_proto as proto;
 
@@ -60,7 +60,8 @@ pub struct ExecutionInfo {
 /// `thread_local` of its client: those that a thread added, which the operations that it
 /// starts carry. A new thread has none. The tags of a thread are a set that it may share with
 /// other threads ([`SharedTags`]), as the threads of PySpark's `inheritable_thread_target` share
-/// the set of tags that it copied.
+/// the set of tags that it copied. A thread is the calling thread of the core
+/// ([`calling_thread_id`]), whose user context extensions are keyed by it too.
 #[derive(Default)]
 pub(crate) struct ThreadTags {
     by_thread: Arc<Mutex<std::collections::HashMap<std::thread::ThreadId, SharedTags>>>,
@@ -116,6 +117,13 @@ pub enum Tag {
     Text(String),
     /// The UTF-32 little-endian bytes of a tag that UTF-8 cannot encode.
     Unencodable(Vec<u8>),
+    /// A tag of PySpark's client that is neither a str nor bytes, which the string field of the
+    /// tags of its request refuses with the `TypeError` of this message when it builds an
+    /// execution, as a tags value that is not iterable fails `list()` of it there.
+    NotText(String),
+    /// A tag of bytes that are not UTF-8, which the string field of the tags of PySpark's request
+    /// refuses with the `UnicodeDecodeError` of its decoder when it builds an execution.
+    NotUtf8(Vec<u8>),
 }
 
 impl ThreadTags {
@@ -125,18 +133,41 @@ impl ThreadTags {
             .by_thread
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .get(&std::thread::current().id())
+            .get(&calling_thread_id())
             .cloned();
         shared
             .map(|tags| tags.0.lock().unwrap_or_else(|e| e.into_inner()).clone())
             .unwrap_or_default()
     }
 
+    /// The tags of the current thread, which has an empty set of them from now on if it had
+    /// none, as PySpark's `get_tags` gives a `thread_local` of no tags a set.
+    fn current_or_new(&self) -> Vec<Tag> {
+        let shared = {
+            let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
+            let thread = calling_thread_id();
+            if !by_thread.contains_key(&thread) {
+                forget_when_thread_ends(&self.by_thread, forget_thread_tags);
+            }
+            by_thread.entry(thread).or_default().clone()
+        };
+        let tags = shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        tags.clone()
+    }
+
+    /// Whether the current thread has a set of tags.
+    fn has_current(&self) -> bool {
+        self.by_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&calling_thread_id())
+    }
+
     /// Change the tags of the current thread, and forget a thread without tags that it shares
     /// with no other.
     fn update(&self, change: impl FnOnce(&mut Vec<Tag>)) {
         let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
-        let thread = std::thread::current().id();
+        let thread = calling_thread_id();
         if !by_thread.contains_key(&thread) {
             forget_when_thread_ends(&self.by_thread, forget_thread_tags);
         }
@@ -156,7 +187,7 @@ impl ThreadTags {
         self.by_thread
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(&std::thread::current().id());
+            .remove(&calling_thread_id());
     }
 
     /// A copy of the tags of the current thread.
@@ -164,14 +195,107 @@ impl ThreadTags {
         SharedTags(Arc::new(Mutex::new(self.current())))
     }
 
+    /// The set of tags of the calling thread, if it has one, of its ID.
+    fn of_calling_thread(&self) -> (std::thread::ThreadId, Option<SharedTags>) {
+        let thread = calling_thread_id();
+        let tags = self
+            .by_thread
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&thread)
+            .cloned();
+        (thread, tags)
+    }
+
+    /// Give `thread` the set `tags`, or none, which it had (see [`ThreadTags::of_calling_thread`]):
+    /// a thread that had a set is registered still, until it ends.
+    fn restore(&self, thread: std::thread::ThreadId, tags: Option<SharedTags>) {
+        let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
+        match tags {
+            Some(tags) => {
+                by_thread.insert(thread, tags);
+            }
+            None => {
+                by_thread.remove(&thread);
+            }
+        }
+    }
+
     /// Make `tags` those of the current thread.
     fn share(&self, tags: &SharedTags) {
         let mut by_thread = self.by_thread.lock().unwrap_or_else(|e| e.into_inner());
-        let thread = std::thread::current().id();
+        let thread = calling_thread_id();
         if !by_thread.contains_key(&thread) {
             forget_when_thread_ends(&self.by_thread, forget_thread_tags);
         }
         by_thread.insert(thread, tags.clone());
+    }
+}
+
+/// The context of the requests of a thread, which it has again when this drops (see
+/// [`SparkSession::keep_thread_request_context`]). Not a stable API.
+#[doc(hidden)]
+#[must_use = "the context is given back when the guard drops"]
+pub struct KeptThreadRequestContext<'a> {
+    session: &'a SparkSession,
+    thread: std::thread::ThreadId,
+    client: Option<spark_connect_core::client::ThreadRequestState>,
+    tags: Option<SharedTags>,
+}
+
+impl Drop for KeptThreadRequestContext<'_> {
+    fn drop(&mut self) {
+        if let Some(client) = self.client.take() {
+            self.session.client.restore_thread_request_state(client);
+        }
+        self.session.tags.restore(self.thread, self.tags.take());
+    }
+}
+
+/// The hook of [`set_finalizer_request_hook`].
+static FINALIZER_REQUEST_HOOK: std::sync::OnceLock<FinalizerRequestHook> =
+    std::sync::OnceLock::new();
+
+/// The functions that a session calls on the thread of a finalizer around its request, the
+/// release of the relation of a checkpoint or of a cached ML object when its last handle is
+/// dropped (see [`set_finalizer_request_hook`]). Not a stable API.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug)]
+pub struct FinalizerRequestHook {
+    /// Called before the request is built: a binding brings the tags, the user context
+    /// extensions, the session ID and the user of the requests of the thread up to date then, of
+    /// the state of its client, as PySpark's finalizers build their requests when they run, and
+    /// returns whether to send the request, which is not sent when PySpark's would fail to be
+    /// built.
+    pub before: fn(&SparkSession) -> bool,
+    /// Called once the request is built, or is not sent, when the thread has the context of its
+    /// requests of before `before` again (see [`SparkSession::keep_thread_request_context`]): a
+    /// binding reads that of a call that the finalizer ran during again, of its client.
+    pub after: fn(&SparkSession),
+}
+
+/// Set, once for the process, the functions that a session calls around the request of a
+/// finalizer (see [`FinalizerRequestHook`]). A later call does nothing. Not a stable API.
+#[doc(hidden)]
+pub fn set_finalizer_request_hook(hook: FinalizerRequestHook) {
+    let _ = FINALIZER_REQUEST_HOOK.set(hook);
+}
+
+/// The request of a finalizer of a session on the calling thread, while it is built: the thread
+/// has the context of its requests of before it again when this drops, after which the `after`
+/// function of the hook of [`set_finalizer_request_hook`] runs (see
+/// [`SparkSession::finalizer_request`]).
+struct FinalizerRequest<'a> {
+    session: &'a SparkSession,
+    kept: Option<KeptThreadRequestContext<'a>>,
+}
+
+impl Drop for FinalizerRequest<'_> {
+    fn drop(&mut self) {
+        drop(self.kept.take());
+        if let Some(hook) = FINALIZER_REQUEST_HOOK.get() {
+            (hook.after)(self.session);
+        }
     }
 }
 
@@ -391,7 +515,7 @@ impl SparkSession {
             .into_iter()
             .filter_map(|tag| match tag {
                 Tag::Text(text) => Some(text),
-                Tag::Unencodable(_) => None,
+                Tag::Unencodable(_) | Tag::NotText(_) | Tag::NotUtf8(_) => None,
             })
             .collect()
     }
@@ -405,7 +529,7 @@ impl SparkSession {
             .into_iter()
             .filter_map(|tag| match tag {
                 Tag::Unencodable(bytes) => Some(bytes),
-                Tag::Text(_) => None,
+                Tag::Text(_) | Tag::NotText(_) | Tag::NotUtf8(_) => None,
             })
             .collect()
     }
@@ -578,24 +702,54 @@ impl SparkSession {
 
     /// Internal accessor used by the execute-request builders to attach the tags of the
     /// current thread, which builds the request: a tag that UTF-8 cannot encode fails the
-    /// request with its `UnicodeEncodeError`, as protobuf's string field does in PySpark.
+    /// request with its `UnicodeEncodeError`, as protobuf's string field does in PySpark, and so
+    /// does one that the field does not take (see [`Tag`]). A thread of no tags has an empty set
+    /// of them from then on (see [`SparkSession::has_thread_tags`]), as PySpark's request reads
+    /// them with `get_tags`, which gives its `thread_local` a set.
     pub(crate) fn tags(&self) -> Result<Vec<String>> {
         self.tags
-            .current()
+            .current_or_new()
             .into_iter()
             .map(|tag| match tag {
                 Tag::Text(text) => Ok(text),
                 Tag::Unencodable(bytes) => Err(SparkError::unencodable_str(&bytes)),
+                Tag::NotText(message) => Err(SparkError {
+                    kind: spark_connect_core::error::SparkErrorKind::BuiltinTypeError,
+                    ..SparkError::value_msg(message)
+                }),
+                Tag::NotUtf8(bytes) => Err(SparkError::invalid_utf8(0, &bytes)),
             })
             .collect()
+    }
+
+    /// Whether the current thread has a set of tags: tags that it added or was given, or the
+    /// empty set that an execution of a thread of none gives it, as PySpark's `get_tags` sets
+    /// one in the `thread_local` of its client. Not a stable API.
+    #[doc(hidden)]
+    pub fn has_thread_tags(&self) -> bool {
+        self.tags.has_current()
     }
 
     /// Start a brand-new session over the same connection. Mirrors
     /// `SparkSession.newSession` — a fresh server-side session (new session id),
     /// with its own tags and plan IDs.
     pub fn new_session(&self) -> SparkSession {
+        self.new_session_of(self.client.with_new_session_id())
+    }
+
+    /// As [`SparkSession::new_session`], of the user `user_id` as it is given, whom its requests
+    /// and those of its artifacts carry, also when the connection has a `user_id`, which
+    /// `new_session` takes in its place, as PySpark's `newSession()` does (see
+    /// `SparkConnectClient::with_new_session_id_of_user`). Not a stable API.
+    #[doc(hidden)]
+    pub fn new_session_of_user(&self, user_id: Option<String>) -> SparkSession {
+        self.new_session_of(self.client.with_new_session_id_of_user(user_id))
+    }
+
+    /// A new session of the client `client`, of none of the state of this one.
+    fn new_session_of(&self, client: SparkConnectClient) -> SparkSession {
         SparkSession {
-            client: Arc::new(self.client.with_new_session_id()),
+            client: Arc::new(client),
             plan_ids: Arc::new(PlanIds::new()),
             tags: Arc::new(ThreadTags::default()),
             last_execution: Arc::new(Mutex::new(None)),
@@ -623,9 +777,21 @@ impl SparkSession {
     /// `SparkSession.cloneSession(new_session_id)`.
     pub fn clone_session_with_id(&self, new_session_id: Option<&str>) -> Result<SparkSession> {
         let client = block_on(self.client.clone_session(new_session_id))?;
-        let mut session = self.new_session();
-        session.client = Arc::new(client);
-        Ok(session)
+        Ok(self.new_session_of(client))
+    }
+
+    /// As [`SparkSession::clone_session_with_id`], of the user `user_id` as it is given, whom the
+    /// requests of the clone and those of its artifacts carry, also when the connection has a
+    /// `user_id`, which `clone_session_with_id` takes in its place, as PySpark's `cloneSession()`
+    /// does (see `SparkConnectClient::clone_session_of_user`). Not a stable API.
+    #[doc(hidden)]
+    pub fn clone_session_with_id_of_user(
+        &self,
+        new_session_id: Option<&str>,
+        user_id: Option<String>,
+    ) -> Result<SparkSession> {
+        let client = block_on(self.client.clone_session_of_user(new_session_id, user_id))?;
+        Ok(self.new_session_of(client))
     }
 
     /// Set the hook of the executions of this session, and of its clones, or clear it: the
@@ -1322,6 +1488,10 @@ impl SparkSession {
         if self.is_stopped() {
             return;
         }
+        let (_request, send) = self.finalizer_request();
+        if !send {
+            return;
+        }
         // A tag that UTF-8 cannot encode fails PySpark's request before it is sent, and
         // `_delete_ml_cache` ignores the error.
         let Ok(tags) = self.tags() else {
@@ -1363,6 +1533,10 @@ impl SparkSession {
         if self.is_stopped() {
             return;
         }
+        let (_request, send) = self.finalizer_request();
+        if !send {
+            return;
+        }
         // A tag that UTF-8 cannot encode fails PySpark's request before it is sent.
         let Ok(tags) = self.tags() else {
             return;
@@ -1385,6 +1559,26 @@ impl SparkSession {
             ..Default::default()
         };
         self.client.spawn_unary_execute_plan(request);
+    }
+
+    /// The request of a finalizer of this session on the calling thread, and whether to send it,
+    /// after the `before` function of the hook of [`set_finalizer_request_hook`], if any, brought
+    /// the context of the requests of the thread up to date: as PySpark's finalizers build their
+    /// requests when they run, of the attributes of the client then, and send none when they fail
+    /// to build them. The thread has its own context again once the returned request drops, after
+    /// the request is built, so that a call during which the finalizer runs, as on a collection
+    /// of the garbage collector, sends the rest of its requests of its own, which the `after`
+    /// function of the hook reads again then.
+    fn finalizer_request(&self) -> (FinalizerRequest<'_>, bool) {
+        let request = FinalizerRequest {
+            session: self,
+            kept: Some(self.keep_thread_request_context()),
+        };
+        let send = match FINALIZER_REQUEST_HOOK.get() {
+            Some(hook) => (hook.before)(self),
+            None => true,
+        };
+        (request, send)
     }
 
     /// Get the runtime configuration for this session.
@@ -1512,19 +1706,77 @@ impl SparkSession {
         self.client.channel_builder()
     }
 
-    /// The user of the requests of this session, as PySpark's `client._user_id`: of the
-    /// connection string, else of the environment, if any. Not a stable API.
+    /// The user of the connection of this session: of the connection string, else of the
+    /// environment, if any, which the requests of its artifacts carry. Not a stable API.
     #[doc(hidden)]
     pub fn user_id(&self) -> Option<&str> {
         self.client.user_id()
     }
 
+    /// The user that the other requests of this session carry, as PySpark's `client._user_id`
+    /// (see [`SparkConnectClient::request_user_id`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn request_user_id(&self) -> Option<String> {
+        self.client.request_user_id()
+    }
+
+    /// Make the requests of this session but those of its artifacts carry the user `user_id`, or
+    /// none, as a set of PySpark's `client._user_id` (see
+    /// [`SparkConnectClient::set_request_user_id`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn set_request_user_id(&self, user_id: Option<String>) {
+        self.client.set_request_user_id(user_id);
+    }
+
+    /// Make the requests of the current thread carry the session ID, the user and the global user
+    /// context extensions of the client that it calls (see
+    /// [`SparkConnectClient::set_thread_request_context`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_request_context(
+        &self,
+        session_id: String,
+        user_id: Option<String>,
+        global: Vec<(String, prost_types::Any)>,
+    ) {
+        self.client
+            .set_thread_request_context(session_id, user_id, global);
+    }
+
+    /// Keep the context of the requests of the calling thread, as it is now, until the returned
+    /// guard drops, when the thread has it again: the session ID, the user and the global user
+    /// context extensions of [`SparkSession::set_thread_request_context`], the user context
+    /// extensions of the thread and its tags. As a binding keeps them around a call that runs
+    /// during another call of the thread, such as one of a progress handler or of a finalizer,
+    /// whose own context would otherwise be that of the requests that the other call sends once
+    /// it returned, as the details of its failure, where PySpark's requests read the attributes of
+    /// their own client. Not a stable API.
+    #[doc(hidden)]
+    pub fn keep_thread_request_context(&self) -> KeptThreadRequestContext<'_> {
+        let (thread, tags) = self.tags.of_calling_thread();
+        KeptThreadRequestContext {
+            session: self,
+            thread,
+            client: Some(self.client.thread_request_state()),
+            tags,
+        }
+    }
+
     /// Open this session again, which `close()` closed, as PySpark's `client._closed = False`
-    /// lets the requests of its client be sent again. Not a stable API.
+    /// lets the requests of its client be sent again: of the `ValueError` of a closed channel,
+    /// once `close()` closed it (see [`SparkConnectClient::close`]). Not a stable API.
     #[doc(hidden)]
     pub fn reopen(&self) {
         self.stopped.store(false, Ordering::SeqCst);
         self.client.reopen();
+    }
+
+    /// Mark this session closed, as PySpark's `client._closed = True`: it is stopped, and its
+    /// requests raise `NO_ACTIVE_SESSION`, but its channel stays open, so that those of its
+    /// artifacts are sent, as PySpark's ArtifactManager sends them, and `reopen()` lets the
+    /// others be sent again. Not a stable API.
+    #[doc(hidden)]
+    pub fn mark_closed(&self) {
+        self.client.set_closed(true);
     }
 
     /// The statuses of the operations of this session of `request`, a GetStatus request built
@@ -3890,6 +4142,37 @@ mod tests {
         assert!(spark.unencodable_tags().is_empty());
     }
 
+    /// Tags that protobuf's string field does not take, as the set of PySpark's client keeps them:
+    /// the executions fail with the `TypeError` of an object that is neither a str nor bytes and
+    /// with the `UnicodeDecodeError` of bytes that are not UTF-8, until they are gone; they are
+    /// not tags of text. An execution of a thread of no tags gives it an empty set of them, as
+    /// PySpark's `get_tags` does.
+    #[test]
+    fn tags_that_the_field_does_not_take_fail_the_executions() {
+        let spark = session();
+        let refused = SharedTags::new(vec![
+            Tag::Text("a".to_string()),
+            Tag::NotText("bad argument type for built-in operation".to_string()),
+        ]);
+        spark.share_thread_tags(&refused);
+        let error = spark.tags().unwrap_err();
+        assert_eq!(
+            error.kind,
+            spark_connect_core::error::SparkErrorKind::BuiltinTypeError
+        );
+        assert_eq!(error.message(), "bad argument type for built-in operation");
+        assert_eq!(spark.get_tags(), vec!["a".to_string()]);
+        spark.share_thread_tags(&SharedTags::new(vec![Tag::NotUtf8(vec![0xff])]));
+        let error = spark.tags().unwrap_err();
+        assert_eq!(error.invalid_utf8_value(), Some(vec![0xff]));
+        assert!(spark.get_tags().is_empty() && spark.unencodable_tags().is_empty());
+        spark.clear_tags();
+        assert!(!spark.has_thread_tags());
+        assert!(spark.tags().unwrap().is_empty());
+        assert!(spark.has_thread_tags());
+        spark.clear_tags();
+    }
+
     #[test]
     fn threads_given_a_copy_of_tags_share_it() {
         // As the threads of PySpark's inheritable_thread_target: they share the copy of the tags
@@ -3986,6 +4269,85 @@ mod tests {
         }
         assert!(spark.tags.by_thread.lock().unwrap().is_empty());
         assert!(spark.get_tags().is_empty());
+    }
+
+    #[test]
+    fn the_tags_that_a_future_of_a_call_sets_are_the_callers() {
+        // As the user context extensions of the core: a future of a call that runs on another
+        // thread, inside a `current_thread` runtime, is of the thread that calls, whose tags it
+        // reads and sets, and which are forgotten when that thread ends.
+        let spark = session();
+        let other = spark.clone();
+        std::thread::spawn(move || {
+            other.add_tag("caller").unwrap();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let in_the_future = runtime.block_on(async {
+                block_on(async {
+                    other.add_tag("future").unwrap();
+                    (std::thread::current().id(), other.get_tags())
+                })
+            });
+            assert_ne!(in_the_future.0, std::thread::current().id());
+            assert_eq!(in_the_future.1, vec!["caller", "future"]);
+            assert_eq!(other.get_tags(), vec!["caller", "future"]);
+        })
+        .join()
+        .unwrap();
+        assert!(spark.tags.by_thread.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_kept_request_context_of_a_thread_is_given_back() {
+        // As a binding keeps the context of the requests of a call around a call that runs
+        // during it, such as one of a progress handler or of a finalizer: the session ID, the user
+        // and the user context extensions of the requests of the thread, and its tags.
+        let spark = session();
+        let any = |name: &str| prost_types::Any {
+            type_url: format!("type.googleapis.com/{name}"),
+            value: vec![],
+        };
+        std::thread::spawn(move || {
+            spark.add_tag("outer").unwrap();
+            spark.set_thread_request_context(
+                "outer-session".to_string(),
+                Some("alice".to_string()),
+                vec![("global_outer".to_string(), any("outer"))],
+            );
+            {
+                let _kept = spark.keep_thread_request_context();
+                spark.clear_tags();
+                spark.add_tag("inner").unwrap();
+                spark.set_thread_request_context("inner-session".to_string(), None, vec![]);
+                spark.share_threadlocal_user_context_extensions(
+                    &spark_connect_core::client::SharedUserContextExtensions::new(vec![(
+                        "threadlocal_inner".to_string(),
+                        any("inner"),
+                    )]),
+                );
+                assert_eq!(spark.get_tags(), vec!["inner"]);
+                assert_eq!(spark.client_session_id(), "inner-session");
+            }
+            assert_eq!(spark.get_tags(), vec!["outer"]);
+            assert_eq!(spark.client_session_id(), "outer-session");
+            assert_eq!(spark.request_user_id().as_deref(), Some("alice"));
+            assert!(spark
+                .client
+                .threadlocal_user_context_extensions()
+                .is_empty());
+            assert_eq!(spark.client.global_user_context_extensions().len(), 1);
+            // Of a thread of no tags, the tags of the call during it are gone with it.
+            spark.clear_tags();
+            {
+                let _kept = spark.keep_thread_request_context();
+                spark.add_tag("inner").unwrap();
+            }
+            assert!(!spark.has_thread_tags());
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
