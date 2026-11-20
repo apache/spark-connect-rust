@@ -773,8 +773,13 @@ pub struct SparkConnectClient {
     /// The channel builder of the connection, as PySpark's `client._builder`: of no session ID
     /// for the client of a new session, and of its own for that of a clone.
     builder: crate::channel::ChannelBuilder,
-    /// User context (user_id from the channel builder).
+    /// User context (user_id from the channel builder), which the requests of the artifacts
+    /// carry, as PySpark's ArtifactManager keeps the user of the client when it was built.
     user_id: Option<String>,
+    /// The user that the other requests carry, shared by the clones of the client: `user_id`
+    /// until a caller sets another, as PySpark's `client._user_id` is an attribute that its
+    /// requests read (see [`SparkConnectClient::set_request_user_id`]).
+    request_user_id: std::sync::Arc<std::sync::RwLock<Option<String>>>,
     /// The metadata of the connection string, and the `authorization` of its token.
     metadata: Vec<(String, String)>,
     /// The headers of every request: `metadata`, but a `user-agent` parameter (see `connect`).
@@ -808,6 +813,12 @@ pub struct SparkConnectClient {
     /// Whether the client is closed, shared by its clones: its RPCs then raise
     /// `NO_ACTIVE_SESSION`, as PySpark's `SparkConnectClient._stub` does once it is closed.
     closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Whether [`SparkConnectClient::close`] closed the channel of the client, shared by its
+    /// clones, as PySpark's `close` closes its gRPC channel: once the client is open again (see
+    /// [`SparkConnectClient::set_closed`]), its RPCs raise the `ValueError` of grpc's closed
+    /// channel, and so do those of the artifacts, which PySpark's ArtifactManager sends whether
+    /// the client is closed or not.
+    channel_closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The server-side session ID that the first response carried, shared by the clones of the
     /// client, as PySpark's `_server_session_id`. Each request sends it as the observed ID, and
     /// each response is checked against it.
@@ -948,6 +959,20 @@ fn set_waiter(
     }
 }
 
+/// The hook of [`set_failure_requests_hook`].
+static FAILURE_REQUESTS_HOOK: std::sync::OnceLock<fn(&SparkConnectClient)> =
+    std::sync::OnceLock::new();
+
+/// Set, once for the process, the function that a client calls on the thread that converts the
+/// failure of a call, an error that the server raised, before it builds the requests that it sends
+/// for it, of the details of the error and of the configs of its stack trace: a binding brings the
+/// context of the requests of that thread up to date then, of the attributes of its client, as
+/// PySpark builds those requests of them. A later call does nothing. Not a stable API.
+#[doc(hidden)]
+pub fn set_failure_requests_hook(hook: fn(&SparkConnectClient)) {
+    let _ = FAILURE_REQUESTS_HOOK.set(hook);
+}
+
 /// The class of the error of a wait that a signal of the process ended (see
 /// [`crate::runtime::until_abort`]).
 const WAIT_ABORTED: &str = "WAIT_ABORTED";
@@ -970,9 +995,34 @@ pub fn is_wait_aborted(error: &SparkError) -> bool {
 struct UserContextExtensions {
     global: Vec<(String, prost_types::Any)>,
     by_thread: std::collections::HashMap<std::thread::ThreadId, SharedUserContextExtensions>,
+    /// The session ID, the user and the global extensions of the requests of each thread that a
+    /// binding gave them (see [`SparkConnectClient::set_thread_request_context`]), which take the
+    /// place of those of the client for the requests of that thread.
+    request_by_thread: std::collections::HashMap<std::thread::ThreadId, ThreadRequestContext>,
     /// What a binding keeps to bring the extensions up to date before the calls of a thread send
     /// requests (see [`SparkConnectClient::set_user_context_refresher`]).
     refresher: Option<UserContextRefresher>,
+}
+
+/// The session ID, the user and the global user context extensions of the requests of a thread,
+/// of the client of a binding that the thread called last (see
+/// [`SparkConnectClient::set_thread_request_context`]).
+#[derive(Clone, Debug)]
+struct ThreadRequestContext {
+    session_id: String,
+    user_id: Option<String>,
+    global: Vec<(String, prost_types::Any)>,
+}
+
+/// The context of the requests of a thread as it was, of
+/// [`SparkConnectClient::thread_request_state`], which
+/// [`SparkConnectClient::restore_thread_request_state`] gives the thread again. Not a stable API.
+#[doc(hidden)]
+#[derive(Clone, Debug)]
+pub struct ThreadRequestState {
+    thread: std::thread::ThreadId,
+    request: Option<ThreadRequestContext>,
+    own: Option<SharedUserContextExtensions>,
 }
 
 /// The opaque refresher of the user context extensions of a binding.
@@ -1023,6 +1073,7 @@ impl SharedUserContextExtensions {
 /// thread.
 fn forget_thread_extensions(extensions: &mut UserContextExtensions, thread: std::thread::ThreadId) {
     extensions.by_thread.remove(&thread);
+    extensions.request_by_thread.remove(&thread);
 }
 
 impl SparkConnectClient {
@@ -1115,6 +1166,7 @@ impl SparkConnectClient {
             metadata.push((AUTHORIZATION_HEADER.to_string(), bearer));
         }
 
+        let user_id = builder.user_id().map(String::from).or_else(default_user_id);
         Ok(Self {
             channel,
             host: builder.host().to_string(),
@@ -1122,7 +1174,8 @@ impl SparkConnectClient {
             client_session_id: std::sync::Arc::new(std::sync::RwLock::new(session_id.clone())),
             session_id,
             builder: builder.clone(),
-            user_id: builder.user_id().map(String::from).or_else(default_user_id),
+            request_user_id: std::sync::Arc::new(std::sync::RwLock::new(user_id.clone())),
+            user_id,
             metadata,
             headers,
             user_agent,
@@ -1134,6 +1187,7 @@ impl SparkConnectClient {
             reattachable: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             execute_plan_hook: Default::default(),
             closed: Default::default(),
+            channel_closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: true,
             inflight_operations: Default::default(),
@@ -1148,13 +1202,113 @@ impl SparkConnectClient {
 
     /// The session ID that the requests of this client and of its clones carry, as PySpark's
     /// `client._session_id`: the session ID, unless
-    /// [`SparkConnectClient::set_client_session_id`] set another. Not a stable API.
+    /// [`SparkConnectClient::set_client_session_id`] set another, or the one that a binding gave
+    /// the requests of the calling thread ([`SparkConnectClient::set_thread_request_context`]).
+    /// Not a stable API.
     #[doc(hidden)]
     pub fn client_session_id(&self) -> String {
+        if let Some(session_id) = self.thread_request(|request| request.session_id.clone()) {
+            return session_id;
+        }
         self.client_session_id
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
+    }
+
+    /// `of` of the request context that a binding gave the calling thread, if it gave it one (see
+    /// [`SparkConnectClient::set_thread_request_context`]).
+    fn thread_request<T>(&self, of: impl FnOnce(&ThreadRequestContext) -> T) -> Option<T> {
+        self.user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .request_by_thread
+            .get(&crate::runtime::calling_thread_id())
+            .map(of)
+    }
+
+    /// Make the requests of the calling thread ([`crate::runtime::calling_thread_id`], whose
+    /// requests read it) carry the session ID `session_id`, the user `user_id` and the global user
+    /// context extensions `global`, of their IDs, in their order, in the place of those of the
+    /// client, until the thread ends or is given others: as a binding gives them of the client
+    /// that the thread calls, which PySpark's requests read when they are built, so that the calls
+    /// of two clients of the session, such as a client and its copy, carry their own, also at once
+    /// on two threads. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_thread_request_context(
+        &self,
+        session_id: String,
+        user_id: Option<String>,
+        global: Vec<(String, prost_types::Any)>,
+    ) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = crate::runtime::calling_thread_id();
+        if !extensions.by_thread.contains_key(&thread)
+            && !extensions.request_by_thread.contains_key(&thread)
+        {
+            forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
+        }
+        extensions.request_by_thread.insert(
+            thread,
+            ThreadRequestContext {
+                session_id,
+                user_id,
+                global,
+            },
+        );
+    }
+
+    /// What the requests of the calling thread carry of the context that a binding gave it, as of
+    /// now: the session ID, the user and the global user context extensions of
+    /// [`SparkConnectClient::set_thread_request_context`], and the user context extensions of the
+    /// thread, which [`SparkConnectClient::restore_thread_request_state`] gives the thread again.
+    /// Not a stable API.
+    #[doc(hidden)]
+    pub fn thread_request_state(&self) -> ThreadRequestState {
+        let extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = crate::runtime::calling_thread_id();
+        ThreadRequestState {
+            thread,
+            request: extensions.request_by_thread.get(&thread).cloned(),
+            own: extensions.by_thread.get(&thread).cloned(),
+        }
+    }
+
+    /// Give the thread of `state` the context of its requests that `state` kept (see
+    /// [`SparkConnectClient::thread_request_state`]), in the place of the one that it has: as a
+    /// binding gives the requests of a call back their context once a call that ran during it,
+    /// such as one of a progress handler or of a finalizer, gave the thread its own. Not a stable
+    /// API.
+    #[doc(hidden)]
+    pub fn restore_thread_request_state(&self, state: ThreadRequestState) {
+        let mut extensions = self
+            .user_context_extensions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let thread = state.thread;
+        // A thread that had an entry is registered still: its registration ends with it.
+        match state.request {
+            Some(request) => {
+                extensions.request_by_thread.insert(thread, request);
+            }
+            None => {
+                extensions.request_by_thread.remove(&thread);
+            }
+        }
+        match state.own {
+            Some(own) => {
+                extensions.by_thread.insert(thread, own);
+            }
+            None => {
+                extensions.by_thread.remove(&thread);
+            }
+        }
     }
 
     /// Make the requests of this client and of its clones carry `session_id`, against which
@@ -1187,8 +1341,26 @@ impl SparkConnectClient {
     /// reference client's `newSession()`, which opens a new session over the same
     /// connection: the new client keeps the deadlines, the hook and whether the executions are
     /// reattachable, and has the default retry policy and result chunking, as PySpark's
-    /// `newSession()` and `clone()` build their client of these only.
+    /// `newSession()` and `clone()` build their client of these only. Its user is the
+    /// `user_id` of the connection, else the user of the requests of this client (see
+    /// [`SparkConnectClient::set_request_user_id`]), as PySpark's new client takes the
+    /// `_user_id` of the client that makes it.
     pub fn with_new_session_id(&self) -> Self {
+        let user_id = self
+            .builder
+            .user_id()
+            .map(String::from)
+            .or_else(|| self.request_user_id());
+        self.with_new_session_id_of_user(user_id)
+    }
+
+    /// As [`SparkConnectClient::with_new_session_id`], of the user `user_id` as it is given, whom
+    /// the requests of the new client and those of its artifacts carry, also when the connection
+    /// has a `user_id`, which PySpark's `SparkConnectClient(connection, user_id=...)` and
+    /// `with_new_session_id` take in its place: the caller decides the user, as a binding does of
+    /// the attributes of PySpark's client. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_new_session_id_of_user(&self, user_id: Option<String>) -> Self {
         let session_id = Uuid::new_v4().to_string();
         // As PySpark's `newSession`, which pops the session ID of a copy of the builder.
         let mut builder = self.builder.clone();
@@ -1200,7 +1372,8 @@ impl SparkConnectClient {
             client_session_id: std::sync::Arc::new(std::sync::RwLock::new(session_id.clone())),
             session_id,
             builder,
-            user_id: self.user_id.clone(),
+            request_user_id: std::sync::Arc::new(std::sync::RwLock::new(user_id.clone())),
+            user_id,
             metadata: self.metadata.clone(),
             headers: self.headers.clone(),
             user_agent: self.user_agent.clone(),
@@ -1215,6 +1388,7 @@ impl SparkConnectClient {
             )),
             execute_plan_hook: std::sync::Arc::clone(&self.execute_plan_hook),
             closed: Default::default(),
+            channel_closed: Default::default(),
             server_session_id: Default::default(),
             session_tracking: self.session_tracking,
             inflight_operations: Default::default(),
@@ -1223,18 +1397,59 @@ impl SparkConnectClient {
     }
 
     /// Close this client, as PySpark's `SparkConnectClient.close` closes its channel: its RPCs
-    /// raise `NO_ACTIVE_SESSION` from now on, and its clones with them. `release_session` is
-    /// still sent, as `stop()` sends it before it closes the client.
+    /// raise `NO_ACTIVE_SESSION` from now on, and its clones with them, but those of the
+    /// artifacts, which raise the `ValueError` of grpc's closed channel, as PySpark's
+    /// ArtifactManager does of its own stub; once the client is open again
+    /// ([`SparkConnectClient::set_closed`]), all of them raise that `ValueError`, as PySpark's do
+    /// then.
     pub fn close(&self) {
+        self.channel_closed
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
-    /// Open this client again, which [`SparkConnectClient::close`] closed, as PySpark's
-    /// `client._closed = False` lets its RPCs be sent again. Not a stable API.
+    /// Mark this client closed, or open, as a set of PySpark's `client._closed`, without closing
+    /// its channel: a closed client raises `NO_ACTIVE_SESSION` for its RPCs but those of the
+    /// artifacts, which PySpark's ArtifactManager sends of its own stub, and an open one sends
+    /// them, unless [`SparkConnectClient::close`] closed its channel. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_closed(&self, closed: bool) {
+        self.closed
+            .store(closed, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Open this client again, as `set_closed(false)`. Not a stable API.
     #[doc(hidden)]
     pub fn reopen(&self) {
-        self.closed
-            .store(false, std::sync::atomic::Ordering::SeqCst);
+        self.set_closed(false);
+    }
+
+    /// The user that the requests of this client and of its clones carry, but those of the
+    /// artifacts, as PySpark's `client._user_id`: the user of the connection, unless
+    /// [`SparkConnectClient::set_request_user_id`] set another, or the one that a binding gave the
+    /// requests of the calling thread ([`SparkConnectClient::set_thread_request_context`]). Not a
+    /// stable API.
+    #[doc(hidden)]
+    pub fn request_user_id(&self) -> Option<String> {
+        if let Some(user_id) = self.thread_request(|request| request.user_id.clone()) {
+            return user_id;
+        }
+        self.request_user_id
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Make the requests of this client and of its clones carry the user `user_id`, or none, as
+    /// a set of PySpark's `client._user_id` does, which its requests read. The requests of the
+    /// artifacts carry the user of the client when it was made, as PySpark's ArtifactManager
+    /// keeps it. Not a stable API.
+    #[doc(hidden)]
+    pub fn set_request_user_id(&self, user_id: Option<String>) {
+        *self
+            .request_user_id
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = user_id;
     }
 
     /// Whether the client is closed. See [`SparkConnectClient::close`].
@@ -1259,7 +1474,8 @@ impl SparkConnectClient {
             .map(|entry| entry.operation_id.clone())
     }
 
-    /// The error of an RPC of a closed client, as PySpark's `SparkConnectClient._stub` raises it.
+    /// The error of a unary RPC of a closed client, as PySpark's `SparkConnectClient._stub` raises
+    /// it, or of one whose channel is closed (see [`SparkConnectClient::close`]).
     #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
     fn ensure_open(&self) -> Result<()> {
         if self.is_closed() {
@@ -1267,6 +1483,38 @@ impl SparkConnectClient {
                 crate::error::SparkErrorKind::Connect,
                 "NO_ACTIVE_SESSION",
                 &[],
+            ));
+        }
+        self.ensure_channel_open()
+    }
+
+    /// As [`SparkConnectClient::ensure_open`], for a server-streaming RPC, `ExecutePlan` and
+    /// `ReattachExecute`, whose call grpc refuses of another message on a closed channel.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn ensure_open_for_stream(&self) -> Result<()> {
+        if self
+            .channel_closed
+            .load(std::sync::atomic::Ordering::SeqCst)
+            && !self.is_closed()
+        {
+            return Err(SparkError::builtin_value_msg(
+                "Cannot invoke RPC: Channel closed!",
+            ));
+        }
+        self.ensure_open()
+    }
+
+    /// The `ValueError` of a unary or a client-streaming RPC on a closed channel, as grpc raises it
+    /// once PySpark's `close` closed it, whether the client is closed or not: the RPCs of the
+    /// artifacts check it only, as PySpark's ArtifactManager calls its own stub.
+    #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
+    fn ensure_channel_open(&self) -> Result<()> {
+        if self
+            .channel_closed
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(SparkError::builtin_value_msg(
+                "Cannot invoke RPC on closed channel!",
             ));
         }
         Ok(())
@@ -1315,9 +1563,11 @@ impl SparkConnectClient {
 
     /// Checks the IDs of a response, as PySpark's `_verify_response_integrity`: the session ID
     /// must be this session's. The first non-empty server-side session ID that a response
-    /// carries is observed; a later one that differs closes the client, as the server restarted,
-    /// and is an error. An empty ID is neither observed nor checked. PySpark keeps an empty
-    /// first ID and then raises for a later non-empty one.
+    /// carries is observed; a later one that differs marks the client closed, as the server
+    /// restarted, and is an error. As PySpark's `_closed = True` of then, the channel stays open,
+    /// so the artifacts are sent and the client sends its requests again once it is open (see
+    /// [`SparkConnectClient::set_closed`]). An empty ID is neither observed nor checked. PySpark
+    /// keeps an empty first ID and then raises for a later non-empty one.
     #[allow(clippy::result_large_err)] // SparkError is large; changing the type would break the API
     fn verify_response(&self, session_id: &str, server_side_session_id: &str) -> Result<()> {
         if !self.session_tracking {
@@ -1342,7 +1592,7 @@ impl SparkConnectClient {
             None => {}
             Some(old) if !server_side_session_id.is_empty() && server_side_session_id != old => {
                 drop(observed);
-                self.close();
+                self.set_closed(true);
                 return Err(assertion_error(format!(
                     "Received incorrect server side session identifier for request. Please \
                      create a new Spark Session to reconnect. ({server_side_session_id} != {old})"
@@ -1353,14 +1603,15 @@ impl SparkConnectClient {
         Ok(())
     }
 
-    /// The gRPC failure of a call of the kind `call` as a [`SparkError`], which closes the client
-    /// when the server reports that the session changed, and disables its plan compression when
-    /// the server cannot parse a plan, as PySpark's `_handle_rpc_error` does.
+    /// The gRPC failure of a call of the kind `call` as a [`SparkError`], which marks the client
+    /// closed when the server reports that the session changed, of an open channel (see
+    /// [`SparkConnectClient::verify_response`]), and disables its plan compression when the server
+    /// cannot parse a plan, as PySpark's `_handle_rpc_error` does.
     fn grpc_error(&self, status: tonic::Status, call: GrpcCall) -> SparkError {
         let error = SparkError::from_grpc_status_of(status, call);
         let condition = error.get_condition();
         if self.session_tracking && condition.as_deref() == Some("INVALID_HANDLE.SESSION_CHANGED") {
-            self.close();
+            self.set_closed(true);
         }
         if condition.as_deref() == Some("CONNECT_INVALID_PLAN.CANNOT_PARSE") {
             *self
@@ -1435,7 +1686,7 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let thread = std::thread::current().id();
+        let thread = crate::runtime::calling_thread_id();
         if !extensions.by_thread.contains_key(&thread) {
             forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
         }
@@ -1466,7 +1717,7 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let thread = std::thread::current().id();
+        let thread = crate::runtime::calling_thread_id();
         if !all.by_thread.contains_key(&thread) {
             forget_when_thread_ends(&self.user_context_extensions, forget_thread_extensions);
         }
@@ -1511,7 +1762,7 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .by_thread
-            .remove(&std::thread::current().id());
+            .remove(&crate::runtime::calling_thread_id());
     }
 
     /// Add `extension` to the user context of the requests of all the threads, and return its
@@ -1544,7 +1795,10 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         if extension_id.starts_with("threadlocal_") {
-            if let Some(own) = extensions.by_thread.get_mut(&std::thread::current().id()) {
+            if let Some(own) = extensions
+                .by_thread
+                .get_mut(&crate::runtime::calling_thread_id())
+            {
                 // As PySpark rebinds the list of the thread, which other threads that share it
                 // keep as it was.
                 let kept = own
@@ -1566,7 +1820,9 @@ impl SparkConnectClient {
             .user_context_extensions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        extensions.by_thread.remove(&std::thread::current().id());
+        extensions
+            .by_thread
+            .remove(&crate::runtime::calling_thread_id());
         extensions.global.clear();
     }
 
@@ -1577,18 +1833,24 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .by_thread
-            .get(&std::thread::current().id())
+            .get(&crate::runtime::calling_thread_id())
             .map(SharedUserContextExtensions::snapshot)
             .unwrap_or_default()
     }
 
     /// The global user context extensions, of their IDs, as PySpark's
-    /// `global_user_context_extensions` of a client.
+    /// `global_user_context_extensions` of a client: those that the requests of the calling
+    /// thread carry, of a binding (see [`SparkConnectClient::set_thread_request_context`]), else
+    /// those of the client.
     pub fn global_user_context_extensions(&self) -> Vec<(String, prost_types::Any)> {
-        self.user_context_extensions
+        let extensions = self
+            .user_context_extensions
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .global
+            .unwrap_or_else(|e| e.into_inner());
+        extensions
+            .request_by_thread
+            .get(&crate::runtime::calling_thread_id())
+            .map_or(&extensions.global, |request| &request.global)
             .clone()
     }
 
@@ -1601,17 +1863,22 @@ impl SparkConnectClient {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         // The thread that calls the API, also when this future is polled on another thread.
+        let caller = crate::runtime::calling_thread_id();
         let own = extensions
             .by_thread
-            .get(&crate::runtime::calling_thread_id())
+            .get(&caller)
             .map(|own| own.0.lock().unwrap_or_else(|e| e.into_inner()));
-        if extensions.global.is_empty() && own.as_ref().is_none_or(|own| own.is_empty()) {
+        // The global extensions that a binding gave the thread, else those of the client.
+        let global = extensions
+            .request_by_thread
+            .get(&caller)
+            .map_or(&extensions.global, |request| &request.global);
+        if global.is_empty() && own.as_ref().is_none_or(|own| own.is_empty()) {
             return;
         }
         let context = context.get_or_insert_with(UserContext::default);
         context.extensions.extend(
-            extensions
-                .global
+            global
                 .iter()
                 .chain(own.iter().flat_map(|own| own.iter()))
                 .map(|(_, extension)| extension.clone()),
@@ -1793,7 +2060,7 @@ impl SparkConnectClient {
         compressed: bool,
     ) -> Result<ExecutePlanRequest> {
         self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open()?;
+        self.ensure_open_for_stream()?;
         add_result_chunking_option(&mut request, self.result_chunking);
         self.session_on(&mut request.session_id);
         // The caller has extended the user context with the extensions of its thread.
@@ -1821,7 +2088,7 @@ impl SparkConnectClient {
         // As PySpark reads its `_stub` once the plan is built and the hooks ran: the lookup of
         // the plan compression of the first plan closes the client when it sees that the server
         // restarted, and then the execution raises NO_ACTIVE_SESSION and sends nothing.
-        self.ensure_open()?;
+        self.ensure_open_for_stream()?;
         Ok(request)
     }
 
@@ -1854,7 +2121,7 @@ impl SparkConnectClient {
     /// and deep plans don't hit the recursion limit - the server sees exactly the bytes
     /// the reference client built.
     pub async fn execute_plan_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
-        self.ensure_open()?;
+        self.ensure_open_for_stream()?;
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
@@ -1873,7 +2140,7 @@ impl SparkConnectClient {
 
     /// ReattachExecute, byte-exact passthrough returning a raw response stream.
     pub async fn reattach_execute_raw(&self, request: Vec<u8>) -> Result<Streaming<Vec<u8>>> {
-        self.ensure_open()?;
+        self.ensure_open_for_stream()?;
         let mut grpc = tonic::client::Grpc::new(self.channel.clone())
             .max_decoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT)
             .max_encoding_message_size(GRPC_MAX_MESSAGE_LENGTH_DEFAULT);
@@ -1898,7 +2165,7 @@ impl SparkConnectClient {
         mut request: ReattachExecuteRequest,
     ) -> Result<Streaming<ExecutePlanResponse>> {
         self.fill_client_type(&mut request.client_type)?;
-        self.ensure_open()?;
+        self.ensure_open_for_stream()?;
         self.fill_user_context(&mut request.user_context);
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let mut req = Request::new(request);
@@ -2012,6 +2279,34 @@ impl SparkConnectClient {
     {
         let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
         self.with_retry_in(&mut retries, GrpcCall::Unary, op).await
+    }
+
+    /// As [`Self::with_retry`], of a call whose failure PySpark's client leaves to grpc, as its
+    /// `clone` does, which does not call `_handle_error`: the failed RPC that ends the attempts is
+    /// the error of its status as it is ([`SparkError::from_grpc_status_of`]), so nothing else is
+    /// requested of the server for it, neither the details of the error nor the configs of its
+    /// stack trace, and it does not close the client.
+    async fn with_retry_unhandled<T, Fut, F>(&self, op: F) -> Result<T>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = std::result::Result<T, tonic::Status>>,
+    {
+        let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
+        match self.retried(&mut retries, op).await {
+            Ok(value) => Ok(value),
+            Err(RetryError::Status(status)) => {
+                Err(SparkError::from_grpc_status_of(status, GrpcCall::Unary))
+            }
+            // As PySpark's `Retrying`, which warns that the retries are spent before it raises.
+            Err(RetryError::Exceeded(status)) => Err(
+                match crate::retries::retries_exceeded(RetriesExceeded::Policy) {
+                    Ok(()) => SparkError::from_grpc_status_of(status, GrpcCall::Unary),
+                    Err(error) => error,
+                },
+            ),
+            Err(RetryError::Aborted(error)) => Err(error),
+            Err(RetryError::WaitAborted) => Err(wait_aborted()),
+        }
     }
 
     /// As [`Self::with_retry`], of a call of the kind `call`, whose attempts are those of
@@ -2348,6 +2643,11 @@ impl SparkConnectClient {
         let Some(server) = &error.server else {
             return error;
         };
+        // The requests of the failure are of the context of the calling thread as it is now, as
+        // PySpark builds them of the attributes of its client then.
+        if let Some(hook) = FAILURE_REQUESTS_HOOK.get() {
+            hook(self);
+        }
         let details = match &server.error_id {
             Some(error_id) => {
                 // PySpark builds the request of the details with its user agent, and fetches
@@ -2370,8 +2670,8 @@ impl SparkConnectClient {
     }
 
     /// The details of the error that the server keeps under `error_id`, or `None` if they
-    /// cannot be fetched, with a request of the client type `client_type`. Mirrors
-    /// `SparkConnectClient._fetch_enriched_error`.
+    /// cannot be fetched, or once a signal interrupted the wait of the caller, with a request of
+    /// the client type `client_type`. Mirrors `SparkConnectClient._fetch_enriched_error`.
     async fn error_details(
         &self,
         error_id: &str,
@@ -2381,8 +2681,8 @@ impl SparkConnectClient {
             session_id: self.client_session_id(),
             error_id: error_id.to_string(),
             client_type: Some(client_type),
-            user_context: self.user_id.as_ref().map(|user_id| UserContext {
-                user_id: user_id.clone(),
+            user_context: self.request_user_id().map(|user_id| UserContext {
+                user_id,
                 ..Default::default()
             }),
             ..Default::default()
@@ -2394,10 +2694,17 @@ impl SparkConnectClient {
         let deadline = self.rpc_deadlines.fetch_error_details;
         let mut req = with_deadline(Request::new(request), deadline);
         self._attach_metadata(&mut req);
-        let response = within_deadline(deadline, self.stub.clone().fetch_error_details(req))
-            .await
-            .ok()?
-            .into_inner();
+        // Not sent once a signal interrupted the wait of the caller, which raises the exception of
+        // the signal: as PySpark's KeyboardInterrupt leaves the failure of the execution that it
+        // interrupts unread, such as the server's cancellation of it. The reads of the configs of
+        // the stack trace end then too (see `conf_while_raising`).
+        let response = crate::runtime::until_abort(
+            crate::runtime::ABORT_RETRIES,
+            within_deadline(deadline, self.stub.clone().fetch_error_details(req)),
+        )
+        .await?
+        .ok()?
+        .into_inner();
         self.verify_response(&response.session_id, &response.server_side_session_id)
             .ok()?;
         Some(response)
@@ -2436,7 +2743,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest {
             session_id: self.client_session_id(),
             user_context: Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
+                user_id: self.request_user_id().unwrap_or_default(),
                 ..Default::default()
             }),
             operation: Some(Operation {
@@ -2548,7 +2855,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2621,7 +2928,7 @@ impl SparkConnectClient {
         let request = ConfigRequest {
             session_id: self.client_session_id(),
             user_context: Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
+                user_id: self.request_user_id().unwrap_or_default(),
                 ..Default::default()
             }),
             operation: Some(spark_connect_proto::config_request::Operation {
@@ -2644,7 +2951,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2688,7 +2995,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2710,7 +3017,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2739,7 +3046,7 @@ impl SparkConnectClient {
         let mut request = ConfigRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
 
@@ -2770,7 +3077,7 @@ impl SparkConnectClient {
         let mut request = InterruptRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // InterruptType::INTERRUPT_TYPE_ALL = 1
@@ -2787,7 +3094,7 @@ impl SparkConnectClient {
         let mut request = InterruptRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // InterruptType::INTERRUPT_TYPE_TAG = 2
@@ -2806,7 +3113,7 @@ impl SparkConnectClient {
         let mut request = InterruptRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // InterruptType::INTERRUPT_TYPE_OPERATION_ID = 3
@@ -2828,23 +3135,47 @@ impl SparkConnectClient {
     /// `SparkConnectClient.clone(new_session_id)`: a `CloneSession` RPC copies the server-side
     /// state of the session, its SQL configurations, temporary views, registered functions
     /// and catalog state, into a new session, of the id `new_session_id` if one is given. The
-    /// returned client, of the same channel, is of that session.
+    /// returned client, of the same channel, is of that session. A failure of the RPC is the error
+    /// of its status as it is, as PySpark's `clone` leaves it to grpc: neither the details of the
+    /// error nor the stack trace of the server are requested for it. As PySpark's, the response is
+    /// not checked against the session of this client: a session ID or a server-side session ID
+    /// of the response that is not that of this client is not an error, and does not close it.
     pub async fn clone_session(&self, new_session_id: Option<&str>) -> Result<Self> {
+        let user_id = self
+            .builder
+            .user_id()
+            .map(String::from)
+            .or_else(|| self.request_user_id());
+        self.clone_session_of_user(new_session_id, user_id).await
+    }
+
+    /// As [`SparkConnectClient::clone_session`], of a client of the user `user_id` as it is given,
+    /// whom its requests and those of its artifacts carry, also when the connection has a
+    /// `user_id`, which `clone_session` takes in its place, as PySpark's `clone` makes its client
+    /// of the connection and `user_id=self._user_id` (see
+    /// [`SparkConnectClient::with_new_session_id_of_user`]). Not a stable API.
+    #[doc(hidden)]
+    pub async fn clone_session_of_user(
+        &self,
+        new_session_id: Option<&str>,
+        user_id: Option<String>,
+    ) -> Result<Self> {
         self.ensure_open()?;
         // As PySpark's request: of the client type "python", not of the user agent, and with
         // no observed server-side session ID.
         let request = CloneSessionRequest {
             session_id: self.client_session_id(),
             user_context: Some(UserContext {
-                user_id: self.user_id.clone().unwrap_or_default(),
+                user_id: self.request_user_id().unwrap_or_default(),
                 ..Default::default()
             }),
             client_type: Some("python".to_string()),
             new_session_id: new_session_id.map(str::to_string),
             ..Default::default()
         };
+        // PySpark's `clone` leaves the failure of the call to grpc.
         let response = self
-            .with_retry(|| {
+            .with_retry_unhandled(|| {
                 let deadline = self.rpc_deadlines.clone_session;
                 let mut req = with_deadline(Request::new(request.clone()), deadline);
                 self._attach_metadata(&mut req);
@@ -2856,7 +3187,8 @@ impl SparkConnectClient {
                 }
             })
             .await?;
-        self.verify_response(&response.session_id, &response.server_side_session_id)?;
+        // As PySpark's `clone`, which does not check the IDs of its response: neither its session
+        // ID nor its server-side session ID, which the client does not observe either.
         if let Some(requested) = new_session_id {
             if response.new_session_id != requested {
                 return Err(SparkError::connect_msg(format!(
@@ -2865,7 +3197,7 @@ impl SparkConnectClient {
                 )));
             }
         }
-        let mut cloned = self.with_new_session_id();
+        let mut cloned = self.with_new_session_id_of_user(user_id);
         // As PySpark's `clone`, which sets the new session ID in a copy of the builder.
         cloned
             .builder
@@ -2885,11 +3217,14 @@ impl SparkConnectClient {
         let mut request = ReleaseSessionRequest::default();
         request.session_id = self.client_session_id();
         request.user_context = Some(UserContext {
-            user_id: self.user_id.clone().unwrap_or_default(),
+            user_id: self.request_user_id().unwrap_or_default(),
             ..Default::default()
         });
         // The error of the user agent is that of the release, which PySpark's `stop()` logs.
         request.client_type = Some(self.client_type()?);
+        // As PySpark's `_stub`, read once the request is built: NO_ACTIVE_SESSION once the client is
+        // closed, and the error of a closed channel once it is open again.
+        self.ensure_open()?;
 
         let response = self
             .with_retry(|| {
@@ -2919,9 +3254,9 @@ impl SparkConnectClient {
         self.ensure_open()?;
         request.session_id = self.client_session_id();
         request.client_type = Some(self.client_type()?);
-        if let Some(user_id) = self.user_id.as_ref().filter(|user_id| !user_id.is_empty()) {
+        if let Some(user_id) = self.request_user_id().filter(|user_id| !user_id.is_empty()) {
             request.user_context = Some(UserContext {
-                user_id: user_id.clone(),
+                user_id,
                 ..Default::default()
             });
         }
@@ -2957,7 +3292,7 @@ impl SparkConnectClient {
         archive: bool,
         file: bool,
     ) -> Result<()> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         // Each path is named as PySpark's ArtifactManager names it, by the flags and its file
         // extension (see `parse_artifact`).
         for path in paths {
@@ -2975,7 +3310,7 @@ impl SparkConnectClient {
     /// Used by `SparkSession::copy_from_local_to_fs`, which names the artifact
     /// `forward_to_fs/<dest>` so the server writes it to the target filesystem path.
     pub async fn add_named_artifact(&self, name: &str, local_path: &str) -> Result<()> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         let artifact =
             NamedArtifact::new(name.to_string(), Box::new(FileArtifact::new(local_path)));
         self.upload_artifact(&artifact).await
@@ -2987,7 +3322,7 @@ impl SparkConnectClient {
     /// As `SparkConnectClient.cache_artifacts`, the status check and the upload are one
     /// attempt under the retry policy, so a transient failure of either retries both.
     pub async fn cache_artifacts(&self, blobs: Vec<Vec<u8>>) -> Result<Vec<String>> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         use bytes::Bytes;
         use std::collections::HashSet;
 
@@ -3038,17 +3373,17 @@ impl SparkConnectClient {
     }
 
     /// The identity of a typed request that the caller built: adds the user context when it
-    /// is missing, and takes a missing user ID from the connection (`user_id` of the
-    /// channel), as the reference client sets `user_context.user_id` on the requests it
-    /// builds. The server keys a session by the user ID of each request, so without it the
-    /// request would reach another session than the RPCs this client builds itself. An
-    /// explicit user ID, the user name and the extensions are kept; raw requests are sent
-    /// as given.
+    /// is missing, and takes a missing user ID from the user of the requests (the `user_id` of
+    /// the channel, unless [`SparkConnectClient::set_request_user_id`] set another), as the
+    /// reference client sets `user_context.user_id` on the requests it builds of its `_user_id`.
+    /// The server keys a session by the user ID of each request, so without it the request
+    /// would reach another session than the RPCs this client builds itself. An explicit user
+    /// ID, the user name and the extensions are kept; raw requests are sent as given.
     fn fill_user_context(&self, context: &mut Option<UserContext>) {
-        let context = context.get_or_insert_with(|| self.new_user_context());
+        let context = context.get_or_insert_with(UserContext::default);
         if context.user_id.is_empty() {
-            if let Some(user_id) = &self.user_id {
-                context.user_id.clone_from(user_id);
+            if let Some(user_id) = self.request_user_id() {
+                context.user_id = user_id;
             }
         }
     }
@@ -3142,7 +3477,7 @@ impl SparkConnectClient {
         &self,
         names: &[&str],
     ) -> Result<std::collections::HashMap<String, bool>> {
-        self.ensure_open()?;
+        self.ensure_channel_open()?;
         let names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
         match self.artifact_status_rpc(&names).await {
             // The IDs of the response are not checked, as by PySpark's ArtifactManager.
@@ -3429,7 +3764,12 @@ impl SparkConnectClient {
     /// client is closed. Not a stable API.
     #[doc(hidden)]
     pub fn spawn_unary_execute_plan(&self, mut request: ExecutePlanRequest) {
-        if self.is_closed() {
+        // Neither is sent of a closed channel, whose call PySpark's finalizer would fail.
+        if self.is_closed()
+            || self
+                .channel_closed
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
             return;
         }
         add_result_chunking_option(&mut request, self.result_chunking);
@@ -5209,18 +5549,285 @@ mod tests {
 
     #[test]
     fn a_closed_client_reopens_and_the_status_rpc_has_a_deadline() {
-        // As PySpark's `client._closed = False`, which sends the requests again, and its
-        // `RpcDeadlines.get_status`, of 10 minutes, and none when the deadlines are disabled.
+        // As PySpark's `client._closed`, which a set to True closes and a set to False opens, so
+        // the requests are sent again, and its `RpcDeadlines.get_status`, of 10 minutes, and none
+        // when the deadlines are disabled. The artifacts are sent while it is closed, as PySpark's
+        // ArtifactManager sends them of a stub of its own.
         let client = connect_blocking("sc://localhost");
-        client.close();
+        client.set_closed(true);
         assert!(client.is_closed() && client.ensure_open().is_err());
+        assert!(client.ensure_channel_open().is_ok());
         client.clone().reopen();
         assert!(!client.is_closed() && client.ensure_open().is_ok());
+        assert!(client.ensure_open_for_stream().is_ok());
         assert_eq!(
             RpcDeadlines::default().get_status,
             Some(Duration::from_secs(600))
         );
         assert_eq!(RpcDeadlines::disabled().get_status, None);
+    }
+
+    #[test]
+    fn a_client_that_close_closed_fails_with_the_error_of_a_closed_channel_when_open() {
+        // As PySpark's `close`, which closes its gRPC channel: its RPCs raise NO_ACTIVE_SESSION
+        // while the client is closed, and grpc's ValueError of a closed channel once it is open
+        // again, of the message of a server-streaming call and of that of the others, which the
+        // artifacts raise whether it is closed or not. A client of a new session is open.
+        let client = connect_blocking("sc://localhost");
+        client.close();
+        let closed = client.ensure_open().unwrap_err();
+        assert_eq!(closed.error_class, "NO_ACTIVE_SESSION");
+        assert_eq!(
+            client.ensure_open_for_stream().unwrap_err().error_class,
+            "NO_ACTIVE_SESSION"
+        );
+        let unary = "Cannot invoke RPC on closed channel!";
+        let artifacts = client.ensure_channel_open().unwrap_err();
+        assert_eq!(
+            artifacts.kind,
+            crate::error::SparkErrorKind::BuiltinValueError
+        );
+        assert_eq!(artifacts.message(), unary);
+        client.reopen();
+        assert_eq!(client.ensure_open().unwrap_err().message(), unary);
+        let streaming = client.ensure_open_for_stream().unwrap_err();
+        assert_eq!(
+            streaming.kind,
+            crate::error::SparkErrorKind::BuiltinValueError
+        );
+        assert_eq!(streaming.message(), "Cannot invoke RPC: Channel closed!");
+        let new = client.with_new_session_id();
+        assert!(new.ensure_open().is_ok() && new.ensure_channel_open().is_ok());
+    }
+
+    #[test]
+    fn a_session_change_marks_the_client_closed_of_an_open_channel() {
+        // As PySpark's `_closed = True` of a response of another server-side session, and of
+        // INVALID_HANDLE.SESSION_CHANGED: the channel stays open, so the artifacts are sent, and
+        // the client sends its requests again once it is open.
+        let client = connect_blocking("sc://localhost");
+        assert!(client.verify_response("", "server-a").is_ok());
+        assert!(client.verify_response("", "server-b").is_err());
+        assert!(client.is_closed() && client.ensure_open().is_err());
+        assert!(client.ensure_channel_open().is_ok());
+        client.reopen();
+        assert!(client.ensure_open().is_ok() && client.ensure_open_for_stream().is_ok());
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct ErrorInfo {
+            #[prost(string, tag = "1")]
+            reason: String,
+            #[prost(map = "string, string", tag = "3")]
+            metadata: std::collections::HashMap<String, String>,
+        }
+        #[derive(Clone, PartialEq, prost::Message)]
+        struct RpcStatus {
+            #[prost(message, repeated, tag = "3")]
+            details: Vec<prost_types::Any>,
+        }
+        let info = ErrorInfo {
+            reason: "org.apache.spark.SparkSQLException".into(),
+            metadata: [(
+                "errorClass".to_string(),
+                "INVALID_HANDLE.SESSION_CHANGED".to_string(),
+            )]
+            .into(),
+        };
+        let details = RpcStatus {
+            details: vec![prost_types::Any {
+                type_url: "type.googleapis.com/google.rpc.ErrorInfo".into(),
+                value: info.encode_to_vec(),
+            }],
+        };
+        let status = tonic::Status::with_details(
+            tonic::Code::Internal,
+            "[INVALID_HANDLE.SESSION_CHANGED] changed",
+            details.encode_to_vec().into(),
+        );
+        let _ = client.grpc_error(status, GrpcCall::Unary);
+        assert!(client.is_closed() && client.ensure_channel_open().is_ok());
+        client.reopen();
+        assert!(client.ensure_open().is_ok());
+    }
+
+    #[test]
+    fn the_request_context_of_a_thread_is_its_own() {
+        // As the attributes of the client that a thread of the binding calls: the session ID, the
+        // user and the global extensions that a thread was given are those of its requests, and
+        // the other threads keep those of the client, until the thread ends.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let shared = client.client_session_id();
+        let global = prost_types::Any {
+            type_url: "type.googleapis.com/g".to_string(),
+            value: vec![],
+        };
+        client.set_thread_request_context(
+            "thread-session".to_string(),
+            Some("bob".to_string()),
+            vec![(String::new(), global.clone())],
+        );
+        assert_eq!(client.client_session_id(), "thread-session");
+        assert_eq!(client.request_user_id().as_deref(), Some("bob"));
+        assert_eq!(client.global_user_context_extensions().len(), 1);
+        let mut context = None;
+        client.extend_user_context(&mut context);
+        assert_eq!(context.unwrap().extensions, vec![global]);
+        let other = client.clone();
+        let seen = std::thread::spawn(move || {
+            (
+                other.client_session_id(),
+                other.request_user_id(),
+                other.global_user_context_extensions().len(),
+            )
+        })
+        .join()
+        .unwrap();
+        assert_eq!(seen, (shared, Some("alice".to_string()), 0));
+        assert_eq!(
+            client
+                .with_new_session_id_of_user(Some("carol".to_string()))
+                .user_id(),
+            Some("carol")
+        );
+        let other = client.clone();
+        std::thread::spawn(move || {
+            other.set_thread_request_context("gone".to_string(), None, vec![]);
+        })
+        .join()
+        .unwrap();
+        let contexts = client
+            .user_context_extensions
+            .lock()
+            .unwrap()
+            .request_by_thread
+            .len();
+        assert_eq!(contexts, 1);
+    }
+
+    #[test]
+    fn the_request_context_that_a_future_of_a_call_sets_is_the_callers() {
+        // A future of a call that runs on another thread, inside a `current_thread` runtime, is of
+        // the thread that calls: the request context and the user context extensions that it
+        // gives the thread are those that the requests of that thread read, on it as in the
+        // future, and they are forgotten when that thread ends.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let other = client.clone();
+        std::thread::spawn(move || {
+            let own = prost_types::Any {
+                type_url: "type.googleapis.com/own".to_string(),
+                value: vec![],
+            };
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let in_the_future = runtime.block_on(async {
+                crate::runtime::block_on(async {
+                    other.set_thread_request_context(
+                        "caller-session".to_string(),
+                        Some("bob".to_string()),
+                        vec![],
+                    );
+                    other.share_threadlocal_user_context_extensions(
+                        &SharedUserContextExtensions::new(vec![(
+                            "threadlocal_own".to_string(),
+                            own.clone(),
+                        )]),
+                    );
+                    (
+                        std::thread::current().id(),
+                        other.client_session_id(),
+                        other.threadlocal_user_context_extensions().len(),
+                    )
+                })
+            });
+            assert_ne!(in_the_future.0, std::thread::current().id());
+            assert_eq!(in_the_future.1, "caller-session");
+            assert_eq!(in_the_future.2, 1);
+            assert_eq!(other.client_session_id(), "caller-session");
+            assert_eq!(other.request_user_id().as_deref(), Some("bob"));
+            let mut context = None;
+            other.extend_user_context(&mut context);
+            assert_eq!(context.unwrap().extensions, vec![own]);
+        })
+        .join()
+        .unwrap();
+        let extensions = client.user_context_extensions.lock().unwrap();
+        assert!(extensions.request_by_thread.is_empty());
+        assert!(extensions.by_thread.is_empty());
+    }
+
+    #[test]
+    fn a_kept_request_state_of_a_thread_is_given_back() {
+        // As a binding keeps the context of the requests of a call around a call that runs during
+        // it, such as one of a progress handler.
+        let client = connect_blocking("sc://localhost/;user_id=alice");
+        let any = |name: &str| prost_types::Any {
+            type_url: format!("type.googleapis.com/{name}"),
+            value: vec![],
+        };
+        client.set_thread_request_context(
+            "outer".to_string(),
+            None,
+            vec![("global_outer".to_string(), any("outer"))],
+        );
+        let own = SharedUserContextExtensions::new(vec![("threadlocal_o".to_string(), any("o"))]);
+        client.share_threadlocal_user_context_extensions(&own);
+        let kept = client.thread_request_state();
+        client.set_thread_request_context("inner".to_string(), Some("bob".to_string()), vec![]);
+        client.clear_threadlocal_user_context_extensions();
+        assert_eq!(client.client_session_id(), "inner");
+        client.restore_thread_request_state(kept);
+        assert_eq!(client.client_session_id(), "outer");
+        assert_eq!(client.request_user_id(), None);
+        let mut context = None;
+        client.extend_user_context(&mut context);
+        assert_eq!(context.unwrap().extensions, vec![any("outer"), any("o")]);
+        // The list of the thread is the one that it shared, of the changes of the others.
+        own.replace(vec![]);
+        assert!(client.threadlocal_user_context_extensions().is_empty());
+        // A thread that had none has none again.
+        let kept = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let kept = client.thread_request_state();
+                    client.set_thread_request_context("other".to_string(), None, vec![]);
+                    client.restore_thread_request_state(kept);
+                    client.client_session_id()
+                })
+                .join()
+                .unwrap()
+        });
+        assert_eq!(kept, client.session_id());
+    }
+
+    #[test]
+    fn the_user_of_the_requests_is_set_apart_from_that_of_the_artifacts() {
+        // As PySpark's `client._user_id`, an attribute that its requests read, while its
+        // ArtifactManager keeps the user that the client was made with; the clients of new
+        // sessions take the user of the requests, unless the connection has one.
+        let client = connect_blocking("sc://localhost");
+        let original = client.user_id().map(String::from);
+        assert_eq!(client.request_user_id(), original);
+        client.clone().set_request_user_id(Some("bob".to_string()));
+        assert_eq!(client.request_user_id().as_deref(), Some("bob"));
+        assert_eq!(client.user_id().map(String::from), original);
+        assert_eq!(
+            client.new_user_context().user_id,
+            original.clone().unwrap_or_default()
+        );
+        let mut context = None;
+        client.fill_user_context(&mut context);
+        assert_eq!(context.unwrap().user_id, "bob");
+        let new = client.with_new_session_id();
+        assert_eq!(new.user_id(), Some("bob"));
+        assert_eq!(new.request_user_id().as_deref(), Some("bob"));
+        let named = connect_blocking("sc://localhost/;user_id=alice");
+        named.set_request_user_id(Some("bob".to_string()));
+        assert_eq!(named.with_new_session_id().user_id(), Some("alice"));
+        named.set_request_user_id(None);
+        let mut context = None;
+        named.fill_user_context(&mut context);
+        assert_eq!(context.unwrap().user_id, "");
     }
 
     #[test]

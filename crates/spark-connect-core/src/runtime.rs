@@ -71,7 +71,10 @@ pub enum Watch {
     /// Keep waiting for the server.
     Continue,
     /// Interrupt the execution that the wait is for, by this future, which the wait drives to its
-    /// end. The wait then ends with the server's cancellation of the execution.
+    /// end. The wait then ends with the server's cancellation of the execution. The future runs
+    /// on the threads of the runtime, as the calls of the thread that waits ([`calling_thread_id`]
+    /// is that thread while it is polled), so that its requests carry the state that the client
+    /// keeps for that thread, as PySpark's interrupt is sent from the thread of the execution.
     Interrupt(Pin<Box<dyn Future<Output = ()> + Send>>),
     /// Stop waiting, when no execution is in flight to interrupt. A wait of
     /// [`block_on_abortable`] ends at once, without the output of its future; any other wait
@@ -290,7 +293,7 @@ async fn watched_abortable<F: Future>(
                 Watch::Interrupt(sent) => {
                     abort.send_replace(ABORT_RETRIES);
                     if interrupt.is_none() {
-                        interrupt = Some(tokio::spawn(sent));
+                        interrupt = Some(tokio::spawn(acting_for(calling_thread_id(), sent)));
                     }
                 }
                 Watch::Continue => {}
@@ -359,7 +362,7 @@ async fn watched<F: Future>(
                 Watch::Interrupt(sent) => {
                     abort.send_replace(ABORT_RETRIES);
                     if interrupt.is_none() {
-                        interrupt = Some(tokio::spawn(sent));
+                        interrupt = Some(tokio::spawn(acting_for(calling_thread_id(), sent)));
                     }
                 }
                 Watch::Abort => {
@@ -376,24 +379,30 @@ async fn watched<F: Future>(
 /// block in place and cannot start another runtime.
 ///
 /// The future is polled on the other thread, so the state that the client keeps per thread is
-/// that of the caller: [`calling_thread_id`] is the caller's ID there, and the callback depth
-/// and the recursion failure of the caller carry over, then back, so a call made from inside a
+/// that of the caller: [`calling_thread_id`] is the caller's ID there, the entries that it makes
+/// of that state end with the caller (see [`crate::thread_entries`]), and the callback depth and
+/// the recursion failure of the caller carry over, then back, so a call made from inside a
 /// callback bounds its recursion as on the caller's own thread.
 fn block_on_other_thread<F>(f: F) -> F::Output
 where
     F: std::future::Future + Send,
     F::Output: Send,
 {
-    let caller = std::thread::current().id();
+    // The thread that this one acts for, if it runs a future for another.
+    let caller = calling_thread_id();
     let depth = CALLBACK_DEPTH.with(std::cell::Cell::get);
     let recursion_failed = CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get);
-    let (output, recursion_failed) = std::thread::scope(|scope| {
+    let (output, recursion_failed, registrations) = std::thread::scope(|scope| {
         let worker = scope.spawn(move || {
             CALLER_THREAD.with(|caller_thread| caller_thread.set(Some(caller)));
             CALLBACK_DEPTH.with(|d| d.set(depth));
             CALLBACK_RECURSION_FAILED.with(|failed| failed.set(recursion_failed));
             let output = get_runtime().block_on(f);
-            (output, CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get))
+            (
+                output,
+                CALLBACK_RECURSION_FAILED.with(std::cell::Cell::get),
+                crate::thread_entries::take_registrations_for_caller(),
+            )
         });
         match worker.join() {
             Ok(result) => result,
@@ -401,7 +410,34 @@ where
         }
     });
     CALLBACK_RECURSION_FAILED.with(|failed| failed.set(recursion_failed));
+    // The entries that the future made of the per-thread state of the caller end with it.
+    crate::thread_entries::adopt_registrations(registrations);
     output
+}
+
+/// `f`, polled as the calls of the thread `caller` are, on whichever thread of the runtime polls
+/// it: [`calling_thread_id`] is `caller` during each of its polls, as for a future of a call of
+/// that thread, such as the interrupt of the execution that it waits for (see
+/// [`Watch::Interrupt`]), which reads the per-thread state of the client and makes none of it.
+fn acting_for<F: Future>(caller: std::thread::ThreadId, f: F) -> impl Future<Output = F::Output> {
+    struct Restore(Option<std::thread::ThreadId>);
+
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            let previous = self.0;
+            CALLER_THREAD.with(|caller_thread| caller_thread.set(previous));
+            // A thread of the runtime cannot hand `caller` the registration of an entry of its
+            // state that the future made, which is not kept on this thread either.
+            drop(crate::thread_entries::take_registrations_for_caller());
+        }
+    }
+
+    let mut f = Box::pin(f);
+    std::future::poll_fn(move |cx| {
+        let previous = CALLER_THREAD.with(|caller_thread| caller_thread.replace(Some(caller)));
+        let _restore = Restore(previous);
+        f.as_mut().poll(cx)
+    })
 }
 
 thread_local! {
@@ -594,6 +630,55 @@ mod tests {
         });
         assert_eq!(output, 9);
         assert!(interrupted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_the_interrupt_of_a_watch_runs_as_a_call_of_the_thread_that_waits() {
+        // The interrupt runs on a thread of the runtime, as the calls of the thread that waits,
+        // whose per-thread state its requests carry, in a wait of `block_on` and of
+        // `block_on_abortable` alike, and then no longer on that thread of the runtime.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        type Seen =
+            Arc<std::sync::Mutex<Vec<(std::thread::ThreadId, std::thread::ThreadId, bool)>>>;
+        fn watch_recording(seen: &Seen) -> Arc<WaitWatch> {
+            let fired = AtomicBool::new(false);
+            let seen = Arc::clone(seen);
+            Arc::new(move || {
+                if fired.swap(true, Ordering::SeqCst) {
+                    return Watch::Continue;
+                }
+                let seen = Arc::clone(&seen);
+                Watch::Interrupt(Box::pin(async move {
+                    let acting_for = calling_thread_id();
+                    let polled_on = std::thread::current().id();
+                    // A task of the runtime that the interrupt waits for acts for its own thread.
+                    let after =
+                        tokio::spawn(async { calling_thread_id() == std::thread::current().id() })
+                            .await
+                            .unwrap_or(false);
+                    seen.lock().unwrap().push((acting_for, polled_on, after));
+                }))
+            })
+        }
+        let seen: Seen = Arc::default();
+        let waiter = std::thread::current().id();
+        with_wait_watch(watch_recording(&seen), || {
+            block_on(async { tokio::time::sleep(POLL_INTERVAL * 3).await })
+        });
+        let output = with_wait_watch(watch_recording(&seen), || {
+            block_on_abortable(async {
+                tokio::time::sleep(POLL_INTERVAL * 3).await;
+                5
+            })
+        });
+        assert_eq!(output, Some(5));
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for (acting_for, polled_on, after) in seen.iter() {
+            assert_eq!(*acting_for, waiter);
+            assert_ne!(*polled_on, waiter);
+            assert!(after);
+        }
     }
 
     #[test]

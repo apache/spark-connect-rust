@@ -2,7 +2,7 @@
 
 use pyo3::prelude::*;
 use spark_connect::conf::RuntimeConf;
-use spark_connect::session::SparkSession;
+use spark_connect::session::{SparkSession, WeakSparkSession};
 
 use crate::interrupt::interruptible;
 
@@ -15,17 +15,36 @@ use crate::interrupt::interruptible;
     dict
 )]
 pub struct PyRuntimeConf {
-    conf: RuntimeConf,
-    /// The session of the configuration, whose executions a signal of the process interrupts
-    /// while a call of the configuration waits for the server.
-    session: SparkSession,
+    /// The session of the configuration, held weakly, as PySpark's `RuntimeConf` holds the
+    /// client of its session and not the session object: once the program dropped the session,
+    /// whose `__del__` closes its client in PySpark, the requests of the configuration raise
+    /// `NO_ACTIVE_SESSION`.
+    session: WeakSparkSession,
 }
 
 impl PyRuntimeConf {
-    pub fn new(session: SparkSession) -> Self {
+    pub fn new(session: &SparkSession) -> Self {
         PyRuntimeConf {
-            conf: session.conf(),
-            session,
+            session: session.downgrade(),
+        }
+    }
+
+    /// The session of the configuration, whose executions a signal of the process interrupts
+    /// while a call of the configuration waits for the server, and its runtime configuration;
+    /// once the session is dropped, the `NO_ACTIVE_SESSION` of PySpark's closed client.
+    fn live(&self) -> PyResult<(SparkSession, RuntimeConf)> {
+        match self.session.upgrade() {
+            Some(session) => {
+                let conf = session.conf();
+                Ok((session, conf))
+            }
+            None => Err(crate::errors::spark_error_to_py_exception(
+                spark_connect_core::error::SparkError::classed(
+                    spark_connect_core::error::SparkErrorKind::Connect,
+                    "NO_ACTIVE_SESSION",
+                    &[],
+                ),
+            )),
         }
     }
 }
@@ -94,7 +113,12 @@ impl PyRuntimeConf {
     /// session, with the instance attributes of this one.
     fn __copy__(slf: &Bound<'_, Self>) -> PyResult<Py<Self>> {
         let py = slf.py();
-        let copy = Py::new(py, PyRuntimeConf::new(slf.borrow().session.clone()))?;
+        let copy = Py::new(
+            py,
+            PyRuntimeConf {
+                session: slf.borrow().session.clone(),
+            },
+        )?;
         crate::reduce::copy_instance_dict(slf.as_any(), copy.bind(py).as_any())?;
         Ok(copy)
     }
@@ -123,9 +147,9 @@ impl PyRuntimeConf {
             crate::str_argument(key)?
         };
         let value = conf_value(value)?;
-        let warnings = interruptible(py, &self.session, || {
-            self.conf
-                .set_pairs(&[(key.as_str(), value.as_deref())], None)
+        let (session, conf) = self.live()?;
+        let warnings = interruptible(py, &session, || {
+            conf.set_pairs(&[(key.as_str(), value.as_deref())], None)
                 .map_err(Box::new)
         })?;
         // Of PySpark's `RuntimeConf.set`.
@@ -153,14 +177,15 @@ impl PyRuntimeConf {
                 } else {
                     Some(checked_str(default, "default")?)
                 };
-                interruptible(py, &self.session, || {
-                    self.conf
-                        .get_with_default(&key, default.as_deref())
+                let (session, conf) = self.live()?;
+                interruptible(py, &session, || {
+                    conf.get_with_default(&key, default.as_deref())
                         .map_err(Box::new)
                 })
             }
             ConfDefault::Omitted => {
-                interruptible(py, &self.session, || self.conf.get(&key).map_err(Box::new))
+                let (session, conf) = self.live()?;
+                interruptible(py, &session, || conf.get(&key).map_err(Box::new))
             }
         }
     }
@@ -170,9 +195,8 @@ impl PyRuntimeConf {
     #[doc = connect_doc!(RuntimeConf.unset)]
     fn unset(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<()> {
         let key = crate::str_argument(key)?;
-        let warnings = interruptible(py, &self.session, || {
-            self.conf.unset(&key).map_err(Box::new)
-        })?;
+        let (session, conf) = self.live()?;
+        let warnings = interruptible(py, &session, || conf.unset(&key).map_err(Box::new))?;
         // Of PySpark's `RuntimeConf.unset`.
         warn_all(py, 100, &warnings)
     }
@@ -182,9 +206,10 @@ impl PyRuntimeConf {
     /// `SparkConnectClient.get_configs`, which `SparkConnectClient` of the connect import path
     /// gives.
     fn _get_many(&self, py: Python<'_>, keys: Vec<String>) -> PyResult<Vec<Option<String>>> {
-        interruptible(py, &self.session, || {
+        let (session, conf) = self.live()?;
+        interruptible(py, &session, || {
             let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-            self.conf.get_many(&keys).map_err(Box::new)
+            conf.get_many(&keys).map_err(Box::new)
         })
     }
 
@@ -195,12 +220,13 @@ impl PyRuntimeConf {
         py: Python<'_>,
         pairs: Vec<(String, Option<String>)>,
     ) -> PyResult<Vec<Option<String>>> {
-        interruptible(py, &self.session, || {
+        let (session, conf) = self.live()?;
+        interruptible(py, &session, || {
             let pairs: Vec<(&str, Option<&str>)> = pairs
                 .iter()
                 .map(|(key, default)| (key.as_str(), default.as_deref()))
                 .collect();
-            self.conf.get_with_defaults(&pairs).map_err(Box::new)
+            conf.get_with_defaults(&pairs).map_err(Box::new)
         })
     }
 
@@ -208,16 +234,16 @@ impl PyRuntimeConf {
     #[doc = connect_doc!(RuntimeConf.isModifiable)]
     fn is_modifiable(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<bool> {
         let key = crate::str_argument(key)?;
-        interruptible(py, &self.session, || {
-            self.conf.is_modifiable(&key).map_err(Box::new)
-        })
+        let (session, conf) = self.live()?;
+        interruptible(py, &session, || conf.is_modifiable(&key).map_err(Box::new))
     }
 
     // All configuration values as a dict. Mirrors the `RuntimeConf.getAll` property.
     #[getter(getAll)]
     #[doc = connect_doc!(RuntimeConf.getAll)]
     fn get_all<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
-        let all = interruptible(py, &self.session, || self.conf.get_all().map_err(Box::new))?;
+        let (session, conf) = self.live()?;
+        let all = interruptible(py, &session, || conf.get_all().map_err(Box::new))?;
         let dict = pyo3::types::PyDict::new(py);
         for (k, v) in all {
             dict.set_item(k, v)?;

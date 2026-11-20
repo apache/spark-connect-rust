@@ -423,11 +423,13 @@ impl PySparkSessionBuilder {
         })
     }
 
-    /// `channelBuilder` - accept a Spark Connect ChannelBuilder and reconstruct an
-    /// `sc://` connection URL from its endpoint (host/port) and connection params, then
-    /// use it as the native-transport remote. Mirrors `SparkSession.Builder.channelBuilder`
-    /// (custom gRPC channels/interceptors themselves are a Python-transport concept and
-    /// do not apply to the native Rust transport, but the endpoint + params are honored).
+    /// `channelBuilder` - the channel builder that the session connects with, of any object, as
+    /// PySpark's `SparkSession.Builder.channelBuilder` keeps it: the session that the builder
+    /// creates is of the `sc://` URL of its endpoint (host and port) and its connection
+    /// parameters, read then, and raises the errors of PySpark's client for an object that is not
+    /// one (see `url_of_channel_builder`). Custom gRPC channels and interceptors are a concept of
+    /// the Python transport and do not apply to the native Rust transport, but the endpoint and
+    /// the parameters do.
     #[pyo3(name = "channelBuilder")]
     #[allow(non_snake_case)]
     fn channel_builder<'py>(
@@ -435,9 +437,6 @@ impl PySparkSessionBuilder {
         channelBuilder: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         with_builder_lock(slf, || {
-            // A builder without an endpoint is an error here, not when the session is created;
-            // the URL itself is read then, with the parameters of the builder as they are by then.
-            url_of_channel_builder(channelBuilder)?;
             let replaced = slf
                 .borrow_mut()
                 .channel_builder
@@ -497,11 +496,23 @@ impl PySparkSessionBuilder {
     /// hooks of its factories before it holds `SparkSession._lock` to make it the default.
     fn create(slf: &Bound<'_, Self>) -> PyResult<Py<PySparkSession>> {
         let py = slf.py();
-        let (url, factories) = {
+        let (url, factories, channel_builder) = {
             let this = slf.borrow();
-            (this.connection_url(py)?, this.factories(py))
+            let channel_builder = this
+                .channel_builder
+                .as_ref()
+                .map(|channel_builder| channel_builder.clone_ref(py));
+            (
+                this.connection_url(py)?,
+                this.factories(py),
+                channel_builder,
+            )
         };
         let session = new_session(py, &url)?;
+        if let Some(channel_builder) = channel_builder {
+            // As PySpark's session of a channel builder, whose client's `_builder` it is.
+            init_client_state(py, session.bind(py), channel_builder.bind(py), None)?;
+        }
         install_hook_factories(py, &factories, &session)?;
         set_default_and_active(py, &session)?;
         Self::apply_options(slf, &session.borrow(py).session)?;
@@ -616,25 +627,35 @@ impl PySparkSessionBuilder {
     }
 }
 
-/// The `sc://` URL of the channel builder `channel_builder`, which has the `host` and the `port`
+/// The `sc://` URL of the channel builder of `connection`, which has the `host` and the `port`
 /// of its endpoint and the `_params` of its connection, as PySpark's `ChannelBuilder` does. Its
-/// parameters are percent-encoded, as the URL parser of the transport decodes them.
-pub(crate) fn url_of_channel_builder(channel_builder: &Bound<'_, PyAny>) -> PyResult<String> {
-    // Endpoint: the builder's host and port, which DefaultChannelBuilder exposes.
-    let host: String = channel_builder
-        .getattr("host")
-        .and_then(|h| h.extract::<String>())
-        .map_err(|_| {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                "channelBuilder must expose a `host` (e.g. DefaultChannelBuilder); \
-                 otherwise configure the endpoint via .remote(url)",
-            )
-        })?;
-    let port: i64 = channel_builder
-        .getattr("port")
-        .and_then(|p| p.extract::<i64>())
-        .unwrap_or(15002);
-    let mut url = format!("sc://{host}:{port}");
+/// parameters are percent-encoded, as the URL parser of the transport decodes them. As PySpark's
+/// client, the channel builder of an object that is not one is `DefaultChannelBuilder(connection)`,
+/// whose errors are raised, such as the `TypeError` of the slicing of an object that is not a
+/// str, and its session ID, its user and its channel are read first, so that a builder of no
+/// `toChannel` raises its error (see `pyspark.sql.connect.client._checked_channel_builder`).
+pub(crate) fn url_of_channel_builder(connection: &Bound<'_, PyAny>) -> PyResult<String> {
+    let channel_builder = connection
+        .py()
+        .import("pyspark.sql.connect.client")?
+        .getattr("_checked_channel_builder")?
+        .call1((connection,))?;
+    // Endpoint: the builder's host and port, which DefaultChannelBuilder exposes, of the error of
+    // the `host` of a builder that has none, as PySpark's raises it. A builder of its own of no
+    // port, whose `toChannel` PySpark connects through, is of its `endpoint`, the `host:port` of
+    // DefaultChannelBuilder, if it has one, else of the port of Spark Connect.
+    let host: String = channel_builder.getattr("host")?.extract()?;
+    let endpoint = match channel_builder.getattr("port") {
+        Ok(port) => format!("{host}:{}", port.extract::<i64>().unwrap_or(15002)),
+        Err(_) => match channel_builder
+            .getattr("endpoint")
+            .and_then(|endpoint| endpoint.extract::<String>())
+        {
+            Ok(endpoint) => endpoint,
+            Err(_) => format!("{host}:15002"),
+        },
+    };
+    let mut url = format!("sc://{endpoint}");
     // Preserve connection params (token/use_ssl/user_id/...) if present as `_params`.
     if let Ok(params) = channel_builder.getattr("_params") {
         if let Ok(dict) = params.cast::<pyo3::types::PyDict>() {
@@ -671,13 +692,28 @@ fn quote_param(value: &str) -> String {
 }
 
 /// `url`, with the parameter `user_id` set to `user`, unless it has one, which takes precedence,
-/// as PySpark's `SparkSession(userId=...)` gives it to the connection.
-fn with_user_id(url: &str, user: &str) -> PyResult<String> {
-    if spark_connect_core::channel::ChannelBuilder::parse(url)
+/// as PySpark's `SparkSession(userId=...)` gives it to the connection: a str, or bytes of UTF-8,
+/// as the string field of the user of the requests of PySpark's ArtifactManager takes it, of the
+/// `TypeError` of another object, which its client raises when it is made.
+fn with_user_id(url: &str, user: &Bound<'_, PyAny>) -> PyResult<String> {
+    if has_user_id(url)? {
+        return Ok(url.to_string());
+    }
+    with_user_id_text(url, &crate::str_argument(user)?)
+}
+
+/// Whether the connection string `url` has a `user_id`.
+fn has_user_id(url: &str) -> PyResult<bool> {
+    Ok(spark_connect_core::channel::ChannelBuilder::parse(url)
         .to_pyerr()?
         .get("user_id")
-        .is_some()
-    {
+        .is_some())
+}
+
+/// `url`, with the parameter `user_id` set to the text `user`, unless it has one (see
+/// [`with_user_id`]).
+fn with_user_id_text(url: &str, user: &str) -> PyResult<String> {
+    if has_user_id(url)? {
         return Ok(url.to_string());
     }
     let param = format!("user_id={}", quote_param(user));
@@ -696,7 +732,7 @@ fn with_user_id(url: &str, user: &str) -> PyResult<String> {
 fn new_session_of_connection(
     py: Python<'_>,
     connection: &Bound<'_, PyAny>,
-    user_id: Option<String>,
+    user_id: Option<&Bound<'_, PyAny>>,
     hook_factories: Option<Bound<'_, PyAny>>,
     configure: impl FnOnce(spark_connect::SparkSessionBuilder) -> spark_connect::SparkSessionBuilder
         + Send,
@@ -714,7 +750,7 @@ fn new_session_of_connection(
 fn connected_session(
     py: Python<'_>,
     connection: &Bound<'_, PyAny>,
-    user_id: Option<String>,
+    user_id: Option<&Bound<'_, PyAny>>,
     configure: impl FnOnce(spark_connect::SparkSessionBuilder) -> spark_connect::SparkSessionBuilder
         + Send,
 ) -> PyResult<SparkSession> {
@@ -722,8 +758,8 @@ fn connected_session(
         Ok(url) => url,
         Err(_) => url_of_channel_builder(connection)?,
     };
-    let url = match user_id {
-        Some(user) => with_user_id(&url, &user)?,
+    let url = match user_id.filter(|user| !user.is_none()) {
+        Some(user) => with_user_id(&url, user)?,
         None => url,
     };
     py.detach(|| {
@@ -732,6 +768,23 @@ fn connected_session(
             .map_err(Box::new)
     })
     .to_pyerr()
+}
+
+/// Give `session`, a session object of `connection`, the state of the clients of PySpark's
+/// client of `connection`, of `userId` as it is given (see
+/// `pyspark.sql.connect.client._init_client_state`): as PySpark's `SparkSession(connection,
+/// userId)` makes its client, whose `_builder` is the channel builder of `connection` and whose
+/// `_user_id` is `userId` unless the connection has one.
+fn init_client_state(
+    py: Python<'_>,
+    session: &Bound<'_, PySparkSession>,
+    connection: &Bound<'_, PyAny>,
+    user_id: Option<&Bound<'_, PyAny>>,
+) -> PyResult<()> {
+    py.import("pyspark.sql.connect.client")?
+        .getattr("_init_client_state")?
+        .call1((session, connection, user_id))?;
+    Ok(())
 }
 
 /// The hook factories of the argument `hook_factories` of PySpark's `SparkSession(...)`, an
@@ -1179,9 +1232,10 @@ impl PyExitHook {
             }),
         )?;
         if self.release_session_on_exit {
+            // As PySpark's `release_session`, whose request carries no user context extensions.
             raise_only_base_exceptions(
                 py,
-                crate::interrupt::interruptible_outcome(py, &session, || {
+                crate::interrupt::interruptible_outcome_without_user_context(py, &session, || {
                     session.release_session().map_err(Box::new)
                 }),
             )?;
@@ -1426,111 +1480,83 @@ impl PyHook {
     }
 }
 
-/// A copy of the tags of a thread, which the threads that `_share_thread_tags` gives it share,
-/// for `pyspark.util.inheritable_thread_target`.
-#[pyclass(name = "_SharedTags", module = "pyspark.sql.connect.session", frozen)]
-pub struct PySharedTags(spark_connect::session::SharedTags);
-
-/// A copy of the user context extensions of a thread, which the threads that
-/// `_share_thread_user_context_extensions` gives it share, for
-/// `pyspark.util.inheritable_thread_target`.
-#[pyclass(
-    name = "_SharedUserContextExtensions",
-    module = "pyspark.sql.connect.session",
-    frozen
-)]
-pub struct PySharedUserContextExtensions(spark_connect_core::client::SharedUserContextExtensions);
+/// A handle of a session that does not keep it alive, as the client and the `conf` of PySpark's
+/// session hold its client and not the session object: `client` holds one, so that once the
+/// program dropped the session, its objects and the objects that keep it (its DataFrames,
+/// readers, writers, catalog and streams), the session is closed under the client, as PySpark's
+/// `SparkSession.__del__` closes its client then.
+#[pyclass(name = "_WeakSession", module = "pyspark.sql.connect.session", frozen)]
+pub struct PyWeakSession(WeakSparkSession);
 
 #[pymethods]
-impl PySharedTags {
-    /// Replace the tags of this set with `tags`, which the requests of the threads that have it
-    /// carry from now on, as a change of the set of PySpark's `thread_local.tags`.
-    fn _replace(&self, tags: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
-        self.0.replace(core_tags(&tags)?);
-        Ok(())
+impl PyWeakSession {
+    /// The object of the session, while it is alive, or None.
+    fn _session(&self, py: Python<'_>) -> PyResult<Option<Py<PySparkSession>>> {
+        match self.0.upgrade() {
+            Some(session) => Ok(Some(session_object(py, &session)?)),
+            None => Ok(None),
+        }
     }
 
-    /// The tags of this set, as the strs that they are of.
-    fn _tags<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+    /// Whether this is a handle of the session of `session`, a session object.
+    fn _is_of(&self, session: &Bound<'_, PySparkSession>) -> bool {
         self.0
-            .tags()
-            .into_iter()
-            .map(|tag| match tag {
-                spark_connect::session::Tag::Text(text) => {
-                    Ok(pyo3::types::PyString::new(py, &text).into_any())
-                }
-                spark_connect::session::Tag::Unencodable(utf32le) => {
-                    pyo3::types::PyBytes::new(py, &utf32le)
-                        .call_method1("decode", ("utf-32-le", "surrogatepass"))
-                }
-            })
-            .collect()
+            .upgrade()
+            .is_some_and(|alive| alive.is_same_session(&session.borrow().session))
     }
 }
 
-#[pymethods]
-impl PySharedUserContextExtensions {
-    /// Replace the extensions of this list with `extensions`, which the requests of the threads
-    /// that have it carry from now on, as a change of the list of PySpark's
-    /// `thread_local.user_context_extensions`.
-    fn _replace(&self, extensions: Vec<(String, Vec<u8>)>) -> PyResult<()> {
-        self.0.replace(decoded_extensions(extensions)?);
-        Ok(())
-    }
-
-    /// The extensions of this list, their IDs and the bytes of each `google.protobuf.Any`.
-    fn _extensions<'py>(&self, py: Python<'py>) -> Vec<(String, Bound<'py, pyo3::types::PyBytes>)> {
-        use prost::Message;
-        self.0
-            .snapshot()
-            .into_iter()
-            .map(|(id, extension)| {
-                (
-                    id,
-                    pyo3::types::PyBytes::new(py, &extension.encode_to_vec()),
-                )
-            })
-            .collect()
-    }
-}
-
-/// The `google.protobuf.Any` of each of `extensions`, of its ID and its bytes.
-fn decoded_extensions(
-    extensions: Vec<(String, Vec<u8>)>,
+/// The `google.protobuf.Any` of each of `extensions`, the bytes of each, as the requests carry
+/// them: the client keeps their IDs, which the requests do not carry.
+pub(crate) fn decoded_extensions(
+    extensions: Vec<Vec<u8>>,
 ) -> PyResult<Vec<(String, prost_types::Any)>> {
     use prost::Message;
     extensions
         .into_iter()
-        .map(|(id, extension)| {
+        .map(|extension| {
             prost_types::Any::decode(extension.as_slice())
-                .map(|extension| (id, extension))
+                .map(|extension| (String::new(), extension))
                 .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
         })
         .collect()
 }
 
-/// The core tags of `tags`, the elements of the set of PySpark's `thread_local.tags`, as the
-/// requests carry them: a str of its text, or of the UTF-32 bytes of a str that UTF-8 cannot
-/// encode, with which each request fails, as PySpark's; bytes of their UTF-8; and the `TypeError`
-/// of the protobuf string field of the tags of a request for another object, which PySpark raises
-/// when it builds a request, and the drop-in when the set changes.
-fn core_tags(tags: &[Bound<'_, PyAny>]) -> PyResult<Vec<spark_connect::session::Tag>> {
-    tags.iter()
+/// The core tags of `tags`, the elements of the set of PySpark's `thread_local.tags` as a list,
+/// as the executions carry them, or the `TypeError` of the `list()` of a tags value that is not
+/// iterable: a str of its text, or of the UTF-32 bytes of a str that UTF-8 cannot encode; bytes of
+/// their UTF-8, or of no UTF-8; and the `TypeError` of the protobuf string field of the tags for
+/// another object. An execution fails with the error of the first of them that the field does not
+/// take, as PySpark's raises it when it builds the request (see `spark_connect::session::Tag`).
+pub(crate) fn core_tags_of(tags: &Bound<'_, PyAny>) -> PyResult<Vec<spark_connect::session::Tag>> {
+    use spark_connect::session::Tag;
+    if tags.is_instance_of::<pyo3::exceptions::PyTypeError>() {
+        return Ok(vec![Tag::NotText(tags.str()?.to_string())]);
+    }
+    tags.cast::<PyList>()?
+        .iter()
         .map(|tag| {
             if let Ok(text) = tag.cast::<pyo3::types::PyString>() {
                 return Ok(match text.to_cow() {
-                    Ok(text) => spark_connect::session::Tag::Text(text.into_owned()),
+                    Ok(text) => Tag::Text(text.into_owned()),
                     Err(_) => {
                         let utf32le =
                             text.call_method1("encode", ("utf-32-le", "surrogatepass"))?;
-                        spark_connect::session::Tag::Unencodable(
+                        Tag::Unencodable(
                             utf32le.cast::<pyo3::types::PyBytes>()?.as_bytes().to_vec(),
                         )
                     }
                 });
             }
-            Ok(spark_connect::session::Tag::Text(
-                crate::options::str_argument(tag)?,
+            if let Ok(bytes) = tag.cast::<pyo3::types::PyBytes>() {
+                let bytes = bytes.as_bytes();
+                return Ok(match std::str::from_utf8(bytes) {
+                    Ok(text) => Tag::Text(text.to_string()),
+                    Err(_) => Tag::NotUtf8(bytes.to_vec()),
+                });
+            }
+            Ok(Tag::NotText(
+                "bad argument type for built-in operation".to_string(),
             ))
         })
         .collect()
@@ -1661,7 +1687,7 @@ impl PySparkSession {
                 return Err(unsupported_artifact_error(py, format));
             }
             check_local_artifact(py, &name, &local, pyfile)?;
-            crate::interrupt::interruptible_without_user_context(py, &self.session, || {
+            crate::interrupt::interruptible_of_artifacts(py, &self.session, true, || {
                 self.session
                     .add_artifacts_of_flags(&[p.as_str()], pyfile, archive, file)
                     .map_err(Box::new)
@@ -3529,7 +3555,7 @@ impl PySparkSession {
     #[getter]
     #[pyo3(name = "conf")]
     fn conf(&self) -> crate::conf::PyRuntimeConf {
-        crate::conf::PyRuntimeConf::new(self.session.clone())
+        crate::conf::PyRuntimeConf::new(&self.session)
     }
 
     /// Table-valued functions namespace (`spark.tvf`).
@@ -3582,7 +3608,7 @@ impl PySparkSession {
         local_path: String,
         dest_path: String,
     ) -> PyResult<()> {
-        crate::interrupt::interruptible_without_user_context(py, &self.session, || {
+        crate::interrupt::interruptible_of_artifacts(py, &self.session, false, || {
             self.session
                 .copy_from_local_to_fs(&local_path, &dest_path)
                 .map_err(Box::new)
@@ -3679,10 +3705,28 @@ impl PySparkSession {
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         // As PySpark's stop, all of which holds `SparkSession._lock`.
         with_session_lock(py, || {
-            let released = if self
+            let release = self
                 .release_session_on_close
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
+                .load(std::sync::atomic::Ordering::SeqCst);
+            // As PySpark's stop, whose `except Exception` around the release of the client takes
+            // the error of its request, built of the attributes of the client (`_session_id`,
+            // `_user_id`), as the failure of the release, and closes the client all the same.
+            let unbuilt = if release {
+                match crate::interrupt::refresh_request_context(
+                    py,
+                    &self.session,
+                    crate::interrupt::RequestContext::Identity,
+                ) {
+                    Ok(_) => None,
+                    Err(error) if error.is_instance_of::<pyo3::exceptions::PyException>(py) => {
+                        Some(error)
+                    }
+                    Err(error) => return Err(error),
+                }
+            } else {
+                None
+            };
+            let released = if release && unbuilt.is_none() {
                 // As PySpark's stop, whose sleeps between the retries of the release a signal
                 // interrupts: the exception of the signal is raised at once, and leaves the
                 // session open, so nothing below runs. The core runs its stops of all sessions
@@ -3693,6 +3737,7 @@ impl PySparkSession {
                     &self.session,
                     || self.session.stop().map_err(Box::new),
                 )?
+                .map_err(|error| crate::errors::spark_error_to_py_exception(*error))
             } else {
                 // As PySpark's stop, which closes the client under its lock all the same.
                 let _stopping = crate::interrupt::abortable_without_session(
@@ -3700,7 +3745,7 @@ impl PySparkSession {
                     spark_connect::session::enter_stop_lock,
                 )?;
                 py.detach(|| self.session.close());
-                Ok(())
+                unbuilt.map_or(Ok(()), Err)
             };
             crate::progress::forget_session(&self.session);
             crate::profiler::forget_session(&self.session);
@@ -3708,7 +3753,6 @@ impl PySparkSession {
                 // As PySpark's stop, whose `except Exception as e` logs the exception of the
                 // release through the logger of Spark Connect, which is disabled unless
                 // SPARK_CONNECT_LOG_LEVEL is set, with the `$` of its f-string.
-                let error = crate::errors::spark_error_to_py_exception(*error);
                 py.import("pyspark.sql.connect.logging")?
                     .getattr("logger")?
                     .call_method1(
@@ -3902,43 +3946,6 @@ impl PySparkSession {
         })
     }
 
-    /// The user context extensions of this session, the global ones if `is_global`, else those
-    /// of the current thread, as their IDs and the bytes of each `google.protobuf.Any`: for the
-    /// global list of `client` when it is made.
-    fn _user_context_extensions<'py>(
-        &self,
-        py: Python<'py>,
-        is_global: bool,
-    ) -> Vec<(String, Bound<'py, pyo3::types::PyBytes>)> {
-        use prost::Message;
-        let extensions = if is_global {
-            self.session.global_user_context_extensions()
-        } else {
-            self.session.threadlocal_user_context_extensions()
-        };
-        extensions
-            .into_iter()
-            .map(|(id, extension)| {
-                (
-                    id,
-                    pyo3::types::PyBytes::new(py, &extension.encode_to_vec()),
-                )
-            })
-            .collect()
-    }
-
-    /// Replace the global user context extensions of this session with `extensions`, their IDs
-    /// and the bytes of each `google.protobuf.Any`, in their order: for the
-    /// `global_user_context_extensions` of `client`, whose changes the requests take.
-    fn _set_global_user_context_extensions(
-        &self,
-        extensions: Vec<(String, Vec<u8>)>,
-    ) -> PyResult<()> {
-        self.session
-            .set_global_user_context_extensions(decoded_extensions(extensions)?);
-        Ok(())
-    }
-
     /// The responses of the server to `command`, the bytes of a `spark.connect.Command` built
     /// outside the client, such as the ML commands of `pyspark.ml`, as the bytes of each
     /// `ExecutePlanResponse`: for the `execute_command` of `client`. The command is decoded, and
@@ -4059,17 +4066,20 @@ impl PySparkSession {
     fn __init__(
         slf: &Bound<'_, Self>,
         connection: &Bound<'_, PyAny>,
-        userId: Option<String>,
+        userId: Option<Bound<'_, PyAny>>,
         hook_factories: Option<Bound<'_, PyAny>>,
     ) -> PyResult<()> {
         let py = slf.py();
-        let session = connected_session(py, connection, userId, |builder| builder)?;
+        let session = connected_session(py, connection, userId.as_ref(), |builder| builder)?;
         let value = PySparkSession::new(session.clone());
         let replaced = std::mem::replace(&mut *slf.borrow_mut(), value);
         // The objects of the session that it replaces, dropped once it is not borrowed, as their
         // drop may run Python code.
         drop(replaced);
         let object = register_session_object(py, slf.clone().unbind(), &session)?;
+        // As PySpark's client, of the channel builder of `connection` and of the user `userId`
+        // as it is given, unless the connection has one.
+        init_client_state(py, object.bind(py), connection, userId.as_ref())?;
         install_hook_factories(py, &hook_factories_of(hook_factories)?, &object)?;
         log_client_banner(py);
         Ok(())
@@ -4085,7 +4095,7 @@ impl PySparkSession {
     fn _of_client_options(
         py: Python<'_>,
         connection: &Bound<'_, PyAny>,
-        user_id: Option<String>,
+        user_id: Option<Bound<'_, PyAny>>,
         hook_factories: Option<Bound<'_, PyAny>>,
         allow_arrow_batch_chunking: bool,
         preferred_arrow_chunk_size: Option<i64>,
@@ -4097,14 +4107,20 @@ impl PySparkSession {
             .as_ref()
             .map(crate::client::rpc_deadlines)
             .transpose()?;
-        new_session_of_connection(py, connection, user_id, hook_factories, move |builder| {
-            builder.configure_client(move |client| {
-                client.set_result_chunking(chunking);
-                if let Some(deadlines) = deadlines {
-                    client.set_rpc_deadlines(deadlines);
-                }
-            })
-        })
+        new_session_of_connection(
+            py,
+            connection,
+            user_id.as_ref(),
+            hook_factories,
+            move |builder| {
+                builder.configure_client(move |client| {
+                    client.set_result_chunking(chunking);
+                    if let Some(deadlines) = deadlines {
+                        client.set_rpc_deadlines(deadlines);
+                    }
+                })
+            },
+        )
     }
 
     /// The bytes of the response of the server to `request`, the bytes of an `AnalyzePlanRequest`
@@ -4151,7 +4167,7 @@ impl PySparkSession {
         blobs: Vec<pyo3::pybacked::PyBackedBytes>,
     ) -> PyResult<Vec<String>> {
         let blobs: Vec<Vec<u8>> = blobs.iter().map(|blob| blob.to_vec()).collect();
-        interruptible(py, &self.session, || {
+        crate::interrupt::interruptible_of_artifacts(py, &self.session, false, || {
             self.session.cache_artifacts(blobs).map_err(Box::new)
         })
     }
@@ -4338,14 +4354,11 @@ impl PySparkSession {
         url
     }
 
-    /// The user of the requests of the session, as PySpark's `SparkConnectClient._user_id`.
+    /// The user of the connection of the session, of the connection string, else of `userId`,
+    /// else of the environment, for the `_user_id` of `client`, as PySpark's client reads it when
+    /// it is made.
     fn _user_id(&self) -> Option<String> {
         self.session.user_id().map(str::to_string)
-    }
-
-    /// Open the session again, as PySpark's `SparkConnectClient._closed = False`.
-    fn _reopen(&self) {
-        self.session.reopen()
     }
 
     /// The bytes of the response of the server to `request`, the bytes of a `GetStatusRequest`
@@ -4622,75 +4635,41 @@ impl PySparkSession {
         Ok(())
     }
 
-    /// A copy of the tags of the current thread, which `pyspark.util.inheritable_thread_target`
-    /// makes when it decorates a function, as PySpark Connect's copies the `thread_local` of the
-    /// client.
-    fn _copy_thread_tags(&self) -> PySharedTags {
-        PySharedTags(self.session.copy_thread_tags())
-    }
-
-    /// Make `tags` those of the current thread, which shares them with the other threads given
-    /// them, as `pyspark.util.inheritable_thread_target` gives every thread that runs its
-    /// function the copy of the `thread_local` of the client of PySpark Connect.
-    fn _share_thread_tags(&self, tags: &PySharedTags) {
-        self.session.share_thread_tags(&tags.0)
-    }
-
-    /// A copy of the user context extensions of the current thread, which
-    /// `pyspark.util.inheritable_thread_target` makes when it decorates a function, as PySpark
-    /// Connect's deep-copies the `thread_local` of the client.
-    fn _copy_thread_user_context_extensions(&self) -> PySharedUserContextExtensions {
-        PySharedUserContextExtensions(self.session.copy_threadlocal_user_context_extensions())
-    }
-
-    /// Make `extensions` the user context extensions of the current thread, which it shares with
-    /// the other threads given them, as `pyspark.util.inheritable_thread_target` sets the copy of
-    /// the `thread_local` of the client in each thread that runs its function.
-    fn _share_thread_user_context_extensions(&self, extensions: &PySharedUserContextExtensions) {
-        self.session
-            .share_threadlocal_user_context_extensions(&extensions.0)
-    }
-
-    /// A set of the tags `tags`, which no thread has yet, for a set of the `thread_local.tags` of
-    /// `client`.
-    fn _new_tags(&self, tags: Vec<Bound<'_, PyAny>>) -> PyResult<PySharedTags> {
-        Ok(PySharedTags(spark_connect::session::SharedTags::new(
-            core_tags(&tags)?,
-        )))
-    }
-
-    /// A list of `extensions`, their IDs and the bytes of each `google.protobuf.Any`, which no
-    /// thread has yet, for a list of the `thread_local.user_context_extensions` of `client`.
-    fn _new_user_context_extensions(
-        &self,
-        extensions: Vec<(String, Vec<u8>)>,
-    ) -> PyResult<PySharedUserContextExtensions> {
-        Ok(PySharedUserContextExtensions(
-            spark_connect_core::client::SharedUserContextExtensions::new(decoded_extensions(
-                extensions,
-            )?),
-        ))
-    }
-
-    /// Keep `refresh`, a function of no arguments, which a call of this session calls before it
-    /// sends requests (see `crate::interrupt::refresh_user_context`): for `client`, which
-    /// serializes the `google.protobuf.Any` messages of its lists of user context extensions
-    /// again then, as PySpark serializes them when it builds each request.
+    /// Keep `refresh`, which a call of this session calls with the kind of its requests before it
+    /// sends them (see `crate::interrupt::refresh_request_context`): the state of the clients of
+    /// the session, of `client`, which gives the session ID, the user, the user context extensions
+    /// and the tags that the requests carry, as PySpark's requests read them of its client when
+    /// they are built, and which the session keeps as long as it lives, as PySpark's session keeps
+    /// its client.
     fn _set_user_context_refresh(&self, refresh: Py<PyAny>) {
         self.session
             .set_user_context_refresher(Some(std::sync::Arc::new(refresh)));
     }
 
-    /// Forget the tags of the current thread, which has none from now on, for a
-    /// `thread_local.tags` of `client` that is deleted.
-    fn _clear_thread_tags(&self) {
-        self.session.clear_tags()
+    /// The function of `_set_user_context_refresh`, if any: the state of the clients of the
+    /// session.
+    fn _user_context_refresh(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        let refresher = self.session.user_context_refresher()?;
+        refresher
+            .downcast_ref::<Py<PyAny>>()
+            .map(|refresh| refresh.clone_ref(py))
     }
 
-    /// Forget the user context extensions of the current thread, for a
-    /// `thread_local.user_context_extensions` of `client` that is deleted.
-    fn _clear_thread_user_context_extensions(&self) {
-        self.session.clear_threadlocal_user_context_extensions()
+    /// A handle of this session that does not keep it alive, for `client` (see `_WeakSession`).
+    fn _downgrade(&self) -> PyWeakSession {
+        PyWeakSession(self.session.downgrade())
+    }
+
+    /// Mark the session closed, as PySpark's `client._closed = True`, or open it again, as
+    /// `client._closed = False`: a closed session sends nothing but the requests of its
+    /// artifacts, and one that `client.close()` or `stop()` closed raises the `ValueError` of a
+    /// closed channel for its requests once it is open again, as PySpark's do.
+    fn _set_closed(&self, closed: bool) {
+        if closed {
+            self.session.mark_closed();
+        } else {
+            self.session.reopen();
+        }
     }
 
     /// Add local files, or `file:` URIs, as artifacts of the session, as PySpark's
@@ -4735,31 +4714,73 @@ impl PySparkSession {
         self.add_artifacts(py, path, pyfile, archive, file)
     }
 
+    /// A new session of the same connection, as PySpark's `newSession()`: a session of none of
+    /// the server-side state of this one, of the user of `client._user_id`, as PySpark's new
+    /// client takes it, unless the connection has one (see
+    /// `pyspark.sql.connect.client._new_session_of`).
     #[pyo3(name = "newSession")]
-    fn new_session(&self, py: Python<'_>) -> PyResult<Py<PySparkSession>> {
-        session_object(py, &self.session.new_session())
+    fn new_session(slf: &Bound<'_, Self>) -> PyResult<Py<PyAny>> {
+        Ok(slf
+            .py()
+            .import("pyspark.sql.connect.client")?
+            .getattr("_new_session_of")?
+            .call1((slf,))?
+            .unbind())
     }
 
     /// Clone this session on the server, as PySpark's `cloneSession(new_session_id=None)`: a
     /// session of a copy of the server-side state of this one, its SQL configurations,
     /// temporary views, registered functions and catalog state, of the id `new_session_id`,
-    /// a UUID, if one is given.
+    /// a UUID, if one is given, and of the user of `client._user_id`, as `newSession()`.
     #[pyo3(name = "cloneSession", signature = (new_session_id=None))]
     fn clone_session(
+        slf: &Bound<'_, Self>,
+        new_session_id: Option<Bound<'_, PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        Ok(slf
+            .py()
+            .import("pyspark.sql.connect.client")?
+            .getattr("_new_session_of")?
+            .call1((slf, true, new_session_id))?
+            .unbind())
+    }
+
+    /// The new session of `newSession()`, without the client state of this one, for `client`:
+    /// of the user `user_id`, whom its requests and those of its artifacts carry, as PySpark's
+    /// new client takes the `_user_id` of the client that makes it.
+    fn _new_session(
+        &self,
+        py: Python<'_>,
+        user_id: Option<String>,
+    ) -> PyResult<Py<PySparkSession>> {
+        session_object(py, &self.session.new_session_of_user(user_id))
+    }
+
+    /// The clone of `cloneSession(new_session_id)`, without the client state of this one, for
+    /// `client`: of the user `user_id`, as `_new_session`, unless the user of the connection is
+    /// asked for (`of_user` False).
+    #[pyo3(signature = (new_session_id=None, user_id=None, of_user=false))]
+    fn _clone_session(
         &self,
         py: Python<'_>,
         new_session_id: Option<String>,
+        user_id: Option<String>,
+        of_user: bool,
     ) -> PyResult<Py<PySparkSession>> {
-        let session =
-            crate::interrupt::interruptible_without_user_context(py, &self.session, || {
+        let session = crate::interrupt::interruptible_of_clone(py, &self.session, || {
+            if of_user {
+                self.session
+                    .clone_session_with_id_of_user(new_session_id.as_deref(), user_id)
+                    .map_err(Box::new)
+            } else {
                 self.session
                     .clone_session_with_id(new_session_id.as_deref())
                     .map_err(Box::new)
-            })?;
+            }
+        })?;
         session_object(py, &session)
     }
 }
-
 /// PySpark's error for a path of `addArtifacts` that it does not upload.
 fn unsupported_artifact_error(py: Python<'_>, unsupported: UnsupportedArtifact) -> PyErr {
     match unsupported {
@@ -5664,7 +5685,7 @@ mod decimal_text_tests {
 
 #[cfg(test)]
 mod connection_url_tests {
-    use super::{quote_param, with_user_id};
+    use super::{quote_param, with_user_id_text as with_user_id};
 
     #[test]
     fn a_parameter_value_is_percent_encoded_outside_the_unreserved_characters() {

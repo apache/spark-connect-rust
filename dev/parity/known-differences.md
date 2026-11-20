@@ -443,7 +443,10 @@ requests of the unpickled object pickle as it is then. This case still differs:
   Column of its subquery, is not collected, where PySpark collects it, as each of its holders, a
   Python object, holds a reference of its own. A stream writer holds its DataFrame, where PySpark's
   holds the plan, so a DataFrame that keeps its stream writer is freed by the collector rather than
-  at its last reference.
+  at its last reference. The attributes of the clients of a session, their `thread_local` and their
+  lists, are kept by the session as long as it lives, which no Python object reports, so a reference
+  cycle through them, such as an attribute of the client or of its `thread_local` that keeps a
+  DataFrame of the session, is not collected, where PySpark's client, a Python object, is.
 
 ## Session and client (Connect)
 
@@ -466,7 +469,8 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `metadata()`, and the drop-in's `DefaultChannelBuilder` has a `port` too, which PySpark's has
   not (it keeps the port in `_port`). The transport reads the `host`, the `port` (15002 without
   one) and the `_params` of a channel builder as a `sc://` URL, so they apply. The gRPC channel
-  members do not: `toChannel`, `add_interceptor`, `setChannelOption`. The keepalive
+  members do not: `toChannel`, which the transport calls of a builder of its own for its errors
+  only (see "A channel builder without a host"), `add_interceptor`, `setChannelOption`. The keepalive
   properties and `userAgent` read the parameters as PySpark does, but `userAgent` reports
   PySpark's `python/<version>` where the transport sends `python/rust` as the client type. The
   transport reads `SPARK_CONNECT_USER_AGENT` when a session is made of a connection string, and
@@ -495,8 +499,10 @@ requests of the unpickled object pickle as it is then. This case still differs:
   The drop-in converts it as the errors of its other RPCs: `clone("not-a-uuid")` raises the
   `UnknownException` of `INVALID_CLONE_SESSION_REQUEST.TARGET_SESSION_ID_FORMAT`, and a copy to
   a local path that the server refuses the `UnsupportedOperationException` of
-  `_LEGACY_ERROR_TEMP_3161`. With a user agent that is too long, they raise the
-  `SparkConnectException` of the request of the error's details.
+  `_LEGACY_ERROR_TEMP_3161`. The clone asks the server for nothing more of its failure, as
+  PySpark's, neither the details of the error nor the configs of its stack trace; the copy asks
+  for them, and with a user agent that is too long, it raises the `SparkConnectException` of the
+  request of the error's details.
 - **The retry policy of the clones of a core client** (intentional; Rust API). The retry policy
   of `spark_connect_core::SparkConnectClient` is shared by its clones (`Clone`), as PySpark's
   `set_retry_policies` replaces the policies of a client that is in use: `set_retry_policy` of a
@@ -534,17 +540,41 @@ requests of the unpickled object pickle as it is then. This case still differs:
   ...`), the failure that ends its retries (`Given up on retrying. error: ...`) and each gRPC
   failure that it converts (`GRPC Error received`), which the transport, whose retries and errors
   are its own, does not.
-- **`SparkConnectClient.thread_local`** (intentional). A subclass of `threading.local`, of
-  subclasses of `set` and `list` for its tags and its user context extensions, which keep the Rust
-  transport's lists of them in step, where PySpark's is a `threading.local` of a plain set and
-  list. The global list of the extensions is a subclass of `list` too. A set of tags refuses an
-  object that is neither a str nor bytes when it is added, where PySpark's raises the `TypeError`
-  of the field of the tags when it builds a request. An extension that is not an `Any` fails each
-  call whose requests carry the extensions, as PySpark's requests fail when they are built, of
-  upb's `TypeError`, which names the runtime's class of `Any`
-  (`pyspark.sql.connect.proto._rust.any_pb2.Any`) where PySpark's names
-  `google.protobuf.any_pb2.Any`. A list that the attribute of a `copy.copy` of a client is set to
-  is not one that the requests of the session carry.
+- **`SparkConnectClient.thread_local`** (intentional; the transport is native). The
+  `thread_local` of the client, its set of tags and its lists of user context extensions are
+  PySpark's plain `threading.local`, set and lists, as are the `global_user_context_extensions` of
+  the client and its `_session_id` and `_user_id`, plain attributes, which the transport reads on
+  the calling thread when a call starts its requests, when a finalizer sends its request, once a
+  call or a finalizer of the session that ran during a call of the session ended, and when it
+  builds the requests of the details of the failure of a call, of the configs of its stack trace
+  and of the interrupt of a signal, of the client of the call as they are then, the copy of a
+  client whose method made it or the session's, also of the `next()` of the iterator of an
+  execution, as PySpark's requests read them when they are built; the requests that continue an
+  execution, its reattaches and releases, copy its request, as PySpark's. The other requests that
+  a call sends after its first carry them as they were at the start of the call, or at the end of
+  a call or a finalizer of its session that ran during it, where PySpark's read them when they are
+  built, so a change of them by a progress handler or by another thread meanwhile is not in them.
+  A `KeyboardInterrupt` that a signal handler raises while the transport reads them at the end of
+  a call that ran during another is the error of that call, whose result is dropped. A finalizer
+  whose last reference a thread of the transport drops, not a thread of Python, sends the context
+  of the last call of that thread, else of the session, where PySpark's finalizers run on a thread
+  of Python. A request of more than one value that protobuf refuses raises the error of the
+  session ID, of the user and of the extensions before that of a tag, where PySpark's execution
+  raises that of the tag before those of the user and of the extensions; and the request of the
+  details of the failure of a call whose requests carry no extensions (of `ReleaseSession`,
+  `GetStatus` and the artifacts) carries the extensions of the last call when one of them is not
+  an `Any`, where PySpark's `_fetch_enriched_error` raises the `TypeError` of protobuf in place of
+  the error of the server. An extension that is not an `Any` raises upb's `TypeError`, which
+  names the runtime's class of `Any` (`pyspark.sql.connect.proto._rust.any_pb2.Any`) where
+  PySpark's names `google.protobuf.any_pb2.Any`. A failed request leaves `inside_error_handling`
+  False in the `thread_local`, as PySpark's `_handle_error` does, which the drop-in does not read:
+  PySpark's raises the error of a request as grpc gives it while it is True. A `copy.copy` of a
+  client sends its own attributes, as PySpark's, also at once with its client on another thread,
+  and a call of the session that runs during a call of the copy, as of a progress handler or a
+  finalizer, sends the session's, after which the call of the copy sends its own again, as they
+  are then; but it shares with its session whether it is closed (`_closed`), the server-side
+  session ID that the responses carried, whether its executions are reattachable and the retry
+  policies, which PySpark's copy has of its own.
 - **Plans of a DataFrame's relation** (intentional; DESIGN). `df._plan.plan(client)` is a
   placeholder that holds the DataFrame's relation, which the core builds at the call, as
   PySpark's `plan` does, with its pickles, warnings and errors: the core builds the relation, and
@@ -566,10 +596,11 @@ requests of the unpickled object pickle as it is then. This case still differs:
   `pyspark.sql.SparkSession` and `pyspark.sql.connect.session.SparkSession` are PySpark's two
   builders, with its errors: `CONNECT_URL_NOT_SET`, a `PySparkRuntimeError`, and
   `SESSION_NEED_CONN_STR_OR_BUILDER`, a `PySparkValueError`, also for both a URL and a channel
-  builder. `channelBuilder(...)` rejects a channel builder without a `host` with a `ValueError`,
-  as the transport connects to the `sc://` URL of its `host`, `port` and `_params`; PySpark's
-  takes any object, and its session fails when it is made, of the error of the object (the
-  `TypeError` of a str's slicing, or the error of its `toChannel`).
+  builder. `channelBuilder(...)` takes any object, and the session fails when it is made, of the
+  errors of PySpark's client: the transport connects to the `sc://` URL of the `host`, the `port`
+  and the `_params` of the builder, and calls the `toChannel` of a `ChannelBuilder` that is not a
+  `DefaultChannelBuilder` for its errors only, so a builder of its own `toChannel` and no `host`
+  raises the error of the `host` of `ChannelBuilder`, where PySpark's connects through its channel.
 - **Plan logging of a deep DataFrame** (intentional; DESIGN). `DataFrame._plan` is a
   placeholder over the relation of the Rust core, whose `to_proto(client)` is the `Plan` of the
   placeholder, `plan(client)`, as the root. The `to_proto` of a `LogicalPlan` is the `Plan` of
@@ -584,45 +615,42 @@ requests of the unpickled object pickle as it is then. This case still differs:
   levels. Plan logging of a deep DataFrame therefore does not reach the recursion handling that
   the test `test_recursion_handling_for_plan_logging` exercises.
 - **Client session ID** (intentional). `SparkConnectClient._session_id` is the session ID that
-  the requests carry, which a set changes for them, as PySpark's, so the next response of
-  another server-side session closes the session; `_server_session_id` is exposed and settable,
-  as PySpark's, and a changed value closes the session. A value that is not a str raises the
-  `TypeError` of the string field of the session ID of the requests when it is set, where
-  PySpark raises it when it builds the next request.
-- **`_closed`** (intentional). Reading `_closed` gives the session's stopped state. Setting it
-  to True closes the session, and setting it to False opens it again, as PySpark's. After
-  `close()` or `stop()`, which close PySpark's channel too, PySpark's requests still fail once
-  `_closed` is False, with grpc's `ValueError: Cannot invoke RPC: Channel closed!`, where the
-  drop-in's are sent again.
-- **`_user_id`** (intentional). It is read-only, where PySpark's is an attribute that a set
-  changes for the requests.
+  the requests carry, an attribute that a set changes for them, as PySpark's, so the next response
+  of another server-side session marks the session closed, of an open channel, as PySpark's
+  `_closed = True` of then; `_server_session_id` is exposed and settable, as PySpark's, and a
+  changed value marks the session closed so. A `_session_id` of None raises
+  the `TypeError` of the string field of the session ID for every request, where PySpark's
+  executions and `CloneSession` send an empty session ID, which the server refuses; one of the
+  bytes of a session ID is sent as its text, where PySpark's check of the responses compares the
+  str of the server with the bytes and fails with `PySparkAssertionError`.
 - **The exit of a dropped session in a reference cycle** (intentional). PySpark's
   `SparkSession.__del__` closes the client of a session object that is freed, and the exit hook
-  of a closed client sends nothing; the drop-in's exit hook holds its session weakly, so a
-  session that the program dropped, of which no object is left, sends nothing at exit either.
-  But once its `catalog` or `streams` is read, PySpark's session object is in a reference cycle
-  with the `Catalog` of its `functools.cached_property` or the `StreamingQueryManager` of its
-  `_sqm`, each of which holds the session, so that a drop does not free it: it stays open until
-  a collection of the garbage collector frees it, and an exit before that sends its
-  `clean_cache` (and its release, with `SPARK_CONNECT_RELEASE_SESSION_ON_EXIT`), which waits on
-  the retries when the server is gone. The drop-in's session keeps its catalog and its streams
-  without a cycle, so it is freed when the program drops it, and its exit sends nothing,
-  whatever the timing of the collections. The same goes for the other cycles that keep a
-  PySpark session until a collection, such as that of an error that the `_handle_error` of its
-  client raises again (`raise error`), whose traceback keeps the frame that holds the error and,
-  with it, the frames of the calls that led to it and their variables. And PySpark 4.3.0 does not
-  exit at all while a session other than its default one is left open to the end (of
-  `newSession()`, or `SparkSession(connection=...)`), as its `SparkSession.__del__` closes the
-  client in the teardown of the interpreter, whose grpcio `Channel.close()` waits forever; the
-  drop-in exits.
-- **A `conf` or a `client` kept apart from its session** (tracked). PySpark's `RuntimeConf` and
-  the `SparkConnectClient` of a session hold the client, not the session object: once the
-  program drops the session, its `__del__` closes the client, so the `conf` or `client` that the
-  program kept raises `NO_ACTIVE_SESSION`, and the exit sends nothing for the session. The
-  drop-in's hold the session, which stays open while either is alive: their requests work, and
-  the exit cleans its ML cache. A client that no session object owns, of
-  `SparkConnectClient(...)` or of the `newSession()` or `clone()` of a client, lives until the
-  exit in both, as the `atexit` registration of PySpark's keeps it.
+  of a closed client sends nothing; the drop-in closes a session once the program dropped its
+  objects and the objects that hold it, also when a `conf` or a `client` of it is kept, so it
+  sends nothing at exit either. But once its `catalog` or `streams` is read, PySpark's session
+  object is in a reference cycle with the `Catalog` of its `functools.cached_property` or the
+  `StreamingQueryManager` of its `_sqm`, each of which holds the session, so that a drop does not
+  free it: it stays open until a collection of the garbage collector frees it, which the
+  allocations of the program decide, and an exit before that sends its `clean_cache` (and its
+  release, with `SPARK_CONNECT_RELEASE_SESSION_ON_EXIT`). The drop-in's session keeps its catalog
+  and its streams without a cycle, so it is freed when the program drops it, as PySpark's is after
+  a collection (`gc.collect()`), and its exit sends nothing, whatever the timing of the
+  collections. The same goes for the other cycles that keep a PySpark session until a collection,
+  such as that of an error that the `_handle_error` of its client raises again (`raise error`),
+  whose traceback keeps the frame that holds the error and, with it, the frames of the calls that
+  led to it and their variables. PySpark 4.3.0 then does not exit at all, as it does not while a
+  session other than its default one is left open to the end (of `newSession()`, or
+  `SparkSession(connection=...)`): its `SparkSession.__del__` closes the client in the teardown of
+  the interpreter, whose grpcio `Channel.close()` waits forever. That is a bug of PySpark, which
+  the drop-in does not reproduce: it exits.
+- **A `client` kept apart from its session** (intentional; the state is native). As PySpark's
+  `RuntimeConf` and `SparkConnectClient`, which hold the client of a session and not the session
+  object, the drop-in's do not keep the session open: once the program dropped the session and the
+  objects that hold it, as its DataFrames, a kept `conf` or `client` raises `NO_ACTIVE_SESSION`, as
+  PySpark's raise once the `__del__` of the session closed the client, and the exit sends nothing
+  for the session. The client of such a session keeps its attributes and its retry policies, but
+  reads its server-side session ID and whether its executions are reattachable of a closed session
+  of its connection, which has the defaults, where PySpark's client keeps its own.
 - **The `__dict__` of the objects of a session** (intentional; the state is native). The
   readers, writers, builders and the other objects of a session or a DataFrame hold their
   state in the Rust core: their `__dict__` holds the attributes that a user sets on them,
@@ -691,10 +719,6 @@ requests of the unpickled object pickle as it is then. This case still differs:
   The class's own types compare without the attributes that a user set on them, where PySpark's
   comparison of the `__dict__`s holds them (see `docs/compatibility.md`); their copies and pickles
   keep them, as PySpark's.
-- **Direct construction** (intentional). `SparkSession(connection=..., userId=...,
-  hook_factories=...)` makes a session that is neither default nor active, as PySpark's
-  constructor does. `userId` is added to the URL unless the URL has a `user_id`, which
-  takes precedence, as PySpark's does.
 - **The functions of `pyspark.sql.connect.functions`** (intentional; the drop-in's, of the Rust
   core). `pyspark.sql.functions` is PySpark's package, as it is, whose functions run those of
   `pyspark.sql.connect.functions` of their names, as with `pyspark-client`. Those are the

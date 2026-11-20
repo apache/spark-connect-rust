@@ -8203,7 +8203,12 @@ impl PyLocalRowIterator {
             .and_then(LocalRowIterator::next_decoded)
         {
             Some(row) => Some(Ok(row)),
-            None => interruptible(py, &session, || {
+            // The first fetch sends the execution, of the request context of the client; the
+            // others continue it, as PySpark's generator reads nothing of the client again.
+            None if self.prepared.is_some() => interruptible(py, &session, || {
+                Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
+            })?,
+            None => crate::interrupt::interruptible_continuation(py, &session, || {
                 Ok::<_, Box<spark_connect_core::error::SparkError>>(self.next_row())
             })?,
         };

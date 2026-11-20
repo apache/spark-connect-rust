@@ -39,8 +39,10 @@ __all__ = [
 ]
 
 
+import contextvars
 import copy
 import functools
+import inspect
 import logging
 import math
 import os
@@ -211,10 +213,9 @@ class ChannelBuilder:
 
     @property
     def host(self) -> str:
-        """The hostname where this client intends to connect."""
-        raise PySparkNotImplementedError(
-            errorClass="NOT_IMPLEMENTED", messageParameters={"feature": "host"}
-        )
+        """The hostname where this client intends to connect, which a channel builder of its own
+        gives: PySpark's raises without one (``PySparkNotImplementedError``)."""
+        raise PySparkNotImplementedError
 
     @property
     def userId(self) -> Optional[str]:
@@ -569,9 +570,21 @@ class SparkConnectClient:
 
     # The session of the client is kept apart from its attributes, which are those of its session:
     # the clients of a session share them (see `_client_state`), as PySpark's session has one
-    # client, of one `thread_local`, one list of global user context extensions, its lock, and the
-    # attributes that a caller sets.
-    __slots__ = ("_session", "__dict__", "__weakref__")
+    # client, of one `thread_local`, one list of global user context extensions, its lock, the
+    # session ID and the user of its requests, and the attributes that a caller sets. The client
+    # holds its session weakly, as PySpark's session object holds its client and not the other way
+    # (see `_session`), and the state of the session (`_context`); a copy of a client sends its
+    # requests of its own attributes (`_copy_context`).
+    __slots__ = (
+        "_session_ref",
+        "_session_cache",
+        "_url",
+        "_dropped",
+        "_context",
+        "_copy_context",
+        "__dict__",
+        "__weakref__",
+    )
 
     # The thread of an ML cache RPC in flight, as SparkConnectClient's re-entrancy guard of a
     # RemoteModelRef finalizer that deletes a model.
@@ -630,50 +643,78 @@ class SparkConnectClient:
             preferred_arrow_chunk_size,
             deadlines,
         )
-        self._init_of_session(session, builder)
+        _init_client_state(session, builder, user_id)
+        self._init_of_session(session)
         if not use_reattachable_execute:
             self.disable_reattachable_execute()
         if policies is not None or max_retry_exception_elapsed_time is not None:
             self._set_retry_policies(policies, max_retry_exception_elapsed_time)
         # As PySpark's client, which registers its exit hook once it is made: the registration
         # keeps it until the exit, and no session object owns it, whose __del__ would close it.
+        self._keep_until_exit(session)
+
+    def _keep_until_exit(self, session: Any) -> None:
+        # The session of a client that no session object owns, which lives until the exit, as
+        # PySpark's `atexit` registration keeps its client: the client holds its session object.
         session._keep_until_exit()
+        self._session_cache = lambda: session
 
     @classmethod
-    def _of_session(
-        cls, session: Any, builder: Optional[ChannelBuilder] = None
-    ) -> "SparkConnectClient":
+    def _of_session(cls, session: Any) -> "SparkConnectClient":
         """The client of ``session``, a session of the drop-in, as ``SparkSession.client`` and
-        the clients of ``newSession`` and ``clone`` are, of the channel builder ``builder`` of the
-        connection, if there is one."""
+        the clients of ``newSession`` and ``clone`` are."""
         client = cls.__new__(cls)
-        client._init_of_session(session, builder)
+        client._init_of_session(session)
         return client
 
-    def _init_of_session(self, session: Any, builder: Optional[ChannelBuilder]) -> None:
-        self._session = session
+    def _init_of_session(self, session: Any) -> None:
+        self._session_ref = session._downgrade()
+        self._session_cache = weakref.ref(session)
+        self._url = session._connection_string()
+        self._dropped = None
+        self._copy_context = None
         # The attributes of the client are those of its session, which its other clients have
         # too: its channel builder, its thread_local, its global user context extensions and their
-        # lock, and the attributes that a caller set.
-        object.__setattr__(self, "__dict__", _client_state(session, builder))
+        # lock, the session ID and the user of its requests, and the attributes that a caller set.
+        self._context = _client_context(session)
+        object.__setattr__(self, "__dict__", self._context.state)
 
-    def __setattr__(self, name: str, value: Any) -> None:
-        # As PySpark's client, whose requests read its `global_user_context_extensions`, a list
-        # that its methods and a caller may change or rebind: the session takes the extensions of
-        # the list that the attribute is set to.
-        if name == "global_user_context_extensions" and hasattr(self, "_session"):
-            value = _GlobalUserContextExtensions(self._session, value)
-            object.__setattr__(self, name, value)
-            value._sync()
-            return
-        object.__setattr__(self, name, value)
+    @property
+    def _session(self) -> Any:
+        """The session object of the client, while the session lives: while the program holds it
+        or an object that holds it, such as a DataFrame, a reader, a writer, its catalog or its
+        streams, as PySpark's objects hold the session object. Once the program dropped them, as
+        PySpark's ``SparkSession.__del__`` closes its client then, it is a closed session of the
+        same connection, whose requests raise ``NO_ACTIVE_SESSION``, and the ``ValueError`` of a
+        closed channel once ``_closed`` is set to False."""
+        # The session object of the last access, while it lives, else the object of the session.
+        session = self._session_cache()
+        if session is not None:
+            return session
+        session = self._session_ref._session()
+        if session is not None:
+            self._session_cache = weakref.ref(session)
+            return session
+        dropped = self._dropped
+        if dropped is None:
+            dropped = _pyspark.SparkSession._of_client_options(
+                self._url, None, [], True, None, None
+            )
+            dropped._close()
+            self._dropped = dropped
+        return dropped
 
     def __copy__(self) -> "SparkConnectClient":
         # As copy.copy of PySpark's client, a plain object: a client of the same session and of a
-        # copy of its attributes, whose rebinding of a list is its own. The requests of the
-        # session carry the extensions of the list of the session's own client.
+        # copy of its attributes, whose requests carry its own session ID, user and lists of
+        # user context extensions, and whose rebinding of one of them is its own.
         copied = object.__new__(type(self))
-        object.__setattr__(copied, "_session", self._session)
+        copied._session_ref = self._session_ref
+        copied._session_cache = self._session_cache
+        copied._url = self._url
+        copied._dropped = self._dropped
+        copied._context = self._context
+        copied._copy_context = self._context
         copied.__dict__.update(self.__dict__)
         return copied
 
@@ -719,37 +760,15 @@ class SparkConnectClient:
     @property
     def _closed(self) -> bool:
         """Whether the client is closed, as SparkConnectClient's ``_closed``. Setting it to True
-        closes the session, which the session registry then no longer returns, and setting it
-        to False opens it again, as PySpark's requests are sent again then."""
+        closes the session, which the session registry then no longer returns, and its requests
+        raise ``NO_ACTIVE_SESSION`` but those of its artifacts; setting it to False opens it
+        again, as PySpark's requests are sent again then, or fail with the ``ValueError`` of a
+        closed channel once ``close()`` or ``stop()`` closed it."""
         return self._session.is_stopped
 
     @_closed.setter
     def _closed(self, value: bool) -> None:
-        if value:
-            self._session._close()
-        else:
-            self._session._reopen()
-
-    @property
-    def _session_id(self) -> str:
-        """The session ID that the requests of the client carry, as SparkConnectClient's
-        ``_session_id``: the session's, until it is set to another, which the requests carry from
-        then on, as PySpark's do; the server answers them of the session of that ID, and a
-        response of another server-side session than the one that the client observed closes
-        the client. The session's ``session_id`` stays, as PySpark's does, and so does that of
-        the requests of the artifacts, as PySpark's ArtifactManager keeps the ID that the client
-        was built with."""
-        return self._session._client_session_id()
-
-    @_session_id.setter
-    def _session_id(self, value: str) -> None:
-        self._session._set_client_session_id(value)
-
-    @property
-    def _user_id(self) -> Optional[str]:
-        """The user of the requests of the client, as SparkConnectClient's ``_user_id``: of the
-        connection string, else of ``user_id``, else of ``SPARK_USER`` or ``USER``."""
-        return self._session._user_id()
+        self._session._set_closed(bool(value))
 
     @property
     def _use_reattachable_execute(self) -> bool:
@@ -1547,30 +1566,27 @@ class SparkConnectClient:
     def newSession(self) -> "SparkConnectClient":
         """A client of a new session of the same connection, as SparkConnectClient's
         ``newSession``: of none of the state of this session, of its hooks, its deadlines and
-        whether its executions are reattachable, and of the default retry policy."""
-        builder = None
-        if self._builder is not None:
-            builder = copy.deepcopy(self._builder)
-            builder._params.pop(ChannelBuilder.PARAM_SESSION_ID, None)
-        session = self._session.newSession()
+        whether its executions are reattachable, of the user of ``_user_id`` unless the
+        connection has one, and of the default retry policy."""
+        session = _new_session_of(self._session, client_state=self.__dict__)
         # A client that no session object owns, as PySpark's, lives until the exit.
-        session._keep_until_exit()
-        return SparkConnectClient._of_session(session, builder)
+        client = SparkConnectClient._of_session(session)
+        client._keep_until_exit(session)
+        return client
 
     def clone(self, new_session_id: Optional[str] = None) -> "SparkConnectClient":
         """A client of a clone of this session on the server, of the ID ``new_session_id``, a
         UUID, if one is given, as SparkConnectClient's ``clone``: of a copy of its SQL
         configurations, temporary views, registered functions and catalog state, of the hooks,
-        the deadlines and the reattachable executions of this client, and of the default retry
-        policy."""
-        session = self._session.cloneSession(new_session_id)
+        the deadlines and the reattachable executions of this client, of the user of its
+        ``_user_id`` unless the connection has one, and of the default retry policy."""
+        session = _new_session_of(
+            self._session, True, new_session_id, client_state=self.__dict__
+        )
         # A client that no session object owns, as PySpark's, lives until the exit.
-        session._keep_until_exit()
-        builder = None
-        if self._builder is not None:
-            builder = copy.deepcopy(self._builder)
-            builder.set(ChannelBuilder.PARAM_SESSION_ID, session.session_id)
-        return SparkConnectClient._of_session(session, builder)
+        client = SparkConnectClient._of_session(session)
+        client._keep_until_exit(session)
+        return client
 
     def register_progress_handler(self, handler: Any) -> None:
         """Register ``handler`` to be called with the progress of the executions of the session,
@@ -1611,7 +1627,7 @@ class SparkConnectClient:
         """The retry policies of the RPCs of the session, as SparkConnectClient's
         ``get_retry_policies``: those that ``set_retry_policies`` set, else a ``DefaultPolicy``
         of the parameters that the transport retries with."""
-        policies = _RETRY_POLICIES.get(self._session)
+        policies = _RETRY_POLICIES.get(self._context)
         if policies is None:
             from pyspark.sql.connect.client.retries import DefaultPolicy
 
@@ -1619,7 +1635,7 @@ class SparkConnectClient:
             parameters.pop("max_retry_exception_elapsed_time")
             parameters.pop("retries_failures")
             policies = [DefaultPolicy(**parameters)]
-            _RETRY_POLICIES[self._session] = policies
+            _RETRY_POLICIES[self._context] = policies
         return list(policies)
 
     def _set_retry_policies(
@@ -1637,7 +1653,7 @@ class SparkConnectClient:
             parameters.update(_retry_parameters(policies))
         self._session._set_retry_policy(**parameters)
         if policies is not None:
-            _RETRY_POLICIES[self._session] = policies
+            _RETRY_POLICIES[self._context] = policies
 
     def release_session(self) -> None:
         """Release the session on the server, as SparkConnectClient's: its state there."""
@@ -1645,7 +1661,8 @@ class SparkConnectClient:
 
     def close(self) -> None:
         """Close the client, as SparkConnectClient's: of a session that ``is_closed``, and is
-        not released on the server."""
+        not released on the server, whose channel is closed, so that its requests raise the
+        ``ValueError`` of a closed channel once ``_closed`` is set to False."""
         self._session._close()
 
     def _resources(self) -> dict[str, Any]:
@@ -1742,218 +1759,184 @@ class SparkConnectClient:
         return properties["ml_command_result"].param.long
 
 
-class _GlobalUserContextExtensions(list):
-    """The global user context extensions of a client, as the list of PySpark's
-    ``SparkConnectClient.global_user_context_extensions``, of their IDs and their
-    ``google.protobuf.Any``: a list whose changes the session of the client takes, so that the
-    requests of all its threads carry them, as PySpark's requests read the list, while it is the
-    list of the clients of the session. Its copies and its pickles are plain lists."""
-
-    def __init__(self, session: Any, extensions: Iterable[Any] = ()) -> None:
-        super().__init__(extensions)
-        self._session_ref = weakref.ref(session)
-
-    def _sync(self, at_request: bool = False) -> None:
-        session = self._session_ref()
-        if session is None:
-            return
-        state = _CLIENT_STATES.get(session)
-        # A list that the attribute of the session's clients is no longer set to is not the one
-        # that the requests read, as in PySpark, and neither is a copy's.
-        if state is None or state.get("global_user_context_extensions") is not self:
-            return
-        session._set_global_user_context_extensions(_serialized_extensions(self, at_request))
-
-    def __reduce_ex__(self, protocol: Any) -> Any:
-        return (list, (list(self),))
-
-    def __copy__(self) -> list[Any]:
-        return list(self)
-
-    def __deepcopy__(self, memo: Any) -> list[Any]:
-        return copy.deepcopy(list(self), memo)
+def _proto_str(value: Any) -> str:
+    # The text of `value` that a string field of protobuf's default backend (upb) takes, as
+    # PySpark's requests set it: a str as it is, which UTF-8 must encode, and bytes of UTF-8, of the
+    # UnicodeEncodeError and the UnicodeDecodeError of those conversions, and the TypeError of any
+    # other object.
+    if isinstance(value, str):
+        value.encode("utf-8")
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    raise TypeError("bad argument type for built-in operation")
 
 
-class _ThreadExtensions(list):
-    """The user context extensions of the threads that have it, as the list of PySpark's
-    ``thread_local.user_context_extensions``, of their IDs and their ``google.protobuf.Any``: the
-    list of a thread, which the requests of the thread carry, as PySpark's read it, and of the
-    threads that are given it, as those of ``inheritable_thread_target``. Its changes are those of
-    the list of the Rust transport that it holds, which the threads that have it share. Its copies
-    and its pickles are plain lists."""
-
-    def __init__(self, session: Any, extensions: Iterable[Any]) -> None:
-        super().__init__(extensions)
-        self._session_ref = weakref.ref(session)
-        self._handle = session._new_user_context_extensions(_serialized_extensions(self))
-
-    @classmethod
-    def _of(cls, thread_local: Any, extensions: Any) -> Any:
-        # The list of the current thread once `thread_local.user_context_extensions` is set to
-        # `extensions`: a list of the session, which the thread shares, or a new one of its
-        # extensions, which the thread has alone.
-        session = thread_local._session_ref()
-        if session is None:
-            return extensions
-        if not (isinstance(extensions, cls) and extensions._session_ref() is session):
-            extensions = cls(session, extensions)
-        session._share_thread_user_context_extensions(extensions._handle)
-        return extensions
-
-    def _sync(self, at_request: bool = False) -> None:
-        self._handle._replace(_serialized_extensions(self, at_request))
-
-    def _copy(self) -> "_ThreadExtensions":
-        # A list of deep copies of the extensions, which no thread has yet.
-        session = self._session_ref()
-        assert session is not None
-        return type(self)(session, copy.deepcopy(list(self)))
-
-    def __reduce_ex__(self, protocol: Any) -> Any:
-        return (list, (list(self),))
-
-    def __copy__(self) -> list[Any]:
-        return list(self)
-
-    def __deepcopy__(self, memo: Any) -> list[Any]:
-        return copy.deepcopy(list(self), memo)
+_MISSING = object()
 
 
-class _ThreadTags(set):
-    """The operation tags of the threads that have it, as the set of PySpark's
-    ``thread_local.tags``: the set of a thread, which its executions carry, as PySpark's read it,
-    and of the threads that are given it, as those of ``inheritable_thread_target``. Its changes
-    are those of the set of the Rust transport that it holds, which the threads that have it
-    share: a str that UTF-8 cannot encode fails each request, as in PySpark, and an object that is
-    neither a str nor bytes raises the ``TypeError`` of the protobuf field of the tags, which
-    PySpark raises when it builds a request, when it is added. Its copies and its pickles are plain
-    sets."""
-
-    def __init__(self, session: Any, tags: Iterable[Any]) -> None:
-        super().__init__(tags)
-        self._session_ref = weakref.ref(session)
-        self._handle = session._new_tags(list(self))
-
-    @classmethod
-    def _of(cls, thread_local: Any, tags: Any) -> Any:
-        # The set of the current thread once `thread_local.tags` is set to `tags`: a set of the
-        # session, which the thread shares, or a new one of its tags, which the thread has alone.
-        session = thread_local._session_ref()
-        if session is None:
-            return tags
-        if not (isinstance(tags, cls) and tags._session_ref() is session):
-            tags = cls(session, tags)
-        session._share_thread_tags(tags._handle)
-        return tags
-
-    def _sync(self) -> None:
-        self._handle._replace(list(self))
-
-    def _copy(self) -> "_ThreadTags":
-        # A set of the same tags, which no thread has yet.
-        session = self._session_ref()
-        assert session is not None
-        return type(self)(session, copy.deepcopy(set(self)))
-
-    def __repr__(self) -> str:
-        # As the repr of PySpark's plain set.
-        return repr(set(self))
-
-    def __reduce_ex__(self, protocol: Any) -> Any:
-        return (set, (list(self),))
-
-    def __copy__(self) -> set[Any]:
-        return set(self)
-
-    def __deepcopy__(self, memo: Any) -> set[Any]:
-        return copy.deepcopy(set(self), memo)
+def _client_attribute(state: dict[str, Any], name: str) -> Any:
+    # The attribute `name` of the clients of `state`, or the AttributeError of a client that has
+    # none, as PySpark's requests read the attributes of its client.
+    try:
+        return state[name]
+    except KeyError:
+        raise AttributeError(f"'SparkConnectClient' object has no attribute '{name}'") from None
 
 
-def _serialized_extensions(
-    extensions: Iterable[Any], at_request: bool = False
-) -> list[tuple[Any, bytes]]:
-    # The IDs and the bytes of the google.protobuf.Any of `extensions`, as the Rust transport takes
-    # them for the user context of its requests. Each is added to the extensions of a UserContext,
-    # as PySpark's `_update_request_with_user_context_extensions` adds it to the request that it
-    # builds, so an item that is not a pair, or an extension that is not an Any (another message,
-    # or not a message), fails as it fails there, of upb's TypeError. The lists take it, as
-    # PySpark's do: a change of a list leaves it out, and the serialization before each call whose
-    # requests carry the extensions (`at_request`) raises its error, as each of those requests of
-    # PySpark raises it.
+def _serialized_extensions(extensions: Any) -> list[bytes]:
+    # The bytes of the google.protobuf.Any of each of `extensions`, pairs of an ID and an Any, as
+    # the requests of the Rust transport carry them. Each is added to the extensions of a
+    # UserContext, as PySpark's `_update_request_with_user_context_extensions` adds it to the
+    # request that it builds, so an item that is not a pair, or an extension that is not an Any
+    # (another message, or not a message), fails as it fails there, of upb's TypeError.
+    if type(extensions) is list and not extensions:
+        return []
     from pyspark.sql.connect.proto import UserContext
 
-    serialized = []
-    for item in extensions:
+    context = UserContext()
+    for _, extension in extensions:
+        context.extensions.append(extension)
+    return [extension.SerializeToString() for extension in context.extensions]
+
+
+# The refresher of the session of a copy of a client whose method runs, and the attributes of the
+# copy, which the requests of the method carry (see `SparkConnectClient.__copy__`).
+_COPY_CALL: "contextvars.ContextVar[Optional[tuple[Any, dict[str, Any]]]]" = (
+    contextvars.ContextVar("_COPY_CALL", default=None)
+)
+
+
+class _RequestContext:
+    """The attributes of the clients of a session, which the session keeps as long as it lives,
+    as PySpark's session keeps its client (see ``_client_state``), and the refresher that the Rust
+    transport calls before each call of the session that sends requests, and before the request
+    of a finalizer, which gives it what the requests carry of them, as PySpark's requests read
+    them when they are built: the session ID of ``_session_id`` and the user of ``_user_id``, the
+    user context extensions of ``global_user_context_extensions`` and of the
+    ``thread_local.user_context_extensions`` of the calling thread, and the tags of its
+    ``thread_local.tags``, which only the executions carry, of the client that the thread calls.
+    Of the mode 2, the calls whose requests carry the extensions (executions, analyses,
+    configurations and interrupts) and the finalizers, a value that the field of a request does not
+    take raises the error of protobuf, as PySpark's request raises it, but for a tag, with which
+    only the executions fail; of the mode 1 (``ReleaseSession``, ``GetStatus``,
+    ``CloneSession``), only those of the session ID and the user are raised; of the mode 0 (the
+    artifacts), none is. A value that a refresh of no error does not read is ``...``."""
+
+    __slots__ = ("state", "__weakref__")
+
+    def __init__(self, state: dict[str, Any]) -> None:
+        self.state = state
+
+    def __call__(self, mode: int) -> tuple[Any, ...]:
+        # The attributes of the copy of a client whose method calls, else those of the session,
+        # which a finalizer (the mode 3, of the mode 2) reads, as PySpark's reads the client of
+        # its session; the contextvar of the copy is None while the call runs, so that a call that
+        # it makes meanwhile, of a progress handler or a finalizer, is of the session (see
+        # `_after_call`).
+        state, token = self.state, None
+        if mode < 3:
+            token = self._hold()
+            if token is not None:
+                state = token.old_value[1]
         try:
-            extension_id, extension = item
-            context = UserContext()
-            context.extensions.append(extension)
-        except Exception:
-            if at_request:
-                raise
-            continue
-        serialized.append((extension_id, context.extensions[0].SerializeToString()))
-    return serialized
-
-
-def _synced(base: type, name: str) -> Any:
-    # A method of `base`, a list or a set, that changes it, after which the Rust transport takes
-    # the extensions or the tags: a change that it does not take, of a tag that it cannot send,
-    # is undone, and its error raised. An extension that it cannot send stays in the list, and
-    # fails each call (see `_serialized_extensions`).
-    method = getattr(base, name)
-
-    def synced(self: Any, *args: Any, **kwargs: Any) -> Any:
-        before = base(self)
-        result = method(self, *args, **kwargs)
-        try:
-            self._sync()
+            values = _request_values(state, min(mode, 2))
         except BaseException:
-            base.clear(self)
-            if base is list:
-                base.extend(self, before)
-            else:
-                base.update(self, before)
+            if token is not None:
+                _COPY_CALL.reset(token)
             raise
-        return result
+        return values + (token, state is self.state)
 
-    synced.__name__ = synced.__qualname__ = name
-    return synced
+    def _hold(self) -> Any:
+        # The token of the contextvar of the copy of a client of this session whose method calls,
+        # which is None while the call runs, until `_after_call` sets it again, or None: of a call
+        # that reads nothing of the client, as the `next()` of the iterator of an execution.
+        call = _COPY_CALL.get()
+        if call is not None and call[0] is self:
+            return _COPY_CALL.set(None)
+        return None
+
+    def _values_of_call(self, token: Any = None) -> tuple[Any, ...]:
+        # The values of the requests of a call of a client of this session that runs on the calling
+        # thread, read again of none of their errors, as those of the mode 0, once a call or a
+        # finalizer that ran during it ended, as PySpark's requests of the rest of the call read
+        # the attributes of its client then: of the copy of a client whose method made the call,
+        # of the token of the contextvar of its refresh (see `_hold`), else of the session.
+        state = self.state
+        if token is not None and token.old_value is not contextvars.Token.MISSING:
+            state = token.old_value[1]
+        return _request_values(state, 0)
+
+    def _after_call(self, read_tags: bool, handled_error: bool, token: Any = None) -> None:
+        # What PySpark's client leaves in the `thread_local` of the calling thread once a call
+        # ended: the empty set of tags that the `get_tags` of the request of an execution gives a
+        # thread of none (`read_tags`), and the `inside_error_handling` that its `_handle_error`
+        # sets while it handles the failure of a request, and leaves False (`handled_error`); and
+        # the contextvar of a copy of a client whose method made the call, set again.
+        try:
+            state = self.state
+            if token is not None and token.old_value is not contextvars.Token.MISSING:
+                state = token.old_value[1]
+            if read_tags or handled_error:
+                local = _client_attribute(state, "thread_local")
+                if read_tags and not hasattr(local, "tags"):
+                    local.tags = set()
+                if handled_error:
+                    local.inside_error_handling = False
+        finally:
+            if token is not None:
+                _COPY_CALL.reset(token)
 
 
-for _list in (_GlobalUserContextExtensions, _ThreadExtensions):
-    for _name in (
-        "append",
-        "extend",
-        "insert",
-        "remove",
-        "pop",
-        "clear",
-        "sort",
-        "reverse",
-        "__setitem__",
-        "__delitem__",
-        "__iadd__",
-        "__imul__",
-    ):
-        setattr(_list, _name, _synced(list, _name))
-for _name in (
-    "add",
-    "discard",
-    "remove",
-    "pop",
-    "clear",
-    "update",
-    "difference_update",
-    "intersection_update",
-    "symmetric_difference_update",
-    "__ior__",
-    "__iand__",
-    "__isub__",
-    "__ixor__",
-):
-    setattr(_ThreadTags, _name, _synced(set, _name))
-del _list, _name
+def _request_values(state: dict[str, Any], mode: int) -> tuple[Any, ...]:
+    # The session ID, the user, the global extensions, the extensions of the thread and the tags
+    # of the thread of the requests of the client of `state`, of the errors of the mode of
+    # `_RequestContext`.
+    def read(strict: bool, value: Any) -> Any:
+        if strict:
+            return value()
+        try:
+            return value()
+        except Exception:
+            return ...
+
+    def global_extensions() -> list[bytes]:
+        # As PySpark's requests, of the global extensions first.
+        with _client_attribute(state, "global_user_context_extensions_lock"):
+            return _serialized_extensions(
+                _client_attribute(state, "global_user_context_extensions")
+            )
+
+    def own_extensions() -> Optional[list[bytes]]:
+        local = _client_attribute(state, "thread_local")
+        own = getattr(local, "user_context_extensions", _MISSING)
+        return None if own is _MISSING else _serialized_extensions(own)
+
+    def tags() -> Any:
+        local = _client_attribute(state, "thread_local")
+        tags = getattr(local, "tags", _MISSING)
+        if tags is _MISSING:
+            return None
+        try:
+            return list(tags)
+        except TypeError as error:
+            # The error of `list(self.get_tags())` of PySpark's request of an execution, which only
+            # the executions raise.
+            return error
+
+    def user_id() -> Optional[str]:
+        user = _client_attribute(state, "_user_id")
+        # As PySpark's requests, which set the user of a `_user_id` that is not empty.
+        return _proto_str(user) if user else None
+
+    identity, extensions = mode >= 1, mode >= 2
+    return (
+        read(identity, lambda: _proto_str(_client_attribute(state, "_session_id"))),
+        read(identity, user_id),
+        read(extensions, global_extensions),
+        read(extensions, own_extensions),
+        read(extensions, tags),
+    )
 
 
 def _parse_response(message_class: Any, data: bytes, streaming: bool = False) -> Any:
@@ -1979,118 +1962,175 @@ def _parse_response(message_class: Any, data: bytes, streaming: bool = False) ->
         ) from None
 
 
-def _extensions_of(extensions: Any) -> list[Any]:
-    # The user context extensions of the Rust transport, as SparkConnectClient keeps them: the
-    # ID and the google.protobuf.Any of each, of the Any of pyspark.sql.connect.proto's runtime.
-    from pyspark.sql.connect.proto._rust import Any as ProtoAny
+def _in_copy_context(method: Any) -> Any:
+    # A method of SparkConnectClient whose requests, of a copy of a client, carry the attributes
+    # of the copy, as the requests of a copy of PySpark's client read its own.
+    if inspect.isgeneratorfunction(method):
 
-    return [(extension_id, ProtoAny.FromString(data)) for extension_id, data in extensions]
+        @functools.wraps(method)
+        def generator(self: Any, *args: Any, **kwargs: Any) -> Any:
+            items = method(self, *args, **kwargs)
+            context = getattr(self, "_copy_context", None)
+            if context is None:
+                return (yield from items)
+            call = (context, self.__dict__)
+            try:
+                while True:
+                    token = _COPY_CALL.set(call)
+                    try:
+                        item = next(items)
+                    except StopIteration as stop:
+                        return stop.value
+                    finally:
+                        _COPY_CALL.reset(token)
+                    yield item
+            finally:
+                token = _COPY_CALL.set(call)
+                try:
+                    items.close()
+                finally:
+                    _COPY_CALL.reset(token)
 
+        return generator
 
-class _ThreadLocalOfClient(threading.local):
-    """The state of each thread of the session of a client, as SparkConnectClient's
-    ``thread_local``, a ``threading.local``: the attributes that a thread sets are its own, and
-    PySpark's ``tags`` and ``user_context_extensions`` exist once a thread uses them. The set of
-    the tags and the list of the extensions that a thread sets are those that its requests carry
-    (see ``_ThreadTags`` and ``_ThreadExtensions``), and so are those of the threads that are given
-    them, as by ``inheritable_thread_target``. Deleting them leaves the thread with none."""
+    @functools.wraps(method)
+    def call(self: Any, *args: Any, **kwargs: Any) -> Any:
+        # None of a client whose `__init__` has not set it yet.
+        context = getattr(self, "_copy_context", None)
+        if context is None:
+            return method(self, *args, **kwargs)
+        token = _COPY_CALL.set((context, self.__dict__))
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            _COPY_CALL.reset(token)
 
-    # The session of the clients, held weakly, which all threads see.
-    __slots__ = ("_session_ref",)
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name == "tags":
-            value = _ThreadTags._of(self, value)
-        elif name == "user_context_extensions":
-            value = _ThreadExtensions._of(self, value)
-        super().__setattr__(name, value)
-
-    def __delattr__(self, name: str) -> None:
-        super().__delattr__(name)
-        session = self._session_ref()
-        if session is None:
-            return
-        if name == "tags":
-            session._clear_thread_tags()
-        elif name == "user_context_extensions":
-            session._clear_thread_user_context_extensions()
-
-
-def _thread_local_copies(thread_local: Any) -> list[tuple[str, Any]]:
-    """The attributes of the current thread of ``thread_local``, a client's, as PySpark's
-    ``inheritable_thread_target`` copies them for the threads of a function, of ``copy.deepcopy``
-    of each: the copies of the set of the tags and of the list of the extensions are a set and a
-    list that the threads that are given them share, as the threads share PySpark's copies."""
-    copies = []
-    for attr, value in thread_local.__dict__.items():
-        if isinstance(value, (_ThreadTags, _ThreadExtensions)):
-            value = value._copy()
-        else:
-            value = copy.deepcopy(value)
-        copies.append((attr, value))
-    return copies
+    return call
 
 
-# The attributes of the clients of each session, which they share, as PySpark's session has one
-# client (see `SparkConnectClient.__slots__`): held weakly by their session, which they hold
-# weakly too.
-_CLIENT_STATES: "weakref.WeakKeyDictionary[Any, dict[str, Any]]" = weakref.WeakKeyDictionary()
+for _name, _member in list(vars(SparkConnectClient).items()):
+    if not _name.startswith("__") and inspect.isfunction(_member):
+        setattr(SparkConnectClient, _name, _in_copy_context(_member))
+del _name, _member
+
+
 _CLIENT_STATES_LOCK = threading.Lock()
 
 
-def _client_state(session: Any, builder: Optional[ChannelBuilder]) -> dict[str, Any]:
-    """The attributes of the clients of ``session``, made with the first of them: its channel
-    builder ``builder``, as PySpark's ``_builder``, else a ``DefaultChannelBuilder`` of the
-    connection of the session, of the host and the token of the client; its ``thread_local``; its
-    ``global_user_context_extensions``, those that the session has, whose changes, and a list that
-    the attribute is set to, are the session's (see ``SparkConnectClient.__setattr__``); and their
-    lock."""
+def _new_client_state(session: Any, builder: Any, user_id: Any) -> dict[str, Any]:
+    """The attributes of a new client of ``session``, as PySpark's ``SparkConnectClient`` makes
+    them: its channel builder ``builder``, as ``_builder``, else a ``DefaultChannelBuilder`` of the
+    connection of the session; a ``threading.local`` as its ``thread_local``; an empty list of
+    global user context extensions, and its lock; the session ID of the session, as
+    ``_session_id``; and as ``_user_id``, the ``user_id`` of the channel builder, else
+    ``user_id`` as it is given, else the user of the connection of the session, of
+    ``SPARK_USER`` or ``USER``."""
+    if builder is None:
+        connection_string = getattr(session, "_connection_string", None)
+        if connection_string is not None:
+            # As PySpark's client of a session, of the channel builder of its connection.
+            builder = DefaultChannelBuilder(connection_string())
+    if builder is not None and builder.userId is not None:
+        user = builder.userId
+    elif user_id is not None:
+        user = user_id
+    else:
+        user = session._user_id()
+    return {
+        "thread_local": threading.local(),
+        "_builder": builder,
+        "_user_id": user,
+        "_session_id": session._client_session_id(),
+        "global_user_context_extensions": [],
+        "global_user_context_extensions_lock": threading.Lock(),
+    }
+
+
+def _client_context(session: Any) -> _RequestContext:
+    """The state of the clients of ``session``, which the session keeps as long as it lives, as
+    PySpark's session keeps its client: so the clients of a session share their attributes, and so
+    do the objects of the session that are made again while it lives, as a session object that a
+    DataFrame gives back once the program dropped the one it had. Its first client makes them (see
+    ``_new_client_state``), unless the session was made with them (``_init_client_state``)."""
     with _CLIENT_STATES_LOCK:
-        state = _CLIENT_STATES.get(session)
-        if state is None:
-            connection_string = getattr(session, "_connection_string", None)
-            if builder is None and connection_string is not None:
-                # As PySpark's client of a session, of the channel builder of its connection.
-                builder = DefaultChannelBuilder(connection_string())
-            thread_local = _ThreadLocalOfClient()
-            thread_local._session_ref = weakref.ref(session)
-            extensions = _extensions_of(session._user_context_extensions(True))
-            state = {
-                "_builder": builder,
-                "thread_local": thread_local,
-                "global_user_context_extensions": _GlobalUserContextExtensions(
-                    session, extensions
-                ),
-                "global_user_context_extensions_lock": threading.Lock(),
-            }
-            _CLIENT_STATES[session] = state
-            # As PySpark's requests, which serialize the extensions when they are built: the calls
-            # of the session serialize them again before they send requests.
-            session._set_user_context_refresh(
-                functools.partial(_refresh_user_context_extensions, weakref.ref(session))
-            )
-    return state
+        context = session._user_context_refresh()
+        if context is None:
+            context = _RequestContext(_new_client_state(session, None, None))
+            session._set_user_context_refresh(context)
+    return context
 
 
-def _refresh_user_context_extensions(session_ref: Any) -> None:
-    """Serialize the user context extensions of the session of ``session_ref`` again for the
-    Rust transport, of its clients' global list and of the list of the current thread, before a
-    call of the session sends requests, as PySpark serializes them when it builds each request:
-    so a ``google.protobuf.Any`` of the lists that was changed in place is sent as it is now, and
-    an extension that is not an Any raises upb's ``TypeError`` from the call, of the global list
-    first, as PySpark's request adds the global extensions first."""
-    session = session_ref()
-    if session is None:
-        return
-    state = _CLIENT_STATES.get(session)
+def _client_state(session: Any) -> dict[str, Any]:
+    """The attributes of the clients of ``session`` (see ``_client_context``)."""
+    return _client_context(session).state
+
+
+def _init_client_state(session: Any, connection: Any, user_id: Any = None) -> None:
+    """Give ``session``, a new session of ``connection``, the attributes of PySpark's client of
+    ``connection`` and ``user_id``: of the channel builder of ``connection`` (the object itself if
+    it is one), and of the user ``user_id`` as it is given, unless the connection has one, as
+    PySpark's ``SparkSession(connection, userId)`` and ``SparkConnectClient(connection, user_id)``
+    make their client."""
+    builder = (
+        connection if isinstance(connection, ChannelBuilder) else DefaultChannelBuilder(connection)
+    )
+    with _CLIENT_STATES_LOCK:
+        session._set_user_context_refresh(
+            _RequestContext(_new_client_state(session, builder, user_id))
+        )
+
+
+def _new_session_of(
+    session: Any,
+    clone: bool = False,
+    new_session_id: Any = None,
+    client_state: Optional[dict[str, Any]] = None,
+) -> Any:
+    """The session of ``newSession()``, or of ``cloneSession(new_session_id)``, of ``session``, as
+    PySpark's ``SparkSession.newSession`` and ``cloneSession`` make it of the ``newSession`` and
+    the ``clone`` of its client, of the attributes ``client_state`` of a client, else of those of
+    the clients of the session: a session of the user of its ``_user_id`` unless the connection
+    has one, of the TypeError of one that is not a str, and of the channel builder of its
+    ``_builder``, deep-copied, without a session ID, or of that of the clone."""
+    state = client_state
     if state is None:
-        return
-    extensions = state.get("global_user_context_extensions")
-    if isinstance(extensions, _GlobalUserContextExtensions) and extensions:
-        extensions._sync(at_request=True)
-    own = getattr(state.get("thread_local"), "user_context_extensions", None)
-    if isinstance(own, _ThreadExtensions) and own:
-        own._sync(at_request=True)
+        context = session._user_context_refresh()
+        state = None if context is None else context.state
+    if state is None:
+        if clone:
+            return session._clone_session(new_session_id)
+        # Of the user of the connection, as the client of the session would have it.
+        return session._new_session(session._user_id())
+    builder = _client_attribute(state, "_builder")
+    user = _client_attribute(state, "_user_id")
+    new_builder = None if builder is None else copy.deepcopy(builder)
+    if new_builder is not None and not clone:
+        new_builder._params.pop(ChannelBuilder.PARAM_SESSION_ID, None)
+    if new_builder is not None and new_builder.userId is not None:
+        new_user = new_builder.userId
+    elif user is not None:
+        new_user = user
+    else:
+        new_user = os.getenv("SPARK_USER", os.getenv("USER", None))
+    if clone:
+        # The request of the clone carries the session ID and the user of the client (see
+        # `crate::interrupt::RequestContext::Identity`), of their errors; the clone is of the new
+        # user, as the client of PySpark's `clone`, which PySpark checks once the clone is made.
+        new = session._clone_session(
+            new_session_id, None if new_user is None else _proto_str(new_user), True
+        )
+        if new_builder is not None:
+            new_builder.set(ChannelBuilder.PARAM_SESSION_ID, new.session_id)
+    else:
+        # As the ArtifactManager of PySpark's new client of the user, which sets it in the string
+        # field of its user context, before the session is made: its requests and those of its
+        # artifacts carry it.
+        new = session._new_session(None if new_user is None else _proto_str(new_user))
+    with _CLIENT_STATES_LOCK:
+        new._set_user_context_refresh(
+            _RequestContext(_new_client_state(new, new_builder, new_user))
+        )
+    return new
 
 
 # The client of each session, by its ID, while it is in use.
@@ -2106,10 +2146,37 @@ def _client_of(session: Any) -> "SparkConnectClient":
     """The client of ``session``, the same object while it is in use, as ``SparkSession.client``
     is one object per session."""
     client = _CLIENTS.get(session.session_id)
-    if client is None or client._session is not session:
+    if client is None or (
+        client._session_cache() is not session and not client._session_ref._is_of(session)
+    ):
         client = SparkConnectClient._of_session(session)
         _CLIENTS[session.session_id] = client
     return client
+
+
+def _checked_channel_builder(connection: Any) -> ChannelBuilder:
+    """The channel builder of ``connection``, as PySpark's ``SparkConnectClient`` reads it when it
+    is made: ``connection`` itself if it is a ``ChannelBuilder``, else ``DefaultChannelBuilder``
+    of it, which raises the errors of an object that is not a connection string, such as the
+    ``TypeError`` of its slicing, of its ``session_id``, of its ``userId``, and of the channel of
+    its ``toChannel``, which a ``ChannelBuilder`` that is not a ``DefaultChannelBuilder`` has of
+    its own: PySpark's raises without one (``PySparkNotImplementedError``). The Rust transport
+    connects to the ``sc://`` URL of the ``host``, the ``port`` and the ``_params`` of the
+    builder, and not to the channel of its ``toChannel``, which it calls for its errors only: a
+    ``DefaultChannelBuilder`` has none, so that one of a subclass, which may call the one of its
+    base, is not called."""
+    builder = (
+        connection if isinstance(connection, ChannelBuilder) else DefaultChannelBuilder(connection)
+    )
+    _ = builder.session_id
+    _ = builder.userId
+    if not isinstance(builder, DefaultChannelBuilder):
+        to_channel = getattr(builder, "toChannel", None)
+        if to_channel is None:
+            # As PySpark's `ChannelBuilder.toChannel`, which a builder of its own overrides.
+            raise PySparkNotImplementedError
+        to_channel()
+    return builder
 
 
 def _check_data_type(data_type: Any) -> None:

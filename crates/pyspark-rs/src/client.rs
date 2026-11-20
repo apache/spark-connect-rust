@@ -128,7 +128,11 @@ impl PyExecutePlanResponses {
             return Ok(None);
         };
         let session = self.session.clone();
-        let next = interruptible(py, &session, || execution.next_response().map_err(Box::new));
+        // As PySpark's iterator of the responses, whose reattaches and releases copy the request
+        // of the execution: nothing of the client is read again.
+        let next = crate::interrupt::interruptible_continuation(py, &session, || {
+            execution.next_response().map_err(Box::new)
+        });
         let response = match next {
             Ok(Some(response)) => response,
             Ok(None) => {

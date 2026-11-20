@@ -113,6 +113,17 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     origin::listen_to_plan_builds();
     client::warn_of_spent_retries();
     client::log_grpc_errors();
+    // The requests of the finalizers of a session read the state of its client when they are
+    // sent, as PySpark's finalizers build their requests when they run.
+    spark_connect::session::set_finalizer_request_hook(
+        spark_connect::session::FinalizerRequestHook {
+            before: interrupt::before_finalizer_request,
+            after: interrupt::after_finalizer_request,
+        },
+    );
+    // So do the requests of the failure of a call, of the details of its error and of the configs
+    // of its stack trace, as PySpark's `_handle_error` builds them.
+    spark_connect_core::client::set_failure_requests_hook(interrupt::before_failure_requests);
     m.add_class::<PySparkSession>()?;
     m.add_function(wrap_pyfunction!(session::_close_sessions_at_exit, m)?)?;
     m.add_function(wrap_pyfunction!(session::_refuse_releases, m)?)?;
@@ -331,18 +342,16 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 /// The native classes that are not attributes of the module, of objects that it makes: the
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
-/// hook and the active session of the sessions (`SparkSession._active_session`), the tags and the
-/// user context extensions that threads share, the listener bus of a stream manager, and the
-/// objects of the options and the kept arguments that the copies of a reader, a writer or a
-/// builder share.
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 8] {
+/// hook and the active session of the sessions (`SparkSession._active_session`), the handle of a
+/// session that a client holds, the listener bus of a stream manager, and the objects of the
+/// options and the kept arguments that the copies of a reader, a writer or a builder share.
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
         py.get_type::<session::PyExitHook>(),
         py.get_type::<session::PyActiveSession>(),
-        py.get_type::<session::PySharedTags>(),
-        py.get_type::<session::PySharedUserContextExtensions>(),
+        py.get_type::<session::PyWeakSession>(),
         py.get_type::<streaming::PyStreamingQueryListenerBus>(),
         py.get_type::<options::PySharedObjects>(),
     ]

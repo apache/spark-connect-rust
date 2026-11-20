@@ -2504,21 +2504,85 @@ def test_session_id_of_the_connection_string_is_checked_as_pythons_uuid(mock_con
     assert taken == 10
 
 
-def test_channel_builder_uses_endpoint():
-    # channelBuilder reconstructs an sc:// URL from the builder's host/port (+ params)
-    # for the native transport, returning a configured Builder (no longer raises).
+def test_channel_builders_of_any_object_fail_when_the_session_is_made_as_pyspark(mock_connect):
+    # As PySpark's builder, whose channelBuilder keeps any object, and whose session fails when it
+    # is made, of the errors of PySpark's client: an object that is not a ChannelBuilder is the
+    # connection string of a DefaultChannelBuilder, which raises the TypeError of its slicing
+    # (and takes a str), and a ChannelBuilder that is not a DefaultChannelBuilder raises the error
+    # of its toChannel, or that of PySpark's own of a builder of none (the AttributeError of the
+    # PySparkNotImplementedError of no error class), and of its host. SparkSession(connection=...)
+    # and SparkConnectClient(...) raise them too. A builder of its own toChannel, host and port
+    # is connected to the sc:// URL of them and of its parameters.
+    from pyspark.sql.connect.client import ChannelBuilder, SparkConnectClient
     from pyspark.sql.connect.session import SparkSession
 
-    class CB:
-        host = "localhost"
-        port = 15002
-        _params = {"use_ssl": "false"}
+    spark, service = mock_connect
+    port = int(service.remote.rsplit(":", 1)[1])
+    no_error_class = "'NoneType' object has no attribute 'split'"
 
-    b = SparkSession.builder.channelBuilder(CB())
-    assert type(b).__name__ == "Builder"
-    # A builder without a host is a clear error (not a silent misconfig).
-    with pytest.raises(ValueError):
-        SparkSession.builder.channelBuilder(object())
+    class HostOnly(ChannelBuilder):
+        @property
+        def host(self):
+            return "localhost"
+
+    class Raising(HostOnly):
+        def toChannel(self):
+            raise RuntimeError("no channel")
+
+    class Endpoint(HostOnly):
+        def __init__(self):
+            super().__init__(params={"x-custom": "value"})
+            self.channels = 0
+
+        @property
+        def host(self):
+            return "127.0.0.1"
+
+        @property
+        def port(self):
+            return port
+
+        def toChannel(self):
+            self.channels += 1
+
+    class NoHost(ChannelBuilder):
+        def toChannel(self):
+            return None
+
+    cases = [
+        (object(), TypeError, "'object' object is not subscriptable"),
+        (5, TypeError, "'int' object is not subscriptable"),
+        (ChannelBuilder(), AttributeError, no_error_class),
+        (HostOnly(), AttributeError, no_error_class),
+        (Raising(), RuntimeError, "no channel"),
+        (NoHost(), AttributeError, no_error_class),
+    ]
+    for connection, error, message in cases:
+        builder = SparkSession.builder.channelBuilder(connection)
+        assert type(builder).__name__ == "Builder"
+        for make in (
+            builder.create,
+            lambda: SparkSession(connection=connection),
+            lambda: SparkConnectClient(connection),
+        ):
+            with pytest.raises(error, match=f"^{re.escape(message)}$"):
+                make()
+    # A str is a connection string, as PySpark's DefaultChannelBuilder takes it.
+    session = SparkSession.builder.channelBuilder(service.remote).create()
+    try:
+        session.range(1).collect()
+        assert session.client.host == "127.0.0.1"
+    finally:
+        session.stop()
+    endpoint = Endpoint()
+    session = SparkSession.builder.channelBuilder(endpoint).create()
+    try:
+        assert endpoint.channels == 1 and session.client._builder is endpoint
+        before = len(service.execute_requests)
+        session.range(1).collect()
+        assert len(service.execute_requests) == before + 1
+    finally:
+        session.stop()
 
 
 def test_functions_udtf_and_arrow_decorators():
@@ -4357,20 +4421,49 @@ def test_stop_releases_the_session_on_the_server_unless_released_on_close_is_fal
     assert service.release_session_calls == before + 1
 
 
+class _FakeSessionOfClient:
+    # What SparkConnectClient reads of the session object of a client, for a session that stands
+    # in for one of the drop-in: a handle of the session, its connection, its session ID and its
+    # user, and the state of its clients, which it keeps.
+    session_id = "s"
+    _refresh = None
+
+    def _downgrade(self):
+        session = self
+
+        class Handle:
+            def _session(self):
+                return session
+
+            def _is_of(self, other):
+                return other is session
+
+        return Handle()
+
+    def _connection_string(self):
+        return "sc://localhost"
+
+    def _user_context_refresh(self):
+        return self._refresh
+
+    def _set_user_context_refresh(self, refresh):
+        self._refresh = refresh
+
+    def _client_session_id(self):
+        return self.session_id
+
+    def _user_id(self):
+        return None
+
+
 def test_plan_logging_string_of_a_protobuf_message_as_pyspark_connect():
     # SparkConnectClient._proto_to_string: the one-line text of a plan, truncated when asked,
     # and the placeholder of a message too deep for text formatting.
     import pyspark.sql.connect.proto as pb2
     from pyspark.sql.connect.client import SparkConnectClient
 
-    class Session:
+    class Session(_FakeSessionOfClient):
         session_id = "x"
-
-        def _user_context_extensions(self, is_global):
-            return []
-
-        def _set_user_context_refresh(self, refresh):
-            pass
 
     client = SparkConnectClient._of_session(Session())
     relation = pb2.Relation()
@@ -7755,19 +7848,13 @@ def test_udf_defaults_and_registration():
     from pyspark.sql.connect.client import SparkConnectClient
     from pyspark.sql.connect.udf import UDFRegistration
 
-    class _StubSession:
+    class _StubSession(_FakeSessionOfClient):
         def __init__(self):
             self.calls = []
 
         @property
         def _client(self):
             return SparkConnectClient._of_session(self)
-
-        def _user_context_extensions(self, is_global):
-            return []
-
-        def _set_user_context_refresh(self, refresh):
-            pass
 
         def _registerPythonUdf(self, name, returnType, evalType, command, python_ver, deterministic):
             self.calls.append((name, evalType, isinstance(command, (bytes, bytearray))))
@@ -27345,16 +27432,10 @@ def test_client_analysis_requests_and_results_are_those_of_pyspark():
     from pyspark.sql.connect.client.core import AnalyzeResult
     from pyspark.storagelevel import StorageLevel
 
-    class Session:
+    class Session(_FakeSessionOfClient):
         session_id = "s"
         response = pb2.AnalyzePlanResponse()
         sent = None
-
-        def _user_context_extensions(self, is_global):
-            return []
-
-        def _set_user_context_refresh(self, refresh):
-            pass
 
         def _analyze_plan(self, data):
             Session.sent = pb2.AnalyzePlanRequest.FromString(data)
@@ -27439,15 +27520,9 @@ def test_client_reads_responses_of_any_depth_and_raises_pysparks_error_of_bad_on
     deep = pb2.AnalyzePlanResponse()
     deep.schema.schema.CopyFrom(_deep_struct_type(40))
 
-    class Session:
+    class Session(_FakeSessionOfClient):
         session_id = "s"
         response = deep.SerializeToString()
-
-        def _user_context_extensions(self, is_global):
-            return []
-
-        def _set_user_context_refresh(self, refresh):
-            pass
 
         def _analyze_plan(self, data):
             return Session.response
@@ -28235,18 +28310,23 @@ def test_the_attributes_of_the_clients_of_a_session_are_its_own_as_pyspark(mock_
     del client.attribute
 
 
-def test_the_thread_local_of_a_client_is_a_threading_local_of_live_tags_and_extensions_as_pyspark(
+def test_the_thread_local_of_a_client_is_pysparks_threading_local_of_a_set_and_lists(
     mock_connect,
 ):
-    # As PySpark Connect's thread_local, a threading.local: its tags and user_context_extensions
-    # exist once a thread uses them, are the set and the list that the requests of the thread
-    # carry, also as they are changed or set, and are the thread's own, as are its other
-    # attributes. The tags of SparkSession.addTag are those of the client, and getTags gives their
-    # set. A thread of inheritable_thread_target shares the copies of the attributes of the thread
-    # that decorated its function. Deleting the attributes leaves the thread with none.
+    # As PySpark Connect's thread_local, a plain threading.local, of a plain set of tags and plain
+    # lists of user context extensions, as is the global list of the client: they exist once a
+    # thread uses them, the requests of the thread carry them as they are when they are sent, also
+    # as they are changed or set, and they are the thread's own, as are its other attributes. An
+    # execution gives a thread of no tags an empty set of them, as PySpark's `get_tags` does when
+    # it builds the request, and a failure of a request leaves `inside_error_handling` False, as
+    # its `_handle_error` does. The tags of SparkSession.addTag are those of the client, and
+    # getTags gives their set. A thread of inheritable_thread_target shares the copies of the
+    # attributes of the thread that decorated its function. Deleting the attributes leaves the
+    # thread with none.
     import threading
 
     import pyspark.sql.connect.proto as pb2
+    from pyspark.errors.exceptions.connect import SparkConnectException
     from pyspark.sql.connect.proto._rust import Any
     from pyspark.util import inheritable_thread_target
 
@@ -28259,14 +28339,19 @@ def test_the_thread_local_of_a_client_is_a_threading_local_of_live_tags_and_exte
         request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
         return sorted(request.tags), [e.type_url for e in request.user_context.extensions]
 
-    assert isinstance(local, threading.local)
+    assert type(local) is threading.local
+    assert type(client.global_user_context_extensions) is list
     assert not hasattr(local, "tags") and not hasattr(local, "user_context_extensions")
+    spark.range(1).schema
+    assert not hasattr(local, "tags")
     first = Any(type_url="type.googleapis.com/t1")
     client.add_threadlocal_user_context_extension(first)
     extensions = local.user_context_extensions
+    assert type(extensions) is list
     assert extensions[0][1] is first and local.user_context_extensions is extensions
     extensions.append(("threadlocal_x", Any(type_url="type.googleapis.com/t2")))
     assert run() == ([], ["type.googleapis.com/t1", "type.googleapis.com/t2"])
+    assert type(local.tags) is set and local.tags == set()
     local.user_context_extensions = [("threadlocal_y", Any(type_url="type.googleapis.com/t3"))]
     assert run() == ([], ["type.googleapis.com/t3"])
     local.user_context_extensions[0][1].type_url = "type.googleapis.com/t4"
@@ -28275,15 +28360,11 @@ def test_the_thread_local_of_a_client_is_a_threading_local_of_live_tags_and_exte
     spark.addTag("a")
     tags = local.tags
     assert tags is client.get_tags() is spark.getTags() and tags == {"a"}
-    assert repr(tags) == "{'a'}"
+    assert type(tags) is set
     tags.add("b")
     assert run() == (["a", "b"], ["type.googleapis.com/t4"])
     local.tags = {"z"}
     assert run() == (["z"], ["type.googleapis.com/t4"]) and spark.getTags() == {"z"}
-    # A tag that the field of the tags of a request cannot take is refused, and the set is kept.
-    with pytest.raises(TypeError, match="bad argument type for built-in operation"):
-        local.tags.add(("not", "a", "str"))
-    assert local.tags == {"z"} and run()[0] == ["z"]
 
     seen = {}
 
@@ -28292,13 +28373,20 @@ def test_the_thread_local_of_a_client_is_a_threading_local_of_live_tags_and_exte
         seen["extensions"] = hasattr(local, "user_context_extensions")
         local.other = 1
         seen["run"] = run()
+        seen["vars"] = sorted(vars(local))
 
     thread = threading.Thread(target=other)
     thread.start()
     thread.join()
-    assert seen == {"tags": False, "extensions": False, "run": ([], [])}
+    assert seen == {"tags": False, "extensions": False, "run": ([], []), "vars": ["other", "tags"]}
     assert not hasattr(local, "other")
     assert sorted(vars(local)) == ["tags", "user_context_extensions"]
+    client._closed = True
+    with pytest.raises(SparkConnectException):
+        run()
+    client._closed = False
+    assert local.inside_error_handling is False
+    del local.inside_error_handling
 
     @inheritable_thread_target(spark)
     def inherited():
@@ -28323,6 +28411,67 @@ def test_the_thread_local_of_a_client_is_a_threading_local_of_live_tags_and_exte
     assert not hasattr(local, "tags") and run() == ([], [])
     spark.clearTags()
     assert spark.getTags() == set() and run() == ([], [])
+
+
+def test_tags_that_the_tags_of_a_request_do_not_take_fail_the_executions_as_pyspark(
+    mock_connect,
+):
+    # As PySpark Connect's set of tags, which takes any object: a tag that the string field of the
+    # tags of an execution request does not take, an object that is neither a str nor bytes,
+    # bytes that are not UTF-8 or a str that UTF-8 cannot encode, stays in the set, and each
+    # execution of the thread raises protobuf's error when its request is built, before it is
+    # sent, as PySpark's `ExecutePlanRequest(tags=list(self.get_tags()))` raises it, while the
+    # analyses, the configurations and the interrupts, whose requests carry no tags, are sent. A
+    # tags value that is not iterable raises the TypeError of its `list()`. Bytes of UTF-8 are
+    # the tag of their text.
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+
+    spark, service = mock_connect
+    client = spark.client
+    local = client.thread_local
+    executions = len(service.execute_requests)
+    for bad, error, message in [
+        (("not", "a", "str"), TypeError, "bad argument type for built-in operation"),
+        (None, TypeError, "bad argument type for built-in operation"),
+        (
+            b"\xff",
+            UnicodeDecodeError,
+            "'utf-8' codec can't decode byte 0xff in position 0: invalid start byte",
+        ),
+        (
+            "a\ud800",
+            UnicodeEncodeError,
+            "'utf-8' codec can't encode character '\\ud800' in position 1: surrogates not allowed",
+        ),
+    ]:
+        local.tags = {"good", bad}
+        with pytest.raises(error) as raised:
+            spark.range(1).collect()
+        assert str(raised.value) == message
+        assert len(service.execute_requests) == executions
+        assert spark.range(1).filter("id > 0").schema is not None
+        assert spark.conf.get("spark.sql.shuffle.partitions", "200") == "200"
+        spark.interruptOperation("op")
+        assert spark.getTags() == {"good", bad}
+        other = []
+        thread = threading.Thread(target=lambda: other.append(spark.range(1).collect()))
+        thread.start()
+        thread.join()
+        executions += 1
+        assert len(other) == 1 and len(service.execute_requests) == executions
+        local.tags.discard(bad)
+        spark.range(1).collect()
+        executions += 1
+    local.tags = None
+    with pytest.raises(TypeError, match="^'NoneType' object is not iterable$"):
+        spark.range(1).collect()
+    local.tags = {b"bytes"}
+    spark.range(1).collect()
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert list(request.tags) == ["bytes"]
+    spark.clearTags()
 
 
 def test_user_context_extensions_that_are_not_anys_fail_each_request_as_pyspark(mock_connect):
@@ -28452,10 +28601,11 @@ def test_calls_whose_requests_carry_no_user_context_extensions_take_one_that_is_
 def test_client_members_that_pysparks_tests_read_are_pysparks(mock_connect):
     # As PySpark Connect's SparkConnectClient, whose tests and libraries read these members:
     # _builder is the DefaultChannelBuilder of the connection; _session_id the session ID of the
-    # requests, which a set changes for them while the session's session_id stays; _user_id the
-    # user of the requests; _use_reattachable_execute whether the executions are reattachable,
-    # of enable_reattachable_execute and of a set; and _closed closes the session, and opens it
-    # again when it is set to False.
+    # requests and _user_id their user, attributes that a set changes for the requests, of the
+    # errors of protobuf for a value that the field does not take when the next request is built,
+    # while the session's session_id stays; _use_reattachable_execute whether the executions are
+    # reattachable, of enable_reattachable_execute and of a set; and _closed closes the session,
+    # and opens it again when it is set to False.
     import uuid
 
     import pyspark.sql.connect.proto as pb2
@@ -28483,9 +28633,39 @@ def test_client_members_that_pysparks_tests_read_are_pysparks(mock_connect):
     request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
     assert request.session_id == changed and spark.session_id == original
     assert client._session_id == changed
-    with pytest.raises(TypeError, match="bad argument type for built-in operation"):
-        client._session_id = 5
+    assert vars(client)["_session_id"] == changed
+    sent = len(service.execute_requests), len(service.analyze_requests)
+    for name in ("_session_id", "_user_id"):
+        setattr(client, name, 5)
+        assert getattr(client, name) == 5
+        for call in (
+            lambda: spark.range(1).collect(),
+            lambda: spark.range(1).filter("id > 0").schema,
+            lambda: spark.conf.get("spark.sql.shuffle.partitions", "200"),
+            lambda: spark.interruptOperation("op"),
+            client._get_operation_statuses,
+        ):
+            with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+                call()
+        assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+        delattr(client, name)
+        with pytest.raises(AttributeError, match=f"object has no attribute '{name}'"):
+            spark.range(1).collect()
+        setattr(client, name, original if name == "_session_id" else None)
     client._session_id = original
+    client._user_id = "bob"
+    spark.range(1).collect()
+    client._get_operation_statuses()
+    for request in (
+        pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]),
+        pb2.GetStatusRequest.FromString(service.get_status_requests[-1]),
+    ):
+        assert request.user_context.user_id == "bob" and request.session_id == original
+    client._user_id = ""
+    spark.range(1).collect()
+    request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert request.user_context.user_id == ""
+    client._user_id = os.environ.get("SPARK_USER", os.environ.get("USER"))
 
     assert client._closed is False
     client._closed = True
@@ -28496,6 +28676,937 @@ def test_client_members_that_pysparks_tests_read_are_pysparks(mock_connect):
     client._closed = False
     assert client._closed is False and not client.is_closed and not spark.is_stopped
     spark.range(1).collect()
+
+
+def test_closed_clients_and_their_closed_channels_are_pysparks(mock_connect, tmp_path):
+    # As PySpark Connect's `_closed`, an attribute of its client: set to True, the requests raise
+    # NO_ACTIVE_SESSION, but those of the artifacts, which its ArtifactManager sends of a stub of
+    # its own, and set to False they are sent again. `close()` and `stop()` close the channel too,
+    # so that once `_closed` is set to False, the requests raise grpc's ValueError of a closed
+    # channel, of its two messages, that of a server-streaming call (the executions) and that of
+    # the others, and so do those of the artifacts, whether the client is closed or not. A new
+    # session of the client has a channel of its own.
+    spark, service = mock_connect
+    path = tmp_path / "a.txt"
+    path.write_text("x")
+    streaming = "^Cannot invoke RPC: Channel closed!$"
+    unary = "^Cannot invoke RPC on closed channel!$"
+
+    def calls(session):
+        client = session.client
+        return {
+            "collect": lambda: session.range(1).collect(),
+            "schema": lambda: session.range(1).filter("id > 0").schema,
+            "conf": lambda: session.conf.get("spark.sql.shuffle.partitions", "200"),
+            "interrupt": lambda: session.interruptOperation("op"),
+            "status": client._get_operation_statuses,
+            "release": client.release_session,
+        }
+
+    other = spark.newSession()
+    other.client._closed = True
+    for name, call in calls(other).items():
+        with pytest.raises(Exception) as error:
+            call()
+        assert error.value.getCondition() == "NO_ACTIVE_SESSION", name
+    other.addArtifacts(str(path), file=True)
+    other.client._closed = False
+    for call in calls(other).values():
+        call()
+    for close in ("close", "stop"):
+        other = spark.newSession()
+        if close == "close":
+            other.client.close()
+        else:
+            other.stop()
+        assert other.is_stopped and other.client._closed and other.client.is_closed
+        with pytest.raises(ValueError, match=unary):
+            other.addArtifacts(str(path), file=True)
+        other.client._closed = False
+        assert not other.is_stopped and not other.client.is_closed
+        sent = len(service.execute_requests), len(service.analyze_requests)
+        for name, call in calls(other).items():
+            with pytest.raises(ValueError, match=streaming if name == "collect" else unary):
+                call()
+        with pytest.raises(ValueError, match=unary):
+            other.addArtifacts(str(path), file=True)
+        with pytest.raises(ValueError, match=unary):
+            other.client.clone()
+        assert (len(service.execute_requests), len(service.analyze_requests)) == sent
+        fresh = other.newSession()
+        fresh.range(1).collect()
+        fresh.stop()
+        other.stop()
+        assert other.is_stopped
+
+
+def test_the_user_of_a_client_is_an_attribute_of_its_requests_as_pysparks(mock_connect):
+    # As PySpark Connect's `_user_id`, an attribute that its requests read: a set changes the user
+    # of the requests, but not that of the artifacts, which its ArtifactManager keeps, and the
+    # sessions of its newSession and clone, and of those of the session, are of that user, unless
+    # the connection has one; a user that is not a str fails their newSession with the TypeError
+    # of the string field of the user of the ArtifactManager of the new client.
+    import pyspark.sql.connect.proto as pb2
+
+    spark, service = mock_connect
+    other = spark.newSession()
+    client = other.client
+    client._user_id = "bob"
+    other.range(1).collect()
+    assert pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).user_context.user_id == (
+        "bob"
+    )
+    made = [client.newSession(), client.clone(), other.newSession(), other.cloneSession()]
+    for new in made:
+        new_client = new if not hasattr(new, "client") else new.client
+        assert new_client._user_id == "bob"
+    assert pb2.CloneSessionRequest.FromString(service.clone_requests[-1]).user_context.user_id == (
+        "bob"
+    )
+    made[0].execute_command(
+        pb2.Command(sql_command=pb2.SqlCommand(input=pb2.Relation(sql=pb2.SQL(query="SELECT 1"))))
+    )
+    assert pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).user_context.user_id == (
+        "bob"
+    )
+    for new in made:
+        new.close() if not hasattr(new, "client") else new.stop()
+    client._user_id = b"carol"
+    assert client.newSession()._user_id == b"carol"
+    client._user_id = 5
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        client.newSession()
+    with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+        other.newSession()
+    client._user_id = "bob"
+    other.stop()
+
+
+def test_the_copies_of_a_client_send_their_own_attributes_as_pysparks(mock_connect):
+    # As copy.copy of PySpark Connect's client, a plain object of a copy of its attributes: the
+    # requests of the copy carry its session ID, its user and its lists of user context
+    # extensions, also once the copy rebinds them, while those of the session carry the
+    # attributes of the session's own client; a list that both hold is the same list.
+    import copy
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    copied = copy.copy(client)
+    assert type(copied) is type(client) and copied is not client
+    assert copied.global_user_context_extensions is client.global_user_context_extensions
+    command = pb2.Command(
+        sql_command=pb2.SqlCommand(input=pb2.Relation(sql=pb2.SQL(query="SELECT 1")))
+    )
+
+    def extensions():
+        request = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+        return request.user_context.user_id, [e.type_url for e in request.user_context.extensions]
+
+    user = client._user_id
+    copied.add_global_user_context_extension(Any(type_url="type.googleapis.com/shared"))
+    copied.execute_command(command)
+    assert extensions() == (user, ["type.googleapis.com/shared"])
+    copied.global_user_context_extensions = [("global_x", Any(type_url="type.googleapis.com/x"))]
+    copied._user_id = "copy"
+    copied.execute_command(command)
+    assert extensions() == ("copy", ["type.googleapis.com/x"])
+    list(copied.execute_command_as_iterator(command))
+    assert extensions() == ("copy", ["type.googleapis.com/x"])
+    client.execute_command(command)
+    assert extensions() == (user, ["type.googleapis.com/shared"])
+    spark.range(1).collect()
+    assert extensions() == (user, ["type.googleapis.com/shared"])
+    copy.copy(copied).execute_command(command)
+    assert extensions() == ("copy", ["type.googleapis.com/x"])
+    client.clear_user_context_extensions()
+
+
+def test_a_conf_or_a_client_kept_apart_from_its_session_is_closed_with_it_as_pysparks(
+    mock_connect,
+):
+    # As PySpark's RuntimeConf and SparkConnectClient, which hold the client of a session and not
+    # the session object: once the program dropped the session, and the objects that hold it, as
+    # its DataFrames, whose drop closes PySpark's client (`SparkSession.__del__`), a kept conf
+    # raises NO_ACTIVE_SESSION, and so do the requests of a kept client, which is closed, and
+    # keeps its attributes; set open, its requests raise the ValueError of a closed channel, and
+    # its newSession is of a channel of its own. While a DataFrame of the session lives, both work.
+    import gc
+    import weakref
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.errors import PySparkTypeError
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    spark, service = mock_connect
+    other = spark.newSession()
+    conf = other.conf
+    client = other.client
+    session_id = other.session_id
+    df = other.range(3)
+    gone = weakref.ref(other)
+    del other
+    gc.collect()
+    assert gone() is None
+    assert conf.get("spark.sql.shuffle.partitions", "200") == "200"
+    assert client.is_closed is False and df.filter("id > 0").schema is not None
+    del df
+    gc.collect()
+    for call in (
+        lambda: conf.get("spark.sql.shuffle.partitions", "200"),
+        lambda: conf.set("spark.sql.shuffle.partitions", "7"),
+        lambda: conf.isModifiable("spark.sql.shuffle.partitions"),
+        lambda: client.get_configs("spark.sql.shuffle.partitions"),
+        lambda: client.interrupt_operation("op"),
+        lambda: client.execute_command(pb2.Command()),
+    ):
+        with pytest.raises(SparkConnectException) as error:
+            call()
+        assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+    assert client.is_closed and client._closed
+    assert client._session_id == session_id and client.host == "127.0.0.1"
+    assert client.get_tags() == set()
+    # The arguments are checked first, as PySpark's RuntimeConf checks them before its request.
+    with pytest.raises(PySparkTypeError) as error:
+        conf.get(5)
+    assert error.value.getCondition() == "NOT_EXPECTED_TYPE"
+    client._closed = False
+    with pytest.raises(ValueError, match="^Cannot invoke RPC on closed channel!$"):
+        client.get_configs("spark.sql.shuffle.partitions")
+    fresh = client.newSession()
+    assert fresh.get_config_with_defaults(("spark.sql.shuffle.partitions", "200")) == ("200",)
+    fresh.close()
+
+
+def test_sessions_of_a_connection_take_pysparks_users_and_channel_builders(mock_connect):
+    # As PySpark's SparkSession(connection, userId) and SparkConnectClient(connection, user_id):
+    # the user of the requests is the user_id of the connection, else the given one as it is
+    # (`_user_id`), else of the environment, of the TypeError of the string field of the user of
+    # PySpark's ArtifactManager for one that is not a str, and the `_builder` of the client is the
+    # channel builder of the connection, the one given.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.client import DefaultChannelBuilder, SparkConnectClient
+    from pyspark.sql.connect.session import SparkSession
+
+    spark, service = mock_connect
+
+    def user_of(session):
+        session.range(1).collect()
+        return pb2.ExecutePlanRequest.FromString(service.execute_requests[-1]).user_context.user_id
+
+    for make in (
+        lambda connection, user: SparkSession(connection=connection, userId=user),
+        lambda connection, user: SparkConnectClient(connection, user_id=user)._session,
+    ):
+        session = make(service.remote, b"alice")
+        assert session.client._user_id == b"alice" and user_of(session) == "alice"
+        assert session.client._builder.userId is None
+        session.stop()
+        builder = DefaultChannelBuilder(service.remote + "/;user_id=bob")
+        session = make(builder, 5)
+        assert session.client._builder is builder and session.client._user_id == "bob"
+        assert user_of(session) == "bob"
+        session.stop()
+        with pytest.raises(TypeError, match="^bad argument type for built-in operation$"):
+            make(service.remote, 5)
+
+
+def test_a_session_change_marks_the_client_closed_of_an_open_channel_as_pyspark(
+    mock_connect, tmp_path
+):
+    # As PySpark's `_handle_rpc_error` of a session that changed on the server
+    # (INVALID_HANDLE.SESSION_CHANGED), which sets `_closed = True` and leaves the channel open:
+    # the requests raise NO_ACTIVE_SESSION but those of the artifacts, which are sent, and once
+    # `_closed` is False, the requests are sent again. The e2e test of the server-side session ID
+    # that changes checks the other way to it.
+    from pyspark.errors.exceptions.connect import SparkConnectException
+
+    spark, service = mock_connect
+    path = tmp_path / "a.txt"
+    path.write_text("x")
+    other = spark.newSession()
+    other.range(1).collect()
+    client = other.client
+    service.execute_error = (
+        "[INVALID_HANDLE.SESSION_CHANGED] The existing Spark server driver instance has restarted.",
+        "org.apache.spark.SparkSQLException",
+        {"errorClass": "INVALID_HANDLE.SESSION_CHANGED"},
+    )
+    with pytest.raises(Exception):
+        other.range(1).collect()
+    service.execute_error = None
+    assert client.is_closed and other.is_stopped
+    with pytest.raises(SparkConnectException) as error:
+        other.range(1).collect()
+    assert error.value.getCondition() == "NO_ACTIVE_SESSION"
+    other.addArtifacts(str(path), file=True)
+    client._closed = False
+    other.range(1).collect()
+    other.stop()
+
+
+def test_the_requests_of_finalizers_read_the_client_when_they_are_sent_as_pyspark(mock_connect):
+    # As PySpark's `CachedRemoteRelation.__del__`, which builds the request of the removal of the
+    # relation of a checkpoint when it runs, of the tags, the extensions and the user of the
+    # client then: a drop after a change of them sends the changed ones, also of no call between,
+    # and sends nothing when one of them is a value that protobuf refuses.
+    import gc
+    import time
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+
+    def removals(wait):
+        # The removals that the server received, once one arrived or `wait` seconds passed.
+        deadline = time.time() + wait
+        while True:
+            found = []
+            for data in service.execute_requests:
+                request = pb2.ExecutePlanRequest.FromString(data)
+                if request.plan.command.HasField("remove_cached_remote_relation_command"):
+                    found.append(request)
+            if found or time.time() > deadline:
+                return found
+            time.sleep(0.05)
+
+    spark.addTag("t1")
+    df = spark.range(1).localCheckpoint()
+    spark.removeTag("t1")
+    spark.addTag("t2")
+    client.add_global_user_context_extension(Any(type_url="type.googleapis.com/g"))
+    client._user_id = "finalizer-user"
+    del df
+    gc.collect()
+    (removal,) = removals(10)
+    assert list(removal.tags) == ["t2"]
+    assert [e.type_url for e in removal.user_context.extensions] == ["type.googleapis.com/g"]
+    assert removal.user_context.user_id == "finalizer-user"
+    client._user_id = os.environ.get("SPARK_USER", os.environ.get("USER"))
+    service.reset()
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r2")))
+    df = spark.range(1).localCheckpoint()
+    client.global_user_context_extensions.append(("bad", 5))
+    del df
+    gc.collect()
+    assert removals(1) == []
+    client.clear_user_context_extensions()
+    spark.clearTags()
+
+
+@pytest.mark.parametrize("during", ["call", "finalizer"])
+@pytest.mark.parametrize("of", ["copy", "change"])
+def test_a_call_during_a_call_leaves_it_the_attributes_of_its_client_as_pyspark(
+    mock_connect, of, during
+):
+    # As PySpark's requests, which read the attributes of their own client when they are built: a
+    # call of a progress handler that runs during an execution, and the request of a finalizer
+    # that runs then, are of the session, and the requests that the execution sends after them,
+    # of the details of its failure and of the configs of its stack trace, are of the client of
+    # the execution, of its attributes as they are then: those of a copy of the client, whose
+    # execution it is, or of the client, a global extension of which the handler added before.
+    import copy
+    import gc
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    # ExecutePlanResponse.checkpoint_command_result=19 -> relation=1 -> relation_id=1.
+    service.execute_payload = message_field(19, message_field(1, message_field(1, "r1")))
+    held = [spark.range(1).localCheckpoint()]
+    client = spark.client
+    if of == "copy":
+        client = copy.copy(spark.client)
+        client.global_user_context_extensions = [
+            ("global_x", Any(type_url="type.googleapis.com/copyext"))
+        ]
+    plan = spark.range(1)._plan.to_proto(client)
+    _progress_of_one_stage(service)
+    service.stream_error = (
+        "[INTERNAL_ERROR] boom",
+        "org.apache.spark.SparkException",
+        {"errorClass": "INTERNAL_ERROR", "errorId": "call-error"},
+    )
+    ran = []
+
+    def handler(**kwargs):
+        if ran or kwargs["done"]:
+            return
+        ran.append(during)
+        if of == "change":
+            spark.client.add_global_user_context_extension(Any(type_url="type.googleapis.com/g2"))
+        if during == "call":
+            assert spark.range(1).schema is not None
+        else:
+            held.clear()
+            gc.collect()
+
+    def extensions(request):
+        return [e.type_url for e in request.user_context.extensions]
+
+    def removals(wait):
+        # The removals of the relation of the checkpoint, once one arrived or `wait` seconds
+        # passed: the request of the finalizer is sent in the background.
+        deadline = time.time() + wait
+        while True:
+            found = [
+                request
+                for request in map(pb2.ExecutePlanRequest.FromString, service.execute_requests)
+                if request.plan.command.HasField("remove_cached_remote_relation_command")
+            ]
+            if found or time.time() > deadline:
+                return found
+            time.sleep(0.05)
+
+    spark.registerProgressHandler(handler)
+    analyses, configs = len(service.analyze_requests), len(service.config_requests)
+    try:
+        with pytest.raises(Exception):
+            client.to_table(plan, {})
+    finally:
+        spark.removeProgressHandler(handler)
+        service.stream_error = None
+        spark.client.clear_user_context_extensions()
+    assert ran == [during]
+    of_the_session = [] if of == "copy" else ["type.googleapis.com/g2"]
+    of_the_call = ["type.googleapis.com/copyext"] if of == "copy" else of_the_session
+    if during == "call":
+        (nested,) = map(pb2.AnalyzePlanRequest.FromString, service.analyze_requests[analyses:])
+        assert extensions(nested) == of_the_session
+    else:
+        (removal,) = removals(10)
+        assert extensions(removal) == of_the_session
+    (details,) = map(pb2.FetchErrorDetailsRequest.FromString, service.fetch_error_details_requests)
+    assert details.error_id == "call-error"
+    assert extensions(details) == of_the_call
+    stack_trace = list(map(pb2.ConfigRequest.FromString, service.config_requests[configs:]))
+    assert stack_trace
+    assert all(extensions(request) == of_the_call for request in stack_trace)
+    service.execute_payload = b""
+
+
+def test_a_call_of_a_session_that_ends_during_a_call_of_another_reads_its_own_call_again(
+    mock_connect,
+):
+    # As PySpark's requests of the rest of a call, which read the attributes of its client when
+    # they are built: a call of the session that ends during a call of another session, which ran
+    # during a call of the session (A, then B, then A), gives the thread the context of the outer
+    # call of the session again, of its client as it is then, not of the call on top of the stack.
+    # The session ID that the handler of A set is so that of the next response of the outer call,
+    # which is of the session ID that the call sent, as PySpark's check of the response raises.
+    from pyspark.errors import PySparkAssertionError
+
+    spark, service = mock_connect
+    client = spark.client
+    original = client._session_id
+    other = spark.newSession()
+    _progress_of_one_stage(service)
+    seen = []
+
+    def handler_of_spark(**kwargs):
+        if seen or kwargs["done"]:
+            return
+        seen.append("outer")
+        client._session_id = "00000000-0000-4000-8000-00000000000a"
+        assert other.range(1).collect() is not None
+
+    def handler_of_other(**kwargs):
+        if len(seen) != 1 or kwargs["done"]:
+            return
+        assert spark.range(1).schema is not None
+        seen.append(spark._client_session_id())
+
+    spark.registerProgressHandler(handler_of_spark)
+    other.registerProgressHandler(handler_of_other)
+    try:
+        with pytest.raises(PySparkAssertionError):
+            spark.range(1).collect()
+    finally:
+        spark.removeProgressHandler(handler_of_spark)
+        other.removeProgressHandler(handler_of_other)
+        client._session_id = original
+        service.execute_payload = b""
+    assert seen == ["outer", "00000000-0000-4000-8000-00000000000a"]
+    assert spark.range(1).collect() == []
+    other.stop()
+
+
+def test_a_call_that_fails_to_refresh_during_a_call_reads_the_call_again(mock_connect):
+    # As at the end of any call that runs during another (see the test above): a call of a
+    # progress handler that fails of the error of protobuf for an extension of the client, as its
+    # request raises it when it is built, gives the thread the context of the call during which it
+    # ran, of its client as it is then.
+    from pyspark.errors import PySparkAssertionError
+
+    spark, service = mock_connect
+    client = spark.client
+    original = client._session_id
+    _progress_of_one_stage(service)
+    seen = []
+
+    def handler(**kwargs):
+        if seen or kwargs["done"]:
+            return
+        client._session_id = "00000000-0000-4000-8000-00000000000b"
+        client.global_user_context_extensions.append(("bad", 5))
+        try:
+            with pytest.raises(TypeError):
+                spark.range(1).schema
+        finally:
+            client.global_user_context_extensions.pop()
+        seen.append(spark._client_session_id())
+
+    spark.registerProgressHandler(handler)
+    try:
+        with pytest.raises(PySparkAssertionError):
+            spark.range(1).collect()
+    finally:
+        spark.removeProgressHandler(handler)
+        client._session_id = original
+        service.execute_payload = b""
+    assert seen == ["00000000-0000-4000-8000-00000000000b"]
+    assert spark.range(1).collect() == []
+
+
+@pytest.mark.parametrize("change", ["handler", "handler_then_other_session", "other_thread"])
+def test_the_requests_of_a_failure_read_the_client_when_they_are_built_as_pyspark(
+    mock_connect, change
+):
+    # As PySpark's `_handle_error`, which builds the requests of the details of a failure and of
+    # the configs of its stack trace of the attributes of the client as they are then: a global
+    # extension that a progress handler adds during the execution, also before a call of another
+    # session, or that another thread adds meanwhile, is in them, with no call of the session after
+    # the change.
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    other = spark.newSession() if change == "handler_then_other_session" else None
+    _progress_of_one_stage(service)
+    service.stream_error = (
+        "[INTERNAL_ERROR] boom",
+        "org.apache.spark.SparkException",
+        {"errorClass": "INTERNAL_ERROR", "errorId": "late-error"},
+    )
+    added = "type.googleapis.com/late"
+    ran = []
+
+    def handler(**kwargs):
+        if ran or kwargs["done"]:
+            return
+        ran.append(change)
+        if change == "other_thread":
+            thread = threading.Thread(
+                target=lambda: client.add_global_user_context_extension(Any(type_url=added))
+            )
+            thread.start()
+            thread.join()
+        else:
+            client.add_global_user_context_extension(Any(type_url=added))
+        if other is not None:
+            assert other.range(1).schema is not None
+
+    configs = len(service.config_requests)
+    spark.registerProgressHandler(handler)
+    try:
+        with pytest.raises(Exception):
+            spark.range(1).collect()
+    finally:
+        spark.removeProgressHandler(handler)
+        service.stream_error = None
+        service.execute_payload = b""
+        client.clear_user_context_extensions()
+    assert ran == [change]
+
+    def extensions(request):
+        return [e.type_url for e in request.user_context.extensions]
+
+    (details,) = map(pb2.FetchErrorDetailsRequest.FromString, service.fetch_error_details_requests)
+    assert extensions(details) == [added]
+    stack_trace = list(map(pb2.ConfigRequest.FromString, service.config_requests[configs:]))
+    assert stack_trace
+    assert all(extensions(request) == [added] for request in stack_trace)
+    if other is not None:
+        other.stop()
+
+
+def test_the_interrupt_of_a_signal_reads_the_client_when_it_is_built_as_pyspark(mock_connect):
+    # As PySpark's `interrupt_operation` of the `except KeyboardInterrupt` of an execution, which
+    # builds its request of the attributes of the client once the KeyboardInterrupt is raised: a
+    # global extension that another thread added during the execution is in it.
+    import signal
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    _two_row_range_results(service)
+    service.block_result_complete = True
+
+    def add_then_interrupt():
+        client.add_global_user_context_extension(Any(type_url="type.googleapis.com/late"))
+        os.kill(os.getpid(), signal.SIGINT)
+
+    timer = threading.Timer(0.3, add_then_interrupt)
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(2).collect()
+    finally:
+        timer.cancel()
+        service.block_result_complete = False
+        service.execute_payload = b""
+        client.clear_user_context_extensions()
+    (interrupt,) = map(pb2.InterruptRequest.FromString, service.interrupt_requests)
+    assert [e.type_url for e in interrupt.user_context.extensions] == [
+        "type.googleapis.com/late"
+    ]
+
+
+def test_the_failure_of_the_iterator_of_a_copy_reads_the_copy_as_pyspark(mock_connect):
+    # As PySpark's iterator of an execution of a copy of the client, whose `_handle_error` builds
+    # the request of the details of its failure of the attributes of the copy then: also after a
+    # call of the session between two of its `next()`, the request carries those of the copy.
+    import copy
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    copied = copy.copy(spark.client)
+    copied.global_user_context_extensions = [
+        ("global_x", Any(type_url="type.googleapis.com/copyext"))
+    ]
+    plan = spark.range(2)._plan.to_proto(copied)
+    _two_row_range_results(service)
+    service.stream_error = (
+        "[INTERNAL_ERROR] boom",
+        "org.apache.spark.SparkException",
+        {"errorClass": "INTERNAL_ERROR", "errorId": "iterator-error"},
+    )
+    configs = len(service.config_requests)
+    try:
+        items = copied.to_table_as_iterator(plan, {})
+        next(items)
+        assert spark.range(1).schema is not None
+        with pytest.raises(Exception):
+            for _ in items:
+                pass
+    finally:
+        service.stream_error = None
+        service.execute_payload = b""
+
+    def extensions(request):
+        return [e.type_url for e in request.user_context.extensions]
+
+    (details,) = map(pb2.FetchErrorDetailsRequest.FromString, service.fetch_error_details_requests)
+    assert extensions(details) == ["type.googleapis.com/copyext"]
+    stack_trace = list(map(pb2.ConfigRequest.FromString, service.config_requests[configs:]))
+    assert stack_trace
+    assert all(extensions(request) == ["type.googleapis.com/copyext"] for request in stack_trace)
+
+
+def _interrupt_a_collect_with_sigint(spark, service):
+    # Interrupt a collect that waits for the server, which has sent its first responses, with the
+    # SIGINT of Ctrl-C, after which the server fails the interrupted execution with an error of
+    # an error ID, as its OPERATION_CANCELED.
+    import signal
+    import threading
+
+    _two_row_range_results(service)
+    service.block_result_complete = True
+    service.interrupted_error = (
+        "[OPERATION_CANCELED] Operation has been cancelled.",
+        "org.apache.spark.SparkException",
+        {"errorClass": "OPERATION_CANCELED", "errorId": "canceled"},
+    )
+    timer = threading.Timer(0.3, os.kill, (os.getpid(), signal.SIGINT))
+    timer.start()
+    try:
+        with pytest.raises(KeyboardInterrupt):
+            spark.range(2).collect()
+    finally:
+        timer.cancel()
+        service.block_result_complete = False
+        service.interrupted_error = None
+        service.execute_payload = b""
+
+
+def test_the_interrupt_of_a_signal_carries_the_extensions_of_the_thread_as_pyspark(mock_connect):
+    # As PySpark's `interrupt_operation` of the `except KeyboardInterrupt` of an execution, of
+    # the attributes of the client of the execution on its thread: the request of the interrupt,
+    # which the transport sends from its own threads, carries the global user context extensions
+    # and those of the thread that waits for the execution.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    client.add_global_user_context_extension(Any(type_url="type.googleapis.com/G"))
+    client.add_threadlocal_user_context_extension(Any(type_url="type.googleapis.com/L"))
+    try:
+        _interrupt_a_collect_with_sigint(spark, service)
+    finally:
+        client.clear_user_context_extensions()
+    (interrupt,) = map(pb2.InterruptRequest.FromString, service.interrupt_requests)
+    assert [e.type_url for e in interrupt.user_context.extensions] == [
+        "type.googleapis.com/G",
+        "type.googleapis.com/L",
+    ]
+
+
+def test_the_failure_of_an_execution_that_a_signal_interrupted_is_left_unread_as_pyspark(
+    mock_connect,
+):
+    # As PySpark's KeyboardInterrupt, which leaves the failure of the execution that it
+    # interrupts unread: nothing is asked of the server for the error that ends it, neither its
+    # details nor the configs of its stack trace.
+    spark, service = mock_connect
+    configs = len(service.config_requests)
+    _interrupt_a_collect_with_sigint(spark, service)
+    assert len(service.interrupt_requests) == 1
+    assert service.fetch_error_details_requests == []
+    assert len(service.config_requests) == configs
+
+
+def test_a_failed_clone_sends_no_other_request_as_pyspark(mock_connect):
+    # As PySpark's `clone`, which leaves the failure of its CloneSession to grpc, without
+    # `_handle_error`: neither the details of the error nor the configs of its stack trace are
+    # asked for, and the session stays open.
+    spark, service = mock_connect
+    spark.range(1).collect()
+    configs = len(service.config_requests)
+    service.clone_error = (
+        "[INTERNAL_ERROR] boom",
+        "org.apache.spark.SparkException",
+        {"errorClass": "INTERNAL_ERROR", "errorId": "clone-error"},
+    )
+    try:
+        with pytest.raises(Exception):
+            spark.cloneSession()
+        with pytest.raises(Exception):
+            spark.client.clone()
+    finally:
+        service.clone_error = None
+    assert len(service.clone_requests) == 2
+    assert service.fetch_error_details_requests == []
+    assert len(service.config_requests) == configs
+    assert spark.range(1).collect() == []
+
+
+def test_the_response_of_a_clone_is_not_checked_as_pysparks(mock_connect):
+    # As PySpark's `clone`, which does not check its response against the session of its client:
+    # a response of another session ID and another server-side session ID than the client's gives
+    # the clone, and leaves the client open, of the server-side session ID that it observed.
+    spark, service = mock_connect
+    spark.range(1).collect()
+    client = spark.client
+    client._server_session_id = "server-a"
+    # CloneSessionResponse.session_id=1, server_side_session_id=2.
+    service.clone_response_fields = message_field(1, "another-session") + message_field(
+        2, "server-b"
+    )
+    try:
+        clone = spark.cloneSession()
+        cloned_client = client.clone()
+    finally:
+        service.clone_response_fields = b""
+    assert clone.session_id == service.cloned_session_id
+    assert cloned_client._session_id == service.cloned_session_id
+    assert not client.is_closed
+    assert client._server_session_id == "server-a"
+    assert spark.range(1).collect() == []
+    clone.stop()
+
+
+def test_the_details_of_a_failure_carry_the_extensions_of_the_client_as_pyspark(mock_connect):
+    # As PySpark's `_fetch_enriched_error` of the failure of a request that carries no user
+    # context extensions, as GetStatus, whose request of the details carries the extensions of
+    # the client as they are then, also of no call between.
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    spark.range(1).collect()
+    client.add_global_user_context_extension(Any(type_url="type.googleapis.com/g1"))
+    client.add_threadlocal_user_context_extension(Any(type_url="type.googleapis.com/t1"))
+    service.get_status_error = (
+        "[INTERNAL_ERROR] boom",
+        "org.apache.spark.SparkException",
+        {"errorClass": "INTERNAL_ERROR", "errorId": "status-error"},
+    )
+    with pytest.raises(Exception):
+        client._get_operation_statuses()
+    service.get_status_error = None
+    assert service.fetched_error_ids == ["status-error"]
+    (request,) = (
+        pb2.FetchErrorDetailsRequest.FromString(data)
+        for data in service.fetch_error_details_requests
+    )
+    assert [e.type_url for e in request.user_context.extensions] == [
+        "type.googleapis.com/g1",
+        "type.googleapis.com/t1",
+    ]
+    client.clear_user_context_extensions()
+
+
+def test_the_retry_policies_of_a_client_are_the_ones_it_was_given_as_pysparks(mock_connect):
+    # As PySpark's `set_retry_policies` and `get_retry_policies` (test_retry_client_unit), which
+    # keep the policy objects of the client: those of a client of a session of its own, of its
+    # newSession and its clone, and of a session that the program dropped while a DataFrame holds
+    # it, are the objects that were set, of their classes.
+    import gc
+
+    from pyspark.sql.connect.client import SparkConnectClient
+    from pyspark.sql.connect.client.retries import DefaultPolicy
+
+    spark, service = mock_connect
+
+    class MyPolicy(DefaultPolicy):
+        pass
+
+    policy = DefaultPolicy(max_retries=3)
+    mine = MyPolicy(max_retries=2)
+    client = SparkConnectClient(service.remote)
+    clients = [client, client.newSession(), client.clone()]
+    for each in clients:
+        each.set_retry_policies([policy])
+        gc.collect()
+        assert each.get_retry_policies()[0] is policy
+        each.set_retry_policies([mine])
+        assert each.get_retry_policies() == [mine] and type(mine) is MyPolicy
+    other = spark.newSession()
+    df = other.range(1)
+    other.client.set_retry_policies([policy])
+    del other
+    gc.collect()
+    assert df.sparkSession.client.get_retry_policies()[0] is policy
+    df.sparkSession.stop()
+    for each in clients:
+        each.close()
+
+
+def test_the_iterators_of_an_execution_read_nothing_of_the_client_again_as_pysparks(
+    mock_connect,
+):
+    # As PySpark's iterators of an execution, whose request is built once, and whose reattaches
+    # and releases copy it: an extension that is not an Any, added once the iteration started,
+    # does not fail the rest of it, which reads nothing of the client.
+    import pyarrow as pa
+    import pyspark.sql.connect.proto as pb2
+
+    spark, service = mock_connect
+    client = spark.client
+    sink = pa.BufferOutputStream()
+    table = pa.table({"id": pa.array([0, 1, 2], pa.int64())})
+    with pa.ipc.new_stream(sink, table.schema) as writer:
+        writer.write_table(table)
+    # ExecutePlanResponse.schema=7 and arrow_batch=2: ArrowBatch.row_count=1, data=2.
+    service.execute_payload = message_field(7, struct_schema()) + message_field(
+        2, varint_field(1, 3) + message_field(2, sink.getvalue().to_pybytes())
+    )
+    it = spark.range(3).toLocalIterator()
+    assert next(it).id == 0
+    client.global_user_context_extensions.append(("bad", 5))
+    assert [row.id for row in it] == [1, 2]
+    client.global_user_context_extensions.clear()
+    plan = pb2.Plan(root=pb2.Relation(range=pb2.Range(end=1)))
+    items = client.to_table_as_iterator(plan, {})
+    assert next(items) is not None
+    client.global_user_context_extensions.append(("bad", 5))
+    assert len(list(items)) == 1
+    client.global_user_context_extensions.clear()
+    # ExecutePlanResponse.sql_command_result=5 -> SqlCommandResult.relation=1.
+    service.execute_payload = message_field(5, message_field(1, b""))
+    items = client.execute_command_as_iterator(
+        pb2.Command(sql_command=pb2.SqlCommand(input=pb2.Relation(sql=pb2.SQL(query="x"))))
+    )
+    assert "sql_command_result" in next(items)
+    client.global_user_context_extensions.append(("bad", 5))
+    assert list(items) == []
+    client.global_user_context_extensions.clear()
+    with pytest.raises(TypeError, match="^Expected a message object, but got 5.$"):
+        client.global_user_context_extensions.append(("bad", 5))
+        spark.range(1).collect()
+    client.global_user_context_extensions.clear()
+
+
+def test_a_copy_and_its_client_send_their_own_attributes_at_once_as_pysparks(mock_connect):
+    # As copy.copy of PySpark's client, of its own attributes: the requests of a copy and of its
+    # client, sent at once from threads of their own, carry their own users and global
+    # extensions, and a call of the session that the method of a copy makes meanwhile, as of a
+    # progress handler, is of the session's.
+    import copy
+    import threading
+
+    import pyspark.sql.connect.proto as pb2
+    from pyspark.sql.connect.proto._rust import Any
+
+    spark, service = mock_connect
+    client = spark.client
+    copied = copy.copy(client)
+    copied._user_id = "copy"
+    copied.global_user_context_extensions = [("global_x", Any(type_url="type.googleapis.com/x"))]
+    user = client._user_id
+    command = pb2.Command(
+        sql_command=pb2.SqlCommand(input=pb2.Relation(sql=pb2.SQL(query="SELECT 1")))
+    )
+
+    def run(each, tag):
+        spark.addTag(tag)
+        for _ in range(30):
+            each.execute_command(command)
+
+    threads = [threading.Thread(target=run, args=(copied, "A")) for _ in range(2)]
+    threads += [threading.Thread(target=run, args=(client, "B")) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    sent = [pb2.ExecutePlanRequest.FromString(data) for data in service.execute_requests]
+    for request in sent:
+        if list(request.tags) == ["A"]:
+            assert request.user_context.user_id == "copy"
+            assert [e.type_url for e in request.user_context.extensions] == [
+                "type.googleapis.com/x"
+            ]
+        else:
+            assert list(request.tags) == ["B"] and request.user_context.user_id == user
+            assert list(request.user_context.extensions) == []
+    assert len(sent) == 120
+
+    # ExecutePlanResponse.execution_progress=18, of a stage of tasks.
+    stage = varint_field(1, 7) + varint_field(2, 4) + varint_field(3, 1)
+    service.execute_payload = message_field(18, message_field(1, stage) + varint_field(2, 3))
+    nested = []
+
+    def handler(**kwargs):
+        if not nested:
+            nested.append(spark.range(2).filter("id > 0").schema)
+
+    spark.registerProgressHandler(handler)
+    try:
+        copied.execute_command(command)
+    finally:
+        spark.clearProgressHandlers()
+    assert nested
+    analysis = pb2.AnalyzePlanRequest.FromString(service.analyze_requests[-1])
+    assert analysis.user_context.user_id == user
+    execution = pb2.ExecutePlanRequest.FromString(service.execute_requests[-1])
+    assert execution.user_context.user_id == "copy"
 
 
 def test_client_get_operation_statuses_sends_pysparks_get_status_request(mock_connect):
