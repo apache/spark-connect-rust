@@ -426,10 +426,11 @@ impl RequestContext {
         )
     }
 
-    /// The mode of the refresher of the client (see `pyspark.sql.connect.client._RequestContext`):
-    /// 2 of all of the context, raising its errors, 3 as 2 of the client of the session rather
-    /// than of a copy whose method runs, 1 of the session ID and the user, raising theirs, and of
-    /// the rest of none, 0 of all of it, of none, or no refresh.
+    /// The mode of the refresher of the client (see
+    /// `pyspark.sql.connect.client.core._RequestContext`): 2 of all of the context, raising its
+    /// errors, 3 as 2 of the client of the session rather than of a copy whose method runs, 1 of
+    /// the session ID and the user, raising theirs, and of the rest of none, 0 of all of it, of
+    /// none, or no refresh.
     fn mode(self) -> Option<u8> {
         match self {
             RequestContext::Full => Some(2),

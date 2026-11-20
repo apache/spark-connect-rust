@@ -99,6 +99,7 @@ omit =
     */pyspark/sql/connect/protobuf/__init__.py
     */pyspark/sql/connect/streaming/__init__.py
     */pyspark/sql/connect/client/retries.py
+    */pyspark/sql/connect/client/__init__.py
     # The native extension and its embedded Row and value sources, which have synthetic
     # filenames.
     */pyspark/_pyspark*

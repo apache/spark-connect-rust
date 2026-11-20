@@ -59,7 +59,8 @@ pyo3::create_exception!(_pyspark, RustRpcError, pyo3::exceptions::PyException);
 /// so the reference client's reattachable iterator can drive it correctly - detecting an
 /// early stream end (e.g. an interrupted operation) and reattaching, rather than us
 /// eagerly collecting the whole stream and reporting partial results as success.
-#[pyclass(module = "pyspark.sql.connect.client")]
+// PySpark has no such class: as `RustConnectStub`, it is of the extension, which has it.
+#[pyclass(module = "pyspark._pyspark")]
 pub struct ResponseStream {
     /// The stream of the call, of the connection of the generation of the process that made it,
     /// which a child of a `fork()` leaves as it is (see `spark_connect_core::fork`).
@@ -179,7 +180,9 @@ impl ResponseStream {
 ///
 /// Each method mirrors one `SparkConnectServiceStub` RPC. Requests/responses cross
 /// the boundary as protobuf bytes so the Python side can keep using its pb2 types.
-#[pyclass(name = "RustConnectStub", module = "pyspark.sql.connect.client")]
+// PySpark has no such class: it is of the extension, which has it, and not of PySpark's modules of
+// the client, whose names are PySpark's.
+#[pyclass(name = "RustConnectStub", module = "pyspark._pyspark")]
 pub struct RustConnectStub {
     client: SparkConnectClient,
     // Shared cancellation, cloned into every ResponseStream this stub hands out. close()

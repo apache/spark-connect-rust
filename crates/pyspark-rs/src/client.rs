@@ -15,11 +15,12 @@
 // specific language governing permissions and limitations
 // under the License.
 
-//! The requests of PySpark Connect's `SparkConnectClient` (`pyspark.sql.connect.client`) that it
-//! sends of the messages it is given, such as the plans of `to_table` and `schema`, over the Rust
-//! transport of its session: the analyses, the configuration requests and the executions, of the
-//! bytes of the messages of `pyspark.sql.connect.proto` that the client builds as PySpark's does,
-//! and the settings of the client that the transport honors, such as its retry policy.
+//! The requests of PySpark Connect's `SparkConnectClient` (`pyspark.sql.connect.client.core`)
+//! that it sends of the messages it is given, such as the plans of `to_table` and `schema`, over
+//! the Rust transport of its session: the analyses, the configuration requests and the
+//! executions, of the bytes of the messages of `pyspark.sql.connect.proto` that the client builds
+//! as PySpark's does, and the settings of the client that the transport honors, such as its retry
+//! policy.
 
 use prost::Message;
 use pyo3::exceptions::PyValueError;
@@ -110,7 +111,9 @@ pub(crate) fn execute_plan(
 /// the bytes of a response, with the `PlanMetrics` of its metrics and the `PlanObservedMetrics` of
 /// its observed metrics, as `DataFrame.executionInfo` has them, which the client builds the
 /// `ExecutionInfo` of the execution of. Closing it, or reading it to its end, ends the execution.
-#[pyclass(name = "ExecutePlanResponses", module = "pyspark.sql.connect.client")]
+// PySpark has no such class: it is of the extension, which has it, and not of PySpark's modules of
+// the client, whose names are PySpark's.
+#[pyclass(name = "ExecutePlanResponses", module = "pyspark._pyspark")]
 pub struct PyExecutePlanResponses {
     session: SparkSession,
     /// The execution, until it ends or is closed.
@@ -240,9 +243,9 @@ pub(crate) struct RetryParameters {
 
 /// What the client does when the retries of a call of the transport are spent, where PySpark's
 /// `Retrying._wait` warns `[RETRIES_EXCEEDED]`: it warns as PySpark does, with
-/// `_warn_retries_exceeded` of `pyspark.sql.connect.client`, on the thread of the call, and the
-/// exception of the warning, of a filter of `"error"`, is the error of the call in place of its
-/// failure, as PySpark raises it out of `_wait`. A call of a thread of the runtime, which no
+/// `_warn_retries_exceeded` of `pyspark.sql.connect.client.core`, on the thread of the call, and
+/// the exception of the warning, of a filter of `"error"`, is the error of the call in place of
+/// its failure, as PySpark raises it out of `_wait`. A call of a thread of the runtime, which no
 /// caller waits for, warns on the delivery thread, as PySpark's warns from the thread that sends
 /// it, and its failure stays its error. It logs to the logger of Spark Connect what PySpark's
 /// `Retrying` logs of the retries of the calls, and the failure of a request that the transport
@@ -250,9 +253,9 @@ pub(crate) struct RetryParameters {
 struct RetriesWarning;
 
 /// Warn as PySpark's `Retrying._wait` warns once retries are spent, with `_warn_retries_exceeded`
-/// of `pyspark.sql.connect.client`: the exception of the warning, of a filter of `"error"`.
+/// of `pyspark.sql.connect.client.core`: the exception of the warning, of a filter of `"error"`.
 fn warn_retries_exceeded(py: Python<'_>, exceeded: RetriesExceeded) -> PyResult<()> {
-    py.import("pyspark.sql.connect.client")?.call_method1(
+    py.import("pyspark.sql.connect.client.core")?.call_method1(
         "_warn_retries_exceeded",
         (exceeded == RetriesExceeded::RetryException,),
     )?;
@@ -380,12 +383,12 @@ impl RetriesListener for RetriesWarning {
         // A handler of the log may wait forever on the error (see `may_wait_forever`).
         let apart = may_wait_forever(&error);
         delivered(apart, move |py| {
-            // The error of grpcio, of `pyspark.sql.connect.client`, which imports grpc, is made
-            // only for a log that is written.
+            // The error of grpcio, of `pyspark.sql.connect.client.core`, which imports grpc, is
+            // made only for a log that is written.
             if !connect_logger_enabled_for(py, LOG_ERROR)? {
                 return Ok(());
             }
-            py.import("pyspark.sql.connect.client")?
+            py.import("pyspark.sql.connect.client.core")?
                 .call_method1("_log_rpc_error", grpc_error_args(py, &error))?;
             Ok(())
         })
@@ -441,9 +444,10 @@ fn may_wait_forever(error: &spark_connect_core::error::GrpcioError) -> bool {
     error.call == GrpcCall::ServerStreaming && error.debug_error_string.is_none()
 }
 
-/// The arguments of `_grpc_error` of `pyspark.sql.connect.client` of grpcio's `error`: whether
-/// its call is of a stream of responses, its code, its details, its `debug_error_string`, None
-/// when it has none, its trailing metadata, and its text, of which an error of no grpcio is made.
+/// The arguments of `_grpc_error` of `pyspark.sql.connect.client.core` of grpcio's `error`:
+/// whether its call is of a stream of responses, its code, its details, its `debug_error_string`,
+/// None when it has none, its trailing metadata, and its text, of which an error of no grpcio is
+/// made.
 #[allow(clippy::type_complexity)]
 pub(crate) fn grpc_error_args<'py>(
     py: Python<'py>,
@@ -472,9 +476,9 @@ pub(crate) fn grpc_error_args<'py>(
 
 /// The retries of the calls of a session whose retry policies the transport does not retry with
 /// itself, of their own methods, which PySpark's `Retrying` decides, as PySpark's client asks it:
-/// `_CallRetries` of `pyspark.sql.connect.client`, a `Retrying` of the policies of each call, of
-/// grpcio's `RpcError` of each failed attempt. The Python of a call of a thread of Python runs on
-/// that thread, the `to_state` of the policies as the call starts; that of a request that the
+/// `_CallRetries` of `pyspark.sql.connect.client.core`, a `Retrying` of the policies of each call,
+/// of grpcio's `RpcError` of each failed attempt. The Python of a call of a thread of Python runs
+/// on that thread, the `to_state` of the policies as the call starts; that of a request that the
 /// transport sends in the background runs on the delivery thread, from its first failure on.
 pub(crate) struct PolicyRetries {
     /// The list of the policies, which a thread of the runtime clones without the GIL.
@@ -492,7 +496,7 @@ struct PolicyCallRetries {
 /// The `_CallRetries` of `policies`, a `Retrying` of their states.
 fn call_retries(py: Python<'_>, policies: &Py<PyAny>) -> PyResult<Py<PyAny>> {
     Ok(py
-        .import("pyspark.sql.connect.client")?
+        .import("pyspark.sql.connect.client.core")?
         .getattr("_CallRetries")?
         .call1((policies.clone_ref(py),))?
         .unbind())
@@ -676,7 +680,7 @@ fn write_grpc_log(severity: char, file: String, line: u32, message: String) {
 fn write_grpc_log(severity: char, file: String, line: u32, message: String) {
     // An error that cannot be logged is dropped, as gRPC's core goes on.
     crate::deliver::run_dropping_errors(move |py| {
-        py.import("pyspark.sql.connect.client")?.call_method1(
+        py.import("pyspark.sql.connect.client.core")?.call_method1(
             "_log_grpc_error",
             (file, line, message, severity.to_string()),
         )?;

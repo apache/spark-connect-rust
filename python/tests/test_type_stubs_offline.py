@@ -715,6 +715,47 @@ def test_mypy_finds_one_module_of_the_functions_by_path():
     assert all(d[0].parent == sql / "functions" for d in diagnostics)
 
 
+# The types that mypy reveals of the client of a session and of its class, of
+# pyspark.sql.connect.client.core, with the official pyspark-client 4.3.0.
+CLIENT_TYPES = [
+    '"pyspark.sql.connect.client.core.SparkConnectClient"',
+    '"def (self: pyspark.sql.connect.client.core.SparkConnectClient, connection: str | '
+    "pyspark.sql.connect.client.core.ChannelBuilder, user_id: str | None =, channel_options: "
+    "list[tuple[str, Any]] | None =, retry_policy: dict[str, Any] | None =, "
+    "use_reattachable_execute: bool =, session_hooks: "
+    "list[pyspark.sql.connect.session.SparkSession.Hook] | None =, allow_arrow_batch_chunking: "
+    "bool =, preferred_arrow_chunk_size: int | None =, rpc_deadlines: "
+    "pyspark.sql.connect.client.core.RpcDeadlines | None =, max_retry_exception_elapsed_time: "
+    'float | None =)"',
+    '"def (self: pyspark.sql.connect.client.core.SparkConnectClient, handler: '
+    'pyspark.sql.connect.shell.progress.ProgressHandler)"',
+    '"pyspark.sql.connect.client.core.RpcDeadlines"',
+    '"pyspark.sql.connect.client.core.ConfigResult"',
+]
+
+
+def test_mypy_types_the_client_as_with_the_official_client(tmp_path):
+    # As with pyspark-client: the client of a session is of PySpark's class, of
+    # pyspark.sql.connect.client.core, whose source mypy reads, of PySpark's annotations, and so
+    # are the classes that its package names and the results of the client.
+    probe = tmp_path / "probe_client.py"
+    probe.write_text(
+        "from pyspark.sql.connect.client import RpcDeadlines, SparkConnectClient\n"
+        "from pyspark.sql.connect.proto import ConfigRequest\n"
+        "from pyspark.sql.connect.session import SparkSession\n"
+        "spark = SparkSession.builder.remote('sc://localhost').getOrCreate()\n"
+        "reveal_type(spark.client)\n"
+        "reveal_type(SparkConnectClient.__init__)\n"
+        "reveal_type(SparkConnectClient.register_progress_handler)\n"
+        "reveal_type(RpcDeadlines())\n"
+        "reveal_type(spark.client.config(ConfigRequest.Operation()))\n"
+    )
+    diagnostics = _run_mypy("--cache-dir", os.devnull, probe.name, cwd=tmp_path)
+    assert [d[3] for d in diagnostics if d[2] == "error"] == []
+    revealed = [d[3] for d in diagnostics if d[3].startswith("Revealed type is ")]
+    assert revealed == [f"Revealed type is {t}" for t in CLIENT_TYPES]
+
+
 def test_pyright_resolves_the_modules_of_the_functions_from_source(tmp_path):
     # pyright typed the modules of the functions of their stubs, and warned that each import of
     # one "could not be resolved from source" (reportMissingModuleSource). As with
