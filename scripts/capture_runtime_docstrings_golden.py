@@ -4,9 +4,8 @@ run time, as digests of their exact text: of each module, of each public class a
 defines, and of each public member of such a class, as Python finds it on the class, of the
 ``__doc__`` of each, or of the ``inspect.getdoc`` of one of no docstring of its own that inherits
 one (python/tests/_runtime_docstrings.py). python/tests/test_dropin_class_modules_offline.py
-compares the drop-in's with them. The DataFrame class of both DataFrame modules and the modules of
-the session and its client, whose docstrings are not all PySpark's yet, are left out
-(``EXCLUDED`` and ``of_the_dataframe`` of the helper).
+compares the drop-in's with them. The modules of the session and its client, whose docstrings are
+not all PySpark's yet, are left out (``EXCLUDED`` of the helper).
 
 Run with official PySpark 4.3.0 (``pyspark-client``), without a server, from the repository::
 

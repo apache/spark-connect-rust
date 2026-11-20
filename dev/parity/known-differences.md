@@ -391,7 +391,9 @@ difference is intentional or tracked for a fix.
   native MRO, the metaclass, the patches that the native class holds, the native lookup of
   attributes and the factory. The methods of the base that dispatch to the native class have
   its signatures, of no annotations and of a positional-only `self`
-  (`inspect.signature(DataFrame.select)` is `(self, /, *cols)`), and its docstrings.
+  (`inspect.signature(DataFrame.select)` is `(self, /, *cols)`), and the docstrings of PySpark's
+  classic DataFrame: those of the native class, or, where PySpark's classic and Connect DataFrames
+  differ in them, of `python/pyspark/sql/_classic_docs_generated.py`.
   The unchanged official pipeline, tuning and one-vs-rest selection passed on both
   the official and native high-level clients with `PYTHONHASHSEED=0`: 16 passed and
   four upstream-disabled GC tests skipped on each client. This includes
@@ -828,18 +830,20 @@ mypy and pyright type an application as with `pyspark-client` (see `docs/compati
   documentation with the drop-in, and none with `pyspark-client`.
 - **The docstrings of the `__init__` of the native classes** (inherent; the classes are native).
   The `__init__` of a native class, as of the types of `pyspark.sql.types` (`StringType`,
-  `ArrayType`, `StructField`, ...) and of the classes of `pyspark.sql.connect` (`Catalog`,
-  `RuntimeConf`, `Observation`, ...), is a slot of CPython, whose wrapper has CPython's docstring
-  (`Initialize self.  See help(type(self)) for accurate signature.`), which the class cannot set.
-  PySpark's is that of its Python function: None, or of a docstring that PySpark Connect's modules
-  copy (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
+  `ArrayType`, `StructField`, ...) and of the classes of `pyspark.sql.connect` (`DataFrame`,
+  `Catalog`, `RuntimeConf`, `Observation`, ...), is a slot of CPython, whose wrapper has CPython's
+  docstring (`Initialize self.  See help(type(self)) for accurate signature.`), which the class
+  cannot set. PySpark's is that of its Python function: None, its own (`Creates a new data frame`
+  of the DataFrame of Spark Connect), or of a docstring that PySpark Connect's modules copy
+  (`__init__.__doc__ = PySparkRuntimeConfig.__init__.__doc__`). The other docstrings of the
   modules of `pyspark.sql` and `pyspark.errors` are PySpark's (see `docs/compatibility.md`).
-- **The docstrings of the native Column, WindowSpec, TableArg, `DataFrameNaFunctions` and
-  `DataFrameStatFunctions` of Spark Connect** (inherent; a virtual subclass inherits no docstring).
-  PySpark Connect's classes are subclasses of the classic ones, and neither they nor their members
-  have docstrings of their own, so `inspect.getdoc` and `help()` show those of the classic class.
-  The native classes are virtual subclasses of the classic ones, which are not in their MRO: they
-  and their members carry the classic docstrings, so that `inspect.getdoc` and `help()` show
-  PySpark's text, as `pyspark-client`'s inherited ones do. Their `__doc__` is that text, where
-  PySpark Connect's own is None. So is that of `Read.print` of `pyspark.sql.connect.plan`, of
-  PySpark Connect's `LogicalPlan.print`, which the drop-in's `LogicalPlan` does not have.
+- **The docstrings of the native DataFrame, Column, WindowSpec, TableArg, `DataFrameNaFunctions`
+  and `DataFrameStatFunctions` of Spark Connect** (inherent; a virtual subclass inherits no
+  docstring). PySpark Connect's classes are subclasses of the classic ones, and neither they nor
+  their members have docstrings of their own, so `inspect.getdoc` and `help()` show those of the
+  classic class. The native classes are virtual subclasses of the classic ones, which are not in
+  their MRO: they and their members carry the classic docstrings, so that `inspect.getdoc` and
+  `help()` show PySpark's text, as `pyspark-client`'s inherited ones do. Their `__doc__` is that
+  text, where PySpark Connect's own is None. So is that of `Read.print` of
+  `pyspark.sql.connect.plan`, of PySpark Connect's `LogicalPlan.print`, which the drop-in's
+  `LogicalPlan` does not have.

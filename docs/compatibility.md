@@ -2337,7 +2337,7 @@ server raises has the frames of the user's code only, without those of PySpark's
 time, `pyspark.sql.SparkSession` and the functions of `pyspark.sql.functions`, PySpark's own, have
 PySpark's signatures and docstrings, and so do the functions of `pyspark.sql.connect.functions`, of
 which PySpark Connect's copy them too, while the methods of the native classes, such as
-`DataFrame.select`, have PySpark's parameters, without its annotations and its full docstrings.
+`DataFrame.select`, have PySpark's parameters and docstrings, without its annotations.
 The docstrings of the modules of `pyspark.sql` and `pyspark.errors`, of their classes and functions
 and of the members of the classes, are PySpark's: the types of `pyspark.sql.types`, the classes and
 the members whose docstrings PySpark Connect's modules copy of PySpark's classic classes (the
@@ -2348,15 +2348,18 @@ and the `PandasCogroupedOps`, the `MergeIntoWriter` and its clauses, the `Observ
 native classes are built with them, of the source of PySpark at the tracked tag
 (`scripts/gen_connect_docstrings.py`), but for the `__init__` of a native class, the slot of
 CPython, whose docstring is CPython's (see `dev/parity/known-differences.md`).
-The Column, the WindowSpec, the TableArg, the `DataFrameNaFunctions` and the
+The DataFrame, the Column, the WindowSpec, the TableArg, the `DataFrameNaFunctions` and the
 `DataFrameStatFunctions` of Spark Connect and their members have the docstrings of PySpark's classic
 classes, which `inspect.getdoc` and `help()` show of PySpark Connect's, whose own are None (see
-`dev/parity/known-differences.md`). `tests/golden/runtime_docstrings.json` holds the digests of
+`dev/parity/known-differences.md`). The classic `pyspark.sql.DataFrame`, the public base of the
+native DataFrame, takes the docstrings of the native class, and PySpark's of its classic DataFrame
+where the two differ (`python/pyspark/sql/_classic_docs_generated.py`): of the aliases, such as
+`groupby`, whose docstring that `help()` shows of PySpark Connect's is that of the member that it
+names, and of the members that PySpark Connect's DataFrame wraps in a cache of functools, such as
+`isEmpty`, of which `help()` shows none. `tests/golden/runtime_docstrings.json` holds the digests of
 PySpark's, which a test compares with the drop-in's: of the `__doc__` of each object, or of the
-`inspect.getdoc` of one of no docstring of its own that inherits one. The DataFrame class of the
-two DataFrame modules, with the docstrings of these modules and those that the classic
-`DataFrameNaFunctions` and `DataFrameStatFunctions` copy of the DataFrame's, and the modules of the
-session and its client are left out of it: not all of their docstrings are PySpark's yet.
+`inspect.getdoc` of one of no docstring of its own that inherits one. The modules of the session and
+its client are left out of it: not all of their docstrings are PySpark's yet.
 A default of an object, which the text signature of a native method cannot hold (`inspect` takes
 only literals there), shows as `Ellipsis`: the `StorageLevel(True, True, False, True, 1)` of
 `DataFrame.persist`, and the `<no value>` (`pyspark._globals._NoValue`) of the `value` of

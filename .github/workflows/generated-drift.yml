@@ -26,8 +26,9 @@ name: Generated files drift
 # It guards the same way the type stubs that scripts/gen_type_stubs.py generates from that
 # PySpark (python/pyspark/**/*.pyi, and their block of ruff excludes in pyproject.toml), and the
 # docstrings that scripts/gen_connect_docstrings.py generates for the native classes of the modules
-# of PySpark Connect (crates/pyspark-rs/src/connect_docs_generated.rs). It checks too the names of
-# PySpark's Connect classes that the metaclass of the classic classes keeps
+# of PySpark Connect (crates/pyspark-rs/src/connect_docs_generated.rs) and for the public bases of
+# PySpark's classic classes (python/pyspark/sql/_classic_docs_generated.py). It checks too the
+# names of PySpark's Connect classes that the metaclass of the classic classes keeps
 # (python/pyspark/sql/_classic_bases.py), with scripts/check_classic_bindings.py.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

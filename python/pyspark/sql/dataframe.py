@@ -14,14 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The public DataFrame base and its concrete Rust-backed implementation.
-
-As in PySpark, ``pyspark.sql.DataFrame`` is a Python base/factory, whereas
-``pyspark.sql.connect.dataframe.DataFrame`` is the concrete remote DataFrame.  Keeping
-the public base in Python lets user-defined subclasses allocate their own Python state
-with ``object.__new__``.  A concrete frame must still be allocated by the native class:
-its Rust payload cannot be initialized by Python's object allocator.
-"""
+# The public DataFrame base and its concrete Rust-backed implementation.
+#
+# As in PySpark, ``pyspark.sql.DataFrame`` is a Python base/factory, whereas
+# ``pyspark.sql.connect.dataframe.DataFrame`` is the concrete remote DataFrame.  Keeping
+# the public base in Python lets user-defined subclasses allocate their own Python state
+# with ``object.__new__``.  A concrete frame must still be allocated by the native class:
+# its Rust payload cannot be initialized by Python's object allocator.
 
 from abc import ABCMeta
 from functools import wraps
@@ -41,6 +40,11 @@ from pyspark._pyspark import (
     DataFrame as _NativeDataFrame,
 )
 from pyspark.sql._classic_bases import _ClassicMeta
+
+# PySpark's docstrings of the members of its classic DataFrame that differ from those of the native
+# class, which are those that `inspect.getdoc` and `help()` find of PySpark's Connect DataFrame
+# (scripts/gen_connect_docstrings.py): the public base takes them in their place.
+from pyspark.sql._classic_docs_generated import DATAFRAME as _classic_docstrings
 
 # PySpark's, of the annotations of the classes of this module, as its module imports them.
 from pyspark.sql.column import Column
@@ -264,6 +268,12 @@ def _not_implemented(name):
     )
 
 
+def _docstring(name, attribute):
+    """The docstring of the member `name` of the public base, PySpark's of its classic DataFrame:
+    that of the native class's `attribute`, or of `_classic_docstrings` where they differ."""
+    return _classic_docstrings.get(name, attribute.__doc__)
+
+
 def _dispatch_method(name, method):
     @wraps(method)
     def dispatched(self, *args, **kwargs):
@@ -283,6 +293,7 @@ def _dispatch_method(name, method):
 
     dispatched.__module__ = __name__
     dispatched.__qualname__ = f"DataFrame.{name}"
+    dispatched.__doc__ = _docstring(name, method)
     return dispatched
 
 
@@ -296,11 +307,11 @@ def _empty_property(name, descriptor):
     get.__name__ = name
     get.__module__ = __name__
     get.__qualname__ = f"DataFrame.{name}"
-    return property(get, doc=descriptor.__doc__)
+    return property(get, doc=_docstring(name, descriptor))
 
 
 class DataFrame(metaclass=_DataFrameMeta):
-    __doc__ = _NativeDataFrame.__doc__
+    __doc__ = _classic_docstrings.get("", _NativeDataFrame.__doc__)
     # PySpark's annotations of the attributes of its frames, which make no attribute.
     _sql_ctx: Optional["SQLContext"]
     _session: "SparkSession"
@@ -392,7 +403,7 @@ for _name, _attribute in vars(_NativeDataFrame).items():
         continue
     if _name in _empty_public_methods:
         _public_attribute = vars(DataFrame)[_name]
-        _public_attribute.__doc__ = _attribute.__doc__
+        _public_attribute.__doc__ = _docstring(_name, _attribute)
     elif isinstance(_attribute, staticmethod):
         _public_attribute = _attribute
     elif isinstance(_attribute, (classmethod, ClassMethodDescriptorType)):
