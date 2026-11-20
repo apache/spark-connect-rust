@@ -39,7 +39,8 @@ _VARIABLE = "SPARK_CONNECT_RELEASE_SESSION_ON_EXIT"
 # modes "stop_wait" and "new_session_dropped_wait" stop the session, then print "ready" and hold
 # the child until a line on its stdin, for a test that stops the server before the child exits.
 # The mode "live_wait" does so with its session live, and prints "exiting" when it exits, just
-# before the exit hook of its session runs.
+# before the exit hook of its session runs. The modes "client_*" print the ID of the session of
+# the client that they drop.
 _CHILD = textwrap.dedent("""
     import os
     import sys
@@ -65,11 +66,11 @@ _CHILD = textwrap.dedent("""
         from pyspark.sql.connect.client import SparkConnectClient
 
         # A client of a session of its own, which the child drops at once.
-        SparkConnectClient(remote)
+        print(SparkConnectClient(remote)._session_id, flush=True)
     if mode == "client_new_session_dropped":
-        spark.client.newSession()
+        print(spark.client.newSession()._session_id, flush=True)
     if mode == "client_clone_dropped":
-        spark.client.clone()
+        print(spark.client.clone()._session_id, flush=True)
     if mode == "stop":
         spark.stop()
     if mode == "set_after_creation":
@@ -80,9 +81,20 @@ _CHILD = textwrap.dedent("""
         spark.stop()
         print("ready", flush=True)
         sys.stdin.readline()
-    if mode == "live_wait":
+    if mode in ("live_wait", "live_handler_wait"):
         import atexit
 
+        if mode == "live_handler_wait":
+            import signal
+
+            class HandlerError(Exception):
+                pass
+
+            def handler(signum, frame):
+                print("signal", flush=True)
+                raise HandlerError("of the handler")
+
+            signal.signal(signal.SIGINT, handler)
         print("ready", flush=True)
         sys.stdin.readline()
         # Registered after the session, so it runs before the session's exit hook.
@@ -167,17 +179,6 @@ def _exit_requests(service, session_id):
         elif kind in ("release_session", "release_execute"):
             requests.append(kind)
     return requests
-
-
-def _session_ids_of_requests(service):
-    # The IDs of the sessions of the requests that the server received, in the order of their
-    # first request.
-    session_ids = []
-    for _, data in service.recorded_order:
-        session_id = parse_message(data).get(1, [b""])[0].decode()
-        if session_id not in session_ids:
-            session_ids.append(session_id)
-    return session_ids
 
 
 def test_a_live_session_cleans_its_ml_cache_at_exit(exit_service):
@@ -267,12 +268,15 @@ def test_i_a_dropped_client_of_a_session_of_its_own_cleans_its_ml_cache_at_exit(
     # (i) The atexit registration of PySpark's SparkConnectClient keeps the client until the exit,
     # and no session object owns a client of SparkConnectClient(connection), or of the newSession
     # or the clone of a client, which none closes: its exit hook sends its clean_cache, even
-    # though the child dropped the client.
-    _, (session_id,) = _run_child(exit_service.remote, mode)
-    session_ids = _session_ids_of_requests(exit_service)
-    assert len(session_ids) == 2 and session_id in session_ids
-    (client_session_id,) = [other for other in session_ids if other != session_id]
+    # though the child dropped the client, as the session that the child keeps does. The requests
+    # are told apart by the sessions that the child printed, as each other test's are: a request
+    # of another session can reach the server too, such as a request of another process that is
+    # retried after its server stopped (the release of an execution, or the execution), once this
+    # server has the port of that one.
+    (session_id,), (client_session_id,) = _run_child_lines(exit_service.remote, mode)
+    assert client_session_id != session_id
     assert _exit_requests(exit_service, client_session_id) == ["clean_cache"]
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]
 
 
 def test_h_an_execution_once_the_interpreter_shuts_down_raises_pysparks_runtime_error(
@@ -374,3 +378,43 @@ def test_f_a_signal_ends_the_wait_of_the_exit_hook_when_the_server_is_gone(varia
     assert elapsed < 30, elapsed
     assert "Exception ignored in atexit callback" in stderr, stderr
     assert "KeyboardInterrupt" in stderr, stderr
+
+
+def test_f_the_plan_compression_lookup_of_the_exit_hook_catches_the_exception_of_a_handler(
+        exit_service):
+    # (f) The clean_cache of the exit hook of a session that ran no plan looks the plan compression
+    # up first, as PySpark's `_set_command_in_plan` does, whose `except Exception` catches the
+    # exception that a signal handler raises while the lookup waits: the lookup ends, and the exit
+    # hook goes on to send its clean_cache, as PySpark's keeps waiting, and the child exits with
+    # status 0, of no exception reported by atexit.
+    exit_service.plan_compression_lookup_delay = 10.0
+    child = subprocess.Popen(
+        [sys.executable, "-c", _CHILD, exit_service.remote, "live_handler_wait"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_child_env(None),
+    )
+    try:
+        (session_id,) = child.stdout.readline().split()
+        assert child.stdout.readline().strip() == "ready"
+        child.stdin.write("\n")
+        child.stdin.close()
+        assert child.stdout.readline().strip() == "exiting"
+        # The exit hook of the session waits on its lookup by now.
+        time.sleep(1)
+        child.send_signal(signal.SIGINT)
+        started = time.monotonic()
+        status = child.wait(timeout=60)
+        elapsed = time.monotonic() - started
+        stdout, stderr = child.stdout.read(), child.stderr.read()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
+    assert status == 0, stderr
+    assert stdout.split() == ["signal"]
+    assert elapsed < 8, elapsed
+    assert "Exception ignored" not in stderr, stderr
+    assert _exit_requests(exit_service, session_id) == ["clean_cache"]

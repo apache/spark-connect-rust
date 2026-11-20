@@ -519,28 +519,38 @@ pub(crate) fn caught(error: crate::error::SparkError) {
     }
 }
 
-/// A pseudo-random jitter value in `[0, max)` milliseconds.
+/// A pseudo-random jitter value in `[0, max)` milliseconds, of a draw of its own.
 ///
-/// Mirrors `random.uniform(0, jitter)` in the reference `RetryPolicyState`. Retry
-/// jitter needs no cryptographic strength, so this is a clock-seeded xorshift with
-/// no external RNG dependency.
+/// Mirrors `random.uniform(0, jitter)` in the reference `RetryPolicyState`, which draws each
+/// jitter of Python's generator: each call takes the next value of the jitter sequence of the
+/// process ([`next_jitter_bits`]), so consecutive draws, of one thread or of several, are spread
+/// over the range, as the retries of a burst of calls need. Retry jitter needs no cryptographic
+/// strength.
 fn rand_jitter(max: u64) -> f64 {
     if max == 0 {
         return 0.0;
     }
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0)
-        | 1;
-    // xorshift64
-    let mut x = seed;
-    x ^= x << 13;
-    x ^= x >> 7;
-    x ^= x << 17;
-    let frac = (x >> 11) as f64 / (1u64 << 53) as f64; // uniform in [0, 1)
+    let frac = (next_jitter_bits() >> 11) as f64 / (1u64 << 53) as f64; // uniform in [0, 1)
     frac * (max as f64)
+}
+
+/// The next value of the SplitMix64 sequence (Steele, Lea and Flood) of the jitters of the
+/// process: its state advances by the golden gamma at each call, atomically, and the value is the
+/// mix of the new state. It starts of a seed of the randomness of the OS, which the UUIDs of the
+/// client draw, as Python seeds its generator.
+fn next_jitter_bits() -> u64 {
+    const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
+    static STATE: std::sync::OnceLock<std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
+    let state = STATE.get_or_init(|| {
+        let (high, low) = uuid::Uuid::new_v4().as_u64_pair();
+        std::sync::atomic::AtomicU64::new(high ^ low.rotate_left(32))
+    });
+    let mut z = state
+        .fetch_add(GOLDEN_GAMMA, std::sync::atomic::Ordering::Relaxed)
+        .wrapping_add(GOLDEN_GAMMA);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
 }
 
 #[cfg(test)]
@@ -651,6 +661,38 @@ mod tests {
             assert!((0.0..100.0).contains(&j), "jitter {j} out of range");
         }
         assert_eq!(rand_jitter(0), 0.0);
+    }
+
+    #[test]
+    fn consecutive_jitters_are_spread_over_the_range_as_the_reference_draws_them() {
+        // As `random.uniform(0, jitter)`, which draws each jitter of Python's generator: the
+        // jitters of consecutive retries, as of a burst of calls that fail together, are spread
+        // over [0, max), not alike, of one time of the clock. 200 draws of 500 values take
+        // about 165 of them; both halves of the range are drawn.
+        let draws: Vec<u64> = (0..200).map(|_| rand_jitter(500) as u64).collect();
+        let distinct: std::collections::HashSet<u64> = draws.iter().copied().collect();
+        assert!(
+            distinct.len() >= 100,
+            "{} distinct: {draws:?}",
+            distinct.len()
+        );
+        assert!(draws.iter().any(|&d| d < 250), "{draws:?}");
+        assert!(draws.iter().any(|&d| d >= 250), "{draws:?}");
+        // So are the draws of threads that retry at once.
+        let threads: Vec<_> = (0..4)
+            .map(|_| std::thread::spawn(|| (0..50).map(|_| rand_jitter(500) as u64).collect()))
+            .collect();
+        let mut all: Vec<u64> = Vec::new();
+        for thread in threads {
+            let draws: Vec<u64> = thread.join().unwrap();
+            all.extend(draws);
+        }
+        let distinct: std::collections::HashSet<u64> = all.iter().copied().collect();
+        assert!(
+            distinct.len() >= 100,
+            "{} distinct: {all:?}",
+            distinct.len()
+        );
     }
 
     #[test]
@@ -839,7 +881,6 @@ mod tests {
                 "expected 3200..3700, got {wait}"
             );
             jittered.push(wait);
-            std::thread::sleep(std::time::Duration::from_millis(1));
         }
         assert!(jittered.iter().any(|&wait| wait > 3200), "{jittered:?}");
         // A wait of the max backoff is jittered too, in [60000, 60500).

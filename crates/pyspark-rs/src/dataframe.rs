@@ -99,7 +99,8 @@ impl PyDataFrame {
 
     /// The schema of this DataFrame, as PySpark's `_cached_schema` is: the object of `to` that is
     /// not a DataType, which it keeps (see `schema_object`), or else the schema of the server, as
-    /// PySpark's client converts it. The schema is cached, so it is asked of the server once.
+    /// PySpark's client converts it, of the errors of that conversion (see `check_python_schema`).
+    /// The schema is cached, so it is asked of the server once.
     fn own_schema<'py>(&self, py: Python<'py>) -> PyResult<PropertySchema<'py>> {
         if let Some(schema) = &self.schema_object {
             return Ok(PropertySchema::Object(schema.bind(py).clone()));
@@ -107,8 +108,19 @@ impl PyDataFrame {
         let schema = interruptible(py, &self.dataframe.spark_session(), || {
             self.dataframe.schema()
         })?;
-        check_schema_conversion(py, Some(&schema))?;
+        check_python_schema(py, &schema)?;
         Ok(PropertySchema::Core(schema))
+    }
+
+    /// Raises as PySpark's `schema` of this DataFrame does, which its grouped data reads, of the
+    /// conversion of the schema that it caches (see `own_schema`): of a copy or an unpickle,
+    /// whose `schema` is the schema that it requested and converted then (see `copy_schema`),
+    /// nothing.
+    pub(crate) fn check_schema_read(&self, py: Python<'_>) -> PyResult<()> {
+        if self.copy_schema.is_none() {
+            self.own_schema(py)?;
+        }
+        Ok(())
     }
 
     /// The schema that the properties `schema`, `columns` and `dtypes` read, as PySpark's read
@@ -155,7 +167,10 @@ impl PyDataFrame {
     /// first plan of the session reads the plan compression settings then; then
     /// `SparkConnectClient.to_pandas` reads the settings of the conversion, in one request,
     /// and sends the plan; the Arrow result with the schema that the server sends is converted
-    /// by `pyspark.sql.connect.client._to_pandas`.
+    /// by `pyspark.sql.connect.client._to_pandas`. The DataFrame keeps the information of the
+    /// execution once the result is converted, as `_to_pandas` sets `_execution_info` after
+    /// `SparkConnectClient.to_pandas` returns: a conversion that fails leaves `executionInfo` as
+    /// it was.
     pub(crate) fn to_pandas(
         &self,
         py: Python<'_>,
@@ -172,9 +187,9 @@ impl PyDataFrame {
                 "spark.sql.execution.arrow.pyspark.selfDestruct.enabled",
             ])
         })?;
-        let (batches, schema) = interruptible(py, &session, || {
+        let (batches, schema, info) = interruptible(py, &session, || {
             execution
-                .collect_record_batches_checked(check_schema_at_receipt)
+                .collect_record_batches_and_info(check_schema_at_receipt)
                 .map_err(Box::new)
         })?;
         check_schema_conversion(py, schema.as_ref())?;
@@ -191,13 +206,7 @@ impl PyDataFrame {
             Some(schema) => crate::types::schema_to_py(py, schema)?,
             None => py.None(),
         };
-        let (metrics, observed) = match self.dataframe.execution_info() {
-            Ok(info) => execution_metrics(py, &info)?,
-            Err(_) => (
-                pyo3::types::PyList::empty(py),
-                pyo3::types::PyList::empty(py),
-            ),
-        };
+        let (metrics, observed) = execution_metrics(py, &info)?;
         let kwargs = pyo3::types::PyDict::new(py);
         kwargs.set_item("timezone", &settings[0])?;
         match struct_handling_mode {
@@ -210,6 +219,7 @@ impl PyDataFrame {
             (table, schema, metrics, observed),
             Some(&kwargs),
         )?;
+        self.dataframe.keep_execution_info(info);
         Ok(pdf.unbind())
     }
 
@@ -326,7 +336,7 @@ impl PyDataFrame {
     /// this one keeps apart from the core, as PySpark's `alias`, `filter`, `limit`, `sort`, the
     /// repartitions and the other methods that copy the `_cached_schema` of their input copy it
     /// whatever it is. The core keeps a cached struct itself.
-    fn of_same_schema(&self, mut result: PyDataFrame) -> PyDataFrame {
+    pub(crate) fn of_same_schema(&self, mut result: PyDataFrame) -> PyDataFrame {
         if let Some(schema) = &self.schema_object {
             result.schema_object = Some(Python::attach(|py| schema.clone_ref(py)));
         }
@@ -360,7 +370,10 @@ impl PyDataFrame {
             .to_pyerr()
             .map_err(|err| columns_read_error(py, err))?;
         let fresh = DataFrame::from_sent_relation(session.clone(), relation);
-        interruptible(py, &session, || fresh.schema())
+        let schema = interruptible(py, &session, || fresh.schema())?;
+        // As the read of the columns, which converts the schema (see `check_python_schema`).
+        check_python_schema(py, &schema)?;
+        Ok(schema)
     }
 
     /// The number of rows and the truncation of the eager evaluation, as PySpark's `int` of
@@ -1011,8 +1024,9 @@ impl PyDataFrame {
             },
         };
         // The schema that this DataFrame cached, of the types of PySpark, when they hold it: the
-        // `StructType` that it keeps as an object, of `to` or of a map function, as it is now, as
-        // PySpark's state carries the object.
+        // `StructType` that it keeps as an object, of `to`, of a map function or of an unpickle,
+        // as it is now, as PySpark's state carries the object; else that of the server, of new
+        // objects of its user-defined types, as PySpark's `_schema` made them.
         let cached_schema = match &this.schema_object {
             Some(schema)
                 if schema
@@ -1021,12 +1035,7 @@ impl PyDataFrame {
             {
                 Some(schema.clone_ref(py))
             }
-            _ => this
-                .dataframe
-                .known_schema()
-                .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
-                .map(|schema| crate::types::data_type_to_py(py, &schema))
-                .transpose()?,
+            _ => known_schema_object(py, &this.dataframe)?,
         };
         py.import("pyspark.sql.connect.dataframe")?
             .getattr("_reduce_dataframe")?
@@ -1181,9 +1190,10 @@ impl PyDataFrame {
     /// The DataFrame of `relation`, the bytes of a relation of `levels` levels of `session`, as a
     /// pickled DataFrame unpickles, with the `_support_repr_html` and the `_cached_schema` of its
     /// state. As PySpark's unpickle, whose lookup of the `__setstate__` of the new DataFrame reads
-    /// its columns, it requests the schema of the relation, whose error it raises, and keeps it
-    /// (see `copy_schema`), and then the DataFrame has the cached schema of the pickled one,
-    /// none when it had none, so that its `schema` requests it again then. Without
+    /// its columns, it requests the schema of the relation, whose error it raises, also that of
+    /// its conversion (see `check_python_schema`), and keeps it (see `copy_schema`), and then the
+    /// DataFrame has the cached schema of the pickled one, the objects that it is of, or none
+    /// when it had none, so that its `schema` requests it again then. Without
     /// `request_schema`, of an object that PySpark pickles of the plan of the DataFrame, as a
     /// DataStreamWriter, the schema is not requested.
     #[staticmethod]
@@ -1216,12 +1226,18 @@ impl PyDataFrame {
         .to_pyerr()?;
         let requested = if request_schema {
             let schema = interruptible(py, &dataframe.spark_session(), || dataframe.schema())?;
-            check_schema_conversion(py, Some(&schema))?;
+            check_python_schema(py, &schema)?;
             Some(schema)
         } else {
             None
         };
         let mut dataframe = PyDataFrame::new(dataframe.with_known_schema(known_schema));
+        // The `StructType` of the state as the object that it is, as PySpark's `_cached_schema`,
+        // which `columns`, `dtypes` and the methods that copy the cached schema read: of the
+        // objects of `to`, of a map function or of the server that the pickled DataFrame held.
+        dataframe.schema_object = cached_schema
+            .filter(|schema| schema.is_instance_of::<crate::types::PyStructType>())
+            .map(|schema| schema.clone().unbind());
         if let Some(requested) = requested {
             dataframe.keep_copy_schema(requested);
         }
@@ -2505,14 +2521,15 @@ impl PyDataFrame {
     }
 
     /// Observe metrics, as PySpark's `DataFrame.observe(observation, *exprs)`: the Columns
-    /// `exprs`, which an Observation receives, or which are observed by a name.
+    /// `exprs`, which an Observation receives by its `_on`, of a subclass too, or which are
+    /// observed by a name.
     #[pyo3(signature = (observation, *exprs))]
-    fn observe(
-        &self,
-        py: Python<'_>,
-        observation: &Bound<'_, PyAny>,
-        exprs: Vec<Bound<'_, PyAny>>,
-    ) -> PyResult<PyDataFrame> {
+    fn observe<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        observation: &Bound<'py, PyAny>,
+        exprs: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         if exprs.is_empty() {
             return Err(crate::column::raise_pyspark(
                 py,
@@ -2539,18 +2556,26 @@ impl PyDataFrame {
                 }
             }
         }
-        if let Ok(observation) = observation.cast::<crate::observation::PyObservation>() {
-            let observed = crate::observation::observe(py, self, observation, columns)?;
-            return Ok(self.of_same_schema(observed));
+        if observation.is_instance_of::<crate::observation::PyObservation>() {
+            // As PySpark's, which gives the DataFrame of the `_on` of the Observation, of a
+            // subclass too.
+            let mut arguments = vec![slf.clone().into_any()];
+            arguments.extend(exprs);
+            return observation.call_method1(
+                pyo3::intern!(py, "_on"),
+                pyo3::types::PyTuple::new(py, arguments)?,
+            );
         }
+        let this = slf.borrow();
         if observation.is_instance_of::<pyo3::types::PyString>() {
             // Its `CollectMetrics` plan sets the name when it builds the plan, before the metrics.
             let mut args = crate::plan_args::PlanArgs::new();
             let name = args.str(observation)?;
             let args = args.before(&mut columns);
-            return Ok(self.of_same_schema(PyDataFrame::new(
-                args.plan(self.dataframe.observe(&name, columns)),
-            )));
+            let observed = this.of_same_schema(PyDataFrame::new(
+                args.plan(this.dataframe.observe(&name, columns)),
+            ));
+            return Ok(Bound::new(py, observed)?.into_any());
         }
         let type_name = observation.get_type().name()?.to_string();
         Err(crate::column::raise_pyspark(
@@ -3736,7 +3761,7 @@ impl PyDataFrame {
     fn write_to(slf: &Bound<'_, Self>, table: &Bound<'_, PyAny>) -> PyDataFrameWriterV2 {
         let (name, unsent_table) = written_table(table);
         let frame = slf.clone().unbind();
-        PyDataFrameWriterV2 {
+        let mut writer = PyDataFrameWriterV2 {
             inner: std::sync::Arc::new(WriterState::of_frame(
                 slf.borrow().dataframe.write_to(&name),
                 &frame,
@@ -3749,8 +3774,11 @@ impl PyDataFrame {
             unsent_partition: std::sync::Arc::new(std::sync::Mutex::new(None)),
             unsent_options: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             unsent_properties: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            shared: None,
             gc_ready: crate::gc::GcReady::new(),
-        }
+        };
+        writer.shared = writer.shared_of();
+        writer
     }
 
     /// The streaming writer interface (`df.writeStream`).
@@ -4135,7 +4163,8 @@ impl PyDataFrame {
     }
 }
 
-/// Python wrapper for `DataFrameNaFunctions` (`df.na`).
+// Python wrapper for `DataFrameNaFunctions` (`df.na`).
+#[doc = connect_doc!(DataFrameNaFunctions)]
 #[pyclass(
     name = "DataFrameNaFunctions",
     module = "pyspark.sql.connect.dataframe",
@@ -4217,12 +4246,13 @@ impl PyDataFrameNaFunctions {
         self.frame.clone_ref(py)
     }
 
-    /// Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
-    /// `DataFrame.dropna`.
+    // Drop rows containing nulls, as PySpark's `DataFrameNaFunctions.drop`, which is
+    // `DataFrame.dropna`.
     #[pyo3(
         signature = (how=None, thresh=None, subset=None),
         text_signature = "($self, how='any', thresh=None, subset=None)"
     )]
+    #[doc = connect_doc!(DataFrameNaFunctions.drop)]
     fn drop(
         &self,
         how: Option<&Bound<'_, PyAny>>,
@@ -4232,8 +4262,9 @@ impl PyDataFrameNaFunctions {
         crate::stat_arguments::dropna(&self.df, how, thresh, subset)
     }
 
-    /// Fill nulls, as PySpark's `DataFrameNaFunctions.fill`, which is `DataFrame.fillna`.
+    // Fill nulls, as PySpark's `DataFrameNaFunctions.fill`, which is `DataFrame.fillna`.
     #[pyo3(signature = (value, subset=None))]
+    #[doc = connect_doc!(DataFrameNaFunctions.fill)]
     fn fill(
         &self,
         value: &Bound<'_, PyAny>,
@@ -4242,9 +4273,10 @@ impl PyDataFrameNaFunctions {
         crate::stat_arguments::fillna(&self.df, value, subset)
     }
 
-    /// Replace values, as PySpark's `DataFrameNaFunctions.replace`, which is
-    /// `DataFrame.replace`.
+    // Replace values, as PySpark's `DataFrameNaFunctions.replace`, which is
+    // `DataFrame.replace`.
     #[pyo3(signature = (to_replace, value=ReplaceValue::Omitted, subset=None))]
+    #[doc = connect_doc!(DataFrameNaFunctions.replace)]
     fn replace(
         &self,
         to_replace: &Bound<'_, PyAny>,
@@ -4501,12 +4533,13 @@ fn check_written_table(py: Python<'_>, unsent_table: &Option<Py<PyAny>>) -> PyRe
     }
 }
 
-/// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).
-///
-/// Mirrors PySpark's mutable writer: `withSchemaEvolution` and every clause action
-/// (`whenMatched().updateAll()`, ...) change this object and return it, and `merge`
-/// leaves it usable. The core writer is a consuming builder, so the wrapped value is
-/// replaced in place and `merge` runs on a clone.
+// Python wrapper for `MergeIntoWriter` (`df.mergeInto(...)`).
+//
+// Mirrors PySpark's mutable writer: `withSchemaEvolution` and every clause action
+// (`whenMatched().updateAll()`, ...) change this object and return it, and `merge`
+// leaves it usable. The core writer is a consuming builder, so the wrapped value is
+// replaced in place and `merge` runs on a clone.
+#[doc = connect_doc!(MergeIntoWriter)]
 #[pyclass(
     name = "MergeIntoWriter",
     module = "pyspark.sql.connect.merge",
@@ -4638,8 +4671,11 @@ type MergeClause = (
 /// which asserts a str and sets it in a string field, and then its value, whose `to_plan` an
 /// object that is not a Column lacks; and then the condition. A Column that does not build raises
 /// its error there, such as a str that UTF-8 cannot encode, or the `RecursionError` of PySpark's
-/// serializer of one too deep to be sent, and the clause is not added. The merge builds them again
-/// when it runs. The assignments keep their order, in which the merge sends them.
+/// serializer of one too deep to be sent, and the clause is not added. The clause keeps them as
+/// they were built then ([`built_column`]), which the merge sends, as PySpark's merge sends the
+/// protos that its clause built: so the functions of their UDFs are pickled once, when the clause
+/// is added, and the warning of a window of no partitions is given then. The assignments keep
+/// their order, in which the merge sends them.
 fn merge_clause(
     py: Python<'_>,
     condition: &ClauseCondition,
@@ -4660,23 +4696,28 @@ fn merge_clause(
                     return Err(not_column(&value, "value"));
                 }
             };
-            value.try_to_proto().to_pyerr()?;
-            built.push((key, value));
+            built.push((key, built_column(&value)?));
         }
     }
     let condition = match condition {
         ClauseCondition::None => None,
-        ClauseCondition::Column(column) => Some(column.clone()),
+        ClauseCondition::Column(column) => Some(built_column(column)?),
         ClauseCondition::Object(object) => {
             let object = object.bind(py);
             object.getattr("to_plan")?;
             return Err(not_column(object, "condition"));
         }
     };
-    if let Some(condition) = &condition {
-        condition.try_to_proto().to_pyerr()?;
-    }
     Ok((condition, built))
+}
+
+/// The Column of the `spark.connect.Expression` of `column` as a request builds it now, of its
+/// rendering and its levels, which sends that expression as it is (`Column::sent`), as the
+/// `MergeAction` that PySpark's `_build_merge_action` builds holds the protos of its Columns; or
+/// the error of the build.
+fn built_column(column: &spark_connect::column::Column) -> PyResult<spark_connect::column::Column> {
+    let (expression, levels) = column.try_to_proto_with_levels().to_pyerr()?;
+    spark_connect::column::Column::sent(expression, column.expression().render(), levels).to_pyerr()
 }
 
 #[pymethods]
@@ -4730,14 +4771,16 @@ impl PyMergeIntoWriter {
         py.get_type::<PyWhenNotMatchedBySource>().unbind()
     }
 
-    /// A clause of the condition `condition`, which PySpark keeps as it is given: its action builds
-    /// it ([`merge_clause`]).
+    // A clause of the condition `condition`, which PySpark keeps as it is given: its action builds
+    // it ([`merge_clause`]).
     #[pyo3(name = "whenMatched", signature = (condition=None))]
+    #[doc = connect_doc!(MergeIntoWriter.whenMatched)]
     fn when_matched(slf: &Bound<'_, Self>, condition: Option<&Bound<'_, PyAny>>) -> PyWhenMatched {
         PyWhenMatched::new(slf.clone().unbind(), ClauseCondition::of(condition))
     }
 
     #[pyo3(name = "whenNotMatched", signature = (condition=None))]
+    #[doc = connect_doc!(MergeIntoWriter.whenNotMatched)]
     fn when_not_matched(
         slf: &Bound<'_, Self>,
         condition: Option<&Bound<'_, PyAny>>,
@@ -4746,6 +4789,7 @@ impl PyMergeIntoWriter {
     }
 
     #[pyo3(name = "whenNotMatchedBySource", signature = (condition=None))]
+    #[doc = connect_doc!(MergeIntoWriter.whenNotMatchedBySource)]
     fn when_not_matched_by_source(
         slf: &Bound<'_, Self>,
         condition: Option<&Bound<'_, PyAny>>,
@@ -4754,6 +4798,7 @@ impl PyMergeIntoWriter {
     }
 
     #[pyo3(name = "withSchemaEvolution")]
+    #[doc = connect_doc!(MergeIntoWriter.withSchemaEvolution)]
     fn with_schema_evolution<'py>(slf: &Bound<'py, Self>) -> Bound<'py, Self> {
         slf.borrow()
             .schema_evolution
@@ -4762,6 +4807,7 @@ impl PyMergeIntoWriter {
         slf.clone()
     }
 
+    #[doc = connect_doc!(MergeIntoWriter.merge)]
     fn merge(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
         let mut writer = self.inner.get();
@@ -4815,8 +4861,9 @@ impl PyMergeIntoWriter {
     }
 }
 
-/// `whenMatched(...)` clause builder. Holds its parent writer, like PySpark's
-/// `MergeIntoWriter.WhenMatched`; each action may be called more than once.
+// `whenMatched(...)` clause builder. Holds its parent writer, like PySpark's
+// `MergeIntoWriter.WhenMatched`; each action may be called more than once.
+#[doc = connect_doc!(MergeIntoWriter.WhenMatched)]
 #[pyclass(
     name = "WhenMatched",
     module = "pyspark.sql.connect.merge",
@@ -4887,11 +4934,13 @@ impl PyWhenMatched {
     }
 
     #[pyo3(name = "updateAll")]
+    #[doc = connect_doc!(MergeIntoWriter.WhenMatched.updateAll)]
     fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let (cond, _) = merge_clause(py, &self.condition, None)?;
         merge_clause_action(py, &self.writer, |w| w.when_matched(cond).update_all())
     }
 
+    #[doc = connect_doc!(MergeIntoWriter.WhenMatched.update)]
     fn update(
         &self,
         py: Python<'_>,
@@ -4903,14 +4952,16 @@ impl PyWhenMatched {
         })
     }
 
+    #[doc = connect_doc!(MergeIntoWriter.WhenMatched.delete)]
     fn delete(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let (cond, _) = merge_clause(py, &self.condition, None)?;
         merge_clause_action(py, &self.writer, |w| w.when_matched(cond).delete())
     }
 }
 
-/// `whenNotMatched(...)` clause builder. Holds its parent writer, like PySpark's
-/// `MergeIntoWriter.WhenNotMatched`.
+// `whenNotMatched(...)` clause builder. Holds its parent writer, like PySpark's
+// `MergeIntoWriter.WhenNotMatched`.
+#[doc = connect_doc!(MergeIntoWriter.WhenNotMatched)]
 #[pyclass(
     name = "WhenNotMatched",
     module = "pyspark.sql.connect.merge",
@@ -4981,11 +5032,13 @@ impl PyWhenNotMatched {
     }
 
     #[pyo3(name = "insertAll")]
+    #[doc = connect_doc!(MergeIntoWriter.WhenNotMatched.insertAll)]
     fn insert_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let (cond, _) = merge_clause(py, &self.condition, None)?;
         merge_clause_action(py, &self.writer, |w| w.when_not_matched(cond).insert_all())
     }
 
+    #[doc = connect_doc!(MergeIntoWriter.WhenNotMatched.insert)]
     fn insert(
         &self,
         py: Python<'_>,
@@ -4998,8 +5051,9 @@ impl PyWhenNotMatched {
     }
 }
 
-/// `whenNotMatchedBySource(...)` clause builder. Holds its parent writer, like
-/// PySpark's `MergeIntoWriter.WhenNotMatchedBySource`.
+// `whenNotMatchedBySource(...)` clause builder. Holds its parent writer, like
+// PySpark's `MergeIntoWriter.WhenNotMatchedBySource`.
+#[doc = connect_doc!(MergeIntoWriter.WhenNotMatchedBySource)]
 #[pyclass(
     name = "WhenNotMatchedBySource",
     module = "pyspark.sql.connect.merge",
@@ -5070,6 +5124,7 @@ impl PyWhenNotMatchedBySource {
     }
 
     #[pyo3(name = "updateAll")]
+    #[doc = connect_doc!(MergeIntoWriter.WhenNotMatchedBySource.updateAll)]
     fn update_all(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let (cond, _) = merge_clause(py, &self.condition, None)?;
         merge_clause_action(py, &self.writer, |w| {
@@ -5077,6 +5132,7 @@ impl PyWhenNotMatchedBySource {
         })
     }
 
+    #[doc = connect_doc!(MergeIntoWriter.WhenNotMatchedBySource.update)]
     fn update(
         &self,
         py: Python<'_>,
@@ -5088,6 +5144,7 @@ impl PyWhenNotMatchedBySource {
         })
     }
 
+    #[doc = connect_doc!(MergeIntoWriter.WhenNotMatchedBySource.delete)]
     fn delete(&self, py: Python<'_>) -> PyResult<Py<PyMergeIntoWriter>> {
         let (cond, _) = merge_clause(py, &self.condition, None)?;
         merge_clause_action(py, &self.writer, |w| {
@@ -5096,7 +5153,7 @@ impl PyWhenNotMatchedBySource {
     }
 }
 
-/// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
+// Python wrapper for the V1 `DataFrameWriter` (`df.write`).
 #[pyclass(
     name = "DataFrameWriter",
     module = "pyspark.sql.connect.readwriter",
@@ -5119,9 +5176,125 @@ pub struct PyDataFrameWriter {
     /// The format, the partitioning columns and the save mode that PySpark keeps as they are,
     /// and whose `WriteOperation.command` converts, or resolves, at each write ([`UnsentArgs`]).
     unsent: std::sync::Arc<std::sync::Mutex<UnsentArgs>>,
+    /// The Python object of `unsent` and `refused_bucket_count`, which the copies of this writer
+    /// share too, and which reports the objects that they keep to Python's garbage collector, as
+    /// the `_write` of PySpark's copies holds them (see [`WriterKeptArgs`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
     /// Set once the value is written, as `__traverse__` reads `unsent`, which is not valid while
     /// the writer object is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
+}
+
+/// The arguments that a V1 writer keeps as they are, which the copies of the writer share, as the
+/// `_write` of PySpark's copies is one object: their Python objects are reported to Python's
+/// garbage collector by the Python object of them that each copy holds (see
+/// [`crate::options::SharedObjects`]).
+struct WriterKeptArgs {
+    unsent: std::sync::Arc<std::sync::Mutex<UnsentArgs>>,
+    refused_bucket_count: std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>,
+}
+
+impl crate::options::SharedObjects for WriterKeptArgs {
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        if let Ok(unsent) = self.unsent.try_lock() {
+            for object in [
+                &unsent.format,
+                &unsent.partition,
+                &unsent.clustering,
+                &unsent.mode,
+                &unsent.sort,
+                &unsent.bucket,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                visit.call(object)?;
+            }
+            unsent.options.visit_objects(visit)?;
+        }
+        if let Ok(count) = self.refused_bucket_count.try_lock() {
+            if let Some(count) = &*count {
+                visit.call(count)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn clear(&self) {
+        let unsent = self
+            .unsent
+            .try_lock()
+            .map(|mut unsent| std::mem::take(&mut *unsent));
+        drop(unsent);
+        let count = self
+            .refused_bucket_count
+            .try_lock()
+            .map(|mut count| count.take());
+        drop(count);
+    }
+}
+
+/// The arguments that a V2 writer keeps as they are, which the copies of the writer share, as the
+/// `_write` of PySpark's copies is one object (see [`WriterKeptArgs`]).
+struct WriterV2KeptArgs {
+    kept: [std::sync::Arc<std::sync::Mutex<Option<Py<PyAny>>>>; 3],
+    options: [std::sync::Arc<std::sync::Mutex<crate::options::UnencodableOptions>>; 2],
+}
+
+impl crate::options::SharedObjects for WriterV2KeptArgs {
+    fn visit(&self, visit: &pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
+        for kept in &self.kept {
+            if let Ok(kept) = kept.try_lock() {
+                if let Some(object) = &*kept {
+                    visit.call(object)?;
+                }
+            }
+        }
+        for options in &self.options {
+            if let Ok(options) = options.try_lock() {
+                options.visit_objects(visit)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn clear(&self) {
+        let kept: Vec<_> = self
+            .kept
+            .iter()
+            .filter_map(|kept| kept.try_lock().ok().and_then(|mut kept| kept.take()))
+            .collect();
+        drop(kept);
+        let options: Vec<_> = self
+            .options
+            .iter()
+            .filter_map(|options| {
+                options
+                    .try_lock()
+                    .ok()
+                    .map(|mut options| std::mem::take(&mut *options))
+            })
+            .collect();
+        drop(options);
+    }
+}
+
+impl PyDataFrameWriterV2 {
+    /// The Python object of the arguments that this writer keeps, for a new writer that holds
+    /// them (see [`WriterV2KeptArgs`]).
+    fn shared_of(&self) -> Option<Py<crate::options::PySharedObjects>> {
+        crate::options::PySharedObjects::of(std::sync::Arc::new(WriterV2KeptArgs {
+            kept: [
+                std::sync::Arc::clone(&self.unsent_provider),
+                std::sync::Arc::clone(&self.unsent_clustering),
+                std::sync::Arc::clone(&self.unsent_partition),
+            ],
+            options: [
+                std::sync::Arc::clone(&self.unsent_options),
+                std::sync::Arc::clone(&self.unsent_properties),
+            ],
+        }))
+    }
 }
 
 /// The arguments of a writer that PySpark keeps as they are, and that its `WriteOperation.command`
@@ -5155,15 +5328,21 @@ impl PyDataFrameWriter {
         writer: spark_connect::readwriter::DataFrameWriter,
         frame: Py<PyDataFrame>,
     ) -> Self {
+        let refused_bucket_count = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
         PyDataFrameWriter {
             inner: std::sync::Arc::new(WriterState::of_frame(
                 writer,
                 &frame,
                 spark_connect::readwriter::DataFrameWriter::shares_plan_with,
             )),
-            refused_bucket_count: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            refused_bucket_count: refused_bucket_count.clone(),
             refused_bucket_cols: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            unsent: std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default())),
+            shared: crate::options::PySharedObjects::of(std::sync::Arc::new(WriterKeptArgs {
+                unsent: unsent.clone(),
+                refused_bucket_count,
+            })),
+            unsent,
             frame,
             gc_ready: crate::gc::GcReady::new(),
         }
@@ -5378,6 +5557,7 @@ impl PyDataFrameWriter {
                 refused_bucket_count: std::sync::Arc::clone(&this.refused_bucket_count),
                 refused_bucket_cols: std::sync::Arc::clone(&this.refused_bucket_cols),
                 unsent: std::sync::Arc::clone(&this.unsent),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
                 frame: this.frame.clone_ref(py),
                 gc_ready: crate::gc::GcReady::new(),
             },
@@ -5560,7 +5740,8 @@ impl PyDataFrameWriter {
         crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
-    /// The save mode, as PySpark's: `None` keeps the default, "error".
+    // The save mode, as PySpark's: `None` keeps the default, "error".
+    #[doc = connect_doc!(DataFrameWriter.mode)]
     fn mode<'py>(
         slf: &Bound<'py, Self>,
         saveMode: Option<&Bound<'_, PyAny>>,
@@ -5570,8 +5751,9 @@ impl PyDataFrameWriter {
         Ok(slf.clone())
     }
 
-    /// The format of the write. As PySpark's, None unsets it, so that the server writes its
-    /// default source.
+    // The format of the write. As PySpark's, None unsets it, so that the server writes its
+    // default source.
+    #[doc = connect_doc!(DataFrameWriter.format)]
     fn format<'py>(
         slf: &Bound<'py, Self>,
         source: Option<&Bound<'_, PyAny>>,
@@ -5581,6 +5763,7 @@ impl PyDataFrameWriter {
         Ok(slf.clone())
     }
 
+    #[doc = connect_doc!(DataFrameWriter.option)]
     fn option<'py>(
         slf: &Bound<'py, Self>,
         key: &Bound<'_, PyAny>,
@@ -5602,6 +5785,7 @@ impl PyDataFrameWriter {
     // Mirrors reference `DataFrameWriter.options(**options)`: keyword args; None values
     // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
+    #[doc = connect_doc!(DataFrameWriter.options)]
     fn options<'py>(
         slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
@@ -5619,6 +5803,7 @@ impl PyDataFrameWriter {
     }
 
     #[pyo3(name = "partitionBy", signature = (*cols))]
+    #[doc = connect_doc!(DataFrameWriter.partitionBy)]
     fn partition_by<'py>(
         slf: &Bound<'py, Self>,
         cols: Vec<Bound<'_, PyAny>>,
@@ -5631,6 +5816,7 @@ impl PyDataFrameWriter {
     }
 
     #[pyo3(name = "bucketBy", signature = (numBuckets, col, *cols))]
+    #[doc = connect_doc!(DataFrameWriter.bucketBy)]
     fn bucket_by<'py>(
         slf: &Bound<'py, Self>,
         numBuckets: &Bound<'_, PyAny>,
@@ -5670,6 +5856,7 @@ impl PyDataFrameWriter {
     }
 
     #[pyo3(name = "sortBy", signature = (col, *cols))]
+    #[doc = connect_doc!(DataFrameWriter.sortBy)]
     fn sort_by<'py>(
         slf: &Bound<'py, Self>,
         col: &Bound<'_, PyAny>,
@@ -5683,9 +5870,10 @@ impl PyDataFrameWriter {
         Ok(slf.clone())
     }
 
-    /// The clustering columns, as PySpark's: column names, or a list or tuple of them, at
-    /// least one.
+    // The clustering columns, as PySpark's: column names, or a list or tuple of them, at
+    // least one.
     #[pyo3(name = "clusterBy", signature = (*cols))]
+    #[doc = connect_doc!(DataFrameWriter.clusterBy)]
     fn cluster_by<'py>(
         slf: &Bound<'py, Self>,
         cols: Vec<Bound<'_, PyAny>>,
@@ -5705,9 +5893,10 @@ impl PyDataFrameWriter {
         Ok(slf.clone())
     }
 
-    /// Write to an external JDBC table. Connection details go through `properties`, options of
-    /// any type (None skipped, bools lowercased), as PySpark's.
+    // Write to an external JDBC table. Connection details go through `properties`, options of
+    // any type (None skipped, bools lowercased), as PySpark's.
     #[pyo3(signature = (url, table, mode=None, properties=None))]
+    #[doc = connect_doc!(DataFrameWriter.jdbc)]
     fn jdbc(
         &self,
         py: Python<'_>,
@@ -5751,6 +5940,7 @@ impl PyDataFrameWriter {
 
     #[pyo3(signature = (path=None, format=None, mode=None, partitionBy=None, **options))]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(DataFrameWriter.save)]
     fn save(
         &self,
         py: Python<'_>,
@@ -5776,6 +5966,7 @@ impl PyDataFrameWriter {
 
     #[pyo3(name = "saveAsTable", signature = (name, format=None, mode=None, partitionBy=None, **options))]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(DataFrameWriter.saveAsTable)]
     fn save_as_table(
         &self,
         py: Python<'_>,
@@ -5800,10 +5991,11 @@ impl PyDataFrameWriter {
         })
     }
 
-    /// Insert into an existing table. `overwrite` maps to overwrite/append mode,
-    /// mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`, of its
-    /// truth when it is not None (`"overwrite" if overwrite else "append"`).
+    // Insert into an existing table. `overwrite` maps to overwrite/append mode,
+    // mirroring reference `DataFrameWriter.insertInto(tableName, overwrite=None)`, of its
+    // truth when it is not None (`"overwrite" if overwrite else "append"`).
     #[pyo3(name = "insertInto", signature = (tableName, overwrite=None))]
+    #[doc = connect_doc!(DataFrameWriter.insertInto)]
     fn insert_into(
         &self,
         py: Python<'_>,
@@ -5831,10 +6023,11 @@ impl PyDataFrameWriter {
         })
     }
 
-    /// Write as PARQUET - full pyspark signature; each named option is
-    /// applied when provided.
+    // Write as PARQUET - full pyspark signature; each named option is
+    // applied when provided.
     #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None, **unexpected), text_signature = "($self, path, mode=None, partitionBy=None, compression=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameWriter.parquet)]
     fn parquet(
         &self,
         py: Python<'_>,
@@ -5862,10 +6055,11 @@ impl PyDataFrameWriter {
         })
     }
 
-    /// Write as JSON - full pyspark signature; each named option is
-    /// applied when provided.
+    // Write as JSON - full pyspark signature; each named option is
+    // applied when provided.
     #[pyo3(signature = (path, mode=None, compression=None, dateFormat=None, timestampFormat=None, lineSep=None, encoding=None, ignoreNullFields=None, **unexpected), text_signature = "($self, path, mode=None, compression=None, dateFormat=None, timestampFormat=None, lineSep=None, encoding=None, ignoreNullFields=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameWriter.json)]
     fn json(
         &self,
         py: Python<'_>,
@@ -5902,10 +6096,11 @@ impl PyDataFrameWriter {
         interruptible(py, &w.spark_session(), || w.json(&path).map_err(Box::new))
     }
 
-    /// Write as CSV - full pyspark signature; each named option is
-    /// applied when provided.
+    // Write as CSV - full pyspark signature; each named option is
+    // applied when provided.
     #[pyo3(signature = (path, mode=None, compression=None, sep=None, quote=None, escape=None, header=None, nullValue=None, escapeQuotes=None, quoteAll=None, dateFormat=None, timestampFormat=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, charToEscapeQuoteEscaping=None, encoding=None, emptyValue=None, lineSep=None, **unexpected), text_signature = "($self, path, mode=None, compression=None, sep=None, quote=None, escape=None, header=None, nullValue=None, escapeQuotes=None, quoteAll=None, dateFormat=None, timestampFormat=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, charToEscapeQuoteEscaping=None, encoding=None, emptyValue=None, lineSep=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameWriter.csv)]
     fn csv(
         &self,
         py: Python<'_>,
@@ -5962,10 +6157,11 @@ impl PyDataFrameWriter {
         interruptible(py, &w.spark_session(), || w.csv(&path).map_err(Box::new))
     }
 
-    /// Write as ORC - full pyspark signature; each named option is
-    /// applied when provided.
+    // Write as ORC - full pyspark signature; each named option is
+    // applied when provided.
     #[pyo3(signature = (path, mode=None, partitionBy=None, compression=None, **unexpected), text_signature = "($self, path, mode=None, partitionBy=None, compression=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameWriter.orc)]
     fn orc(
         &self,
         py: Python<'_>,
@@ -5991,10 +6187,11 @@ impl PyDataFrameWriter {
         interruptible(py, &w.spark_session(), || w.orc(&path).map_err(Box::new))
     }
 
-    /// Write as TEXT - full pyspark signature; each named option is
-    /// applied when provided.
+    // Write as TEXT - full pyspark signature; each named option is
+    // applied when provided.
     #[pyo3(signature = (path, compression=None, lineSep=None, **unexpected), text_signature = "($self, path, compression=None, lineSep=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameWriter.text)]
     fn text(
         &self,
         py: Python<'_>,
@@ -6015,10 +6212,11 @@ impl PyDataFrameWriter {
         interruptible(py, &w.spark_session(), || w.text(&path).map_err(Box::new))
     }
 
-    /// Write as XML - full pyspark signature; each named option is
-    /// applied when provided.
+    // Write as XML - full pyspark signature; each named option is
+    // applied when provided.
     #[pyo3(signature = (path, rowTag=None, mode=None, attributePrefix=None, valueTag=None, rootTag=None, declaration=None, arrayElementName=None, nullValue=None, dateFormat=None, timestampFormat=None, compression=None, encoding=None, validateName=None, **unexpected), text_signature = "($self, path, rowTag=None, mode=None, attributePrefix=None, valueTag=None, rootTag=None, declaration=None, arrayElementName=None, nullValue=None, dateFormat=None, timestampFormat=None, compression=None, encoding=None, validateName=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataFrameWriter.xml)]
     fn xml(
         &self,
         py: Python<'_>,
@@ -6069,30 +6267,15 @@ impl PyDataFrameWriter {
 
     fn __traverse__(&self, visit: pyo3::PyVisit<'_>) -> Result<(), pyo3::PyTraverseError> {
         // The DataFrame, which reports the objects of the plan that the writer shares with it, as
-        // PySpark's writer holds the plan (see `crate::gc::Holders`). The kept arguments, which
-        // Python's garbage collector sees, as `exclusive_relation_owners` reports a DataFrame's
-        // owners: only when this writer holds them alone, so that a copy that shares them does not
-        // count one reference twice. A lock held elsewhere is skipped. Nothing of a writer object
-        // that is being created.
+        // PySpark's writer holds the plan (see `crate::gc::Holders`), and the Python object of the
+        // kept arguments, which the copies of the writer share and which reports them (see
+        // [`WriterKeptArgs`]). Nothing of a writer object that is being created.
         if !self.gc_ready.get() {
             return Ok(());
         }
         visit.call(&self.frame)?;
-        if std::sync::Arc::strong_count(&self.unsent) != 1 {
-            return Ok(());
-        }
-        if let Ok(unsent) = self.unsent.try_lock() {
-            for object in [
-                &unsent.format,
-                &unsent.partition,
-                &unsent.clustering,
-                &unsent.mode,
-            ]
-            .into_iter()
-            .flatten()
-            {
-                visit.call(object)?;
-            }
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
         }
         Ok(())
     }
@@ -6100,6 +6283,7 @@ impl PyDataFrameWriter {
     /// Drop this writer's references to the kept arguments and to its state, of which it keeps a
     /// cleared copy; a copy's are kept.
     fn __clear__(&mut self) {
+        self.shared = None;
         self.unsent = std::sync::Arc::new(std::sync::Mutex::new(UnsentArgs::default()));
         self.inner = std::sync::Arc::new(
             self.inner
@@ -6108,7 +6292,7 @@ impl PyDataFrameWriter {
     }
 }
 
-/// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
+// Python wrapper for the V2 `DataFrameWriter` (`df.writeTo`).
 #[pyclass(
     name = "DataFrameWriterV2",
     module = "pyspark.sql.connect.readwriter",
@@ -6139,9 +6323,12 @@ pub struct PyDataFrameWriterV2 {
     /// The table properties that the core writer does not take, which each write fails with after
     /// its options.
     unsent_properties: std::sync::Arc<std::sync::Mutex<crate::options::UnencodableOptions>>,
-    /// Set once the value is written, as `__traverse__` reads `unsent_provider` and
-    /// `unsent_clustering`, which are not valid while the writer object is created (see
-    /// [`crate::gc::GcReady`]).
+    /// The Python object of the kept provider, columns, options and table properties, which the
+    /// copies of this writer share too, and which reports their objects to Python's garbage
+    /// collector, as the `_write` of PySpark's copies holds them (see [`WriterV2KeptArgs`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
+    /// Set once the value is written, as `__traverse__` reads `inner`, which is not valid while
+    /// the writer object is created (see [`crate::gc::GcReady`]).
     gc_ready: crate::gc::GcReady,
 }
 
@@ -6281,6 +6468,7 @@ impl PyDataFrameWriterV2 {
                 unsent_partition: std::sync::Arc::clone(&this.unsent_partition),
                 unsent_options: std::sync::Arc::clone(&this.unsent_options),
                 unsent_properties: std::sync::Arc::clone(&this.unsent_properties),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
                 frame: this.frame.clone_ref(py),
                 gc_ready: crate::gc::GcReady::new(),
             },
@@ -6378,7 +6566,7 @@ impl PyDataFrameWriterV2 {
         if !cluster_cols.is_empty() {
             writer = writer.cluster_by(cluster_cols);
         }
-        let restored = PyDataFrameWriterV2 {
+        let mut restored = PyDataFrameWriterV2 {
             inner: std::sync::Arc::new(WriterState::of_frame(
                 writer,
                 &frame,
@@ -6390,9 +6578,11 @@ impl PyDataFrameWriterV2 {
             unsent_partition: std::sync::Arc::new(std::sync::Mutex::new(kept_partition)),
             unsent_options: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
             unsent_properties: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            shared: None,
             frame,
             gc_ready: crate::gc::GcReady::new(),
         };
+        restored.shared = restored.shared_of();
         // The options and the table properties that the core writer does not take are set in
         // their order, as PySpark's dicts, which keep them.
         for (key, value) in &kept_options {
@@ -6423,8 +6613,9 @@ impl PyDataFrameWriterV2 {
         crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
-    /// Set the provider of the write, as PySpark's `using`: a str of UTF-8 (bytes too) at once, else
-    /// kept for each write to fail with. None unsets it.
+    // Set the provider of the write, as PySpark's `using`: a str of UTF-8 (bytes too) at once, else
+    // kept for each write to fail with. None unsets it.
+    #[doc = connect_doc!(DataFrameWriterV2.using)]
     fn using<'py>(
         slf: &Bound<'py, Self>,
         provider: Option<&Bound<'_, PyAny>>,
@@ -6449,6 +6640,7 @@ impl PyDataFrameWriterV2 {
 
     // None -> option left unset, before the key is looked at, as PySpark's returns at once;
     // bools -> "true"/"false" (reference `to_str`), same as the other writer option bindings.
+    #[doc = connect_doc!(DataFrameWriterV2.option)]
     fn option<'py>(
         slf: &Bound<'py, Self>,
         key: &Bound<'_, PyAny>,
@@ -6466,6 +6658,7 @@ impl PyDataFrameWriterV2 {
 
     // Mirrors reference `DataFrameWriterV2.options(**options)`; None skipped, bools lowercased.
     #[pyo3(signature = (**options))]
+    #[doc = connect_doc!(DataFrameWriterV2.options)]
     fn options<'py>(
         slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
@@ -6482,10 +6675,11 @@ impl PyDataFrameWriterV2 {
         Ok(slf.clone())
     }
 
-    /// Set the table property `property` to `value`, or leave it unset for None, as PySpark's. A
-    /// value that is not a str or bytes of UTF-8 is kept, and fails each write, as PySpark's
-    /// command sends the map at the write.
+    // Set the table property `property` to `value`, or leave it unset for None, as PySpark's. A
+    // value that is not a str or bytes of UTF-8 is kept, and fails each write, as PySpark's
+    // command sends the map at the write.
     #[pyo3(name = "tableProperty")]
+    #[doc = connect_doc!(DataFrameWriterV2.tableProperty)]
     fn table_property<'py>(
         slf: &Bound<'py, Self>,
         property: &Bound<'_, PyAny>,
@@ -6500,10 +6694,11 @@ impl PyDataFrameWriterV2 {
         Ok(slf.clone())
     }
 
-    /// Partition by the columns, each a Column or a column name, as PySpark's `F._to_col` of
-    /// each, else `NOT_EXPECTED_TYPE` of `col`, also for a list. A column name that UTF-8 cannot
-    /// encode is kept for the write.
+    // Partition by the columns, each a Column or a column name, as PySpark's `F._to_col` of
+    // each, else `NOT_EXPECTED_TYPE` of `col`, also for a list. A column name that UTF-8 cannot
+    // encode is kept for the write.
     #[pyo3(name = "partitionedBy", signature = (col, *cols))]
+    #[doc = connect_doc!(DataFrameWriterV2.partitionedBy)]
     fn partitioned_by<'py>(
         slf: &Bound<'py, Self>,
         col: Bound<'_, PyAny>,
@@ -6524,10 +6719,11 @@ impl PyDataFrameWriterV2 {
         Ok(slf.clone())
     }
 
-    /// The clustering columns of `clusterBy(col, *cols)`, which PySpark keeps as `[col, *cols]`:
-    /// each column is set in the string field of the command at each write, as
-    /// [`crate::str_argument`] converts it.
+    // The clustering columns of `clusterBy(col, *cols)`, which PySpark keeps as `[col, *cols]`:
+    // each column is set in the string field of the command at each write, as
+    // [`crate::str_argument`] converts it.
     #[pyo3(name = "clusterBy", signature = (col, *cols))]
+    #[doc = connect_doc!(DataFrameWriterV2.clusterBy)]
     fn cluster_by<'py>(
         slf: &Bound<'py, Self>,
         col: &Bound<'_, PyAny>,
@@ -6541,6 +6737,7 @@ impl PyDataFrameWriterV2 {
         Ok(slf.clone())
     }
 
+    #[doc = connect_doc!(DataFrameWriterV2.create)]
     fn create(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
@@ -6550,6 +6747,7 @@ impl PyDataFrameWriterV2 {
         })
     }
 
+    #[doc = connect_doc!(DataFrameWriterV2.replace)]
     fn replace(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
@@ -6560,6 +6758,7 @@ impl PyDataFrameWriterV2 {
     }
 
     #[pyo3(name = "createOrReplace")]
+    #[doc = connect_doc!(DataFrameWriterV2.createOrReplace)]
     fn create_or_replace(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
@@ -6569,6 +6768,7 @@ impl PyDataFrameWriterV2 {
         })
     }
 
+    #[doc = connect_doc!(DataFrameWriterV2.append)]
     fn append(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
@@ -6578,8 +6778,9 @@ impl PyDataFrameWriterV2 {
         })
     }
 
-    /// Overwrite the rows of `condition`, a Column or a column name, as PySpark's `F._to_col`,
-    /// else `NOT_EXPECTED_TYPE` of `col`, before the command sets the table.
+    // Overwrite the rows of `condition`, a Column or a column name, as PySpark's `F._to_col`,
+    // else `NOT_EXPECTED_TYPE` of `col`, before the command sets the table.
+    #[doc = connect_doc!(DataFrameWriterV2.overwrite)]
     fn overwrite(&self, py: Python<'_>, condition: &Bound<'_, PyAny>) -> PyResult<()> {
         let (writer, condition) = (self.inner.get(), column_or_name(condition)?);
         check_written_table(py, &self.unsent_table)?;
@@ -6590,6 +6791,7 @@ impl PyDataFrameWriterV2 {
     }
 
     #[pyo3(name = "overwritePartitions")]
+    #[doc = connect_doc!(DataFrameWriterV2.overwritePartitions)]
     fn overwrite_partitions(&self, py: Python<'_>) -> PyResult<()> {
         check_written_table(py, &self.unsent_table)?;
         self.check_unsent_all(py)?;
@@ -6610,18 +6812,12 @@ impl PyDataFrameWriterV2 {
         if let Some(table) = &self.unsent_table {
             visit.call(table)?;
         }
-        // The kept arguments and the state that a copy shares are reported by no owner, as the
-        // writer's are, and a lock held elsewhere is skipped: of the state, the functions of the
-        // UDFs of the partitioning columns that it alone keeps alive.
-        for kept in [&self.unsent_provider, &self.unsent_clustering] {
-            if std::sync::Arc::strong_count(kept) != 1 {
-                continue;
-            }
-            if let Ok(kept) = kept.try_lock() {
-                if let Some(object) = &*kept {
-                    visit.call(object)?;
-                }
-            }
+        // The Python object of the kept arguments, which the copies of the writer share and which
+        // reports them (see [`WriterV2KeptArgs`]). The state that a copy shares is reported by no
+        // owner, and a lock held elsewhere is skipped: of the state, the functions of the UDFs of
+        // the partitioning columns that it alone keeps alive.
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
         }
         if std::sync::Arc::strong_count(&self.inner) == 1 {
             if let Some(writer) = self.inner.try_lock() {
@@ -6638,6 +6834,7 @@ impl PyDataFrameWriterV2 {
     /// cleared copy; a copy's are kept.
     fn __clear__(&mut self) {
         self.unsent_table = None;
+        self.shared = None;
         self.unsent_provider = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.unsent_clustering = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.inner = std::sync::Arc::new(
@@ -6790,21 +6987,21 @@ fn bind_arguments<'py, const N: usize>(
     }))
 }
 
-/// Resolve the return type of a map or group function (a `DataType` wrapper or a DDL string)
-/// into a Rust DataType: a DDL string as the server of `session` parses it, as PySpark's
-/// `_parse_ddl`. Another object raises as [`check_return_type_argument`].
+/// Resolve the return type of a map or group function (a `DataType` wrapper or a DDL string): a
+/// DDL string into the type that the server of `session` parses it to, as PySpark's `_parse_ddl`,
+/// and a type object into None, which [`map_udf_of`] lowers when it builds the function, as the
+/// `returnType` of PySpark's `UserDefinedFunction` reads it then, after the columns of the input.
+/// Another object raises as [`check_return_type_argument`].
 pub(crate) fn resolve_datatype(
     py: Python<'_>,
     session: &spark_connect::session::SparkSession,
     schema: &Bound<'_, PyAny>,
-) -> PyResult<spark_connect::types::DataType> {
-    // The live conversion, not the base snapshot: an edit in place of a StructType's fields or
-    // metadata after it was built is kept, as PySpark does.
+) -> PyResult<Option<spark_connect::types::DataType>> {
     if schema.extract::<PyRef<PyDataType>>().is_ok() {
-        return crate::types::py_to_data_type(schema);
+        return Ok(None);
     }
     if schema.is_instance_of::<pyo3::types::PyString>() {
-        return crate::types::schema_data_type(py, session, schema);
+        return crate::types::schema_data_type(py, session, schema).map(Some);
     }
     Err(not_expected_type(schema, "returnType", "DataType or str"))
 }
@@ -6955,7 +7152,7 @@ pub(crate) fn map_udf_of(
     py: Python<'_>,
     func: &Bound<'_, PyAny>,
     schema: &Bound<'_, PyAny>,
-    return_type: spark_connect::types::DataType,
+    return_type: Option<spark_connect::types::DataType>,
     eval_type_id: i32,
     input_cols: &[String],
 ) -> PyResult<CommonInlineUserDefinedFunctionExpression> {
@@ -6963,15 +7160,20 @@ pub(crate) fn map_udf_of(
     // As PySpark's `MapPartitions`, `GroupMap` and the other map nodes do when they build the
     // UDF, the return type is checked for the eval type: a map or group function returns a
     // struct, so another type raises `INVALID_RETURN_TYPE_FOR_PANDAS_UDF` here, not at the action.
+    // A type object is checked as it is, whose Arrow type of metadata that `json.dumps` refuses is
+    // its `NOT_IMPLEMENTED`, and then lowered, as the live type of the object: an edit in place
+    // of a StructType's fields or metadata after it was built is kept, as PySpark does.
+    let checked = match &return_type {
+        Some(return_type) => crate::types::data_type_to_py(py, return_type)?.into_bound(py),
+        None => schema.clone(),
+    };
     py.import("pyspark.sql.udf")?
         .getattr("UserDefinedFunction")?
-        .call_method1(
-            "_check_return_type",
-            (
-                crate::types::data_type_to_py(py, &return_type)?,
-                eval_type_id,
-            ),
-        )?;
+        .call_method1("_check_return_type", (checked, eval_type_id))?;
+    let return_type = match return_type {
+        Some(return_type) => return_type,
+        None => crate::types::py_to_data_type(schema)?,
+    };
     // The worker reads the pickled type as a `DataType`, so a DDL string is pickled as the
     // type it parses to, as the reference client pickles the type of `_parse_ddl`.
     let pickled_type = if schema.is_instance_of::<pyo3::types::PyString>() {
@@ -7170,13 +7372,51 @@ pub(crate) fn check_schema_conversion(
     }
 }
 
+/// Raises as PySpark's conversion of `schema`, a schema of the server, raises where its
+/// `_schema` makes the type objects of it: the errors of [`check_schema_conversion`], and those of
+/// its user-defined types, of which `UserDefinedType.fromJson` makes `UDT()` of the class that
+/// the `pyClass` names (see `types::schema_to_py`), so that a class whose `__init__` takes
+/// arguments raises its `TypeError`. The properties that read the schema, the column lookups,
+/// the copies and the unpickles raise it so.
+pub(crate) fn check_python_schema(
+    py: Python<'_>,
+    schema: &spark_connect::types::DataType,
+) -> PyResult<()> {
+    check_schema_conversion(py, Some(schema))?;
+    if crate::types::has_udt(schema) {
+        crate::types::schema_to_py(py, schema)?;
+    }
+    Ok(())
+}
+
+/// The `_cached_schema` of PySpark's DataFrame of `dataframe`, of the schema that the core caches,
+/// which is of the server: its type objects, as PySpark converts the schema of the server, of a
+/// new object of each user-defined type (see `types::schema_to_py`), and not of the objects that
+/// the client was given. None when it has none, or when PySpark would not have one, as its
+/// conversion of the schema raised (see [`check_python_schema`]).
+fn known_schema_object(py: Python<'_>, dataframe: &DataFrame) -> PyResult<Option<Py<PyAny>>> {
+    let Some(schema) = dataframe.known_schema() else {
+        return Ok(None);
+    };
+    if check_schema_conversion(py, Some(&schema)).is_err() {
+        return Ok(None);
+    }
+    match crate::types::schema_to_py(py, &schema) {
+        Ok(schema) => Ok(Some(schema)),
+        Err(err) if err.is_instance_of::<pyo3::exceptions::PyException>(py) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
 /// The result of a set operation of `this` and `other`, `dataframe`, which keeps the schema that
 /// PySpark's `_merge_cached_schema` keeps: `this.schema` when the cached schemas of both are
 /// equal, else none. The core keeps that of two cached structs; of a schema that a DataFrame
 /// keeps as a Python object, the schema of `to` that is not a DataType or the `StructType` of a
 /// map function, the objects are compared as they are now, as PySpark compares them with `==`,
-/// and the result keeps a deep copy of that of `this`, as `this.schema` gives. Of a copy or an
-/// unpickle, `this.schema` is the schema that it requested (see `copy_schema`).
+/// with the type objects of the cached schema of the other, which of the server holds new objects
+/// of its user-defined types (see `known_schema_object`), and the result keeps a deep copy of
+/// that of `this`, as `this.schema` gives. Of a copy or an unpickle, `this.schema` is the schema
+/// that it requested (see `copy_schema`).
 fn set_operation_result(
     py: Python<'_>,
     this: &PyDataFrame,
@@ -7194,12 +7434,7 @@ fn set_operation_result(
     let cached = |df: &PyDataFrame| -> PyResult<Option<Py<PyAny>>> {
         match &df.schema_object {
             Some(schema) => Ok(Some(schema.clone_ref(py))),
-            None => df
-                .dataframe
-                .known_schema()
-                .filter(|schema| check_schema_conversion(py, Some(schema)).is_ok())
-                .map(|schema| crate::types::data_type_to_py(py, &schema))
-                .transpose(),
+            None => known_schema_object(py, &df.dataframe),
         }
     };
     if let (Some(left), Some(right)) = (cached(this)?, cached(other)?) {
@@ -7820,12 +8055,13 @@ pub(crate) fn execution_metrics<'py>(
         }
     }
     let observed_cls = py
-        .import("pyspark.sql.connect.client")?
+        .import("pyspark.sql.connect.client.core")?
         .getattr("PlanObservedMetrics")?;
     // The metrics as PySpark's client keeps them, the `Expression.Literal` messages that the
     // server sent, of `pyspark.sql.connect.proto`, which `PlanObservedMetrics.pairs` converts
     // when it is read, and so raises the `UNSUPPORTED_LITERAL` of a literal that PySpark does not
-    // convert there.
+    // convert there. They are parsed of any depth, as the transport reads the responses, so a
+    // struct nested past upb's limit reads as `collect()` reads it.
     let literal_cls = py
         .import("pyspark.sql.connect.proto")?
         .getattr("Expression")?
@@ -7837,8 +8073,7 @@ pub(crate) fn execution_metrics<'py>(
             .iter()
             .map(|literal| {
                 use prost::Message;
-                let encoded = pyo3::types::PyBytes::new(py, &literal.encode_to_vec());
-                literal_cls.call_method1("FromString", (encoded,))
+                crate::pbmsg::parse_deep(&literal_cls, &literal.encode_to_vec())
             })
             .collect::<PyResult<Vec<_>>>()?;
         observed.append(observed_cls.call1((&o.name, values, o.keys.clone()))?)?;
@@ -8067,13 +8302,11 @@ pub(crate) fn literal_text(
 ) -> String {
     use prost::Message;
     let text = || -> PyResult<String> {
-        py.import("pyspark.sql.connect.proto")?
+        let literal_cls = py
+            .import("pyspark.sql.connect.proto")?
             .getattr("Expression")?
-            .getattr("Literal")?
-            .call_method1(
-                "FromString",
-                (pyo3::types::PyBytes::new(py, &literal.encode_to_vec()),),
-            )?
+            .getattr("Literal")?;
+        crate::pbmsg::parse_deep(&literal_cls, &literal.encode_to_vec())?
             .str()?
             .extract()
     };

@@ -53,6 +53,8 @@ struct State {
     failures: Mutex<VecDeque<(String, Status)>>,
     /// The method and the bytes of every request, in the order they arrived.
     requests: Mutex<Vec<(String, Vec<u8>)>>,
+    /// Whether the Config calls are not answered, as of a server that hangs.
+    hang_config: Mutex<bool>,
 }
 
 impl State {
@@ -101,6 +103,7 @@ impl Fixture {
             drop_next_execute: Mutex::new(false),
             failures: Mutex::new(VecDeque::new()),
             requests: Mutex::new(Vec::new()),
+            hang_config: Mutex::new(false),
         });
         let server = service(state.clone()).serve().await;
         let address = server.address;
@@ -217,6 +220,9 @@ impl UnaryService<Vec<u8>> for Unary {
         self.0.record(&self.1, bytes.clone());
         if let Some(status) = self.0.failure(&self.1) {
             return Box::pin(async { Err(status) });
+        }
+        if self.1 == "Config" && *self.0.hang_config.lock().unwrap() {
+            return Box::pin(std::future::pending());
         }
         let session_id = session_of(&self.1, &bytes);
         let server_side_session_id = self.0.server_session_id();
@@ -792,6 +798,65 @@ async fn a_set_client_session_id_is_that_of_the_calls_and_not_of_the_artifacts_a
         }),
         [session_id]
     );
+}
+
+#[test]
+fn a_signal_that_the_plan_compression_lookup_catches_ends_it_and_the_execution_goes_on() {
+    // As the `except Exception` of PySpark's lookup of the plan compression settings, which
+    // catches the exception that a signal handler raises while the lookup waits: the lookup of a
+    // server that does not answer it ends, the compression is disabled for the client, which looks
+    // nothing up again, and the execution goes on, as the later executions do.
+    use spark_connect_core::runtime::{block_on, catch_signal, with_wait_watch, WaitWatch, Watch};
+    use spark_connect_proto::{plan, Plan, Relation};
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let runtime = spark_connect_core::get_runtime();
+    let fixture = runtime.block_on(Fixture::start());
+    let client = runtime.block_on(fixture.client());
+    *fixture.state.hang_config.lock().unwrap() = true;
+    let caught = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&caught);
+    let state = Arc::clone(&fixture.state);
+    // A signal whose exception the caller of the lookup catches, once the lookup waits for the
+    // server.
+    let watch: Arc<WaitWatch> = Arc::new(move || {
+        let waits = state
+            .requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == "Config");
+        if waits && !flag.load(Ordering::SeqCst) && catch_signal() {
+            flag.store(true, Ordering::SeqCst);
+        }
+        Watch::Continue
+    });
+    let execute = || {
+        let execution = ExecutePlanRequest {
+            plan: Some(Plan {
+                op_type: Some(plan::OpType::Root(Relation::default())),
+            }),
+            ..execute_request(&client)
+        };
+        with_wait_watch(Arc::clone(&watch), || {
+            block_on(async {
+                let mut stream = client.execute_plan(execution).await.unwrap();
+                while stream.message().await.unwrap().is_some() {}
+            })
+        })
+    };
+    execute();
+    assert!(caught.load(Ordering::SeqCst));
+    execute();
+    let methods: Vec<String> = fixture
+        .state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(method, _)| method.clone())
+        .collect();
+    assert_eq!(methods, ["Config", "ExecutePlan", "ExecutePlan"]);
 }
 
 #[tokio::test]

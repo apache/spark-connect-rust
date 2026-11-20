@@ -57,7 +57,7 @@ fn post_listener_event<'a>(
     event: &StreamingQueryListenerEvent,
     started: bool,
 ) -> std::result::Result<(), ListenerDispatchError> {
-    let module = py.import("pyspark.sql.streaming.query")?;
+    let module = py.import("pyspark.sql.connect.streaming.query")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("started", started)?;
     let decoded = module.call_method(
@@ -243,14 +243,15 @@ fn query_name_of(name: &Bound<'_, PyAny>) -> PyResult<String> {
     ))
 }
 
-/// Python wrapper for DataStreamReader.
-///
-/// Like PySpark's reader, the setters change this object and return it, and the
-/// reader can be used again after a read: the core reader is a consuming builder, so
-/// the setters replace the wrapped value in place and the reads work on a clone.
-/// As PySpark's plain class, it constructs of a session, `DataStreamReader(spark)`, and is
-/// subclassed: the setters return the object, of its subclass, and its copies and pickles are
-/// of its class.
+// Python wrapper for DataStreamReader.
+//
+// Like PySpark's reader, the setters change this object and return it, and the
+// reader can be used again after a read: the core reader is a consuming builder, so
+// the setters replace the wrapped value in place and the reads work on a clone.
+// As PySpark's plain class, it constructs of a session, `DataStreamReader(spark)`, and is
+// subclassed: the setters return the object, of its subclass, and its copies and pickles are
+// of its class.
+#[doc = connect_doc!(DataStreamReader)]
 #[pyclass(
     name = "DataStreamReader",
     module = "pyspark.sql.connect.streaming.readwriter",
@@ -269,6 +270,10 @@ pub struct PyDataStreamReader {
     /// The options that UTF-8 cannot encode, which the copies of this reader share, as they share
     /// `options` ([`UnencodableOptions`]).
     unencodable_options: Arc<WriterState<UnencodableOptions>>,
+    /// The Python object of `unencodable_options`, which the copies of this reader share too, and
+    /// which reports the keys of its options that are objects to Python's garbage collector, as
+    /// the `_options` dict of PySpark's copies holds them (see [`crate::options::SharedObjects`]).
+    shared: Option<Py<crate::options::PySharedObjects>>,
     /// The UTF-32LE bytes of the schema, when it is a str that UTF-8 cannot encode, which the core
     /// reader leaves unset.
     unencodable_schema: Option<Vec<u8>>,
@@ -296,11 +301,13 @@ fn stream_reader_format(
 impl PyDataStreamReader {
     pub fn new(reader: DataStreamReader) -> Self {
         let options = reader.get_options().clone();
+        let unencodable_options = Arc::new(WriterState::new(UnencodableOptions::default()));
         PyDataStreamReader {
             inner: without_options(reader, &options),
             options: Arc::new(WriterState::new(options)),
             unsent_format: None,
-            unencodable_options: Arc::new(WriterState::new(UnencodableOptions::default())),
+            shared: crate::options::PySharedObjects::of(unencodable_options.clone()),
+            unencodable_options,
             unencodable_schema: None,
             gc_ready: crate::gc::GcReady::new(),
         }
@@ -448,19 +455,13 @@ impl PyDataStreamReader {
     /// `DataStreamReader(client)`, as PySpark Connect's, of the session `client`: the reader that
     /// `spark.readStream` gives. As the `object.__new__` of PySpark's plain class, it takes the
     /// arguments of the `__init__` of a subclass too, of which the session is the first that is
-    /// a session (see `session::constructor_session`); `__init__` checks them.
+    /// a session, and none, as an unpickle gives none (see `session::constructor_session`);
+    /// `__init__` checks them.
     #[new]
-    #[classmethod]
     #[pyo3(signature = (*args, **kwargs), text_signature = "(client)")]
-    fn py_new(
-        cls: &Bound<'_, pyo3::types::PyType>,
-        args: &Bound<'_, PyTuple>,
-        kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<Self> {
-        let session = crate::session::constructor_session(cls, args, kwargs, "client")?;
-        Ok(PyDataStreamReader::new(
-            session.borrow().session.read_stream(),
-        ))
+    fn py_new(args: &Bound<'_, PyTuple>, kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<Self> {
+        let session = crate::session::constructor_session(args, kwargs, "client")?;
+        Ok(PyDataStreamReader::new(session.read_stream()))
     }
 
     /// As PySpark's `__init__(client)`, which makes the reader of the session anew: of no
@@ -487,6 +488,7 @@ impl PyDataStreamReader {
                     .as_ref()
                     .map(|format| format.clone_ref(py)),
                 unencodable_options: Arc::clone(&this.unencodable_options),
+                shared: this.shared.as_ref().map(|shared| shared.clone_ref(py)),
                 unencodable_schema: this.unencodable_schema.clone(),
                 gc_ready: crate::gc::GcReady::new(),
             },
@@ -523,6 +525,60 @@ impl PyDataStreamReader {
         let args = crate::reduce::with_subclass(slf.as_any(), py.get_type::<Self>(), args)?;
         let reduced = state_reduce(py, "stream_reader_reduce", args)?;
         crate::reduce::reduce_with_instance_dict(slf.as_any(), reduced)
+    }
+
+    /// The state of a pickle of a stream reader, which pickle sets on the reader that `__new__`
+    /// made of no arguments. Of PySpark's pickle, the state is the `__dict__` of its plain object,
+    /// which holds `_options`: so the reader is of the session `_client`, and of the format, the
+    /// schema, the options and the source name of `_format`, `_schema`, `_options` and
+    /// `_source_name`, which it takes as `format`, `schema`, `option` and `name` take them, and
+    /// the other entries are its instance attributes. The state of the drop-in's pickle holds the
+    /// instance attributes alone (see `__reduce__`), as a reader's `__dict__` cannot hold
+    /// `_options`, a property of the reader.
+    fn __setstate__(slf: &Bound<'_, Self>, state: &Bound<'_, PyDict>) -> PyResult<()> {
+        let py = slf.py();
+        let state = state.copy()?;
+        if state.contains("_options")? {
+            let take = |key: &str| -> PyResult<Option<Bound<'_, PyAny>>> {
+                let value = state.get_item(key)?;
+                if value.is_some() {
+                    state.del_item(key)?;
+                }
+                Ok(value)
+            };
+            if let Some(client) = take("_client")? {
+                let session = client.cast_into::<crate::session::PySparkSession>()?;
+                let reader = PyDataStreamReader::new(session.borrow().session.read_stream());
+                let replaced = std::mem::replace(&mut *slf.borrow_mut(), reader);
+                drop(replaced);
+            }
+            if let Some(format) = take("_format")? {
+                let source = (!format.is_none()).then_some(&format);
+                Self::format(slf.borrow_mut(), source)?;
+            }
+            if let Some(schema) = take("_schema")? {
+                Self::schema(slf.borrow_mut(), &schema)?;
+            }
+            if let Some(options) = take("_options")? {
+                for (key, value) in options.cast_into::<PyDict>()?.iter() {
+                    Self::option(slf.borrow_mut(), &key, &value)?;
+                }
+            }
+            if let Some(source_name) = take("_source_name")? {
+                if !source_name.is_none() {
+                    Self::name(slf.borrow_mut(), &source_name)?;
+                }
+            }
+        }
+        slf.getattr(pyo3::intern!(py, "__dict__"))?
+            .call_method1(pyo3::intern!(py, "update"), (state,))?;
+        Ok(())
+    }
+
+    /// The source name of `name`, or None, as PySpark's `DataStreamReader._source_name`.
+    #[getter]
+    fn _source_name(&self) -> Option<String> {
+        self.inner.get_source_name().map(str::to_string)
     }
 
     /// A stream reader of its state, as `__reduce__` gives it, of the class `cls`: of the session
@@ -581,8 +637,9 @@ impl PyDataStreamReader {
         crate::options::set_opts(slf.as_any(), schema.as_ref(), options.as_ref())
     }
 
-    /// Set the source format. As PySpark's, None unsets it, so that the server reads its
-    /// default source.
+    // Set the source format. As PySpark's, None unsets it, so that the server reads its
+    // default source.
+    #[doc = connect_doc!(DataStreamReader.format)]
     fn format<'py>(
         mut slf: PyRefMut<'py, Self>,
         source: Option<&Bound<'_, PyAny>>,
@@ -593,7 +650,8 @@ impl PyDataStreamReader {
         Ok(slf)
     }
 
-    /// Set the schema: a StructType or a DDL string, as in pyspark.
+    // Set the schema: a StructType or a DDL string, as in pyspark.
+    #[doc = connect_doc!(DataStreamReader.schema)]
     fn schema<'py>(
         mut slf: PyRefMut<'py, Self>,
         schema: &Bound<'_, PyAny>,
@@ -604,6 +662,7 @@ impl PyDataStreamReader {
         Ok(slf)
     }
 
+    #[doc = connect_doc!(DataStreamReader.option)]
     fn option<'py>(
         mut slf: PyRefMut<'py, Self>,
         key: &Bound<'_, PyAny>,
@@ -625,6 +684,7 @@ impl PyDataStreamReader {
     // Mirrors reference `DataStreamReader.options(**options)`: keyword args; None values
     // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
+    #[doc = connect_doc!(DataStreamReader.options)]
     fn options<'py>(
         mut slf: PyRefMut<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
@@ -643,11 +703,22 @@ impl PyDataStreamReader {
         if let Some(format) = &self.unsent_format {
             visit.call(&format.object)?;
         }
+        if let Some(shared) = &self.shared {
+            visit.call(shared)?;
+        }
         Ok(())
     }
 
     fn __clear__(&mut self) {
         self.unsent_format = None;
+        self.shared = None;
+    }
+
+    /// The session of the reader, as PySpark Connect's `DataStreamReader._client`, which its
+    /// pickle keeps.
+    #[getter]
+    fn _client(&self, py: Python<'_>) -> PyResult<Py<crate::session::PySparkSession>> {
+        crate::session::session_object(py, &self.inner.spark_session())
     }
 
     /// The configured source format (PySpark Connect's `DataStreamReader._format`), which is the
@@ -676,6 +747,7 @@ impl PyDataStreamReader {
     }
 
     #[pyo3(signature = (path=None, format=None, schema=None, **options))]
+    #[doc = connect_doc!(DataStreamReader.load)]
     fn load(
         &mut self,
         path: Option<&Bound<'_, PyAny>>,
@@ -724,12 +796,13 @@ impl PyDataStreamReader {
         )))
     }
 
-    /// Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
-    /// which raises `NOT_EXPECTED_TYPE` for a name that is not a str, and
-    /// `INVALID_STREAMING_SOURCE_NAME`, of the name as it is, unless
-    /// `re.match(r"^[a-zA-Z0-9_]+$", source_name)` matches it: a name of other characters than
-    /// ASCII letters, digits and underscores, a lone surrogate too, but one of a final newline,
-    /// before which `$` matches, which the server refuses when it reads the plan.
+    // Set the source name (for checkpoint stability). Mirrors `DataStreamReader.name`,
+    // which raises `NOT_EXPECTED_TYPE` for a name that is not a str, and
+    // `INVALID_STREAMING_SOURCE_NAME`, of the name as it is, unless
+    // `re.match(r"^[a-zA-Z0-9_]+$", source_name)` matches it: a name of other characters than
+    // ASCII letters, digits and underscores, a lone surrogate too, but one of a final newline,
+    // before which `$` matches, which the server refuses when it reads the plan.
+    #[doc = connect_doc!(DataStreamReader.name)]
     fn name<'py>(
         mut slf: PyRefMut<'py, Self>,
         source_name: &Bound<'_, PyAny>,
@@ -758,9 +831,10 @@ impl PyDataStreamReader {
         Ok(slf)
     }
 
-    /// Read the streaming CDC changes of a named table. Mirrors `DataStreamReader.changes`,
-    /// which raises an `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a
-    /// schema, before it sets the name in its string field, as `table` does.
+    // Read the streaming CDC changes of a named table. Mirrors `DataStreamReader.changes`,
+    // which raises an `AnalysisException` of `_LEGACY_ERROR_TEMP_1189` for a reader of a
+    // schema, before it sets the name in its string field, as `table` does.
+    #[doc = connect_doc!(DataStreamReader.changes)]
     fn changes(&self, py: Python<'_>, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         if !self.inner.get_schema().is_empty() || self.unencodable_schema.is_some() {
             return Err(crate::readwriter::changes_of_schema_error(py));
@@ -771,10 +845,11 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(with_plan_error(r.changes(&name), error)))
     }
 
-    /// Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
-    /// option, then `format("xml").load(path)`.
+    // Load an XML streaming source. Mirrors `DataStreamReader.xml(...)`: set each named
+    // option, then `format("xml").load(path)`.
     #[pyo3(signature = (path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None, **unexpected), text_signature = "($self, path, rowTag=None, schema=None, excludeAttribute=None, attributePrefix=None, valueTag=None, ignoreSurroundingSpaces=None, rowValidationXSDPath=None, ignoreNamespace=None, wildcardColName=None, encoding=None, inferSchema=None, nullValue=None, dateFormat=None, timestampFormat=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, samplingRatio=None, locale=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataStreamReader.xml)]
     fn xml(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -834,8 +909,9 @@ impl PyDataStreamReader {
         )))
     }
 
-    /// Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
-    /// [`crate::str_argument`] converts it.
+    // Read a table by name, which PySpark's `Read` plan sets in its string field as it is, as
+    // [`crate::str_argument`] converts it.
+    #[doc = connect_doc!(DataStreamReader.table)]
     fn table(&self, tableName: &Bound<'_, PyAny>) -> PyResult<PyDataFrame> {
         let (name, error) = table_name_of(tableName)?;
         let error = error.or_else(|| self.unencodable_options.get().error());
@@ -845,6 +921,7 @@ impl PyDataStreamReader {
 
     #[pyo3(signature = (path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None, **unexpected), text_signature = "($self, path, schema=None, primitivesAsString=None, prefersDecimal=None, allowComments=None, allowUnquotedFieldNames=None, allowSingleQuotes=None, allowNumericLeadingZero=None, allowBackslashEscapingAnyCharacter=None, mode=None, columnNameOfCorruptRecord=None, dateFormat=None, timestampFormat=None, multiLine=None, allowUnquotedControlChars=None, lineSep=None, locale=None, dropFieldIfAllNull=None, encoding=None, pathGlobFilter=None, recursiveFileLookup=None, allowNonNumericNumbers=None, useUnsafeRow=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataStreamReader.json)]
     fn json(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -912,6 +989,7 @@ impl PyDataStreamReader {
 
     #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, datetimeRebaseMode=None, int96RebaseMode=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataStreamReader.parquet)]
     fn parquet(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -942,6 +1020,7 @@ impl PyDataStreamReader {
 
     #[pyo3(signature = (path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None, **unexpected), text_signature = "($self, path, schema=None, sep=None, encoding=None, quote=None, escape=None, comment=None, header=None, inferSchema=None, ignoreLeadingWhiteSpace=None, ignoreTrailingWhiteSpace=None, nullValue=None, nanValue=None, positiveInf=None, negativeInf=None, dateFormat=None, timestampFormat=None, maxColumns=None, maxCharsPerColumn=None, maxMalformedLogPerPartition=None, mode=None, columnNameOfCorruptRecord=None, multiLine=None, charToEscapeQuoteEscaping=None, enforceSchema=None, emptyValue=None, locale=None, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, unescapedQuoteHandling=None)")]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataStreamReader.csv)]
     fn csv(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -1022,6 +1101,7 @@ impl PyDataStreamReader {
 
     #[pyo3(signature = (path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None, **unexpected), text_signature = "($self, path, mergeSchema=None, pathGlobFilter=None, recursiveFileLookup=None)")]
     #[allow(non_snake_case)]
+    #[doc = connect_doc!(DataStreamReader.orc)]
     fn orc(
         &mut self,
         path: &Bound<'_, PyAny>,
@@ -1046,13 +1126,14 @@ impl PyDataStreamReader {
         Ok(PyDataFrame::new(with_plan_error(r.orc(&path), error)))
     }
 
-    /// As PySpark's `wholetext=False`, an omitted `wholetext` sets `False`, also over an earlier
-    /// `wholetext` option.
+    // As PySpark's `wholetext=False`, an omitted `wholetext` sets `False`, also over an earlier
+    // `wholetext` option.
     #[pyo3(
         signature = (path, wholetext=DefaultedOption::Omitted, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None, **unexpected),
         text_signature = "($self, path, wholetext=False, lineSep=None, pathGlobFilter=None, recursiveFileLookup=None)"
     )]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataStreamReader.text)]
     fn text(
         &mut self,
         py: Python<'_>,
@@ -1087,7 +1168,7 @@ impl PyDataStreamReader {
 /// Python wrapper for Trigger.
 #[pyclass(
     name = "Trigger",
-    module = "pyspark.sql.streaming.readwriter",
+    module = "pyspark.sql.connect.streaming.readwriter",
     from_py_object
 )]
 #[derive(Clone)]
@@ -1164,7 +1245,7 @@ fn trigger_of(kind: &str, value: Option<String>) -> PyResult<Trigger> {
     }
 }
 
-/// Python wrapper for DataStreamWriter.
+// Python wrapper for DataStreamWriter.
 #[pyclass(
     name = "DataStreamWriter",
     module = "pyspark.sql.connect.streaming.readwriter",
@@ -1410,8 +1491,9 @@ impl PyDataStreamWriter {
         Bound::new(py, PyDataStreamWriter::new(writer, frame))
     }
 
-    /// The output mode, which PySpark sets in its protobuf string field at once, as
-    /// [`crate::str_argument`] converts it.
+    // The output mode, which PySpark sets in its protobuf string field at once, as
+    // [`crate::str_argument`] converts it.
+    #[doc = connect_doc!(DataStreamWriter.outputMode)]
     fn outputMode<'py>(
         slf: &Bound<'py, Self>,
         outputMode: &Bound<'_, PyAny>,
@@ -1421,8 +1503,9 @@ impl PyDataStreamWriter {
         Ok(slf.clone())
     }
 
-    /// The format, which PySpark sets in its protobuf string field at once, as
-    /// [`crate::str_argument`] converts it.
+    // The format, which PySpark sets in its protobuf string field at once, as
+    // [`crate::str_argument`] converts it.
+    #[doc = connect_doc!(DataStreamWriter.format)]
     fn format<'py>(
         slf: &Bound<'py, Self>,
         source: &Bound<'_, PyAny>,
@@ -1432,6 +1515,7 @@ impl PyDataStreamWriter {
         Ok(slf.clone())
     }
 
+    #[doc = connect_doc!(DataStreamWriter.option)]
     fn option<'py>(
         slf: &Bound<'py, Self>,
         key: &Bound<'_, PyAny>,
@@ -1453,6 +1537,7 @@ impl PyDataStreamWriter {
     // Mirrors reference `DataStreamWriter.options(**options)`: keyword args; None values
     // skipped, booleans lowercased.
     #[pyo3(signature = (**options))]
+    #[doc = connect_doc!(DataStreamWriter.options)]
     fn options<'py>(
         slf: &Bound<'py, Self>,
         options: Option<&Bound<'_, PyDict>>,
@@ -1462,8 +1547,9 @@ impl PyDataStreamWriter {
         Ok(slf.clone())
     }
 
-    /// Partition by the column names, or a list or tuple of them alone, as PySpark's.
+    // Partition by the column names, or a list or tuple of them alone, as PySpark's.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(DataStreamWriter.partitionBy)]
     fn partitionBy<'py>(
         slf: &Bound<'py, Self>,
         cols: &Bound<'_, PyTuple>,
@@ -1478,8 +1564,9 @@ impl PyDataStreamWriter {
         Ok(slf.clone())
     }
 
-    /// Cluster by the column names, or a list or tuple of them alone, as PySpark's.
+    // Cluster by the column names, or a list or tuple of them alone, as PySpark's.
     #[pyo3(signature = (*cols))]
+    #[doc = connect_doc!(DataStreamWriter.clusterBy)]
     fn clusterBy<'py>(
         slf: &Bound<'py, Self>,
         cols: &Bound<'_, PyTuple>,
@@ -1494,7 +1581,8 @@ impl PyDataStreamWriter {
         Ok(slf.clone())
     }
 
-    /// Name the query, a non-empty str, else `VALUE_NOT_NON_EMPTY_STR`, as PySpark's.
+    // Name the query, a non-empty str, else `VALUE_NOT_NON_EMPTY_STR`, as PySpark's.
+    #[doc = connect_doc!(DataStreamWriter.queryName)]
     fn queryName<'py>(
         slf: &Bound<'py, Self>,
         queryName: &Bound<'_, PyAny>,
@@ -1504,12 +1592,13 @@ impl PyDataStreamWriter {
         Ok(slf.clone())
     }
 
-    /// `DataStreamWriter.trigger(...)`, as PySpark's: exactly one of `processingTime`, `once`,
-    /// `continuous`, `availableNow` and `realTime`, else `ONLY_ALLOW_SINGLE_TRIGGER`; an
-    /// interval or duration is a non-empty string, which is stripped, else
-    /// `VALUE_NOT_NON_EMPTY_STR`, and `once` and `availableNow` are True, else
-    /// `VALUE_NOT_ALLOWED`.
+    // `DataStreamWriter.trigger(...)`, as PySpark's: exactly one of `processingTime`, `once`,
+    // `continuous`, `availableNow` and `realTime`, else `ONLY_ALLOW_SINGLE_TRIGGER`; an
+    // interval or duration is a non-empty string, which is stripped, else
+    // `VALUE_NOT_NON_EMPTY_STR`, and `once` and `availableNow` are True, else
+    // `VALUE_NOT_ALLOWED`.
     #[pyo3(signature = (*, processingTime=None, once=None, continuous=None, availableNow=None, realTime=None))]
+    #[doc = connect_doc!(DataStreamWriter.trigger)]
     fn trigger<'py>(
         slf: &Bound<'py, Self>,
         processingTime: Option<Bound<'py, PyAny>>,
@@ -1587,6 +1676,7 @@ impl PyDataStreamWriter {
 
     #[pyo3(signature = (path=None, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataStreamWriter.start)]
     fn start(
         &self,
         py: Python<'_>,
@@ -1615,6 +1705,7 @@ impl PyDataStreamWriter {
 
     #[pyo3(signature = (tableName, format=None, outputMode=None, partitionBy=None, queryName=None, **options))]
     #[allow(non_snake_case, clippy::too_many_arguments)]
+    #[doc = connect_doc!(DataStreamWriter.toTable)]
     fn toTable(
         &self,
         py: Python<'_>,
@@ -1643,11 +1734,12 @@ impl PyDataStreamWriter {
         Ok(PyStreamingQuery::new(query))
     }
 
-    /// `DataStreamWriter.foreachBatch(func)`: cloudpickle the `(batch_df, batch_id)`
-    /// function (with PySpark's `CloudPickleSerializer`) and attach it as the
-    /// foreach-batch sink. Pickling happens here so the Python skin can re-export this
-    /// class directly rather than subclassing a (non-subclassable) PyO3 type. The writer keeps
-    /// the pickle and not the function, as PySpark's `WriteStreamOperationStart` does.
+    // `DataStreamWriter.foreachBatch(func)`: cloudpickle the `(batch_df, batch_id)`
+    // function (with PySpark's `CloudPickleSerializer`) and attach it as the
+    // foreach-batch sink. Pickling happens here so the Python skin can re-export this
+    // class directly rather than subclassing a (non-subclassable) PyO3 type. The writer keeps
+    // the pickle and not the function, as PySpark's `WriteStreamOperationStart` does.
+    #[doc = connect_doc!(DataStreamWriter.foreachBatch)]
     fn foreachBatch<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'_>,
@@ -1661,20 +1753,21 @@ impl PyDataStreamWriter {
         Ok(slf.clone())
     }
 
-    /// `DataStreamWriter.foreach(f)`, as PySpark's: the function of the partition and the
-    /// rows of each partition of `_construct_foreach_function(f)`, which raises
-    /// `ATTRIBUTE_NOT_CALLABLE` for an object without a callable `process`, in the command
-    /// `(func, None, serializer, serializer)` of `AutoBatchedSerializer(CPickleSerializer())`,
-    /// which the worker of the server deserializes with its own `pyspark.serializers`. Built
-    /// here to avoid a Python subclass of the PyO3 class. The writer keeps the pickle and not
-    /// `f`, as PySpark's `WriteStreamOperationStart` does.
+    // `DataStreamWriter.foreach(f)`, as PySpark's: the function of the partition and the
+    // rows of each partition of `_construct_foreach_function(f)`, which raises
+    // `ATTRIBUTE_NOT_CALLABLE` for an object without a callable `process`, in the command
+    // `(func, None, serializer, serializer)` of `AutoBatchedSerializer(CPickleSerializer())`,
+    // which the worker of the server deserializes with its own `pyspark.serializers`. Built
+    // here to avoid a Python subclass of the PyO3 class. The writer keeps the pickle and not
+    // `f`, as PySpark's `WriteStreamOperationStart` does.
+    #[doc = connect_doc!(DataStreamWriter.foreach)]
     fn foreach<'py>(
         slf: &Bound<'py, Self>,
         py: Python<'_>,
         f: &Bound<'_, PyAny>,
     ) -> PyResult<Bound<'py, Self>> {
         let func = py
-            .import("pyspark.sql.streaming.readwriter")?
+            .import("pyspark.sql.connect.streaming.readwriter")?
             .getattr("_construct_foreach_function")?
             .call1((f,))?;
         let serializers = py.import("pyspark.serializers")?;
@@ -1830,7 +1923,7 @@ fn streaming_function_command(
     }
 }
 
-/// Python wrapper for StreamingQuery.
+// Python wrapper for StreamingQuery.
 #[pyclass(
     name = "StreamingQuery",
     module = "pyspark.sql.connect.streaming.query",
@@ -1895,28 +1988,33 @@ impl PyStreamingQuery {
     }
 
     #[getter]
+    #[doc = connect_doc!(StreamingQuery.id)]
     fn id(&self) -> String {
         self.inner.id().to_string()
     }
 
     #[getter]
+    #[doc = connect_doc!(StreamingQuery.runId)]
     fn runId(&self) -> String {
         self.inner.run_id().to_string()
     }
 
     #[getter]
+    #[doc = connect_doc!(StreamingQuery.name)]
     fn name(&self) -> Option<String> {
         self.inner.name().map(|s| s.to_string())
     }
 
     #[getter]
+    #[doc = connect_doc!(StreamingQuery.isActive)]
     fn isActive(&self, py: Python<'_>) -> PyResult<bool> {
         interruptible(py, &self.inner.spark_session(), || self.inner.is_active())
     }
 
-    /// The status of the query, as PySpark's: a dict of its `message`, `isDataAvailable` and
-    /// `isTriggerActive`.
+    // The status of the query, as PySpark's: a dict of its `message`, `isDataAvailable` and
+    // `isTriggerActive`.
     #[getter]
+    #[doc = connect_doc!(StreamingQuery.status)]
     fn status<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let status = interruptible(py, &self.inner.spark_session(), || {
             self.inner.status().map_err(Box::new)
@@ -1928,6 +2026,7 @@ impl PyStreamingQuery {
         Ok(dict)
     }
 
+    #[doc = connect_doc!(StreamingQuery.stop)]
     fn stop(&self, py: Python<'_>) -> PyResult<()> {
         interruptible(py, &self.inner.spark_session(), || {
             self.inner.stop().map_err(Box::new)
@@ -1935,6 +2034,7 @@ impl PyStreamingQuery {
     }
 
     #[pyo3(signature = (timeout=None))]
+    #[doc = connect_doc!(StreamingQuery.awaitTermination)]
     fn awaitTermination(
         &self,
         py: Python<'_>,
@@ -1948,8 +2048,9 @@ impl PyStreamingQuery {
         })
     }
 
-    /// The last progress of the query, as PySpark's `StreamingQueryProgress`, or None.
+    // The last progress of the query, as PySpark's `StreamingQueryProgress`, or None.
     #[getter]
+    #[doc = connect_doc!(StreamingQuery.lastProgress)]
     fn lastProgress<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyAny>>> {
         let progress = interruptible(py, &self.inner.spark_session(), || {
             self.inner.last_progress().map_err(Box::new)
@@ -1960,8 +2061,9 @@ impl PyStreamingQuery {
         }
     }
 
-    /// The recent progress of the query, each as PySpark's `StreamingQueryProgress`.
+    // The recent progress of the query, each as PySpark's `StreamingQueryProgress`.
     #[getter]
+    #[doc = connect_doc!(StreamingQuery.recentProgress)]
     fn recentProgress<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
         interruptible(py, &self.inner.spark_session(), || {
             self.inner.recent_progress().map_err(Box::new)
@@ -1971,15 +2073,17 @@ impl PyStreamingQuery {
         .collect()
     }
 
+    #[doc = connect_doc!(StreamingQuery.processAllAvailable)]
     fn processAllAvailable(&self, py: Python<'_>) -> PyResult<()> {
         interruptible(py, &self.inner.spark_session(), || {
             self.inner.process_all_available().map_err(Box::new)
         })
     }
 
-    /// Print the plan of the query with Python's `print`, as PySpark's
-    /// `StreamingQuery.explain(extended=False)`.
+    // Print the plan of the query with Python's `print`, as PySpark's
+    // `StreamingQuery.explain(extended=False)`.
     #[pyo3(signature = (extended=ProtoBool(None)), text_signature = "($self, extended=False)")]
+    #[doc = connect_doc!(StreamingQuery.explain)]
     fn explain(&self, py: Python<'_>, extended: ProtoBool) -> PyResult<()> {
         let extended = extended.value(py)?;
         let plan = interruptible(py, &self.inner.spark_session(), || {
@@ -1989,9 +2093,10 @@ impl PyStreamingQuery {
         Ok(())
     }
 
-    /// The exception of a failed query, as PySpark's: the `StreamingQueryException` of
-    /// `pyspark.errors.exceptions.connect`, of the message of the server without the type of
-    /// its Java exception, and with its JVM stack trace, and of the error class as its reason.
+    // The exception of a failed query, as PySpark's: the `StreamingQueryException` of
+    // `pyspark.errors.exceptions.connect`, of the message of the server without the type of
+    // its Java exception, and with its JVM stack trace, and of the error class as its reason.
+    #[doc = connect_doc!(StreamingQuery.exception)]
     fn exception(&self, py: Python<'_>) -> PyResult<Option<Py<PyAny>>> {
         let exception = interruptible(py, &self.inner.spark_session(), || {
             self.inner.exception().map_err(Box::new)
@@ -2016,7 +2121,7 @@ impl PyStreamingQuery {
     }
 }
 
-/// Python wrapper for StreamingQueryManager, of the listener bus of its session.
+// Python wrapper for StreamingQueryManager, of the listener bus of its session.
 #[pyclass(
     name = "StreamingQueryManager",
     module = "pyspark.sql.connect.streaming.query",
@@ -2059,7 +2164,7 @@ fn warn(py: Python<'_>, line: u32, message: String) -> PyResult<()> {
 /// which Apache Spark's tests read to remove them.
 #[pyclass(
     name = "StreamingQueryListenerBus",
-    module = "pyspark.sql.streaming.query",
+    module = "pyspark.sql.connect.streaming.query",
     frozen
 )]
 pub struct PyStreamingQueryListenerBus {
@@ -2118,6 +2223,7 @@ impl PyStreamingQueryManager {
     }
 
     #[getter]
+    #[doc = connect_doc!(StreamingQueryManager.active)]
     fn active(&self, py: Python<'_>) -> PyResult<Vec<PyStreamingQuery>> {
         let queries = interruptible(py, &self.inner.spark_session(), || {
             self.inner.active().map_err(Box::new)
@@ -2125,6 +2231,7 @@ impl PyStreamingQueryManager {
         Ok(queries.into_iter().map(PyStreamingQuery::new).collect())
     }
 
+    #[doc = connect_doc!(StreamingQueryManager.get)]
     fn get(&self, py: Python<'_>, id: &str) -> PyResult<Option<PyStreamingQuery>> {
         let query = interruptible(py, &self.inner.spark_session(), || {
             self.inner.get(id).map_err(Box::new)
@@ -2133,6 +2240,7 @@ impl PyStreamingQueryManager {
     }
 
     #[pyo3(signature = (timeout=None))]
+    #[doc = connect_doc!(StreamingQueryManager.awaitAnyTermination)]
     fn awaitAnyTermination(
         &self,
         py: Python<'_>,
@@ -2146,20 +2254,22 @@ impl PyStreamingQueryManager {
         })
     }
 
+    #[doc = connect_doc!(StreamingQueryManager.resetTerminated)]
     fn resetTerminated(&self, py: Python<'_>) -> PyResult<()> {
         interruptible(py, &self.inner.spark_session(), || {
             self.inner.reset_terminated().map_err(Box::new)
         })
     }
 
-    /// Register a client-side listener object (with onQueryStarted/Progress/Idle/
-    /// Terminated callbacks). Mirrors `StreamingQueryManager.addListener`: the listener gets the
-    /// session as its `spark`, and the native Rust bus of the session dispatches its events to
-    /// it. A listener added twice is in the bus twice, and each registration keeps its own id
-    /// (see `PyListenerAdapter::id`); nothing is stored on the listener. Should the server fail
-    /// to add its listener, this warns, as PySpark Connect's does.
-    /// A terminal event-stream end or error clears the registrations; add listeners again
-    /// to open a new subscription.
+    // Register a client-side listener object (with onQueryStarted/Progress/Idle/
+    // Terminated callbacks). Mirrors `StreamingQueryManager.addListener`: the listener gets the
+    // session as its `spark`, and the native Rust bus of the session dispatches its events to
+    // it. A listener added twice is in the bus twice, and each registration keeps its own id
+    // (see `PyListenerAdapter::id`); nothing is stored on the listener. Should the server fail
+    // to add its listener, this warns, as PySpark Connect's does.
+    // A terminal event-stream end or error clears the registrations; add listeners again
+    // to open a new subscription.
+    #[doc = connect_doc!(StreamingQueryManager.addListener)]
     fn addListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let session = crate::session::session_object(py, &self.session)?;
         listener
@@ -2204,16 +2314,17 @@ impl PyStreamingQueryManager {
         }
     }
 
-    /// Remove a previously-added client-side listener object. Mirrors
-    /// `StreamingQueryManager.removeListener`: one registration of the listener is removed from
-    /// the bus of the session, the first one that the bus has, as PySpark's `list.remove` of
-    /// its bus finds it: the first that is the listener, or equal to it. The registrations of
-    /// the listener in the buses of other sessions stay. Should the server fail to remove its
-    /// listener, this warns, and the listener stays, as PySpark Connect's does.
-    /// The registrations are read from the bus, so a removal that did not complete, such as a
-    /// callback coalesced with another caller's in-progress last-listener removal or close,
-    /// leaves its registration there to be removed again, and those that a terminal end of the
-    /// event stream cleared are not looked for.
+    // Remove a previously-added client-side listener object. Mirrors
+    // `StreamingQueryManager.removeListener`: one registration of the listener is removed from
+    // the bus of the session, the first one that the bus has, as PySpark's `list.remove` of
+    // its bus finds it: the first that is the listener, or equal to it. The registrations of
+    // the listener in the buses of other sessions stay. Should the server fail to remove its
+    // listener, this warns, and the listener stays, as PySpark Connect's does.
+    // The registrations are read from the bus, so a removal that did not complete, such as a
+    // callback coalesced with another caller's in-progress last-listener removal or close,
+    // leaves its registration there to be removed again, and those that a terminal end of the
+    // event stream cleared are not looked for.
+    #[doc = connect_doc!(StreamingQueryManager.removeListener)]
     fn removeListener(&self, py: Python<'_>, listener: Py<PyAny>) -> PyResult<()> {
         let listener = listener.bind(py);
         // The registrations that this call did not remove: another call removed them first,
@@ -2280,9 +2391,9 @@ impl PyStreamingQueryManager {
         }
     }
 
-    /// Remove all client-side listeners and stop the dispatch thread. Mirrors
-    /// `StreamingQueryManager.close`. A server removal failure warns and keeps the
-    /// listeners registered, as PySpark Connect's does, so close can be retried.
+    // Remove all client-side listeners and stop the dispatch thread. Mirrors
+    // `StreamingQueryManager.close`. A server removal failure warns and keeps the
+    // listeners registered, as PySpark Connect's does, so close can be retried.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         if let Err(error) = interruptible_caught(py, &self.inner.spark_session(), || {
             self.inner.close().map_err(Box::new)
@@ -2315,7 +2426,10 @@ impl PyStreamingQueryManager {
 
 /// Python wrapper for ListenerEventStream.
 /// Implements `__iter__` and `__next__` to yield (event_type: i32, event_json: String) tuples.
-#[pyclass(name = "ListenerEventStream", module = "pyspark.sql.streaming.query")]
+#[pyclass(
+    name = "ListenerEventStream",
+    module = "pyspark.sql.connect.streaming.query"
+)]
 pub struct PyListenerEventStream {
     inner: Option<ListenerEventStream>,
     /// The session of the stream, whose waits a signal of the process ends.

@@ -49,9 +49,12 @@ mod tests {
 
     use super::*;
     use crate::column::Column;
-    use crate::expression::Expression;
+    use crate::expression::{Expression, ExpressionNode, MAX_EXPRESSION_DEPTH};
     use crate::functions::{col, row_number};
     use crate::window::Window;
+
+    /// Taken by the tests that set the listener of the process, which run one at a time.
+    static LISTENER_TESTS: Mutex<()> = Mutex::new(());
 
     /// A listener that records what the plan builds of one thread tell it, as other tests build
     /// plans at the same time, and that fails a window of no partitions once `fail_windows` is
@@ -107,6 +110,7 @@ mod tests {
 
     #[test]
     fn a_plan_build_tells_the_listener_as_pysparks_client_builds_the_plan() {
+        let _serial = LISTENER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let unordered = || row_number().over(Window::order_by(["id"]));
         let conjunction = Column::new(Expression::with_plan_build_origin(
             col("a").and(col("b")).expression().clone(),
@@ -166,6 +170,113 @@ mod tests {
         let three = crate::functions::r#struct([unordered(), conjunction.clone(), unordered()]);
         let error = three.try_to_proto().unwrap_err();
         assert_eq!(error.message(), "no partitions");
+        assert_eq!(listener.take(), ["window"]);
+        set_listener(None);
+    }
+
+    /// A Python UDF of `arguments`, whose pickler records its pickling in the calls of
+    /// `listener`, and fails with the error of `tag` when it `fails`.
+    fn recording_udf(
+        listener: &Arc<Recording>,
+        tag: &'static str,
+        fails: bool,
+        arguments: Vec<Column>,
+    ) -> Column {
+        let pickler = crate::udf::CommandPickler::new(Arc::clone(listener), move |listener| {
+            listener.calls.lock().unwrap().push(format!("pickle {tag}"));
+            if fails {
+                return Err(SparkError::value_msg(tag));
+            }
+            Ok(tag.as_bytes().to_vec())
+        });
+        let payload = crate::udf::PythonUDFPayload::pickled_at_build(
+            crate::types::DataType::Long,
+            crate::udf::eval_type::SQL_BATCHED_UDF,
+            pickler,
+            "3.11".to_string(),
+        );
+        Column::new(Expression::new(
+            ExpressionNode::CommonInlineUserDefinedFunction(Box::new(
+                crate::udf::CommonInlineUserDefinedFunctionExpression::new(
+                    "f".to_string(),
+                    true,
+                    arguments.iter().map(|c| c.expression().clone()).collect(),
+                    payload,
+                ),
+            )),
+        ))
+    }
+
+    #[test]
+    fn a_window_after_a_udf_is_told_in_its_turn_among_the_picklings_as_pysparks_build() {
+        let _serial = LISTENER_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = Arc::new(Recording {
+            thread: std::thread::current().id(),
+            calls: Mutex::default(),
+            fail_windows: Default::default(),
+        });
+        set_listener(Some(listener.clone()));
+        let unordered = || row_number().over(Window::order_by(["id"]));
+        let udf = |tag, fails, arguments| recording_udf(&listener, tag, fails, arguments);
+        let build =
+            |columns: Vec<Column>| crate::functions::r#struct(columns).try_to_proto().map(drop);
+
+        // As PySpark's build of a plan, which pickles each UDF and warns of each window of no
+        // partitions as it meets them, once, though this one builds a plan of UDFs twice.
+        build(vec![
+            udf("a", false, vec![]),
+            unordered(),
+            udf("b", false, vec![]),
+            unordered(),
+        ])
+        .unwrap();
+        assert_eq!(
+            listener.take(),
+            ["pickle a", "window", "pickle b", "window"]
+        );
+        // The first pickling that fails ends the build: a window after it is not told.
+        let error = build(vec![
+            udf("a", false, vec![]),
+            unordered(),
+            udf("bad", true, vec![]),
+            unordered(),
+        ])
+        .unwrap_err();
+        assert_eq!(error.message(), "bad");
+        assert_eq!(listener.take(), ["pickle a", "window", "pickle bad"]);
+        build(vec![udf("bad", true, vec![]), unordered()]).unwrap_err();
+        assert_eq!(listener.take(), ["pickle bad"]);
+        // The arguments of a UDF are built before its function is pickled.
+        build(vec![udf("bad", true, vec![unordered()])]).unwrap_err();
+        assert_eq!(listener.take(), ["window", "pickle bad"]);
+
+        // An error of a window after a UDF fails the build before the UDFs after it are pickled.
+        listener
+            .fail_windows
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let error = build(vec![
+            udf("a", false, vec![]),
+            unordered(),
+            udf("b", false, vec![]),
+        ])
+        .unwrap_err();
+        assert_eq!(error.message(), "no partitions");
+        assert_eq!(listener.take(), ["pickle a", "window"]);
+        listener
+            .fail_windows
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+
+        // An expression too deep to be sent is the `RecursionError` of the request, and no
+        // function is pickled; its windows are told, as in a build of no UDFs.
+        let mut deep = col("x");
+        for _ in 0..MAX_EXPRESSION_DEPTH {
+            deep = deep + col("y");
+        }
+        let error = build(vec![udf("a", false, vec![]), unordered(), deep]).unwrap_err();
+        assert_eq!(
+            error.kind,
+            spark_connect_core::error::SparkErrorKind::RecursionError
+        );
         assert_eq!(listener.take(), ["window"]);
         set_listener(None);
     }

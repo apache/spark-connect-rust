@@ -14,9 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The functions of ``pyspark.sql.connect.functions``, as PySpark Connect's: of the modules of
-PySpark Connect, distinct from those of ``pyspark.sql.functions``, which PySpark's classic module
-holds."""
+"""The functions of ``pyspark.sql.connect.avro.functions`` and
+``pyspark.sql.connect.protobuf.functions``, as PySpark Connect's: of the modules of PySpark
+Connect, distinct from those of ``pyspark.sql.avro.functions`` and
+``pyspark.sql.protobuf.functions``, which the drop-in's classic modules hold."""
 
 import types
 from typing import Any
@@ -26,8 +27,8 @@ def connect_functions(namespace: dict[str, Any], source: Any, module: str) -> No
     """Put in ``namespace`` the public names of the module ``source``: a copy of each function that
     ``source`` defines (its ``__module__`` is that of ``source``) of the module ``module``, which
     runs as the function does, and each other name as it is. PySpark Connect's functions are of
-    the modules of ``pyspark.sql.connect.functions``, so that ``repr``, ``__module__`` and a pickle
-    by reference name them there, and a worker of the server imports them from there.
+    its modules (``pyspark.sql.connect.avro.functions``, ...), so that ``repr``, ``__module__`` and
+    a pickle by reference name them there, and a worker of the server imports them from there.
 
     The names of one function, as ``random = rand``, get one copy, as PySpark Connect binds such
     an alias to its function: so the alias is the function of its ``__qualname__``, which a pickle

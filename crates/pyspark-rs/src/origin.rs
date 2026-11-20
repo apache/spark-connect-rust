@@ -67,7 +67,7 @@ impl spark_connect::plan_build::PlanBuildListener for PlanBuild {
     }
 
     fn window_without_partitions(&self) -> spark_connect::Result<()> {
-        if PICKLING.with(std::cell::Cell::get) {
+        if is_pickling() {
             return Ok(());
         }
         Python::attach(|py| {
@@ -93,6 +93,12 @@ thread_local! {
     /// Whether this thread pickles a DataFrame or a Column, whose plan the client builds to keep
     /// it in the pickle.
     static PICKLING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread builds the plan of a DataFrame, a Column or a table argument to pickle it
+/// ([`pickling`]).
+pub(crate) fn is_pickling() -> bool {
+    PICKLING.with(std::cell::Cell::get)
 }
 
 /// Run `pickle`, which builds the plan of a DataFrame or a Column to pickle it, without the

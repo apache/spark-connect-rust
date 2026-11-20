@@ -14,12 +14,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""The formatting of ``SparkSession.sql`` queries with keyword arguments.
-
-Mirrors ``pyspark.sql.connect.sql_formatter`` of PySpark 4.3.0. The Rust-backed Column has
-no expression tree in Python, so ``column_reference_name`` of the extension tells whether
-it is a plain column reference, and its name.
-"""
+# The formatting of ``SparkSession.sql`` queries with keyword arguments.
+#
+# Mirrors ``pyspark.sql.connect.sql_formatter`` of PySpark 4.3.0. The Rust-backed Column has
+# no expression tree in Python, so ``column_reference_name`` of the extension tells whether
+# it is a plain column reference, and its name.
 
 import string
 import typing

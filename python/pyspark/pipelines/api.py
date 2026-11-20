@@ -605,9 +605,10 @@ def create_auto_cdc_flow(
         These confs will be set when the flow is executed; they can override confs set for the \
         destination, for the pipeline, or on the cluster.
     """
-    # Lazy import kept to match upstream layering; in this Rust-backed drop-in the Connect
-    # functions module is our `pyspark.sql.functions` (there is no separate connect variant).
-    from pyspark.sql.functions import expr as _connect_expr
+    # Lazy import: pyspark.sql.connect.functions.builtin transitively imports grpc, which is
+    # not available in the docs-build environment. pyspark.pipelines.api is loaded eagerly
+    # from pyspark.pipelines.__init__, so a top-level import here would break docs CI.
+    from pyspark.sql.connect.functions.builtin import expr as _connect_expr
 
     if type(target) is not str:
         raise PySparkTypeError(
@@ -778,7 +779,7 @@ def _normalize_column_list(
     column_list: Union[List[str], List[Column]],
 ) -> List[Column]:
     # Lazy import: see comment in create_auto_cdc_flow.
-    from pyspark.sql.functions import col as _connect_col
+    from pyspark.sql.connect.functions.builtin import col as _connect_col
 
     if not isinstance(column_list, list):
         raise PySparkTypeError(

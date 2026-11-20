@@ -127,12 +127,21 @@ pub struct PreparedExecution {
 
 impl PreparedExecution {
     /// Send the execution and collect its Arrow batches, as
-    /// [`DataFrame::collect_record_batches_with_schema_checked`] does.
-    pub fn collect_record_batches_checked(
+    /// [`DataFrame::collect_record_batches_with_schema_checked`] does, and the information of the
+    /// execution, which the session records as its most recent one, and which the DataFrame keeps
+    /// once [`DataFrame::keep_execution_info`] is given it: PySpark's `toPandas` sets the
+    /// `_execution_info` of the DataFrame once it has converted the result, so a conversion that
+    /// fails leaves it as it was.
+    pub fn collect_record_batches_and_info(
         self,
         check: impl Fn(&DataType) -> Result<()>,
-    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
-        self.dataframe.record_batches_of(self.request, check)
+    ) -> Result<(
+        Vec<arrow::record_batch::RecordBatch>,
+        Option<DataType>,
+        ExecutionInfo,
+    )> {
+        self.dataframe
+            .record_batches_of(self.request, check, KeptBy::Caller)
     }
 
     /// Send the execution and stream its rows, as [`DataFrame::to_local_iterator`] does.
@@ -140,6 +149,14 @@ impl PreparedExecution {
         self.dataframe
             .local_iterator_of(self.request, prefetch_partitions)
     }
+}
+
+/// Who keeps the information of an execution as that of the last execution of its DataFrame: the
+/// DataFrame, when the execution ends, or the caller, with [`DataFrame::keep_execution_info`].
+#[derive(Clone, Copy)]
+enum KeptBy {
+    DataFrame,
+    Caller,
 }
 
 /// Returned by `DataFrame::to_local_iterator()`, this iterator consumes the ExecutePlan
@@ -1296,16 +1313,23 @@ impl DataFrame {
         check: impl Fn(&DataType) -> Result<()>,
     ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
         let request = self.build_execute_request()?;
-        self.record_batches_of(request, check)
+        self.record_batches_of(request, check, KeptBy::DataFrame)
+            .map(|(batches, schema, _)| (batches, schema))
     }
 
     /// The Arrow batches of the execution of `request`, a request of this DataFrame, as
-    /// [`DataFrame::collect_record_batches_with_schema_checked`] collects them.
+    /// [`DataFrame::collect_record_batches_with_schema_checked`] collects them, and the
+    /// information of the execution, which the session records and `kept_by` keeps.
     fn record_batches_of(
         &self,
         request: proto::ExecutePlanRequest,
         check: impl Fn(&DataType) -> Result<()>,
-    ) -> Result<(Vec<arrow::record_batch::RecordBatch>, Option<DataType>)> {
+        kept_by: KeptBy,
+    ) -> Result<(
+        Vec<arrow::record_batch::RecordBatch>,
+        Option<DataType>,
+        ExecutionInfo,
+    )> {
         let observations = self.plan.observations();
         let mut stream = self.session.execute_plan(request)?;
 
@@ -1334,8 +1358,19 @@ impl DataFrame {
                 relaxed = read.or(relaxed);
             }
         }
-        self.record_execution(info);
-        Ok((share_schema(batches, relaxed)?, schema))
+        match kept_by {
+            KeptBy::DataFrame => self.record_execution(info.clone()),
+            KeptBy::Caller => self.session.record_execution(info.clone()),
+        }
+        Ok((share_schema(batches, relaxed)?, schema, info))
+    }
+
+    /// Keep `info`, the information of an execution of this DataFrame, as the information of its
+    /// last execution ([`DataFrame::execution_info`]), of
+    /// [`PreparedExecution::collect_record_batches_and_info`]. Not a stable API.
+    #[doc(hidden)]
+    pub fn keep_execution_info(&self, info: ExecutionInfo) {
+        *self.execution.lock().unwrap() = Some(info);
     }
 
     /// Get the count of rows.
@@ -3687,7 +3722,10 @@ fn capture_execution(
 /// set, as PySpark's client raises when it converts them. Before that, the metrics of an
 /// Observation that is not used, which `observations` may hold when the caller gives them, as
 /// the `observations` of `SparkConnectClient.to_table`, are the `AssertionError` of PySpark's
-/// client, which asserts that the result of the Observation is not None.
+/// client, which asserts that the result of the Observation is not None. The error of the mirror
+/// of a binding of an Observation, which is told of its metrics and of its error (see
+/// [`crate::observation::MetricsMirror`]), is returned, as PySpark's client raises the error of
+/// the update of the result of an Observation, or of its `_set_error`.
 fn set_observations(
     session: &SparkSession,
     observations: &[(String, crate::observation::Observation)],
@@ -3705,7 +3743,7 @@ fn set_observations(
                     observation.set_error(SparkError::from_observation_errors(
                         root_error_idx,
                         observed.errors.clone(),
-                    ));
+                    ))?;
                 }
             }
             None if observed.name == crate::profiler::PYTHON_ACCUMULATOR_METRICS => session
@@ -3713,13 +3751,13 @@ fn set_observations(
                 .accumulate(std::slice::from_ref(observed)),
             None => {
                 if let Some(observation) = observation {
-                    if !observation.is_used() {
+                    if !observation.is_used()? {
                         return Err(SparkError::builtin_assertion());
                     }
                     if let Some(check) = &check {
                         check(observed)?;
                     }
-                    observation.update(&observed.keys, &observed.values);
+                    observation.update(&observed.keys, &observed.values)?;
                 }
             }
         }
@@ -7244,7 +7282,7 @@ mod plan_construction_tests {
         );
         assert_eq!(err.operation_id.as_deref(), Some("op-1"));
         assert!(used.get().unwrap().is_empty());
-        assert!(!unused.is_used());
+        assert!(!unused.is_used().unwrap());
 
         let mut failed = observed("u");
         failed.root_error_idx = Some(0);
@@ -8176,7 +8214,7 @@ mod plan_construction_tests {
                 name: "id".to_string(),
                 data_type: DataType::Long,
                 nullable: true,
-                metadata: std::collections::BTreeMap::new(),
+                metadata: crate::types::Metadata::new(),
             }],
         }));
         ser(&df.unpivot(vec![col("id")], None::<Vec<Column>>, "var", "val"));

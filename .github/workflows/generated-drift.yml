@@ -19,12 +19,16 @@ name: Generated files drift
 
 # Guards the two files that scripts/gen_fn_dispatch.py generates
 # (crates/pyspark-rs/src/dispatch_generated.rs and
-# python/pyspark/sql/functions_generated.py): regenerates them in memory from
+# python/pyspark/sql/connect/functions/_generated.py): regenerates them in memory from
 # crates/spark-connect/src/functions.rs and the PySpark of the tracked Apache Spark
 # tag, and fails with a diff when a checked-in file differs. Catches hand edits to the
 # generated files, and generator or functions.rs changes that were not regenerated.
 # It guards the same way the type stubs that scripts/gen_type_stubs.py generates from that
-# PySpark (python/pyspark/**/*.pyi, and their block of ruff excludes in pyproject.toml).
+# PySpark (python/pyspark/**/*.pyi, and their block of ruff excludes in pyproject.toml), and the
+# docstrings that scripts/gen_connect_docstrings.py generates for the native classes of the modules
+# of PySpark Connect (crates/pyspark-rs/src/connect_docs_generated.rs). It checks too the names of
+# PySpark's Connect classes that the metaclass of the classic classes keeps
+# (python/pyspark/sql/_classic_bases.py), with scripts/check_classic_bindings.py.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -67,3 +71,10 @@ jobs:
       - name: Check the type stubs
         # The generator parses the reference PySpark, and imports none of it.
         run: python scripts/gen_type_stubs.py --pyspark-src "${RUNNER_TEMP}/spark/python" --check
+      - name: Check the docstrings of the native classes of PySpark Connect's modules
+        # As the stubs, of the reference PySpark parsed, not imported.
+        run: python scripts/gen_connect_docstrings.py --pyspark-src "${RUNNER_TEMP}/spark/python" --check
+      - name: Check the names that the classic classes keep of PySpark's Connect classes
+        # The names that PySpark's Connect classes define and set on their objects, which hide a
+        # patch of a classic class, of the reference PySpark parsed, not imported.
+        run: python scripts/check_classic_bindings.py --pyspark-src "${RUNNER_TEMP}/spark/python"

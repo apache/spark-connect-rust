@@ -458,6 +458,22 @@ impl Column {
         Ok(Column::new(Expression::sent(expression, rendered, levels)?))
     }
 
+    /// As [`Column::sent`], of an expression whose subqueries refer to the plans of the relations
+    /// of `subqueries`, each of its levels, which a pickled Column keeps
+    /// ([`Expression::subquery_relations`]): the relation that holds the Column sends them (see
+    /// [`Expression::sent_with_subqueries`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn sent_with_subqueries(
+        expression: proto::Expression,
+        rendered: String,
+        levels: usize,
+        subqueries: Vec<(proto::Relation, usize)>,
+    ) -> spark_connect_core::error::Result<Column> {
+        Ok(Column::new(Expression::sent_with_subqueries(
+            expression, rendered, levels, subqueries,
+        )?))
+    }
+
     /// Mirrors `pyspark.sql.column.Column.over` - window function application.
     pub fn over(self, window_spec: WindowSpec) -> Column {
         // Convert window frame spec if present

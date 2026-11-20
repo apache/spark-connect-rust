@@ -39,6 +39,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_client(true)
         // async_trait repeats Future's must_use on generated server methods.
         .trait_attribute("SparkConnectService", "#[allow(clippy::double_must_use)]")
+        // Tag client response decoding errors. Generated server bindings share this codec;
+        // their error sources stay local and are not sent to clients.
+        .codec_path("crate::ClientCodec")
         .bytes(".")
         .file_descriptor_set_path(&full_set)
         .compile_protos(&protos, &[proto_root])?;

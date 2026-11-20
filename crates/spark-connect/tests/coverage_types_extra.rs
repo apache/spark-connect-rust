@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 
-use spark_connect::types::{DataType, StructField};
+use spark_connect::types::{DataType, Metadata, StructField};
 use spark_connect_proto as proto;
 
 /// Variants (and branch variations) whose accessors are otherwise under-exercised.
@@ -91,7 +91,7 @@ fn extra_variants() -> Vec<DataType> {
                         scale: 2,
                     },
                     nullable: true,
-                    metadata: BTreeMap::new(),
+                    metadata: Metadata::new(),
                 },
                 StructField {
                     name: "b".to_string(),
@@ -100,7 +100,7 @@ fn extra_variants() -> Vec<DataType> {
                     metadata: {
                         let mut m = BTreeMap::new();
                         m.insert("k".to_string(), serde_json::Value::String("v".to_string()));
-                        m
+                        m.into()
                     },
                 },
             ],
@@ -322,7 +322,7 @@ fn struct_helpers_and_non_struct_errors() {
             name: "x".to_string(),
             data_type: DataType::Integer,
             nullable: true,
-            metadata: BTreeMap::new(),
+            metadata: Metadata::new(),
         }],
     };
     assert_eq!(s.field_names().unwrap(), vec!["x".to_string()]);

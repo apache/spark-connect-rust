@@ -20,9 +20,9 @@ Generator of the type stubs of the drop-in's Rust-backed and dynamic modules.
 
 Type checkers such as mypy and pyright read the source of a module, they do not run it. The
 modules of the drop-in whose API is native (``from pyspark._pyspark import DataFrameReader``) or
-injected at import time (``pyspark.sql.functions`` copies the functions of
-``functions_generated.py`` into ``globals()``) show them none of PySpark's API: ``F.desc`` does
-not exist, and ``spark.read.json(...)`` is ``Any``. Each of these modules gets a ``.pyi`` stub
+injected at import time (``pyspark.sql.connect.functions.builtin`` runs the code of
+``_generated.py`` in its ``globals()``) show them none of PySpark's API: ``CF.desc`` does not
+exist, and ``spark.read.json(...)`` is ``Any``. Each of these modules gets a ``.pyi`` stub
 next to it, which a type checker reads instead of the module, and which Python never imports.
 
 A stub is PySpark's module of the tracked tag without its bodies, an AST transform of its
@@ -46,8 +46,8 @@ official ``pyspark-client``, where these modules are annotated Python. In detail
     any other condition, such as ``is_remote_only()``, both branches are kept, as a type checker
     of PySpark's source sees both.
   * The decorators that type checkers apply are kept (``overload``, ``property``,
-    ``classmethod``, ``functools.cache``, ``dataclass``, ...), and those of the module itself
-    (``dfapi`` of ``pyspark.sql.group``). PySpark's call-site and dispatch decorators are typed
+    ``classmethod``, ``functools.cache``, ``dataclass``, ...), and those that the module defines
+    itself. PySpark's call-site and dispatch decorators are typed
     ``(f: FuncT) -> FuncT``, which ``IDENTITY_DECORATORS`` lists and which the generator checks
     in PySpark's source: they change no type and are dropped. Any other decorator is an error.
   * The implementation of an overloaded function is dropped, as stubs declare only overloads.
@@ -73,10 +73,11 @@ official ``pyspark-client``, where these modules are annotated Python. In detail
     lines of a signature that ast.unparse prints on one line merged.
 
 ``EXTRAS`` adds the names that the drop-in's module has and PySpark's does not, such as the
-native ``Trigger`` of ``pyspark.sql.streaming.readwriter``. python/tests/test_type_stubs_offline.py
-checks that every public name of each module of the drop-in, and every public member of each class
-of a stub, is in its stub, that mypy and pyright type every public instance attribute of the
-stubbed classes, and runs mypy and pyright on a user's application.
+native ``Trigger`` of ``pyspark.sql.connect.streaming.readwriter``.
+python/tests/test_type_stubs_offline.py checks that every public name of each module of the
+drop-in, and every public member of each class of a stub, is in its stub, that mypy and pyright
+type every public instance attribute of the stubbed classes, and runs mypy and pyright on a user's
+application.
 
 The modules of pyspark.ml.connect of the drop-in's native ML classes (``ML_CONNECT_MODULES``) and
 their package are not PySpark's modules of their import paths, which are its ML API on PyTorch:
@@ -85,15 +86,6 @@ their stubs are made of the drop-in's own modules, of a ``class X(<public bases>
 of the re-exports of what the module imports; PySpark's vendored pyspark.ml.connect.feature gets
 the native stages of pyspark.ml.feature that the package sets in it in place of its classes of the
 same names.
-
-``pyspark.sql.functions`` is a package in PySpark (``functions/__init__.py``, ``builtin.py``,
-``partitioning.py``) and a module here (``functions.py``, which registers ``builtin`` and
-``partitioning`` in ``sys.modules``). Its stubs are the directory ``pyspark/sql/functions/`` with
-the three ``.pyi`` files and no ``__init__.py``: mypy and pyright take a package with an
-``__init__.pyi`` over a module of the same name, and give its ``builtin.pyi`` to
-``import pyspark.sql.functions.builtin``. Python imports ``functions.py``, as a module of a
-directory goes before a namespace package of the same name (PEP 420), and no loader reads
-``.pyi`` files.
 
 Usage, from anywhere:
 
@@ -132,47 +124,41 @@ RUFF_BLOCK_END = "    # --- generated type stubs: END ---\n"
 
 # The modules that get a stub, by PySpark's import path: each Rust-backed or dynamic module of
 # the drop-in whose objects a user imports. The stub is at the path of PySpark's module, with
-# .pyi for .py (pyspark/sql/functions/__init__.pyi for the package pyspark.sql.functions).
+# .pyi for .py (pyspark/sql/connect/functions/__init__.pyi for the package
+# pyspark.sql.connect.functions).
 STUB_MODULES = (
-    # The modules of the native classes, which re-export them from pyspark._pyspark. Not
-    # pyspark.sql.conf, merge, observation and tvf, whose classic classes are PySpark's annotated
-    # modules, vendored as they are (scripts/check_vendored_upstream.sh), which a stub would shadow.
+    # The modules of the native classes, which re-export them from pyspark._pyspark, and
+    # pyspark.sql.dataframe, whose public DataFrame is made at import time, and pyspark.sql.window,
+    # PySpark's of the native FrameBound. Not the modules of the classic classes of PySpark, such
+    # as pyspark.sql.column, table_arg, catalog, readwriter, udf, udtf, group, conf, merge,
+    # observation and tvf, pyspark.sql.pandas.group_ops and the streaming query and readwriter,
+    # PySpark's annotated modules, vendored as they are (scripts/check_vendored_upstream.sh), which
+    # a stub would shadow.
     "pyspark.storagelevel",
-    "pyspark.sql.catalog",
-    "pyspark.sql.column",
     "pyspark.sql.dataframe",
-    "pyspark.sql.group",
-    "pyspark.sql.pandas.group_ops",
-    "pyspark.sql.readwriter",
-    "pyspark.sql.table_arg",
     "pyspark.sql.types",
     "pyspark.sql.window",
-    "pyspark.sql.streaming.query",
-    "pyspark.sql.streaming.readwriter",
-    # The functions: those that functions.py copies into its globals() from
-    # functions_generated.py, and those of Avro and Protobuf, unannotated calls of the Rust core.
-    "pyspark.sql.functions",
-    "pyspark.sql.functions.builtin",
-    "pyspark.sql.functions.partitioning",
+    # The functions of Avro and Protobuf, unannotated calls of the Rust core. Not
+    # pyspark.sql.functions, PySpark's package, vendored as it is, whose functions run those of
+    # pyspark.sql.connect.functions, nor PySpark Connect's pyspark.sql.connect.functions.partitioning,
+    # vendored as it is too.
     "pyspark.sql.avro.functions",
     "pyspark.sql.protobuf.functions",
     # Their copies of the import paths of PySpark Connect (see
     # pyspark/sql/connect/functions/_copies.py), which copy them into their globals().
     "pyspark.sql.connect.avro.functions",
     "pyspark.sql.connect.protobuf.functions",
-    # PySpark's modules with their Rust-backed parts swapped in: the native PythonEvalType and
-    # SkipRestOfInputTableException, and user-defined functions that annotate fewer parameters.
+    # PySpark's module with its Rust-backed part swapped in: the native PythonEvalType.
     "pyspark.util",
-    "pyspark.sql.udf",
-    "pyspark.sql.udtf",
     # The modules of PySpark Connect, which re-export the drop-in's classes and functions.
     "pyspark.sql.connect.catalog",
     "pyspark.sql.connect.column",
     "pyspark.sql.connect.conf",
     "pyspark.sql.connect.dataframe",
     "pyspark.sql.connect.functions",
+    # The functions that pyspark/sql/connect/functions/builtin.py defines in its globals() of the
+    # code of _generated.py, unannotated calls of the Rust core.
     "pyspark.sql.connect.functions.builtin",
-    "pyspark.sql.connect.functions.partitioning",
     "pyspark.sql.connect.group",
     "pyspark.sql.connect.merge",
     "pyspark.sql.connect.observation",
@@ -197,6 +183,15 @@ STUB_MODULES = (
     # modules, of which the drop-in ships PySpark's own stubs (``base_pb2.pyi``, ...), vendored.
     "pyspark.sql.connect.proto",
 )
+
+# The drop-in's modules that run the code of other files in their namespace, by import path, with
+# the paths of those files under python/: the names that those files bind at their top level are
+# names of the module at run time too, such as its private functions that the stub keeps.
+EXECUTED_SOURCES = {
+    # The functions that scripts/gen_fn_dispatch.py generates, and the helpers of PySpark
+    # Connect's module that they call (_to_col, _invoke_function_over_columns, ...).
+    "pyspark.sql.connect.functions.builtin": ("pyspark/sql/connect/functions/_generated.py",),
+}
 
 # The decorators that a type checker applies: kept as they are. A decorator of the module
 # itself (a function that it defines) is kept too.
@@ -255,34 +250,18 @@ class Extra:
 
 
 EXTRAS = {
-    # The drop-in's pyspark.sql.connect.functions.builtin has every public name of its
-    # pyspark.sql.functions.builtin (see pyspark/sql/connect/functions/_copies.py), with these,
-    # which PySpark's module of PySpark Connect does not import.
-    "pyspark.sql.connect.functions.builtin": Extra(
-        "from pyspark.sql.connect.udf import UserDefinedFunction as UserDefinedFunction\n"
-        "from pyspark.sql.connect.udtf import UserDefinedTableFunction as "
-        "UserDefinedTableFunction\n"
-        "from pyspark.sql.pandas.functions import ArrowUDFType as ArrowUDFType\n"
-        "from pyspark.sql.pandas.functions import PandasUDFType as PandasUDFType\n"
-        "from pyspark.sql.types import ByteType as ByteType\n"
-        "from pyspark.sql.types import NumericType as NumericType\n"
-        "from pyspark.sql.udtf import OrderingColumn as OrderingColumn\n"
-        "from pyspark.sql.udtf import PartitioningColumn as PartitioningColumn\n"
-        "from pyspark.sql.udtf import SelectedColumn as SelectedColumn\n"
-        "from pyspark.sql.udtf import SkipRestOfInputTableException as "
-        "SkipRestOfInputTableException\n"
-    ),
     # The drop-in's DataFrame pickles its plan with this parser of protobuf messages.
     "pyspark.sql.connect.dataframe": Extra(
         "from pyspark.sql.connect._column_reduce import parse_deep as parse_deep\n"
     ),
-    # The drop-in defines udf, udtf and arrow_udtf of pyspark.sql.functions in these modules,
-    # and their evaluation types.
-    "pyspark.sql.udf": Extra(
+    # The drop-in defines udf, udtf and arrow_udtf of pyspark.sql.connect.functions in these
+    # modules, and their evaluation types.
+    "pyspark.sql.connect.udf": Extra(
         "from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer\n"
         "from pyspark.sql.functions.builtin import udf as udf\n"
     ),
-    "pyspark.sql.udtf": Extra(
+    "pyspark.sql.connect.udtf": Extra(
+        "from pyspark.errors import PySparkPicklingError as PySparkPicklingError\n"
         "from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer\n"
         "from pyspark.sql.functions.builtin import arrow_udtf as arrow_udtf\n"
         "from pyspark.sql.functions.builtin import udtf as udtf\n"
@@ -290,17 +269,12 @@ EXTRAS = {
         "SQL_ARROW_TABLE_UDF: int\n"
         "SQL_ARROW_UDTF: int\n"
     ),
-    # The drop-in's module dispatches the events of the listeners itself.
-    "pyspark.sql.streaming.query": Extra(
-        "from pyspark.sql.streaming.listener import QueryIdleEvent as QueryIdleEvent\n"
-        "from pyspark.sql.streaming.listener import QueryProgressEvent as QueryProgressEvent\n"
-        "from pyspark.sql.streaming.listener import QueryStartedEvent as QueryStartedEvent\n"
-        "from pyspark.sql.streaming.listener import QueryTerminatedEvent as QueryTerminatedEvent\n"
-    ),
     # The native classes of the frame bounds, which PySpark's `__all__` does not list as the
     # drop-in's does not, and of the triggers.
     "pyspark.sql.window": Extra("class FrameBound: ...\n"),
-    "pyspark.sql.streaming.readwriter": Extra(
+    "pyspark.sql.connect.streaming.readwriter": Extra(
+        "from pyspark.errors import PySparkAttributeError as PySparkAttributeError\n"
+        "from pyspark.errors import PySparkRuntimeError as PySparkRuntimeError\n"
         "class Trigger:\n"
         "    @staticmethod\n"
         "    def processingTime(interval: str) -> Trigger: ...\n"
@@ -310,7 +284,6 @@ EXTRAS = {
         "    def availableNow() -> Trigger: ...\n"
         "    @staticmethod\n"
         "    def continuous(interval: str) -> Trigger: ...\n",
-        ("Trigger",),
     ),
 }
 
@@ -338,14 +311,8 @@ _CONNECT = (
 UNRESOLVED_IMPORTS = {
     "pyspark.core.context.SparkContext": _CLASSIC,
     "pyspark.core.rdd.RDD": _CLASSIC,
-    # PySpark's streaming readers and writers import it from its readwriter for the bodies of
-    # their option methods, which the stubs keep; the drop-in's readwriter has no to_str.
-    "pyspark.sql.readwriter.to_str": "a helper that only the kept bodies of methods call",
-    "pyspark.sql.utils.StringConcat": (
-        "the helper of the private tree strings of PySpark's classic types, which the drop-in's "
-        "native types build in Rust"
-    ),
     "pyspark.sql.connect.expressions.CommonInlineUserDefinedFunction": _CONNECT,
+    "pyspark.sql.connect.expressions.LambdaFunction": _CONNECT,
     "pyspark.sql.connect.expressions.SortOrder": _CONNECT,
     "pyspark.sql.connect.expressions.SubqueryExpression": _CONNECT,
     "pyspark.sql.connect.plan.ChunkedCachedLocalRelation": _CONNECT,
@@ -372,18 +339,15 @@ DROPPED = {
         "NumpyScalarConverter",
         "TimeConverter",
     },
-    # The module that pyspark/sql/functions.py makes of the five partition transforms, and the
-    # modules of the Connect functions, which copy the functions of pyspark.sql.functions and of
-    # its Avro and Protobuf modules: they do not import what PySpark's modules import, whose names
-    # they do not have at run time.
-    "pyspark.sql.functions.partitioning": {"Column", "PySparkTypeError"},
+    # The modules of the Connect functions, the drop-in's, of the Rust core, and those that copy
+    # the functions of its Avro and Protobuf modules: they do not import what PySpark's modules
+    # import, whose names they do not have at run time.
     "pyspark.sql.connect.functions": {"should_test_connect"},
     "pyspark.sql.connect.functions.builtin": {
         "Expression",
         "LiteralExpression",
         "UnresolvedNamedLambdaVariable",
     },
-    "pyspark.sql.connect.functions.partitioning": {"Column", "PySparkTypeError"},
     "pyspark.sql.connect.avro.functions": {"lit"},
     "pyspark.sql.connect.protobuf.functions": {"Column", "lit"},
 }
@@ -1670,12 +1634,16 @@ class DropIn:
 
     def runtime_names(self, module: str) -> frozenset[str]:
         """The names that the source of the drop-in's `module` (not its stub) binds at its top
-        level, under any condition: names of it at run time. None of a module of no source."""
+        level, under any condition, with those of the files that it runs in its namespace
+        (``EXECUTED_SOURCES``): names of it at run time. None of a module of no source."""
         base = self.root / Path(*module.split("."))
         for path in (base / "__init__.py", base.with_suffix(".py")):
             if path.is_file():
-                top = _top_level(ast.parse(path.read_text()).body)
-                return frozenset().union(*(bound_names(s) for s in top))
+                names: set[str] = set()
+                for source in (path, *(self.root / p for p in EXECUTED_SOURCES.get(module, ()))):
+                    top = _top_level(ast.parse(source.read_text()).body)
+                    names = names.union(*(bound_names(s) for s in top))
+                return frozenset(names)
         return frozenset()
 
 
@@ -2400,6 +2368,9 @@ def generate(root: Path, pyspark_src: str, log=print) -> dict[Path, str]:
     src = Path(pyspark_src).resolve()
     if not (src / "pyspark" / "sql" / "functions" / "builtin.py").is_file():
         raise GeneratorError(f"--pyspark-src {pyspark_src}: not the python/ directory of Spark")
+    unknown = sorted(set(EXECUTED_SOURCES) - set(STUB_MODULES))
+    if unknown:
+        raise GeneratorError(f"EXECUTED_SOURCES of modules without a stub: {unknown}")
     unknown = sorted(set(EXTRAS) - set(STUB_MODULES))
     if unknown:
         raise GeneratorError(f"EXTRAS of modules without a stub: {unknown}")

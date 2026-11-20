@@ -34,10 +34,13 @@ omit =
     */pyspark/errors/*
     */pyspark/messages/*
     */pyspark/sql/streaming/*
+    # The drop-in's streaming code of the modules of PySpark Connect (the listener bus and the
+    # functions of foreach), as that of pyspark.sql.streaming: the subsystem has its own tests.
+    */pyspark/sql/connect/streaming/*
     */pyspark/sql/worker/*
     */pyspark/sql/plot/*
     */pyspark/sql/pandas/*
-    */pyspark/sql/functions_generated.py
+    */pyspark/sql/connect/functions/_generated.py
     */pyspark/sql/datasource.py
     */pyspark/sql/conversion.py
     */pyspark/sql/internal.py
@@ -52,13 +55,23 @@ omit =
     */pyspark/sql/merge.py
     */pyspark/sql/observation.py
     */pyspark/sql/context.py
+    */pyspark/sql/catalog.py
+    */pyspark/sql/readwriter.py
+    */pyspark/sql/udf.py
+    */pyspark/sql/udtf.py
+    */pyspark/sql/group.py
+    */pyspark/sql/pandas/group_ops.py
+    */pyspark/sql/streaming/readwriter.py
+    */pyspark/sql/streaming/query.py
+    */pyspark/sql/column.py
+    */pyspark/sql/table_arg.py
+    */pyspark/sql/utils.py
     */pyspark/serializers.py
     */pyspark/loose_version.py
     */pyspark/_globals.py
     # Classic-Spark / JVM / launcher utilities that a Connect-only client never uses and
     # cannot exercise offline (SparkContext helpers, gateway launch, local-install discovery).
     */pyspark/util.py
-    */pyspark/sql/utils.py
     */pyspark/find_spark_home.py
     */pyspark/version.py
     */pyspark/accumulators.py
@@ -80,6 +93,8 @@ omit =
     */pyspark/sql/connect/profiler.py
     */pyspark/sql/connect/shell/progress.py
     */pyspark/sql/connect/resource/*
+    */pyspark/sql/functions/*
+    */pyspark/sql/connect/functions/partitioning.py
     */pyspark/sql/connect/avro/__init__.py
     */pyspark/sql/connect/protobuf/__init__.py
     */pyspark/sql/connect/streaming/__init__.py

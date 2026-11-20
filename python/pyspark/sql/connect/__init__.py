@@ -14,8 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Compatibility shims for code (and upstream parity tests) that import from
-``pyspark.sql.connect.*``. In this Rust-backed drop-in there is no separate Python
-Connect implementation — the Connect client *is* the Rust core — so these modules
-simply re-export the single Rust-backed implementation under the connect import paths.
-"""
+"""Spark Connect client"""
+
+# The modules of this package are those of PySpark Connect's import paths, of the drop-in's
+# implementation, whose client is the Rust core.
+#
+# As PySpark's package, it imports check_dependencies, but it does not run it at the import.
+# PySpark's call requires pandas, PyArrow, grpcio, grpcio-status, googleapis-common-protos and
+# zstandard, which this client does not need: its transport is the Rust core's, and it runs
+# without PyArrow and pandas. Of a main module without a file, as of ``python -c``, it also takes
+# the import for a run of the doctests and imports pyspark.testing.connectutils, which exits the
+# process without SPARK_HOME or the test dependencies. A program that calls check_dependencies
+# runs it (see pyspark.sql.connect.utils).
+from pyspark.sql.connect.utils import check_dependencies  # noqa: F401

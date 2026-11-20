@@ -24,14 +24,41 @@ pub struct Observation {
 /// The metrics of an observation, by their names, in order.
 type Metrics = Vec<(String, proto::expression::Literal)>;
 
-/// What a binding of another language keeps of the metrics of a used observation, such as the
-/// result dict of the Python client, which the observation tells of each update of its metrics,
-/// as PySpark's client updates the result dict of an Observation in place. The shallow copies of
-/// the observation share it with its metrics. Not a stable API.
+/// What a binding of another language keeps of the state of a used observation, such as the
+/// Python Observation of the Python client, whose `_result` and `_error` the observation sets as
+/// PySpark's client sets them: it is asked whether the observation is used, and told of each
+/// update of the metrics and of the error that the server reports. The shallow copies of the
+/// observation share it with its metrics. Not a stable API.
 #[doc(hidden)]
 pub trait MetricsMirror: Send + Sync {
-    /// The metrics of the names `keys` were set to `values` by an action, in their order.
-    fn update(&self, keys: &[String], values: &[proto::expression::Literal]);
+    /// Whether the observation of the binding is used, as PySpark's client asserts that the
+    /// `_result` of an Observation is not None before it sets its metrics, which a program may
+    /// have set to None: its error, such as the `AttributeError` of a `_result` that the program
+    /// deleted, is that of the action. Used, unless the binding says otherwise.
+    fn is_used(&self) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// The metrics of the names `keys` were set to `values` by an action, in their order: its
+    /// error is that of the action, as PySpark's client raises the error of the update of the
+    /// result of an Observation.
+    fn update(&self, keys: &[String], values: &[proto::expression::Literal]) -> Result<()>;
+
+    /// The server reported `error` of collecting the metrics: its error is that of the action, as
+    /// PySpark's client raises the error of the `_set_error` of an Observation.
+    fn error(&self, error: &SparkError) -> Result<()> {
+        let _ = error;
+        Ok(())
+    }
+
+    /// The name of the observation of the binding as it is now, which a plan of it is built of,
+    /// as PySpark's `CollectMetrics` sets the `str` of the `_name` of its Observation each time it
+    /// builds the plan, and by which the metrics of the plan are set: its error, as that of a name
+    /// that the plan does not take, is that of the request. None, unless the binding gives it, for
+    /// the name of the observation.
+    fn name(&self) -> Option<Result<String>> {
+        None
+    }
 
     /// This mirror, by which the binding finds its own type.
     fn as_any(&self) -> &dyn std::any::Any;
@@ -42,7 +69,17 @@ pub trait MetricsMirror: Send + Sync {
 #[derive(Default)]
 struct UsedMetrics {
     metrics: Mutex<Metrics>,
-    mirror: std::sync::OnceLock<Arc<dyn MetricsMirror>>,
+    mirror: Mutex<Option<Arc<dyn MetricsMirror>>>,
+}
+
+impl UsedMetrics {
+    /// The mirror of a binding, if it set one.
+    fn mirror(&self) -> Option<Arc<dyn MetricsMirror>> {
+        self.mirror
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
 }
 
 #[derive(Default)]
@@ -82,6 +119,16 @@ impl Observation {
     /// `Observation()`.
     pub fn unnamed() -> Self {
         Self::default()
+    }
+
+    /// A used observation of the name `name`, of no metrics until an action observes them, as an
+    /// observation once a DataFrame observes by it, for a binding whose own object of it says
+    /// whether it is used (see [`MetricsMirror::is_used`]). Not a stable API.
+    #[doc(hidden)]
+    pub fn used(name: &str) -> Self {
+        let observation = Self::new(name);
+        observation.start();
+        observation
     }
 
     /// The name of the observation; None for an unnamed observation before it is used.
@@ -126,47 +173,59 @@ impl Observation {
         (result, state.error.clone())
     }
 
-    /// Whether the observation is used, as PySpark's Observation once its `_result` is not None.
-    pub(crate) fn is_used(&self) -> bool {
-        self.lock().result.is_some()
+    /// Whether the observation is used, as PySpark's Observation once its `_result` is not None:
+    /// the mirror of a binding, if it set one, says it (see [`MetricsMirror::is_used`]).
+    pub(crate) fn is_used(&self) -> Result<bool> {
+        let Some(result) = self.lock().result.clone() else {
+            return Ok(false);
+        };
+        match result.mirror() {
+            Some(mirror) => mirror.is_used(),
+            None => Ok(true),
+        }
     }
 
-    /// The mirror of the metrics of this observation that a binding set (see
+    /// The name that a plan of this observation is built of now: the name that the mirror of a
+    /// binding gives, if it gives one (see [`MetricsMirror::name`]), of its error, else none, for
+    /// the name of the observation. Not a stable API.
+    #[doc(hidden)]
+    pub fn name_of_plan(&self) -> Option<Result<String>> {
+        self.metrics_mirror()?.name()
+    }
+
+    /// The mirror of the state of this observation that a binding set (see
     /// [`Observation::set_metrics_mirror`]), if any. Not a stable API.
     #[doc(hidden)]
     pub fn metrics_mirror(&self) -> Option<Arc<dyn MetricsMirror>> {
-        let result = self.lock().result.clone()?;
-        result.mirror.get().cloned()
+        self.lock().result.clone()?.mirror()
     }
 
-    /// Make `mirror` the mirror of the metrics of this used observation (see [`MetricsMirror`]),
-    /// unless a binding set one already: the mirror that it has then, and, if it is `mirror`, the
-    /// metrics set so far, which the caller fills it with, as each update after it is told to it.
-    /// None before the observation is used. No lock of the observation is held while the caller
-    /// fills the mirror, or while a mirror is told of an update, so either may take a lock of its
-    /// own. Not a stable API.
+    /// Make `mirror` the mirror of the state of this used observation (see [`MetricsMirror`]),
+    /// in the place of the one that a binding set before, if any: the metrics set so far, which
+    /// the caller fills it with, as each update after it is told to it. None before the
+    /// observation is used. No lock of the observation is held while the caller fills the
+    /// mirror, or while a mirror is told of an update, so either may take a lock of its own. Not
+    /// a stable API.
     #[doc(hidden)]
-    #[allow(clippy::type_complexity)]
     pub fn set_metrics_mirror(
         &self,
         mirror: Arc<dyn MetricsMirror>,
-    ) -> Option<(
-        Arc<dyn MetricsMirror>,
-        Option<Vec<(String, proto::expression::Literal)>>,
-    )> {
+    ) -> Option<Vec<(String, proto::expression::Literal)>> {
         let result = self.lock().result.clone()?;
         // Set under the lock of the metrics, so that an update is either in the metrics given to
         // the caller or told to the mirror.
-        let (kept, metrics, rejected) = {
+        let (metrics, replaced) = {
             let metrics = lock_metrics(&result.metrics);
-            match result.mirror.set(mirror) {
-                Ok(()) => (result.mirror.get().cloned(), Some(metrics.clone()), None),
-                Err(rejected) => (result.mirror.get().cloned(), None, Some(rejected)),
-            }
+            let replaced = result
+                .mirror
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .replace(mirror);
+            (metrics.clone(), replaced)
         };
         // Dropped once the lock is released, as the drop of a mirror may run code of the binding.
-        drop(rejected);
-        kept.map(|kept| (kept, metrics))
+        drop(replaced);
+        Some(metrics)
     }
 
     /// A clone of this observation that keeps `owner` alive while it is, as the plan of an
@@ -273,10 +332,15 @@ impl Observation {
     }
 
     /// Set the metrics that an action observed, as PySpark's client updates the result of
-    /// the observation with them: a metric replaces the value of a metric of its name.
-    pub(crate) fn update(&self, keys: &[String], values: &[proto::expression::Literal]) {
+    /// the observation with them: a metric replaces the value of a metric of its name. The error
+    /// of the mirror of a binding, which is told of them, is returned.
+    pub(crate) fn update(
+        &self,
+        keys: &[String],
+        values: &[proto::expression::Literal],
+    ) -> Result<()> {
         let Some(result) = self.lock().result.clone() else {
-            return;
+            return Ok(());
         };
         {
             let mut metrics = lock_metrics(&result.metrics);
@@ -289,14 +353,24 @@ impl Observation {
         }
         // Told once the locks are released, as a mirror may take a lock of its own, such as the
         // GIL of Python, under which a thread may want the locks of the observation.
-        if let Some(mirror) = result.mirror.get() {
-            mirror.update(keys, values);
+        match result.mirror() {
+            Some(mirror) => mirror.update(keys, values),
+            None => Ok(()),
         }
     }
 
-    /// Set the error of collecting the metrics, which `get` returns.
-    pub(crate) fn set_error(&self, error: SparkError) {
-        self.lock().error = Some(error);
+    /// Set the error of collecting the metrics, which `get` returns. The error of the mirror of a
+    /// binding, which is told of it, is returned.
+    pub(crate) fn set_error(&self, error: SparkError) -> Result<()> {
+        let mirror = {
+            let mut state = self.lock();
+            state.error = Some(error.clone());
+            state.result.as_ref().and_then(|result| result.mirror())
+        };
+        match mirror {
+            Some(mirror) => mirror.error(&error),
+            None => Ok(()),
+        }
     }
 
     fn lock(&self) -> MutexGuard<'_, ObservationState> {
@@ -350,8 +424,11 @@ mod tests {
 
         let clone = obs.clone();
         assert!(clone.same(&obs) && !Observation::unnamed().same(&obs));
-        clone.update(&["a".to_string(), "b".to_string()], &[long(1), long(2)]);
-        obs.update(&["b".to_string(), "c".to_string()], &[long(3), long(4)]);
+        clone
+            .update(&["a".to_string(), "b".to_string()], &[long(1), long(2)])
+            .unwrap();
+        obs.update(&["b".to_string(), "c".to_string()], &[long(3), long(4)])
+            .unwrap();
         let names: Vec<(String, Option<LiteralType>)> = obs
             .get()
             .unwrap()
@@ -367,7 +444,7 @@ mod tests {
             ]
         );
 
-        obs.set_error(SparkError::connect_msg("failed"));
+        obs.set_error(SparkError::connect_msg("failed")).unwrap();
         assert!(obs.get().unwrap_err().message().contains("failed"));
         assert!(format!("{obs:?}").contains(&name));
     }
@@ -385,10 +462,11 @@ mod tests {
         assert!(obs.get().is_err());
 
         obs.start();
-        obs.update(&["a".to_string()], &[long(1)]);
+        obs.update(&["a".to_string()], &[long(1)]).unwrap();
         let copy = obs.detached();
-        copy.update(&["a".to_string(), "b".to_string()], &[long(2), long(3)]);
-        obs.update(&["c".to_string()], &[long(4)]);
+        copy.update(&["a".to_string(), "b".to_string()], &[long(2), long(3)])
+            .unwrap();
+        obs.update(&["c".to_string()], &[long(4)]).unwrap();
         let values = |o: &Observation| -> Vec<(String, Option<LiteralType>)> {
             o.get()
                 .unwrap()
@@ -414,7 +492,7 @@ mod tests {
         // A failed observation keeps its error in the copy.
         let failed = Observation::new("f");
         failed.start();
-        failed.set_error(SparkError::connect_msg("failed"));
+        failed.set_error(SparkError::connect_msg("failed")).unwrap();
         assert!(failed
             .detached()
             .get()
@@ -443,31 +521,52 @@ mod tests {
         // PySpark's copy of an Observation shares its result dict, and is used already.
         let obs = Observation::new("s");
         obs.start();
-        obs.update(&["a".to_string()], &[long(1)]);
+        obs.update(&["a".to_string()], &[long(1)]).unwrap();
         let copy = obs.shallow_copy();
         assert!(!copy.same(&obs));
         assert_eq!(copy.name().as_deref(), Some("s"));
-        obs.update(&["b".to_string()], &[long(2)]);
+        obs.update(&["b".to_string()], &[long(2)]).unwrap();
         assert_eq!(names(&copy), vec!["a", "b"]);
         let err = copy.name_to_observe().unwrap_err();
         assert_eq!(err.get_condition().as_deref(), Some("REUSE_OBSERVATION"));
 
         // An error that an action reports later is set on the observation only, and a copy of a
         // failed observation keeps its error.
-        obs.set_error(SparkError::connect_msg("failed"));
+        obs.set_error(SparkError::connect_msg("failed")).unwrap();
         assert!(obs.get().is_err());
         assert_eq!(names(&copy), vec!["a", "b"]);
         let failed = obs.shallow_copy().get().unwrap_err();
         assert!(failed.message().contains("failed"));
     }
 
-    /// A mirror that records what it is told, as the result dict of a binding.
+    /// A mirror that records what it is told, as the Python Observation of a binding, and fails
+    /// as it is told to.
     #[derive(Default)]
-    struct Recorded(Mutex<Vec<String>>);
+    struct Recorded {
+        told: Mutex<Vec<String>>,
+        unused: std::sync::atomic::AtomicBool,
+        failing: std::sync::atomic::AtomicBool,
+    }
 
     impl MetricsMirror for Recorded {
-        fn update(&self, keys: &[String], _values: &[proto::expression::Literal]) {
-            self.0.lock().unwrap().extend(keys.iter().cloned());
+        fn is_used(&self) -> Result<bool> {
+            Ok(!self.unused.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn update(&self, keys: &[String], _values: &[proto::expression::Literal]) -> Result<()> {
+            if self.failing.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(SparkError::connect_msg("the update failed"));
+            }
+            self.told.lock().unwrap().extend(keys.iter().cloned());
+            Ok(())
+        }
+
+        fn error(&self, error: &SparkError) -> Result<()> {
+            self.told
+                .lock()
+                .unwrap()
+                .push(format!("error {}", error.message()));
+            Ok(())
         }
 
         fn as_any(&self) -> &dyn std::any::Any {
@@ -475,48 +574,135 @@ mod tests {
         }
     }
 
-    fn recorded(mirror: &Arc<dyn MetricsMirror>) -> Vec<String> {
-        let recorded = mirror.as_any().downcast_ref::<Recorded>().unwrap();
-        recorded.0.lock().unwrap().clone()
+    fn recorded(mirror: &Arc<dyn MetricsMirror>) -> &Recorded {
+        mirror.as_any().downcast_ref::<Recorded>().unwrap()
+    }
+
+    fn told(mirror: &Arc<dyn MetricsMirror>) -> Vec<String> {
+        recorded(mirror).told.lock().unwrap().clone()
+    }
+
+    /// A mirror that gives the name of the observation of its binding as it is now.
+    struct Named(Mutex<Result<String>>);
+
+    impl MetricsMirror for Named {
+        fn is_used(&self) -> Result<bool> {
+            Ok(true)
+        }
+
+        fn update(&self, _keys: &[String], _values: &[proto::expression::Literal]) -> Result<()> {
+            Ok(())
+        }
+
+        fn name(&self) -> Option<Result<String>> {
+            Some(self.0.lock().unwrap().clone())
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     #[test]
-    fn a_mirror_is_set_once_of_the_metrics_and_told_of_each_update() {
-        // An unused observation has no mirror, as PySpark's has no result dict before `_on`.
+    fn a_plan_of_an_observation_is_built_of_the_name_that_its_mirror_gives_then() {
+        let built_name = |plan: &crate::plan::LogicalPlan| match plan.try_to_proto() {
+            Ok(proto::Relation {
+                rel_type: Some(proto::relation::RelType::CollectMetrics(metrics)),
+                ..
+            }) => Ok(metrics.name),
+            Ok(other) => panic!("a CollectMetrics, not {other:?}"),
+            Err(error) => Err(error),
+        };
+        let names = |plan: &crate::plan::LogicalPlan| -> Vec<String> {
+            plan.observations()
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        };
+        let obs = Observation::used("first");
+        let plan = crate::plan::LogicalPlan::Observe {
+            input: Arc::new(crate::plan::range(0, 3, 1)),
+            name: "first".to_string(),
+            exprs: vec![crate::expression::Expression::column("id")],
+            observation: Some(obs.clone()),
+        };
+        // Without a mirror of a name, the plan is of the name of the observation.
+        assert!(obs.name_of_plan().is_none());
+        assert_eq!(built_name(&plan).unwrap(), "first");
+        assert_eq!(names(&plan), vec!["first"]);
+
+        // With one, of the name that it gives at each build, by which the plan names it.
+        let mirror = Arc::new(Named(Mutex::new(Ok("now".to_string()))));
+        assert!(obs
+            .set_metrics_mirror(Arc::clone(&mirror) as Arc<dyn MetricsMirror>)
+            .is_some());
+        assert_eq!(built_name(&plan).unwrap(), "now");
+        assert_eq!(names(&plan), vec!["now"]);
+
+        // Its error is that of each build, until it gives a name again.
+        *mirror.0.lock().unwrap() = Err(SparkError::connect_msg("no name"));
+        for _ in 0..2 {
+            let error = built_name(&plan).unwrap_err();
+            assert!(error.message().contains("no name"), "{error}");
+        }
+        *mirror.0.lock().unwrap() = Ok("again".to_string());
+        assert_eq!(built_name(&plan).unwrap(), "again");
+        assert_eq!(names(&plan), vec!["again"]);
+    }
+
+    #[test]
+    fn a_mirror_is_told_of_each_update_and_error_and_says_whether_it_is_used() {
+        // An unused observation has no mirror, as PySpark's has no result before `_on`.
         let obs = Observation::new("m");
-        assert!(!obs.is_used());
+        assert!(!obs.is_used().unwrap());
         let first: Arc<dyn MetricsMirror> = Arc::new(Recorded::default());
         assert!(obs.set_metrics_mirror(Arc::clone(&first)).is_none());
         obs.start();
-        assert!(obs.is_used());
-        obs.update(&["a".to_string()], &[long(1)]);
+        assert!(obs.is_used().unwrap());
+        obs.update(&["a".to_string()], &[long(1)]).unwrap();
         assert!(obs.metrics_mirror().is_none());
 
-        // It is set once, with the metrics so far, which the caller fills it with: a second one is
-        // not set, and the first is given back, without metrics.
-        let (mirror, metrics) = obs.set_metrics_mirror(Arc::clone(&first)).unwrap();
-        assert!(Arc::ptr_eq(&mirror, &first));
-        let names: Vec<String> = metrics.unwrap().into_iter().map(|(name, _)| name).collect();
+        // It is set with the metrics so far, which the caller fills it with.
+        let metrics = obs.set_metrics_mirror(Arc::clone(&first)).unwrap();
+        let names: Vec<String> = metrics.into_iter().map(|(name, _)| name).collect();
         assert_eq!(names, vec!["a"]);
-        let second: Arc<dyn MetricsMirror> = Arc::new(Recorded::default());
-        let (again, none) = obs.set_metrics_mirror(Arc::clone(&second)).unwrap();
-        assert!(Arc::ptr_eq(&again, &first) && none.is_none());
-        assert_eq!(Arc::strong_count(&second), 1);
         assert!(Arc::ptr_eq(&obs.metrics_mirror().unwrap(), &first));
 
         // Each update is told to it, after the metrics are set, also through a clone, and a
-        // shallow copy shares it, as PySpark's copy shares its result dict; a detached copy does
-        // not.
-        obs.update(&["b".to_string(), "c".to_string()], &[long(2), long(3)]);
-        obs.clone().update(&["a".to_string()], &[long(4)]);
-        assert_eq!(recorded(&mirror), vec!["b", "c", "a"]);
+        // shallow copy shares it; a detached copy does not.
+        obs.update(&["b".to_string(), "c".to_string()], &[long(2), long(3)])
+            .unwrap();
+        obs.clone().update(&["a".to_string()], &[long(4)]).unwrap();
+        assert_eq!(told(&first), vec!["b", "c", "a"]);
         let shallow = obs.shallow_copy();
-        assert!(Arc::ptr_eq(&mirror, &shallow.metrics_mirror().unwrap()));
+        assert!(Arc::ptr_eq(&first, &shallow.metrics_mirror().unwrap()));
         let detached = obs.detached();
         assert!(detached.metrics_mirror().is_none());
-        detached.update(&["d".to_string()], &[long(5)]);
-        assert_eq!(recorded(&mirror), vec!["b", "c", "a"]);
+        detached.update(&["d".to_string()], &[long(5)]).unwrap();
+        assert_eq!(told(&first), vec!["b", "c", "a"]);
         assert_eq!(detached.get().unwrap().len(), 4);
+
+        // It says whether the observation is used, and its errors are those of the update.
+        recorded(&first)
+            .unused
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!obs.is_used().unwrap());
+        recorded(&first)
+            .failing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let failed = obs.update(&["e".to_string()], &[long(6)]).unwrap_err();
+        assert!(failed.message().contains("the update failed"));
+
+        // Another mirror replaces it, of the metrics so far, and is told of the error.
+        let second: Arc<dyn MetricsMirror> = Arc::new(Recorded::default());
+        assert_eq!(
+            obs.set_metrics_mirror(Arc::clone(&second)).unwrap().len(),
+            4
+        );
+        assert!(Arc::ptr_eq(&obs.metrics_mirror().unwrap(), &second));
+        obs.set_error(SparkError::connect_msg("failed")).unwrap();
+        assert_eq!(told(&second), vec!["error failed"]);
+        assert!(obs.get().unwrap_err().message().contains("failed"));
     }
 
     #[test]

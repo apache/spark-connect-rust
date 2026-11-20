@@ -1722,20 +1722,24 @@ impl SparkConnectClient {
         if known != PlanCompression::Unknown {
             return known;
         }
-        let looked_up = match self
-            .get_configs(&[
-                PLAN_COMPRESSION_THRESHOLD_CONF,
-                PLAN_COMPRESSION_ALGORITHM_CONF,
-            ])
-            .await
+        // As PySpark's `except Exception` of the lookup, which catches the exception that a signal
+        // handler raises while the lookup waits, unless it is a `BaseException` only, such as the
+        // KeyboardInterrupt of Ctrl-C: then the settings are those of a failed lookup, kept for the
+        // later plans, and the call goes on (see `runtime::catching`).
+        let looked_up = match crate::runtime::catching(self.get_configs(&[
+            PLAN_COMPRESSION_THRESHOLD_CONF,
+            PLAN_COMPRESSION_ALGORITHM_CONF,
+        ]))
+        .await
         {
-            Ok(values) => match values.as_slice() {
+            None => PlanCompression::Disabled,
+            Some(Ok(values)) => match values.as_slice() {
                 [threshold, algorithm] => {
                     plan_compression_of(threshold.as_deref(), algorithm.as_deref())
                 }
                 _ => PlanCompression::Disabled,
             },
-            Err(error) => {
+            Some(Err(error)) => {
                 let aborted = is_wait_aborted(&error);
                 // As PySpark's `except Exception` of the lookup, which catches its failure, and the
                 // exception of the warning of its retries once they are spent.
@@ -2451,19 +2455,21 @@ impl SparkConnectClient {
         self.observe_on(&mut request.client_observed_server_side_session_id);
         let request = &request;
         let mut retries = Retrying::new(&self.retry_policy()).ending_with_abort();
-        let attempts = self
-            .retried(&mut retries, || {
-                let deadline = self.rpc_deadlines.config;
-                let mut req = with_deadline(Request::new(request.clone()), deadline);
-                self._attach_metadata(&mut req);
-                let mut stub = self.stub.clone();
-                async move {
-                    within_deadline(deadline, stub.config(req))
-                        .await
-                        .map(Response::into_inner)
-                }
-            })
-            .await;
+        // As the `except Exception` of `_display_server_stack_trace`, which catches the exception
+        // that a signal handler raises while the config is read, unless it is a `BaseException`
+        // only: the config is then not read (see `runtime::catching`).
+        let attempts = crate::runtime::catching(self.retried(&mut retries, || {
+            let deadline = self.rpc_deadlines.config;
+            let mut req = with_deadline(Request::new(request.clone()), deadline);
+            self._attach_metadata(&mut req);
+            let mut stub = self.stub.clone();
+            async move {
+                within_deadline(deadline, stub.config(req))
+                    .await
+                    .map(Response::into_inner)
+            }
+        }))
+        .await?;
         let response = match attempts {
             Ok(response) => response,
             Err(RetryError::Exceeded(_)) => {
@@ -6489,5 +6495,139 @@ mod metadata_validation_tests {
         let metadata = other.execution_metadata();
         assert_eq!(metadata.get("authorization").unwrap(), "Bearer tok");
         assert_eq!(metadata.get("x-hdr").unwrap(), "v");
+    }
+}
+
+/// The error of a response that the client fails to decode, of its codec, and of a status of the
+/// server of the same text.
+#[cfg(test)]
+mod decode_failure_tests {
+    use super::*;
+    use crate::bytes_codec::BytesCodec;
+    use spark_connect_proto::analyze_plan_request::SparkVersion;
+    use tonic::codegen::{http, BoxFuture};
+    use tonic::server::{NamedService, UnaryService};
+
+    /// The status that a server sends of a request that it fails to decode, as a server of tonic
+    /// does: the code and the text of the client's own failure to decode a response.
+    const SERVERS_FAILURE: &str =
+        "failed to decode Protobuf message: AnalyzePlanRequest.plan: buffer underflow";
+
+    /// A server whose RPCs answer bytes that no response decodes of, or (`fails`) fail of the
+    /// status of a server that fails to decode the request.
+    #[derive(Clone)]
+    struct Undecodable {
+        fails: bool,
+    }
+
+    impl NamedService for Undecodable {
+        const NAME: &'static str = "spark.connect.SparkConnectService";
+    }
+
+    impl tonic::codegen::Service<http::Request<tonic::body::Body>> for Undecodable {
+        type Response = http::Response<tonic::body::Body>;
+        type Error = std::convert::Infallible;
+        type Future = BoxFuture<Self::Response, Self::Error>;
+
+        fn poll_ready(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn call(&mut self, request: http::Request<tonic::body::Body>) -> Self::Future {
+            let rpc = self.clone();
+            Box::pin(async move {
+                let mut grpc = tonic::server::Grpc::new(BytesCodec);
+                Ok(grpc.unary(rpc, request).await)
+            })
+        }
+    }
+
+    impl UnaryService<Vec<u8>> for Undecodable {
+        type Response = Vec<u8>;
+        type Future = BoxFuture<tonic::Response<Vec<u8>>, tonic::Status>;
+
+        fn call(&mut self, _: tonic::Request<Vec<u8>>) -> Self::Future {
+            let fails = self.fails;
+            Box::pin(async move {
+                if fails {
+                    Err(tonic::Status::internal(SERVERS_FAILURE))
+                } else {
+                    // A field of the number 1 of a length past the end.
+                    Ok(tonic::Response::new(vec![0x0a, 0x05]))
+                }
+            })
+        }
+    }
+
+    /// The error of `AnalyzePlan` of a client of an [`Undecodable`] server.
+    async fn analyze_error(fails: bool) -> SparkError {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let incoming = futures::stream::unfold(listener, |listener| async {
+            Some((listener.accept().await.map(|(socket, _)| socket), listener))
+        });
+        let server = tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(Undecodable { fails })
+                .serve_with_incoming(incoming)
+                .await
+                .unwrap();
+        });
+        // As `recording_client`: no token nor user agent of the environment.
+        let env = crate::channel::set_env(&[
+            ("SPARK_CONNECT_AUTHENTICATE_TOKEN", None),
+            ("SPARK_CONNECT_USER_AGENT", None),
+        ]);
+        let builder =
+            ChannelBuilder::parse(&format!("sc://127.0.0.1:{}/", address.port())).unwrap();
+        let client = SparkConnectClient::connect(&builder).await.unwrap();
+        drop(env);
+        let request = AnalyzePlanRequest {
+            session_id: client.session_id().to_string(),
+            analyze: Some(Analyze::SparkVersion(SparkVersion {})),
+            ..Default::default()
+        };
+        let error = client.analyze_plan(request).await.unwrap_err();
+        server.abort();
+        error
+    }
+
+    #[tokio::test]
+    async fn a_response_that_does_not_decode_is_pysparks_error_of_it_and_a_servers_status_its_own()
+    {
+        // The status of the client's codec of a response that does not decode is PySpark's error
+        // of a response that grpcio fails to deserialize; the status of a server of the same code
+        // and text, as of its failure to decode a request, is the text of grpcio's error of it.
+        // The error of the Rust API is prost's of either.
+        let undecodable = analyze_error(false).await;
+        assert_eq!(
+            undecodable.pyspark_message.as_deref(),
+            Some(
+                "<_InactiveRpcError of RPC that terminated with:\n\
+                 \tstatus = StatusCode.INTERNAL\n\
+                 \tdetails = \"Exception deserializing response!\"\n\
+                 \tdebug_error_string = \"None\"\n>"
+            )
+        );
+        assert!(
+            undecodable
+                .message()
+                .contains("failed to decode Protobuf message: AnalyzePlanResponse"),
+            "{}",
+            undecodable.message()
+        );
+        let of_server = analyze_error(true).await;
+        assert_eq!(
+            of_server.pyspark_message,
+            Some(format!(
+                "<_InactiveRpcError of RPC that terminated with:\n\
+                 \tstatus = StatusCode.INTERNAL\n\tdetails = \"{SERVERS_FAILURE}\"\n\
+                 \tdebug_error_string = \"INTERNAL:{SERVERS_FAILURE}\"\n>"
+            ))
+        );
+        assert!(of_server.message().contains(SERVERS_FAILURE));
     }
 }

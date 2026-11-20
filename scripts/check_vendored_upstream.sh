@@ -24,7 +24,8 @@
 # byte-identical files whose sibling files are fork-adapted) as more is vendored, and
 # VENDORED_MAPPED_FILES for a byte-identical copy outside python/pyspark.
 # Do NOT list Rust-backed shims here (anything importing `pyspark._pyspark`), nor
-# fork-adapted files (e.g. pipelines/api.py) — those intentionally differ from upstream.
+# fork-adapted files (e.g. pipelines/spark_connect_pipeline.py) — those intentionally differ
+# from upstream.
 set -euo pipefail
 
 SPARK_TAG="v4.3.0"
@@ -43,11 +44,15 @@ VENDORED_DIRS=(
   "testing/tests"
   # New in 4.3.0: the client-side message-receiver package (pyspark.messages).
   "messages"
+  # PySpark's package of the functions, pyspark.sql.functions (builtin and partitioning), as in
+  # PySpark: each function runs that of pyspark.sql.connect.functions of its name when the
+  # session is remote (try_remote_functions of pyspark.sql.utils), the drop-in's, of the Rust core.
+  "sql/functions"
 )
 
 # Individual files under python/pyspark vendored verbatim from upstream. Listed per-file
 # (not per-dir) because their parent dirs also hold fork-adapted files that intentionally
-# differ (e.g. pipelines/api.py's connect->functions import repointing, and the Rust-backed
+# differ (e.g. pipelines/spark_connect_pipeline.py of the Rust transport, and the Rust-backed
 # errors/exceptions/__init__.py; upstream's errors/exceptions/connect.py is omitted here
 # as it needs grpc, and captured.py imports py4j only where the JVM is used). Keep these
 # byte-identical to the tag.
@@ -68,6 +73,10 @@ VENDORED_FILES=(
   "resource/requests.py"
   "sql/connect/resource/__init__.py"
   "sql/connect/resource/profile.py"
+
+  # The partition transforms of PySpark Connect, which build their columns with the functions of
+  # the drop-in's pyspark.sql.connect.functions.builtin.
+  "sql/connect/functions/partitioning.py"
 
   # The packages of the Avro and Protobuf functions and of the streaming classes of PySpark
   # Connect, which re-export none of the names of their modules, as PySpark's.
@@ -92,8 +101,10 @@ VENDORED_FILES=(
   "errors/exceptions/captured.py"
   "errors/exceptions/tblib.py"
 
-  # Pipelines
+  # Pipelines. The decorators and functions of pyspark.pipelines, which build their columns with the
+  # functions of pyspark.sql.connect.functions, as in PySpark.
   "pipelines/__init__.py"
+  "pipelines/api.py"
   "pipelines/flow.py"
   "pipelines/output.py"
   # The CLI of Spark Declarative Pipelines (spark-pipelines), and the official tests of it, which
@@ -151,6 +162,27 @@ VENDORED_FILES=(
   # Connect returns those of pyspark.sql.connect.context, and their constructors read the
   # SparkContext of a JVM, which a session of Spark Connect does not have.
   "sql/context.py"
+  # PySpark's classic modules of the objects of a session (its Catalog, readers and writers, UDF
+  # and UDTF classes and registrations, GroupedData, PandasCogroupedOps and the streaming query
+  # and readwriter), as in PySpark: the objects of a session of Spark Connect are of the classes
+  # of pyspark.sql.connect, the drop-in's, which are not subclasses of these, as in PySpark.
+  "sql/catalog.py"
+  "sql/readwriter.py"
+  "sql/udf.py"
+  "sql/udtf.py"
+  "sql/group.py"
+  "sql/pandas/group_ops.py"
+  "sql/streaming/readwriter.py"
+  "sql/streaming/query.py"
+  # PySpark's classic Column and TableArg, of which the native Connect classes are virtual
+  # subclasses (pyspark.sql._classic_bases, which the metaclass of TableValuedFunctionArgument,
+  # their base, makes them of).
+  "sql/column.py"
+  "sql/table_arg.py"
+  # PySpark's pyspark.sql.utils, of the helpers and the decorators that its modules import: its
+  # is_remote() is True of the remote-only pyspark.util, and its decorators run the functions and
+  # the methods of the classes of pyspark.sql.connect, the drop-in's.
+  "sql/utils.py"
 
   # PEP 561: the package is typed, and the type aliases of PySpark's stubs.
   "py.typed"

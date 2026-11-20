@@ -30,6 +30,9 @@ pub struct ArrowInputOptions {
     infer_dict_as_struct: bool,
     infer_array_from_first_element: bool,
     infer_map_from_first_pair: bool,
+    /// The JSON text that a relation of local data sends as its schema, if any, in place of the
+    /// JSON of its type: that of the Python client, PySpark's `json()` of the schema object.
+    schema_json: Option<String>,
 }
 
 impl ArrowInputOptions {
@@ -105,7 +108,30 @@ impl ArrowInputOptions {
                 chunk_bytes: chunk_bytes.min(upload_batch_bytes),
                 upload_batch_bytes,
             },
+            schema_json: None,
         })
+    }
+
+    /// These settings, of which a relation of local data sends `json` as the text of its schema,
+    /// as PySpark sends the `json()` of the schema object of its `createDataFrame`, which the
+    /// Python client writes as PySpark does, of the order of the keys of the metadata of a field as
+    /// Python sorts them, where the JSON of the core type sorts their strs. Not a stable API.
+    #[doc(hidden)]
+    pub fn with_schema_json(mut self, json: impl Into<String>) -> Self {
+        self.schema_json = Some(json.into());
+        self
+    }
+
+    /// The type that a relation of local data of `schema` sends, of the text of
+    /// [`ArrowInputOptions::with_schema_json`] if any: a type that the client lowered by its JSON,
+    /// which [`DataType::json_as_pyspark`] writes as it is.
+    pub(crate) fn sent_schema(&self, schema: DataType) -> DataType {
+        match &self.schema_json {
+            Some(json) => DataType::Unparsed {
+                data_type_string: json.clone(),
+            },
+            None => schema,
+        }
     }
 
     /// Server timestamp type, including its registered default.
@@ -271,7 +297,7 @@ fn child_types(data_type: &ArrowType) -> Vec<&ArrowType> {
 /// Reconcile schema field names and metadata only through checked construction.
 /// Arrow's name-insensitive equality also accepts reordered union fields, whose
 /// children cannot be relabeled by position, so reject those before recursion.
-fn with_schema_type(data: ArrayData, data_type: &ArrowType) -> Result<ArrayData> {
+pub(crate) fn with_schema_type(data: ArrayData, data_type: &ArrowType) -> Result<ArrayData> {
     if data.data_type() == data_type {
         return Ok(data);
     }
@@ -595,6 +621,46 @@ mod tests {
     use std::io::Cursor;
     use std::ops::Range;
     use std::sync::Arc;
+
+    #[test]
+    fn a_schema_json_of_the_settings_is_the_schema_that_a_relation_sends() {
+        // The text of the Python client, PySpark's `json()` of its schema object, in place of the
+        // JSON of the core type, whose sort of the strs of the keys `"10"` and `"9"` it keeps.
+        let values: HashMap<&str, String> = ArrowInputOptions::KEYS
+            .into_iter()
+            .map(|key| {
+                let value = match key {
+                    "spark.sql.timestampType" => "TIMESTAMP_LTZ",
+                    "spark.sql.session.timeZone" => "UTC",
+                    "spark.sql.session.localRelationCacheThreshold" => "1048576",
+                    "spark.sql.execution.arrow.useLargeVarTypes" => "false",
+                    key if key.ends_with("SizeBytes") || key.ends_with("SizeLimit") => "1000",
+                    key if key.ends_with("SizeRows") => "10",
+                    _ => "false",
+                };
+                (key, value.to_string())
+            })
+            .collect();
+        let options = ArrowInputOptions::from_values(values).unwrap();
+        let schema = DataType::from_ddl("a INT").unwrap();
+        assert_eq!(options.sent_schema(schema.clone()), schema);
+        let json = r#"{"fields":[{"metadata":{"9":"b","10":"a"},"name":"a","nullable":true,"type":"integer"}],"type":"struct"}"#;
+        let sent = options.with_schema_json(json).sent_schema(schema);
+        assert_eq!(sent.json_as_pyspark(), json);
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![Field::new("a", ArrowType::Int32, true)])),
+            vec![Arc::new(Int32Array::from(vec![1])) as ArrayRef],
+        )
+        .unwrap();
+        let plan = inline_relation(&[batch], Some(sent)).unwrap();
+        let LogicalPlan::LocalRelation { schema, .. } = &plan else {
+            panic!("expected a local relation");
+        };
+        assert_eq!(
+            schema.as_ref().map(DataType::json_as_pyspark).as_deref(),
+            Some(json)
+        );
+    }
 
     #[test]
     fn data_sizes_are_the_nbytes_of_pyarrow() {

@@ -138,21 +138,35 @@ vendored `pyspark.ml` (and any module that builds its own `spark.connect` messag
 RPCs, and the retry policies, which the transport retries with - with the
 `pyspark.sql.connect.proto`: always the Rust protobuf runtime (`crates/pyspark-rs/src/pbmsg`,
 exported by `pyspark/sql/connect/proto/_rust.py`; the generated `*_pb2.py` are not vendored, only
-their `.pyi` stubs), which `python/tests/test_proto_rust_offline.py` compares with upb. Where
-`protobuf` is installed, the runtime also adds the files of the protos to protobuf's default pool,
-so that a plugin's generated modules that import them build, and wraps protobuf's builder, so that
-those modules (of protoc 3.20 and later, which build their classes with it) get the runtime's
-classes, whose fields take ours as they are: their files are added to the runtime's pool at run
-time (`pbmsg::pool::register`; see `docs/compatibility.md`).
+their `.pyi` stubs, next to which a docstring-only `*_pb2.py` is the source that type checkers
+find, which the runtime's finder shadows), which `python/tests/test_proto_rust_offline.py`
+compares with upb. Where `protobuf` imports, the runtime's classes are of the shape of upb's
+(metaclass `MessageMeta`, subclasses of protobuf's `Message` and `WKTBASES`, of protobuf's
+descriptors of its default pool, to which the runtime adds the files of the protos), and the
+runtime wraps protobuf's metaclass (`reflection.GeneratedProtocolMessageType`) and
+`message_factory.GetMessageClass`, so that a plugin's generated modules (of any protoc) of files
+of proto2, proto3 or editions that import the protos get the runtime's classes, whose fields take
+ours as they are: their files are added to the runtime's pool at run time
+(`pbmsg::pool::register`; see `docs/compatibility.md`). So do the modules of the files of their
+package (of a package) that they import, and the modules of the files of any package (but
+Google's) that import a file that the runtime holds so, before or after it does. Any other file
+keeps protobuf's classes (the runtime has classes of its types of its own, which pickle as
+protobuf's): a file of another package or of no package that such a file imports, unless it imports
+a held file itself, Google's, and a file that the runtime cannot hold (of extensions, extension
+ranges or message sets), which also gives protobuf's classes back to the held files that it
+imports (but a proto of Spark Connect and a file that imports one), so that upb's classes of it
+take their messages. Never take over a module of a file that imports no file that the runtime
+holds, but a file of a plugin's own package that the plugin's file imports.
 `DataFrame(plan, session)`, `DataFrame._plan` and `Column._expr` are the other half of
 that bridge: a `LogicalPlan` of Python sends its `plan(session)` relation as it is, of the
 placeholder that `DataFrame._plan.plan(session)` gives, of one level, which holds the relation of
 the DataFrame encoded, built at the call, and which the core replaces wherever a plan, a command or
 an analysis built in Python holds a relation: every input of every relation
 (`plan::relation_inputs_of`), the relation of each command that holds one, the inputs of the plans
-of `pyspark.ml`, and the messages of the extensions of a plugin's relations and commands
-(`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), but not in an expression's
-extension: "Plans of a DataFrame's relation" in `dev/parity/known-differences.md`.
+of `pyspark.ml`, the messages of the extensions of a plugin's relations and commands
+(`plan::resolve_relation`, `resolve_command`, `resolve_analysis`), and those of the extensions of
+the expressions of the relations and commands built in Python (`plan::resolve_own_fields`): "Plans
+of a DataFrame's relation" in `dev/parity/known-differences.md`.
 
 ## 3. Close API gaps (three layers)
 
@@ -213,14 +227,24 @@ history, and update via `git subtree pull`.
 
 Rigorously classify before touching anything (diff our dir vs the version tag):
 - **Rust-backed shims — KEEP OURS** (anything importing `pyspark._pyspark`, or an
-  adapter): `sql/*` top-level, `ml/connect/*`, `sql/streaming/{query,readwriter}.py`,
-  `errors/*`, `pyspark/__init__.py`, `util.py` (Connect-only trim), `storagelevel.py`.
+  adapter): most of `sql/*` top-level, `sql/connect/*` (the classes of the objects of a
+  session, as PySpark Connect's), `ml/connect/*`, `errors/*`, `pyspark/__init__.py`, `util.py`
+  (Connect-only trim), `storagelevel.py`.
 - **Pure upstream — VENDOR via subtree**: `cloudpickle`, `pandas` (see caveat),
   `_globals.py`, `loose_version.py`, `serializers.py`, `resource/*` and
   `sql/connect/resource/*` (PySpark's resource profiles, whose profile id the connect
   `ResourceProfile` creates through `SparkSession.client`), and audit for more. A directory of
-  shims can hold vendored files too, such as most of `errors/*` and `sql/session.py`:
-  `VENDORED_FILES` of `scripts/check_vendored_upstream.sh` lists every vendored file.
+  shims can hold vendored files too, such as most of `errors/*`, `sql/session.py` and the
+  classic modules of the objects of a session (`sql/{catalog,conf,readwriter,udf,udtf,group}.py`,
+  `sql/streaming/{query,readwriter}.py`, `sql/pandas/group_ops.py` and others), whose objects on
+  Spark Connect are of the classes of `sql/connect/*`, as in PySpark, `sql/utils.py`, whose
+  decorators run those of Spark Connect, the package `sql/functions/` (with
+  `sql/connect/functions/partitioning.py`), whose functions run those of
+  `sql/connect/functions/builtin.py`, the drop-in's, which `_generated.py` there and the Rust
+  core implement, and `sql/column.py` and `sql/table_arg.py`, whose classes the metaclass of
+  `sql/_classic_bases.py` (the one of `sql/tvf_argument.py`, their base) makes the native Connect
+  classes virtual subclasses of: `VENDORED_DIRS` and `VENDORED_FILES` of
+  `scripts/check_vendored_upstream.sh` list every vendored file.
 
 Subtree conversion (serial, needs a **clean working tree**, one dir at a time):
 ```
@@ -555,7 +579,7 @@ For every method matching a pyspark name:
   - **Internal pandas functions dispatch by NAME, not by client reimplementation.**
     `pyspark.sql.internal.InternalFunction` (`distributed_sequence_id`, `pandas_product`,
     `pandas_stddev`, ...) routes through `connect.functions.builtin._invoke_function_over_columns`,
-    which must build a plain `UnresolvedFunction(name, cols)` (via `functions._invoke_function` →
+    which must build a plain `UnresolvedFunction(name, cols)` (via its `_invoke_function` →
     Rust `pyfunc_invoke_function`). The Connect *server* resolves these internal names. Do NOT
     special-case them client-side (e.g. faking `distributed_sequence_id` with a `row_number`
     window — it is wrong and non-distributed).

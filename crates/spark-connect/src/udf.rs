@@ -509,6 +509,13 @@ impl<'c> PicklerRebuild<'c> {
         name: &str,
         observation: &mut Option<crate::observation::Observation>,
     ) -> bool {
+        // By the name of the plan as it is built now, by which the copies are named (see
+        // `LogicalPlan::observations`).
+        let current = observation
+            .as_ref()
+            .and_then(crate::observation::Observation::name_of_plan)
+            .and_then(Result::ok);
+        let name = current.as_deref().unwrap_or(name);
         match (observation.is_some(), self.copy_of_observation(name)) {
             (true, Some(copy)) => {
                 *observation = Some(copy);

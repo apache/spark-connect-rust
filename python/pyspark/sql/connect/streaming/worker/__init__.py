@@ -15,4 +15,5 @@
 # limitations under the License.
 #
 
-"""Spark Connect Streaming Server-side Worker marker package."""
+# Spark Connect Streaming Server-side Worker marker package.
+"""Spark Connect Streaming Server-side Worker"""

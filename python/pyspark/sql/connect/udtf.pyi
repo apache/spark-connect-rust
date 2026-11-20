@@ -19,16 +19,20 @@
 
 """User-defined table function related classes and functions"""
 
-from typing import Type, Optional, Union
+from typing import Type, Optional, Union, Any
 from pyspark.util import PythonEvalType
 from pyspark.sql.connect.plan import CommonInlineUserDefinedTableFunction
 from pyspark.sql.connect.types import UnparsedDataType
 from pyspark.sql.udtf import AnalyzeArgument as AnalyzeArgument, AnalyzeResult as AnalyzeResult
 from pyspark.sql.udtf import _validate_udtf_handler
-from pyspark.sql.types import DataType, StructType
+from pyspark.sql.types import DataType, StructType as StructType
+from pyspark.errors import PySparkTypeError as PySparkTypeError, PySparkAttributeError as PySparkAttributeError
 from pyspark.sql.connect._typing import ColumnOrName
 from pyspark.sql.connect.dataframe import DataFrame
 from pyspark.sql.connect.session import SparkSession
+
+def _validate_arrow_udtf_handler(cls: Any, returnType: Optional[Union[StructType, str]]) -> None:
+    """Validate the handler class of a PyArrow UDTF."""
 
 class UserDefinedTableFunction:
     """User defined function in Python
@@ -107,3 +111,12 @@ class UDTFRegistration:
         >>> spark.sql("SELECT * FROM VALUES (0, 1), (1, 2) t(x, y), LATERAL plus_one(x)").collect()
         [Row(x=0, y=1, c1=0, c2=1), Row(x=1, y=2, c1=1, c2=2)]
         """
+
+# Names of the drop-in's module that PySpark's does not have.
+from pyspark.errors import PySparkPicklingError as PySparkPicklingError
+from pyspark.serializers import CloudPickleSerializer as CloudPickleSerializer
+from pyspark.sql.functions.builtin import arrow_udtf as arrow_udtf
+from pyspark.sql.functions.builtin import udtf as udtf
+SQL_TABLE_UDF: int
+SQL_ARROW_TABLE_UDF: int
+SQL_ARROW_UDTF: int

@@ -12,6 +12,10 @@
 
 use pyo3::prelude::*;
 
+// First, as the modules that take its `connect_doc!` in their attributes are those after it, of the
+// textual scope of the macro.
+#[macro_use]
+mod connect_docs_generated;
 mod catalog;
 mod client;
 mod column;
@@ -51,7 +55,6 @@ mod transport;
 mod tvf;
 mod types;
 mod udf_command;
-mod udtf_analyze;
 mod values;
 mod window;
 
@@ -82,7 +85,7 @@ use types::{
     PyStructType, PyTimeType, PyTimestampLTZNanosType, PyTimestampNTZNanosType, PyTimestampNTZType,
     PyTimestampType, PyVarcharType, PyVariantType, PyYearMonthIntervalType,
 };
-use window::{PyFrameBound, PyWindow, PyWindowSpec};
+use window::{PyFrameBound, PyWindowSpec};
 
 /// The stack that the encode, the decode and the drop of a protobuf of a pickled Column,
 /// DataFrame or hook request take on the thread that unpickles or sends it. Prost recurses once
@@ -238,18 +241,13 @@ fn _pyspark(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     values::register(m)?;
 
     // Register Window classes
-    m.add_class::<PyWindow>()?;
+    m.add_function(wrap_pyfunction!(window::empty_window_spec, m)?)?;
     m.add_class::<PyWindowSpec>()?;
     m.add_class::<PyFrameBound>()?;
 
     // Register TVF + Observation
     m.add_class::<tvf::PyTableValuedFunction>()?;
     m.add_class::<tablearg::PyTableArg>()?;
-    m.add(
-        "SkipRestOfInputTableException",
-        m.py()
-            .get_type::<udtf_analyze::SkipRestOfInputTableException>(),
-    )?;
 
     m.add_class::<observation::PyObservation>()?;
 
@@ -333,8 +331,10 @@ fn bare_type_names(m: &Bound<'_, PyModule>) -> PyResult<()> {
 /// The native classes that are not attributes of the module, of objects that it makes: the
 /// expression of a Column (`Column._expr`), the attribute of a param of an ML class, the exit
 /// hook and the active session of the sessions (`SparkSession._active_session`), the tags and the
-/// user context extensions that threads share, and the listener bus of a stream manager.
-fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7] {
+/// user context extensions that threads share, the listener bus of a stream manager, and the
+/// objects of the options and the kept arguments that the copies of a reader, a writer or a
+/// builder share.
+fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 8] {
     [
         py.get_type::<column::PyColumnExpression>(),
         py.get_type::<ml::params_api::PyParamAttribute>(),
@@ -343,5 +343,6 @@ fn classes_outside_module(py: Python<'_>) -> [Bound<'_, pyo3::types::PyType>; 7]
         py.get_type::<session::PySharedTags>(),
         py.get_type::<session::PySharedUserContextExtensions>(),
         py.get_type::<streaming::PyStreamingQueryListenerBus>(),
+        py.get_type::<options::PySharedObjects>(),
     ]
 }

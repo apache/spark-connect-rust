@@ -14,17 +14,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Avro functions, mirroring ``pyspark.sql.avro.functions``."""
+# Avro functions, mirroring ``pyspark.sql.avro.functions``.
+"""
+A collections of builtin avro functions
+"""
 
 from pyspark.errors import PySparkTypeError
 from pyspark.sql.column import Column
-from pyspark.sql.functions import (
+from pyspark.sql.connect.functions.builtin import (
     _call_function,
     _dict_to_options_column,
     _invoke_function,
     _to_col,
 )
-from pyspark.sql.functions import (
+from pyspark.sql.connect.functions.builtin import (
     lit as _lit,
 )
 
@@ -38,12 +41,48 @@ def _check_data(data):
 
 
 def from_avro(data, jsonFormatSchema, options=None):
-    """Converts a binary column of Avro format into its corresponding catalyst value.
+    """
+    Converts a binary column of Avro format into its corresponding catalyst value.
+    The specified schema must match the read data, otherwise the behavior is undefined:
+    it may fail or return arbitrary result.
+    To deserialize the data with a compatible and evolved schema, the expected Avro schema can be
+    set via the option avroSchema.
 
-    Args:
-        data: the binary column (a Column or a column name).
-        jsonFormatSchema: the Avro schema in JSON string format.
-        options: optional dict of options for the Avro reader.
+    .. versionadded:: 3.0.0
+
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
+    Parameters
+    ----------
+    data : :class:`~pyspark.sql.Column` or str
+        the binary column.
+    jsonFormatSchema : str
+        the avro schema in JSON string format.
+    options : dict, optional
+        options to control how the Avro record is parsed.
+
+    Notes
+    -----
+    Avro is built-in but external data source module since Spark 2.4. Please deploy the
+    application as per the deployment section of "Apache Avro Data Source Guide".
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> from pyspark.sql.avro.functions import from_avro, to_avro
+    >>> data = [(1, Row(age=2, name='Alice'))]
+    >>> df = spark.createDataFrame(data, ("key", "value"))
+    >>> avroDf = df.select(to_avro(df.value).alias("avro"))
+    >>> avroDf.collect()
+    [Row(avro=b'\\x00\\x00\\x04\\x00\\nAlice')]
+
+    >>> jsonFormatSchema = '''{"type":"record","name":"topLevelRecord","fields":
+    ...     [{"name":"avro","type":[{"type":"record","name":"value","namespace":"topLevelRecord",
+    ...     "fields":[{"name":"age","type":["long","null"]},
+    ...     {"name":"name","type":["string","null"]}]},"null"]}]}'''
+    >>> avroDf.select(from_avro(avroDf.avro, jsonFormatSchema).alias("value")).collect()
+    [Row(value=Row(avro=Row(age=2, name='Alice')))]
     """
     _check_data(data)
     if not isinstance(jsonFormatSchema, str):
@@ -66,11 +105,39 @@ def from_avro(data, jsonFormatSchema, options=None):
 
 
 def to_avro(data, jsonFormatSchema=""):
-    """Converts a column into binary of Avro format.
+    """
+    Converts a column into binary of avro format.
 
-    Args:
-        data: the data column (a Column or a column name).
-        jsonFormatSchema: the Avro schema in JSON string format; empty to infer it.
+    .. versionadded:: 3.0.0
+
+    .. versionchanged:: 3.5.0
+        Supports Spark Connect.
+
+    Parameters
+    ----------
+    data : :class:`~pyspark.sql.Column` or str
+        the data column.
+    jsonFormatSchema : str, optional
+        user-specified output avro schema in JSON string format.
+
+    Notes
+    -----
+    Avro is built-in but external data source module since Spark 2.4. Please deploy the
+    application as per the deployment section of "Apache Avro Data Source Guide".
+
+    Examples
+    --------
+    >>> from pyspark.sql import Row
+    >>> from pyspark.sql.avro.functions import to_avro
+    >>> data = ['SPADES']
+    >>> df = spark.createDataFrame(data, "string")
+    >>> df.select(to_avro(df.value).alias("suite")).collect()
+    [Row(suite=b'\\x00\\x0cSPADES')]
+
+    >>> jsonFormatSchema = '''["null", {"type": "enum", "name": "value",
+    ...     "symbols": ["SPADES", "HEARTS", "DIAMONDS", "CLUBS"]}]'''
+    >>> df.select(to_avro(df.value, jsonFormatSchema).alias("suite")).collect()
+    [Row(suite=b'\\x02\\x00')]
     """
     _check_data(data)
     if not isinstance(jsonFormatSchema, str):

@@ -20,9 +20,13 @@
 // of Spark Connect, so its generated module gets the classes of the drop-in's Rust protobuf
 // runtime, and base.proto, which does not.
 //
-// plugin_pb2.py and base_pb2.py are of protoc 33.0, from the root of the repository:
+// plugin_pb2.py, base_pb2.py and the modules of legacy.proto (proto2), editions.proto (of the
+// edition 2023) and wkt.proto (of well-known types) are of protoc 33.0, from the root of the
+// repository:
 //   protoc -I python/tests -I crates/spark-connect-proto/proto --python_out=python/tests \
-//     python/tests/plugin_protos/base.proto python/tests/plugin_protos/plugin.proto
+//     python/tests/plugin_protos/base.proto python/tests/plugin_protos/plugin.proto \
+//     python/tests/plugin_protos/legacy.proto python/tests/plugin_protos/editions.proto \
+//     python/tests/plugin_protos/wkt.proto
 // with the imports of the modules of Spark Connect rewritten to pyspark.sql.connect.proto and the
 // license prepended, as Apache Spark's dev/gen-protos.sh does to its generated modules.
 

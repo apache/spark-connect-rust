@@ -1001,9 +1001,11 @@ def prepare_float64_table(frame, schema):
                   mask=~valid.iloc[:, i], from_pandas=False)
          for i, column in enumerate(columns)],
         # Match the row serializer's physical fields. The complete Spark
-        # metadata remains in the explicit logical schema, not Arrow metadata.
-        schema=pa.schema([pa.field(field.name, pa.float64(), nullable=field.nullable)
-                          for field in fields]),
+        # metadata remains in the explicit logical schema, not Arrow metadata. The names are
+        # PySpark's of its table, `schema.names`, which of a `fields` list changed in place are
+        # the names before the change.
+        schema=pa.schema([pa.field(name, pa.float64(), nullable=field.nullable)
+                          for name, field in zip(schema.names, fields)]),
     )
 
 
@@ -1121,6 +1123,11 @@ def prepare_string_input(frame, schema):
            or type(array.dtype) is not type(np.dtype("object"))
            or array.dtype != np.dtype("object") or len(array) != len(frame)
            for array in arrays):
+        return None
+    # The IPC is of the names of the fields, where PySpark's table is of `schema.names`, which of
+    # a `fields` list changed in place are the names before the change: that takes PySpark's
+    # conversion.
+    if list(schema.names) != [field.name for field in schema.fields]:
         return None
     return _pandas_string_ipc(arrays, schema)
 
@@ -1489,15 +1496,12 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
     from pyspark.sql.pandas.conversion import create_arrow_table_from_pandas
     from pyspark.sql.pandas.types import _deduplicate_field_names, to_arrow_schema
 
+    # As PySpark's, the table is of the names of `_deduplicate_field_names`, of the top level too
+    # (`a_0`, `a_1`), which the relation's schema has as given, and `toDF` applies.
     deduplicated = _deduplicate_field_names(schema)
     arrow_schema = to_arrow_schema(
         deduplicated, timezone="UTC", prefers_large_types=prefers_large_types
     )
-    # Top-level names are the caller's, which may repeat: the importer casts to them.
-    arrow_schema = pa.schema([
-        pa.field(name, field.type, field.nullable, field.metadata)
-        for name, field in zip(schema.names, arrow_schema)
-    ])
     if len(frame.columns) == 0:
         table = pa.Table.from_batches([pa.RecordBatch.from_pandas(frame)])
     else:
@@ -1513,7 +1517,9 @@ def prepare_pandas_table(frame, schema, timezone, safecheck, prefers_large_types
         )
     if len(schema.fields) == 0:
         return table
-    return table.rename_columns(schema.names).cast(arrow_schema)
+    # The names of `_deduplicate_field_names`, of a `fields` list changed in place of its cached
+    # `names`, as many as the fields, of which fewer raise its `IndexError`.
+    return table.rename_columns(deduplicated.names).cast(arrow_schema)
 
 
 def arrow_decimal_column(values, dtype, name):
