@@ -2815,7 +2815,7 @@ impl SparkConnectClient {
         let mismatch = if deadline {
             None
         } else {
-            crate::error::proto_mismatch_error(&status, call).map(Box::new)
+            crate::error::from_call_error(&status, call).map(Box::new)
         };
         let mut deliveries = Vec::new();
         crate::retries::log(|listener| {
@@ -4465,12 +4465,12 @@ impl ReattachableResponseStream {
     /// The `ValueError` of a failure `status` of the stream of a reattachable execution whose
     /// `google.rpc.Status` does not match it, as the `_call_iter` of PySpark's iterator raises it
     /// of `rpc_status.from_call` before its retries see the failure, which is not logged (see
-    /// [`crate::error::proto_mismatch_error`]).
+    /// [`crate::error::from_call_error`]).
     fn mismatch(&self, status: &tonic::Status) -> Option<SparkError> {
         if !self.reattachable {
             return None;
         }
-        crate::error::proto_mismatch_error(status, GrpcCall::ServerStreaming)
+        crate::error::from_call_error(status, GrpcCall::ServerStreaming)
     }
 
     /// Ends the stream with the error of `status`, as [`Self::fail`].
