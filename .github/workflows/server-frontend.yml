@@ -30,6 +30,8 @@ on:
       - "rust-toolchain*"
       - "crates/spark-connect-server/**"
       - "crates/spark-connect-proto/**"
+      - "crates/spark-connect/**"
+      - "crates/spark-connect-core/**"
   push:
     branches: [master, "branch-*"]
     paths:
@@ -40,6 +42,8 @@ on:
       - "rust-toolchain*"
       - "crates/spark-connect-server/**"
       - "crates/spark-connect-proto/**"
+      - "crates/spark-connect/**"
+      - "crates/spark-connect-core/**"
   workflow_dispatch:
 
 permissions:

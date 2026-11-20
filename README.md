@@ -124,11 +124,15 @@ the full setup, SQL registration, supported types, and more.
 The unpublished [`spark-connect-server`](crates/spark-connect-server/README.md)
 library provides a Rust Spark Connect protocol frontend. It manages protocol sessions,
 operations and Arrow IPC responses, delegating planning and execution to an
-application-provided `Engine`. The library includes no execution backend or standalone
-server executable; its protocol tests use injected engine fixtures.
+application-provided `Engine`; its protocol tests use injected engine fixtures.
+The optional, unpublished `spark-connect-jni` crate embeds that frontend inside a
+Spark JVM and supplies an adapter for Spark planning and execution. Both crates
+are explicit opt-in builds; no standalone server executable is included. See the
+[server guide](crates/spark-connect-server/README.md) for the JNI prototype's
+supported scope, build requirements and validation limits.
 
-The frontend is intended for local, trusted experiments. Read its
-[security model](SECURITY.md#experimental-server-frontend) before embedding it.
+The frontend and JNI prototype are intended for local, trusted experiments. Read their
+[security model](SECURITY.md#experimental-server-frontend) before embedding them.
 
 ## Contributing
 

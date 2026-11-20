@@ -39,3 +39,4 @@ uuid.workspace = true
 
 [dev-dependencies]
 h2.workspace = true
+spark-connect = { package = "apache-spark-connect", path = "../spark-connect" }
